@@ -1,0 +1,42 @@
+# Release on tag push. A release is a version-bump commit (`uv version X.Y.Z`)
+# plus a matching `vX.Y.Z` tag: the workflow fails fast if the tag and
+# pyproject.toml disagree, then builds and publishes to PyPI via trusted
+# publishing (OIDC). Requires a trusted publisher configured on PyPI for this
+# repository and workflow file.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Build and publish to PyPI
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+
+      - name: Verify tag matches pyproject version
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          project_version="$(uv version --short)"
+          if [[ "$tag_version" != "$project_version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match pyproject version $project_version."
+            exit 1
+          fi
+
+      - run: uv build
+      - run: uv publish

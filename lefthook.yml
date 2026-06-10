@@ -1,0 +1,21 @@
+# Git hooks. Install with: uv run lefthook install
+# Skip all: LEFTHOOK=0 git commit
+# Skip one: LEFTHOOK_EXCLUDE=ruff-check git commit
+
+pre-commit:
+  parallel: true
+  commands:
+    ruff-check:
+      glob: "*.py"
+      run: uv run ruff check {staged_files}
+    ruff-format:
+      glob: "*.py"
+      run: uv run ruff format --check {staged_files}
+
+pre-push:
+  parallel: true
+  commands:
+    mypy:
+      run: uv run mypy
+    pytest:
+      run: uv run pytest -q
