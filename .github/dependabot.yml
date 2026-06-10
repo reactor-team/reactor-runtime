@@ -1,0 +1,15 @@
+# Dependabot version updates for the uv-managed Python dependencies and the
+# GitHub Actions used by the workflows. Dependabot PRs are exempt from the
+# DCO check (see .github/workflows/dco.yml) since its commits are
+# machine-generated.
+
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "daily"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "daily"
