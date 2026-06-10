@@ -32,11 +32,11 @@ jobs:
         run: |
           set -euo pipefail
           tag_version="${GITHUB_REF_NAME#v}"
-          project_version="$(uv version --short)"
+          project_version="$(make -s version)"
           if [[ "$tag_version" != "$project_version" ]]; then
             echo "::error::Tag $GITHUB_REF_NAME does not match pyproject version $project_version."
             exit 1
           fi
 
-      - run: uv build
-      - run: uv publish
+      - run: make build
+      - run: make publish

@@ -1,7 +1,8 @@
 ##@ Configuration
 
-VERSION := $(shell uv version --short 2>/dev/null)
+VERSION ?= $(shell uv version --short 2>/dev/null)
 GIT_SHA := $(shell git rev-parse --short HEAD)
+RELEASE := v$(VERSION)-g$(GIT_SHA)
 
 ##@ General
 
@@ -15,15 +16,32 @@ version: ## Display the current version
 
 .PHONY: release
 release: ## Display the release (version + git SHA)
-	@echo "$(VERSION)-g$(GIT_SHA)"
+	@echo "$(RELEASE)"
 
 ##@ Setup
 
 .PHONY: install
 install: ## Install dependencies and git hooks
-	@echo "--- 📦 Installing dependencies"
+	@echo "--- 📦 Installing dependencies and git hooks"
 	uv sync
 	uv run lefthook install
+
+.PHONY: install-locked
+install-locked: ## Install dependencies exactly as locked (used by CI)
+	@echo "--- 📦 Installing locked dependencies"
+	uv sync --locked
+
+##@ Build
+
+.PHONY: build
+build: ## Build sdist and wheel into dist/
+	@echo "--- 🛠️ Building reactor-runtime $(RELEASE)"
+	uv build
+
+.PHONY: publish
+publish: ## Publish dist/ to PyPI (trusted publishing in CI)
+	@echo "--- 📦 Publishing reactor-runtime $(VERSION) to PyPI"
+	uv publish
 
 ##@ Quality
 
@@ -34,7 +52,7 @@ lint: ## Run ruff lint and format checks
 	uv run ruff format --check
 
 .PHONY: format
-format: ## Format the codebase
+format: ## Format the codebase and fix auto-fixable lints
 	uv run ruff format
 	uv run ruff check --fix
 
@@ -52,13 +70,7 @@ test: ## Run unit tests
 
 .PHONY: check
 check: lint typecheck test ## Run all checks (lint, typecheck, test)
-
-##@ Build
-
-.PHONY: build
-build: ## Build sdist and wheel into dist/
-	@echo "--- 🛠️ Building reactor-runtime $(VERSION)"
-	uv build
+	@echo "--- ✅ All checks passed"
 
 ##@ Cleanup
 
