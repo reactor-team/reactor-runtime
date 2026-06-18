@@ -25,6 +25,7 @@ from reactor_runtime.core.model import (
     TransitionEvent,
     UploadedFile,
 )
+from reactor_runtime.core.service import RuntimeConfig, ServiceComponent
 from reactor_runtime.core.session import SessionEvent, SessionState, Transition
 from reactor_runtime.core.transport import Connection, ConnectionSink
 from reactor_runtime.core.values import (
@@ -61,6 +62,8 @@ __all__ = [
     "MediaBundle",
     "ReactorEvent",
     "RunnerEvent",
+    "RuntimeConfig",
+    "ServiceComponent",
     "SessionEnded",
     "SessionEvent",
     "SessionMetricEvent",
