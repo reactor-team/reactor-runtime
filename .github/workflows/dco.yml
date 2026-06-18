@@ -5,8 +5,9 @@
 name: DCO
 
 on:
+  # Run on every PR, including stacked PRs whose base is another feature
+  # branch rather than main.
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read

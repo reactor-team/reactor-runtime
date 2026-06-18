@@ -8,13 +8,29 @@ name: CI
 on:
   push:
     branches: [main]
+  # Run on every PR, including stacked PRs whose base is another feature
+  # branch rather than main.
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
+  proto:
+    name: Proto
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ github.token }}
+
+      - run: make proto-lint
+      - run: make proto-breaking
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -26,6 +42,9 @@ jobs:
           python-version: "3.12"
 
       - run: make install-locked
+      - run: make wire-vendor
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - run: make lint
 
   typecheck:
@@ -39,6 +58,9 @@ jobs:
           python-version: "3.12"
 
       - run: make install-locked
+      - run: make wire-vendor
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - run: make typecheck
 
   unit-tests:
@@ -55,4 +77,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - run: make install-locked
+      - run: make wire-vendor
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - run: make test
