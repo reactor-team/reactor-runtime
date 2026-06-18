@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package reactor_wire.v1;
+
+import "reactor_wire/v1/common.proto";
+import "reactor_wire/v1/model.proto";
+
+// Data channel, client to runtime. Carries only the model's own command
+// traffic; all platform and track messages travel on the control channel.
+message DataClientMessage {
+  string request_id = 1;
+  MessageKind kind = 2;
+  oneof payload {
+    Command command = 10;
+    Error error = 40;
+  }
+}
+
+// Data channel, runtime to client. Carries only the model's own emitted
+// messages.
+message DataServerMessage {
+  string request_id = 1;
+  MessageKind kind = 2;
+  oneof payload {
+    ModelMessage message = 10;
+    Error error = 40;
+  }
+}

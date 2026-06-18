@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package reactor_wire.v1;
+
+import "google/protobuf/struct.proto";
+
+// Reference to a file uploaded out of band via the presigned-URL protocol,
+// injected into a Command argument by parameter name.
+message UploadReference {
+  string upload_id = 1;
+  string name = 2;
+  string mime_type = 3;
+  int64 size = 4;
+}
+
+// A model-defined command from the client. type is the command name; the
+// arguments are a dynamic object so the protocol carries any model's schema
+// without knowing it.
+message Command {
+  string type = 1;
+  google.protobuf.Struct data = 2;
+  map<string, UploadReference> uploads = 3;
+}
+
+// A model-emitted message to the client. type is the message name; the body is
+// a dynamic object.
+message ModelMessage {
+  string type = 1;
+  google.protobuf.Struct data = 2;
+}

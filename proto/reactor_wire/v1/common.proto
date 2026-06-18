@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package reactor_wire.v1;
+
+// Framing shared by every channel message. A request expects a correlated
+// response (matched by request_id); a notification is fire-and-forget.
+enum MessageKind {
+  MESSAGE_KIND_UNSPECIFIED = 0;
+  MESSAGE_KIND_REQUEST = 1;
+  MESSAGE_KIND_RESPONSE = 2;
+  MESSAGE_KIND_NOTIFICATION = 3;
+}
+
+// Payload of a failed response, correlated to its request by request_id.
+message Error {
+  string code = 1;
+  string message = 2;
+}

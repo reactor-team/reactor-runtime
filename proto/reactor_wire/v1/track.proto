@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package reactor_wire.v1;
+
+// Request to claim the single publisher slot for an input track.
+message PublishTrack {
+  string name = 1;
+}
+
+// Stop sending an input track without releasing the publisher slot.
+message PauseTrack {
+  string name = 1;
+}
+
+// Resume a paused input track.
+message ResumeTrack {
+  string name = 1;
+}
+
+// Release the publisher slot for an input track.
+message UnpublishTrack {
+  string name = 1;
+}
+
+// Successful response to a PublishTrack request. A failure is carried as an
+// Error in the same response slot instead.
+message PublishTrackResponse {
+  string name = 1;
+}
