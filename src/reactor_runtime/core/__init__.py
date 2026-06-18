@@ -6,6 +6,24 @@ vocabulary, and the service-lifecycle contract. Types only, no behaviour beyond
 small pure helpers, so it sits at the root of the dependency graph.
 """
 
+from reactor_runtime.core.model import (
+    ClientConnected,
+    ClientDisconnected,
+    ClipReadyEvent,
+    Command,
+    ConnectionEvent,
+    EndReason,
+    ErrorEvent,
+    FileUploaded,
+    InboundCommandEvent,
+    ReactorEvent,
+    RunnerEvent,
+    SessionEnded,
+    SessionMetricEvent,
+    SessionStarted,
+    TransitionEvent,
+    UploadedFile,
+)
 from reactor_runtime.core.session import SessionEvent, SessionState, Transition
 from reactor_runtime.core.transport import Connection, ConnectionSink
 from reactor_runtime.core.values import (
@@ -22,19 +40,35 @@ from reactor_runtime.core.values import (
 )
 
 __all__ = [
+    "ClientConnected",
+    "ClientDisconnected",
+    "ClipReadyEvent",
+    "Command",
     "ConnId",
     "Connection",
     "ConnectionCapabilities",
+    "ConnectionEvent",
     "ConnectionSink",
+    "EndReason",
+    "ErrorEvent",
+    "FileUploaded",
     "Health",
     "HealthStatus",
+    "InboundCommandEvent",
     "InputFrame",
     "MediaBundle",
+    "ReactorEvent",
+    "RunnerEvent",
+    "SessionEnded",
     "SessionEvent",
+    "SessionMetricEvent",
+    "SessionStarted",
     "SessionState",
     "TrackData",
     "TrackDirection",
     "TrackInfo",
     "TrackKind",
     "Transition",
+    "TransitionEvent",
+    "UploadedFile",
 ]
