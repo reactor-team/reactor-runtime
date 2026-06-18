@@ -6,6 +6,7 @@ vocabulary, and the service-lifecycle contract. Types only, no behaviour beyond
 small pure helpers, so it sits at the root of the dependency graph.
 """
 
+from reactor_runtime.core.transport import Connection, ConnectionSink
 from reactor_runtime.core.values import (
     ConnectionCapabilities,
     ConnId,
@@ -21,7 +22,9 @@ from reactor_runtime.core.values import (
 
 __all__ = [
     "ConnId",
+    "Connection",
     "ConnectionCapabilities",
+    "ConnectionSink",
     "Health",
     "HealthStatus",
     "InputFrame",
