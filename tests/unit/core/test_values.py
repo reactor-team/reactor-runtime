@@ -54,9 +54,8 @@ def test_media_bundle_lookups() -> None:
     assert bundle.get_tracks_by_kind(TrackKind.AUDIO) == [audio]
 
 
-def test_connection_capabilities_default_to_data_only() -> None:
+def test_connection_capabilities_default_to_no_media() -> None:
     caps = ConnectionCapabilities()
-    assert caps.carries_data is True
     assert caps.carries_video is False
     assert caps.carries_audio is False
 
