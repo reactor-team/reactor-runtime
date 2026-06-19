@@ -71,7 +71,7 @@ class ConnectionSink(Protocol):
         peer connection reaches its connected state — never at handshake or
         offer time. A transport that builds a connection during signaling holds
         it itself until then, so a client that offers but never connects never
-        advances the session (and so is never billed for streaming).
+        advances the session.
         """
 
     def connection_closed(self, conn_id: ConnId) -> None:
