@@ -6,8 +6,10 @@ live-connection registry without knowing anything about transports, the model, o
 asyncio — the runner wires them to the rest of the process.
 """
 
+from reactor_runtime.runner.connection_manager import ConnectionManager
 from reactor_runtime.runner.state_machine import SessionStateMachine
 
 __all__ = [
+    "ConnectionManager",
     "SessionStateMachine",
 ]
