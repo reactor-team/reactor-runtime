@@ -2,6 +2,21 @@
 requires = ["uv_build>=0.11.22,<0.12.0"]
 build-backend = "uv_build"
 
+[tool.uv.build-backend]
+# Ship two top-level packages in one wheel: the runtime, and the generated
+# wire-protocol bindings (reactor_wire.v1). The bindings are not committed; the
+# build vendors them from the pinned wire/v* release into src/reactor_wire/
+# before packaging (see scripts/fetch-wire.py and the build make target).
+module-name = ["reactor_runtime", "reactor_wire"]
+namespace = true
+
+# The released wire-protocol language package this runtime vendors. CalVer,
+# matching a wire/v<version> GitHub release tag (e.g. 1.20260618.42). The 0.0.0
+# placeholder is unset: it resolves to no release until the first wire/v* is
+# cut. Bump it to adopt a release; buf breaking keeps the line compatible.
+[tool.reactor-wire]
+version = "0.0.0"
+
 [project]
 name = "reactor-runtime"
 version = "0.1.0"
@@ -18,7 +33,9 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Typing :: Typed",
 ]
-dependencies = []
+dependencies = [
+    "protobuf>=7.35.1",
+]
 
 [project.urls]
 Source = "https://github.com/reactor-team/reactor-runtime"
@@ -30,11 +47,14 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "ruff",
+    "types-protobuf",
 ]
 
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]
+# Vendored protobuf bindings are generated, never linted or hand-edited.
+extend-exclude = ["src/reactor_wire"]
 
 [tool.ruff.lint]
 select = [
@@ -69,6 +89,9 @@ convention = "google"
 strict = true
 python_version = "3.12"
 files = ["src", "tests"]
+# Vendored protobuf bindings ship their own .pyi stubs; do not type-check the
+# generated .py bodies (callers still get types from the stubs).
+exclude = ["src/reactor_wire/"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

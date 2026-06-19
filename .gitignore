@@ -32,6 +32,10 @@ htmlcov/
 *.swp
 *.swo
 
+# Generated wire-protocol bindings: fetched from a released wire/v* package and
+# vendored at build time, never committed (see scripts/fetch-wire.py).
+/src/reactor_wire/
+
 # Local config and secrets
 .env
 .env.*

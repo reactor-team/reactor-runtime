@@ -21,9 +21,10 @@ release: ## Display the release (version + git SHA)
 ##@ Setup
 
 .PHONY: install
-install: ## Install dependencies and git hooks
+install: ## Install dependencies, vendor the pinned wire bindings, and install git hooks
 	@echo "--- 📦 Installing dependencies and git hooks"
 	uv sync
+	$(MAKE) wire-vendor
 	uv run lefthook install
 
 .PHONY: install-locked
@@ -31,10 +32,47 @@ install-locked: ## Install dependencies exactly as locked (used by CI)
 	@echo "--- 📦 Installing locked dependencies"
 	uv sync --locked
 
+##@ Protobuf
+
+.PHONY: proto-gen
+proto-gen: ## Generate the wire-protocol bindings from proto/ into src/ (dev only)
+	@echo "--- 🛠️ Generating wire-protocol bindings"
+	buf generate
+
+.PHONY: proto-lint
+proto-lint: ## Lint the proto sources
+	@echo "--- 🔎 Linting protos"
+	buf lint
+
+.PHONY: proto-breaking
+proto-breaking: ## Detect breaking proto changes against main (skips if main has no protos)
+	@base=main; git rev-parse --verify --quiet "$$base" >/dev/null 2>&1 || base=origin/main; \
+	if git cat-file -e "$$base:buf.yaml" 2>/dev/null; then \
+		echo "--- 🔎 Checking protos for breaking changes against $$base"; \
+		buf breaking --against ".git#ref=$$base"; \
+	else \
+		echo "--- ⏭️  No proto module on $$base yet; skipping breaking check"; \
+	fi
+
+.PHONY: proto-breaking-release
+proto-breaking-release: ## Guard the published contract: breaking-check against the latest wire/v* tag
+	@tag=$$(git tag --list 'wire/v*' --sort=-v:refname | head -n1); \
+	if [ -z "$$tag" ]; then \
+		echo "--- ⏭️  No prior wire/v* release tag; skipping release breaking check"; \
+	else \
+		echo "--- 🔎 Checking protos for breaking changes against $$tag"; \
+		buf breaking --against ".git#tag=$$tag"; \
+	fi
+
+.PHONY: wire-vendor
+wire-vendor: ## Download the pinned wire/v* release and vendor its bindings into src/
+	@echo "--- 📥 Vendoring pinned wire-protocol bindings"
+	uv run python scripts/fetch-wire.py
+
 ##@ Build
 
 .PHONY: build
-build: ## Build sdist and wheel into dist/
+build: wire-vendor ## Build sdist and wheel into dist/ (bundles the vendored wire bindings)
 	@echo "--- 🛠️ Building reactor-runtime $(RELEASE)"
 	uv build
 
@@ -69,7 +107,7 @@ test: ## Run unit tests
 	uv run pytest -q
 
 .PHONY: check
-check: lint typecheck test ## Run all checks (lint, typecheck, test)
+check: proto-lint proto-breaking lint typecheck test ## Run all checks
 	@echo "--- ✅ All checks passed"
 
 ##@ Cleanup

@@ -11,6 +11,9 @@ pre-commit:
     ruff-format:
       glob: "*.py"
       run: uv run ruff format --check {staged_files}
+    proto-lint:
+      glob: "proto/**/*.proto"
+      run: buf lint
 
 pre-push:
   parallel: true

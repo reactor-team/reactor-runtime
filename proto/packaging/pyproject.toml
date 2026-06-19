@@ -1,0 +1,27 @@
+# Packaging template for the standalone wire-protocol language package. The
+# release workflow copies this beside the generated reactor_wire/ tree, injects
+# the CalVer version, and builds reactor_wire-<version>-py3-none-any.whl. The
+# runtime vendors that wheel rather than depending on it (see fetch-wire.py).
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reactor-wire"
+version = "0.0.0"
+description = "Reactor wire-protocol bindings (reactor_wire.v1)"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.12"
+dependencies = [
+    "protobuf>=7.35.1",
+]
+
+[project.urls]
+Source = "https://github.com/reactor-team/reactor-runtime"
+
+# PEP 420 namespace packages: the buf-generated tree ships no __init__.py.
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["reactor_wire*"]
+namespaces = true
