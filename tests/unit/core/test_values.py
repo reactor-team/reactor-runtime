@@ -79,3 +79,14 @@ def test_health_aggregate_of_nothing_is_healthy() -> None:
     rolled = Health.aggregate([])
     assert rolled.status is HealthStatus.HEALTHY
     assert rolled.detail is None
+
+
+def test_health_aggregate_omits_healthy_part_details() -> None:
+    rolled = Health.aggregate(
+        [
+            Health.healthy("warming complete"),
+            Health(HealthStatus.DEGRADED, "cache cold"),
+        ]
+    )
+    assert rolled.status is HealthStatus.DEGRADED
+    assert rolled.detail == "cache cold"

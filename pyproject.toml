@@ -34,7 +34,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "numpy>=2.4.6",
+    "numpy>=2.1",
     "protobuf>=7.35.1",
 ]
 
