@@ -58,16 +58,7 @@ jobs:
 
             reactor-runtime is the open-source (Apache 2.0) Python framework for building and running real-time, interactive video models. Everything in it is public: code, comments, docs, commit messages. The package is managed end-to-end by uv (`uv_build` backend, static version in `pyproject.toml`); a release is a `uv version X.Y.Z` bump commit plus a matching `vX.Y.Z` tag, published to PyPI via trusted publishing. The Makefile is the canonical build interface and CI delegates to make targets (`install-locked`, `lint`, `typecheck`, `test`, `build`, `publish`). Quality gates are ruff (lint + format, Google-style docstrings) and strict mypy, wired through lefthook git hooks and GitHub Actions. Python floor is 3.12.
 
-            Read `AGENTS.md` before reviewing — it carries the engineering standards that tooling cannot enforce, and the review must hold the PR to them.
-
-            ## Standards to hold the PR to (from AGENTS.md)
-
-            - **This repo is public: no private-system references.** Treat Reactor's private monorepo and production services as if they do not exist — no internal service names, package names, repo paths, infrastructure, or tooling. Flag any code, comment, doc, or string that leaks insider context or assumes a private system. This is the single most important thing to catch.
-            - **Tests ship with behaviour.** Every PR that adds or changes behaviour must include tests in the same PR (unit tests in `tests/unit/`, integration in `tests/integration/`, mirroring the `src/reactor_runtime/` layout). Flag behaviour changes that arrive without tests.
-            - **Strict typing.** mypy runs strict; flag blanket `# type: ignore` without a verifiable reason, and weakening of the type surface. Modern syntax only: `X | None`, builtin generics, no `Optional[...]`/`Dict[...]`.
-            - **Docstrings document the contract.** Google style, imperative one-line summary, `Args:`/`Returns:`/`Raises:` when they add information. Public modules/classes/functions need one.
-            - **End-state writing.** Comments and docstrings describe what the code does and why, as if it has always been this way — no iteration narration ("previously...", "switched from X to Y", "no longer..."), no double negations, no narrating what the code visibly does.
-            - **Releases are tag-driven.** The version field in `pyproject.toml` is only touched by a deliberate `uv version` bump; flag stray version edits in unrelated changes.
+            Read `AGENTS.md` before reviewing — it carries the engineering standards that tooling cannot enforce (public-repo rule against private-system references, tests shipping with behaviour, strict typing, Google-style docstrings, end-state writing, tag-driven releases). Hold the PR to them rather than restating them here.
 
             ## Instructions
 
@@ -80,11 +71,11 @@ jobs:
             3. Focus your review on:
                - **Bugs & Logic Errors**: actual bugs, off-by-one, None handling, race conditions, async/await misuse
                - **Security Issues**: hardcoded secrets, unsafe deserialization, command/path injection
-               - **Private-system leaks**: any reference that assumes Reactor's private infrastructure (see standards above)
+               - **Private-system leaks**: any reference that assumes Reactor's private infrastructure
                - **Missing tests** for changed behaviour
                - **Breaking Changes**: public API/protocol contract changes, backwards compatibility
                - **Missing Error Handling**: unhandled exceptions, missing validation
-               - **Typing & docstring contract violations** as described in the standards
+               - **Typing & docstring contract violations** against the AGENTS.md standards
 
             4. **DO NOT comment on**:
                - Code that is already good or correct
@@ -102,7 +93,9 @@ jobs:
                - Be specific about what's wrong and why
                - Suggest a concrete fix when possible
 
-            6. **DO NOT post a summary comment.** Only leave inline comments on specific lines that need attention. If you find no NEW issues, don't comment at all — silence means approval.
+            6. Decide how to close out the review based on what you found:
+               - **If you found at least one new issue:** leave only the inline comments from step 5. Do not post a summary comment on top of them.
+               - **If you found no new issues at all:** post exactly one summary comment whose body is the single word `lgtm` (lowercase, nothing else). Before creating it, re-read the body you are about to submit and confirm it contains only `lgtm` — no preamble, no summary of the diff, no caveats, no extra whitespace or formatting — then create the comment with `gh pr comment <PR NUMBER> --body "lgtm"`.
 
             ## Review Style
 
@@ -112,4 +105,4 @@ jobs:
             - NEVER repeat yourself — if you've commented on something before, trust that the author saw it
 
           claude_args: |
-            --allowedTools "Read,Glob,Grep,Bash(gh api:*),Bash(gh pr diff:*),Bash(gh pr view:*),mcp__github_inline_comment__create_inline_comment"
+            --allowedTools "Read,Glob,Grep,Bash(gh api:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),mcp__github_inline_comment__create_inline_comment"
