@@ -129,22 +129,21 @@ class MediaBundle:
 
 @dataclass(frozen=True)
 class ConnectionCapabilities:
-    """What a connection's wire can actually carry.
+    """What media a connection's wire can carry.
 
-    Makes heterogeneous sessions sound: a data-only client never has the video
-    sender resumed onto it, while a full WebRTC client does. A transport
-    advertises its capabilities so media is routed only to connections that can
-    receive it, rather than relying on a silent no-op.
+    Makes heterogeneous sessions sound: a connection with no media is never sent
+    the video track, while a full WebRTC client is. A transport advertises what it
+    can carry so media is routed only to connections that can receive it, rather
+    than relying on a silent no-op. The data channel is universal — every
+    connection carries control messages — so only media is optional.
 
     Attributes:
         carries_video: The wire can deliver outbound video.
         carries_audio: The wire can deliver outbound audio.
-        carries_data: The wire can deliver data-channel messages.
     """
 
     carries_video: bool = False
     carries_audio: bool = False
-    carries_data: bool = True
 
 
 class HealthStatus(Enum):
