@@ -1,0 +1,108 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, ready_for_review, reopened]
+  issue_comment:
+    types: [created]
+
+jobs:
+  claude-review:
+    # Token-burning is gated to maintainers: review runs automatically on a
+    # maintainer-authored PR, or on demand when a maintainer comments `/review`.
+    # Outside contributors never trigger it implicitly. The `claude-code-review`
+    # environment scopes access to the ANTHROPIC_API_KEY.
+    if: |
+      (
+        github.event_name == 'pull_request' &&
+        !github.event.pull_request.draft &&
+        !contains(github.event.pull_request.title, '[skip-claude]') &&
+        github.event.pull_request.user.login != 'dependabot[bot]' &&
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)
+      ) || (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        github.event.comment.body == '/review' &&
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+      )
+    runs-on: ubuntu-latest
+    environment: claude-code-review
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Run Claude Code Review
+        id: claude-review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          allowed_bots: "graphite-app"
+          track_progress: true
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+
+            You are a senior engineer reviewing this pull request. Act like a helpful team member who wants to improve code quality while being respectful of the author's work.
+
+            First, run `gh pr view <PR NUMBER> --json title,author` to get the PR title and author.
+
+            ## What this repository is
+
+            reactor-runtime is the open-source (Apache 2.0) Python framework for building and running real-time, interactive video models. Everything in it is public: code, comments, docs, commit messages. The package is managed end-to-end by uv (`uv_build` backend, static version in `pyproject.toml`); a release is a `uv version X.Y.Z` bump commit plus a matching `vX.Y.Z` tag, published to PyPI via trusted publishing. The Makefile is the canonical build interface and CI delegates to make targets (`install-locked`, `lint`, `typecheck`, `test`, `build`, `publish`). Quality gates are ruff (lint + format, Google-style docstrings) and strict mypy, wired through lefthook git hooks and GitHub Actions. Python floor is 3.12.
+
+            Read `AGENTS.md` before reviewing — it carries the engineering standards that tooling cannot enforce (public-repo rule against private-system references, tests shipping with behaviour, strict typing, Google-style docstrings, end-state writing, tag-driven releases). Hold the PR to them rather than restating them here.
+
+            ## Instructions
+
+            1. **CRITICAL: Check for existing review comments BEFORE reviewing the code.**
+               Run: `gh api repos/${{ github.repository }}/pulls/<PR NUMBER>/comments`
+               Parse the JSON and note each comment's `path`, `line`/`original_line`, and `body`, and whether it is from a previous bot review (look for "claude" or "github-actions" in the user login). Build a mental map of issues that have ALREADY been flagged.
+
+            2. Review the PR diff using `gh pr diff <PR NUMBER>`.
+
+            3. Focus your review on:
+               - **Bugs & Logic Errors**: actual bugs, off-by-one, None handling, race conditions, async/await misuse
+               - **Security Issues**: hardcoded secrets, unsafe deserialization, command/path injection
+               - **Private-system leaks**: any reference that assumes Reactor's private infrastructure
+               - **Missing tests** for changed behaviour
+               - **Breaking Changes**: public API/protocol contract changes, backwards compatibility
+               - **Missing Error Handling**: unhandled exceptions, missing validation
+               - **Typing & docstring contract violations** against the AGENTS.md standards
+
+            4. **DO NOT comment on**:
+               - Code that is already good or correct
+               - Minor style preferences (leave that to ruff)
+               - Pre-existing issues not introduced in this PR
+               - Nitpicks or pedantic suggestions
+               - **Issues that have ALREADY been flagged in existing comments (even if not fixed yet)**
+               - **Issues where an existing comment was marked as "Resolved" by the author**
+               - **Any file+line combination that already has a review comment, even if your wording differs**
+
+            5. For each NEW issue you find (not previously commented on):
+               - Double-check the existing comments list — if a similar issue exists on the same file/line, SKIP IT
+               - Use `mcp__github_inline_comment__create_inline_comment` to comment directly on the specific line of code
+               - Keep comments concise (2-4 sentences max)
+               - Be specific about what's wrong and why
+               - Suggest a concrete fix when possible
+
+            6. Decide how to close out the review based on what you found:
+               - **If you found at least one new issue:** leave only the inline comments from step 5. Do not post a summary comment on top of them.
+               - **If you found no new issues at all:** post exactly one summary comment whose body is the single word `lgtm` (lowercase, nothing else). Before creating it, re-read the body you are about to submit and confirm it contains only `lgtm` — no preamble, no summary of the diff, no caveats, no extra whitespace or formatting — then create the comment with `gh pr comment <PR NUMBER> --body "lgtm"`.
+
+            ## Review Style
+
+            - Be constructive, not critical
+            - Explain the "why" behind suggestions
+            - Ask questions if intent is unclear rather than assuming it's wrong
+            - NEVER repeat yourself — if you've commented on something before, trust that the author saw it
+
+          claude_args: |
+            --allowedTools "Read,Glob,Grep,Bash(gh api:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),mcp__github_inline_comment__create_inline_comment"

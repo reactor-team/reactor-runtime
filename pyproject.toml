@@ -1,0 +1,75 @@
+[build-system]
+requires = ["uv_build>=0.8.22,<0.9.0"]
+build-backend = "uv_build"
+
+[project]
+name = "reactor-runtime"
+version = "0.1.0"
+description = "A Python framework for building real-time, interactive video models"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Reactor", email = "team@reactor.inc" }]
+requires-python = ">=3.12"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.urls]
+Source = "https://github.com/reactor-team/reactor-runtime"
+
+[dependency-groups]
+dev = [
+    "lefthook",
+    "mypy",
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "N",     # pep8-naming
+    "UP",    # pyupgrade (keeps syntax at the 3.12 floor)
+    "B",     # bugbear
+    "C4",    # comprehensions
+    "SIM",   # simplify
+    "RET",   # return statements
+    "RUF",   # ruff-specific
+    "D",     # pydocstyle
+    "PT",    # pytest style
+    "ASYNC", # async pitfalls
+    "TID",   # tidy imports (bans relative-import escapes)
+]
+ignore = [
+    "D105", # magic methods rarely need docstrings
+    "D107", # __init__ is documented on the class
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D"]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
