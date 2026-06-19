@@ -210,7 +210,6 @@ RunnerEvent = (
 )
 """The egress union the runtime journals out for an external consumer to mirror.
 
-Replaces the injected reporter and observer ports: rather than composing
-platform objects in, the runtime records one of these facts and surfaces it for
-a consumer to map onto its own world.
+The runtime records one of these facts and surfaces it for a consumer to map
+onto its own world, rather than composing a platform object in directly.
 """
