@@ -192,6 +192,6 @@ class Health:
         for part in parts:
             if _SEVERITY[part.status] < _SEVERITY[worst]:
                 worst = part.status
-            if part.detail:
+            if part.status is not HealthStatus.HEALTHY and part.detail:
                 details.append(part.detail)
         return cls(worst, "; ".join(details) or None)
