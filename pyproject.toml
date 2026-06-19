@@ -15,7 +15,7 @@ namespace = true
 # placeholder is unset: it resolves to no release until the first wire/v* is
 # cut. Bump it to adopt a release; buf breaking keeps the line compatible.
 [tool.reactor-wire]
-version = "0.0.0"
+version = "1.20260619.2"
 
 [project]
 name = "reactor-runtime"
