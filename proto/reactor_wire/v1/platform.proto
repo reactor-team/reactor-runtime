@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package reactor_wire.v1;
+
+import "google/protobuf/struct.proto";
+
+// Liveness heartbeat from the client.
+message Ping {}
+
+// Request for the model's schema.
+message RequestSchema {}
+
+// The model's schema, carried as an OpenAPI document.
+message ModelSchema {
+  google.protobuf.Struct openapi = 1;
+}
+
+// Notification that a client upload completed and can now be referenced.
+message FileUploaded {
+  string upload_id = 1;
+  string name = 2;
+  string mime_type = 3;
+  int64 size = 4;
+}
+
+// Request a clip of the last duration_seconds of output.
+message RequestClip {
+  double duration_seconds = 1;
+}
+
+// Request a recording of the session so far.
+message RequestRecording {}
+
+// A clip or recording is being prepared.
+message ClipReady {
+  string session_id = 1;
+  string kind = 2;
+  double start_marker = 3;
+  double end_marker = 4;
+  double now_marker = 5;
+  int64 predicted_ready_at_ms = 6;
+  string playlist_url = 7;
+}
+
+// A clip or recording request failed.
+message ClipFailed {
+  string reason = 1;
+}

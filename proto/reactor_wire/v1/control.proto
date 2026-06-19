@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package reactor_wire.v1;
+
+import "reactor_wire/v1/common.proto";
+import "reactor_wire/v1/platform.proto";
+import "reactor_wire/v1/track.proto";
+
+// Control channel, client to runtime. Carries all platform and track traffic.
+message ControlClientMessage {
+  string request_id = 1;
+  MessageKind kind = 2;
+  oneof payload {
+    Ping ping = 10;
+    RequestSchema request_schema = 11;
+    FileUploaded file_uploaded = 12;
+    RequestClip request_clip = 13;
+    RequestRecording request_recording = 14;
+    PublishTrack publish_track = 15;
+    PauseTrack pause_track = 16;
+    ResumeTrack resume_track = 17;
+    UnpublishTrack unpublish_track = 18;
+    Error error = 40;
+  }
+}
+
+// Control channel, runtime to client. Carries all platform and track traffic.
+message ControlServerMessage {
+  string request_id = 1;
+  MessageKind kind = 2;
+  oneof payload {
+    ModelSchema model_schema = 10;
+    ClipReady clip_ready = 11;
+    ClipFailed clip_failed = 12;
+    PublishTrackResponse publish_track = 14;
+    Error error = 40;
+  }
+}
