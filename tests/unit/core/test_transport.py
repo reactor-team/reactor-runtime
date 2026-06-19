@@ -13,7 +13,7 @@ from reactor_runtime.core import (
 class FakeConnection:
     def __init__(self, conn_id: int) -> None:
         self.id = ConnId(conn_id)
-        self.capabilities = ConnectionCapabilities(carries_video=True, carries_data=True)
+        self.capabilities = ConnectionCapabilities(carries_video=True)
         self.sent: list[bytes] = []
         self.paused: list[str] = []
         self.closed = False
