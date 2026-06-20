@@ -27,6 +27,7 @@ from reactor_runtime.interface.events import (
     session_ended,
     session_started,
 )
+from reactor_runtime.interface.model import ReactorModel
 from reactor_runtime.interface.tracks import Audio, Input, Output, Track, Video
 
 __all__ = [
@@ -39,6 +40,7 @@ __all__ = [
     "MessageField",
     "ModelMessage",
     "Output",
+    "ReactorModel",
     "Track",
     "UploadedFile",
     "Video",
