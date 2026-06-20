@@ -17,6 +17,7 @@ from reactor_runtime.core import (
     InputFrame,
     UploadedFile,
 )
+from reactor_runtime.interface.client import ClientInfo
 from reactor_runtime.interface.events import (
     MessageField,
     ModelMessage,
@@ -27,20 +28,29 @@ from reactor_runtime.interface.events import (
     session_ended,
     session_started,
 )
+from reactor_runtime.interface.internal.input_buffer import (
+    BufferClosed,
+    InputBuffer,
+    ReadMode,
+)
 from reactor_runtime.interface.model import ReactorModel
 from reactor_runtime.interface.tracks import Audio, Input, Output, Track, Video
 
 __all__ = [
     "Audio",
+    "BufferClosed",
+    "ClientInfo",
     "Command",
     "FieldInfo",
     "Input",
+    "InputBuffer",
     "InputField",
     "InputFrame",
     "MessageField",
     "ModelMessage",
     "Output",
     "ReactorModel",
+    "ReadMode",
     "Track",
     "UploadedFile",
     "Video",
