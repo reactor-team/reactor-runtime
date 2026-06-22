@@ -20,13 +20,13 @@ class FakeConnection:
         self.capabilities = capabilities or ConnectionCapabilities(
             carries_video=True, carries_audio=True
         )
-        self.messages: list[bytes] = []
+        self.messages: list[bytes | str] = []
         self.media: list[MediaBundle] = []
         self.resumed: list[str] = []
         self.paused: list[str] = []
         self.closed = False
 
-    def send_message(self, payload: bytes) -> None:
+    def send_message(self, payload: bytes | str) -> None:
         self.messages.append(payload)
 
     def send_media(self, bundle: MediaBundle) -> None:
@@ -134,8 +134,9 @@ def test_broadcast_reaches_every_connection() -> None:
     cm.register(a)
     cm.register(b)
     cm.broadcast(b"payload")
-    assert a.messages == [b"payload"]
-    assert b.messages == [b"payload"]
+    cm.broadcast('{"type":"text-frame"}')
+    assert a.messages == [b"payload", '{"type":"text-frame"}']
+    assert b.messages == [b"payload", '{"type":"text-frame"}']
 
 
 def test_addressed_send_reaches_only_the_target() -> None:
@@ -233,3 +234,28 @@ async def test_close_is_awaitable_on_the_fake() -> None:
     conn = FakeConnection(1)
     await conn.close()
     assert conn.closed is True
+
+
+@pytest.mark.asyncio
+async def test_close_all_closes_every_connection_and_empties_the_registry() -> None:
+    cm, _ = waiting_manager()
+    a, b = FakeConnection(1), FakeConnection(2)
+    cm.register(a)
+    cm.register(b)
+    cm.publish_track(ConnId(1), "camera")
+    await cm.close_all()
+    assert a.closed is True
+    assert b.closed is True
+    assert cm.count == 0
+    assert cm.publish_track(ConnId(1), "camera") is False
+
+
+@pytest.mark.asyncio
+async def test_close_all_does_not_drive_the_session_machine() -> None:
+    cm, sm = waiting_manager()
+    cm.register(FakeConnection(1))
+    seen: list[Transition] = []
+    sm.on_transition(seen.append)
+    await cm.close_all()
+    assert seen == []
+    assert sm.current_state is SessionState.STREAMING

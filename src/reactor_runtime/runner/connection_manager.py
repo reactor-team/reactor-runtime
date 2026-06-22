@@ -84,6 +84,24 @@ class ConnectionManager:
         for name in held:
             del self._publishers[name]
 
+    async def close_all(self) -> None:
+        """Close every connection and empty the registry, for session teardown.
+
+        Used when the session itself is ending rather than a single client
+        leaving: the registry is cleared and every wire is closed wholesale. It
+        does not drive the session machine — the open/close moves are illegal once
+        the session has left its running states — and does not announce
+        per-connection losses, because the model learns the session has ended
+        through the session-end reactor event, not one disconnect per client. The
+        registry is emptied before the closes are awaited so the manager presents
+        as session-less the moment teardown begins.
+        """
+        conns = list(self._by_id.values())
+        self._by_id.clear()
+        self._publishers.clear()
+        for conn in conns:
+            await conn.close()
+
     def publish_track(self, cid: ConnId, name: str) -> bool:
         """Claim the publisher slot for a track on behalf of a connection.
 
@@ -116,13 +134,13 @@ class ConnectionManager:
         if conn is not None:
             conn.pause_track(name)
 
-    def broadcast(self, payload: bytes) -> None:
-        """Send an encoded message to every connection."""
+    def broadcast(self, payload: bytes | str) -> None:
+        """Send an encoded frame to every connection."""
         for conn in self._by_id.values():
             conn.send_message(payload)
 
-    def send(self, cid: ConnId, payload: bytes) -> None:
-        """Send an encoded message to one connection, if it is registered."""
+    def send(self, cid: ConnId, payload: bytes | str) -> None:
+        """Send an encoded frame to one connection, if it is registered."""
         conn = self._by_id.get(cid)
         if conn is not None:
             conn.send_message(payload)
