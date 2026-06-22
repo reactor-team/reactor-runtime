@@ -8,8 +8,10 @@ directly.
 """
 
 from reactor_runtime.http.routes import EgressRoutes, SessionRoutes
+from reactor_runtime.http.server import HttpServer
 
 __all__ = [
     "EgressRoutes",
+    "HttpServer",
     "SessionRoutes",
 ]
