@@ -21,4 +21,14 @@ pre-push:
     mypy:
       run: uv run mypy
     pytest:
-      run: uv run pytest -q
+      # macOS SIP strips DYLD_* from this hook's subprocess, so PyGObject cannot
+      # find the Homebrew GStreamer libraries the transport tests load. Re-add
+      # Homebrew's library and typelib paths there. A no-op on Linux/CI, where
+      # the loader finds them through the standard search paths.
+      run: |
+        if [ "$(uname)" = "Darwin" ] && command -v brew >/dev/null 2>&1; then
+          brew_prefix="$(brew --prefix)"
+          export DYLD_LIBRARY_PATH="$brew_prefix/lib:${DYLD_LIBRARY_PATH:-}"
+          export GI_TYPELIB_PATH="$brew_prefix/lib/girepository-1.0:${GI_TYPELIB_PATH:-}"
+        fi
+        uv run pytest -q
