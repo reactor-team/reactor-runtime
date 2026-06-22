@@ -14,11 +14,11 @@ class FakeConnection:
     def __init__(self, conn_id: int) -> None:
         self.id = ConnId(conn_id)
         self.capabilities = ConnectionCapabilities(carries_video=True)
-        self.sent: list[bytes] = []
+        self.sent: list[bytes | str] = []
         self.paused: list[str] = []
         self.closed = False
 
-    def send_message(self, payload: bytes) -> None:
+    def send_message(self, payload: bytes | str) -> None:
         self.sent.append(payload)
 
     def send_media(self, bundle: MediaBundle) -> None:
@@ -37,7 +37,7 @@ class FakeConnection:
 class FakeSink:
     def __init__(self) -> None:
         self.opened: list[ConnId] = []
-        self.messages: list[tuple[ConnId, bytes]] = []
+        self.messages: list[tuple[ConnId, bytes | str]] = []
 
     def connection_opened(self, conn: Connection) -> None:
         self.opened.append(conn.id)
@@ -45,7 +45,7 @@ class FakeSink:
     def connection_closed(self, conn_id: ConnId) -> None:
         pass
 
-    def message_received(self, conn_id: ConnId, payload: bytes) -> None:
+    def message_received(self, conn_id: ConnId, payload: bytes | str) -> None:
         self.messages.append((conn_id, payload))
 
     def media_received(self, conn_id: ConnId, track: str, frame: InputFrame) -> None:
@@ -74,16 +74,18 @@ def test_facts_flow_up_through_the_sink() -> None:
 
     sink.connection_opened(conn)
     sink.message_received(conn.id, b"hello")
+    sink.message_received(conn.id, '{"scope":"runtime"}')
     sink.media_received(conn.id, "camera", InputFrame(np.zeros((1, 1, 3), dtype=np.uint8)))
 
     assert isinstance(sink, FakeSink)
     assert sink.opened == [ConnId(7)]
-    assert sink.messages == [(ConnId(7), b"hello")]
+    assert sink.messages == [(ConnId(7), b"hello"), (ConnId(7), '{"scope":"runtime"}')]
 
 
 def test_commands_flow_down_through_the_connection() -> None:
     conn = FakeConnection(3)
     conn.send_message(b"frame")
+    conn.send_message('{"type":"current_mode"}')
     conn.pause_track("main_video")
-    assert conn.sent == [b"frame"]
+    assert conn.sent == [b"frame", '{"type":"current_mode"}']
     assert conn.paused == ["main_video"]

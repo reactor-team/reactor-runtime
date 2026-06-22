@@ -38,8 +38,13 @@ class Connection(Protocol):
     id: ConnId
     capabilities: ConnectionCapabilities
 
-    def send_message(self, payload: bytes) -> None:
-        """Send already-encoded bytes to this client."""
+    def send_message(self, payload: bytes | str) -> None:
+        """Send an already-encoded frame to this client.
+
+        A frame is text or binary depending on the wire version — a v0 JSON
+        frame is ``str`` (a text frame), a v1 protobuf frame is ``bytes`` (a
+        binary frame) — so the connection carries both.
+        """
 
     def send_media(self, bundle: MediaBundle) -> None:
         """Send a media bundle, or do nothing when the wire carries no media."""
@@ -82,8 +87,13 @@ class ConnectionSink(Protocol):
         discarded inside the transport and is never seen here.
         """
 
-    def message_received(self, conn_id: ConnId, payload: bytes) -> None:
-        """Hand an inbound encoded payload up for decoding and dispatch."""
+    def message_received(self, conn_id: ConnId, payload: bytes | str) -> None:
+        """Hand an inbound encoded frame up for decoding and dispatch.
+
+        The frame is text or binary as the wire version dictates (``str`` for a
+        v0 JSON frame, ``bytes`` for a v1 protobuf frame), mirroring what the
+        codec decodes.
+        """
 
     def media_received(self, conn_id: ConnId, track: str, frame: InputFrame) -> None:
         """Hand an inbound media frame up for the named track."""
