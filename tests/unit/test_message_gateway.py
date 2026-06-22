@@ -17,7 +17,7 @@ class FakeSink:
     def connection_closed(self, conn_id: ConnId) -> None:
         pass
 
-    def message_received(self, conn_id: ConnId, payload: bytes) -> None:
+    def message_received(self, conn_id: ConnId, payload: bytes | str) -> None:
         pass
 
     def media_received(self, conn_id: ConnId, track: str, frame: InputFrame) -> None:
