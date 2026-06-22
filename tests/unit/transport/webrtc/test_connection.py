@@ -80,11 +80,12 @@ async def test_outbound_commands_delegate_to_peer(
     conn = await _connect(fake_peer, factory_for(fake_peer), out_av_tracks)
     bundle = MediaBundle()
     conn.send_message(b"payload")
+    conn.send_message('{"type":"current_mode"}')
     conn.send_media(bundle)
     conn.resume_track("main_video")
     conn.pause_track("main_video")
     await conn.add_ice(IceCandidate("cand", "0", 0))
-    assert fake_peer.messages == [b"payload"]
+    assert fake_peer.messages == [b"payload", '{"type":"current_mode"}']
     assert fake_peer.sent_media == [bundle]
     assert fake_peer.resumed == ["main_video"]
     assert fake_peer.paused == ["main_video"]
@@ -97,16 +98,17 @@ async def test_inbound_message_and_media_forwarded(
     out_av_tracks: TrackMap,
 ) -> None:
     conn = await _connect(fake_peer, factory_for(fake_peer), out_av_tracks)
-    messages: list[bytes] = []
+    messages: list[bytes | str] = []
     media: list[tuple[str, InputFrame]] = []
     conn.on_message(messages.append)
     conn.on_media(lambda track, frame: media.append((track, frame)))
 
     frame = InputFrame(np.zeros((1, 1, 3), dtype=np.uint8))
     fake_peer.fire_message(b"hello")
+    fake_peer.fire_message('{"scope":"runtime"}')
     fake_peer.fire_media("webcam", frame)
 
-    assert messages == [b"hello"]
+    assert messages == [b"hello", '{"scope":"runtime"}']
     assert media == [("webcam", frame)]
 
 
@@ -137,6 +139,39 @@ async def test_close_is_silent(
 
     assert fake_peer.closed is True
     assert events == ["up"]
+
+
+async def test_close_fires_on_closed_once_not_disconnect(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    conn = await _connect(fake_peer, factory_for(fake_peer), out_av_tracks)
+    events: list[str] = []
+    conn.on_disconnect(lambda: events.append("down"))
+    conn.on_closed(lambda: events.append("closed"))
+
+    fake_peer.fire_connected()
+    await conn.close()
+    await conn.close()
+
+    assert events == ["closed"]
+
+
+async def test_peer_loss_does_not_fire_on_closed(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    conn = await _connect(fake_peer, factory_for(fake_peer), out_av_tracks)
+    events: list[str] = []
+    conn.on_disconnect(lambda: events.append("down"))
+    conn.on_closed(lambda: events.append("closed"))
+
+    fake_peer.fire_connected()
+    fake_peer.fire_disconnect()
+
+    assert events == ["down"]
 
 
 async def test_peer_disconnect_reports_loss_once(

@@ -78,11 +78,12 @@ class WebRTCConnection:
         self._peer = peer
         self._ping_timeout = ping_timeout
 
-        self._on_message: Callable[[bytes], None] | None = None
+        self._on_message: Callable[[bytes | str], None] | None = None
         self._on_media: Callable[[str, InputFrame], None] | None = None
         self._on_ping: Callable[[], None] | None = None
         self._on_connected: Callable[[], None] | None = None
         self._on_disconnect: Callable[[], None] | None = None
+        self._on_closed: Callable[[], None] | None = None
         self._on_stats: Callable[[PeerStats], None] | None = None
 
         self._alive = True
@@ -125,8 +126,8 @@ class WebRTCConnection:
         """The most recent stats sample, or ``None`` before the first cycle."""
         return self._latest_stats
 
-    def on_message(self, callback: Callable[[bytes], None]) -> None:
-        """Register the sink for inbound encoded bytes."""
+    def on_message(self, callback: Callable[[bytes | str], None]) -> None:
+        """Register the sink for inbound encoded frames (text or binary)."""
         self._on_message = callback
 
     def on_media(self, callback: Callable[[str, InputFrame], None]) -> None:
@@ -149,12 +150,23 @@ class WebRTCConnection:
         """
         self._on_disconnect = callback
 
+    def on_closed(self, callback: Callable[[], None]) -> None:
+        """Register the observer for a commanded :meth:`close`.
+
+        The mirror of :meth:`on_disconnect`: it fires only when the connection
+        is torn down on command (session teardown), never on an involuntary
+        loss. It lets the owner that initiated the close drop its own bookkeeping
+        for this connection without the loss being reported back as if it came
+        from the wire.
+        """
+        self._on_closed = callback
+
     def on_stats(self, callback: Callable[[PeerStats], None]) -> None:
         """Register an optional observer for each stats sample."""
         self._on_stats = callback
 
-    def send_message(self, payload: bytes) -> None:
-        """Send already-encoded bytes to this client."""
+    def send_message(self, payload: bytes | str) -> None:
+        """Send an already-encoded frame (text or binary) to this client."""
         self._peer.send_message(payload)
 
     def send_media(self, bundle: MediaBundle) -> None:
@@ -176,18 +188,21 @@ class WebRTCConnection:
     async def close(self) -> None:
         """Tear the connection down without reporting a loss upward.
 
-        A commanded close — session teardown — is silent: the watchdog and stats
-        sampling stop and the peer is closed, but the disconnect callback does
-        not fire, because the runner initiated this and is not waiting to hear
-        its own command back.
+        A commanded close — session teardown — is silent toward the sink: the
+        watchdog and stats sampling stop and the peer is closed, but the
+        disconnect callback does not fire, because the runner initiated this and
+        is not waiting to hear its own command back. The ``on_closed`` observer
+        does fire, once, so the owner that built the connection can forget it.
         """
         if not self._alive:
             return
         self._alive = False
         self._cancel_tasks()
         await self._close_peer()
+        if self._on_closed is not None:
+            self._on_closed()
 
-    def _handle_message(self, payload: bytes) -> None:
+    def _handle_message(self, payload: bytes | str) -> None:
         if self._on_message is not None:
             self._on_message(payload)
 

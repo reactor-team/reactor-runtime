@@ -19,14 +19,14 @@ class FakePeer:
 
     def __init__(self, stats: PeerStats | None = None) -> None:
         self.ice: list[IceCandidate] = []
-        self.messages: list[bytes] = []
+        self.messages: list[bytes | str] = []
         self.sent_media: list[MediaBundle] = []
         self.resumed: list[str] = []
         self.paused: list[str] = []
         self.closed = False
         self.stats_fail_times = 0
         self._stats = stats if stats is not None else PeerStats(rtt_seconds=0.1)
-        self._on_message: Callable[[bytes], None] | None = None
+        self._on_message: Callable[[bytes | str], None] | None = None
         self._on_media: Callable[[str, InputFrame], None] | None = None
         self._on_ping: Callable[[], None] | None = None
         self._on_connected: Callable[[], None] | None = None
@@ -35,7 +35,7 @@ class FakePeer:
     async def add_ice(self, candidate: IceCandidate) -> None:
         self.ice.append(candidate)
 
-    def send_message(self, payload: bytes) -> None:
+    def send_message(self, payload: bytes | str) -> None:
         self.messages.append(payload)
 
     def send_media(self, bundle: MediaBundle) -> None:
@@ -56,7 +56,7 @@ class FakePeer:
     async def close(self) -> None:
         self.closed = True
 
-    def on_message(self, callback: Callable[[bytes], None]) -> None:
+    def on_message(self, callback: Callable[[bytes | str], None]) -> None:
         self._on_message = callback
 
     def on_media(self, callback: Callable[[str, InputFrame], None]) -> None:
@@ -85,7 +85,7 @@ class FakePeer:
         assert self._on_ping is not None
         self._on_ping()
 
-    def fire_message(self, payload: bytes) -> None:
+    def fire_message(self, payload: bytes | str) -> None:
         assert self._on_message is not None
         self._on_message(payload)
 

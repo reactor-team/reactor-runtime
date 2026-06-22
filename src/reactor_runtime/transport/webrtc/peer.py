@@ -77,8 +77,8 @@ class WebRtcPeer(Protocol):
     async def add_ice(self, candidate: IceCandidate) -> None:
         """Add a trickle-ICE candidate; valid before and after the wire connects."""
 
-    def send_message(self, payload: bytes) -> None:
-        """Send already-encoded bytes over the data channel."""
+    def send_message(self, payload: bytes | str) -> None:
+        """Send an already-encoded frame over the data channel (text or binary)."""
 
     def send_media(self, bundle: MediaBundle) -> None:
         """Send a media bundle, routing each track to its negotiated sender."""
@@ -95,8 +95,8 @@ class WebRtcPeer(Protocol):
     async def close(self) -> None:
         """Tear the peer connection down."""
 
-    def on_message(self, callback: Callable[[bytes], None]) -> None:
-        """Register the sink for inbound data-channel bytes."""
+    def on_message(self, callback: Callable[[bytes | str], None]) -> None:
+        """Register the sink for inbound data-channel frames (text or binary)."""
 
     def on_media(self, callback: Callable[[str, InputFrame], None]) -> None:
         """Register the sink for inbound media frames, by track name."""
