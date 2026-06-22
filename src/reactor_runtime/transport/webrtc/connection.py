@@ -1,0 +1,284 @@
+"""WebRTC as a connection.
+
+:class:`WebRTCConnection` is the concrete
+:class:`~reactor_runtime.core.transport.Connection` for the WebRTC wire. It moves
+encoded messages and media through its peer, arbitrates publisher tracks, owns
+its own liveness through a ping watchdog, and samples connection stats — all the
+per-connection behaviour, with none of the signalling, which lives in the
+acceptor.
+
+The connection holds its media engine as a :class:`WebRtcPeer` and adapts it: it
+forwards the peer's inbound facts to the callbacks the acceptor registers, resets
+its watchdog on every client ping, and reports the connection lost — to the same
+callback — when a ping never arrives in time.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from collections.abc import Callable
+
+from reactor_runtime.core import (
+    ConnectionCapabilities,
+    ConnId,
+    InputFrame,
+    MediaBundle,
+    TrackDirection,
+    TrackKind,
+)
+from reactor_runtime.transport.webrtc.config import WebRtcConfig
+from reactor_runtime.transport.webrtc.peer import PeerStats, WebRtcPeer, WebRtcPeerFactory
+from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpAnswer, SdpOffer, TrackMap
+
+logger = logging.getLogger(__name__)
+
+
+def _capabilities_for(tracks: TrackMap) -> ConnectionCapabilities:
+    """Derive a connection's outbound capabilities from the model's tracks."""
+    outbound = tracks.by_direction(TrackDirection.OUT)
+    return ConnectionCapabilities(
+        carries_video=any(t.kind is TrackKind.VIDEO for t in outbound),
+        carries_audio=any(t.kind is TrackKind.AUDIO for t in outbound),
+    )
+
+
+class WebRTCConnection:
+    """One WebRTC client connection, driven through its media peer.
+
+    Built by the acceptor during negotiation and held until its wire connects.
+    The acceptor registers the inbound callbacks before the wire goes live; the
+    connection starts its watchdog and stats sampling on connect and stops them
+    on loss or close.
+    """
+
+    _WATCHDOG_POLL_SECONDS = 2.0
+    _STATS_INTERVAL_SECONDS = 2.0
+
+    def __init__(
+        self,
+        conn_id: ConnId,
+        peer: WebRtcPeer,
+        capabilities: ConnectionCapabilities,
+        *,
+        ping_timeout: float,
+    ) -> None:
+        """Bind the connection to its peer and outbound capabilities.
+
+        Args:
+            conn_id: The centrally-minted id for this connection.
+            peer: The media engine driving the wire.
+            capabilities: What media this connection's wire can carry outbound.
+            ping_timeout: Seconds without a client ping before the watchdog
+                declares the connection lost; ``0`` or less disables it.
+        """
+        self.id = conn_id
+        self.capabilities = capabilities
+        self._peer = peer
+        self._ping_timeout = ping_timeout
+
+        self._on_message: Callable[[bytes], None] | None = None
+        self._on_media: Callable[[str, InputFrame], None] | None = None
+        self._on_ping: Callable[[], None] | None = None
+        self._on_connected: Callable[[], None] | None = None
+        self._on_disconnect: Callable[[], None] | None = None
+        self._on_stats: Callable[[PeerStats], None] | None = None
+
+        self._alive = True
+        self._last_ping: float | None = None
+        self._watchdog_task: asyncio.Task[None] | None = None
+        self._stats_task: asyncio.Task[None] | None = None
+        self._latest_stats: PeerStats | None = None
+
+    @classmethod
+    async def create(
+        cls,
+        conn_id: ConnId,
+        offer: SdpOffer,
+        tracks: TrackMap,
+        config: WebRtcConfig,
+        *,
+        peer_factory: WebRtcPeerFactory,
+    ) -> tuple[WebRTCConnection, SdpAnswer]:
+        """Negotiate a peer for *offer* and wrap it as a connection.
+
+        Returns the connection and the SDP answer the exchange produced. The
+        connection subscribes to its peer's inbound events here, so it is ready
+        to forward facts the moment the acceptor has registered its callbacks.
+        """
+        peer, answer = await peer_factory(conn_id, offer, tracks, config)
+        conn = cls(conn_id, peer, _capabilities_for(tracks), ping_timeout=config.ping_timeout)
+        conn._subscribe()
+        return conn, answer
+
+    def _subscribe(self) -> None:
+        """Wire this connection onto its peer's inbound events."""
+        self._peer.on_message(self._handle_message)
+        self._peer.on_media(self._handle_media)
+        self._peer.on_ping(self._handle_ping)
+        self._peer.on_connected(self._handle_connected)
+        self._peer.on_disconnect(self._report_loss)
+
+    @property
+    def latest_stats(self) -> PeerStats | None:
+        """The most recent stats sample, or ``None`` before the first cycle."""
+        return self._latest_stats
+
+    def on_message(self, callback: Callable[[bytes], None]) -> None:
+        """Register the sink for inbound encoded bytes."""
+        self._on_message = callback
+
+    def on_media(self, callback: Callable[[str, InputFrame], None]) -> None:
+        """Register the sink for inbound media frames, by track name."""
+        self._on_media = callback
+
+    def on_ping(self, callback: Callable[[], None]) -> None:
+        """Register the sink for client liveness pings."""
+        self._on_ping = callback
+
+    def on_connected(self, callback: Callable[[], None]) -> None:
+        """Register the sink for the wire reaching its connected state."""
+        self._on_connected = callback
+
+    def on_disconnect(self, callback: Callable[[], None]) -> None:
+        """Register the sink for the connection being lost.
+
+        Fires on an involuntary loss — a peer drop or a ping-watchdog timeout —
+        not on a commanded :meth:`close`.
+        """
+        self._on_disconnect = callback
+
+    def on_stats(self, callback: Callable[[PeerStats], None]) -> None:
+        """Register an optional observer for each stats sample."""
+        self._on_stats = callback
+
+    def send_message(self, payload: bytes) -> None:
+        """Send already-encoded bytes to this client."""
+        self._peer.send_message(payload)
+
+    def send_media(self, bundle: MediaBundle) -> None:
+        """Send a media bundle to this client."""
+        self._peer.send_media(bundle)
+
+    def resume_track(self, name: str) -> None:
+        """Resume the named outbound track (publisher arbitration)."""
+        self._peer.resume_track(name)
+
+    def pause_track(self, name: str) -> None:
+        """Pause the named outbound track (publisher arbitration)."""
+        self._peer.pause_track(name)
+
+    async def add_ice(self, candidate: IceCandidate) -> None:
+        """Add a trickle-ICE candidate, valid before and after the wire connects."""
+        await self._peer.add_ice(candidate)
+
+    async def close(self) -> None:
+        """Tear the connection down without reporting a loss upward.
+
+        A commanded close — session teardown — is silent: the watchdog and stats
+        sampling stop and the peer is closed, but the disconnect callback does
+        not fire, because the runner initiated this and is not waiting to hear
+        its own command back.
+        """
+        if not self._alive:
+            return
+        self._alive = False
+        self._cancel_tasks()
+        await self._close_peer()
+
+    def _handle_message(self, payload: bytes) -> None:
+        if self._on_message is not None:
+            self._on_message(payload)
+
+    def _handle_media(self, track: str, frame: InputFrame) -> None:
+        if self._on_media is not None:
+            self._on_media(track, frame)
+
+    def _handle_ping(self) -> None:
+        self._last_ping = time.monotonic()
+        if self._on_ping is not None:
+            self._on_ping()
+
+    def _handle_connected(self) -> None:
+        if not self._alive:
+            return
+        self._start_watchdog()
+        self._stats_task = asyncio.create_task(self._stats_loop())
+        if self._on_connected is not None:
+            self._on_connected()
+
+    def _report_loss(self) -> None:
+        """Mark the connection lost, stop its work, and report it once.
+
+        Idempotent and silent on a second call. A peer reports disconnect only
+        after releasing its own wire, so this does not close the peer; the
+        watchdog path, which declares loss while the peer is still live, closes
+        the peer itself before calling this.
+        """
+        if not self._alive:
+            return
+        self._alive = False
+        self._cancel_tasks()
+        if self._on_disconnect is not None:
+            self._on_disconnect()
+
+    def _start_watchdog(self) -> None:
+        if self._ping_timeout <= 0:
+            return
+        self._last_ping = time.monotonic()
+        self._watchdog_task = asyncio.create_task(self._watchdog_loop())
+
+    async def _watchdog_loop(self) -> None:
+        """Declare the connection lost when no client ping arrives in time.
+
+        The peer is still live when the watchdog fires, so it is closed here
+        before the loss is reported — nothing else tears it down on this path.
+        """
+        try:
+            while self._alive:
+                await asyncio.sleep(self._WATCHDOG_POLL_SECONDS)
+                last = self._last_ping
+                if last is None:
+                    return
+                if time.monotonic() - last > self._ping_timeout:
+                    await self._close_peer()
+                    self._report_loss()
+                    return
+        except asyncio.CancelledError:
+            return
+
+    async def _stats_loop(self) -> None:
+        """Sample peer stats on a fixed cadence while connected.
+
+        A single failed sample is logged and skipped rather than ending the
+        sampler: stats are best-effort, so one transient error must not stop
+        sampling for the life of the connection.
+        """
+        try:
+            while self._alive:
+                await asyncio.sleep(self._STATS_INTERVAL_SECONDS)
+                try:
+                    stats = await self._peer.stats()
+                except Exception:
+                    logger.debug("WebRTC stats sample failed", exc_info=True)
+                    continue
+                self._latest_stats = stats
+                if self._on_stats is not None:
+                    self._on_stats(stats)
+        except asyncio.CancelledError:
+            return
+
+    async def _close_peer(self) -> None:
+        """Close the media peer, logging but not raising on failure."""
+        try:
+            await self._peer.close()
+        except Exception:
+            logger.exception("error closing WebRTC peer")
+
+    def _cancel_tasks(self) -> None:
+        for task in (self._watchdog_task, self._stats_task):
+            if task is not None:
+                task.cancel()
+        self._watchdog_task = None
+        self._stats_task = None
