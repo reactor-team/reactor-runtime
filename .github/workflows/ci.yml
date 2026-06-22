@@ -37,6 +37,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # PyGObject builds from source against the GObject-introspection and
+      # Cairo development libraries; without them the locked sync cannot
+      # compile its pycairo/pygobject wheels.
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libcairo2-dev libgirepository-2.0-dev libglib2.0-dev pkg-config
+
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.12"
@@ -52,6 +60,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+
+      # PyGObject builds from source against the GObject-introspection and
+      # Cairo development libraries; without them the locked sync cannot
+      # compile its pycairo/pygobject wheels.
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libcairo2-dev libgirepository-2.0-dev libglib2.0-dev pkg-config
 
       - uses: astral-sh/setup-uv@v7
         with:
@@ -71,6 +87,21 @@ jobs:
         python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v7
+
+      # PyGObject builds against the GObject-introspection and Cairo dev
+      # libraries, and the WebRTC media engine binds to a native GStreamer
+      # install. The media-engine tests import its typelibs at module load
+      # (Gst, GstWebRTC, GstSdp, GstVideo, GstRtp), so the running suite needs
+      # the GStreamer plugin sets and the gir typelibs present.
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libcairo2-dev libgirepository-2.0-dev libglib2.0-dev pkg-config \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
+            gstreamer1.0-nice gstreamer1.0-libav \
+            gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
+            gir1.2-gst-plugins-bad-1.0
 
       - uses: astral-sh/setup-uv@v7
         with:
