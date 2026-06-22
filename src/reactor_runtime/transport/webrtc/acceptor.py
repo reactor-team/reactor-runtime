@@ -71,6 +71,7 @@ class WebRTCAcceptor(ConnectionAcceptor):
         conn.on_ping(lambda: self._sink.keepalive(conn_id))
         conn.on_connected(lambda: self._opened(conn_id, conn))
         conn.on_disconnect(lambda: self._closed(conn_id))
+        conn.on_closed(lambda: self._forget(conn_id))
         self._conns[conn_id] = conn
 
         for candidate in self._pending_ice.pop(conn_id, []):
@@ -106,3 +107,16 @@ class WebRTCAcceptor(ConnectionAcceptor):
         if conn_id in self._live:
             self._live.discard(conn_id)
             self._sink.connection_closed(conn_id)
+
+    def _forget(self, conn_id: ConnId) -> None:
+        """Drop a connection torn down on command, without reporting it upward.
+
+        The mirror of :meth:`_closed` for a commanded close (session teardown):
+        the connection's owner already drove the close and knows it is gone, so
+        the acceptor clears its own bookkeeping but does not notify the sink.
+        Without this the acceptor would hold a dead connection for the life of
+        the process, since a commanded close is silent.
+        """
+        self._conns.pop(conn_id, None)
+        self._pending_ice.pop(conn_id, None)
+        self._live.discard(conn_id)

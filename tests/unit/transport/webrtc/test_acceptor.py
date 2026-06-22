@@ -20,7 +20,7 @@ class FakeSink:
     def __init__(self) -> None:
         self.opened: list[ConnId] = []
         self.closed: list[ConnId] = []
-        self.messages: list[tuple[ConnId, bytes]] = []
+        self.messages: list[tuple[ConnId, bytes | str]] = []
         self.media: list[tuple[ConnId, str]] = []
         self.keepalives: list[ConnId] = []
 
@@ -30,7 +30,7 @@ class FakeSink:
     def connection_closed(self, conn_id: ConnId) -> None:
         self.closed.append(conn_id)
 
-    def message_received(self, conn_id: ConnId, payload: bytes) -> None:
+    def message_received(self, conn_id: ConnId, payload: bytes | str) -> None:
         self.messages.append((conn_id, payload))
 
     def media_received(self, conn_id: ConnId, track: str, frame: InputFrame) -> None:
@@ -122,6 +122,23 @@ async def test_disconnect_after_open_reports_closed(
     fake_peer.fire_connected()
     fake_peer.fire_disconnect()
     assert sink.closed == [ConnId(7)]
+
+
+async def test_commanded_close_forgets_without_reporting(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    sink = FakeSink()
+    acceptor = _acceptor(sink, fake_peer, factory_for)
+    await acceptor.offer(ConnId(7), SdpOffer("offer"), out_av_tracks)
+    fake_peer.fire_connected()
+
+    await acceptor._conns[ConnId(7)].close()
+
+    assert ConnId(7) not in acceptor._conns
+    assert ConnId(7) not in acceptor._live
+    assert sink.closed == []
 
 
 async def test_add_ice_reaches_connection(
