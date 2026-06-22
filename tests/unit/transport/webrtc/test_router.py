@@ -6,24 +6,28 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from reactor_runtime.core import Connection, ConnId, InputFrame
-from reactor_runtime.transport import SessionNotRunningError
+from reactor_runtime.transport import SessionNotRunningError, UnknownSessionError
 from reactor_runtime.transport.webrtc import WebRtcConfig, WebRtcPeerFactory, WebRtcRouter
 
-_PREFIX = "/sessions/s1/transport/webrtc"
+_SID = "s1"
+_PREFIX = f"/sessions/{_SID}/transport/webrtc"
 
 
 class FakeRunner:
     """A SessionControl that mints ids and records the facts pushed up to it."""
 
-    def __init__(self, *, running: bool = True) -> None:
+    def __init__(self, *, running: bool = True, session_id: str = _SID) -> None:
         self._running = running
+        self._session_id = session_id
         self._next = 5000
         self.opened: list[ConnId] = []
         self.closed: list[ConnId] = []
 
-    def require_session_running(self) -> None:
+    def require_session_running(self, sid: str) -> None:
         if not self._running:
             raise SessionNotRunningError
+        if sid != self._session_id:
+            raise UnknownSessionError
 
     def new_conn_id(self) -> ConnId:
         self._next += 1
@@ -38,7 +42,7 @@ class FakeRunner:
     def connection_closed(self, conn_id: ConnId) -> None:
         self.closed.append(conn_id)
 
-    def message_received(self, conn_id: ConnId, payload: bytes) -> None:
+    def message_received(self, conn_id: ConnId, payload: bytes | str) -> None:
         pass
 
     def media_received(self, conn_id: ConnId, track: str, frame: InputFrame) -> None:
@@ -114,3 +118,12 @@ def test_routes_reject_when_no_session_running(
     client = _client(FakeRunner(running=False), fake_peer, factory_for)
     response = client.post(f"{_PREFIX}/connections")
     assert response.status_code == 400
+
+
+def test_routes_reject_unknown_session_id(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+) -> None:
+    client = _client(FakeRunner(session_id="other"), fake_peer, factory_for)
+    response = client.post(f"{_PREFIX}/connections")
+    assert response.status_code == 404

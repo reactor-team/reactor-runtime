@@ -21,6 +21,7 @@ from reactor_runtime.transport.router import (
     SessionControl,
     SessionNotRunningError,
     TransportRouter,
+    UnknownSessionError,
 )
 from reactor_runtime.transport.webrtc.acceptor import WebRTCAcceptor
 from reactor_runtime.transport.webrtc.config import WebRtcConfig
@@ -80,23 +81,27 @@ class WebRtcRouter(TransportRouter):
         async def _session_not_running(request: Request, exc: Exception) -> Response:
             return JSONResponse(status_code=400, content={"detail": "No session running"})
 
+        async def _unknown_session(request: Request, exc: Exception) -> Response:
+            return JSONResponse(status_code=404, content={"detail": "Unknown session"})
+
         app.add_exception_handler(SessionNotRunningError, _session_not_running)
+        app.add_exception_handler(UnknownSessionError, _unknown_session)
 
         @app.post(f"{_PREFIX}/connections")
         async def register(sid: str) -> dict[str, Any]:
-            runner.require_session_running()
+            runner.require_session_running(sid)
             return {"connection_id": runner.new_conn_id(), "track_map": runner.track_map()}
 
         @app.post(f"{_PREFIX}/connections/{{cid}}/sdp_params")
         async def offer(sid: str, cid: int, req: SdpParamsRequest) -> dict[str, Any]:
-            runner.require_session_running()
+            runner.require_session_running(sid)
             tracks = TrackMap.from_client(entry.model_dump() for entry in req.track_mapping)
             answer = await acceptor.offer(ConnId(cid), SdpOffer(req.sdp_offer), tracks)
             return {"sdp_answer": answer.sdp, "connection_id": cid}
 
         @app.post(f"{_PREFIX}/connections/{{cid}}/ice_candidates")
         async def ice(sid: str, cid: int, req: IceCandidatesRequest) -> Response:
-            runner.require_session_running()
+            runner.require_session_running(sid)
             for entry in req.candidates:
                 await acceptor.add_ice(
                     ConnId(cid),

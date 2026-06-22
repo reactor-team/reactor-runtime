@@ -13,6 +13,7 @@ from reactor_runtime.transport.router import (
     SessionControl,
     SessionNotRunningError,
     TransportRouter,
+    UnknownSessionError,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "SessionControl",
     "SessionNotRunningError",
     "TransportRouter",
+    "UnknownSessionError",
 ]

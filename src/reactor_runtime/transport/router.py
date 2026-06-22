@@ -34,6 +34,16 @@ class SessionNotRunningError(RuntimeError):
     """
 
 
+class UnknownSessionError(RuntimeError):
+    """Raised by :meth:`SessionControl.require_session_running` for a wrong session id.
+
+    A request addressed a session id the runtime does not host. Distinct from
+    :class:`SessionNotRunningError` — the session-control surface is live but the
+    addressed id is not its own — so a router can map it to a not-found rather
+    than a not-running rejection.
+    """
+
+
 @runtime_checkable
 class SessionControl(ConnectionSink, Protocol):
     """The session-facing surface a router drives, beyond the upward sink.
@@ -46,8 +56,15 @@ class SessionControl(ConnectionSink, Protocol):
     ever holds it as this shape.
     """
 
-    def require_session_running(self) -> None:
-        """Raise :class:`SessionNotRunningError` unless a session is live."""
+    def require_session_running(self, sid: str) -> None:
+        """Admit a request only against the live session.
+
+        Raise :class:`SessionNotRunningError` unless a session is live, and
+        :class:`UnknownSessionError` when *sid* is not the id the runtime hosts.
+
+        Args:
+            sid: The session id the request addressed.
+        """
 
     def new_conn_id(self) -> ConnId:
         """Mint a fresh connection id, unique within the session."""
