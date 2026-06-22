@@ -34,6 +34,7 @@ class EndReason(StrEnum):
     STOPPED = "stopped"
     TIMED_OUT = "timed_out"
     EVICTED = "evicted"
+    MODERATED = "moderated"
     ERROR = "error"
 
 
@@ -151,6 +152,24 @@ class ConnectionEvent:
 
 
 @dataclass(frozen=True)
+class ConnectionAnswered:
+    """A transport produced the negotiation answer for one connection.
+
+    Journalled so an external consumer can hand the answer back to the client
+    that offered. The payload is transport-agnostic and opaque to the runtime:
+    for WebRTC it is the SDP answer as a ``{"type", "sdp"}`` mapping. Precedes
+    the :class:`ConnectionEvent` open, which fires only once the wire connects.
+
+    Attributes:
+        conn_id: The connection the answer belongs to.
+        answer: The transport's answer as key-value pairs, relayed verbatim.
+    """
+
+    conn_id: ConnId
+    answer: Mapping[str, str]
+
+
+@dataclass(frozen=True)
 class InboundCommandEvent:
     """A validated inbound command, journalled for moderation or audit.
 
@@ -203,6 +222,7 @@ class ErrorEvent:
 RunnerEvent = (
     TransitionEvent
     | ConnectionEvent
+    | ConnectionAnswered
     | InboundCommandEvent
     | ClipReadyEvent
     | SessionMetricEvent
