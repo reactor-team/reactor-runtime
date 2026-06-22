@@ -388,6 +388,30 @@ class Runner(ServiceComponent, ConnectionSink):
             for name, info in self._bridge.contract.tracks.items()
         }
 
+    # -- read-only surface (read by the HTTP route groups) --------------------
+
+    @property
+    def events(self) -> EventStream:
+        """The egress journal an HTTP egress route streams out."""
+        return self._events
+
+    def descriptor(self) -> dict[str, Any]:
+        """Describe the session: its id, current state, schema, and track map.
+
+        The schema is the model's rendered OpenAPI contract. Schema and tracks
+        are empty until the model is loaded; the id is ``None`` until a session
+        has been started.
+        """
+        schema: dict[str, Any] = {}
+        if self._bridge is not None:
+            schema = self._bridge.contract.render_schema().to_openapi()
+        return {
+            "session_id": self._session_id,
+            "state": self._sm.current_state.name.lower(),
+            "schema": schema,
+            "tracks": dict(self.track_map()),
+        }
+
     # -- internals ------------------------------------------------------------
 
     async def _submit_command(self, command: InboundCommand) -> None:
