@@ -2,8 +2,8 @@ import dataclasses
 
 import pytest
 
+from reactor_runtime import MessageField, ModelMessage
 from reactor_runtime.core.fields import NO_DEFAULT
-from reactor_runtime.model import MessageField, ModelMessage
 
 
 class Progress(ModelMessage):

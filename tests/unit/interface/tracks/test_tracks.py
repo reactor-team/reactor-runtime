@@ -1,5 +1,5 @@
+from reactor_runtime import Audio, Input, Output, Video
 from reactor_runtime.core.values import TrackDirection, TrackKind
-from reactor_runtime.model import Audio, Input, Output, Video
 
 
 class GameOutput(Output):

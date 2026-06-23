@@ -152,7 +152,12 @@ class PrimitiveSpec(TypeSpec):
             if isinstance(value, bool):
                 return None
         elif self._py_type is int:
-            if isinstance(value, int) and not isinstance(value, bool):
+            # bool is never an int field value. The wire has no integer type — a
+            # JSON number decodes to a float — so an integral float is accepted
+            # and narrowed in coerce; a fractional float is not.
+            if not isinstance(value, bool) and (
+                isinstance(value, int) or (isinstance(value, float) and value.is_integer())
+            ):
                 return None
         elif self._py_type is float:
             # A JSON integer is an acceptable number; a bool is not.
@@ -161,6 +166,13 @@ class PrimitiveSpec(TypeSpec):
         elif isinstance(value, str):
             return None
         return f"expected {self._json_type}, got {type(value).__name__}"
+
+    def coerce(self, value: Any) -> Any:  # noqa: D102 — contract on the base
+        # An integral float arriving for an int field is narrowed to int; every
+        # other primitive is already in its Python form.
+        if self._py_type is int and isinstance(value, float):
+            return int(value)
+        return value
 
     def to_json_schema(self) -> dict[str, Any]:  # noqa: D102 — contract on the base
         return {"type": self._json_type}

@@ -2,7 +2,7 @@ import pytest
 
 from reactor_runtime.core import Command, InputField, UploadedFile
 from reactor_runtime.core.fields import NO_DEFAULT
-from reactor_runtime.model.decorators import (
+from reactor_runtime.interface.events.decorators import (
     CONNECTED_ATTR,
     DISCONNECTED_ATTR,
     EVENT_ATTR,

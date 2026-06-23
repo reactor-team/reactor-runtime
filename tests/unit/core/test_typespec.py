@@ -68,6 +68,20 @@ def test_primitive_int_rejects_bool() -> None:
     assert spec.check("3") is not None
 
 
+def test_primitive_int_accepts_and_narrows_integral_float() -> None:
+    # JSON / protobuf Struct carry every number as a float, so an int field must
+    # accept an integral float and narrow it to int.
+    spec = TypeSpec.of(int)
+    assert spec.check(107.0) is None
+    assert spec.coerce(107.0) == 107
+    assert isinstance(spec.coerce(107.0), int)
+
+
+def test_primitive_int_rejects_fractional_float() -> None:
+    spec = TypeSpec.of(int)
+    assert spec.check(107.5) is not None
+
+
 def test_primitive_float_accepts_int_not_bool() -> None:
     spec = TypeSpec.of(float)
     assert spec.check(1) is None
