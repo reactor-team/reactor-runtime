@@ -122,7 +122,7 @@ class AudioSender(_SenderStreamBase):
             buf.duration = self._duration_20ms_ns
         ret = self._appsrc.emit("push-buffer", buf)
         if ret != Gst.FlowReturn.OK:
-            logger.warning(f"AudioSender._on_need_data: push-buffer returned {ret}")
+            logger.warning("AudioSender._on_need_data: push-buffer returned non-OK", result=ret)
 
     @property
     def codec_name(self) -> str:
