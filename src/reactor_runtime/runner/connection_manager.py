@@ -40,11 +40,26 @@ class ConnectionManager:
         # by one connection until it releases or drops, and a later claim on a held
         # track is refused.
         self._publishers: dict[str, ConnId] = {}
+        # Every id ever minted this session, so a fresh id never collides with a
+        # live or a since-dropped connection. The manager owns the id namespace
+        # because it is the one stateful, connection-keyed component.
+        self._used_conn_ids: set[ConnId] = set()
 
     @property
     def count(self) -> int:
         """The number of connections currently registered."""
         return len(self._by_id)
+
+    def new_conn_id(self) -> ConnId:
+        """Mint a fresh connection id, unique within the session.
+
+        Allocated centrally so connections arriving through several transports
+        cannot collide on an id, and monotonic so a new connection never reuses
+        the id of one that has since dropped.
+        """
+        conn_id = ConnId(max(self._used_conn_ids, default=0) + 1)
+        self._used_conn_ids.add(conn_id)
+        return conn_id
 
     def register(self, conn: Connection) -> None:
         """Add a connection and advance the session for it.

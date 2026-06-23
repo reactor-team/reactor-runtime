@@ -59,6 +59,23 @@ def test_fake_connection_conforms_to_the_protocol() -> None:
     assert isinstance(FakeConnection(1), Connection)
 
 
+def test_new_conn_id_is_monotonic() -> None:
+    cm, _ = waiting_manager()
+    assert cm.new_conn_id() == ConnId(1)
+    assert cm.new_conn_id() == ConnId(2)
+    assert cm.new_conn_id() == ConnId(3)
+
+
+def test_new_conn_id_is_not_reused_after_a_drop() -> None:
+    cm, _ = waiting_manager()
+    first = cm.new_conn_id()
+    cm.register(FakeConnection(first))
+    cm.drop(first)
+    second = cm.new_conn_id()
+    assert second != first
+    assert second == ConnId(2)
+
+
 def test_first_connection_moves_session_to_streaming() -> None:
     cm, sm = waiting_manager()
     cm.register(FakeConnection(1))
