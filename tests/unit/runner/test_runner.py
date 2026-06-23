@@ -11,7 +11,9 @@ from reactor_runtime.core import (
     HealthStatus,
     MediaBundle,
     RuntimeConfig,
+    SessionEvent,
     SessionState,
+    TransitionEvent,
 )
 from reactor_runtime.interface.internal.reactor_core import AddressedSink, BroadcastSink
 from reactor_runtime.protocol.common import struct_to_dict
@@ -282,6 +284,27 @@ def test_connection_opened_registers_the_connection() -> None:
     assert runner._connections.count == 1
     runner.connection_closed(ConnId(1))
     assert runner._connections.count == 0
+
+
+async def test_connection_answered_rides_a_self_loop_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = await _started_runner(monkeypatch)
+    try:
+        runner.start_session({})
+        stream = runner._events.subscribe()
+        runner.connection_answered(ConnId(1), {"type": "answer", "sdp": "v=0..."})
+        event = await asyncio.wait_for(anext(stream), timeout=1.0)
+        assert isinstance(event, TransitionEvent)
+        assert event.transition.event is SessionEvent.CONNECTION_ANSWERED
+        assert event.transition.from_state is SessionState.WAITING
+        assert event.transition.to_state is SessionState.WAITING
+        assert event.transition.detail == {
+            "conn_id": ConnId(1),
+            "answer": {"type": "answer", "sdp": "v=0..."},
+        }
+    finally:
+        await runner.stop()
 
 
 async def test_start_session_opens_the_session(started_runner: Runner) -> None:

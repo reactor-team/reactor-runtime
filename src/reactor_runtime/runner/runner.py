@@ -119,7 +119,6 @@ class Runner(ServiceComponent, ConnectionSink):
         self._bridge: ModelBridge | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._inbound: set[asyncio.Task[None]] = set()
-        self._used_conn_ids: set[ConnId] = set()
         self._session_id = SESSION_ID
         self._accepting = True
         # The process-shutdown hook, wired by the assembly so the runner can ask
@@ -313,14 +312,12 @@ class Runner(ServiceComponent, ConnectionSink):
             self._sm.send(SessionEvent.STOP_SESSION, reason=EndReason.MODERATED)
 
     def new_conn_id(self) -> ConnId:
-        """Mint a fresh connection id, unique within the session.
+        """Mint a fresh connection id, delegating to the manager that owns the namespace.
 
-        Allocated centrally so that connections from several ingresses cannot
-        collide on an id.
+        The connection manager is the single owner of the id namespace, so the
+        runner forwards rather than keeping a second counter that could diverge.
         """
-        conn_id = ConnId(max(self._used_conn_ids, default=0) + 1)
-        self._used_conn_ids.add(conn_id)
-        return conn_id
+        return self._connections.new_conn_id()
 
     def require_session_running(self, sid: str) -> None:
         """Admit a request only against the live, correctly-addressed session.
