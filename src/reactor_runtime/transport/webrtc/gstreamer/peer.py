@@ -173,7 +173,7 @@ class GStreamerPeer:
 
         # GStreamer initialization
         major, minor, micro, nano = Gst.version()
-        logger.info(f"GStreamer version: {major}.{minor}.{micro} (nano={nano})")
+        logger.info("GStreamer version", major=major, minor=minor, micro=micro, nano=nano)
 
         # Thread-safe stop flag
         self._stop_event = threading.Event()
@@ -331,7 +331,7 @@ class GStreamerPeer:
         return await asyncio.wait_for(self._answer_fut, timeout=10.0)
 
     def _run_gst_thread(self) -> None:
-        logger.debug(f"_run_gst_thread() [thread:{threading.current_thread().name}]")
+        logger.debug("_run_gst_thread", thread=threading.current_thread().name)
 
         # Create a dedicated MainContext for this thread (recommended)
         self._main_ctx = GLib.MainContext()
@@ -344,7 +344,7 @@ class GStreamerPeer:
 
         try:
             logger.debug(
-                f"_run_gst_thread() starting main loop [thread:{threading.current_thread().name}]"
+                "_run_gst_thread starting main loop", thread=threading.current_thread().name
             )
             self._main_loop.run()
         except Exception as e:
@@ -457,7 +457,7 @@ class GStreamerPeer:
                         # sender not fully wired up).  It's useful when
                         # debugging a stalled encoder but should not flood
                         # production logs at steady state.
-                        logger.debug(f"Failed to push buffer for track {mid}")
+                        logger.debug("failed to push buffer", track=mid)
 
             return GLib.SOURCE_CONTINUE
 
@@ -518,9 +518,7 @@ class GStreamerPeer:
         ice_servers: Optional[List[IceServer]],
     ) -> None:
         """Set up the GStreamer WebRTC pipeline from the offer."""
-        logger.debug(
-            f"_gst_setup_pipeline() [thread:{threading.current_thread().name}]"
-        )
+        logger.debug("_gst_setup_pipeline", thread=threading.current_thread().name)
 
         if self._stop_event.is_set():
             raise WebRTCSupersededError("Client stopped")
@@ -564,7 +562,10 @@ class GStreamerPeer:
             )
 
             logger.warning(
-                f"Offer had invalid BUNDLE; trying to rewrite it to max-compat. Reason: {bundle_policy.reason}. SDP Offer: {sdp_offer}; SDP Fixed {sdp_fixed}"
+                "offer had invalid BUNDLE; rewriting to max-compat",
+                reason=bundle_policy.reason,
+                sdp_offer=sdp_offer,
+                sdp_fixed=sdp_fixed,
             )
 
             sdp_offer = sdp_fixed
@@ -626,17 +627,17 @@ class GStreamerPeer:
         for track in self._sender_tracks:
             mid = self._mid_by_name.get(track.name)
             if mid is None:
-                logger.warning(
-                    f"Track {track.name} not found in track map, skipping"
-                )
+                logger.warning("track not found in track map, skipping", track=track.name)
                 continue
 
             codec_entry = get_codec_from_sdp_by_mid(sdp_offer, mid)
             logger.info(
-                f"Outgoing {track.kind.value} encoder: "
-                f"mid={mid} codec={codec_entry.get('codec')} "
-                f"pt={codec_entry.get('payload_type')} "
-                f"params={codec_entry.get('parameters', {})}"
+                "outgoing encoder",
+                kind=track.kind.value,
+                mid=mid,
+                codec=codec_entry.get("codec"),
+                pt=codec_entry.get("payload_type"),
+                params=codec_entry.get("parameters", {}),
             )
             ssrc = random.randint(1, 0x7FFFFFFF)
             self._ssrc_by_mid[mid] = ssrc
@@ -735,7 +736,7 @@ class GStreamerPeer:
 
         # Start pipeline
         logger.debug(
-            f"_gst_setup_pipeline() set state to PLAYING [thread:{threading.current_thread().name}]"
+            "_gst_setup_pipeline set state to PLAYING", thread=threading.current_thread().name
         )
         ret = self._pipeline.set_state(Gst.State.PLAYING)
         if ret == Gst.StateChangeReturn.FAILURE:
@@ -746,7 +747,7 @@ class GStreamerPeer:
 
         # Set remote description (the offer)
         logger.debug(
-            f"_gst_setup_pipeline() set remote description [thread:{threading.current_thread().name}]"
+            "_gst_setup_pipeline set remote description", thread=threading.current_thread().name
         )
         self._gst_set_remote_description(sdp_offer)
 
@@ -842,10 +843,10 @@ class GStreamerPeer:
         unreachable from outside.  We wait for a srflx or relay candidate which
         guarantees a routable address is included in the SDP answer.
         """
-        logger.debug(f"ICE candidate gathered: {candidate[:80]}...")
+        logger.debug("ICE candidate gathered", candidate=candidate[:80])
         if " typ host" not in candidate:
             logger.info(
-                f"Resolving SDP answer on first routable ICE candidate: {candidate[:80]}..."
+                "resolving SDP answer on first routable ICE candidate", candidate=candidate[:80]
             )
             self._gst_resolve_answer(reason="first-routable-candidate")
 
@@ -855,7 +856,7 @@ class GStreamerPeer:
             return
 
         state = element.get_property("ice-gathering-state")
-        logger.info(f"ICE gathering state: {state}")
+        logger.info("ICE gathering state", state=state)
 
         if state == GstWebRTC.WebRTCICEGatheringState.COMPLETE:
             self._gst_resolve_answer(reason="ice-completed")
@@ -866,7 +867,7 @@ class GStreamerPeer:
             return
 
         state = element.get_property("connection-state")
-        logger.info(f"Connection state: {state}")
+        logger.info("connection state", state=state)
 
         if state == GstWebRTC.WebRTCPeerConnectionState.CONNECTED:
             if not self._connected.is_set():
@@ -890,9 +891,7 @@ class GStreamerPeer:
             return
 
         state = element.get_property("ice-connection-state")
-        logger.debug(
-            f"_gst_on_ice_connection_state() ICE connection state changed [state:{state}]"
-        )
+        logger.debug("ICE connection state changed", state=state)
 
     def _gst_on_ice_gathering_timeout(self) -> bool:
         logger.warning(
@@ -904,7 +903,7 @@ class GStreamerPeer:
 
     def _gst_on_data_channel(self, element, data_channel) -> None:
         label = data_channel.get_property("label")
-        logger.info(f"New data channel: {label!r}")
+        logger.info("new data channel", label=label)
 
         if label == "control":
             self._control_channel = data_channel
@@ -921,7 +920,7 @@ class GStreamerPeer:
             return
 
         pad_name = pad.get_name()
-        logger.debug(f"New incoming pad: {pad_name}")
+        logger.debug("new incoming pad", pad=pad_name)
 
         # Get the pad's capabilities to determine media type
         caps = pad.get_current_caps()
@@ -930,7 +929,7 @@ class GStreamerPeer:
             caps = pad.query_caps(None)
 
         if caps is None or caps.is_empty():
-            logger.warning(f"No caps for pad {pad_name}")
+            logger.warning("no caps for pad", pad=pad_name)
             return
 
         struct = caps.get_structure(0)
@@ -938,17 +937,17 @@ class GStreamerPeer:
 
         # Only handle video (ignore audio for now)
         if not media_type.startswith("application/x-rtp"):
-            logger.debug(f"Ignoring non-RTP pad: {media_type}")
+            logger.debug("ignoring non-RTP pad", media_type=media_type)
             return
 
         # Get encoding name to determine codec
         encoding = struct.get_string("encoding-name")
-        logger.debug(f"Incoming video using {encoding} codec")
+        logger.debug("incoming video codec", encoding=encoding)
 
         # Check if it's video or audio
         media = struct.get_string("media")
         if media != "video" and media != "audio":
-            logger.warning(f"Unknown media type: {media}")
+            logger.warning("unknown media type", media=media)
             return
 
         # Map webrtcbin pad (src_0, src_1, ...) to track name via MID.
@@ -967,9 +966,7 @@ class GStreamerPeer:
                 pass
 
         if track_name is None or track_name == "":
-            logger.warning(
-                f"No track name for pad {pad_name}, using media type {media}"
-            )
+            logger.warning("no track name for pad, using media type", pad=pad_name, media=media)
             track_name = f"{media}_{pad_name}"
 
         ok, ssrc = struct.get_uint("ssrc")
@@ -998,9 +995,7 @@ class GStreamerPeer:
         self, element, dtls_transport: GstWebRTC.WebRTCDTLSTransport
     ) -> Gst.Element:
         """Build the aux sender bin: ``rtprtxsend ! rtpgccbwe`` (or just ``rtprtxsend``)."""
-        logger.debug(
-            f"_gst_on_request_aux_sender() [thread:{threading.current_thread().name}]"
-        )
+        logger.debug("_gst_on_request_aux_sender", thread=threading.current_thread().name)
 
         session_id = dtls_transport.get_property("session-id")
         rtprtxsend = make_element("rtprtxsend", f"rtprtxsend_{session_id}")
@@ -1138,7 +1133,9 @@ class GStreamerPeer:
         # Update dimensions if changed
         if width != self._incoming_width or height != self._incoming_height:
             logger.debug(
-                f"Video resolution changed: {self._incoming_width}x{self._incoming_height} -> {width}x{height}"
+                "video resolution changed",
+                previous=f"{self._incoming_width}x{self._incoming_height}",
+                current=f"{width}x{height}",
             )
             self._incoming_width = width
             self._incoming_height = height
@@ -1286,11 +1283,11 @@ class GStreamerPeer:
 
     def _gst_pause_track(self, track_name: str) -> None:
         self._paused_tracks.add(track_name)
-        logger.info(f"Paused track {track_name!r}")
+        logger.info("paused track", track=track_name)
 
     def _gst_resume_track(self, track_name: str) -> None:
         self._paused_tracks.discard(track_name)
-        logger.info(f"Resumed track {track_name!r}")
+        logger.info("resumed track", track=track_name)
 
     # =========================================================================
     # SDP Handling
@@ -1298,9 +1295,7 @@ class GStreamerPeer:
 
     def _gst_set_remote_description(self, sdp_offer: str) -> None:
         """Set the remote SDP description."""
-        logger.debug(
-            f"_gst_set_remote_description() [thread:{threading.current_thread().name}]"
-        )
+        logger.debug("_gst_set_remote_description", thread=threading.current_thread().name)
         webrtc = self._require_webrtc()
 
         sanitized_sdp, candidates = strip_ice_candidates_from_sdp(sdp_offer)
@@ -1316,13 +1311,14 @@ class GStreamerPeer:
 
         promise = Gst.Promise.new_with_change_func(self._gst_on_offer_set)
         logger.debug(
-            f"_gst_set_remote_description() emitting set-remote-description with offer [thread:{threading.current_thread().name}]"
+            "_gst_set_remote_description emitting set-remote-description with offer",
+            thread=threading.current_thread().name,
         )
         webrtc.emit("set-remote-description", offer, promise)
 
     def _gst_on_offer_set(self, p) -> None:
         """Callback when remote description is set."""
-        logger.debug(f"_gst_on_offer_set() [thread:{threading.current_thread().name}]")
+        logger.debug("_gst_on_offer_set", thread=threading.current_thread().name)
         if self._webrtc is None:
             return
 
@@ -1331,15 +1327,13 @@ class GStreamerPeer:
         # Create answer
         promise = Gst.Promise.new_with_change_func(self._gst_on_answer_created)
         logger.debug(
-            f"_gst_on_offer_set() emitting create-answer [thread:{threading.current_thread().name}]"
+            "_gst_on_offer_set emitting create-answer", thread=threading.current_thread().name
         )
         self._webrtc.emit("create-answer", None, promise)
 
     def _gst_on_answer_created(self, promise) -> None:
         """Callback when answer is created."""
-        logger.debug(
-            f"_gst_on_answer_created() [thread:{threading.current_thread().name}]"
-        )
+        logger.debug("_gst_on_answer_created", thread=threading.current_thread().name)
 
         reply = promise.get_reply()
 
@@ -1356,7 +1350,7 @@ class GStreamerPeer:
             )
             return
 
-        logger.debug(f"Answer SDP (raw): {answer.sdp.as_text()}")
+        logger.debug("answer SDP (raw)", sdp=answer.sdp.as_text())
 
         offer_sdp = self._remote_offer_sdp or ""
         negotiated = negotiated_sdp_extmaps_by_mid(
@@ -1372,7 +1366,7 @@ class GStreamerPeer:
             answer = add_extmaps_per_mid_to_sdp(answer, extmaps_by_mid)
 
         logger.debug(
-            f"Answer SDP (after negotiated RTP header extmaps per mid): {answer.sdp.as_text()}"
+            "answer SDP (after negotiated RTP header extmaps per mid)", sdp=answer.sdp.as_text()
         )
 
         # Rewrite webrtc SSRC / FID signaling before set-local-description so the
@@ -1400,15 +1394,13 @@ class GStreamerPeer:
         answer = GstWebRTC.WebRTCSessionDescription.new(
             GstWebRTC.WebRTCSDPType.ANSWER, sdpmsg
         )
-        logger.debug(f"Answer SDP (after SSRC / FID rewrite): {answer.sdp.as_text()}")
+        logger.debug("answer SDP (after SSRC / FID rewrite)", sdp=answer.sdp.as_text())
 
         # Set local description
         self._webrtc.emit("set-local-description", answer, None)
 
     def _gst_add_remote_candidates(self):
-        logger.debug(
-            f"_gst_add_remote_candidates() [thread:{threading.current_thread().name}]"
-        )
+        logger.debug("_gst_add_remote_candidates", thread=threading.current_thread().name)
 
         bundle_policy = self._webrtc.get_property("bundle-policy")
 
@@ -1427,16 +1419,14 @@ class GStreamerPeer:
         self._start_ice_gathering_timeout(self._config.ice_gathering_timeout_ms)
 
     def _gst_clear_ice_gathering_timeout(self) -> None:
-        logger.debug(
-            f"_gst_clear_ice_gathering_timeout() [thread:{threading.current_thread().name}]"
-        )
+        logger.debug("_gst_clear_ice_gathering_timeout", thread=threading.current_thread().name)
         if self._ice_gathering_timeout_source is not None:
             self._ice_gathering_timeout_source.destroy()
             self._ice_gathering_timeout_source = None
 
     def _gst_resolve_answer(self, reason: str) -> None:
         logger.debug(
-            f"_gst_resolve_answer() [reason:{reason}, thread:{threading.current_thread().name}]"
+            "_gst_resolve_answer", reason=reason, thread=threading.current_thread().name
         )
 
         self._run_on_gst_thread(self._gst_clear_ice_gathering_timeout)
@@ -1451,9 +1441,7 @@ class GStreamerPeer:
         # set-local-description; reuse that SDP here.
         self._answer_sdp = local_desc.sdp.as_text()
 
-        logger.debug(
-            f"_gst_resolve_answer() got sdp answer [thread:{threading.current_thread().name}]"
-        )
+        logger.debug("_gst_resolve_answer got sdp answer", thread=threading.current_thread().name)
         self._complete_future_threadsafe(self._answer_fut, self._answer_sdp)
 
     # =========================================================================
@@ -1706,7 +1694,7 @@ class GStreamerPeer:
         except queue.Full:
             pass
         except Exception as e:
-            logger.warning(f"Failed to send media bundle: {e}")
+            logger.warning("failed to send media bundle", error=e)
 
     def send_message(self, payload: bytes | str) -> None:
         """Send an already-encoded frame over the data channel (text or binary).
@@ -1820,7 +1808,7 @@ class GStreamerPeer:
         """
         GLib thread only: set pipeline to NULL, drop refs, quit loop.
         """
-        logger.debug(f"_gst_finalize_stop() [thread:{threading.current_thread().name}]")
+        logger.debug("_gst_finalize_stop", thread=threading.current_thread().name)
         try:
             self._gst_destroy_all_sources()
 
@@ -1893,7 +1881,7 @@ async def gstreamer_peer_factory(
     Threads the connection's config into the pipeline and builds, from the
     client's declared track map, the mid/name lookups the media setup needs.
     """
-    logger.debug("Negotiating GStreamer peer for connection %s", conn_id)
+    logger.debug("negotiating GStreamer peer", conn_id=conn_id)
     peer = GStreamerPeer(ping_timeout_seconds=config.ping_timeout)
     peer._config = config
     peer._track_by_mid = {mt.mid: mt.info for mt in tracks.tracks}
