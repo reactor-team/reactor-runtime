@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import importlib.metadata
 from collections.abc import Callable, Coroutine, Mapping
 from typing import Any
 
@@ -61,7 +62,25 @@ _RUNNING_STATES = frozenset({SessionState.WAITING, SessionState.STREAMING, Sessi
 # validate the id, but this is the only value the runtime accepts.
 SESSION_ID = "00000000-0000-0000-0000-000000000000"
 
+# A standalone runtime has no cluster; it reports a constant so the v0 client's
+# schema, which requires the field, is satisfied.
+_CLUSTER = "local"
+_WEBRTC_TRANSPORT_VERSION = "1.0"
+_V0_PROTOCOL = "v0"
+# Client track directions are the mirror of the model's: a track the model sends
+# out is one the client only receives, and one the model takes in is one the
+# client only sends.
+_CLIENT_DIRECTION = {"out": "recvonly", "in": "sendonly"}
+
 logger = get_logger(__name__)
+
+
+def _server_version() -> str:
+    """Return this runtime's package version, or a zero placeholder if unknown."""
+    try:
+        return importlib.metadata.version("reactor-runtime")
+    except importlib.metadata.PackageNotFoundError:
+        return "0.0.0"
 
 
 def _no_shutdown() -> None:
@@ -411,6 +430,50 @@ class Runner(ServiceComponent, ConnectionSink):
             "schema": schema,
             "tracks": dict(self.track_map()),
         }
+
+    def legacy_descriptor(self) -> dict[str, Any]:
+        """Describe the session in the shape the v0 client validates against.
+
+        The v0 SDK requires a fixed session shape — ``cluster``, ``model``,
+        ``server_info``, and a ``capabilities`` block it builds its transceivers
+        from — and names track directions from the client's perspective, the
+        mirror of the model's. This renders that shape from the model's
+        contract; ``model`` and ``capabilities`` fill in once the model is
+        loaded.
+        """
+        descriptor: dict[str, Any] = {
+            "session_id": self._session_id,
+            "state": self._sm.current_state.name.lower(),
+            "cluster": _CLUSTER,
+            "model": {"name": ""},
+            "server_info": {"server_version": _server_version()},
+            "selected_transport": {
+                "protocol": "webrtc",
+                "version": _WEBRTC_TRANSPORT_VERSION,
+            },
+        }
+        if self._bridge is None:
+            return descriptor
+        contract = self._bridge.contract
+        schema = contract.render_schema()
+        descriptor["model"] = {"name": contract.model}
+        descriptor["capabilities"] = {
+            "protocol_version": _V0_PROTOCOL,
+            "tracks": [
+                {
+                    "name": name,
+                    "kind": info.kind.value,
+                    "direction": _CLIENT_DIRECTION[info.direction.value],
+                }
+                for name, info in contract.tracks.items()
+            ],
+            "commands": [
+                {"name": name, "description": command.description, "schema": command.schema}
+                for name, command in schema.commands.items()
+            ],
+            "emission_fps": self._bridge.output_buffer.fps,
+        }
+        return descriptor
 
     # -- internals ------------------------------------------------------------
 

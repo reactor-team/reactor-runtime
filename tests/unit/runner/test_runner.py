@@ -354,6 +354,22 @@ async def test_track_map_reports_declared_tracks(started_runner: Runner) -> None
     assert tracks["main"]["direction"] == "out"
 
 
+async def test_legacy_descriptor_renders_the_v0_shape(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    descriptor = started_runner.legacy_descriptor()
+
+    assert descriptor["cluster"] == "local"
+    assert descriptor["model"]["name"] == "fake_model"
+    assert descriptor["server_info"]["server_version"]
+    assert descriptor["selected_transport"] == {"protocol": "webrtc", "version": "1.0"}
+    caps = descriptor["capabilities"]
+    assert caps["protocol_version"] == "v0"
+    # The model's outbound track is reported from the client's perspective.
+    assert {"name": "main", "kind": "video", "direction": "recvonly"} in caps["tracks"]
+    assert any(command["name"] == "set_mode" for command in caps["commands"])
+    assert caps["emission_fps"] == 30
+
+
 # --- the dispatch brain ---------------------------------------------------
 
 

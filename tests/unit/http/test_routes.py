@@ -56,7 +56,7 @@ async def client(
         await runner.stop()
 
 
-async def test_start_session_returns_the_descriptor(
+async def test_start_session_defaults_to_the_legacy_descriptor(
     client: tuple[httpx.AsyncClient, Runner],
 ) -> None:
     http_client, _ = client
@@ -66,18 +66,52 @@ async def test_start_session_returns_the_descriptor(
     body = response.json()
     assert body["state"] == "waiting"
     assert body["session_id"]
+    assert body["cluster"] == "local"
+    assert body["model"]["name"]
+    assert body["server_info"]["server_version"]
+    caps = body["capabilities"]
+    assert caps["protocol_version"] == "v0"
+    assert {"name": "main", "kind": "video", "direction": "recvonly"} in caps["tracks"]
+    assert any(command["name"] == "set_mode" for command in caps["commands"])
+    assert "schema" not in body
+
+
+async def test_start_session_serves_the_new_shape_to_a_v1_client(
+    client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, _ = client
+    response = await http_client.post(
+        "/start_session",
+        json={"client_info": {"sdk_version": "3.0.0", "sdk_type": "js"}},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
     assert "main" in body["tracks"]
     assert "paths" in body["schema"]
+    assert "capabilities" not in body
 
 
-async def test_get_session_reports_the_current_state(
+async def test_get_session_defaults_to_the_legacy_descriptor(
     client: tuple[httpx.AsyncClient, Runner],
 ) -> None:
     http_client, _ = client
     response = await http_client.get("/session")
 
     assert response.status_code == 200
-    assert response.json()["state"] == "ready"
+    body = response.json()
+    assert body["state"] == "ready"
+    assert body["cluster"] == "local"
+
+
+async def test_get_session_serves_the_new_shape_on_a_v1_header(
+    client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, _ = client
+    response = await http_client.get("/session", headers={"reactor-sdk-version": "3.1.0"})
+
+    assert response.status_code == 200
+    assert "schema" in response.json()
 
 
 async def test_stop_session_closes(client: tuple[httpx.AsyncClient, Runner]) -> None:
