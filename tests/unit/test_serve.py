@@ -5,7 +5,7 @@ import pytest
 from examples.passthrough import Passthrough
 from reactor_runtime.core import RuntimeConfig
 from reactor_runtime.http import HttpServer
-from reactor_runtime.model import ModelContract
+from reactor_runtime.interface.model import ModelContract
 from reactor_runtime.runner import Runner
 from reactor_runtime.serve import _assemble, _load_config, _version, main
 

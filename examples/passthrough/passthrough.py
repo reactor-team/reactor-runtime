@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 
-from reactor_runtime.model import Output, ReactorModel, Video, event
+from reactor_runtime import InputField, Output, ReactorModel, Video, event
 
 _WIDTH = 512
 _HEIGHT = 512
@@ -33,10 +33,17 @@ class Passthrough(ReactorModel):
         """Start from the configured brightness, mid-grey by default."""
         self._brightness = int(config.get("brightness", 128))
 
-    @event(name="set_brightness")
-    async def set_brightness(self, value: int = 128) -> None:
-        """Set the brightness of the emitted frame, clamped to 0-255."""
-        self._brightness = max(0, min(255, value))
+    @event(name="set_brightness", description="Set the brightness of the emitted frame")
+    async def set_brightness(
+        self,
+        value: int = InputField(default=128, ge=0, le=255, description="Frame brightness, 0-255"),
+    ) -> None:
+        """Set the brightness of the emitted frame.
+
+        The value is bounded to 0-255 by the contract, so a client UI renders it
+        as a slider over that range.
+        """
+        self._brightness = value
 
     async def run(self) -> None:
         """Emit a solid frame forever, paced by the output buffer."""
