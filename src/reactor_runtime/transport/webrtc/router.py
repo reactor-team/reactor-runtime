@@ -2,10 +2,11 @@
 
 Mounts the ``/sessions/{sid}/transport/webrtc`` route group and owns the
 :class:`~reactor_runtime.transport.webrtc.acceptor.WebRTCAcceptor` bound to the
-runner. A client registers a connection to mint its id and learn the track map,
-posts its SDP offer to negotiate, and trickles ICE candidates — three routes over
-one acceptor. Every client registers an explicit connection: there is no implicit
-default.
+runner. A client reads the ICE servers, registers a connection to mint its id
+and learn the track map, posts its SDP offer and polls for the answer (since
+producing it can wait on ICE gathering), and trickles ICE candidates over the
+connection's life. Every client registers an explicit connection: there is no
+implicit default.
 """
 
 from __future__ import annotations
@@ -62,6 +63,22 @@ class IceCandidatesRequest(BaseModel):
     is_final: bool = False
 
 
+def _ice_servers_payload(config: WebRtcConfig) -> dict[str, Any]:
+    """Render the configured ICE servers as the client's expected JSON shape.
+
+    Each server is ``{"uris": [...]}``, with a ``credentials`` object carrying
+    ``username``/``password`` only when the server is an authenticated TURN
+    server. An empty list is valid — a local connection needs no STUN/TURN.
+    """
+    servers: list[dict[str, Any]] = []
+    for server in config.ice_servers:
+        entry: dict[str, Any] = {"uris": list(server.urls)}
+        if server.username is not None and server.credential is not None:
+            entry["credentials"] = {"username": server.username, "password": server.credential}
+        servers.append(entry)
+    return {"ice_servers": servers}
+
+
 class WebRtcRouter(TransportRouter):
     """Mount the WebRTC routes and drive them through a WebRTC acceptor.
 
@@ -87,17 +104,32 @@ class WebRtcRouter(TransportRouter):
         app.add_exception_handler(SessionNotRunningError, _session_not_running)
         app.add_exception_handler(UnknownSessionError, _unknown_session)
 
-        @app.post(f"{_PREFIX}/connections")
+        @app.get(f"{_PREFIX}/ice_servers")
+        async def ice_servers(sid: str) -> dict[str, Any]:
+            runner.require_session_running(sid)
+            return _ice_servers_payload(self._config)
+
+        @app.post(f"{_PREFIX}/connections", status_code=201)
         async def register(sid: str) -> dict[str, Any]:
             runner.require_session_running(sid)
             return {"connection_id": runner.new_conn_id(), "track_map": runner.track_map()}
 
-        @app.post(f"{_PREFIX}/connections/{{cid}}/sdp_params")
+        @app.post(f"{_PREFIX}/connections/{{cid}}/sdp_params", status_code=202)
         async def offer(sid: str, cid: int, req: SdpParamsRequest) -> dict[str, Any]:
             runner.require_session_running(sid)
             tracks = TrackMap.from_client(entry.model_dump() for entry in req.track_mapping)
-            answer = await acceptor.offer(ConnId(cid), SdpOffer(req.sdp_offer), tracks)
-            return {"sdp_answer": answer.sdp, "connection_id": cid}
+            acceptor.start_offer(ConnId(cid), SdpOffer(req.sdp_offer), tracks)
+            return {"connection_id": cid}
+
+        @app.get(f"{_PREFIX}/connections/{{cid}}/sdp_params")
+        async def sdp_answer(sid: str, cid: int) -> Response:
+            runner.require_session_running(sid)
+            answer = acceptor.take_answer(ConnId(cid))
+            if answer is None:
+                return Response(status_code=202)
+            return JSONResponse(
+                status_code=200, content={"sdp_answer": answer.sdp, "connection_id": cid}
+            )
 
         @app.post(f"{_PREFIX}/connections/{{cid}}/ice_candidates")
         async def ice(sid: str, cid: int, req: IceCandidatesRequest) -> Response:
