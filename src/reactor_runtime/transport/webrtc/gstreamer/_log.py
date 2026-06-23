@@ -1,14 +1,15 @@
 """Logging helper for the ported GStreamer media engine.
 
-The media path logs through the standard library so the port carries no
-dependency on a particular logging stack.
+The media engine logs through the runtime's structured logger, so its lines
+render in the same ``key=value`` / JSON shape as the rest of the runtime and
+call sites can attach structured fields as keyword arguments.
 """
 
 from __future__ import annotations
 
-import logging
+from reactor_runtime.log import StructuredLogger, get_logger as _get_logger
 
 
-def get_logger(name: str) -> logging.Logger:
-    """Return the standard-library logger for ``name``."""
-    return logging.getLogger(name)
+def get_logger(name: str) -> StructuredLogger:
+    """Return the runtime's structured logger for ``name``."""
+    return _get_logger(name)
