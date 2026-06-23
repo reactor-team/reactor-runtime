@@ -1251,18 +1251,32 @@ class GStreamerPeer:
         self._fire(self._cb_ping)
 
     def _gst_on_control_channel_message(self, channel, message: str) -> None:
-        """Note client liveness for any inbound control-channel frame.
+        """Note client liveness and apply this connection's track verbs.
 
-        The transport stays protocol-agnostic: it does not decode control
-        traffic. An inbound frame is evidence the client is alive, which feeds
-        the connection's ping watchdog. The control protocol itself — the ping,
-        the track verbs — is decoded above the transport, and publisher
-        arbitration is driven down through :meth:`resume_track` /
-        :meth:`pause_track`.
+        Every inbound control frame is evidence the client is alive, feeding the
+        ping watchdog. A client also drives its own track reception over this
+        channel: ``resume_track`` / ``pause_track`` notifications gate whether
+        this connection's outbound senders push frames. That gate is
+        per-connection — each client in a multi-client session controls its own
+        streams — so it is applied here on the peer. Publisher arbitration for
+        inbound tracks (``publish_track``) is cross-connection and is decided
+        above the transport, not here.
         """
         if self._stopping or self._stop_event.is_set():
             return
         self._fire(self._cb_ping)
+        try:
+            parsed = json.loads(message)
+        except (ValueError, TypeError):
+            return
+        if not isinstance(parsed, dict) or parsed.get("type") != "notification":
+            return
+        event = parsed.get("event")
+        name = str((parsed.get("data") or {}).get("name", ""))
+        if event == "resume_track":
+            self._gst_resume_track(name)
+        elif event == "pause_track":
+            self._gst_pause_track(name)
 
     def resume_track(self, name: str) -> None:
         self._gst_resume_track(name)
