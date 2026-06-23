@@ -6,7 +6,9 @@ runner. A client reads the ICE servers, registers a connection to mint its id
 and learn the track map, posts its SDP offer and polls for the answer (since
 producing it can wait on ICE gathering), and trickles ICE candidates over the
 connection's life. Every client registers an explicit connection: there is no
-implicit default.
+implicit default. A client whose transport dropped reconnects by re-offering on
+the same connection — a PUT to its ``sdp_params`` — which renegotiates a fresh
+peer for that id rather than minting a new one.
 """
 
 from __future__ import annotations
@@ -114,7 +116,11 @@ class WebRtcRouter(TransportRouter):
             runner.require_session_running(sid)
             return {"connection_id": runner.new_conn_id(), "track_map": runner.track_map()}
 
-        @app.post(f"{_PREFIX}/connections/{{cid}}/sdp_params", status_code=202)
+        @app.api_route(
+            f"{_PREFIX}/connections/{{cid}}/sdp_params",
+            methods=["POST", "PUT"],
+            status_code=202,
+        )
         async def offer(sid: str, cid: int, req: SdpParamsRequest) -> dict[str, Any]:
             runner.require_session_running(sid)
             tracks = TrackMap.from_client(entry.model_dump() for entry in req.track_mapping)

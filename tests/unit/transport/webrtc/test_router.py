@@ -134,6 +134,24 @@ def test_offer_is_accepted_then_answer_is_polled(
     assert answer.json() == {"sdp_answer": "answer-sdp", "connection_id": 5001}
 
 
+def test_reconnect_reoffers_on_the_same_connection_with_put(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+) -> None:
+    # A dropped client reconnects by PUT-ing a fresh offer to the same id,
+    # without re-registering; the acceptor renegotiates that id.
+    with _client(FakeRunner(), fake_peer, factory_for) as client:
+        reconnected = client.put(
+            f"{_PREFIX}/connections/5001/sdp_params",
+            json={"sdp_offer": "new-offer", "track_mapping": []},
+        )
+        assert reconnected.status_code == 202
+        assert reconnected.json() == {"connection_id": 5001}
+        answer = _poll_answer(client, 5001)
+    assert answer.status_code == 200
+    assert answer.json() == {"sdp_answer": "answer-sdp", "connection_id": 5001}
+
+
 def test_ice_candidates_reach_the_connection(
     fake_peer: FakePeer,
     factory_for: Callable[..., WebRtcPeerFactory],
