@@ -487,11 +487,7 @@ class GStreamerPeer:
             ]
             score = aggregate_qos_score(scores)
             if score is not None:
-                logger.info(
-                    "video quality score",
-                    score=score,
-                    senders=len(scores),
-                )
+                logger.info("video quality score", score=score, senders=len(scores))
 
             return GLib.SOURCE_CONTINUE
 
