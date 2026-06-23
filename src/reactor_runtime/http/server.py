@@ -13,6 +13,7 @@ import asyncio
 
 import uvicorn
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from reactor_runtime.core import Health, HealthStatus, RuntimeConfig, ServiceComponent
 from reactor_runtime.http.routes import EgressRoutes, SessionRoutes
@@ -54,6 +55,17 @@ class HttpServer(ServiceComponent):
         """
         self._cfg = cfg
         self._app = FastAPI(title="reactor-runtime")
+        # A standalone runtime is called directly by browser clients from their
+        # own origin, so the session and signalling routes must answer the
+        # cross-origin preflight. Auth rides the Authorization header, never a
+        # cookie, so credentialed CORS is unnecessary and a wildcard origin is
+        # safe; an operator fronting the runtime can tighten this upstream.
+        self._app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
         SessionRoutes(runner).mount(self._app)
         EgressRoutes(runner).mount(self._app)
         for transport in transports:

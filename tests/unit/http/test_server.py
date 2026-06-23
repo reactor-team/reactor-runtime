@@ -1,6 +1,7 @@
 import asyncio
 
 from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from reactor_runtime.core import HealthStatus, RuntimeConfig
 from reactor_runtime.http import HttpServer
@@ -36,6 +37,22 @@ def test_mounts_route_groups_and_each_transport() -> None:
     paths = {getattr(route, "path", "") for route in server._app.routes}
     assert {"/start_session", "/stop_session", "/session", "/events", "/health"} <= paths
     assert "/sessions/{sid}/transport/fake/ping" in paths
+
+
+def test_cors_preflight_is_answered() -> None:
+    server = HttpServer(RuntimeConfig(model_ref="fake:Model"), _runner(), [])
+    client = TestClient(server._app)
+
+    response = client.options(
+        "/start_session",
+        headers={
+            "Origin": "http://localhost:3000",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "*"
 
 
 async def test_start_drain_stop_lifecycle() -> None:
