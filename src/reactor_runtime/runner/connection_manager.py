@@ -152,6 +152,26 @@ class ConnectionManager:
         if conn is not None:
             conn.pause_track(name)
 
+    def resume_track(self, cid: ConnId, name: str) -> None:
+        """Resume an outbound track on one connection, at the client's request.
+
+        Per-connection: each client gates its own reception of the model's
+        outbound tracks. A request for an unregistered connection is ignored.
+        """
+        conn = self._by_id.get(cid)
+        if conn is not None:
+            conn.resume_track(name)
+
+    def pause_track(self, cid: ConnId, name: str) -> None:
+        """Pause an outbound track on one connection, at the client's request.
+
+        Per-connection: each client gates its own reception of the model's
+        outbound tracks. A request for an unregistered connection is ignored.
+        """
+        conn = self._by_id.get(cid)
+        if conn is not None:
+            conn.pause_track(name)
+
     def broadcast(self, encode: Callable[[ProtocolVersion], bytes | str]) -> None:
         """Encode and send a frame to every connection in its own codec.
 
@@ -167,6 +187,17 @@ class ConnectionManager:
         conn = self._by_id.get(cid)
         if conn is not None:
             conn.send_message(encode(conn.protocol_version))
+
+    def send_control(self, cid: ConnId, encode: Callable[[ProtocolVersion], bytes | str]) -> None:
+        """Encode and send a control frame to one connection in its codec, if registered.
+
+        The runtime's reply to a client's control request — a publish-track
+        grant or refusal — rides this, encoded for the codec the connection
+        negotiated.
+        """
+        conn = self._by_id.get(cid)
+        if conn is not None:
+            conn.send_control(encode(conn.protocol_version))
 
     def broadcast_media(self, bundle: MediaBundle, duplicate: bool) -> None:
         """Send a media bundle to every connection whose wire carries media.

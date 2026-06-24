@@ -29,6 +29,7 @@ class FakeConnection:
         )
         self.protocol_version = protocol_version
         self.messages: list[bytes | str] = []
+        self.control: list[bytes | str] = []
         self.media: list[MediaBundle] = []
         self.resumed: list[str] = []
         self.paused: list[str] = []
@@ -36,6 +37,9 @@ class FakeConnection:
 
     def send_message(self, payload: bytes | str) -> None:
         self.messages.append(payload)
+
+    def send_control(self, payload: bytes | str) -> None:
+        self.control.append(payload)
 
     def send_media(self, bundle: MediaBundle) -> None:
         self.media.append(bundle)
@@ -189,6 +193,32 @@ def test_addressed_send_to_unknown_connection_is_ignored() -> None:
     cm, _ = waiting_manager()
     cm.register(FakeConnection(1))
     cm.send(ConnId(42), lambda _version: b"nowhere")
+
+
+def test_send_control_reaches_only_the_target() -> None:
+    cm, _ = waiting_manager()
+    a, b = FakeConnection(1), FakeConnection(2)
+    cm.register(a)
+    cm.register(b)
+    cm.send_control(ConnId(2), lambda _version: '{"type":"response"}')
+    assert a.control == []
+    assert b.control == ['{"type":"response"}']
+
+
+def test_send_control_to_unknown_connection_is_ignored() -> None:
+    cm, _ = waiting_manager()
+    cm.register(FakeConnection(1))
+    cm.send_control(ConnId(42), lambda _version: '{"type":"response"}')
+
+
+def test_resume_and_pause_forward_to_the_connection() -> None:
+    cm, _ = waiting_manager()
+    conn = FakeConnection(1)
+    cm.register(conn)
+    cm.resume_track(ConnId(1), "main_video")
+    cm.pause_track(ConnId(1), "main_audio")
+    assert conn.resumed == ["main_video"]
+    assert conn.paused == ["main_audio"]
 
 
 def test_media_skips_data_only_connections() -> None:
