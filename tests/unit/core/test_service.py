@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from reactor_runtime.core import Health, RuntimeConfig, ServiceComponent
 
 
@@ -32,7 +34,7 @@ def test_a_plain_object_does_not_conform() -> None:
 def test_runtime_config_requires_a_model_ref_and_defaults_the_rest() -> None:
     cfg = RuntimeConfig(model_ref="my_pkg.model:MyModel")
     assert cfg.model_ref == "my_pkg.model:MyModel"
-    assert cfg.model_config == {}
+    assert cfg.config_path is None
     assert cfg.port == 8080
     assert cfg.grace_period == 30.0
     assert cfg.recording_dir is None
@@ -41,10 +43,10 @@ def test_runtime_config_requires_a_model_ref_and_defaults_the_rest() -> None:
 def test_runtime_config_overrides() -> None:
     cfg = RuntimeConfig(
         model_ref="m:M",
-        model_config={"weights": "big"},
+        config_path=Path("/etc/model/config.yml"),
         port=9000,
         recording_dir="/tmp/clips",
     )
-    assert cfg.model_config == {"weights": "big"}
+    assert cfg.config_path == Path("/etc/model/config.yml")
     assert cfg.port == 9000
     assert cfg.recording_dir == "/tmp/clips"

@@ -9,9 +9,9 @@ the single object that configures one runtime process.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 from reactor_runtime.core.values import Health
 
@@ -53,7 +53,10 @@ class RuntimeConfig:
 
     Attributes:
         model_ref: Import reference to the model class, ``"module:Class"``.
-        model_config: Opaque settings handed to the model at load time.
+        config_path: Absolute path to the model's config file (from
+            ``runtime.config`` in ``reactor.yaml``), or ``None`` when the
+            manifest names none. Handed to the model's ``load`` to read however
+            it wants; the runtime never parses it.
         host: Address the HTTP ingress binds.
         port: Port the HTTP ingress binds.
         grace_period: Seconds a draining session is given to end before stop.
@@ -63,7 +66,7 @@ class RuntimeConfig:
     """
 
     model_ref: str
-    model_config: Mapping[str, Any] = field(default_factory=dict)
+    config_path: Path | None = None
     host: str = "0.0.0.0"
     port: int = 8080
     grace_period: float = 30.0
