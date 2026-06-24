@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from reactor_runtime.core import Connection, ConnId, InputFrame
+from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.transport import SessionNotRunningError, UnknownSessionError
 from reactor_runtime.transport.webrtc import WebRtcConfig, WebRtcPeerFactory, WebRtcRouter
 from reactor_runtime.transport.webrtc.config import IceServer
@@ -44,7 +45,9 @@ class FakeRunner:
     def connection_closed(self, conn_id: ConnId) -> None:
         self.closed.append(conn_id)
 
-    def message_received(self, conn_id: ConnId, payload: bytes | str) -> None:
+    def message_received(
+        self, conn_id: ConnId, payload: bytes | str, version: ProtocolVersion
+    ) -> None:
         pass
 
     def media_received(self, conn_id: ConnId, track: str, frame: InputFrame) -> None:
@@ -132,6 +135,9 @@ def test_offer_is_accepted_then_answer_is_polled(
         answer = _poll_answer(client, 5001)
     assert answer.status_code == 200
     assert answer.json() == {"sdp_answer": "answer-sdp", "connection_id": 5001}
+    # The codec the router mapped from the (absent) WebRTC version reached the
+    # peer it built for the connection.
+    assert fake_peer.protocol_version is ProtocolVersion.V0
 
 
 def test_reconnect_reoffers_on_the_same_connection_with_put(

@@ -13,9 +13,9 @@ peer for that id rather than minting a new one.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Header, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -30,6 +30,7 @@ from reactor_runtime.transport.webrtc.acceptor import WebRTCAcceptor
 from reactor_runtime.transport.webrtc.config import WebRtcConfig
 from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpOffer, TrackMap
+from reactor_runtime.transport.webrtc.version import protocol_for_transport
 
 _PREFIX = "/sessions/{sid}/transport/webrtc"
 
@@ -121,10 +122,20 @@ class WebRtcRouter(TransportRouter):
             methods=["POST", "PUT"],
             status_code=202,
         )
-        async def offer(sid: str, cid: int, req: SdpParamsRequest) -> dict[str, Any]:
+        async def offer(
+            sid: str,
+            cid: int,
+            req: SdpParamsRequest,
+            webrtc_version: Annotated[str | None, Header(alias="reactor-webrtc-version")] = None,
+        ) -> dict[str, Any]:
             runner.require_session_running(sid)
             tracks = TrackMap.from_client(entry.model_dump() for entry in req.track_mapping)
-            acceptor.start_offer(ConnId(cid), SdpOffer(req.sdp_offer), tracks)
+            acceptor.start_offer(
+                ConnId(cid),
+                SdpOffer(req.sdp_offer),
+                tracks,
+                protocol_for_transport(webrtc_version),
+            )
             return {"connection_id": cid}
 
         @app.get(f"{_PREFIX}/connections/{{cid}}/sdp_params")
