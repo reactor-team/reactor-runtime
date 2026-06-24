@@ -9,7 +9,7 @@ from reactor_runtime.core import (
     SessionState,
     Transition,
 )
-from reactor_runtime.protocol import ProtocolVersion
+from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.runner import ConnectionManager, SessionStateMachine
 
 
@@ -71,11 +71,11 @@ def test_fake_connection_conforms_to_the_protocol() -> None:
     assert isinstance(FakeConnection(1), Connection)
 
 
-def test_new_conn_id_is_monotonic() -> None:
+def test_new_conn_id_is_random_in_range_and_unique() -> None:
     cm, _ = waiting_manager()
-    assert cm.new_conn_id() == ConnId(1)
-    assert cm.new_conn_id() == ConnId(2)
-    assert cm.new_conn_id() == ConnId(3)
+    ids = [cm.new_conn_id() for _ in range(50)]
+    assert len(set(ids)) == 50
+    assert all(1002 <= int(cid) <= 9999 for cid in ids)
 
 
 def test_new_conn_id_is_not_reused_after_a_drop() -> None:
@@ -83,9 +83,18 @@ def test_new_conn_id_is_not_reused_after_a_drop() -> None:
     first = cm.new_conn_id()
     cm.register(FakeConnection(first))
     cm.drop(first)
-    second = cm.new_conn_id()
-    assert second != first
-    assert second == ConnId(2)
+    # The dropped id stays in the session's used pool, so no later mint returns it.
+    later = {cm.new_conn_id() for _ in range(100)}
+    assert first not in later
+
+
+@pytest.mark.asyncio
+async def test_close_all_frees_the_id_pool_for_the_next_session() -> None:
+    cm, _ = waiting_manager()
+    cm.register(FakeConnection(cm.new_conn_id()))
+    await cm.close_all()
+    # Session teardown clears the used-id pool so the next session starts fresh.
+    assert cm._used_conn_ids == set()
 
 
 def test_first_connection_moves_session_to_streaming() -> None:
@@ -105,7 +114,6 @@ def test_additional_connection_does_not_re_enter_streaming() -> None:
     assert sm.current_state is SessionState.STREAMING
     events = [t.event for t in seen]
     assert events == [
-        SessionEvent.CLIENT_CONNECTED,
         SessionEvent.CONNECTION_OPENED,
         SessionEvent.CONNECTION_OPENED,
     ]
@@ -123,13 +131,14 @@ def test_last_connection_out_moves_session_to_orphaned() -> None:
     expect_state(sm, SessionState.ORPHANED)
 
 
-def test_close_precedes_disconnect_on_the_last_drop() -> None:
+def test_last_drop_sends_one_connection_closed_and_orphans() -> None:
     cm, sm = waiting_manager()
     cm.register(FakeConnection(1))
     seen: list[SessionEvent] = []
     sm.on_transition(lambda t: seen.append(t.event))
     cm.drop(ConnId(1))
-    assert seen == [SessionEvent.CONNECTION_CLOSED, SessionEvent.CLIENT_DISCONNECTED]
+    assert seen == [SessionEvent.CONNECTION_CLOSED]
+    assert sm.current_state is SessionState.ORPHANED
 
 
 def test_dropping_unknown_connection_is_ignored() -> None:
@@ -209,6 +218,16 @@ def test_send_control_to_unknown_connection_is_ignored() -> None:
     cm, _ = waiting_manager()
     cm.register(FakeConnection(1))
     cm.send_control(ConnId(42), lambda _version: '{"type":"response"}')
+
+
+def test_send_response_routes_by_the_codec_channel() -> None:
+    cm, _ = waiting_manager()
+    conn = FakeConnection(1)
+    cm.register(conn)
+    cm.send_response(ConnId(1), lambda _v: (Channel.DATA, "on-data"))
+    cm.send_response(ConnId(1), lambda _v: (Channel.CONTROL, "on-control"))
+    assert conn.messages == ["on-data"]
+    assert conn.control == ["on-control"]
 
 
 def test_resume_and_pause_forward_to_the_connection() -> None:

@@ -14,6 +14,7 @@ produced a connection, which is exactly what lets one session mix transports.
 
 from __future__ import annotations
 
+import random
 from collections.abc import Callable
 
 from reactor_runtime.core import (
@@ -22,8 +23,14 @@ from reactor_runtime.core import (
     MediaBundle,
     SessionEvent,
 )
-from reactor_runtime.protocol import ProtocolVersion
+from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.runner.state_machine import SessionStateMachine
+
+# Connection ids are minted at random in this inclusive range, the same id space
+# a production director hands out. 1000 is invalid and 1001 is reserved for
+# legacy single-connection compatibility, so explicit ids start at 1002.
+_MIN_CONN_ID = 1002
+_MAX_CONN_ID = 9999
 
 
 class ConnectionManager:
@@ -43,9 +50,10 @@ class ConnectionManager:
         # by one connection until it releases or drops, and a later claim on a held
         # track is refused.
         self._publishers: dict[str, ConnId] = {}
-        # Every id ever minted this session, so a fresh id never collides with a
-        # live or a since-dropped connection. The manager owns the id namespace
-        # because it is the one stateful, connection-keyed component.
+        # Ids minted within the current session, so a fresh id never collides
+        # with a live or a since-dropped connection. Scoped to the session: it is
+        # cleared on teardown so ids do not accumulate across sessions and the
+        # full range is available again to the next one.
         self._used_conn_ids: set[ConnId] = set()
 
     @property
@@ -54,50 +62,51 @@ class ConnectionManager:
         return len(self._by_id)
 
     def new_conn_id(self) -> ConnId:
-        """Mint a fresh connection id, unique within the session.
+        """Mint a fresh random connection id, unique within the session.
 
-        Allocated centrally so connections arriving through several transports
-        cannot collide on an id, and monotonic so a new connection never reuses
-        the id of one that has since dropped.
+        Drawn at random from ``[1002, 9999]`` and retried until one is free,
+        matching the id space a production director allocates. Allocated centrally
+        so connections arriving through several transports cannot collide, and
+        held in the session's used-id pool so a new connection never reuses the id
+        of one that has since dropped; the pool clears on session teardown.
         """
-        conn_id = ConnId(max(self._used_conn_ids, default=0) + 1)
-        self._used_conn_ids.add(conn_id)
-        return conn_id
+        while True:
+            conn_id = ConnId(random.randint(_MIN_CONN_ID, _MAX_CONN_ID))
+            if conn_id not in self._used_conn_ids:
+                self._used_conn_ids.add(conn_id)
+                return conn_id
 
     def register(self, conn: Connection) -> None:
         """Add a connection and advance the session for it.
 
-        The first connection into an empty session sends ``CLIENT_CONNECTED``,
-        moving the session into streaming; every registration, first or not, then
-        sends ``CONNECTION_OPENED`` so the runner can announce the individual
-        client. Re-registering an id already present replaces the handle without
-        re-driving the session — connection identity across a reconnect is the
-        transport's concern, not the manager's.
+        A fresh registration sends a single ``CONNECTION_OPENED``; the state
+        machine derives occupancy from it, carrying an empty session into
+        streaming on the first connection and self-looping for the rest. The
+        handle is added before the event so a listener reading the live count
+        sees this connection counted. Re-registering an id already present
+        replaces the handle without re-driving the session — connection identity
+        across a reconnect is the transport's concern, not the manager's.
         """
         if conn.id in self._by_id:
             self._by_id[conn.id] = conn
             return
-        first = self.count == 0
         self._by_id[conn.id] = conn
-        if first:
-            self._sm.send(SessionEvent.CLIENT_CONNECTED)
         self._sm.send(SessionEvent.CONNECTION_OPENED, conn_id=conn.id)
 
     def drop(self, cid: ConnId) -> None:
         """Remove a connection and advance the session for its loss.
 
-        Sends ``CONNECTION_CLOSED`` for the connection, and when it was the last
-        one, ``CLIENT_DISCONNECTED`` to move the session into orphaned — in that
-        order, because the close is a streaming self-loop that the move to orphaned
-        would otherwise make illegal. Any tracks the connection still held are
-        released. A drop for an id that is not registered is ignored.
+        Sends a single ``CONNECTION_CLOSED``; the state machine derives occupancy
+        from it, carrying the session into orphaned when the last connection
+        leaves and self-looping while others remain. The handle is removed before
+        the event so a listener reading the live count sees this connection gone.
+        Any tracks the connection still held are released. A drop for an id that
+        is not registered is ignored.
         """
         if cid not in self._by_id:
             return
         del self._by_id[cid]
         self._sm.send(SessionEvent.CONNECTION_CLOSED, conn_id=cid)
-        if self.count == 0:
-            self._sm.send(SessionEvent.CLIENT_DISCONNECTED)
         held = [name for name, owner in self._publishers.items() if owner == cid]
         for name in held:
             del self._publishers[name]
@@ -112,11 +121,13 @@ class ConnectionManager:
         per-connection losses, because the model learns the session has ended
         through the session-end reactor event, not one disconnect per client. The
         registry is emptied before the closes are awaited so the manager presents
-        as session-less the moment teardown begins.
+        as session-less the moment teardown begins. The used-id pool is cleared
+        too, so the next session starts with the whole id range free again.
         """
         conns = list(self._by_id.values())
         self._by_id.clear()
         self._publishers.clear()
+        self._used_conn_ids.clear()
         for conn in conns:
             await conn.close()
 
@@ -198,6 +209,25 @@ class ConnectionManager:
         conn = self._by_id.get(cid)
         if conn is not None:
             conn.send_control(encode(conn.protocol_version))
+
+    def send_response(
+        self, cid: ConnId, encode: Callable[[ProtocolVersion], tuple[Channel, bytes | str]]
+    ) -> None:
+        """Encode and send a server reply to one connection on the channel the codec picks.
+
+        A reply's physical channel is version-dependent — a v0 platform reply
+        (e.g. the model schema) rides the data channel, while v1 places it on the
+        control channel — so *encode* returns the channel alongside the frame and
+        the manager routes to the matching send.
+        """
+        conn = self._by_id.get(cid)
+        if conn is None:
+            return
+        channel, frame = encode(conn.protocol_version)
+        if channel is Channel.CONTROL:
+            conn.send_control(frame)
+        else:
+            conn.send_message(frame)
 
     def broadcast_media(self, bundle: MediaBundle, duplicate: bool) -> None:
         """Send a media bundle to every connection whose wire carries media.
