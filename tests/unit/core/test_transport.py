@@ -1,3 +1,5 @@
+from collections.abc import Mapping
+
 import numpy as np
 
 from reactor_runtime.core import (
@@ -44,6 +46,7 @@ class FakeSink:
     def __init__(self) -> None:
         self.opened: list[ConnId] = []
         self.messages: list[tuple[ConnId, bytes | str, Channel]] = []
+        self.answers: list[tuple[ConnId, dict[str, str]]] = []
 
     def connection_opened(self, conn: Connection) -> None:
         self.opened.append(conn.id)
@@ -74,6 +77,12 @@ class FakeSink:
     def unpublish_track(self, conn_id: ConnId, name: str) -> None:
         pass
 
+    def schema_requested(self, conn_id: ConnId, request_id: str) -> None:
+        pass
+
+    def connection_answered(self, conn_id: ConnId, answer: Mapping[str, str]) -> None:
+        self.answers.append((conn_id, dict(answer)))
+
 
 def test_fake_connection_conforms_by_shape() -> None:
     assert isinstance(FakeConnection(1), Connection)
@@ -92,6 +101,7 @@ def test_facts_flow_up_through_the_sink() -> None:
     sink: ConnectionSink = FakeSink()
     conn: Connection = FakeConnection(7)
 
+    sink.connection_answered(conn.id, {"type": "answer", "sdp": "v=0..."})
     sink.connection_opened(conn)
     sink.message_received(conn.id, b"hello", ProtocolVersion.V1, Channel.DATA)
     sink.message_received(conn.id, '{"type":"notification"}', ProtocolVersion.V0, Channel.CONTROL)
@@ -99,6 +109,7 @@ def test_facts_flow_up_through_the_sink() -> None:
 
     assert isinstance(sink, FakeSink)
     assert sink.opened == [ConnId(7)]
+    assert sink.answers == [(ConnId(7), {"type": "answer", "sdp": "v=0..."})]
     assert sink.messages == [
         (ConnId(7), b"hello", Channel.DATA),
         (ConnId(7), '{"type":"notification"}', Channel.CONTROL),

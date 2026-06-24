@@ -9,6 +9,7 @@ signaling never reaches the runner.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Protocol, runtime_checkable
 
 from reactor_runtime.core.values import (
@@ -140,3 +141,22 @@ class ConnectionSink(Protocol):
 
     def unpublish_track(self, conn_id: ConnId, name: str) -> None:
         """Release an inbound track a connection had claimed."""
+
+    def schema_requested(self, conn_id: ConnId, request_id: str) -> None:
+        """Answer a client's request for the model schema.
+
+        The rendered schema is sent back to the requesting connection,
+        correlated by *request_id*, on whichever channel the connection's wire
+        version places it (data for v0, control for v1).
+        """
+
+    def connection_answered(self, conn_id: ConnId, answer: Mapping[str, str]) -> None:
+        """Relay the transport's negotiation answer for one connection.
+
+        Fired once the transport has produced the answer to a client's
+        connection offer (for WebRTC, the SDP answer as a ``{"type", "sdp"}``
+        mapping). The payload is transport-agnostic and opaque here: the runner
+        journals it for an external consumer to hand back to the client, and
+        never parses it. Distinct from ``connection_opened``, which fires later
+        when the wire actually connects.
+        """
