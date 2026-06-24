@@ -6,6 +6,7 @@ import pytest
 from conftest import FakePeer
 
 from reactor_runtime.core import Connection, ConnId, InputFrame
+from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.transport.webrtc import (
     SdpAnswer,
     SdpOffer,
@@ -33,7 +34,9 @@ class FakeSink:
     def connection_closed(self, conn_id: ConnId) -> None:
         self.closed.append(conn_id)
 
-    def message_received(self, conn_id: ConnId, payload: bytes | str) -> None:
+    def message_received(
+        self, conn_id: ConnId, payload: bytes | str, version: ProtocolVersion
+    ) -> None:
         self.messages.append((conn_id, payload))
 
     def media_received(self, conn_id: ConnId, track: str, frame: InputFrame) -> None:
@@ -56,7 +59,11 @@ def _acceptor(
 
 
 async def _negotiate(
-    acceptor: WebRTCAcceptor, conn_id: ConnId, offer: SdpOffer, tracks: TrackMap
+    acceptor: WebRTCAcceptor,
+    conn_id: ConnId,
+    offer: SdpOffer,
+    tracks: TrackMap,
+    version: ProtocolVersion = ProtocolVersion.V0,
 ) -> SdpAnswer | None:
     """Start an offer and drive its background negotiation to completion.
 
@@ -64,7 +71,7 @@ async def _negotiate(
     yielding, so the task can be captured from ``_negotiating`` and awaited
     before draining the answer.
     """
-    acceptor.start_offer(conn_id, offer, tracks)
+    acceptor.start_offer(conn_id, offer, tracks, version)
     await acceptor._negotiating[conn_id]
     return acceptor.take_answer(conn_id)
 
@@ -89,7 +96,7 @@ async def test_take_answer_is_none_until_negotiation_completes(
 ) -> None:
     sink = FakeSink()
     acceptor = _acceptor(sink, fake_peer, factory_for)
-    acceptor.start_offer(ConnId(7), SdpOffer("offer"), out_av_tracks)
+    acceptor.start_offer(ConnId(7), SdpOffer("offer"), out_av_tracks, ProtocolVersion.V0)
     # The negotiation task has been queued but not yet run.
     assert acceptor.take_answer(ConnId(7)) is None
     await acceptor._negotiating[ConnId(7)]
@@ -209,9 +216,9 @@ async def test_re_offer_supersedes_a_pending_negotiation(
 ) -> None:
     sink = FakeSink()
     acceptor = _acceptor(sink, fake_peer, factory_for)
-    acceptor.start_offer(ConnId(7), SdpOffer("first"), out_av_tracks)
+    acceptor.start_offer(ConnId(7), SdpOffer("first"), out_av_tracks, ProtocolVersion.V0)
     first = acceptor._negotiating[ConnId(7)]
-    acceptor.start_offer(ConnId(7), SdpOffer("second"), out_av_tracks)
+    acceptor.start_offer(ConnId(7), SdpOffer("second"), out_av_tracks, ProtocolVersion.V0)
     second = acceptor._negotiating[ConnId(7)]
     assert second is not first
     with pytest.raises(asyncio.CancelledError):

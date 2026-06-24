@@ -22,6 +22,7 @@ import asyncio
 import logging
 
 from reactor_runtime.core import ConnectionSink, ConnId
+from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.transport.acceptor import ConnectionAcceptor
 from reactor_runtime.transport.webrtc.config import WebRtcConfig
 from reactor_runtime.transport.webrtc.connection import WebRTCConnection
@@ -69,27 +70,33 @@ class WebRTCAcceptor(ConnectionAcceptor):
         self._negotiating: dict[ConnId, asyncio.Task[None]] = {}
         self._answers: dict[ConnId, SdpAnswer] = {}
 
-    def start_offer(self, conn_id: ConnId, sdp_offer: SdpOffer, tracks: TrackMap) -> None:
+    def start_offer(
+        self, conn_id: ConnId, sdp_offer: SdpOffer, tracks: TrackMap, version: ProtocolVersion
+    ) -> None:
         """Begin negotiating *sdp_offer* in the background.
 
         Returns at once; the answer is produced asynchronously (it can wait on
         ICE gathering) and retrieved through :meth:`take_answer`. A fresh offer
         for a connection already negotiating supersedes it: the in-flight
         negotiation is cancelled and any answer it had staged is dropped.
+        *version* is the wire codec negotiated for the connection, fixed for its
+        life and applied to every frame it carries.
         """
         in_flight = self._negotiating.pop(conn_id, None)
         if in_flight is not None:
             in_flight.cancel()
         self._answers.pop(conn_id, None)
         self._negotiating[conn_id] = asyncio.create_task(
-            self._negotiate(conn_id, sdp_offer, tracks)
+            self._negotiate(conn_id, sdp_offer, tracks, version)
         )
 
     def take_answer(self, conn_id: ConnId) -> SdpAnswer | None:
         """Return and clear the negotiated answer, or ``None`` while still pending."""
         return self._answers.pop(conn_id, None)
 
-    async def _negotiate(self, conn_id: ConnId, sdp_offer: SdpOffer, tracks: TrackMap) -> None:
+    async def _negotiate(
+        self, conn_id: ConnId, sdp_offer: SdpOffer, tracks: TrackMap, version: ProtocolVersion
+    ) -> None:
         """Negotiate one offer into a connection and stage its answer.
 
         The connection is held here and only reaches the sink when its wire
@@ -106,9 +113,9 @@ class WebRTCAcceptor(ConnectionAcceptor):
                 await previous.close()
 
             conn, answer = await WebRTCConnection.create(
-                conn_id, sdp_offer, tracks, self._config, peer_factory=self._peer_factory
+                conn_id, sdp_offer, tracks, self._config, version, peer_factory=self._peer_factory
             )
-            conn.on_message(lambda payload: self._sink.message_received(conn_id, payload))
+            conn.on_message(lambda payload, ver: self._sink.message_received(conn_id, payload, ver))
             conn.on_media(lambda track, frame: self._sink.media_received(conn_id, track, frame))
             conn.on_ping(lambda: self._sink.keepalive(conn_id))
             conn.on_connected(lambda: self._opened(conn_id, conn))
