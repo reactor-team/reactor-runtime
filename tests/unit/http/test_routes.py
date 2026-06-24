@@ -1,7 +1,7 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from typing import Any
+from pathlib import Path
 
 import httpx
 import pytest
@@ -26,7 +26,7 @@ class FakeModel(ReactorModel):
     @event(name="set_mode")
     async def set_mode(self, mode: str = InputField(min_length=1)) -> None: ...
 
-    def load(self, config: dict[str, Any]) -> None: ...
+    def load(self, config_path: Path | None) -> None: ...
 
     async def run(self) -> None:
         await asyncio.sleep(60)

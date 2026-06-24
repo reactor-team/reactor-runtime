@@ -14,7 +14,6 @@ from typing import Any
 
 from reactor_runtime.core import (
     ClipReadyEvent,
-    ConnectionEvent,
     ErrorEvent,
     InboundCommandEvent,
     RunnerEvent,
@@ -40,9 +39,8 @@ def runner_event_to_dict(event: RunnerEvent) -> dict[str, Any]:
             "event": transition.event.name.lower(),
             "from": transition.from_state.name.lower(),
             "to": transition.to_state.name.lower(),
+            "detail": dict(transition.detail),
         }
-    if isinstance(event, ConnectionEvent):
-        return {"type": "connection", "conn_id": int(event.conn_id), "opened": event.opened}
     if isinstance(event, InboundCommandEvent):
         conn_id = None if event.conn_id is None else int(event.conn_id)
         return {"type": "command", "name": event.name, "args": dict(event.args), "conn_id": conn_id}

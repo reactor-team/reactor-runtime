@@ -2,7 +2,6 @@ import json
 
 from reactor_runtime.core import (
     ClipReadyEvent,
-    ConnectionEvent,
     ConnId,
     ErrorEvent,
     InboundCommandEvent,
@@ -21,20 +20,49 @@ def _transition() -> TransitionEvent:
     )
 
 
-def test_transition_event_renders_named_states() -> None:
+def test_transition_event_renders_named_states_and_detail() -> None:
     assert runner_event_to_dict(_transition()) == {
         "type": "transition",
         "event": "start_session",
         "from": "ready",
         "to": "waiting",
+        "detail": {},
     }
 
 
-def test_connection_event() -> None:
-    assert runner_event_to_dict(ConnectionEvent(ConnId(3), opened=True)) == {
-        "type": "connection",
-        "conn_id": 3,
-        "opened": True,
+def test_transition_carries_connection_detail() -> None:
+    move = TransitionEvent(
+        Transition(
+            SessionEvent.CONNECTION_OPENED,
+            SessionState.WAITING,
+            SessionState.STREAMING,
+            detail={"conn_id": ConnId(3)},
+        )
+    )
+    assert runner_event_to_dict(move) == {
+        "type": "transition",
+        "event": "connection_opened",
+        "from": "waiting",
+        "to": "streaming",
+        "detail": {"conn_id": 3},
+    }
+
+
+def test_transition_carries_the_negotiation_answer() -> None:
+    move = TransitionEvent(
+        Transition(
+            SessionEvent.CONNECTION_ANSWERED,
+            SessionState.WAITING,
+            SessionState.WAITING,
+            detail={"conn_id": ConnId(4), "answer": {"type": "answer", "sdp": "v=0..."}},
+        )
+    )
+    assert runner_event_to_dict(move) == {
+        "type": "transition",
+        "event": "connection_answered",
+        "from": "waiting",
+        "to": "waiting",
+        "detail": {"conn_id": 4, "answer": {"type": "answer", "sdp": "v=0..."}},
     }
 
 
