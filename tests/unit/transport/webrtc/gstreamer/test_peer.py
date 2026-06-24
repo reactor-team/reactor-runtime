@@ -13,6 +13,7 @@ import inspect
 import pytest
 
 from reactor_runtime.core import TrackDirection
+from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.transport.webrtc.gstreamer.peer import (
     GStreamerPeer,
     gstreamer_peer_factory,
@@ -31,6 +32,16 @@ class FakeChannel:
         self.emitted.append((signal, arg))
 
 
+class _FakeBytes:
+    """Stands in for a ``GLib.Bytes`` carrying a binary data-channel frame."""
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    def get_data(self) -> bytes:
+        return self._data
+
+
 def _peer() -> GStreamerPeer:
     peer = GStreamerPeer(ping_timeout_seconds=5.0)
     peer._stopping = False
@@ -44,7 +55,7 @@ def test_conforms_to_webrtc_peer_protocol() -> None:
 def test_factory_has_the_peer_factory_shape() -> None:
     assert inspect.iscoroutinefunction(gstreamer_peer_factory)
     params = list(inspect.signature(gstreamer_peer_factory).parameters)
-    assert params == ["conn_id", "offer", "tracks", "config"]
+    assert params == ["conn_id", "offer", "tracks", "config", "version"]
 
 
 def test_send_text_uses_send_string() -> None:
@@ -73,24 +84,37 @@ def test_send_binary_uses_send_data_with_bytes() -> None:
 async def test_inbound_data_frame_fires_message_and_ping() -> None:
     peer = _peer()
     peer._loop = asyncio.get_running_loop()
-    messages: list[bytes | str] = []
+    messages: list[tuple[bytes | str, ProtocolVersion]] = []
     pings: list[int] = []
-    peer.on_message(messages.append)
+    peer.on_message(lambda payload, version: messages.append((payload, version)))
     peer.on_ping(lambda: pings.append(1))
 
     peer._gst_on_data_channel_message(None, "hello")
     await asyncio.sleep(0)
 
-    assert messages == ["hello"]
+    assert messages == [("hello", ProtocolVersion.V0)]
     assert pings == [1]
+
+
+async def test_inbound_binary_frame_carries_the_negotiated_version() -> None:
+    peer = _peer()
+    peer._loop = asyncio.get_running_loop()
+    peer.protocol_version = ProtocolVersion.V1
+    messages: list[tuple[bytes | str, ProtocolVersion]] = []
+    peer.on_message(lambda payload, version: messages.append((payload, version)))
+
+    peer._gst_on_data_channel_data(None, _FakeBytes(b"\x08\x01"))
+    await asyncio.sleep(0)
+
+    assert messages == [(b"\x08\x01", ProtocolVersion.V1)]
 
 
 async def test_inbound_control_frame_fires_ping_only() -> None:
     peer = _peer()
     peer._loop = asyncio.get_running_loop()
-    messages: list[bytes | str] = []
+    messages: list[tuple[bytes | str, ProtocolVersion]] = []
     pings: list[int] = []
-    peer.on_message(messages.append)
+    peer.on_message(lambda payload, version: messages.append((payload, version)))
     peer.on_ping(lambda: pings.append(1))
 
     peer._gst_on_control_channel_message(None, '{"scope":"runtime"}')

@@ -38,6 +38,7 @@ from reactor_runtime.core import (
     TrackInfo,
     TrackKind,
 )
+from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.transport.webrtc.config import IceServer, IceTransportPolicy, WebRtcConfig
 from reactor_runtime.transport.webrtc.gstreamer._log import get_logger
 from reactor_runtime.transport.webrtc.gstreamer.errors import (
@@ -157,11 +158,15 @@ class GStreamerPeer:
 
     def __init__(self, ping_timeout_seconds: float = 20.0) -> None:
         # Inbound callbacks the connection registers; invoked on the runtime loop.
-        self._cb_message: Optional[Callable[[bytes | str], None]] = None
+        self._cb_message: Optional[Callable[[bytes | str, ProtocolVersion], None]] = None
         self._cb_media: Optional[Callable[[str, InputFrame], None]] = None
         self._cb_ping: Optional[Callable[[], None]] = None
         self._cb_connected: Optional[Callable[[], None]] = None
         self._cb_disconnect: Optional[Callable[[], None]] = None
+
+        # The wire codec negotiated for this connection, set by the factory and
+        # held for the peer's life. Defaults to the baseline until negotiated.
+        self.protocol_version: ProtocolVersion = ProtocolVersion.V0
 
         # Configuration threaded in by the factory.
         self._config = WebRtcConfig()
@@ -256,8 +261,12 @@ class GStreamerPeer:
     # Seam: inbound callback registrars
     # =========================================================================
 
-    def on_message(self, callback: Callable[[bytes | str], None]) -> None:
-        """Register the sink for inbound data-channel frames (text or binary)."""
+    def on_message(self, callback: Callable[[bytes | str, ProtocolVersion], None]) -> None:
+        """Register the sink for inbound data-channel frames (text or binary).
+
+        The callback receives the frame and this connection's negotiated codec
+        version, so the frame decodes as the client that sent it speaks.
+        """
         self._cb_message = callback
 
     def on_media(self, callback: Callable[[str, InputFrame], None]) -> None:
@@ -811,6 +820,9 @@ class GStreamerPeer:
         self._signals.connect(
             data_channel, "on-message-string", self._gst_on_data_channel_message
         )
+        self._signals.connect(
+            data_channel, "on-message-data", self._gst_on_data_channel_data
+        )
 
     def _setup_control_channel_handlers(self) -> None:
         """Setup handlers for the control data channel."""
@@ -1237,10 +1249,22 @@ class GStreamerPeer:
             self._run_on_gst_thread(self._gst_request_stop)
 
     def _gst_on_data_channel_message(self, channel, message: str) -> None:
-        """Surface an inbound data-channel frame and note client liveness."""
+        """Surface an inbound text data-channel frame and note client liveness."""
         if self._stopping or self._stop_event.is_set():
             return
-        self._fire(self._cb_message, message)
+        self._fire(self._cb_message, message, self.protocol_version)
+        self._fire(self._cb_ping)
+
+    def _gst_on_data_channel_data(self, channel, data: Any) -> None:
+        """Surface an inbound binary data-channel frame and note client liveness.
+
+        A binary frame carries a non-v0 codec (v0 is JSON text); it is relayed
+        with the connection's negotiated version so it decodes as that codec.
+        """
+        if self._stopping or self._stop_event.is_set():
+            return
+        payload = bytes(data.get_data() or b"")
+        self._fire(self._cb_message, payload, self.protocol_version)
         self._fire(self._cb_ping)
 
     def _gst_on_control_channel_message(self, channel, message: str) -> None:
@@ -1874,15 +1898,19 @@ async def gstreamer_peer_factory(
     offer: SdpOffer,
     tracks: TrackMap,
     config: WebRtcConfig,
+    version: ProtocolVersion,
 ) -> tuple[GStreamerPeer, SdpAnswer]:
     """Negotiate *offer* into a :class:`GStreamerPeer` and its SDP answer.
 
     Conforms to :data:`~reactor_runtime.transport.webrtc.peer.WebRtcPeerFactory`.
     Threads the connection's config into the pipeline and builds, from the
     client's declared track map, the mid/name lookups the media setup needs.
+    *version* is the wire codec negotiated for the connection, which the peer
+    holds for its life and applies to every frame it relays.
     """
     logger.debug("negotiating GStreamer peer", conn_id=conn_id)
     peer = GStreamerPeer(ping_timeout_seconds=config.ping_timeout)
+    peer.protocol_version = version
     peer._config = config
     peer._track_by_mid = {mt.mid: mt.info for mt in tracks.tracks}
     peer._mid_by_name = {mt.info.name: mt.mid for mt in tracks.tracks}
