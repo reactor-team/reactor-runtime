@@ -5,6 +5,7 @@ import numpy as np
 from conftest import FakePeer
 
 from reactor_runtime.core import Connection, ConnId, InputFrame, MediaBundle
+from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.transport.webrtc import (
     PeerStats,
     SdpOffer,
@@ -28,6 +29,7 @@ async def _connect(
         SdpOffer("offer"),
         tracks,
         WebRtcConfig(ping_timeout=ping_timeout),
+        ProtocolVersion.V0,
         peer_factory=factory,
     )
     return conn
@@ -43,12 +45,14 @@ async def test_create_returns_answer_and_capabilities(
         SdpOffer("offer"),
         out_av_tracks,
         WebRtcConfig(),
+        ProtocolVersion.V0,
         peer_factory=factory_for(fake_peer),
     )
     assert answer.sdp == "answer-sdp"
     assert conn.id == ConnId(9)
     assert conn.capabilities.carries_video is True
     assert conn.capabilities.carries_audio is True
+    assert conn.protocol_version is ProtocolVersion.V0
 
 
 async def test_data_only_tracks_carry_no_media(
@@ -98,9 +102,9 @@ async def test_inbound_message_and_media_forwarded(
     out_av_tracks: TrackMap,
 ) -> None:
     conn = await _connect(fake_peer, factory_for(fake_peer), out_av_tracks)
-    messages: list[bytes | str] = []
+    messages: list[tuple[bytes | str, ProtocolVersion]] = []
     media: list[tuple[str, InputFrame]] = []
-    conn.on_message(messages.append)
+    conn.on_message(lambda payload, version: messages.append((payload, version)))
     conn.on_media(lambda track, frame: media.append((track, frame)))
 
     frame = InputFrame(np.zeros((1, 1, 3), dtype=np.uint8))
@@ -108,7 +112,10 @@ async def test_inbound_message_and_media_forwarded(
     fake_peer.fire_message('{"scope":"runtime"}')
     fake_peer.fire_media("webcam", frame)
 
-    assert messages == [b"hello", '{"scope":"runtime"}']
+    assert messages == [
+        (b"hello", ProtocolVersion.V0),
+        ('{"scope":"runtime"}', ProtocolVersion.V0),
+    ]
     assert media == [("webcam", frame)]
 
 

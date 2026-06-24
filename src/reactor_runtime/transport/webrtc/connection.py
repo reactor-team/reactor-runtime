@@ -28,6 +28,7 @@ from reactor_runtime.core import (
     TrackDirection,
     TrackKind,
 )
+from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.transport.webrtc.config import WebRtcConfig
 from reactor_runtime.transport.webrtc.peer import PeerStats, WebRtcPeer, WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpAnswer, SdpOffer, TrackMap
@@ -78,7 +79,7 @@ class WebRTCConnection:
         self._peer = peer
         self._ping_timeout = ping_timeout
 
-        self._on_message: Callable[[bytes | str], None] | None = None
+        self._on_message: Callable[[bytes | str, ProtocolVersion], None] | None = None
         self._on_media: Callable[[str, InputFrame], None] | None = None
         self._on_ping: Callable[[], None] | None = None
         self._on_connected: Callable[[], None] | None = None
@@ -99,16 +100,19 @@ class WebRTCConnection:
         offer: SdpOffer,
         tracks: TrackMap,
         config: WebRtcConfig,
+        version: ProtocolVersion,
         *,
         peer_factory: WebRtcPeerFactory,
     ) -> tuple[WebRTCConnection, SdpAnswer]:
         """Negotiate a peer for *offer* and wrap it as a connection.
 
         Returns the connection and the SDP answer the exchange produced. The
-        connection subscribes to its peer's inbound events here, so it is ready
-        to forward facts the moment the acceptor has registered its callbacks.
+        peer is built for *version*, the wire codec negotiated for this
+        connection, which it holds for its life. The connection subscribes to
+        its peer's inbound events here, so it is ready to forward facts the
+        moment the acceptor has registered its callbacks.
         """
-        peer, answer = await peer_factory(conn_id, offer, tracks, config)
+        peer, answer = await peer_factory(conn_id, offer, tracks, config, version)
         conn = cls(conn_id, peer, _capabilities_for(tracks), ping_timeout=config.ping_timeout)
         conn._subscribe()
         return conn, answer
@@ -126,8 +130,13 @@ class WebRTCConnection:
         """The most recent stats sample, or ``None`` before the first cycle."""
         return self._latest_stats
 
-    def on_message(self, callback: Callable[[bytes | str], None]) -> None:
-        """Register the sink for inbound encoded frames (text or binary)."""
+    @property
+    def protocol_version(self) -> ProtocolVersion:
+        """The wire codec the connection negotiated, held by its peer."""
+        return self._peer.protocol_version
+
+    def on_message(self, callback: Callable[[bytes | str, ProtocolVersion], None]) -> None:
+        """Register the sink for inbound encoded frames (text or binary), with the codec version."""
         self._on_message = callback
 
     def on_media(self, callback: Callable[[str, InputFrame], None]) -> None:
@@ -202,9 +211,9 @@ class WebRTCConnection:
         if self._on_closed is not None:
             self._on_closed()
 
-    def _handle_message(self, payload: bytes | str) -> None:
+    def _handle_message(self, payload: bytes | str, version: ProtocolVersion) -> None:
         if self._on_message is not None:
-            self._on_message(payload)
+            self._on_message(payload, version)
 
     def _handle_media(self, track: str, frame: InputFrame) -> None:
         if self._on_media is not None:

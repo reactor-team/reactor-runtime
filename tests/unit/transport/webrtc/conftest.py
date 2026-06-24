@@ -3,6 +3,7 @@ from collections.abc import Callable
 import pytest
 
 from reactor_runtime.core import InputFrame, MediaBundle
+from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.transport.webrtc import (
     PeerStats,
     SdpAnswer,
@@ -24,9 +25,10 @@ class FakePeer:
         self.resumed: list[str] = []
         self.paused: list[str] = []
         self.closed = False
+        self.protocol_version = ProtocolVersion.V0
         self.stats_fail_times = 0
         self._stats = stats if stats is not None else PeerStats(rtt_seconds=0.1)
-        self._on_message: Callable[[bytes | str], None] | None = None
+        self._on_message: Callable[[bytes | str, ProtocolVersion], None] | None = None
         self._on_media: Callable[[str, InputFrame], None] | None = None
         self._on_ping: Callable[[], None] | None = None
         self._on_connected: Callable[[], None] | None = None
@@ -56,7 +58,7 @@ class FakePeer:
     async def close(self) -> None:
         self.closed = True
 
-    def on_message(self, callback: Callable[[bytes | str], None]) -> None:
+    def on_message(self, callback: Callable[[bytes | str, ProtocolVersion], None]) -> None:
         self._on_message = callback
 
     def on_media(self, callback: Callable[[str, InputFrame], None]) -> None:
@@ -87,7 +89,7 @@ class FakePeer:
 
     def fire_message(self, payload: bytes | str) -> None:
         assert self._on_message is not None
-        self._on_message(payload)
+        self._on_message(payload, self.protocol_version)
 
     def fire_media(self, track: str, frame: InputFrame) -> None:
         assert self._on_media is not None
@@ -103,8 +105,13 @@ def fake_peer() -> FakePeer:
 def factory_for() -> Callable[..., WebRtcPeerFactory]:
     def make(peer: FakePeer, answer: str = "answer-sdp") -> WebRtcPeerFactory:
         async def factory(
-            conn_id: int, offer: SdpOffer, tracks: TrackMap, config: WebRtcConfig
+            conn_id: int,
+            offer: SdpOffer,
+            tracks: TrackMap,
+            config: WebRtcConfig,
+            version: ProtocolVersion,
         ) -> tuple[FakePeer, SdpAnswer]:
+            peer.protocol_version = version
             return peer, SdpAnswer(answer)
 
         return factory

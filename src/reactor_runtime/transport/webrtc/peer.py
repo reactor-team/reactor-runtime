@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from reactor_runtime.core import ConnId, InputFrame, MediaBundle, TrackDirection
+from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.transport.webrtc.config import WebRtcConfig
 from reactor_runtime.transport.webrtc.signaling import (
     IceCandidate,
@@ -74,6 +75,14 @@ class WebRtcPeer(Protocol):
     invokes as facts arrive on the wire.
     """
 
+    protocol_version: ProtocolVersion
+    """The wire codec negotiated for this connection at its handshake.
+
+    Fixed for the peer's life. The connection exposes it so the runner encodes
+    each outbound frame in the codec this client speaks, and the peer passes it
+    alongside every inbound frame so decode is per connection.
+    """
+
     async def add_ice(self, candidate: IceCandidate) -> None:
         """Add a trickle-ICE candidate; valid before and after the wire connects."""
 
@@ -95,8 +104,12 @@ class WebRtcPeer(Protocol):
     async def close(self) -> None:
         """Tear the peer connection down."""
 
-    def on_message(self, callback: Callable[[bytes | str], None]) -> None:
-        """Register the sink for inbound data-channel frames (text or binary)."""
+    def on_message(self, callback: Callable[[bytes | str, ProtocolVersion], None]) -> None:
+        """Register the sink for inbound data-channel frames (text or binary).
+
+        The callback receives the frame and the codec version the connection
+        negotiated, so the frame is decoded as this client speaks.
+        """
 
     def on_media(self, callback: Callable[[str, InputFrame], None]) -> None:
         """Register the sink for inbound media frames, by track name."""
@@ -116,12 +129,13 @@ class WebRtcPeer(Protocol):
 
 
 WebRtcPeerFactory = Callable[
-    [ConnId, SdpOffer, TrackMap, WebRtcConfig],
+    [ConnId, SdpOffer, TrackMap, WebRtcConfig, ProtocolVersion],
     Awaitable[tuple[WebRtcPeer, SdpAnswer]],
 ]
-"""Build a negotiated peer for *(conn id, offer, tracks, config)*.
+"""Build a negotiated peer for *(conn id, offer, tracks, config, version)*.
 
-Returns the peer and the SDP answer produced during the exchange. The media
-stack supplies the concrete factory; until it lands, the acceptor is constructed
-with whichever factory the caller injects.
+Returns the peer and the SDP answer produced during the exchange. *version* is
+the wire codec negotiated for the connection, which the peer holds for its life.
+The media stack supplies the concrete factory; until it lands, the acceptor is
+constructed with whichever factory the caller injects.
 """
