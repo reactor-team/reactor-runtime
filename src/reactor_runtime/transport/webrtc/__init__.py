@@ -1,8 +1,9 @@
 """The WebRTC transport.
 
-WebRTC reshaped as a connection: :class:`WebRTCConnection` is the wire and
-:class:`WebRTCAcceptor` concentrates its SDP/ICE signalling. Its media engine
-sits behind the :class:`WebRtcPeer` seam, supplied by a
+WebRTC reshaped as a connection: :class:`WebRTCConnection` is the wire,
+:class:`WebRTCAcceptor` concentrates its SDP/ICE signalling, and
+:class:`WebRtcRouter` mounts its routes. Its media engine sits behind the
+:class:`WebRtcPeer` seam, supplied by a
 :data:`~reactor_runtime.transport.webrtc.peer.WebRtcPeerFactory`, so the wire can
 be built and tested without the media stack present.
 """
@@ -16,6 +17,7 @@ from reactor_runtime.transport.webrtc.peer import (
     WebRtcPeer,
     WebRtcPeerFactory,
 )
+from reactor_runtime.transport.webrtc.router import WebRtcRouter
 from reactor_runtime.transport.webrtc.signaling import (
     IceCandidate,
     MappedTrack,
@@ -39,4 +41,5 @@ __all__ = [
     "WebRtcConfig",
     "WebRtcPeer",
     "WebRtcPeerFactory",
+    "WebRtcRouter",
 ]
