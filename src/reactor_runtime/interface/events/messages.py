@@ -75,10 +75,12 @@ class MessageFieldSpec:
     Attributes:
         spec: The field's resolved type, driving schema rendering.
         description: Human-readable description, or ``None``.
+        default: The field's default value, or :data:`NO_DEFAULT` when required.
     """
 
     spec: TypeSpec
     description: str | None
+    default: Any
 
 
 @dataclass_transform(field_specifiers=(MessageField, MessageFieldInfo))
@@ -195,7 +197,7 @@ def _build_message(cls: type[ModelMessage]) -> None:
                     f"{owner}: default for '{name}' does not match its type ({default_reason})."
                 )
 
-        fields[name] = MessageFieldSpec(spec=spec, description=description)
+        fields[name] = MessageFieldSpec(spec=spec, description=description, default=default)
 
     if no_default and has_default:
         cls.__annotations__ = {key: annotations[key] for key in no_default + has_default}

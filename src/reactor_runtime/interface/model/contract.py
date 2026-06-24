@@ -1,0 +1,339 @@
+"""The per-model contract — :class:`ModelContract`.
+
+One class-level traversal yields the whole client-facing contract of a model and
+caches it on the class: the commands a client can send (each resolved into a
+:class:`CommandSpec` with the message type its handler returns), the messages the
+model sends back, its media tracks, and its lifecycle hooks. The same resolved
+form answers both questions the runtime asks — validate an inbound payload into a
+typed :class:`Command`, and render the published :class:`ModelSchema` — so the
+two can never disagree.
+
+There is no global registry. The contract is instance-free and built once, when
+the model class is created; :meth:`ModelContract.of` is the accessor for the
+cached result.
+"""
+
+from __future__ import annotations
+
+import inspect
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any, get_type_hints
+
+from reactor_runtime.core.fields import NO_DEFAULT, validate_field
+from reactor_runtime.core.model import Command
+from reactor_runtime.core.naming import pascal_to_snake
+from reactor_runtime.core.values import TrackInfo
+from reactor_runtime.interface.events.decorators import (
+    CONNECTED_ATTR,
+    DISCONNECTED_ATTR,
+    EVENT_ATTR,
+    FILE_UPLOADED_ATTR,
+    SESSION_ENDED_ATTR,
+    SESSION_STARTED_ATTR,
+    EventHandler,
+)
+from reactor_runtime.interface.events.messages import ModelMessage
+from reactor_runtime.interface.model.schema import (
+    CommandSchema,
+    MessageSchema,
+    ModelSchema,
+    command_field_schema,
+    message_field_schema,
+    track_schema,
+)
+from reactor_runtime.interface.tracks import Input, Output
+
+
+class ContractError(Exception):
+    """A client payload that fails the contract at request time.
+
+    Attributes:
+        field: The offending field, command, or argument name.
+        reason: Why it was rejected.
+    """
+
+    def __init__(self, field: str, reason: str) -> None:
+        self.field = field
+        self.reason = reason
+        super().__init__(f"{field}: {reason}")
+
+
+@dataclass(frozen=True)
+class CommandSpec:
+    """A resolved command and everything needed to dispatch and document it.
+
+    Attributes:
+        name: The command's wire name.
+        command: The :class:`Command` subclass a payload validates into.
+        handler: The unbound handler method the command dispatches to.
+        description: Human-readable description, surfaced in the schema.
+        response: The message type the handler returns, or ``None``.
+        is_async: Whether the handler is a coroutine function.
+        reserved: Reserved parameters the runtime injects, in injection order.
+    """
+
+    name: str
+    command: type[Command]
+    handler: Callable[..., Any]
+    description: str
+    response: type[ModelMessage] | None
+    is_async: bool
+    reserved: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class LifecycleHooks:
+    """The lifecycle handler methods a model declares, by scope.
+
+    Attributes:
+        session_started: Runs once when the session begins.
+        session_ended: Runs once when the session ends.
+        connected: Runs each time a client connects.
+        disconnected: Runs each time a client disconnects.
+        file_uploaded: Runs when a client uploads a file.
+    """
+
+    session_started: Callable[..., Any] | None = None
+    session_ended: Callable[..., Any] | None = None
+    connected: Callable[..., Any] | None = None
+    disconnected: Callable[..., Any] | None = None
+    file_uploaded: Callable[..., Any] | None = None
+
+
+@dataclass(frozen=True)
+class ModelContract:
+    """The assembled, cached, client-facing contract of one model.
+
+    Attributes:
+        model: The model identifier, lowercase.
+        description: Human-readable model description.
+        commands: Command name to its resolved spec.
+        messages: Message name to its type.
+        tracks: Track name to its metadata.
+        lifecycle: The model's lifecycle hook methods.
+    """
+
+    model: str
+    description: str
+    commands: dict[str, CommandSpec]
+    messages: dict[str, type[ModelMessage]]
+    tracks: dict[str, TrackInfo]
+    lifecycle: LifecycleHooks
+
+    @classmethod
+    def of(cls, model_cls: type) -> ModelContract:
+        """Return the contract cached on *model_cls*.
+
+        Args:
+            model_cls: A model class whose contract was built at creation.
+
+        Returns:
+            The cached contract.
+
+        Raises:
+            TypeError: If *model_cls* carries no contract.
+        """
+        contract = getattr(model_cls, "__reactor_contract__", None)
+        if not isinstance(contract, ModelContract):
+            raise TypeError(f"{model_cls.__qualname__} has no model contract")
+        return contract
+
+    @classmethod
+    def build(cls, model_cls: type) -> ModelContract:
+        """Assemble the contract from a single traversal of *model_cls*.
+
+        Walks the MRO for handler methods (the most-derived definition wins),
+        resolving each command's response type from its handler's return
+        annotation, and reads the model's track topology from its ``Output`` /
+        ``Input`` fields.
+
+        Args:
+            model_cls: The model class to assemble the contract for.
+
+        Returns:
+            The assembled contract.
+
+        Raises:
+            ValueError: If two handlers claim the same command name, or an input
+                and output track share a name.
+        """
+        commands: dict[str, CommandSpec] = {}
+        hooks: dict[str, Callable[..., Any]] = {}
+        seen: set[str] = set()
+
+        for klass in model_cls.__mro__:
+            for attr_name, attr in vars(klass).items():
+                # The most-derived definition of a name wins, even when it drops
+                # the decorator: marking every name on first sight stops a base's
+                # decorated copy from registering behind a plain override.
+                if attr_name in seen:
+                    continue
+                seen.add(attr_name)
+                handler = getattr(attr, EVENT_ATTR, None)
+                if isinstance(handler, EventHandler):
+                    if handler.name in commands:
+                        raise ValueError(f"duplicate command name '{handler.name}'")
+                    commands[handler.name] = _command_spec(handler, attr)
+                    continue
+                for lifecycle_attr, key in _LIFECYCLE_ATTRS.items():
+                    if getattr(attr, lifecycle_attr, False):
+                        hooks.setdefault(key, attr)
+
+        messages = {
+            spec.response.name: spec.response
+            for spec in commands.values()
+            if spec.response is not None
+        }
+
+        return cls(
+            model=pascal_to_snake(model_cls.__name__),
+            description=_normalize(model_cls.__doc__),
+            commands=commands,
+            messages=messages,
+            tracks=_collect_tracks(model_cls),
+            lifecycle=LifecycleHooks(**hooks),
+        )
+
+    def validate(self, name: str, raw_args: dict[str, Any]) -> Command:
+        """Validate a client payload into a typed command.
+
+        Each accepted value is coerced into its Python form, so an enum field
+        holds a member rather than its wire value. An upload field keeps its
+        reference: the bytes are fetched by the runtime, not here.
+
+        Args:
+            name: The command name the client sent.
+            raw_args: The raw argument mapping from the wire.
+
+        Returns:
+            The constructed, validated command.
+
+        Raises:
+            ContractError: If the command is unknown, an argument is unexpected
+                or missing, or a value fails its field's type or constraints.
+        """
+        spec = self.commands.get(name)
+        if spec is None:
+            raise ContractError(name, "unknown command")
+
+        fields = spec.command.__command_fields__
+        for arg in raw_args:
+            if arg not in fields:
+                raise ContractError(arg, "unexpected argument")
+
+        kwargs: dict[str, Any] = {}
+        for field_name, command_field in fields.items():
+            if field_name in raw_args:
+                value = raw_args[field_name]
+                type_reason = command_field.spec.check(value)
+                if type_reason is not None:
+                    raise ContractError(field_name, type_reason)
+                ok, constraint_reason = validate_field(field_name, value, command_field.info)
+                if not ok:
+                    raise ContractError(field_name, constraint_reason)
+                kwargs[field_name] = command_field.spec.coerce(value)
+            elif command_field.info.default is NO_DEFAULT:
+                raise ContractError(field_name, "missing required argument")
+
+        return spec.command(**kwargs)
+
+    def render_schema(self, version: str = "v0.0.0") -> ModelSchema:
+        """Render the contract as a versioned :class:`ModelSchema`.
+
+        Args:
+            version: The release tag to stamp, carrying a leading ``v``.
+
+        Returns:
+            The schema, ready to emit as an OpenAPI document.
+        """
+        commands = {
+            name: CommandSchema(
+                description=spec.description,
+                schema={
+                    field_name: command_field_schema(command_field)
+                    for field_name, command_field in spec.command.__command_fields__.items()
+                },
+            )
+            for name, spec in self.commands.items()
+        }
+        messages = {
+            name: MessageSchema(
+                description=_normalize(message.user_doc),
+                schema={
+                    field_name: message_field_schema(message_field)
+                    for field_name, message_field in message.__message_fields__.items()
+                },
+            )
+            for name, message in self.messages.items()
+        }
+        tracks = {name: track_schema(track) for name, track in self.tracks.items()}
+        return ModelSchema(
+            version=version,
+            name=self.model,
+            description=self.description,
+            tracks=tracks,
+            commands=commands,
+            messages=messages,
+        )
+
+
+_LIFECYCLE_ATTRS = {
+    SESSION_STARTED_ATTR: "session_started",
+    SESSION_ENDED_ATTR: "session_ended",
+    CONNECTED_ATTR: "connected",
+    DISCONNECTED_ATTR: "disconnected",
+    FILE_UPLOADED_ATTR: "file_uploaded",
+}
+
+
+def _command_spec(handler: EventHandler, method: Callable[..., Any]) -> CommandSpec:
+    """Build a :class:`CommandSpec`, resolving the handler's response type."""
+    return CommandSpec(
+        name=handler.name,
+        command=handler.command,
+        handler=method,
+        description=handler.description,
+        response=_response_type(method),
+        is_async=handler.is_async,
+        reserved=handler.reserved,
+    )
+
+
+def _response_type(handler: Callable[..., Any]) -> type[ModelMessage] | None:
+    """Resolve a handler's return annotation to a message type, or ``None``.
+
+    A handler that returns a :class:`ModelMessage` subclass registers it as the
+    command's response; any other return (including none) means no response.
+    """
+    try:
+        hints = get_type_hints(handler)
+    except Exception:
+        return None
+    returned = hints.get("return")
+    if isinstance(returned, type) and issubclass(returned, ModelMessage):
+        return returned
+    return None
+
+
+def _collect_tracks(model_cls: type) -> dict[str, TrackInfo]:
+    """Merge the tracks of every ``Output`` / ``Input`` field on the model."""
+    try:
+        hints = get_type_hints(model_cls)
+    except Exception:
+        hints = {}
+    tracks: dict[str, TrackInfo] = {}
+    for annotation in hints.values():
+        if isinstance(annotation, type) and issubclass(annotation, (Output, Input)):
+            for name, info in annotation.__tracks__.items():
+                if name in tracks:
+                    raise ValueError(f"track name '{name}' is declared more than once")
+                tracks[name] = info
+    return tracks
+
+
+def _normalize(doc: str | None) -> str:
+    """Dedent and trim a docstring for use as a schema description."""
+    if not doc:
+        return ""
+    return inspect.cleandoc(doc)
