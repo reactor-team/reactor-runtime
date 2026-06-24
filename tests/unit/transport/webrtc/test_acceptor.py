@@ -6,7 +6,7 @@ import pytest
 from conftest import FakePeer
 
 from reactor_runtime.core import Connection, ConnId, InputFrame
-from reactor_runtime.protocol import ProtocolVersion
+from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.transport.webrtc import (
     SdpAnswer,
     SdpOffer,
@@ -35,7 +35,7 @@ class FakeSink:
         self.closed.append(conn_id)
 
     def message_received(
-        self, conn_id: ConnId, payload: bytes | str, version: ProtocolVersion
+        self, conn_id: ConnId, payload: bytes | str, version: ProtocolVersion, channel: Channel
     ) -> None:
         self.messages.append((conn_id, payload))
 
@@ -44,6 +44,18 @@ class FakeSink:
 
     def keepalive(self, conn_id: ConnId) -> None:
         self.keepalives.append(conn_id)
+
+    def resume_track(self, conn_id: ConnId, name: str) -> None:
+        pass
+
+    def pause_track(self, conn_id: ConnId, name: str) -> None:
+        pass
+
+    def publish_requested(self, conn_id: ConnId, name: str, request_id: str) -> None:
+        pass
+
+    def unpublish_track(self, conn_id: ConnId, name: str) -> None:
+        pass
 
 
 def _acceptor(

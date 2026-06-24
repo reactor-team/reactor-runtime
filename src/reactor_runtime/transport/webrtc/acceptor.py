@@ -115,7 +115,9 @@ class WebRTCAcceptor(ConnectionAcceptor):
             conn, answer = await WebRTCConnection.create(
                 conn_id, sdp_offer, tracks, self._config, version, peer_factory=self._peer_factory
             )
-            conn.on_message(lambda payload, ver: self._sink.message_received(conn_id, payload, ver))
+            conn.on_message(
+                lambda payload, ver, ch: self._sink.message_received(conn_id, payload, ver, ch)
+            )
             conn.on_media(lambda track, frame: self._sink.media_received(conn_id, track, frame))
             conn.on_ping(lambda: self._sink.keepalive(conn_id))
             conn.on_connected(lambda: self._opened(conn_id, conn))
