@@ -28,7 +28,7 @@ from reactor_runtime.core import (
     TrackDirection,
     TrackKind,
 )
-from reactor_runtime.protocol import ProtocolVersion
+from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.transport.webrtc.config import WebRtcConfig
 from reactor_runtime.transport.webrtc.peer import PeerStats, WebRtcPeer, WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpAnswer, SdpOffer, TrackMap
@@ -79,7 +79,7 @@ class WebRTCConnection:
         self._peer = peer
         self._ping_timeout = ping_timeout
 
-        self._on_message: Callable[[bytes | str, ProtocolVersion], None] | None = None
+        self._on_message: Callable[[bytes | str, ProtocolVersion, Channel], None] | None = None
         self._on_media: Callable[[str, InputFrame], None] | None = None
         self._on_ping: Callable[[], None] | None = None
         self._on_connected: Callable[[], None] | None = None
@@ -135,8 +135,8 @@ class WebRTCConnection:
         """The wire codec the connection negotiated, held by its peer."""
         return self._peer.protocol_version
 
-    def on_message(self, callback: Callable[[bytes | str, ProtocolVersion], None]) -> None:
-        """Register the sink for inbound encoded frames (text or binary), with the codec version."""
+    def on_message(self, callback: Callable[[bytes | str, ProtocolVersion, Channel], None]) -> None:
+        """Register the sink for inbound frames, with the codec version and channel."""
         self._on_message = callback
 
     def on_media(self, callback: Callable[[str, InputFrame], None]) -> None:
@@ -178,6 +178,10 @@ class WebRTCConnection:
         """Send an already-encoded frame (text or binary) to this client."""
         self._peer.send_message(payload)
 
+    def send_control(self, payload: bytes | str) -> None:
+        """Send an already-encoded control frame (text or binary) to this client."""
+        self._peer.send_control(payload)
+
     def send_media(self, bundle: MediaBundle) -> None:
         """Send a media bundle to this client."""
         self._peer.send_media(bundle)
@@ -211,9 +215,11 @@ class WebRTCConnection:
         if self._on_closed is not None:
             self._on_closed()
 
-    def _handle_message(self, payload: bytes | str, version: ProtocolVersion) -> None:
+    def _handle_message(
+        self, payload: bytes | str, version: ProtocolVersion, channel: Channel
+    ) -> None:
         if self._on_message is not None:
-            self._on_message(payload, version)
+            self._on_message(payload, version, channel)
 
     def _handle_media(self, track: str, frame: InputFrame) -> None:
         if self._on_media is not None:

@@ -5,7 +5,7 @@ import numpy as np
 from conftest import FakePeer
 
 from reactor_runtime.core import Connection, ConnId, InputFrame, MediaBundle
-from reactor_runtime.protocol import ProtocolVersion
+from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.transport.webrtc import (
     PeerStats,
     SdpOffer,
@@ -102,21 +102,31 @@ async def test_inbound_message_and_media_forwarded(
     out_av_tracks: TrackMap,
 ) -> None:
     conn = await _connect(fake_peer, factory_for(fake_peer), out_av_tracks)
-    messages: list[tuple[bytes | str, ProtocolVersion]] = []
+    messages: list[tuple[bytes | str, ProtocolVersion, Channel]] = []
     media: list[tuple[str, InputFrame]] = []
-    conn.on_message(lambda payload, version: messages.append((payload, version)))
+    conn.on_message(lambda payload, version, channel: messages.append((payload, version, channel)))
     conn.on_media(lambda track, frame: media.append((track, frame)))
 
     frame = InputFrame(np.zeros((1, 1, 3), dtype=np.uint8))
     fake_peer.fire_message(b"hello")
-    fake_peer.fire_message('{"scope":"runtime"}')
+    fake_peer.fire_message('{"type":"notification"}', Channel.CONTROL)
     fake_peer.fire_media("webcam", frame)
 
     assert messages == [
-        (b"hello", ProtocolVersion.V0),
-        ('{"scope":"runtime"}', ProtocolVersion.V0),
+        (b"hello", ProtocolVersion.V0, Channel.DATA),
+        ('{"type":"notification"}', ProtocolVersion.V0, Channel.CONTROL),
     ]
     assert media == [("webcam", frame)]
+
+
+async def test_send_control_delegates_to_peer(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    conn = await _connect(fake_peer, factory_for(fake_peer), out_av_tracks)
+    conn.send_control('{"type":"response"}')
+    assert fake_peer.control_sent == ['{"type":"response"}']
 
 
 async def test_ping_reports_keepalive(

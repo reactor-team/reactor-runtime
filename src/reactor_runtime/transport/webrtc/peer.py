@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from reactor_runtime.core import ConnId, InputFrame, MediaBundle, TrackDirection
-from reactor_runtime.protocol import ProtocolVersion
+from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.transport.webrtc.config import WebRtcConfig
 from reactor_runtime.transport.webrtc.signaling import (
     IceCandidate,
@@ -89,6 +89,9 @@ class WebRtcPeer(Protocol):
     def send_message(self, payload: bytes | str) -> None:
         """Send an already-encoded frame over the data channel (text or binary)."""
 
+    def send_control(self, payload: bytes | str) -> None:
+        """Send an already-encoded frame over the control channel (text or binary)."""
+
     def send_media(self, bundle: MediaBundle) -> None:
         """Send a media bundle, routing each track to its negotiated sender."""
 
@@ -104,11 +107,13 @@ class WebRtcPeer(Protocol):
     async def close(self) -> None:
         """Tear the peer connection down."""
 
-    def on_message(self, callback: Callable[[bytes | str, ProtocolVersion], None]) -> None:
-        """Register the sink for inbound data-channel frames (text or binary).
+    def on_message(self, callback: Callable[[bytes | str, ProtocolVersion, Channel], None]) -> None:
+        """Register the sink for inbound frames on either channel.
 
-        The callback receives the frame and the codec version the connection
-        negotiated, so the frame is decoded as this client speaks.
+        The callback receives the frame, the codec version the connection
+        negotiated, and the physical channel it arrived on (data or control),
+        so the one decode site above reads it as this client speaks and as the
+        right message family. The peer never interprets a frame itself.
         """
 
     def on_media(self, callback: Callable[[str, InputFrame], None]) -> None:
@@ -136,6 +141,6 @@ WebRtcPeerFactory = Callable[
 
 Returns the peer and the SDP answer produced during the exchange. *version* is
 the wire codec negotiated for the connection, which the peer holds for its life.
-The media stack supplies the concrete factory; until it lands, the acceptor is
-constructed with whichever factory the caller injects.
+The acceptor holds whichever factory the caller injects, so it can be built and
+tested with a fake peer in place of the real media stack.
 """
