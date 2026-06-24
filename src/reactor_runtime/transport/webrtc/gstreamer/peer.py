@@ -1,25 +1,18 @@
 """GStreamer WebRTC peer.
 
 The concrete :class:`~reactor_runtime.transport.webrtc.peer.WebRtcPeer` for the
-WebRTC wire, ported from the original runtime. It owns one negotiated peer
-connection on a dedicated GLib thread with its own main loop: it moves encoded
-messages and media, samples transport statistics, and reports inbound facts
-back through the callbacks the connection registers on it.
+WebRTC wire. It owns one negotiated peer connection on a dedicated GLib thread
+with its own main loop: it moves encoded messages and media, samples transport
+statistics, and reports inbound facts back through the callbacks the connection
+registers on it.
 
 The liveness watchdog, the stats-sampling cadence, and close orchestration live
 in the connection above this peer; here we drive GStreamer and surface facts.
-
-.. note::
-
-    ``send_media()`` currently forwards only the first video track from the
-    bundle to the GStreamer appsrc; audio tracks are dropped. Full multi-track
-    routing is future work.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import queue
 import random
 import threading
@@ -38,7 +31,7 @@ from reactor_runtime.core import (
     TrackInfo,
     TrackKind,
 )
-from reactor_runtime.protocol import ProtocolVersion
+from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.transport.webrtc.config import IceServer, IceTransportPolicy, WebRtcConfig
 from reactor_runtime.transport.webrtc.gstreamer._log import get_logger
 from reactor_runtime.transport.webrtc.gstreamer.errors import (
@@ -158,7 +151,7 @@ class GStreamerPeer:
 
     def __init__(self, ping_timeout_seconds: float = 20.0) -> None:
         # Inbound callbacks the connection registers; invoked on the runtime loop.
-        self._cb_message: Optional[Callable[[bytes | str, ProtocolVersion], None]] = None
+        self._cb_message: Optional[Callable[[bytes | str, ProtocolVersion, Channel], None]] = None
         self._cb_media: Optional[Callable[[str, InputFrame], None]] = None
         self._cb_ping: Optional[Callable[[], None]] = None
         self._cb_connected: Optional[Callable[[], None]] = None
@@ -261,11 +254,15 @@ class GStreamerPeer:
     # Seam: inbound callback registrars
     # =========================================================================
 
-    def on_message(self, callback: Callable[[bytes | str, ProtocolVersion], None]) -> None:
-        """Register the sink for inbound data-channel frames (text or binary).
+    def on_message(
+        self, callback: Callable[[bytes | str, ProtocolVersion, Channel], None]
+    ) -> None:
+        """Register the sink for inbound frames on either channel.
 
-        The callback receives the frame and this connection's negotiated codec
-        version, so the frame decodes as the client that sent it speaks.
+        The callback receives the frame, this connection's negotiated codec
+        version, and the physical channel it arrived on, so the decode site
+        above reads it as the client that sent it speaks and as the right
+        message family. The peer never interprets a frame itself.
         """
         self._cb_message = callback
 
@@ -462,10 +459,10 @@ class GStreamerPeer:
                     if not sender.push_buffer(track_data.data):
                         # Debug-level: this fires at video / audio frame
                         # rate (30+ Hz) when the sender's appsrc rejects a
-                        # buffer (e.g. pipeline not yet PLAYING, or audio
-                        # sender not fully wired up).  It's useful when
-                        # debugging a stalled encoder but should not flood
-                        # production logs at steady state.
+                        # buffer (e.g. pipeline not yet PLAYING, or a sender
+                        # not fully wired up).  It's useful when debugging a
+                        # stalled encoder but should not flood production logs
+                        # at steady state.
                         logger.debug("failed to push buffer", track=mid)
 
             return GLib.SOURCE_CONTINUE
@@ -496,7 +493,7 @@ class GStreamerPeer:
             ]
             score = aggregate_qos_score(scores)
             if score is not None:
-                logger.info("video quality score", score=score, senders=len(scores))
+                logger.debug("video quality score", score=score, senders=len(scores))
 
             return GLib.SOURCE_CONTINUE
 
@@ -839,6 +836,11 @@ class GStreamerPeer:
             "on-message-string",
             self._gst_on_control_channel_message,
         )
+        self._signals.connect(
+            self._control_channel,
+            "on-message-data",
+            self._gst_on_control_channel_data,
+        )
 
     # =========================================================================
     # WebRTC Signal Handlers
@@ -947,7 +949,7 @@ class GStreamerPeer:
         struct = caps.get_structure(0)
         media_type = struct.get_name()
 
-        # Only handle video (ignore audio for now)
+        # Only handle RTP media pads; ignore anything else.
         if not media_type.startswith("application/x-rtp"):
             logger.debug("ignoring non-RTP pad", media_type=media_type)
             return
@@ -1252,7 +1254,7 @@ class GStreamerPeer:
         """Surface an inbound text data-channel frame and note client liveness."""
         if self._stopping or self._stop_event.is_set():
             return
-        self._fire(self._cb_message, message, self.protocol_version)
+        self._fire(self._cb_message, message, self.protocol_version, Channel.DATA)
         self._fire(self._cb_ping)
 
     def _gst_on_data_channel_data(self, channel, data: Any) -> None:
@@ -1264,36 +1266,29 @@ class GStreamerPeer:
         if self._stopping or self._stop_event.is_set():
             return
         payload = bytes(data.get_data() or b"")
-        self._fire(self._cb_message, payload, self.protocol_version)
+        self._fire(self._cb_message, payload, self.protocol_version, Channel.DATA)
         self._fire(self._cb_ping)
 
     def _gst_on_control_channel_message(self, channel, message: str) -> None:
-        """Note client liveness and apply this connection's track verbs.
+        """Surface an inbound text control-channel frame and note client liveness.
 
         Every inbound control frame is evidence the client is alive, feeding the
-        ping watchdog. A client also drives its own track reception over this
-        channel: ``resume_track`` / ``pause_track`` notifications gate whether
-        this connection's outbound senders push frames. That gate is
-        per-connection — each client in a multi-client session controls its own
-        streams — so it is applied here on the peer. Publisher arbitration for
-        inbound tracks (``publish_track``) is cross-connection and is decided
-        above the transport, not here.
+        ping watchdog. The frame itself is relayed opaque, tagged as the control
+        channel, to the one decode site above — the peer never interprets the
+        track verbs (resume/pause/publish/unpublish) itself.
         """
         if self._stopping or self._stop_event.is_set():
             return
+        self._fire(self._cb_message, message, self.protocol_version, Channel.CONTROL)
         self._fire(self._cb_ping)
-        try:
-            parsed = json.loads(message)
-        except (ValueError, TypeError):
+
+    def _gst_on_control_channel_data(self, channel, data: Any) -> None:
+        """Surface an inbound binary control-channel frame and note client liveness."""
+        if self._stopping or self._stop_event.is_set():
             return
-        if not isinstance(parsed, dict) or parsed.get("type") != "notification":
-            return
-        event = parsed.get("event")
-        name = str((parsed.get("data") or {}).get("name", ""))
-        if event == "resume_track":
-            self._gst_resume_track(name)
-        elif event == "pause_track":
-            self._gst_pause_track(name)
+        payload = bytes(data.get_data() or b"")
+        self._fire(self._cb_message, payload, self.protocol_version, Channel.CONTROL)
+        self._fire(self._cb_ping)
 
     def resume_track(self, name: str) -> None:
         self._gst_resume_track(name)
@@ -1687,11 +1682,19 @@ class GStreamerPeer:
     def _gst_send_datachannel_msg(self, payload: bytes | str) -> None:
         if self._stopping or self._data_channel is None:
             return
+        self._gst_send_on(self._data_channel, payload)
+
+    def _gst_send_control_msg(self, payload: bytes | str) -> None:
+        if self._stopping or self._control_channel is None:
+            return
+        self._gst_send_on(self._control_channel, payload)
+
+    def _gst_send_on(self, data_channel: Any, payload: bytes | str) -> None:
         try:
             if isinstance(payload, bytes):
-                self._data_channel.emit("send-data", GLib.Bytes.new(payload))
+                data_channel.emit("send-data", GLib.Bytes.new(payload))
             else:
-                self._data_channel.emit("send-string", payload)
+                data_channel.emit("send-string", payload)
         except Exception:
             pass
 
@@ -1702,10 +1705,11 @@ class GStreamerPeer:
     def send_media(self, bundle: MediaBundle) -> None:
         """Send a multi-track media bundle to the remote peer.
 
-        Currently only video tracks are forwarded to the GStreamer appsrc; audio
-        tracks are dropped. Thread-safe — callable from any thread. A bundle that
-        arrives before the senders exist, or when the outgoing queue is full, is
-        dropped rather than blocking the caller.
+        Every track in the bundle is routed to its negotiated sender by name on
+        the GLib thread, skipping any the client has paused. Thread-safe —
+        callable from any thread. A bundle that arrives before the senders exist,
+        or when the outgoing queue is full, is dropped rather than blocking the
+        caller.
         """
         if self._stop_event.is_set() or self._stopping:
             return
@@ -1728,6 +1732,15 @@ class GStreamerPeer:
         if self._stop_event.is_set() or self._stopping:
             return
         self._run_on_gst_thread(self._gst_send_datachannel_msg, payload)
+
+    def send_control(self, payload: bytes | str) -> None:
+        """Send an already-encoded frame over the control channel (text or binary).
+
+        Thread-safe: the emit is marshalled onto the GLib thread.
+        """
+        if self._stop_event.is_set() or self._stopping:
+            return
+        self._run_on_gst_thread(self._gst_send_control_msg, payload)
 
     async def add_ice(self, candidate: TrickleCandidate) -> None:
         """Add a trickle-ICE candidate to ``webrtcbin``.

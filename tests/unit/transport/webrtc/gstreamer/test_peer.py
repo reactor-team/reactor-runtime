@@ -13,7 +13,7 @@ import inspect
 import pytest
 
 from reactor_runtime.core import TrackDirection
-from reactor_runtime.protocol import ProtocolVersion
+from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.transport.webrtc.gstreamer.peer import (
     GStreamerPeer,
     gstreamer_peer_factory,
@@ -81,18 +81,28 @@ def test_send_binary_uses_send_data_with_bytes() -> None:
     assert payload.get_data() == b"\x08\x96\x01"
 
 
+def test_send_control_uses_the_control_channel() -> None:
+    peer = _peer()
+    channel = FakeChannel()
+    peer._control_channel = channel
+
+    peer._gst_send_control_msg('{"type":"response"}')
+
+    assert channel.emitted == [("send-string", '{"type":"response"}')]
+
+
 async def test_inbound_data_frame_fires_message_and_ping() -> None:
     peer = _peer()
     peer._loop = asyncio.get_running_loop()
-    messages: list[tuple[bytes | str, ProtocolVersion]] = []
+    messages: list[tuple[bytes | str, ProtocolVersion, Channel]] = []
     pings: list[int] = []
-    peer.on_message(lambda payload, version: messages.append((payload, version)))
+    peer.on_message(lambda payload, version, channel: messages.append((payload, version, channel)))
     peer.on_ping(lambda: pings.append(1))
 
     peer._gst_on_data_channel_message(None, "hello")
     await asyncio.sleep(0)
 
-    assert messages == [("hello", ProtocolVersion.V0)]
+    assert messages == [("hello", ProtocolVersion.V0, Channel.DATA)]
     assert pings == [1]
 
 
@@ -100,27 +110,27 @@ async def test_inbound_binary_frame_carries_the_negotiated_version() -> None:
     peer = _peer()
     peer._loop = asyncio.get_running_loop()
     peer.protocol_version = ProtocolVersion.V1
-    messages: list[tuple[bytes | str, ProtocolVersion]] = []
-    peer.on_message(lambda payload, version: messages.append((payload, version)))
+    messages: list[tuple[bytes | str, ProtocolVersion, Channel]] = []
+    peer.on_message(lambda payload, version, channel: messages.append((payload, version, channel)))
 
     peer._gst_on_data_channel_data(None, _FakeBytes(b"\x08\x01"))
     await asyncio.sleep(0)
 
-    assert messages == [(b"\x08\x01", ProtocolVersion.V1)]
+    assert messages == [(b"\x08\x01", ProtocolVersion.V1, Channel.DATA)]
 
 
-async def test_inbound_control_frame_fires_ping_only() -> None:
+async def test_inbound_control_frame_surfaces_up_and_pings() -> None:
     peer = _peer()
     peer._loop = asyncio.get_running_loop()
-    messages: list[tuple[bytes | str, ProtocolVersion]] = []
+    messages: list[tuple[bytes | str, ProtocolVersion, Channel]] = []
     pings: list[int] = []
-    peer.on_message(lambda payload, version: messages.append((payload, version)))
+    peer.on_message(lambda payload, version, channel: messages.append((payload, version, channel)))
     peer.on_ping(lambda: pings.append(1))
 
-    peer._gst_on_control_channel_message(None, '{"scope":"runtime"}')
+    peer._gst_on_control_channel_message(None, '{"type":"notification"}')
     await asyncio.sleep(0)
 
-    assert messages == []
+    assert messages == [('{"type":"notification"}', ProtocolVersion.V0, Channel.CONTROL)]
     assert pings == [1]
 
 
