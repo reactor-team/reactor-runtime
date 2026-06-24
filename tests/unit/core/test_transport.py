@@ -8,12 +8,14 @@ from reactor_runtime.core import (
     InputFrame,
     MediaBundle,
 )
+from reactor_runtime.protocol import ProtocolVersion
 
 
 class FakeConnection:
     def __init__(self, conn_id: int) -> None:
         self.id = ConnId(conn_id)
         self.capabilities = ConnectionCapabilities(carries_video=True)
+        self.protocol_version = ProtocolVersion.V0
         self.sent: list[bytes | str] = []
         self.paused: list[str] = []
         self.closed = False
@@ -45,7 +47,9 @@ class FakeSink:
     def connection_closed(self, conn_id: ConnId) -> None:
         pass
 
-    def message_received(self, conn_id: ConnId, payload: bytes | str) -> None:
+    def message_received(
+        self, conn_id: ConnId, payload: bytes | str, version: ProtocolVersion
+    ) -> None:
         self.messages.append((conn_id, payload))
 
     def media_received(self, conn_id: ConnId, track: str, frame: InputFrame) -> None:
@@ -73,8 +77,8 @@ def test_facts_flow_up_through_the_sink() -> None:
     conn: Connection = FakeConnection(7)
 
     sink.connection_opened(conn)
-    sink.message_received(conn.id, b"hello")
-    sink.message_received(conn.id, '{"scope":"runtime"}')
+    sink.message_received(conn.id, b"hello", ProtocolVersion.V1)
+    sink.message_received(conn.id, '{"scope":"runtime"}', ProtocolVersion.V0)
     sink.media_received(conn.id, "camera", InputFrame(np.zeros((1, 1, 3), dtype=np.uint8)))
 
     assert isinstance(sink, FakeSink)

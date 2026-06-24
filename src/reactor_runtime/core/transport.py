@@ -17,6 +17,7 @@ from reactor_runtime.core.values import (
     InputFrame,
     MediaBundle,
 )
+from reactor_runtime.protocol import ProtocolVersion
 
 
 @runtime_checkable
@@ -37,6 +38,15 @@ class Connection(Protocol):
 
     id: ConnId
     capabilities: ConnectionCapabilities
+
+    @property
+    def protocol_version(self) -> ProtocolVersion:
+        """The wire codec negotiated for this connection at its handshake.
+
+        Fixed for the connection's life and read-only here. The runner reads it
+        to encode each outbound frame for the codec this client speaks, so a
+        mixed-version session addresses each connection in its own version.
+        """
 
     def send_message(self, payload: bytes | str) -> None:
         """Send an already-encoded frame to this client.
@@ -87,12 +97,16 @@ class ConnectionSink(Protocol):
         discarded inside the transport and is never seen here.
         """
 
-    def message_received(self, conn_id: ConnId, payload: bytes | str) -> None:
+    def message_received(
+        self, conn_id: ConnId, payload: bytes | str, version: ProtocolVersion
+    ) -> None:
         """Hand an inbound encoded frame up for decoding and dispatch.
 
         The frame is text or binary as the wire version dictates (``str`` for a
         v0 JSON frame, ``bytes`` for a v1 protobuf frame), mirroring what the
-        codec decodes.
+        codec decodes. *version* is the codec the connection negotiated, so the
+        frame is decoded as the client that sent it speaks — per connection,
+        not a single runtime-wide codec.
         """
 
     def media_received(self, conn_id: ConnId, track: str, frame: InputFrame) -> None:
