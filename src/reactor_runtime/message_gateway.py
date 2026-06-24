@@ -112,11 +112,8 @@ class MessageGateway:
             )
             return
 
-        if (
-            isinstance(message, control_pb2.ControlClientMessage)
-            and message.WhichOneof("payload") == "ping"
-        ):
-            self._sink.keepalive(conn_id)
+        if isinstance(message, control_pb2.ControlClientMessage):
+            self._route_control(conn_id, message)
             return
 
         if (
@@ -136,6 +133,29 @@ class MessageGateway:
             return
 
         logger.debug("MessageGateway received an unrouted message on %s", channel)
+
+    def _route_control(self, conn_id: ConnId, message: control_pb2.ControlClientMessage) -> None:
+        """Dispatch a decoded control message by its kind.
+
+        A ping marks liveness; the track verbs cross to the sink for the runner
+        to act on — resume/pause gate one connection's outbound streams, and
+        publish/unpublish drive the cross-connection publisher arbitration, with
+        the publish request carrying its correlation id for the reply. Anything
+        else decodes cleanly but has no handler here yet.
+        """
+        which = message.WhichOneof("payload")
+        if which == "ping":
+            self._sink.keepalive(conn_id)
+        elif which == "resume_track":
+            self._sink.resume_track(conn_id, message.resume_track.name)
+        elif which == "pause_track":
+            self._sink.pause_track(conn_id, message.pause_track.name)
+        elif which == "publish_track":
+            self._sink.publish_requested(conn_id, message.publish_track.name, message.request_id)
+        elif which == "unpublish_track":
+            self._sink.unpublish_track(conn_id, message.unpublish_track.name)
+        else:
+            logger.debug("MessageGateway received an unrouted control message: %s", which)
 
 
 def _new_request_id() -> str:

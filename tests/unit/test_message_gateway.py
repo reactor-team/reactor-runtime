@@ -4,12 +4,16 @@ from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.protocol.common import dict_to_struct
 from reactor_runtime.protocol.v0.codec import V0Codec
 from reactor_runtime.protocol.v1.codec import V1Codec
-from reactor_wire.v1 import control_pb2, data_pb2, model_pb2, platform_pb2
+from reactor_wire.v1 import control_pb2, data_pb2, model_pb2, platform_pb2, track_pb2
 
 
 class FakeSink:
     def __init__(self) -> None:
         self.keepalives: list[ConnId] = []
+        self.resumed: list[tuple[ConnId, str]] = []
+        self.paused: list[tuple[ConnId, str]] = []
+        self.published: list[tuple[ConnId, str, str]] = []
+        self.unpublished: list[tuple[ConnId, str]] = []
 
     def connection_opened(self, conn: Connection) -> None:
         pass
@@ -18,7 +22,7 @@ class FakeSink:
         pass
 
     def message_received(
-        self, conn_id: ConnId, payload: bytes | str, version: ProtocolVersion
+        self, conn_id: ConnId, payload: bytes | str, version: ProtocolVersion, channel: Channel
     ) -> None:
         pass
 
@@ -27,6 +31,18 @@ class FakeSink:
 
     def keepalive(self, conn_id: ConnId) -> None:
         self.keepalives.append(conn_id)
+
+    def resume_track(self, conn_id: ConnId, name: str) -> None:
+        self.resumed.append((conn_id, name))
+
+    def pause_track(self, conn_id: ConnId, name: str) -> None:
+        self.paused.append((conn_id, name))
+
+    def publish_requested(self, conn_id: ConnId, name: str, request_id: str) -> None:
+        self.published.append((conn_id, name, request_id))
+
+    def unpublish_track(self, conn_id: ConnId, name: str) -> None:
+        self.unpublished.append((conn_id, name))
 
 
 def _gateway() -> tuple[MessageGateway, FakeSink, list[InboundCommand]]:
@@ -130,3 +146,37 @@ async def test_decodes_legacy_v0_ping_routed_by_message_type() -> None:
     channel, frame = V0Codec().encode(control_pb2.ControlClientMessage(ping=platform_pb2.Ping()))
     await gateway.handle(ConnId(5), frame, channel, ProtocolVersion.V0)
     assert sink.keepalives == [ConnId(5)]
+
+
+async def test_publish_track_request_routes_with_its_correlation_id() -> None:
+    gateway, sink, _ = _gateway()
+    channel, frame = V0Codec().encode(
+        control_pb2.ControlClientMessage(
+            request_id="ctrl_9", publish_track=track_pb2.PublishTrack(name="webcam")
+        )
+    )
+    await gateway.handle(ConnId(3), frame, channel, ProtocolVersion.V0)
+    assert sink.published == [(ConnId(3), "webcam", "ctrl_9")]
+
+
+async def test_resume_and_pause_notifications_route_to_the_sink() -> None:
+    gateway, sink, _ = _gateway()
+    _, resume = V0Codec().encode(
+        control_pb2.ControlClientMessage(resume_track=track_pb2.ResumeTrack(name="main_video"))
+    )
+    _, pause = V0Codec().encode(
+        control_pb2.ControlClientMessage(pause_track=track_pb2.PauseTrack(name="main_audio"))
+    )
+    await gateway.handle(ConnId(4), resume, Channel.CONTROL, ProtocolVersion.V0)
+    await gateway.handle(ConnId(4), pause, Channel.CONTROL, ProtocolVersion.V0)
+    assert sink.resumed == [(ConnId(4), "main_video")]
+    assert sink.paused == [(ConnId(4), "main_audio")]
+
+
+async def test_unpublish_notification_routes_to_the_sink() -> None:
+    gateway, sink, _ = _gateway()
+    channel, frame = V0Codec().encode(
+        control_pb2.ControlClientMessage(unpublish_track=track_pb2.UnpublishTrack(name="webcam"))
+    )
+    await gateway.handle(ConnId(6), frame, channel, ProtocolVersion.V0)
+    assert sink.unpublished == [(ConnId(6), "webcam")]
