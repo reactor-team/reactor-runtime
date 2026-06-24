@@ -51,6 +51,24 @@ def test_load_config_reads_the_model_reference_from_runtime_import(tmp_path: Pat
     assert cfg.model_ref == "pipeline:Demo"
 
 
+def test_load_config_resolves_runtime_config_against_the_manifest_dir(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_MANIFEST)
+
+    cfg = _load_config(manifest)
+
+    assert cfg.config_path == tmp_path / "config.yml"
+
+
+def test_load_config_leaves_config_path_none_when_unset(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text("runtime:\n  import: pipeline:Demo\n")
+
+    cfg = _load_config(manifest)
+
+    assert cfg.config_path is None
+
+
 def test_load_config_refuses_a_manifest_without_runtime_import(tmp_path: Path) -> None:
     manifest = tmp_path / "reactor.yaml"
     manifest.write_text("model:\n  name: demo\n")
@@ -76,8 +94,17 @@ def test_example_model_has_a_valid_contract() -> None:
     assert "set_brightness" in contract.commands
 
 
-def test_example_model_loads() -> None:
+def test_example_model_reads_brightness_from_the_config_path(tmp_path: Path) -> None:
+    config = tmp_path / "config.yml"
+    config.write_text("brightness: 200\n")
     model = Passthrough()
-    model.load({"brightness": 200})
+    model.load(config)
 
     assert model._brightness == 200
+
+
+def test_example_model_defaults_when_no_config_path() -> None:
+    model = Passthrough()
+    model.load(None)
+
+    assert model._brightness == 128

@@ -8,9 +8,10 @@ loop that emits — with no model weights and no dependencies beyond the runtime
 
 from __future__ import annotations
 
-from typing import Any
+from pathlib import Path
 
 import numpy as np
+import yaml
 
 from reactor_runtime import InputField, Output, ReactorModel, Video, event
 
@@ -29,8 +30,13 @@ class Passthrough(ReactorModel):
 
     output: PassthroughOutput
 
-    def load(self, config: dict[str, Any]) -> None:
-        """Start from the configured brightness, mid-grey by default."""
+    def load(self, config_path: Path | None) -> None:
+        """Start from the brightness in the config file, mid-grey by default.
+
+        Shows the config contract: the runtime hands the model the path to its
+        config file (or ``None``), and the model reads it however it likes.
+        """
+        config = yaml.safe_load(config_path.read_text()) if config_path else {}
         self._brightness = int(config.get("brightness", 128))
 
     @event(name="set_brightness", description="Set the brightness of the emitted frame")

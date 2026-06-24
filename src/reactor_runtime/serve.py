@@ -13,6 +13,7 @@ import asyncio
 import importlib.metadata
 import sys
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -74,15 +75,18 @@ async def serve(cfg: RuntimeConfig) -> None:
 def _load_config(manifest: Path) -> RuntimeConfig:
     """Read a ``reactor.yaml`` manifest into a :class:`RuntimeConfig`.
 
-    Only ``runtime.import`` — the ``"module:Class"`` model reference — is read;
-    the rest of the manifest describes the model to the platform and is not the
-    runtime's concern.
+    Only ``runtime.import`` — the ``"module:Class"`` model reference — and
+    ``runtime.config`` — the path to the model's own config file — are read; the
+    rest of the manifest describes the model to the platform and is not the
+    runtime's concern. The config path is passed to the model verbatim (resolved
+    to an absolute path); the runtime never parses its contents.
 
     Args:
         manifest: Path to the ``reactor.yaml`` file.
 
     Returns:
-        A configuration naming the model the manifest points at.
+        A configuration naming the model the manifest points at and, when
+        present, the path to its config file.
 
     Raises:
         SystemExit: If the manifest is not a mapping or carries no
@@ -92,10 +96,33 @@ def _load_config(manifest: Path) -> RuntimeConfig:
     if not isinstance(document, dict):
         raise SystemExit(f"{manifest}: not a valid {_MANIFEST}")
     runtime = document.get("runtime")
-    model_ref = runtime.get("import") if isinstance(runtime, dict) else None
+    runtime = runtime if isinstance(runtime, dict) else {}
+    model_ref = runtime.get("import")
     if not isinstance(model_ref, str) or not model_ref:
         raise SystemExit(f"{manifest}: missing runtime.import (the model reference)")
-    return RuntimeConfig(model_ref=model_ref)
+    return RuntimeConfig(model_ref=model_ref, config_path=_resolve_config_path(runtime, manifest))
+
+
+def _resolve_config_path(runtime: dict[str, Any], manifest: Path) -> Path | None:
+    """Resolve ``runtime.config`` to an absolute path, relative to the manifest.
+
+    A relative ``config`` is resolved against the manifest's directory so it
+    works regardless of the process's working directory. Returns ``None`` when
+    no config file is named.
+
+    Args:
+        runtime: The manifest's ``runtime`` section.
+        manifest: Path to the ``reactor.yaml`` file, whose parent anchors a
+            relative config path.
+
+    Returns:
+        The absolute config path, or ``None`` when none is configured.
+    """
+    config = runtime.get("config")
+    if not isinstance(config, str) or not config:
+        return None
+    candidate = Path(config)
+    return candidate if candidate.is_absolute() else manifest.parent / candidate
 
 
 def main() -> None:
