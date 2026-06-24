@@ -14,7 +14,7 @@ from enum import Enum
 from typing import Any
 
 from reactor_runtime.protocol.common import dict_to_struct
-from reactor_wire.v1 import common_pb2, control_pb2, data_pb2, model_pb2
+from reactor_wire.v1 import common_pb2, control_pb2, data_pb2, model_pb2, track_pb2
 
 # A client->runtime message, on either channel.
 ClientMessage = data_pb2.DataClientMessage | control_pb2.ControlClientMessage
@@ -122,6 +122,32 @@ class Codec(ABC):
             ),
             message=model_pb2.ModelMessage(type=type_name, data=dict_to_struct(data)),
         )
+        return self.encode(message)
+
+    def encode_publish_response(
+        self, request_id: str, *, granted: bool, reason: str = ""
+    ) -> tuple[Channel, bytes | str]:
+        """Encode the runtime's reply to a client's publish-track request.
+
+        A grant carries an empty :class:`PublishTrackResponse`; a refusal carries
+        an error with a reason. Correlated by *request_id* so the client matches
+        the reply to its request, and encoded for this wire version so every
+        codec shares one publish-response-to-frame path.
+        """
+        if granted:
+            message = control_pb2.ControlServerMessage(
+                request_id=request_id,
+                kind=common_pb2.MessageKind.MESSAGE_KIND_RESPONSE,
+                publish_track=track_pb2.PublishTrackResponse(),
+            )
+        else:
+            message = control_pb2.ControlServerMessage(
+                request_id=request_id,
+                kind=common_pb2.MessageKind.MESSAGE_KIND_RESPONSE,
+                error=common_pb2.Error(
+                    code="publish_refused", message=reason or "track already published"
+                ),
+            )
         return self.encode(message)
 
 

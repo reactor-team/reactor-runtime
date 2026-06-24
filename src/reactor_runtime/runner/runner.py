@@ -200,18 +200,18 @@ class Runner(ServiceComponent, ConnectionSink):
         self._events.emit(ConnectionAnswered(conn_id, dict(answer)))
 
     def message_received(
-        self, conn_id: ConnId, payload: bytes | str, version: ProtocolVersion
+        self, conn_id: ConnId, payload: bytes | str, version: ProtocolVersion, channel: Channel
     ) -> None:
         """Hand an inbound frame to the gateway for decoding and dispatch.
 
         The gateway decodes asynchronously, so the work is scheduled on the
-        runtime loop and tracked until it completes. Model traffic rides the
-        data channel, so the frame is decoded as such, in the codec the
-        connection negotiated (*version*).
+        runtime loop and tracked until it completes. The frame is decoded in the
+        codec the connection negotiated (*version*) and as the family its
+        physical *channel* carries.
         """
         if self._loop is None:
             return
-        task = self._loop.create_task(self._gateway.handle(conn_id, payload, Channel.DATA, version))
+        task = self._loop.create_task(self._gateway.handle(conn_id, payload, channel, version))
         self._inbound.add(task)
         task.add_done_callback(self._inbound.discard)
 
@@ -223,6 +223,34 @@ class Runner(ServiceComponent, ConnectionSink):
     def keepalive(self, conn_id: ConnId) -> None:
         """Note liveness for a connection."""
         self._connections.note_keepalive(conn_id)
+
+    def resume_track(self, conn_id: ConnId, name: str) -> None:
+        """Resume an outbound track for one connection, at the client's request."""
+        self._connections.resume_track(conn_id, name)
+
+    def pause_track(self, conn_id: ConnId, name: str) -> None:
+        """Pause an outbound track for one connection, at the client's request."""
+        self._connections.pause_track(conn_id, name)
+
+    def publish_requested(self, conn_id: ConnId, name: str, request_id: str) -> None:
+        """Arbitrate a publish-track claim first-come-first-served, then reply.
+
+        The claim is granted only when the track is unheld; either way the
+        outcome is sent back to the requesting connection on its control
+        channel, encoded for its codec and correlated by *request_id*, so the
+        client's pending request resolves instead of timing out.
+        """
+        granted = self._connections.publish_track(conn_id, name)
+        self._connections.send_control(
+            conn_id,
+            lambda version: self._codec_for(version).encode_publish_response(
+                request_id, granted=granted
+            )[1],
+        )
+
+    def unpublish_track(self, conn_id: ConnId, name: str) -> None:
+        """Release an inbound track a connection had claimed."""
+        self._connections.unpublish_track(conn_id, name)
 
     # -- internals ------------------------------------------------------------
 

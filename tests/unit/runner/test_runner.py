@@ -18,9 +18,10 @@ from reactor_runtime.model.reactor_model import ReactorModel
 from reactor_runtime.model.tracks import Output, Video
 from reactor_runtime.protocol.common import struct_to_dict
 from reactor_runtime.runner.runner import Runner
-from reactor_wire.v1 import data_pb2
+from reactor_wire.v1 import control_pb2, data_pb2
 
 DATA = protocol.Channel.DATA
+CONTROL = protocol.Channel.CONTROL
 SERVER = protocol.Direction.SERVER
 V0 = protocol.ProtocolVersion.V0
 
@@ -73,9 +74,13 @@ class FakeConnection:
         self.capabilities = ConnectionCapabilities(carries_video=True)
         self.protocol_version = V0
         self.sent: list[bytes | str] = []
+        self.control: list[bytes | str] = []
 
     def send_message(self, payload: bytes | str) -> None:
         self.sent.append(payload)
+
+    def send_control(self, payload: bytes | str) -> None:
+        self.control.append(payload)
 
     def send_media(self, bundle: MediaBundle) -> None: ...
 
@@ -154,3 +159,38 @@ def test_addressed_send_reaches_only_the_target() -> None:
 
     assert a.sent == []
     assert len(b.sent) == 1
+
+
+def _decode_control_reply(frame: bytes | str) -> control_pb2.ControlServerMessage:
+    decoded = protocol.select(V0).decode(frame, CONTROL, SERVER)
+    assert isinstance(decoded, control_pb2.ControlServerMessage)
+    return decoded
+
+
+def test_publish_request_grants_and_replies_on_the_control_channel() -> None:
+    runner = _runner()
+    conn = FakeConnection(1)
+    runner.connection_opened(conn)
+
+    runner.publish_requested(ConnId(1), "webcam", "ctrl_5")
+
+    assert len(conn.control) == 1
+    reply = _decode_control_reply(conn.control[0])
+    assert reply.request_id == "ctrl_5"
+    assert reply.WhichOneof("payload") == "publish_track"
+
+
+def test_publish_request_for_a_held_track_is_refused() -> None:
+    runner = _runner()
+    a, b = FakeConnection(1), FakeConnection(2)
+    runner.connection_opened(a)
+    runner.connection_opened(b)
+
+    runner.publish_requested(ConnId(1), "webcam", "ctrl_1")
+    runner.publish_requested(ConnId(2), "webcam", "ctrl_2")
+
+    granted = _decode_control_reply(a.control[0])
+    refused = _decode_control_reply(b.control[0])
+    assert granted.WhichOneof("payload") == "publish_track"
+    assert refused.request_id == "ctrl_2"
+    assert refused.WhichOneof("payload") == "error"
