@@ -23,7 +23,7 @@ from typing import Any
 from google.protobuf.message import DecodeError
 
 from reactor_runtime.core import ConnectionSink, ConnId
-from reactor_runtime.protocol import Channel, Codec
+from reactor_runtime.protocol import Channel, Codec, ProtocolVersion, select
 from reactor_runtime.protocol.common import struct_to_dict
 from reactor_wire.v1 import control_pb2, data_pb2
 
@@ -59,35 +59,53 @@ CommandHandler = Callable[[InboundCommand], Awaitable[None]]
 class MessageGateway:
     """Decodes inbound frames and routes them by what they mean.
 
-    Holds the wire codec and the upward sink. Pings mark liveness through the
-    sink; commands are decoded into an :class:`InboundCommand` and passed to the
-    handler. Other control messages decode cleanly but are not routed here — the
-    components that serve them are wired by a later layer.
+    Holds the upward sink and selects a codec per inbound frame from the version
+    the connection negotiated, so one gateway decodes every client in the
+    version it speaks. Pings mark liveness through the sink; commands are decoded
+    into an :class:`InboundCommand` and passed to the handler. Other control
+    messages decode cleanly but are not routed here — the components that serve
+    them are wired by a later layer.
     """
 
     def __init__(
         self,
         *,
         sink: ConnectionSink,
-        codec: Codec,
         on_command: CommandHandler,
     ) -> None:
-        """Bind the gateway to its codec, upward sink, and command handler."""
-        self._sink = sink
-        self._codec = codec
-        self._on_command = on_command
+        """Bind the gateway to its upward sink and command handler.
 
-    async def handle(self, conn_id: ConnId, payload: bytes | str, channel: Channel) -> None:
+        Codecs are selected per inbound frame from the negotiated version and
+        cached, one per version, so repeated frames on a connection reuse one
+        codec.
+        """
+        self._sink = sink
+        self._on_command = on_command
+        self._codecs: dict[ProtocolVersion, Codec] = {}
+
+    def _codec_for(self, version: ProtocolVersion) -> Codec:
+        """Return the codec for *version*, building and caching it on first use."""
+        codec = self._codecs.get(version)
+        if codec is None:
+            codec = select(version)
+            self._codecs[version] = codec
+        return codec
+
+    async def handle(
+        self, conn_id: ConnId, payload: bytes | str, channel: Channel, version: ProtocolVersion
+    ) -> None:
         """Decode one inbound frame and route it.
 
-        A ping notes liveness on the sink. A command is handed to the handler as
-        an :class:`InboundCommand` with a guaranteed ``request_id``. Any other
+        The frame is decoded with the codec the connection negotiated
+        (*version*), so each client is read in the version it speaks. A ping
+        notes liveness on the sink. A command is handed to the handler as an
+        :class:`InboundCommand` with a guaranteed ``request_id``. Any other
         decoded message is left for a later layer to route. A frame that cannot
         be decoded is dropped with a warning rather than raised, so one malformed
         frame from any client cannot break the transport read loop.
         """
         try:
-            message = self._codec.decode_inbound(payload, channel)
+            message = self._codec_for(version).decode_inbound(payload, channel)
         except (ValueError, DecodeError):
             logger.warning(
                 "MessageGateway dropped an undecodable frame on %s", channel, exc_info=True
