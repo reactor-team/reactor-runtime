@@ -1,5 +1,5 @@
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from conftest import FakePeer
@@ -25,6 +25,7 @@ class FakeRunner:
         self._next = 5000
         self.opened: list[ConnId] = []
         self.closed: list[ConnId] = []
+        self.answered: list[tuple[ConnId, dict[str, str]]] = []
 
     def require_session_running(self, sid: str) -> None:
         if not self._running:
@@ -67,6 +68,12 @@ class FakeRunner:
 
     def unpublish_track(self, conn_id: ConnId, name: str) -> None:
         pass
+
+    def schema_requested(self, conn_id: ConnId, request_id: str) -> None:
+        pass
+
+    def connection_answered(self, conn_id: ConnId, answer: Mapping[str, str]) -> None:
+        self.answered.append((conn_id, dict(answer)))
 
 
 def _client(
