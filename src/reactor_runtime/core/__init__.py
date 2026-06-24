@@ -6,6 +6,7 @@ vocabulary, and the service-lifecycle contract. Types only, no behaviour beyond
 small pure helpers, so it sits at the root of the dependency graph.
 """
 
+from reactor_runtime.core.session import SessionEvent, SessionState, Transition
 from reactor_runtime.core.transport import Connection, ConnectionSink
 from reactor_runtime.core.values import (
     ConnectionCapabilities,
@@ -29,8 +30,11 @@ __all__ = [
     "HealthStatus",
     "InputFrame",
     "MediaBundle",
+    "SessionEvent",
+    "SessionState",
     "TrackData",
     "TrackDirection",
     "TrackInfo",
     "TrackKind",
+    "Transition",
 ]
