@@ -1,5 +1,6 @@
 import asyncio
-from typing import Any, ClassVar
+from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -42,15 +43,15 @@ class FakeModel(ReactorModel):
     def __init__(self) -> None:
         super().__init__()
         self.events: list[str] = []
-        self.loaded: dict[str, Any] | None = None
+        self.loaded: Path | None = None
         FakeModel.created.append(self)
 
     @event(name="set_mode")
     async def set_mode(self, mode: str = InputField(min_length=1)) -> None: ...
 
-    def load(self, config: dict[str, Any]) -> None:
+    def load(self, config_path: Path | None) -> None:
         self.events.append("load")
-        self.loaded = config
+        self.loaded = config_path
 
     def bind_output(self, *, broadcast: BroadcastSink, addressed: AddressedSink) -> None:
         self.events.append("bind")
@@ -96,13 +97,13 @@ def _runner() -> Runner:
 async def test_start_resolves_loads_and_readies(monkeypatch: pytest.MonkeyPatch) -> None:
     FakeModel.created.clear()
     monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
-    runner = Runner(RuntimeConfig(model_ref="fake:Model", model_config={"weights": "small"}))
+    runner = Runner(RuntimeConfig(model_ref="fake:Model", config_path=Path("/cfg/config.yml")))
 
     await runner.start()
     try:
         assert runner._sm.current_state is SessionState.READY
         model = FakeModel.created[-1]
-        assert model.loaded == {"weights": "small"}
+        assert model.loaded == Path("/cfg/config.yml")
     finally:
         await runner.stop()
 

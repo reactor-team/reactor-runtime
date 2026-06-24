@@ -22,7 +22,6 @@ from collections.abc import Callable, Mapping
 
 from reactor_runtime.core import (
     Connection,
-    ConnectionAnswered,
     ConnectionSink,
     ConnId,
     Health,
@@ -140,7 +139,7 @@ class Runner(ServiceComponent, ConnectionSink):
             model_cls = import_model_class(self._cfg.model_ref)
             contract = ModelContract.of(model_cls)
             model = model_cls()
-            model.load(dict(self._cfg.model_config))
+            model.load(self._cfg.config_path)
             bridge = ModelBridge(model, contract)
             bridge.bind_outbound(
                 broadcast=self._broadcast_message,
@@ -189,15 +188,17 @@ class Runner(ServiceComponent, ConnectionSink):
         self._connections.drop(conn_id)
 
     def connection_answered(self, conn_id: ConnId, answer: Mapping[str, str]) -> None:
-        """Journal a transport's negotiation answer for a connection.
+        """Record a transport's negotiation answer for a connection.
 
         The answer is an opaque, transport-agnostic payload (for WebRTC, the SDP
-        answer as ``{"type", "sdp"}``); the runner does not parse it, only
-        records it on the egress journal so a consumer can hand it back to the
-        offering client. It arrives before the connection's wire connects, so it
-        is journalled directly rather than riding a session transition.
+        answer as ``{"type", "sdp"}``); the runner does not parse it. It arrives
+        before the connection's wire connects, so it rides a ``CONNECTION_ANSWERED``
+        self-loop — a move that changes no state and touches no occupancy count
+        — whose detail carries the connection id and the answer for the egress
+        journal to hand back to the offering client. An answer for a session
+        that is no longer active is rejected by the machine and dropped.
         """
-        self._events.emit(ConnectionAnswered(conn_id, dict(answer)))
+        self._sm.send(SessionEvent.CONNECTION_ANSWERED, conn_id=conn_id, answer=dict(answer))
 
     def message_received(
         self, conn_id: ConnId, payload: bytes | str, version: ProtocolVersion, channel: Channel
@@ -236,16 +237,18 @@ class Runner(ServiceComponent, ConnectionSink):
         """Arbitrate a publish-track claim first-come-first-served, then reply.
 
         The claim is granted only when the track is unheld; either way the
-        outcome is sent back to the requesting connection on its control
-        channel, encoded for its codec and correlated by *request_id*, so the
-        client's pending request resolves instead of timing out.
+        outcome is sent back to the requesting connection on whichever channel
+        its codec places the reply, correlated by *request_id*, so the client's
+        pending request resolves instead of timing out. Routing through
+        ``send_response`` keeps channel selection the codec's decision, the same
+        path the schema reply takes.
         """
         granted = self._connections.publish_track(conn_id, name)
-        self._connections.send_control(
+        self._connections.send_response(
             conn_id,
             lambda version: self._codec_for(version).encode_publish_response(
                 request_id, granted=granted
-            )[1],
+            ),
         )
 
     def unpublish_track(self, conn_id: ConnId, name: str) -> None:
