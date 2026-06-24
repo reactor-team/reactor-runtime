@@ -128,6 +128,10 @@ class WebRTCAcceptor(ConnectionAcceptor):
             for candidate in self._pending_ice.pop(conn_id, []):
                 await conn.add_ice(candidate)
             self._answers[conn_id] = answer
+            # The answer is both stashed for the client's HTTP poll (take_answer)
+            # and reported up as a transport-agnostic fact, so a consumer driving
+            # the runtime without polling (a director) can relay it back instead.
+            self._sink.connection_answered(conn_id, {"type": answer.type, "sdp": answer.sdp})
         except asyncio.CancelledError:
             raise
         except Exception:

@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 import numpy as np
 import pytest
@@ -27,6 +27,7 @@ class FakeSink:
         self.messages: list[tuple[ConnId, bytes | str]] = []
         self.media: list[tuple[ConnId, str]] = []
         self.keepalives: list[ConnId] = []
+        self.answered: list[tuple[ConnId, dict[str, str]]] = []
 
     def connection_opened(self, conn: Connection) -> None:
         self.opened.append(conn.id)
@@ -56,6 +57,12 @@ class FakeSink:
 
     def unpublish_track(self, conn_id: ConnId, name: str) -> None:
         pass
+
+    def schema_requested(self, conn_id: ConnId, request_id: str) -> None:
+        pass
+
+    def connection_answered(self, conn_id: ConnId, answer: Mapping[str, str]) -> None:
+        self.answered.append((conn_id, dict(answer)))
 
 
 def _acceptor(
@@ -99,6 +106,9 @@ async def test_negotiation_produces_the_answer_without_opening(
     assert answer is not None
     assert answer.sdp == "answer-sdp"
     assert sink.opened == []
+    # The answer is reported up as a transport-agnostic fact before the wire
+    # connects, alongside being stashed for the HTTP poll.
+    assert sink.answered == [(ConnId(7), {"type": "answer", "sdp": "answer-sdp"})]
 
 
 async def test_take_answer_is_none_until_negotiation_completes(
