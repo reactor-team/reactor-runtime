@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from reactor_runtime.core import Connection, ConnId, InputFrame
-from reactor_runtime.protocol import ProtocolVersion
+from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.transport import SessionNotRunningError, UnknownSessionError
 from reactor_runtime.transport.webrtc import WebRtcConfig, WebRtcPeerFactory, WebRtcRouter
 from reactor_runtime.transport.webrtc.config import IceServer
@@ -46,7 +46,7 @@ class FakeRunner:
         self.closed.append(conn_id)
 
     def message_received(
-        self, conn_id: ConnId, payload: bytes | str, version: ProtocolVersion
+        self, conn_id: ConnId, payload: bytes | str, version: ProtocolVersion, channel: Channel
     ) -> None:
         pass
 
@@ -54,6 +54,18 @@ class FakeRunner:
         pass
 
     def keepalive(self, conn_id: ConnId) -> None:
+        pass
+
+    def resume_track(self, conn_id: ConnId, name: str) -> None:
+        pass
+
+    def pause_track(self, conn_id: ConnId, name: str) -> None:
+        pass
+
+    def publish_requested(self, conn_id: ConnId, name: str, request_id: str) -> None:
+        pass
+
+    def unpublish_track(self, conn_id: ConnId, name: str) -> None:
         pass
 
 
