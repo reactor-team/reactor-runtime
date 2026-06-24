@@ -57,6 +57,19 @@ def test_output_topology_is_read_from_annotations() -> None:
     assert core.output_buffer.fps == 30
 
 
+def test_default_buffer_size_sets_the_output_queue_depth() -> None:
+    core = OutputOnlyCore()
+    assert ReactorCore.buffer_size == 10
+    assert core.output_buffer._queue.maxsize == 10
+
+
+def test_buffer_size_class_attr_sets_the_output_queue_depth() -> None:
+    class DeepCore(OutputOnlyCore):
+        buffer_size = 24
+
+    assert DeepCore().output_buffer._queue.maxsize == 24
+
+
 def test_a_model_without_input_has_no_buffers() -> None:
     core = OutputOnlyCore()
     assert core._input_buffers == {}

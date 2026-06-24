@@ -54,6 +54,13 @@ class ReactorModel(ReactorCore):
     resolves the contract and caches it on the class, reachable through
     :meth:`ModelContract.of`.
 
+    Class attributes:
+        fps: Target output frame rate of the emission buffer (default 30).
+        buffer_size: Output buffer queue depth (default 10) — how many emitted
+            frames may sit queued before :meth:`emit` blocks to pace the
+            producer. A smaller value keeps latency low; a larger one absorbs
+            more jitter.
+
     Lifecycle:
         connected: An :class:`asyncio.Event` set while at least one client is
             connected and cleared when the last one leaves, so a ``run`` loop can

@@ -16,6 +16,7 @@ import logging
 import threading
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, ClassVar, TypeVar, get_type_hints
 
 from reactor_runtime.core.model import Command, ReactorEvent
@@ -66,6 +67,7 @@ class ReactorCore:
     """
 
     fps: ClassVar[int] = 30
+    buffer_size: ClassVar[int] = 10
 
     def __init__(self) -> None:
         self._loop = asyncio.new_event_loop()
@@ -80,7 +82,7 @@ class ReactorCore:
 
         output_holder = self._find_holder(Output)
         output_tracks = output_holder[1].__tracks__ if output_holder is not None else {}
-        self.output_buffer = OutputBuffer(output_tracks)
+        self.output_buffer = OutputBuffer(output_tracks, queue_depth=self.buffer_size)
         self.output_buffer.set_fps(self.fps)
 
         self._input_buffers: dict[str, InputBuffer] = {}
@@ -88,11 +90,14 @@ class ReactorCore:
 
     # -- author hooks ---------------------------------------------------------
 
-    def load(self, config: dict[str, Any]) -> None:
+    def load(self, config_path: Path | None) -> None:
         """Load weights and allocate resources, once, before any client connects.
 
         Args:
-            config: The model configuration.
+            config_path: Path to the model's config file (from ``runtime.config``
+                in ``reactor.yaml``), or ``None`` when none is configured. The
+                runtime does not parse it; the model reads and interprets it
+                however it wants (for example ``yaml.safe_load`` the contents).
         """
 
     async def run(self) -> None:
