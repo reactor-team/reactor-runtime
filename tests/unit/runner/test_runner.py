@@ -22,6 +22,7 @@ from reactor_wire.v1 import data_pb2
 
 DATA = protocol.Channel.DATA
 SERVER = protocol.Direction.SERVER
+V0 = protocol.ProtocolVersion.V0
 
 
 class Greeting(ModelMessage):
@@ -70,6 +71,7 @@ class FakeConnection:
     def __init__(self, cid: int) -> None:
         self.id = ConnId(cid)
         self.capabilities = ConnectionCapabilities(carries_video=True)
+        self.protocol_version = V0
         self.sent: list[bytes | str] = []
 
     def send_message(self, payload: bytes | str) -> None:
@@ -136,7 +138,7 @@ def test_broadcast_encodes_a_model_message_and_fans_it_out() -> None:
     runner._broadcast_message(Greeting(text="hello"))
 
     assert len(conn.sent) == 1
-    decoded = runner._codec.decode(conn.sent[0], DATA, SERVER)
+    decoded = protocol.select(V0).decode(conn.sent[0], DATA, SERVER)
     assert isinstance(decoded, data_pb2.DataServerMessage)
     assert decoded.message.type == "greeting"
     assert struct_to_dict(decoded.message.data) == {"text": "hello"}

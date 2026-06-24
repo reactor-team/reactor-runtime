@@ -42,7 +42,7 @@ from reactor_runtime.model.bridge import ModelBridge
 from reactor_runtime.model.contract import ModelContract
 from reactor_runtime.model.message import ModelMessage
 from reactor_runtime.model.reactor_core import ReactorCore
-from reactor_runtime.protocol import Channel, ProtocolVersion, select
+from reactor_runtime.protocol import Channel, Codec, ProtocolVersion, select
 from reactor_runtime.runner.connection_manager import ConnectionManager
 from reactor_runtime.runner.state_machine import SessionStateMachine
 
@@ -101,10 +101,12 @@ class Runner(ServiceComponent, ConnectionSink):
         self._sm.on_transition(self._dispatch_transition)
         self._events = EventStream()
         self._connections = ConnectionManager(state_machine=self._sm)
-        self._codec = select(ProtocolVersion.V0)
-        self._gateway = MessageGateway(
-            sink=self, codec=self._codec, on_command=self._submit_command
-        )
+        # One codec per wire version, built on first use. Inbound decode is
+        # driven by the version a connection negotiated; outbound encode picks
+        # the codec for each target connection, so a mixed-version session is
+        # addressed in each client's own version.
+        self._codecs: dict[ProtocolVersion, Codec] = {}
+        self._gateway = MessageGateway(sink=self, on_command=self._submit_command)
         self._bridge: ModelBridge | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._inbound: set[asyncio.Task[None]] = set()
@@ -197,16 +199,19 @@ class Runner(ServiceComponent, ConnectionSink):
         """
         self._events.emit(ConnectionAnswered(conn_id, dict(answer)))
 
-    def message_received(self, conn_id: ConnId, payload: bytes | str) -> None:
+    def message_received(
+        self, conn_id: ConnId, payload: bytes | str, version: ProtocolVersion
+    ) -> None:
         """Hand an inbound frame to the gateway for decoding and dispatch.
 
         The gateway decodes asynchronously, so the work is scheduled on the
         runtime loop and tracked until it completes. Model traffic rides the
-        data channel, so the frame is decoded as such.
+        data channel, so the frame is decoded as such, in the codec the
+        connection negotiated (*version*).
         """
         if self._loop is None:
             return
-        task = self._loop.create_task(self._gateway.handle(conn_id, payload, Channel.DATA))
+        task = self._loop.create_task(self._gateway.handle(conn_id, payload, Channel.DATA, version))
         self._inbound.add(task)
         task.add_done_callback(self._inbound.discard)
 
@@ -232,21 +237,32 @@ class Runner(ServiceComponent, ConnectionSink):
             request_id=command.request_id,
         )
 
+    def _codec_for(self, version: ProtocolVersion) -> Codec:
+        """Return the codec for *version*, building and caching it on first use."""
+        codec = self._codecs.get(version)
+        if codec is None:
+            codec = select(version)
+            self._codecs[version] = codec
+        return codec
+
     def _broadcast_message(self, message: ModelMessage) -> None:
-        """Encode a model message and broadcast it to every connection."""
-        _channel, frame = self._codec.encode_model_message(
-            message.name, message.to_wire_format()["data"]
+        """Broadcast a model message, encoded for each connection's codec."""
+        data = message.to_wire_format()["data"]
+        self._connections.broadcast(
+            lambda version: self._codec_for(version).encode_model_message(message.name, data)[1]
         )
-        self._connections.broadcast(frame)
 
     def _send_addressed(
         self, conn_id: ConnId, message: ModelMessage, request_id: str | None
     ) -> None:
-        """Encode a model message and send it to one connection, correlating a reply."""
-        _channel, frame = self._codec.encode_model_message(
-            message.name, message.to_wire_format()["data"], request_id=request_id
+        """Send a model message to one connection, in its codec, correlating a reply."""
+        data = message.to_wire_format()["data"]
+        self._connections.send(
+            conn_id,
+            lambda version: self._codec_for(version).encode_model_message(
+                message.name, data, request_id=request_id
+            )[1],
         )
-        self._connections.send(conn_id, frame)
 
     def _dispatch_transition(self, transition: Transition) -> None:
         """Journal each session transition on the egress stream."""
