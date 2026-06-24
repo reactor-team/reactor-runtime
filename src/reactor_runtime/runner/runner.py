@@ -415,26 +415,9 @@ class Runner(ServiceComponent, ConnectionSink):
         return self._events
 
     def descriptor(self) -> dict[str, Any]:
-        """Describe the session: its id, current state, schema, and track map.
+        """Describe the session in the shape the client validates against.
 
-        The schema is the model's rendered OpenAPI contract. Schema and tracks
-        are empty until the model is loaded; the id is ``None`` until a session
-        has been started.
-        """
-        schema: dict[str, Any] = {}
-        if self._bridge is not None:
-            schema = self._bridge.contract.render_schema().to_openapi()
-        return {
-            "session_id": self._session_id,
-            "state": self._sm.current_state.name.lower(),
-            "schema": schema,
-            "tracks": dict(self.track_map()),
-        }
-
-    def legacy_descriptor(self) -> dict[str, Any]:
-        """Describe the session in the shape the v0 client validates against.
-
-        The v0 SDK requires a fixed session shape — ``cluster``, ``model``,
+        The client requires a fixed session shape — ``cluster``, ``model``,
         ``server_info``, and a ``capabilities`` block it builds its transceivers
         from — and names track directions from the client's perspective, the
         mirror of the model's. This renders that shape from the model's
@@ -471,7 +454,6 @@ class Runner(ServiceComponent, ConnectionSink):
                 {"name": name, "description": command.description, "schema": command.schema}
                 for name, command in schema.commands.items()
             ],
-            "emission_fps": self._bridge.output_buffer.fps,
         }
         return descriptor
 

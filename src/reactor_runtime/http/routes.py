@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from typing import Annotated, Any
 
-from fastapi import Body, FastAPI, Header, HTTPException
+from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
@@ -42,15 +42,12 @@ class SessionRoutes:
         async def start_session(
             params: Annotated[dict[str, Any] | None, Body()] = None,
         ) -> dict[str, Any]:
-            body = params or {}
-            runner.start_session(body)
-            return _descriptor(runner, _sdk_version_from_body(body))
+            runner.start_session(params or {})
+            return runner.descriptor()
 
         @app.get("/session")
-        async def get_session(
-            sdk_version: Annotated[str | None, Header(alias="reactor-sdk-version")] = None,
-        ) -> dict[str, Any]:
-            return _descriptor(runner, sdk_version)
+        async def get_session() -> dict[str, Any]:
+            return runner.descriptor()
 
         @app.post("/stop_session")
         async def stop_session() -> Response:
@@ -92,43 +89,6 @@ class EgressRoutes:
                 status_code=code,
                 content={"status": report.status.value, "detail": report.detail},
             )
-
-
-def _descriptor(runner: Runner, sdk_version: str | None) -> dict[str, Any]:
-    """Pick the session descriptor shape for the requesting client.
-
-    The body is version-gated, never the flow: an SDK version of 2 or below, or
-    none at all, gets the legacy shape; a newer one gets the runtime-native
-    shape.
-    """
-    if _is_legacy_client(sdk_version):
-        return runner.legacy_descriptor()
-    return runner.descriptor()
-
-
-def _is_legacy_client(sdk_version: str | None) -> bool:
-    """Whether a client's SDK version asks for the legacy descriptor shape.
-
-    Absent or major version 2 or below is legacy — so the shipped v0 client,
-    which sends no version on session calls, gets the legacy shape untouched. A
-    major version of 3 or more (the v1-protocol client) gets the new shape.
-    """
-    if sdk_version is None:
-        return True
-    try:
-        return int(sdk_version.split(".", 1)[0]) <= 2
-    except ValueError:
-        return True
-
-
-def _sdk_version_from_body(body: dict[str, Any]) -> str | None:
-    """Read ``client_info.sdk_version`` from a session-call body, if present."""
-    client_info = body.get("client_info")
-    if isinstance(client_info, dict):
-        version = client_info.get("sdk_version")
-        if isinstance(version, str):
-            return version
-    return None
 
 
 async def _stream_events(runner: Runner, since: int | None) -> AsyncGenerator[str, None]:

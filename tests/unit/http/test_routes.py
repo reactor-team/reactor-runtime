@@ -7,12 +7,10 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from reactor_runtime import InputField, Output, ReactorModel, Video, event
 from reactor_runtime.core import RuntimeConfig
 from reactor_runtime.http import EgressRoutes, SessionRoutes
 from reactor_runtime.http.routes import _stream_events
-from reactor_runtime.model import InputField, event
-from reactor_runtime.model.reactor_model import ReactorModel
-from reactor_runtime.model.tracks import Output, Video
 from reactor_runtime.runner.runner import SESSION_ID, Runner
 
 
@@ -56,7 +54,7 @@ async def client(
         await runner.stop()
 
 
-async def test_start_session_defaults_to_the_legacy_descriptor(
+async def test_start_session_serves_the_capabilities_descriptor(
     client: tuple[httpx.AsyncClient, Runner],
 ) -> None:
     http_client, _ = client
@@ -76,23 +74,7 @@ async def test_start_session_defaults_to_the_legacy_descriptor(
     assert "schema" not in body
 
 
-async def test_start_session_serves_the_new_shape_to_a_v1_client(
-    client: tuple[httpx.AsyncClient, Runner],
-) -> None:
-    http_client, _ = client
-    response = await http_client.post(
-        "/start_session",
-        json={"client_info": {"sdk_version": "3.0.0", "sdk_type": "js"}},
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert "main" in body["tracks"]
-    assert "paths" in body["schema"]
-    assert "capabilities" not in body
-
-
-async def test_get_session_defaults_to_the_legacy_descriptor(
+async def test_get_session_serves_the_capabilities_descriptor(
     client: tuple[httpx.AsyncClient, Runner],
 ) -> None:
     http_client, _ = client
@@ -102,16 +84,7 @@ async def test_get_session_defaults_to_the_legacy_descriptor(
     body = response.json()
     assert body["state"] == "ready"
     assert body["cluster"] == "local"
-
-
-async def test_get_session_serves_the_new_shape_on_a_v1_header(
-    client: tuple[httpx.AsyncClient, Runner],
-) -> None:
-    http_client, _ = client
-    response = await http_client.get("/session", headers={"reactor-sdk-version": "3.1.0"})
-
-    assert response.status_code == 200
-    assert "schema" in response.json()
+    assert "capabilities" in body
 
 
 async def test_stop_session_closes(client: tuple[httpx.AsyncClient, Runner]) -> None:
