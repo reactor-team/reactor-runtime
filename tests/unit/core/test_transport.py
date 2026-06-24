@@ -8,7 +8,7 @@ from reactor_runtime.core import (
     InputFrame,
     MediaBundle,
 )
-from reactor_runtime.protocol import ProtocolVersion
+from reactor_runtime.protocol import Channel, ProtocolVersion
 
 
 class FakeConnection:
@@ -17,6 +17,7 @@ class FakeConnection:
         self.capabilities = ConnectionCapabilities(carries_video=True)
         self.protocol_version = ProtocolVersion.V0
         self.sent: list[bytes | str] = []
+        self.control: list[bytes | str] = []
         self.paused: list[str] = []
         self.closed = False
 
@@ -32,6 +33,9 @@ class FakeConnection:
     def pause_track(self, name: str) -> None:
         self.paused.append(name)
 
+    def send_control(self, payload: bytes | str) -> None:
+        self.control.append(payload)
+
     async def close(self) -> None:
         self.closed = True
 
@@ -39,7 +43,7 @@ class FakeConnection:
 class FakeSink:
     def __init__(self) -> None:
         self.opened: list[ConnId] = []
-        self.messages: list[tuple[ConnId, bytes | str]] = []
+        self.messages: list[tuple[ConnId, bytes | str, Channel]] = []
 
     def connection_opened(self, conn: Connection) -> None:
         self.opened.append(conn.id)
@@ -48,14 +52,26 @@ class FakeSink:
         pass
 
     def message_received(
-        self, conn_id: ConnId, payload: bytes | str, version: ProtocolVersion
+        self, conn_id: ConnId, payload: bytes | str, version: ProtocolVersion, channel: Channel
     ) -> None:
-        self.messages.append((conn_id, payload))
+        self.messages.append((conn_id, payload, channel))
 
     def media_received(self, conn_id: ConnId, track: str, frame: InputFrame) -> None:
         pass
 
     def keepalive(self, conn_id: ConnId) -> None:
+        pass
+
+    def resume_track(self, conn_id: ConnId, name: str) -> None:
+        pass
+
+    def pause_track(self, conn_id: ConnId, name: str) -> None:
+        pass
+
+    def publish_requested(self, conn_id: ConnId, name: str, request_id: str) -> None:
+        pass
+
+    def unpublish_track(self, conn_id: ConnId, name: str) -> None:
         pass
 
 
@@ -77,13 +93,16 @@ def test_facts_flow_up_through_the_sink() -> None:
     conn: Connection = FakeConnection(7)
 
     sink.connection_opened(conn)
-    sink.message_received(conn.id, b"hello", ProtocolVersion.V1)
-    sink.message_received(conn.id, '{"scope":"runtime"}', ProtocolVersion.V0)
+    sink.message_received(conn.id, b"hello", ProtocolVersion.V1, Channel.DATA)
+    sink.message_received(conn.id, '{"type":"notification"}', ProtocolVersion.V0, Channel.CONTROL)
     sink.media_received(conn.id, "camera", InputFrame(np.zeros((1, 1, 3), dtype=np.uint8)))
 
     assert isinstance(sink, FakeSink)
     assert sink.opened == [ConnId(7)]
-    assert sink.messages == [(ConnId(7), b"hello"), (ConnId(7), '{"scope":"runtime"}')]
+    assert sink.messages == [
+        (ConnId(7), b"hello", Channel.DATA),
+        (ConnId(7), '{"type":"notification"}', Channel.CONTROL),
+    ]
 
 
 def test_commands_flow_down_through_the_connection() -> None:
@@ -91,5 +110,7 @@ def test_commands_flow_down_through_the_connection() -> None:
     conn.send_message(b"frame")
     conn.send_message('{"type":"current_mode"}')
     conn.pause_track("main_video")
+    conn.send_control('{"type":"response"}')
     assert conn.sent == [b"frame", '{"type":"current_mode"}']
     assert conn.paused == ["main_video"]
+    assert conn.control == ['{"type":"response"}']

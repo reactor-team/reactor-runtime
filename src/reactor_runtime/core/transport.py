@@ -17,7 +17,7 @@ from reactor_runtime.core.values import (
     InputFrame,
     MediaBundle,
 )
-from reactor_runtime.protocol import ProtocolVersion
+from reactor_runtime.protocol import Channel, ProtocolVersion
 
 
 @runtime_checkable
@@ -65,6 +65,14 @@ class Connection(Protocol):
     def pause_track(self, name: str) -> None:
         """Pause the named outbound track (publisher arbitration)."""
 
+    def send_control(self, payload: bytes | str) -> None:
+        """Send an already-encoded control frame to this client.
+
+        The control channel carries the runtime's replies to a client's control
+        requests — a publish-track grant or refusal — encoded for the wire
+        version this connection negotiated.
+        """
+
     async def close(self) -> None:
         """Tear the connection down."""
 
@@ -98,7 +106,7 @@ class ConnectionSink(Protocol):
         """
 
     def message_received(
-        self, conn_id: ConnId, payload: bytes | str, version: ProtocolVersion
+        self, conn_id: ConnId, payload: bytes | str, version: ProtocolVersion, channel: Channel
     ) -> None:
         """Hand an inbound encoded frame up for decoding and dispatch.
 
@@ -106,7 +114,9 @@ class ConnectionSink(Protocol):
         v0 JSON frame, ``bytes`` for a v1 protobuf frame), mirroring what the
         codec decodes. *version* is the codec the connection negotiated, so the
         frame is decoded as the client that sent it speaks — per connection,
-        not a single runtime-wide codec.
+        not a single runtime-wide codec. *channel* is the physical channel it
+        arrived on (data or control), so the gateway decodes it as the right
+        message family rather than guessing.
         """
 
     def media_received(self, conn_id: ConnId, track: str, frame: InputFrame) -> None:
@@ -114,3 +124,19 @@ class ConnectionSink(Protocol):
 
     def keepalive(self, conn_id: ConnId) -> None:
         """Note liveness for a connection."""
+
+    def resume_track(self, conn_id: ConnId, name: str) -> None:
+        """Resume an outbound track for one connection, at the client's request."""
+
+    def pause_track(self, conn_id: ConnId, name: str) -> None:
+        """Pause an outbound track for one connection, at the client's request."""
+
+    def publish_requested(self, conn_id: ConnId, name: str, request_id: str) -> None:
+        """Arbitrate a client's claim to publish an inbound track, and reply.
+
+        First publisher wins across the session; the outcome is sent back to the
+        requesting connection on its control channel, correlated by *request_id*.
+        """
+
+    def unpublish_track(self, conn_id: ConnId, name: str) -> None:
+        """Release an inbound track a connection had claimed."""
