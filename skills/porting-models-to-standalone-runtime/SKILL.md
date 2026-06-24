@@ -1,0 +1,118 @@
+---
+name: porting-models-to-standalone-runtime
+description: "Port a model written against an older Reactor authoring API onto this runtime. Use when an existing model fails to import, load, or run here. This is a migration guide: it lists what changed or was removed and what to do about each break, not a from-scratch tutorial."
+---
+
+# Port-over: what changed moving a model onto this runtime
+
+Use this when bringing a model that ran on an older Reactor authoring API onto
+`reactor_runtime` as shipped in this repository. It is a list of breaks and the
+fix for each, in rough order of how hard they bite. It is not a tutorial for
+writing a model from scratch.
+
+Ground rule: the supported surface is what the **top-level package**
+re-exports. If a name is not importable from `reactor_runtime`, it is not part
+of the surface here — do not reach into submodules to find a replacement.
+
+## Your model is a `ReactorPipeline` — stop, wait
+
+If the model subclasses `ReactorPipeline` (a `load()` + `inference()` generator),
+or holds session state in an `InputState` with auto-generated `set_<field>`
+events, it cannot be ported yet: neither `ReactorPipeline` nor `InputState`
+exists in this runtime. Do not rewrite it into a `ReactorModel` to force it
+through — wait until those land. Only models already written as `ReactorModel`
+(a `run()` loop driving `emit()`, explicit `@event` handlers) port today.
+
+## Imports move to the package root
+
+Update every authoring import to come from `reactor_runtime`, not
+`reactor_runtime.interface`:
+
+```python
+# before
+from reactor_runtime.interface import InputField, ReactorModel, ReadMode, event
+# after
+from reactor_runtime import InputField, ReactorModel, ReadMode, event
+```
+
+`reactor_runtime.interface` still resolves, so this is not a hard break — but the
+package root is the canonical path now, and new names (e.g. `get_weights_path`)
+are exported only there. Move imports over so the model tracks the new pattern.
+
+## `load()` receives a config path, not a parsed dict
+
+This is the main break. The signature and contract changed:
+
+```python
+# before — the runtime parsed reactor.yaml's config into a dict and passed it
+def load(self, config):
+    self.steps = config["steps"]
+
+# after — you get the path to the config file (or None) and parse it yourself
+def load(self, config_path: Path | None):
+    config = yaml.safe_load(config_path.read_text()) if config_path else {}
+    self.steps = int(config.get("steps", 4))
+```
+
+The runtime no longer reads your config. `runtime.config` in `reactor.yaml` only
+*names* the file; the reactor CLI is what makes that file available inside the
+container at run time. The runtime resolves it to an absolute path and hands
+`load` that path (or `None` when none is named) — nothing more. A `load(config)`
+body that indexed a dict needs the parse line above prepended; the rest is
+unchanged.
+
+## Profiler imports are gone — strip them
+
+`get_profiler` and the whole `reactor_runtime.profiling` module
+(`BucketPreset`, `ChunkRangeProfiler`, `NoOpProfiler`) do not exist here, so
+they fail at module load — the model never even imports. Remove the imports and
+every call site. Keep per-stage timing in plain locals if you want the log
+lines; there is no profiler to feed.
+
+## Other internal imports are gone
+
+Anything imported from an internal submodule (in-process metrics helpers and the
+like) is not part of this runtime. Remove those imports — only the package-root
+surface is supported, and reaching past it is exactly what breaks on the next
+change.
+
+## Recording and clips do nothing
+
+A `recording:` block in `reactor.yaml` is inert, `requestClip` /
+`requestRecording` are unanswered, and there is no clip endpoint. If the model
+or its client assumed any of these, drop that assumption — recording is not
+wired here.
+
+## Uploads are gone
+
+There is no upload store, and an `@event` cannot take an uploaded-file argument.
+A command that consumed an upload must be reworked to take the data over an
+input track instead.
+
+## `buffer_size` default changed (4 -> 10)
+
+It is still a class attribute controlling the output queue depth, but the
+default is now 10 (it was 4). If the model relied on the old shallow default for
+latency, set `buffer_size` explicitly.
+
+## Private `output_buffer` internals renamed
+
+The output buffer's internal queue is `_queue`, not `_q`. Code that poked
+`self.output_buffer._q` (e.g. a latency probe reading `qsize()`) breaks. There is
+no public queue-depth getter — drop the probe or guard it; do not depend on
+private attributes.
+
+## What did not change
+
+`ReactorModel` itself is the same shape: `load()` + `async def run()` driving
+`await self.emit(...)`, `@event` / `@connected` / `@disconnected` handlers,
+`self.connected` to gate the loop, `fps` as a class attribute, typed
+`ModelMessage` returns/`self.send(...)`, and inbound media via
+`self.input.<track>.try_read(n, mode=ReadMode.LATEST)` / `.read(...)` /
+`.reset()`. Weights are still located with `get_weights_path()` (now imported
+from `reactor_runtime`); it returns `$REACTOR_WEIGHTS_PATH` or
+`~/.cache/reactor_registry`.
+
+Once the breaks above are cleared the model should import, `load`, and run; a
+`reactor.yaml` naming the `ReactorModel` via `runtime.import` is all the runtime
+needs to serve it.
