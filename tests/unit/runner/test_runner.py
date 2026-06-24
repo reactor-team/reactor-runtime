@@ -3,7 +3,7 @@ from typing import Any, ClassVar
 
 import pytest
 
-from reactor_runtime import protocol
+from reactor_runtime import InputField, ModelMessage, Output, ReactorModel, Video, event, protocol
 from reactor_runtime.core import (
     ConnectionCapabilities,
     ConnId,
@@ -12,10 +12,7 @@ from reactor_runtime.core import (
     RuntimeConfig,
     SessionState,
 )
-from reactor_runtime.model import InputField, ModelMessage, event
-from reactor_runtime.model.reactor_core import AddressedSink, BroadcastSink
-from reactor_runtime.model.reactor_model import ReactorModel
-from reactor_runtime.model.tracks import Output, Video
+from reactor_runtime.interface.internal.reactor_core import AddressedSink, BroadcastSink
 from reactor_runtime.protocol.common import struct_to_dict
 from reactor_runtime.runner.runner import Runner
 from reactor_wire.v1 import control_pb2, data_pb2
@@ -24,6 +21,7 @@ DATA = protocol.Channel.DATA
 CONTROL = protocol.Channel.CONTROL
 SERVER = protocol.Direction.SERVER
 V0 = protocol.ProtocolVersion.V0
+V1 = protocol.ProtocolVersion.V1
 
 
 class Greeting(ModelMessage):
@@ -194,3 +192,42 @@ def test_publish_request_for_a_held_track_is_refused() -> None:
     assert granted.WhichOneof("payload") == "publish_track"
     assert refused.request_id == "ctrl_2"
     assert refused.WhichOneof("payload") == "error"
+
+
+async def _started_runner(monkeypatch: pytest.MonkeyPatch) -> Runner:
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
+    runner = _runner()
+    await runner.start()
+    return runner
+
+
+async def test_schema_request_v0_replies_on_the_data_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = await _started_runner(monkeypatch)
+    try:
+        conn = FakeConnection(1)
+        runner.connection_opened(conn)
+        runner.schema_requested(ConnId(1), "ctrl_3")
+        decoded = protocol.select(V0).decode(conn.sent[0], DATA, SERVER)
+        assert isinstance(decoded, control_pb2.ControlServerMessage)
+        assert decoded.WhichOneof("payload") == "model_schema"
+    finally:
+        await runner.stop()
+
+
+async def test_schema_request_v1_replies_on_control_correlated_by_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = await _started_runner(monkeypatch)
+    try:
+        conn = FakeConnection(2)
+        conn.protocol_version = V1
+        runner.connection_opened(conn)
+        runner.schema_requested(ConnId(2), "ctrl_9")
+        decoded = protocol.select(V1).decode(conn.control[0], CONTROL, SERVER)
+        assert isinstance(decoded, control_pb2.ControlServerMessage)
+        assert decoded.WhichOneof("payload") == "model_schema"
+        assert decoded.request_id == "ctrl_9"
+    finally:
+        await runner.stop()

@@ -36,12 +36,12 @@ from reactor_runtime.core import (
     TransitionEvent,
 )
 from reactor_runtime.event_stream import EventStream
+from reactor_runtime.interface.events.messages import ModelMessage
+from reactor_runtime.interface.internal.bridge import ModelBridge
+from reactor_runtime.interface.internal.reactor_core import ReactorCore
+from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.log import get_logger
 from reactor_runtime.message_gateway import InboundCommand, MessageGateway
-from reactor_runtime.model.bridge import ModelBridge
-from reactor_runtime.model.contract import ModelContract
-from reactor_runtime.model.message import ModelMessage
-from reactor_runtime.model.reactor_core import ReactorCore
 from reactor_runtime.protocol import Channel, Codec, ProtocolVersion, select
 from reactor_runtime.runner.connection_manager import ConnectionManager
 from reactor_runtime.runner.state_machine import SessionStateMachine
@@ -251,6 +251,21 @@ class Runner(ServiceComponent, ConnectionSink):
     def unpublish_track(self, conn_id: ConnId, name: str) -> None:
         """Release an inbound track a connection had claimed."""
         self._connections.unpublish_track(conn_id, name)
+
+    def schema_requested(self, conn_id: ConnId, request_id: str) -> None:
+        """Answer a client's schema request, correlated by *request_id*.
+
+        The reply carries the model's rendered OpenAPI contract and is sent to
+        the requesting connection on whichever channel its wire version places
+        it. A request that arrives before the model is loaded is dropped.
+        """
+        if self._bridge is None:
+            return
+        openapi = self._bridge.contract.render_schema().to_openapi()
+        self._connections.send_response(
+            conn_id,
+            lambda version: self._codec_for(version).encode_schema_response(request_id, openapi),
+        )
 
     # -- internals ------------------------------------------------------------
 

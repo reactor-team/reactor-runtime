@@ -14,7 +14,7 @@ from enum import Enum
 from typing import Any
 
 from reactor_runtime.protocol.common import dict_to_struct
-from reactor_wire.v1 import common_pb2, control_pb2, data_pb2, model_pb2, track_pb2
+from reactor_wire.v1 import common_pb2, control_pb2, data_pb2, model_pb2, platform_pb2, track_pb2
 
 # A client->runtime message, on either channel.
 ClientMessage = data_pb2.DataClientMessage | control_pb2.ControlClientMessage
@@ -148,6 +148,23 @@ class Codec(ABC):
                     code="publish_refused", message=reason or "track already published"
                 ),
             )
+        return self.encode(message)
+
+    def encode_schema_response(
+        self, request_id: str, openapi: Mapping[str, Any]
+    ) -> tuple[Channel, bytes | str]:
+        """Encode the runtime's reply to a client's schema request.
+
+        Wraps the rendered OpenAPI document in a ``ControlServerMessage`` and
+        encodes it for this wire version, correlated by *request_id*. The
+        physical channel is version-dependent — v0 carries the schema on the data
+        channel, v1 on the control channel — and is returned alongside the frame.
+        """
+        message = control_pb2.ControlServerMessage(
+            request_id=request_id,
+            kind=common_pb2.MessageKind.MESSAGE_KIND_RESPONSE,
+            model_schema=platform_pb2.ModelSchema(openapi=dict_to_struct(openapi)),
+        )
         return self.encode(message)
 
 
