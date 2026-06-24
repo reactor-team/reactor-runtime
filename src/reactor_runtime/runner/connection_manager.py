@@ -14,12 +14,15 @@ produced a connection, which is exactly what lets one session mix transports.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from reactor_runtime.core import (
     Connection,
     ConnId,
     MediaBundle,
     SessionEvent,
 )
+from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.runner.state_machine import SessionStateMachine
 
 
@@ -149,16 +152,21 @@ class ConnectionManager:
         if conn is not None:
             conn.pause_track(name)
 
-    def broadcast(self, payload: bytes | str) -> None:
-        """Send an encoded frame to every connection."""
-        for conn in self._by_id.values():
-            conn.send_message(payload)
+    def broadcast(self, encode: Callable[[ProtocolVersion], bytes | str]) -> None:
+        """Encode and send a frame to every connection in its own codec.
 
-    def send(self, cid: ConnId, payload: bytes | str) -> None:
-        """Send an encoded frame to one connection, if it is registered."""
+        *encode* renders the outbound frame for a given wire version. Each
+        connection is sent the frame encoded for the codec it negotiated, so a
+        mixed-version session reaches every client in the version it speaks.
+        """
+        for conn in self._by_id.values():
+            conn.send_message(encode(conn.protocol_version))
+
+    def send(self, cid: ConnId, encode: Callable[[ProtocolVersion], bytes | str]) -> None:
+        """Encode and send a frame to one connection in its codec, if registered."""
         conn = self._by_id.get(cid)
         if conn is not None:
-            conn.send_message(payload)
+            conn.send_message(encode(conn.protocol_version))
 
     def broadcast_media(self, bundle: MediaBundle, duplicate: bool) -> None:
         """Send a media bundle to every connection whose wire carries media.

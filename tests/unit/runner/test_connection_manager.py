@@ -9,17 +9,25 @@ from reactor_runtime.core import (
     SessionState,
     Transition,
 )
+from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.runner import ConnectionManager, SessionStateMachine
 
 
 class FakeConnection:
     """A shape-conforming stand-in that records what the manager calls on it."""
 
-    def __init__(self, cid: int, *, capabilities: ConnectionCapabilities | None = None) -> None:
+    def __init__(
+        self,
+        cid: int,
+        *,
+        capabilities: ConnectionCapabilities | None = None,
+        protocol_version: ProtocolVersion = ProtocolVersion.V0,
+    ) -> None:
         self.id = ConnId(cid)
         self.capabilities = capabilities or ConnectionCapabilities(
             carries_video=True, carries_audio=True
         )
+        self.protocol_version = protocol_version
         self.messages: list[bytes | str] = []
         self.media: list[MediaBundle] = []
         self.resumed: list[str] = []
@@ -140,7 +148,7 @@ def test_re_registering_an_id_replaces_without_re_driving() -> None:
     cm.register(replacement)
     assert cm.count == 1
     assert seen == []
-    cm.broadcast(b"hi")
+    cm.broadcast(lambda _version: b"hi")
     assert replacement.messages == [b"hi"]
     assert first.messages == []
 
@@ -150,10 +158,21 @@ def test_broadcast_reaches_every_connection() -> None:
     a, b = FakeConnection(1), FakeConnection(2)
     cm.register(a)
     cm.register(b)
-    cm.broadcast(b"payload")
-    cm.broadcast('{"type":"text-frame"}')
+    cm.broadcast(lambda _version: b"payload")
+    cm.broadcast(lambda _version: '{"type":"text-frame"}')
     assert a.messages == [b"payload", '{"type":"text-frame"}']
     assert b.messages == [b"payload", '{"type":"text-frame"}']
+
+
+def test_broadcast_encodes_per_connection_version() -> None:
+    cm, _ = waiting_manager()
+    v0 = FakeConnection(1, protocol_version=ProtocolVersion.V0)
+    v1 = FakeConnection(2, protocol_version=ProtocolVersion.V1)
+    cm.register(v0)
+    cm.register(v1)
+    cm.broadcast(lambda version: version.value)
+    assert v0.messages == [ProtocolVersion.V0.value]
+    assert v1.messages == [ProtocolVersion.V1.value]
 
 
 def test_addressed_send_reaches_only_the_target() -> None:
@@ -161,7 +180,7 @@ def test_addressed_send_reaches_only_the_target() -> None:
     a, b = FakeConnection(1), FakeConnection(2)
     cm.register(a)
     cm.register(b)
-    cm.send(ConnId(2), b"only-b")
+    cm.send(ConnId(2), lambda _version: b"only-b")
     assert a.messages == []
     assert b.messages == [b"only-b"]
 
@@ -169,7 +188,7 @@ def test_addressed_send_reaches_only_the_target() -> None:
 def test_addressed_send_to_unknown_connection_is_ignored() -> None:
     cm, _ = waiting_manager()
     cm.register(FakeConnection(1))
-    cm.send(ConnId(42), b"nowhere")
+    cm.send(ConnId(42), lambda _version: b"nowhere")
 
 
 def test_media_skips_data_only_connections() -> None:
