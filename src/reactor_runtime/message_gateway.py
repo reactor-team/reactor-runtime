@@ -154,6 +154,8 @@ class MessageGateway:
             self._sink.publish_requested(conn_id, message.publish_track.name, message.request_id)
         elif which == "unpublish_track":
             self._sink.unpublish_track(conn_id, message.unpublish_track.name)
+        elif which == "request_schema":
+            self._sink.schema_requested(conn_id, message.request_id)
         else:
             logger.debug("MessageGateway received an unrouted control message: %s", which)
 

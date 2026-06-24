@@ -263,8 +263,7 @@ class V0Codec(Codec):
             return control_pb2.ControlClientMessage(
                 kind=_KIND.MESSAGE_KIND_NOTIFICATION, ping=platform_pb2.Ping()
             )
-        # requestCapabilities is a deprecated alias superseded by requestSchema.
-        if kind in ("requestSchema", "requestCapabilities"):
+        if kind == "requestSchema":
             return control_pb2.ControlClientMessage(
                 kind=_KIND.MESSAGE_KIND_REQUEST, request_schema=platform_pb2.RequestSchema()
             )

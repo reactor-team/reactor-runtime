@@ -1,3 +1,5 @@
+from collections.abc import Mapping
+
 from reactor_runtime.core import Connection, ConnId, InputFrame
 from reactor_runtime.message_gateway import InboundCommand, MessageGateway
 from reactor_runtime.protocol import Channel, ProtocolVersion
@@ -14,6 +16,7 @@ class FakeSink:
         self.paused: list[tuple[ConnId, str]] = []
         self.published: list[tuple[ConnId, str, str]] = []
         self.unpublished: list[tuple[ConnId, str]] = []
+        self.schema_requests: list[tuple[ConnId, str]] = []
 
     def connection_opened(self, conn: Connection) -> None:
         pass
@@ -43,6 +46,12 @@ class FakeSink:
 
     def unpublish_track(self, conn_id: ConnId, name: str) -> None:
         self.unpublished.append((conn_id, name))
+
+    def schema_requested(self, conn_id: ConnId, request_id: str) -> None:
+        self.schema_requests.append((conn_id, request_id))
+
+    def connection_answered(self, conn_id: ConnId, answer: Mapping[str, str]) -> None:
+        pass
 
 
 def _gateway() -> tuple[MessageGateway, FakeSink, list[InboundCommand]]:
@@ -104,11 +113,39 @@ async def test_upload_references_are_carried_unresolved() -> None:
 async def test_other_control_messages_are_not_routed() -> None:
     gateway, sink, received = _gateway()
     _, frame = V1Codec().encode(
-        control_pb2.ControlClientMessage(request_schema=platform_pb2.RequestSchema())
+        control_pb2.ControlClientMessage(request_recording=platform_pb2.RequestRecording())
     )
     await gateway.handle(ConnId(1), frame, Channel.CONTROL, ProtocolVersion.V1)
     assert sink.keepalives == []
     assert received == []
+
+
+async def test_request_schema_routes_with_its_correlation_id() -> None:
+    gateway, sink, _ = _gateway()
+    _, frame = V1Codec().encode(
+        control_pb2.ControlClientMessage(
+            request_id="ctrl_7", request_schema=platform_pb2.RequestSchema()
+        )
+    )
+    await gateway.handle(ConnId(8), frame, Channel.CONTROL, ProtocolVersion.V1)
+    assert sink.schema_requests == [(ConnId(8), "ctrl_7")]
+
+
+async def test_v0_request_schema_routes_off_the_data_channel() -> None:
+    gateway, sink, _ = _gateway()
+    # v0 carries requestSchema on the data channel and with no correlation id.
+    channel, frame = V0Codec().encode(
+        control_pb2.ControlClientMessage(request_schema=platform_pb2.RequestSchema())
+    )
+    await gateway.handle(ConnId(9), frame, channel, ProtocolVersion.V0)
+    assert sink.schema_requests == [(ConnId(9), "")]
+
+
+async def test_v0_request_capabilities_is_no_longer_answered() -> None:
+    gateway, sink, _ = _gateway()
+    frame = '{"scope": "runtime", "data": {"type": "requestCapabilities", "data": {}}}'
+    await gateway.handle(ConnId(9), frame, Channel.DATA, ProtocolVersion.V0)
+    assert sink.schema_requests == []
 
 
 async def test_undecodable_v1_frame_is_dropped() -> None:
