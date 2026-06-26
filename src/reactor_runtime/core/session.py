@@ -53,6 +53,13 @@ class SessionEvent(Enum):
     which it counts: the first connection to arrive carries the session into
     ``STREAMING`` and the last to leave carries it to ``ORPHANED``, while every
     connection in between rides as a self-loop.
+
+    ``CONNECTION_ANSWERED`` records that a transport produced its negotiation
+    answer for one connection, before that connection's wire is live. It is a
+    pure self-loop in every active state (``WAITING``, ``STREAMING``,
+    ``ORPHANED``): it changes no state and, unlike the open/close facts, leaves
+    the live-connection count untouched. It carries the connection id (and the
+    opaque answer) so the move journals everything a consumer needs.
     """
 
     INITIALIZATION_SUCCESS = auto()
@@ -62,6 +69,7 @@ class SessionEvent(Enum):
     TIMEOUT = auto()
     CONNECTION_OPENED = auto()
     CONNECTION_CLOSED = auto()
+    CONNECTION_ANSWERED = auto()
     CLEANUP_COMPLETE = auto()
     EVICTION = auto()
 

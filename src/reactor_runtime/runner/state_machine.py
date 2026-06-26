@@ -11,7 +11,9 @@ Session occupancy is derived, not signalled. The connection manager reports only
 the per-connection ``CONNECTION_OPENED`` / ``CONNECTION_CLOSED`` facts; the
 machine counts live connections and moves ``WAITING``/``ORPHANED`` to
 ``STREAMING`` on the first connection and ``STREAMING`` to ``ORPHANED`` on the
-last, while connections in between ride as self-loops.
+last, while connections in between ride as self-loops. ``CONNECTION_ANSWERED``
+also self-loops in every active state but leaves the count untouched: it records
+a negotiation answer for a connection that has not yet connected.
 
 Because the core is synchronous and side-effect-free, the whole machine is
 exercised with ``send()`` and ``current_state`` alone, with no transport, model,
@@ -45,6 +47,15 @@ _TRANSITIONS: dict[SessionEvent, dict[SessionState, SessionState]] = {
     },
     SessionEvent.CLEANUP_COMPLETE: {SessionState.CLOSING: SessionState.READY},
     SessionEvent.EVICTION: {SessionState.READY: SessionState.TERMINATED},
+    # A negotiation answer is a fact about a connection that has not yet
+    # connected, so it self-loops in every active state and leaves occupancy
+    # alone (see _update_count). It carries the connection id and the answer
+    # on the transition, journalled but driving no state change.
+    SessionEvent.CONNECTION_ANSWERED: {
+        SessionState.WAITING: SessionState.WAITING,
+        SessionState.STREAMING: SessionState.STREAMING,
+        SessionState.ORPHANED: SessionState.ORPHANED,
+    },
 }
 
 # The states a connection may open from. WAITING and ORPHANED both mean "no live
@@ -136,13 +147,18 @@ class SessionStateMachine:
     def _update_count(self, event: SessionEvent) -> None:
         """Track live connections so occupancy can be resolved.
 
-        Rises on an open and falls on a close (never below zero); any other move
-        clears it, since a non-connection transition either begins a fresh session
-        or unwinds the current one — both of which leave no connection behind.
+        Rises on an open and falls on a close (never below zero). A negotiation
+        answer leaves the count alone: it is a self-loop about a connection that
+        has not yet connected, so it neither opens nor unwinds the session. Any
+        other move clears the count, since a non-connection transition either
+        begins a fresh session or unwinds the current one — both of which leave
+        no connection behind.
         """
         if event is SessionEvent.CONNECTION_OPENED:
             self._live += 1
         elif event is SessionEvent.CONNECTION_CLOSED:
             self._live = max(0, self._live - 1)
+        elif event is SessionEvent.CONNECTION_ANSWERED:
+            pass
         else:
             self._live = 0

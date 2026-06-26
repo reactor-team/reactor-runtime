@@ -3,8 +3,6 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from typing import cast
 
 from reactor_runtime.core import (
-    ConnectionEvent,
-    ConnId,
     ErrorEvent,
     RunnerEvent,
     SessionEvent,
@@ -17,6 +15,10 @@ from reactor_runtime.event_stream import EventStream, SessionSnapshot
 
 def _transition(to_state: SessionState) -> TransitionEvent:
     return TransitionEvent(Transition(SessionEvent.START_SESSION, SessionState.READY, to_state))
+
+
+def _conn(event: SessionEvent, from_state: SessionState, to_state: SessionState) -> TransitionEvent:
+    return TransitionEvent(Transition(event, from_state, to_state))
 
 
 async def _next(agen: AsyncIterator[RunnerEvent]) -> RunnerEvent:
@@ -34,19 +36,34 @@ def test_snapshot_starts_empty() -> None:
 def test_snapshot_reflects_transitions_and_connections() -> None:
     stream = EventStream()
     stream.emit(_transition(SessionState.WAITING))
-    stream.emit(ConnectionEvent(ConnId(1), opened=True))
-    stream.emit(ConnectionEvent(ConnId(2), opened=True))
-    stream.emit(ConnectionEvent(ConnId(1), opened=False))
+    stream.emit(_conn(SessionEvent.CONNECTION_OPENED, SessionState.WAITING, SessionState.STREAMING))
+    stream.emit(
+        _conn(SessionEvent.CONNECTION_OPENED, SessionState.STREAMING, SessionState.STREAMING)
+    )
+    stream.emit(
+        _conn(SessionEvent.CONNECTION_CLOSED, SessionState.STREAMING, SessionState.STREAMING)
+    )
 
     snapshot = stream.snapshot()
-    assert snapshot.state is SessionState.WAITING
+    assert snapshot.state is SessionState.STREAMING
     assert snapshot.connections == 1
     assert snapshot.last_seq == 4
 
 
+def test_answer_self_loop_leaves_the_count_untouched() -> None:
+    stream = EventStream()
+    stream.emit(_conn(SessionEvent.CONNECTION_OPENED, SessionState.WAITING, SessionState.STREAMING))
+    stream.emit(
+        _conn(SessionEvent.CONNECTION_ANSWERED, SessionState.STREAMING, SessionState.STREAMING)
+    )
+    assert stream.snapshot().connections == 1
+
+
 def test_connection_count_never_goes_negative() -> None:
     stream = EventStream()
-    stream.emit(ConnectionEvent(ConnId(1), opened=False))
+    stream.emit(
+        _conn(SessionEvent.CONNECTION_CLOSED, SessionState.STREAMING, SessionState.ORPHANED)
+    )
     assert stream.snapshot().connections == 0
 
 
