@@ -20,8 +20,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from reactor_runtime.core import (
-    ConnectionEvent,
     RunnerEvent,
+    SessionEvent,
     SessionState,
     TransitionEvent,
 )
@@ -122,8 +122,17 @@ class EventStream:
         )
 
     def _fold(self, event: RunnerEvent) -> None:
-        """Update the tracked session view from one event."""
+        """Update the tracked session view from one event.
+
+        Connection occupancy rides the transition itself: a move whose event is
+        ``CONNECTION_OPENED`` or ``CONNECTION_CLOSED`` adjusts the count, and
+        every other move (including a ``CONNECTION_ANSWERED`` self-loop) leaves
+        it alone.
+        """
         if isinstance(event, TransitionEvent):
-            self._state = event.transition.to_state
-        elif isinstance(event, ConnectionEvent):
-            self._connections = max(0, self._connections + (1 if event.opened else -1))
+            transition = event.transition
+            self._state = transition.to_state
+            if transition.event is SessionEvent.CONNECTION_OPENED:
+                self._connections += 1
+            elif transition.event is SessionEvent.CONNECTION_CLOSED:
+                self._connections = max(0, self._connections - 1)

@@ -17,6 +17,9 @@ LEGAL_EDGES: list[tuple[SessionState, SessionEvent, SessionState]] = [
     (SessionState.ORPHANED, SessionEvent.STOP_SESSION, SessionState.CLOSING),
     (SessionState.ORPHANED, SessionEvent.TIMEOUT, SessionState.CLOSING),
     (SessionState.CLOSING, SessionEvent.CLEANUP_COMPLETE, SessionState.READY),
+    (SessionState.WAITING, SessionEvent.CONNECTION_ANSWERED, SessionState.WAITING),
+    (SessionState.STREAMING, SessionEvent.CONNECTION_ANSWERED, SessionState.STREAMING),
+    (SessionState.ORPHANED, SessionEvent.CONNECTION_ANSWERED, SessionState.ORPHANED),
 ]
 
 
@@ -124,6 +127,36 @@ def test_count_resets_across_a_session_restart() -> None:
     sm.send(SessionEvent.CONNECTION_OPENED, conn_id=3)
     expect_state(sm, SessionState.STREAMING)
     assert sm.send(SessionEvent.CONNECTION_CLOSED, conn_id=3) is True
+    expect_state(sm, SessionState.ORPHANED)
+
+
+# -- connection answered, a count-neutral self-loop ---------------------------
+
+
+def test_answer_self_loops_in_every_active_state_without_changing_state() -> None:
+    for state in (SessionState.WAITING, SessionState.STREAMING, SessionState.ORPHANED):
+        sm = SessionStateMachine(initial_state=state)
+        seen: list[Transition] = []
+        sm.on_transition(seen.append)
+        assert sm.send(SessionEvent.CONNECTION_ANSWERED, conn_id=7) is True
+        assert sm.current_state is state
+        (transition,) = seen
+        assert transition.from_state is state
+        assert transition.to_state is state
+        assert transition.detail == {"conn_id": 7}
+
+
+def test_answer_does_not_reset_the_live_count() -> None:
+    # An answer self-loop must leave occupancy alone, or it would zero the count
+    # and the last close would fail to orphan the session.
+    sm = SessionStateMachine(initial_state=SessionState.WAITING)
+    sm.send(SessionEvent.CONNECTION_OPENED, conn_id=1)
+    sm.send(SessionEvent.CONNECTION_OPENED, conn_id=2)
+    sm.send(SessionEvent.CONNECTION_ANSWERED, conn_id=3)
+    expect_state(sm, SessionState.STREAMING)
+    assert sm.send(SessionEvent.CONNECTION_CLOSED, conn_id=1) is True
+    expect_state(sm, SessionState.STREAMING)
+    assert sm.send(SessionEvent.CONNECTION_CLOSED, conn_id=2) is True
     expect_state(sm, SessionState.ORPHANED)
 
 

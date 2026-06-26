@@ -3,8 +3,6 @@ from dataclasses import dataclass
 from reactor_runtime.core import (
     ClientConnected,
     Command,
-    ConnectionAnswered,
-    ConnectionEvent,
     ConnId,
     EndReason,
     FileUploaded,
@@ -55,8 +53,6 @@ def test_runner_event_union_membership() -> None:
     transition = Transition(SessionEvent.START_SESSION, SessionState.READY, SessionState.WAITING)
     egress: list[RunnerEvent] = [
         TransitionEvent(transition),
-        ConnectionEvent(conn_id=ConnId(1), opened=True),
-        ConnectionAnswered(conn_id=ConnId(1), answer={"type": "answer", "sdp": "v=0..."}),
         InboundCommandEvent(name="set_prompt", args={"prompt": "hi"}, conn_id=ConnId(1)),
     ]
     for event in egress:

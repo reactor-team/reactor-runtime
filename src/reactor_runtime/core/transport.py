@@ -156,7 +156,8 @@ class ConnectionSink(Protocol):
         Fired once the transport has produced the answer to a client's
         connection offer (for WebRTC, the SDP answer as a ``{"type", "sdp"}``
         mapping). The payload is transport-agnostic and opaque here: the runner
-        journals it for an external consumer to hand back to the client, and
-        never parses it. Distinct from ``connection_opened``, which fires later
-        when the wire actually connects.
+        records it as a self-loop session move that journals the answer for an
+        external consumer to hand back to the client, and never parses it.
+        Distinct from ``connection_opened``, which fires later when the wire
+        actually connects.
         """
