@@ -17,8 +17,11 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from reactor_runtime.core import Health, HealthStatus, RuntimeConfig, ServiceComponent
 from reactor_runtime.http.routes import EgressRoutes, SessionRoutes
+from reactor_runtime.log import get_logger
 from reactor_runtime.runner import Runner
 from reactor_runtime.transport.router import TransportRouter
+
+logger = get_logger(__name__)
 
 
 class _ServerWithoutSignals(uvicorn.Server):
@@ -75,8 +78,16 @@ class HttpServer(ServiceComponent):
 
     async def start(self) -> None:
         """Bind the configured address and serve the app in the background."""
+        # `/events` is an unbounded stream, so a client still subscribed when the
+        # server drains never lets uvicorn's graceful shutdown complete on its
+        # own. Bound the wait with the same grace period a draining session gets,
+        # so `stop()` cannot hang on a long-lived connection.
         config = uvicorn.Config(
-            self._app, host=self._cfg.host, port=self._cfg.port, log_level="warning"
+            self._app,
+            host=self._cfg.host,
+            port=self._cfg.port,
+            log_level="warning",
+            timeout_graceful_shutdown=int(self._cfg.grace_period),
         )
         self._server = _ServerWithoutSignals(config)
         self._serve_task = asyncio.create_task(self._server.serve())
@@ -87,9 +98,19 @@ class HttpServer(ServiceComponent):
             self._server.should_exit = True
 
     async def stop(self) -> None:
-        """Await the server's own shutdown."""
+        """Await the server's own shutdown, bounded by the graceful-shutdown timeout.
+
+        The wait is already bounded — ``timeout_graceful_shutdown`` caps how long
+        uvicorn lingers on a still-open connection — so this only awaits the serve
+        task to settle. A failure surfacing from that task during shutdown is
+        logged rather than raised, so a late serve error cannot abort the rest of
+        the ordered teardown.
+        """
         if self._serve_task is not None:
-            await self._serve_task
+            try:
+                await self._serve_task
+            except Exception:
+                logger.exception("http serve task failed during shutdown")
 
     def health(self) -> Health:
         """Report ready once the server has finished starting."""

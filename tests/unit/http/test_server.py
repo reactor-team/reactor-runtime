@@ -74,3 +74,33 @@ async def test_start_drain_stop_lifecycle() -> None:
         assert server._server is not None
         assert server._server.should_exit is True
         await asyncio.wait_for(server.stop(), timeout=5.0)
+
+
+async def test_stop_swallows_a_failed_serve_task() -> None:
+    server = HttpServer(
+        RuntimeConfig(model_ref="fake:Model", host="127.0.0.1", port=0), _runner(), []
+    )
+
+    async def boom() -> None:
+        raise RuntimeError("serve crashed")
+
+    server._serve_task = asyncio.create_task(boom())
+    # A serve task that fails during shutdown is logged, not raised, so a late
+    # serve error cannot abort the ordered teardown of the rest of the service.
+    await server.stop()
+
+
+async def test_graceful_shutdown_is_bounded_by_the_grace_period() -> None:
+    server = HttpServer(
+        RuntimeConfig(model_ref="fake:Model", host="127.0.0.1", port=0, grace_period=7.0),
+        _runner(),
+        [],
+    )
+
+    await server.start()
+    try:
+        assert server._server is not None
+        assert server._server.config.timeout_graceful_shutdown == 7
+    finally:
+        await server.drain()
+        await asyncio.wait_for(server.stop(), timeout=5.0)
