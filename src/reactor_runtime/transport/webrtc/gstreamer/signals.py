@@ -1,9 +1,9 @@
 from dataclasses import dataclass
 from typing import Any, Callable, List
 from reactor_runtime.transport.webrtc.gstreamer.gst import GObject
-import logging
+from reactor_runtime.transport.webrtc.gstreamer._log import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -119,10 +119,10 @@ class SignalManager:
 
             except Exception as exc:
                 logger.debug(
-                    "Failed to block signal '%s' (handler_id=%s): %s",
-                    conn.signal_name,
-                    conn.handler_id,
-                    exc,
+                    "failed to block signal",
+                    signal=conn.signal_name,
+                    handler_id=conn.handler_id,
+                    error=exc,
                 )
 
     def disconnect_all(self) -> None:
@@ -156,8 +156,8 @@ class SignalManager:
                 #   - handler already disconnected
                 #   - GI proxy raising due to invalid underlying pointer
                 logger.warning(
-                    "Failed to disconnect signal '%s' (handler_id=%s): %s",
-                    conn.signal_name,
-                    conn.handler_id,
-                    exc,
+                    "failed to disconnect signal",
+                    signal=conn.signal_name,
+                    handler_id=conn.handler_id,
+                    error=exc,
                 )
