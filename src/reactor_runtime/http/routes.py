@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from typing import Annotated, Any
 
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import Body, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
@@ -78,8 +78,12 @@ class EgressRoutes:
         runner = self._runner
 
         @app.get("/events")
-        async def events(since: int | None = None) -> StreamingResponse:
-            return StreamingResponse(_stream_events(runner, since), media_type="text/event-stream")
+        async def events(
+            since: int | None = None,
+            last_event_id: Annotated[str | None, Header()] = None,
+        ) -> StreamingResponse:
+            resume = since if since is not None else _resume_from(last_event_id)
+            return StreamingResponse(_stream_events(runner, resume), media_type="text/event-stream")
 
         @app.get("/health")
         async def health() -> JSONResponse:
@@ -89,6 +93,26 @@ class EgressRoutes:
                 status_code=code,
                 content={"status": report.status.value, "detail": report.detail},
             )
+
+
+def _resume_from(last_event_id: str | None) -> int | None:
+    """Read a ``Last-Event-ID`` header as a resumption point, when it is one.
+
+    A standard ``EventSource`` replays the last ``id:`` it received on
+    auto-reconnect, so an integer value resumes the stream after that sequence;
+    a missing or non-numeric header resumes from live. An explicit ``?since=``
+    always takes precedence over the header.
+
+    Args:
+        last_event_id: The ``Last-Event-ID`` request header, if the client sent
+            one.
+
+    Returns:
+        The sequence number to resume after, or ``None`` to resume from live.
+    """
+    if last_event_id is None or not last_event_id.isdigit():
+        return None
+    return int(last_event_id)
 
 
 async def _stream_events(runner: Runner, since: int | None) -> AsyncGenerator[str, None]:

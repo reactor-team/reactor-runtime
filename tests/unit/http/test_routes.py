@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from reactor_runtime import InputField, Output, ReactorModel, Video, event
 from reactor_runtime.core import RuntimeConfig
 from reactor_runtime.http import EgressRoutes, SessionRoutes
-from reactor_runtime.http.routes import _stream_events
+from reactor_runtime.http.routes import _resume_from, _stream_events
 from reactor_runtime.runner.runner import SESSION_ID, Runner
 
 
@@ -149,3 +149,13 @@ async def test_events_replays_the_backlog_as_sse(
         assert body["to"] == "ready"
     finally:
         await stream.aclose()
+
+
+def test_resume_from_reads_a_numeric_last_event_id() -> None:
+    assert _resume_from("7") == 7
+
+
+def test_resume_from_ignores_a_missing_or_non_numeric_header() -> None:
+    assert _resume_from(None) is None
+    assert _resume_from("") is None
+    assert _resume_from("not-a-number") is None
