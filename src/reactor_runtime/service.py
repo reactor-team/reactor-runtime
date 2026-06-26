@@ -68,12 +68,21 @@ class Service:
             await self._shutdown.wait()
             logger.info("shutdown requested; draining")
         finally:
+            # Shutdown is best-effort: a component that fails to drain or stop
+            # must not abort the wind-down of the rest, or this supervision tree
+            # would leak exactly the resources it exists to release.
             for component in reversed(started):
                 logger.info("draining component", component=component.name)
-                await component.drain()
+                try:
+                    await component.drain()
+                except Exception:
+                    logger.exception("component failed to drain", component=component.name)
             for component in reversed(started):
                 logger.info("stopping component", component=component.name)
-                await component.stop()
+                try:
+                    await component.stop()
+                except Exception:
+                    logger.exception("component failed to stop", component=component.name)
             logger.info("runtime stopped")
 
     def request_shutdown(self) -> None:
