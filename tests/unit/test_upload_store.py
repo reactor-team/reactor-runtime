@@ -74,3 +74,25 @@ async def test_clear_drops_every_slot() -> None:
 
     with pytest.raises(UnknownUploadError):
         await store.fetch(upload_id)
+
+
+def test_expected_size_returns_the_declared_size() -> None:
+    store = UploadStore()
+    upload_id = store.create_slot("cat.png", "image/png", 4)
+
+    assert store.expected_size(upload_id) == 4
+
+
+def test_expected_size_rejects_an_unknown_slot() -> None:
+    store = UploadStore()
+    with pytest.raises(UnknownUploadError):
+        store.expected_size("nope")
+
+
+def test_expected_size_rejects_an_already_completed_slot() -> None:
+    store = UploadStore()
+    upload_id = store.create_slot("cat.png", "image/png", 4)
+    store.put(upload_id, b"\x89PNG")
+
+    with pytest.raises(UploadAlreadyCompleteError):
+        store.expected_size(upload_id)

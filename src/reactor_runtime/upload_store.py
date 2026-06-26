@@ -98,6 +98,30 @@ class UploadStore:
         )
         return upload_id
 
+    def expected_size(self, upload_id: UploadId) -> int:
+        """Return the exact byte count a reserved slot's write must match.
+
+        Lets an ingress reject a write whose declared length is wrong before it
+        reads the body, rather than buffering the bytes only to fail them in
+        :meth:`put`.
+
+        Args:
+            upload_id: The slot's id, from :meth:`create_slot`.
+
+        Returns:
+            The byte count the slot was created with.
+
+        Raises:
+            UnknownUploadError: If no slot exists for *upload_id*.
+            UploadAlreadyCompleteError: If the slot already holds bytes.
+        """
+        slot = self._slots.get(upload_id)
+        if slot is None:
+            raise UnknownUploadError(upload_id)
+        if slot.data is not None:
+            raise UploadAlreadyCompleteError(upload_id)
+        return slot.size
+
     def put(self, upload_id: UploadId, data: bytes) -> None:
         """Store the bytes for a previously reserved slot.
 

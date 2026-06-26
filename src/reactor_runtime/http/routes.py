@@ -129,6 +129,20 @@ class UploadRoutes:
 
         @app.put("/uploads/{upload_id}")
         async def put_upload(upload_id: str, request: Request) -> Response:
+            # The slot knows the exact byte count it expects, so a write whose
+            # declared length is wrong is rejected before the body is read —
+            # otherwise an oversized payload is buffered whole only to fail.
+            try:
+                expected = runner.uploads.expected_size(upload_id)
+            except UnknownUploadError:
+                raise HTTPException(status_code=404, detail="Upload not found") from None
+            except UploadAlreadyCompleteError:
+                raise HTTPException(status_code=409, detail="Upload already completed") from None
+            declared = request.headers.get("content-length")
+            if declared is not None and declared.isdigit() and int(declared) != expected:
+                raise HTTPException(
+                    status_code=400, detail=f"expected {expected} bytes, got {declared}"
+                )
             body = await request.body()
             try:
                 runner.uploads.put(upload_id, body)

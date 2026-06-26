@@ -253,6 +253,24 @@ async def test_put_upload_with_a_size_mismatch_is_rejected(
     assert response.status_code == 400
 
 
+async def test_put_upload_rejects_an_oversized_content_length(
+    client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, _ = client
+    await http_client.post("/start_session", json={})
+    created = await http_client.post(
+        f"/sessions/{SESSION_ID}/uploads",
+        json={"name": "cat.png", "size": 4, "mime_type": "image/png"},
+    )
+    upload_id = created.json()["presigned_id"]
+
+    # The body's Content-Length (18) does not match the slot's declared size (4),
+    # so the write is rejected from the header before the body is buffered.
+    response = await http_client.put(f"/uploads/{upload_id}", content=b"way-too-many-bytes")
+
+    assert response.status_code == 400
+
+
 async def test_events_replays_the_backlog_as_sse(
     client: tuple[httpx.AsyncClient, Runner],
 ) -> None:
