@@ -69,6 +69,9 @@ class FakeRunner:
     def unpublish_track(self, conn_id: ConnId, name: str) -> None:
         pass
 
+    def file_uploaded(self, conn_id: ConnId, upload_id: str) -> None:
+        pass
+
     def schema_requested(self, conn_id: ConnId, request_id: str) -> None:
         pass
 

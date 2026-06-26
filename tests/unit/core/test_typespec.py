@@ -135,7 +135,7 @@ def test_optional_accepts_none() -> None:
 def test_upload_accepts_reference_or_instance() -> None:
     spec = TypeSpec.of(UploadedFile)
     assert spec.check({"upload_id": "u-1"}) is None
-    assert spec.check(UploadedFile(upload_id="u", name="n", mime_type="t", data=b"")) is None
+    assert spec.check(UploadedFile(name="n", mime_type="t", data=b"")) is None
     assert spec.check({"name": "x"}) is not None
 
 

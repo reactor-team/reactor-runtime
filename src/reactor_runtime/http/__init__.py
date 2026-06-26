@@ -7,11 +7,12 @@ lives here: the surface is a documented HTTP contract a standalone caller drives
 directly.
 """
 
-from reactor_runtime.http.routes import EgressRoutes, SessionRoutes
+from reactor_runtime.http.routes import EgressRoutes, SessionRoutes, UploadRoutes
 from reactor_runtime.http.server import HttpServer
 
 __all__ = [
     "EgressRoutes",
     "HttpServer",
     "SessionRoutes",
+    "UploadRoutes",
 ]

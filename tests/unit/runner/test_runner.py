@@ -5,7 +5,17 @@ from typing import Any
 
 import pytest
 
-from reactor_runtime import InputField, ModelMessage, Output, ReactorModel, Video, event, protocol
+from reactor_runtime import (
+    InputField,
+    ModelMessage,
+    Output,
+    ReactorModel,
+    UploadedFile,
+    Video,
+    event,
+    file_uploaded,
+    protocol,
+)
 from reactor_runtime.core import (
     ClientConnected,
     ClientDisconnected,
@@ -13,6 +23,7 @@ from reactor_runtime.core import (
     ConnId,
     EndReason,
     ErrorEvent,
+    FileUploaded,
     HealthStatus,
     InboundCommandEvent,
     MediaBundle,
@@ -23,6 +34,7 @@ from reactor_runtime.core import (
     SessionState,
     TransitionEvent,
 )
+from reactor_runtime.interface.internal.bridge import CommandOutcome
 from reactor_runtime.interface.internal.reactor_core import AddressedSink, BroadcastSink
 from reactor_runtime.message_gateway import InboundCommand
 from reactor_runtime.protocol.common import struct_to_dict
@@ -32,6 +44,7 @@ from reactor_runtime.transport.router import (
     SessionNotRunningError,
     UnknownSessionError,
 )
+from reactor_runtime.upload_store import UnknownUploadError
 from reactor_wire.v1 import control_pb2, data_pb2
 
 DATA = protocol.Channel.DATA
@@ -62,6 +75,12 @@ class FakeModel(ReactorModel):
 
     @event(name="set_mode")
     async def set_mode(self, mode: str = InputField(min_length=1)) -> None: ...
+
+    @event(name="set_image")
+    async def set_image(self, image: UploadedFile) -> None: ...
+
+    @file_uploaded
+    def on_file(self, uploaded_file: UploadedFile) -> None: ...
 
     def load(self, config_path: Path | None) -> None:
         self.events.append("load")
@@ -617,6 +636,121 @@ async def test_init_failure_requests_shutdown(monkeypatch: pytest.MonkeyPatch) -
 
     assert runner._sm.current_state is SessionState.TERMINATED
     assert called == [True]
+
+
+# --- file uploads --------------------------------------------------------
+
+
+class PlainModel(ReactorModel):
+    """A model with no upload hook, to prove file_uploaded is gated on one."""
+
+    output: FakeOut
+
+    def load(self, config_path: Path | None) -> None: ...
+
+    async def run(self) -> None:
+        await asyncio.sleep(60)
+
+
+async def test_command_uploads_are_resolved_before_submit(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started_runner.start_session({})
+    upload_id = started_runner.uploads.create_slot("cat.png", "image/png", 4)
+    started_runner.uploads.put(upload_id, b"\x89PNG")
+    submitted: list[tuple[str, dict[str, Any]]] = []
+
+    async def fake_submit(name: str, args: dict[str, Any], **kwargs: Any) -> CommandOutcome:
+        submitted.append((name, args))
+        return CommandOutcome.accept()
+
+    assert started_runner._bridge is not None
+    monkeypatch.setattr(started_runner._bridge, "submit_command", fake_submit)
+
+    command = InboundCommand(
+        name="set_image",
+        args={},
+        uploads={"image": upload_id},
+        conn_id=ConnId(1),
+        request_id="r1",
+    )
+    await started_runner._submit_command(command)
+
+    assert submitted[0][0] == "set_image"
+    assert submitted[0][1]["image"] == UploadedFile(
+        name="cat.png", mime_type="image/png", data=b"\x89PNG"
+    )
+
+
+async def test_command_with_an_unresolved_upload_is_dropped(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started_runner.start_session({})
+    submitted: list[str] = []
+
+    async def fake_submit(name: str, args: dict[str, Any], **kwargs: Any) -> CommandOutcome:
+        submitted.append(name)
+        return CommandOutcome.accept()
+
+    assert started_runner._bridge is not None
+    monkeypatch.setattr(started_runner._bridge, "submit_command", fake_submit)
+
+    command = InboundCommand(
+        name="set_image",
+        args={},
+        uploads={"image": "missing"},
+        conn_id=ConnId(1),
+        request_id="r1",
+    )
+    await started_runner._submit_command(command)
+
+    assert submitted == []
+    errors = [e for e in _egress(started_runner) if isinstance(e, ErrorEvent)]
+    assert len(errors) == 1
+    assert "set_image" in errors[0].message
+
+
+async def test_file_uploaded_dispatches_when_a_hook_exists(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = _record_reactor_events(started_runner, monkeypatch)
+    upload_id = started_runner.uploads.create_slot("cat.png", "image/png", 4)
+    started_runner.uploads.put(upload_id, b"\x89PNG")
+
+    started_runner.file_uploaded(ConnId(1), upload_id)
+    await asyncio.sleep(0.01)
+
+    uploaded = [e for e in events if isinstance(e, FileUploaded)]
+    assert len(uploaded) == 1
+    assert uploaded[0].file == UploadedFile(name="cat.png", mime_type="image/png", data=b"\x89PNG")
+    assert uploaded[0].conn_id == ConnId(1)
+
+
+async def test_file_uploaded_is_ignored_without_a_hook(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: PlainModel)
+    runner = _runner()
+    await runner.start()
+    try:
+        events = _record_reactor_events(runner, monkeypatch)
+        upload_id = runner.uploads.create_slot("cat.png", "image/png", 4)
+        runner.uploads.put(upload_id, b"\x89PNG")
+        runner.file_uploaded(ConnId(1), upload_id)
+        await asyncio.sleep(0.01)
+        assert not [e for e in events if isinstance(e, FileUploaded)]
+    finally:
+        await runner.stop()
+
+
+async def test_upload_store_is_cleared_on_session_stop(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    upload_id = started_runner.uploads.create_slot("a.bin", "application/octet-stream", 2)
+    started_runner.uploads.put(upload_id, b"hi")
+
+    started_runner.stop_session()
+    await asyncio.sleep(0.01)
+
+    with pytest.raises(UnknownUploadError):
+        await started_runner.uploads.fetch(upload_id)
 
 
 async def test_transitions_are_logged(

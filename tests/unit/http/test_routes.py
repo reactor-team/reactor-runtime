@@ -9,7 +9,7 @@ from fastapi import FastAPI
 
 from reactor_runtime import InputField, Output, ReactorModel, Video, event
 from reactor_runtime.core import RuntimeConfig
-from reactor_runtime.http import EgressRoutes, SessionRoutes
+from reactor_runtime.http import EgressRoutes, SessionRoutes, UploadRoutes
 from reactor_runtime.http.routes import _resume_from, _stream_events
 from reactor_runtime.runner.runner import SESSION_ID, Runner
 
@@ -36,6 +36,7 @@ def _app(runner: Runner) -> FastAPI:
     app = FastAPI()
     SessionRoutes(runner).mount(app)
     EgressRoutes(runner).mount(app)
+    UploadRoutes(runner).mount(app)
     return app
 
 
@@ -145,6 +146,111 @@ async def test_health_is_ok_once_the_model_is_up(
 
     assert response.status_code == 200
     assert response.json()["status"] == "healthy"
+
+
+async def test_create_upload_allocates_a_slot(
+    client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, _ = client
+    await http_client.post("/start_session", json={})
+
+    response = await http_client.post(
+        f"/sessions/{SESSION_ID}/uploads",
+        json={"name": "cat.png", "size": 4, "mime_type": "image/png"},
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    upload_id = body["presigned_id"]
+    assert upload_id
+    assert body["presigned_url"].endswith(f"/uploads/{upload_id}")
+    assert body["path"] == f"sessions/{SESSION_ID}/uploads/{upload_id}/cat.png"
+
+
+async def test_create_upload_rejects_an_unknown_sid(
+    client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, _ = client
+    await http_client.post("/start_session", json={})
+
+    response = await http_client.post(
+        "/sessions/not-the-session/uploads",
+        json={"name": "cat.png", "size": 4, "mime_type": "image/png"},
+    )
+
+    assert response.status_code == 404
+
+
+async def test_create_upload_rejects_a_non_positive_size(
+    client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, _ = client
+    await http_client.post("/start_session", json={})
+
+    response = await http_client.post(
+        f"/sessions/{SESSION_ID}/uploads",
+        json={"name": "cat.png", "size": 0, "mime_type": "image/png"},
+    )
+
+    assert response.status_code == 400
+
+
+async def test_put_upload_stores_the_bytes(
+    client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, runner = client
+    await http_client.post("/start_session", json={})
+    created = await http_client.post(
+        f"/sessions/{SESSION_ID}/uploads",
+        json={"name": "cat.png", "size": 4, "mime_type": "image/png"},
+    )
+    upload_id = created.json()["presigned_id"]
+
+    response = await http_client.put(f"/uploads/{upload_id}", content=b"\x89PNG")
+
+    assert response.status_code == 200
+    assert (await runner.uploads.fetch(upload_id)).data == b"\x89PNG"
+
+
+async def test_put_upload_to_an_unknown_slot_is_not_found(
+    client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, _ = client
+    response = await http_client.put("/uploads/nope", content=b"data")
+    assert response.status_code == 404
+
+
+async def test_put_upload_twice_conflicts(
+    client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, _ = client
+    await http_client.post("/start_session", json={})
+    created = await http_client.post(
+        f"/sessions/{SESSION_ID}/uploads",
+        json={"name": "cat.png", "size": 4, "mime_type": "image/png"},
+    )
+    upload_id = created.json()["presigned_id"]
+    await http_client.put(f"/uploads/{upload_id}", content=b"\x89PNG")
+
+    response = await http_client.put(f"/uploads/{upload_id}", content=b"\x89PNG")
+
+    assert response.status_code == 409
+
+
+async def test_put_upload_with_a_size_mismatch_is_rejected(
+    client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, _ = client
+    await http_client.post("/start_session", json={})
+    created = await http_client.post(
+        f"/sessions/{SESSION_ID}/uploads",
+        json={"name": "cat.png", "size": 4, "mime_type": "image/png"},
+    )
+    upload_id = created.json()["presigned_id"]
+
+    response = await http_client.put(f"/uploads/{upload_id}", content=b"xx")
+
+    assert response.status_code == 400
 
 
 async def test_events_replays_the_backlog_as_sse(

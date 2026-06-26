@@ -140,8 +140,10 @@ class MessageGateway:
         A ping marks liveness; the track verbs cross to the sink for the runner
         to act on — resume/pause gate one connection's outbound streams, and
         publish/unpublish drive the cross-connection publisher arbitration, with
-        the publish request carrying its correlation id for the reply. Anything
-        else decodes cleanly but has no handler here yet.
+        the publish request carrying its correlation id for the reply. A
+        file-uploaded notification crosses with the id of the uploaded slot for
+        the runner to resolve. Anything else decodes cleanly but has no handler
+        here yet.
         """
         which = message.WhichOneof("payload")
         if which == "ping":
@@ -154,6 +156,8 @@ class MessageGateway:
             self._sink.publish_requested(conn_id, message.publish_track.name, message.request_id)
         elif which == "unpublish_track":
             self._sink.unpublish_track(conn_id, message.unpublish_track.name)
+        elif which == "file_uploaded":
+            self._sink.file_uploaded(conn_id, message.file_uploaded.upload_id)
         elif which == "request_schema":
             self._sink.schema_requested(conn_id, message.request_id)
         else:

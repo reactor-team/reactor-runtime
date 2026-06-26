@@ -17,6 +17,7 @@ class FakeSink:
         self.published: list[tuple[ConnId, str, str]] = []
         self.unpublished: list[tuple[ConnId, str]] = []
         self.schema_requests: list[tuple[ConnId, str]] = []
+        self.uploads: list[tuple[ConnId, str]] = []
 
     def connection_opened(self, conn: Connection) -> None:
         pass
@@ -46,6 +47,9 @@ class FakeSink:
 
     def unpublish_track(self, conn_id: ConnId, name: str) -> None:
         self.unpublished.append((conn_id, name))
+
+    def file_uploaded(self, conn_id: ConnId, upload_id: str) -> None:
+        self.uploads.append((conn_id, upload_id))
 
     def schema_requested(self, conn_id: ConnId, request_id: str) -> None:
         self.schema_requests.append((conn_id, request_id))
@@ -208,6 +212,19 @@ async def test_resume_and_pause_notifications_route_to_the_sink() -> None:
     await gateway.handle(ConnId(4), pause, Channel.CONTROL, ProtocolVersion.V0)
     assert sink.resumed == [(ConnId(4), "main_video")]
     assert sink.paused == [(ConnId(4), "main_audio")]
+
+
+async def test_file_uploaded_notification_routes_to_the_sink() -> None:
+    gateway, sink, _ = _gateway()
+    channel, frame = V0Codec().encode(
+        control_pb2.ControlClientMessage(
+            file_uploaded=platform_pb2.FileUploaded(
+                upload_id="u-7", name="cat.png", mime_type="image/png", size=4
+            )
+        )
+    )
+    await gateway.handle(ConnId(2), frame, channel, ProtocolVersion.V0)
+    assert sink.uploads == [(ConnId(2), "u-7")]
 
 
 async def test_unpublish_notification_routes_to_the_sink() -> None:

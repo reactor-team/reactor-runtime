@@ -142,6 +142,15 @@ class ConnectionSink(Protocol):
     def unpublish_track(self, conn_id: ConnId, name: str) -> None:
         """Release an inbound track a connection had claimed."""
 
+    def file_uploaded(self, conn_id: ConnId, upload_id: str) -> None:
+        """Note a client's out-of-band file upload.
+
+        Fired when a client signals it has finished uploading a file outside any
+        command (the ``fileUploaded`` notification, carrying the id of the
+        uploaded slot). The runner fetches the stored bytes and hands the model
+        a file-uploaded reactor event; a model with no upload hook ignores it.
+        """
+
     def schema_requested(self, conn_id: ConnId, request_id: str) -> None:
         """Answer a client's request for the model schema.
 
