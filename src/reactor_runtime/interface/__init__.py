@@ -34,6 +34,7 @@ from reactor_runtime.interface.internal.input_buffer import (
     ReadMode,
 )
 from reactor_runtime.interface.model import ReactorModel
+from reactor_runtime.interface.pipeline import Idle, InputState, ReactorPipeline
 from reactor_runtime.interface.tracks import Audio, Input, Output, Track, Video
 
 __all__ = [
@@ -42,14 +43,17 @@ __all__ = [
     "ClientInfo",
     "Command",
     "FieldInfo",
+    "Idle",
     "Input",
     "InputBuffer",
     "InputField",
     "InputFrame",
+    "InputState",
     "MessageField",
     "ModelMessage",
     "Output",
     "ReactorModel",
+    "ReactorPipeline",
     "ReadMode",
     "Track",
     "UploadedFile",

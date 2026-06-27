@@ -14,14 +14,27 @@ Ground rule: the supported surface is what the **top-level package**
 re-exports. If a name is not importable from `reactor_runtime`, it is not part
 of the surface here — do not reach into submodules to find a replacement.
 
-## Your model is a `ReactorPipeline` — stop, wait
+## Your model is a `ReactorPipeline`
 
-If the model subclasses `ReactorPipeline` (a `load()` + `inference()` generator),
-or holds session state in an `InputState` with auto-generated `set_<field>`
-events, it cannot be ported yet: neither `ReactorPipeline` nor `InputState`
-exists in this runtime. Do not rewrite it into a `ReactorModel` to force it
-through — wait until those land. Only models already written as `ReactorModel`
-(a `run()` loop driving `emit()`, explicit `@event` handlers) port today.
+`ReactorPipeline`, `InputState`, and `Idle` are supported and re-exported from
+`reactor_runtime`. A pipeline ports as-is in shape: declare `state: MyState`
+(an `InputState` subclass), implement `load()` + an `inference()` generator
+(sync or async) that reads `self.state`, yields an `Output` per frame, and
+yields `Idle` (or `None`) to skip a turn. Public `InputState` fields still
+become `set_<field>` commands automatically; underscore-prefixed fields stay
+private; an `UploadedFile`-typed field is a public upload slot. A hand-written
+`@event` of the same `set_<field>` name overrides the generated one.
+
+Two breaks to clear when porting a pipeline:
+
+- **`load()` takes a config path, not a dict** — the same change as for any
+  model (see below).
+- **State is declared by annotation only.** Use `state: MyState`; the legacy
+  `state_class = MyState` fallback is gone.
+
+Two conveniences from older runtimes are deliberately absent: yielding a raw
+`np.ndarray` (yield a typed `Output` instead) and the headless `PipelineExecutor`
+step driver.
 
 ## Imports move to the package root
 
