@@ -24,6 +24,10 @@ Early development. The public API and wire protocol are not yet stable.
   formulae); on Debian/Ubuntu, the `gstreamer1.0-*`, `libnice`, and
   `gir1.2-gstreamer-1.0` packages. Without them, importing the transport or
   running its tests fails.
+- **`ffmpeg`** on `PATH`, when recording is enabled. The recorder shells out to
+  it to encode the model's output into the fMP4 segments `/clips` serves; a
+  runtime with recording turned off does not need it. Install it from Homebrew
+  (`ffmpeg`) or the `ffmpeg` package on Debian/Ubuntu.
 
 ## Development
 

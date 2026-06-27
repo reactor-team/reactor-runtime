@@ -1,0 +1,702 @@
+"""The local recorder.
+
+A standalone runtime records the model's output to local disk and serves the
+clips straight back over HTTP, with no object store in the loop. The recorder
+taps the model's :class:`~reactor_runtime.interface.internal.output_buffer.OutputBuffer`,
+encodes the frames into fMP4 HLS segments under a per-recording directory, and
+answers the clip-manifest math behind ``GET /clips``.
+
+A clip request resolves immediately to a marker range and a path-only playlist
+URL the client polls; the bytes for the boundary segment may still be in flight.
+Separately, once that boundary segment has actually landed on disk the recorder
+notifies an external consumer (the runner journals it on ``/events``), so a
+director learns a clip is genuinely fetchable rather than merely requested.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import math
+import queue
+import re
+import tempfile
+import threading
+import time
+import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlencode
+
+import numpy as np
+import numpy.typing as npt
+
+from reactor_runtime.core import MediaBundle, RecordingConfig, TrackKind
+from reactor_runtime.interface.internal.output_buffer import OutputBuffer
+from reactor_runtime.log import get_logger
+from reactor_runtime.recording.chunk_encoder import ChunkEncoder
+from reactor_runtime.recording.markers import MarkerBookkeeper
+
+logger = get_logger(__name__)
+
+_INIT_FILENAME = "init.mp4"
+# Written into a recording's directory once it is finished, so its final segment
+# (which has no successor to prove it closed) is recognised as fetchable.
+_COMPLETE_MARKER = ".complete"
+_HLS_MEDIA_TYPE = "application/vnd.apple.mpegurl"
+# A recording id is a lowercase UUID. Validating a URL path segment against this
+# shape before joining it onto the recordings root closes the path-traversal
+# vector on ``/clips`` and ``/clips/chunks/{id}/{file}``.
+_SESSION_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+# init plus the zero-padded fMP4 segments the encoder produces; anything else is
+# not a recording artifact.
+_CHUNK_FILENAME_RE = re.compile(r"^(init\.mp4|chunk_\d{5}\.m4s)$")
+
+_AudioArray = npt.NDArray[Any]
+_FeedItem = tuple[npt.NDArray[Any], _AudioArray | None]
+
+
+class RecorderError(Exception):
+    """Base for a clip request the recorder cannot serve."""
+
+
+class RecorderDisabledError(RecorderError):
+    """Recording is off, was never started, or the encoder crashed."""
+
+
+class NoMediaYetError(RecorderDisabledError):
+    """A clip was requested before the first real frame was recorded."""
+
+
+class ClipSessionGoneError(Exception):
+    """The addressed recording is unknown or has aged out (an HTTP 410)."""
+
+
+@dataclass(frozen=True)
+class ClipResult:
+    """The immediate, pollable outcome of a clip or recording request.
+
+    The recorder returns this without waiting for the boundary segment to close,
+    so ``end_marker`` may point inside a segment ffmpeg is still writing. The
+    client polls ``playlist_url`` until the manifest endpoint answers ``200``.
+
+    Attributes:
+        session_id: The recording id the clip belongs to.
+        kind: ``"snap"`` for a tail clip, ``"recording"`` for the whole session.
+        start_marker: Clip start, in seconds on the recording timeline.
+        end_marker: Clip end, in seconds on the recording timeline.
+        now_marker: The timeline position when the request was resolved.
+        predicted_ready_at_ms: Unix epoch in milliseconds when the boundary
+            segment is expected to be servable.
+        playlist_url: A path-only ``/clips?...`` URL the client absolutises.
+    """
+
+    session_id: str
+    kind: str
+    start_marker: float
+    end_marker: float
+    now_marker: float
+    predicted_ready_at_ms: int
+    playlist_url: str
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the clip as a plain dict for wire encoding and journalling."""
+        return {
+            "session_id": self.session_id,
+            "kind": self.kind,
+            "start_marker": self.start_marker,
+            "end_marker": self.end_marker,
+            "now_marker": self.now_marker,
+            "predicted_ready_at_ms": self.predicted_ready_at_ms,
+            "playlist_url": self.playlist_url,
+        }
+
+
+@dataclass(frozen=True)
+class ClipManifest:
+    """A ready HLS manifest body (an HTTP 200)."""
+
+    body: str
+    media_type: str = _HLS_MEDIA_TYPE
+
+
+@dataclass(frozen=True)
+class Pending:
+    """The boundary segment has not landed yet (an HTTP 202 with a retry hint)."""
+
+    retry_after: int = 2
+
+
+@dataclass(frozen=True)
+class Gone:
+    """The addressed recording is unknown or has aged out (an HTTP 410)."""
+
+
+ClipReadyCallback = Callable[[ClipResult], None]
+"""Notified once a requested clip's boundary segment is on disk."""
+
+
+class Recorder:
+    """Records one session's output and serves its clips from local disk.
+
+    Owned by the runner and constructed from the recording config. The runner
+    calls :meth:`start` on the session-start boundary and :meth:`stop` on close;
+    in between, the recorder taps the model's output buffer, encodes fMP4
+    segments, and answers :meth:`request_clip` / :meth:`request_recording` for
+    the wire and :meth:`manifest` / :meth:`chunk_path` for the ``/clips`` routes.
+
+    Recording is best-effort: an encoder failure disables the recorder for the
+    rest of the session and surfaces as a failed clip request, but never breaks
+    the media path it taps.
+    """
+
+    def __init__(
+        self,
+        config: RecordingConfig,
+        *,
+        on_clip_ready: ClipReadyCallback | None = None,
+        keepalive_interval: float = 1.0,
+    ) -> None:
+        """Bind the recorder to its config and the clip-ready notification.
+
+        Args:
+            config: The recorder's tunables, including the directory clips are
+                written under.
+            on_clip_ready: Called when a requested clip's boundary segment lands
+                on disk, on a recorder-owned thread.
+            keepalive_interval: Seconds between idle gap-fill frames fed to the
+                encoder so a paused model still advances the recording timeline.
+        """
+        self._config = config
+        self._on_clip_ready = on_clip_ready
+        self._keepalive_interval = max(0.0, keepalive_interval)
+        # The recordings root is materialised on the first start, so a disabled
+        # recorder (the common case) never creates a directory.
+        self._root: Path | None = None
+
+        self._session_id: str | None = None
+        self._session_dir: Path | None = None
+        self._output_buffer: OutputBuffer | None = None
+        self._markers: MarkerBookkeeper | None = None
+        self._encoder: ChunkEncoder | None = None
+        self._video_track: str | None = None
+        self._audio_track: str | None = None
+        self._audio_sample_rate = 48_000
+        self._has_audio = False
+        self._started = False
+        self._disabled = False
+
+        self._feed_queue: queue.Queue[_FeedItem | None] = queue.Queue(maxsize=4)
+        self._feed_thread: threading.Thread | None = None
+        self._feed_stop = threading.Event()
+        self._watch_thread: threading.Thread | None = None
+        self._watch_stop = threading.Event()
+
+        self._pending: list[tuple[int, ClipResult]] = []
+        self._pending_lock = threading.Lock()
+
+        self._dropped_frames = 0
+        self._last_fed_t = 0.0
+        self._last_video_wall_t = 0.0
+        self._audio_jitter_buf: list[_AudioArray] = []
+        self._audio_buffered_samples = 0
+
+    @property
+    def enabled(self) -> bool:
+        """Whether recording is turned on by config."""
+        return self._config.enabled
+
+    @property
+    def disabled(self) -> bool:
+        """Whether the recorder cannot currently serve a clip request."""
+        return (
+            self._disabled
+            or not self._started
+            or (self._encoder is not None and self._encoder.failed)
+        )
+
+    # -- lifecycle ------------------------------------------------------------
+
+    def start(self, session_id: str, output_buffer: OutputBuffer) -> None:
+        """Begin recording the session's output.
+
+        Mints a fresh recording id (independent of the process's fixed session
+        id, so sequential sessions never overwrite each other's clips), opens its
+        directory, taps *output_buffer*, and starts the feed and watch workers.
+        A no-op when recording is disabled or already running.
+
+        Args:
+            session_id: The runtime session id, kept for log correlation.
+            output_buffer: The model's emission buffer to tap for frames.
+        """
+        if not self._config.enabled or self._started:
+            return
+        self._reset_session_state()
+        if self._root is None:
+            self._root = (
+                Path(self._config.recording_dir)
+                if self._config.recording_dir
+                else Path(tempfile.mkdtemp(prefix="reactor-recordings-"))
+            )
+            self._root.mkdir(parents=True, exist_ok=True)
+        self._session_id = str(uuid.uuid4())
+        self._session_dir = self._root / self._session_id
+        self._session_dir.mkdir(parents=True, exist_ok=True)
+        self._markers = MarkerBookkeeper(anchor_at_first_frame=self._config.skip_leading_black)
+        self._output_buffer = output_buffer
+        self._feed_stop.clear()
+        self._watch_stop.clear()
+        self._feed_thread = threading.Thread(
+            target=self._feed_loop, name="recording-feed", daemon=True
+        )
+        self._watch_thread = threading.Thread(
+            target=self._watch_loop, name="recording-watch", daemon=True
+        )
+        self._feed_thread.start()
+        self._watch_thread.start()
+        self._started = True
+        output_buffer.add_callback(self._on_bundle)
+        logger.info(
+            "recorder started",
+            recording_id=self._session_id,
+            session_id=session_id,
+            dir=str(self._session_dir),
+        )
+
+    def stop(self) -> None:
+        """Stop recording, finalise the directory, and release the encoder.
+
+        Blocks while the encoder shuts down and the workers join, so the runner
+        runs it off the event loop. The recording directory is left in place so
+        its clips stay fetchable after the session ends.
+        """
+        if not self._started:
+            return
+        self._disabled = True
+        if self._output_buffer is not None:
+            self._output_buffer.remove_callback(self._on_bundle)
+        self._feed_stop.set()
+        with contextlib.suppress(queue.Full):
+            self._feed_queue.put_nowait(None)
+        feed_thread = self._feed_thread
+        self._feed_thread = None
+        if self._encoder is not None:
+            self._encoder.stop()
+        if feed_thread is not None:
+            feed_thread.join(timeout=2.0)
+        # Mark the recording finished so its final segment is servable, then fire
+        # any clip whose boundary has now landed before the watcher winds down.
+        if self._session_dir is not None:
+            try:
+                (self._session_dir / _COMPLETE_MARKER).write_text("")
+            except OSError:
+                logger.exception("failed to write recording completion marker")
+        self._fire_ready_clips()
+        self._watch_stop.set()
+        watch_thread = self._watch_thread
+        self._watch_thread = None
+        if watch_thread is not None:
+            watch_thread.join(timeout=2.0)
+        self._started = False
+        logger.info(
+            "recorder stopped",
+            recording_id=self._session_id,
+            dropped=self._dropped_frames,
+        )
+
+    def _reset_session_state(self) -> None:
+        """Clear per-session state so a restart never inherits the last session."""
+        self._encoder = None
+        self._disabled = False
+        self._video_track = None
+        self._audio_track = None
+        self._audio_sample_rate = 48_000
+        self._has_audio = False
+        self._dropped_frames = 0
+        self._last_fed_t = 0.0
+        self._last_video_wall_t = 0.0
+        self._audio_jitter_buf = []
+        self._audio_buffered_samples = 0
+        with self._pending_lock:
+            self._pending = []
+        self._drain_feed_queue()
+
+    # -- output-buffer tap ----------------------------------------------------
+
+    def _on_bundle(
+        self, bundle: MediaBundle, duplicate: bool, is_fresh_black: bool = False
+    ) -> None:
+        """Enqueue a bundle for the feed worker; non-blocking.
+
+        The synthesised black frame at a session boundary (*is_fresh_black*) is
+        not model output and is skipped. Gap-fill duplicates before the first
+        real frame are dropped, and idle duplicates afterwards are throttled to
+        the keepalive interval so a paused model does not flood the encoder.
+        """
+        if self.disabled:
+            return
+        if is_fresh_black:
+            return
+        markers = self._markers
+        if markers is None:
+            return
+        now = time.monotonic()
+        if duplicate:
+            # The encoder is only ever spawned from a real frame (which carries
+            # audio); a gap-fill is video-only, so a leading duplicate is dropped
+            # rather than locking the recording to a silent track.
+            if self._encoder is None:
+                return
+            if self._config.skip_leading_black and not markers.recording_started:
+                return
+            if (
+                self._keepalive_interval <= 0.0
+                or (now - self._last_fed_t) < self._keepalive_interval
+            ):
+                return
+        elif self._encoder is None:
+            self._build_encoder(bundle)
+            if self._encoder is None:
+                return
+        video_data = self._video_frame(bundle)
+        if video_data is None:
+            return
+        audio_data: _AudioArray | None = None
+        if self._has_audio and self._audio_track is not None:
+            audio_td = bundle.get_track(self._audio_track)
+            if audio_td is not None:
+                audio_data = audio_td.data
+        try:
+            self._feed_queue.put_nowait((video_data, audio_data))
+        except queue.Full:
+            self._dropped_frames += 1
+            if self._dropped_frames == 1 or self._dropped_frames % 300 == 0:
+                logger.warning(
+                    "recorder feed queue full; dropping a frame to keep the wire unblocked",
+                    dropped_total=self._dropped_frames,
+                )
+            return
+        if not duplicate:
+            markers.mark_first_real_frame()
+        self._last_fed_t = now
+
+    def _video_frame(self, bundle: MediaBundle) -> npt.NDArray[Any] | None:
+        """Return the configured video track's frame, or the first video track."""
+        if self._video_track is not None:
+            track = bundle.get_track(self._video_track)
+            if track is not None:
+                return track.data
+        videos = bundle.get_tracks_by_kind(TrackKind.VIDEO)
+        return videos[0].data if videos else None
+
+    def _build_encoder(self, bundle: MediaBundle) -> None:
+        """Resolve the tracks to record and spawn the encoder from a real frame."""
+        video_name = self._config.video_track
+        if video_name is None or bundle.get_track(video_name) is None:
+            videos = bundle.get_tracks_by_kind(TrackKind.VIDEO)
+            if not videos:
+                logger.warning("recording enabled but the model emits no video; disabling recorder")
+                self._disabled = True
+                return
+            video_name = videos[0].info.name
+        self._video_track = video_name
+
+        audio_name = self._config.audio_track
+        audio_td = bundle.get_track(audio_name) if audio_name is not None else None
+        if audio_name is None:
+            audios = bundle.get_tracks_by_kind(TrackKind.AUDIO)
+            audio_td = audios[0] if audios else None
+            audio_name = audio_td.info.name if audio_td is not None else None
+        self._audio_track = audio_name
+        self._has_audio = audio_name is not None and audio_td is not None
+        if self._has_audio and audio_td is not None and audio_td.info.rate > 0:
+            self._audio_sample_rate = int(audio_td.info.rate)
+
+        assert self._session_dir is not None
+        self._encoder = ChunkEncoder(
+            output_dir=self._session_dir,
+            config=self._config,
+            has_audio=self._has_audio,
+            audio_sample_rate=self._audio_sample_rate,
+        )
+
+    def _feed_loop(self) -> None:
+        """Drain the feed queue into the encoder, disabling on encoder failure."""
+        while True:
+            if self._feed_stop.is_set() and self._feed_queue.empty():
+                return
+            try:
+                item = self._feed_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if item is None:
+                return
+            encoder = self._encoder
+            if encoder is None:
+                continue
+            video, audio = item
+            now = time.monotonic()
+            dt = now - self._last_video_wall_t if self._last_video_wall_t > 0.0 else 1.0 / 30.0
+            self._last_video_wall_t = now
+            try:
+                encoder.feed_video(video)
+                if self._has_audio:
+                    target = max(0, round(self._audio_sample_rate * dt))
+                    chunk = self._next_audio_chunk(audio, target)
+                    if chunk is not None:
+                        encoder.feed_audio(chunk)
+            except Exception:
+                logger.exception("recorder encoder feed failed; disabling recording")
+                self._disabled = True
+                self._drain_feed_queue()
+                return
+
+    def _next_audio_chunk(self, model_audio: _AudioArray | None, target: int) -> _AudioArray | None:
+        """Produce exactly *target* samples, echoing model audio and padding silence.
+
+        *target* is ``sample_rate * dt`` for the accompanying video frame, so each
+        batch covers the same wall-clock interval as the frame and the audio DTS
+        tracks the video PTS. Surplus is buffered up to a one-second cap.
+        """
+        if target <= 0:
+            return None
+        if model_audio is not None and model_audio.size > 0:
+            flat = np.ascontiguousarray(model_audio, dtype=np.int16).reshape(-1)
+            self._audio_jitter_buf.append(flat)
+            self._audio_buffered_samples += int(flat.size)
+        cap = self._audio_sample_rate
+        while self._audio_buffered_samples > cap:
+            head = self._audio_jitter_buf[0]
+            drop = self._audio_buffered_samples - cap
+            if int(head.size) <= drop:
+                self._audio_jitter_buf.pop(0)
+                self._audio_buffered_samples -= int(head.size)
+            else:
+                self._audio_jitter_buf[0] = head[drop:]
+                self._audio_buffered_samples -= drop
+        out = np.zeros(target, dtype=np.int16)
+        filled = 0
+        while filled < target and self._audio_jitter_buf:
+            head = self._audio_jitter_buf[0]
+            take = min(int(head.size), target - filled)
+            out[filled : filled + take] = head[:take]
+            filled += take
+            if take == int(head.size):
+                self._audio_jitter_buf.pop(0)
+            else:
+                self._audio_jitter_buf[0] = head[take:]
+            self._audio_buffered_samples -= take
+        return out.reshape(1, -1)
+
+    def _drain_feed_queue(self) -> None:
+        """Discard every queued feed item."""
+        while True:
+            try:
+                self._feed_queue.get_nowait()
+            except queue.Empty:
+                return
+
+    # -- clip / recording requests --------------------------------------------
+
+    def request_clip(self, duration_seconds: float) -> ClipResult:
+        """Resolve a snap-clip of the last *duration_seconds* of output.
+
+        Returns immediately with ``end_marker`` at the current timeline position,
+        so the boundary segment may still be in flight; the client polls
+        ``/clips`` until it lands.
+
+        Raises:
+            RecorderDisabledError: If recording is off or the encoder crashed.
+            NoMediaYetError: If no real frame has been recorded yet.
+            ValueError: If *duration_seconds* is not positive.
+        """
+        markers = self._require_started_markers()
+        capped = min(float(duration_seconds), float(self._config.clip_max_seconds))
+        if capped <= 0:
+            raise ValueError("duration_seconds must be positive")
+        start, end = markers.compute_clip_range(capped)
+        return self._build_result("snap", start, end)
+
+    def request_recording(self) -> ClipResult:
+        """Resolve a request for the whole session so far.
+
+        Same promise-then-poll semantics as :meth:`request_clip`.
+
+        Raises:
+            RecorderDisabledError: If recording is off or the encoder crashed.
+            NoMediaYetError: If no real frame has been recorded yet.
+        """
+        markers = self._require_started_markers()
+        start, end = markers.compute_recording_range()
+        return self._build_result("recording", start, end)
+
+    def _require_started_markers(self) -> MarkerBookkeeper:
+        """Return the live marker bookkeeper, or raise why a clip cannot be served."""
+        if self.disabled:
+            raise RecorderDisabledError("recorder disabled or encoder crashed")
+        markers = self._markers
+        if markers is None or not markers.recording_started:
+            raise NoMediaYetError("no media generated yet")
+        return markers
+
+    def _build_result(self, kind: str, start: float, end: float) -> ClipResult:
+        """Assemble a :class:`ClipResult` and register its boundary for readiness."""
+        markers = self._markers
+        assert markers is not None
+        assert self._session_id is not None
+        now = markers.now_marker()
+        cs = float(self._config.chunk_seconds)
+        wait_s = max(0.0, (math.floor(now / cs) + 1) * cs - now) if cs > 0 else 0.0
+        predicted_ready_at_ms = round((time.time() + wait_s) * 1000)
+        query = urlencode(
+            {"session_id": self._session_id, "start": f"{start:.3f}", "end": f"{end:.3f}"}
+        )
+        clip = ClipResult(
+            session_id=self._session_id,
+            kind=kind,
+            start_marker=start,
+            end_marker=end,
+            now_marker=now,
+            predicted_ready_at_ms=predicted_ready_at_ms,
+            playlist_url=f"/clips?{query}",
+        )
+        with self._pending_lock:
+            self._pending.append((_boundary_index(end, self._config.chunk_seconds), clip))
+        return clip
+
+    # -- clip-ready notification ----------------------------------------------
+
+    def _watch_loop(self) -> None:
+        """Poll for landed boundary segments and notify ready clips."""
+        while not self._watch_stop.is_set():
+            self._fire_ready_clips()
+            self._watch_stop.wait(0.1)
+
+    def _fire_ready_clips(self) -> None:
+        """Notify the consumer for every pending clip whose boundary has landed."""
+        session_dir = self._session_dir
+        if session_dir is None:
+            return
+        with self._pending_lock:
+            pending = list(self._pending)
+        ready = [entry for entry in pending if self._boundary_ready(session_dir, entry[0])]
+        if not ready:
+            return
+        with self._pending_lock:
+            for entry in ready:
+                if entry in self._pending:
+                    self._pending.remove(entry)
+        callback = self._on_clip_ready
+        if callback is None:
+            return
+        for _, clip in ready:
+            try:
+                callback(clip)
+            except Exception:
+                logger.exception("clip-ready callback raised")
+
+    # -- HTTP serving ---------------------------------------------------------
+
+    def manifest(self, session_id: str, start: float, end: float) -> ClipManifest | Pending | Gone:
+        """Resolve a marker range into an HLS manifest, a pending hint, or gone.
+
+        Args:
+            session_id: The recording id the clip belongs to.
+            start: Clip start in seconds on the recording timeline.
+            end: Clip end in seconds on the recording timeline.
+
+        Returns:
+            A :class:`ClipManifest` once the boundary segment is on disk, a
+            :class:`Pending` while it is still in flight, or :class:`Gone` when
+            the recording is unknown or aged out.
+
+        Raises:
+            ValueError: If the marker range is malformed.
+        """
+        if self._root is None or not _SESSION_ID_RE.match(session_id):
+            return Gone()
+        if not (math.isfinite(start) and start >= 0):
+            raise ValueError("start must be a finite non-negative number")
+        if not (math.isfinite(end) and end > start):
+            raise ValueError("end must be a finite number greater than start")
+        cs = self._config.chunk_seconds
+        if cs <= 0:
+            return Gone()
+        session_dir = self._root / session_id
+        if not session_dir.is_dir():
+            return Gone()
+        chunk_start_idx = max(0, math.floor(start / cs))
+        chunk_end_idx = max(chunk_start_idx, math.ceil(end / cs) - 1)
+        if not self._boundary_ready(session_dir, chunk_end_idx):
+            return Pending()
+        lines = [
+            "#EXTM3U",
+            "#EXT-X-VERSION:7",
+            f"#EXT-X-TARGETDURATION:{cs}",
+            "#EXT-X-PLAYLIST-TYPE:VOD",
+            f'#EXT-X-MAP:URI="/clips/chunks/{session_id}/{_INIT_FILENAME}"',
+        ]
+        for idx in range(chunk_start_idx, chunk_end_idx + 1):
+            lines.append(f"#EXTINF:{cs:.3f},")
+            lines.append(f"/clips/chunks/{session_id}/chunk_{idx:05d}.m4s")
+        lines.append("#EXT-X-ENDLIST")
+        return ClipManifest(body="\n".join(lines) + "\n")
+
+    def chunk_path(self, session_id: str, filename: str) -> Path | None:
+        """Resolve a chunk URL to the file on disk that backs it.
+
+        Args:
+            session_id: The recording id from the URL path.
+            filename: The segment file name from the URL path.
+
+        Returns:
+            The path to serve, or ``None`` when the file name is not a recording
+            artifact or the segment does not exist.
+
+        Raises:
+            ClipSessionGoneError: If the recording id is malformed or unknown.
+        """
+        if self._root is None or not _SESSION_ID_RE.match(session_id):
+            raise ClipSessionGoneError(session_id)
+        session_dir = self._root / session_id
+        if not session_dir.is_dir():
+            raise ClipSessionGoneError(session_id)
+        if not _CHUNK_FILENAME_RE.match(filename):
+            return None
+        path = session_dir / filename
+        return path if path.is_file() else None
+
+    def _boundary_ready(self, session_dir: Path, boundary_idx: int) -> bool:
+        """Return whether the boundary segment is on disk and closed."""
+        if not self._init_ready(session_dir):
+            return False
+        boundary = session_dir / f"chunk_{boundary_idx:05d}.m4s"
+        if not boundary.is_file():
+            return False
+        # A segment is closed once its successor exists (ffmpeg has rolled over)
+        # or the recording itself has finished.
+        successor = session_dir / f"chunk_{boundary_idx + 1:05d}.m4s"
+        return successor.is_file() or (session_dir / _COMPLETE_MARKER).is_file()
+
+    @staticmethod
+    def _init_ready(session_dir: Path) -> bool:
+        """Return whether the init segment carries its codec headers yet."""
+        init = session_dir / _INIT_FILENAME
+        if not init.is_file():
+            return False
+        try:
+            if init.stat().st_size > 0:
+                return True
+        except OSError:
+            return False
+        # ffmpeg creates init empty and flushes its headers with the first
+        # segment, so the first chunk appearing is the signal init is usable.
+        return (session_dir / "chunk_00000.m4s").is_file()
+
+
+def _boundary_index(end: float, chunk_seconds: int) -> int:
+    """Return the index of the segment that contains the clip's end marker."""
+    if chunk_seconds <= 0:
+        return 0
+    return max(0, math.ceil(end / chunk_seconds) - 1)

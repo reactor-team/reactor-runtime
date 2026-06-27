@@ -6,7 +6,7 @@ from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.protocol.common import dict_to_struct
 from reactor_runtime.protocol.v0.codec import V0Codec
 from reactor_runtime.protocol.v1.codec import V1Codec
-from reactor_wire.v1 import control_pb2, data_pb2, model_pb2, platform_pb2, track_pb2
+from reactor_wire.v1 import common_pb2, control_pb2, data_pb2, model_pb2, platform_pb2, track_pb2
 
 
 class FakeSink:
@@ -18,6 +18,8 @@ class FakeSink:
         self.unpublished: list[tuple[ConnId, str]] = []
         self.schema_requests: list[tuple[ConnId, str]] = []
         self.uploads: list[tuple[ConnId, str]] = []
+        self.clips: list[tuple[ConnId, float, str]] = []
+        self.recordings: list[tuple[ConnId, str]] = []
 
     def connection_opened(self, conn: Connection) -> None:
         pass
@@ -53,6 +55,12 @@ class FakeSink:
 
     def schema_requested(self, conn_id: ConnId, request_id: str) -> None:
         self.schema_requests.append((conn_id, request_id))
+
+    def clip_requested(self, conn_id: ConnId, duration_seconds: float, request_id: str) -> None:
+        self.clips.append((conn_id, duration_seconds, request_id))
+
+    def recording_requested(self, conn_id: ConnId, request_id: str) -> None:
+        self.recordings.append((conn_id, request_id))
 
     def connection_answered(self, conn_id: ConnId, answer: Mapping[str, str]) -> None:
         pass
@@ -117,11 +125,50 @@ async def test_upload_references_are_carried_unresolved() -> None:
 async def test_other_control_messages_are_not_routed() -> None:
     gateway, sink, received = _gateway()
     _, frame = V1Codec().encode(
-        control_pb2.ControlClientMessage(request_recording=platform_pb2.RequestRecording())
+        control_pb2.ControlClientMessage(error=common_pb2.Error(code="boom"))
     )
     await gateway.handle(ConnId(1), frame, Channel.CONTROL, ProtocolVersion.V1)
     assert sink.keepalives == []
     assert received == []
+
+
+async def test_request_clip_routes_with_its_correlation_id() -> None:
+    gateway, sink, _ = _gateway()
+    _, frame = V1Codec().encode(
+        control_pb2.ControlClientMessage(
+            request_id="ctrl_clip",
+            request_clip=platform_pb2.RequestClip(duration_seconds=30.0),
+        )
+    )
+    await gateway.handle(ConnId(8), frame, Channel.CONTROL, ProtocolVersion.V1)
+    assert sink.clips == [(ConnId(8), 30.0, "ctrl_clip")]
+
+
+async def test_request_recording_routes_with_its_correlation_id() -> None:
+    gateway, sink, _ = _gateway()
+    _, frame = V1Codec().encode(
+        control_pb2.ControlClientMessage(
+            request_id="ctrl_rec", request_recording=platform_pb2.RequestRecording()
+        )
+    )
+    await gateway.handle(ConnId(8), frame, Channel.CONTROL, ProtocolVersion.V1)
+    assert sink.recordings == [(ConnId(8), "ctrl_rec")]
+
+
+async def test_v0_clip_request_mints_a_correlation_id_off_the_data_channel() -> None:
+    gateway, sink, _ = _gateway()
+    # The shipped client sends clip requests on the data channel with no id and
+    # correlates by receipt order; the gateway mints one for the runtime side.
+    channel, frame = V0Codec().encode(
+        control_pb2.ControlClientMessage(
+            request_clip=platform_pb2.RequestClip(duration_seconds=5.0)
+        )
+    )
+    await gateway.handle(ConnId(9), frame, channel, ProtocolVersion.V0)
+    assert len(sink.clips) == 1
+    conn_id, duration, request_id = sink.clips[0]
+    assert (conn_id, duration) == (ConnId(9), 5.0)
+    assert request_id != ""
 
 
 async def test_request_schema_routes_with_its_correlation_id() -> None:

@@ -142,8 +142,10 @@ class MessageGateway:
         publish/unpublish drive the cross-connection publisher arbitration, with
         the publish request carrying its correlation id for the reply. A
         file-uploaded notification crosses with the id of the uploaded slot for
-        the runner to resolve. Anything else decodes cleanly but has no handler
-        here yet.
+        the runner to resolve. A clip or recording request crosses with a
+        correlation id — the client's when present, minted here when absent (the
+        shipped client correlates by receipt order) — so the reply can be
+        addressed back. Anything else decodes cleanly but has no handler here yet.
         """
         which = message.WhichOneof("payload")
         if which == "ping":
@@ -160,6 +162,14 @@ class MessageGateway:
             self._sink.file_uploaded(conn_id, message.file_uploaded.upload_id)
         elif which == "request_schema":
             self._sink.schema_requested(conn_id, message.request_id)
+        elif which == "request_clip":
+            self._sink.clip_requested(
+                conn_id,
+                message.request_clip.duration_seconds,
+                message.request_id or _new_request_id(),
+            )
+        elif which == "request_recording":
+            self._sink.recording_requested(conn_id, message.request_id or _new_request_id())
         else:
             logger.debug("MessageGateway received an unrouted control message: %s", which)
 

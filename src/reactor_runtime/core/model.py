@@ -300,13 +300,30 @@ class InboundCommandEvent:
 
 @dataclass(frozen=True)
 class ClipReadyEvent:
-    """A recorded clip is on disk and ready to fetch.
+    """A recorded clip's segments are on disk and ready to fetch.
+
+    Journalled once the clip's boundary segment has actually landed — distinct
+    from the immediate, still-uploading reply the requesting client receives — so
+    an external consumer learns a clip is genuinely fetchable from ``/clips``.
 
     Attributes:
-        clip_id: Identifier for the clip.
+        session_id: The recording id the clip belongs to.
+        kind: ``"snap"`` for a tail clip, ``"recording"`` for the whole session.
+        start_marker: Clip start, in seconds on the recording timeline.
+        end_marker: Clip end, in seconds on the recording timeline.
+        now_marker: The timeline position when the clip was requested.
+        predicted_ready_at_ms: Unix epoch in milliseconds the clip was estimated
+            to become servable.
+        playlist_url: A path-only ``/clips?...`` URL the consumer absolutises.
     """
 
-    clip_id: str
+    session_id: str
+    kind: str
+    start_marker: float
+    end_marker: float
+    now_marker: float
+    predicted_ready_at_ms: int
+    playlist_url: str
 
 
 @dataclass(frozen=True)

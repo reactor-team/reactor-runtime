@@ -83,6 +83,12 @@ class FakeSink:
     def schema_requested(self, conn_id: ConnId, request_id: str) -> None:
         pass
 
+    def clip_requested(self, conn_id: ConnId, duration_seconds: float, request_id: str) -> None:
+        pass
+
+    def recording_requested(self, conn_id: ConnId, request_id: str) -> None:
+        pass
+
     def connection_answered(self, conn_id: ConnId, answer: Mapping[str, str]) -> None:
         self.answers.append((conn_id, dict(answer)))
 

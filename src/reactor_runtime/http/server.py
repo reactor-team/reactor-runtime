@@ -16,7 +16,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from reactor_runtime.core import Health, HealthStatus, RuntimeConfig, ServiceComponent
-from reactor_runtime.http.routes import EgressRoutes, SessionRoutes, UploadRoutes
+from reactor_runtime.http.routes import (
+    EgressRoutes,
+    RecordingRoutes,
+    SessionRoutes,
+    UploadRoutes,
+)
 from reactor_runtime.log import get_logger
 from reactor_runtime.runner import Runner
 from reactor_runtime.transport.router import TransportRouter
@@ -72,6 +77,7 @@ class HttpServer(ServiceComponent):
         SessionRoutes(runner).mount(self._app)
         EgressRoutes(runner).mount(self._app)
         UploadRoutes(runner).mount(self._app)
+        RecordingRoutes(runner).mount(self._app)
         for transport in transports:
             transport.mount(self._app, runner)
         self._server: uvicorn.Server | None = None

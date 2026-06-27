@@ -76,9 +76,24 @@ def test_command_event() -> None:
 
 
 def test_clip_ready_event() -> None:
-    assert runner_event_to_dict(ClipReadyEvent("clip-1")) == {
+    event = ClipReadyEvent(
+        session_id="rec-1",
+        kind="snap",
+        start_marker=10.0,
+        end_marker=40.0,
+        now_marker=40.0,
+        predicted_ready_at_ms=1234,
+        playlist_url="/clips?session_id=rec-1&start=10.000&end=40.000",
+    )
+    assert runner_event_to_dict(event) == {
         "type": "clip_ready",
-        "clip_id": "clip-1",
+        "session_id": "rec-1",
+        "kind": "snap",
+        "start_marker": 10.0,
+        "end_marker": 40.0,
+        "now_marker": 40.0,
+        "predicted_ready_at_ms": 1234,
+        "playlist_url": "/clips?session_id=rec-1&start=10.000&end=40.000",
     }
 
 
