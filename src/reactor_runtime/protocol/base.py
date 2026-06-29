@@ -9,9 +9,12 @@ this contract, never on a specific version.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from enum import Enum
+from typing import Any
 
-from reactor_wire.v1 import control_pb2, data_pb2
+from reactor_runtime.protocol.common import dict_to_struct
+from reactor_wire.v1 import common_pb2, control_pb2, data_pb2, model_pb2, platform_pb2, track_pb2
 
 # A client->runtime message, on either channel.
 ClientMessage = data_pb2.DataClientMessage | control_pb2.ControlClientMessage
@@ -93,6 +96,76 @@ class Codec(ABC):
         if isinstance(message, data_pb2.DataServerMessage | control_pb2.ControlServerMessage):
             raise UnsupportedMessageError("expected a client message, decoded a server message")
         return message
+
+    def encode_model_message(
+        self,
+        type_name: str,
+        data: Mapping[str, Any],
+        *,
+        request_id: str | None = None,
+    ) -> tuple[Channel, bytes | str]:
+        """Encode a model's outbound message into a server frame.
+
+        Wraps a model message — its name and already-serialised payload — into a
+        ``DataServerMessage`` and encodes it for this wire version, so every
+        codec shares one model-message-to-frame path. A reply carries its
+        ``request_id`` and is a response; a broadcast carries none and is a
+        notification, the correlation applied here at send time rather than by
+        the model.
+        """
+        message = data_pb2.DataServerMessage(
+            request_id=request_id or "",
+            kind=(
+                common_pb2.MessageKind.MESSAGE_KIND_RESPONSE
+                if request_id is not None
+                else common_pb2.MessageKind.MESSAGE_KIND_NOTIFICATION
+            ),
+            message=model_pb2.ModelMessage(type=type_name, data=dict_to_struct(data)),
+        )
+        return self.encode(message)
+
+    def encode_publish_response(
+        self, request_id: str, *, granted: bool, reason: str = ""
+    ) -> tuple[Channel, bytes | str]:
+        """Encode the runtime's reply to a client's publish-track request.
+
+        A grant carries an empty :class:`PublishTrackResponse`; a refusal carries
+        an error with a reason. Correlated by *request_id* so the client matches
+        the reply to its request, and encoded for this wire version so every
+        codec shares one publish-response-to-frame path.
+        """
+        if granted:
+            message = control_pb2.ControlServerMessage(
+                request_id=request_id,
+                kind=common_pb2.MessageKind.MESSAGE_KIND_RESPONSE,
+                publish_track=track_pb2.PublishTrackResponse(),
+            )
+        else:
+            message = control_pb2.ControlServerMessage(
+                request_id=request_id,
+                kind=common_pb2.MessageKind.MESSAGE_KIND_RESPONSE,
+                error=common_pb2.Error(
+                    code="publish_refused", message=reason or "track already published"
+                ),
+            )
+        return self.encode(message)
+
+    def encode_schema_response(
+        self, request_id: str, openapi: Mapping[str, Any]
+    ) -> tuple[Channel, bytes | str]:
+        """Encode the runtime's reply to a client's schema request.
+
+        Wraps the rendered OpenAPI document in a ``ControlServerMessage`` and
+        encodes it for this wire version, correlated by *request_id*. The
+        physical channel is version-dependent — v0 carries the schema on the data
+        channel, v1 on the control channel — and is returned alongside the frame.
+        """
+        message = control_pb2.ControlServerMessage(
+            request_id=request_id,
+            kind=common_pb2.MessageKind.MESSAGE_KIND_RESPONSE,
+            model_schema=platform_pb2.ModelSchema(openapi=dict_to_struct(openapi)),
+        )
+        return self.encode(message)
 
 
 def select(version: ProtocolVersion) -> Codec:

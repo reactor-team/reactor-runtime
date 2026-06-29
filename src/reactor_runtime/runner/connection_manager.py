@@ -229,14 +229,14 @@ class ConnectionManager:
         else:
             conn.send_message(frame)
 
-    def broadcast_media(self, bundle: MediaBundle, duplicate: bool) -> None:
+    def broadcast_media(self, bundle: MediaBundle, is_fresh_black: bool) -> None:
         """Send a media bundle to every connection whose wire carries media.
 
         Data-only connections are skipped rather than relying on a silent no-op, so
-        a media bundle only reaches a wire that can deliver it. ``duplicate`` marks
-        a re-emitted gap-fill bundle for downstream consumers (such as recording);
-        the multiplexer forwards every bundle to all media-capable connections and
-        does not branch on it.
+        a media bundle only reaches a wire that can deliver it. ``is_fresh_black``
+        is the flag the model bridge's media sink forwards — the synthesised black
+        frame emitted at a session boundary; the multiplexer sends every bundle to
+        all media-capable connections and does not branch on it.
         """
         for conn in self._by_id.values():
             caps = conn.capabilities

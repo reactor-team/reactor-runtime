@@ -249,7 +249,7 @@ def test_media_skips_data_only_connections() -> None:
     cm.register(media)
     cm.register(data_only)
     bundle = MediaBundle()
-    cm.broadcast_media(bundle, duplicate=False)
+    cm.broadcast_media(bundle, is_fresh_black=False)
     assert media.media == [bundle]
     assert data_only.media == []
 
