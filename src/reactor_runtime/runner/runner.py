@@ -422,7 +422,9 @@ class Runner(ServiceComponent, ConnectionSink):
         from — and names track directions from the client's perspective, the
         mirror of the model's. This renders that shape from the model's
         contract; ``model`` and ``capabilities`` fill in once the model is
-        loaded.
+        loaded. The ``commands`` list is intentionally empty here — a client
+        reads the model's command contract from the ``/schema`` endpoint, not
+        from the session descriptor.
         """
         descriptor: dict[str, Any] = {
             "session_id": self._session_id,
@@ -438,7 +440,6 @@ class Runner(ServiceComponent, ConnectionSink):
         if self._bridge is None:
             return descriptor
         contract = self._bridge.contract
-        schema = contract.render_schema()
         descriptor["model"] = {"name": contract.model}
         descriptor["capabilities"] = {
             "protocol_version": _V0_PROTOCOL,
@@ -450,12 +451,19 @@ class Runner(ServiceComponent, ConnectionSink):
                 }
                 for name, info in contract.tracks.items()
             ],
-            "commands": [
-                {"name": name, "description": command.description, "schema": command.schema}
-                for name, command in schema.commands.items()
-            ],
+            "commands": [],
         }
         return descriptor
+
+    def schema(self) -> dict[str, Any]:
+        """Return the model's command contract as an OpenAPI document.
+
+        The full per-model contract a client uses to drive the model, served by
+        the ``/schema`` route. Empty until the model is loaded.
+        """
+        if self._bridge is None:
+            return {}
+        return self._bridge.contract.render_schema().to_openapi()
 
     # -- internals ------------------------------------------------------------
 

@@ -70,7 +70,8 @@ async def test_start_session_serves_the_capabilities_descriptor(
     caps = body["capabilities"]
     assert caps["protocol_version"] == "v0"
     assert {"name": "main", "kind": "video", "direction": "recvonly"} in caps["tracks"]
-    assert any(command["name"] == "set_mode" for command in caps["commands"])
+    # Commands are served at /schema, not carried on the descriptor.
+    assert caps["commands"] == []
     assert "schema" not in body
 
 
@@ -85,6 +86,18 @@ async def test_get_session_serves_the_capabilities_descriptor(
     assert body["state"] == "ready"
     assert body["cluster"] == "local"
     assert "capabilities" in body
+
+
+async def test_schema_serves_the_model_contract(
+    client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, _ = client
+    response = await http_client.get("/schema")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body  # the model is loaded, so the contract is non-empty
+    assert "set_mode" in json.dumps(body)
 
 
 async def test_stop_session_closes(client: tuple[httpx.AsyncClient, Runner]) -> None:

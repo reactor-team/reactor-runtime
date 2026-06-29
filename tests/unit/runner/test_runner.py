@@ -366,8 +366,17 @@ async def test_descriptor_renders_the_v0_shape(started_runner: Runner) -> None:
     assert caps["protocol_version"] == "v0"
     # The model's outbound track is reported from the client's perspective.
     assert {"name": "main", "kind": "video", "direction": "recvonly"} in caps["tracks"]
-    assert any(command["name"] == "set_mode" for command in caps["commands"])
+    # Commands are not carried on the descriptor; a client reads them from /schema.
+    assert caps["commands"] == []
     assert "emission_fps" not in caps
+
+
+async def test_schema_renders_the_model_contract(started_runner: Runner) -> None:
+    schema = started_runner.schema()
+
+    assert isinstance(schema, dict)
+    assert schema
+    assert "set_mode" in str(schema)
 
 
 # --- the dispatch brain ---------------------------------------------------

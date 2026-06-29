@@ -49,6 +49,10 @@ class SessionRoutes:
         async def get_session() -> dict[str, Any]:
             return runner.descriptor()
 
+        @app.get("/schema")
+        async def get_schema() -> dict[str, Any]:
+            return runner.schema()
+
         @app.post("/stop_session")
         async def stop_session() -> Response:
             runner.stop_session()
