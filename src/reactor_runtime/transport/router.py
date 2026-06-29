@@ -22,7 +22,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from fastapi import FastAPI
 
-from reactor_runtime.core import ConnectionSink, ConnId
+from reactor_runtime.core import ConnectionSink, ConnId, SessionState
 
 
 class SessionNotRunningError(RuntimeError):
@@ -42,6 +42,27 @@ class UnknownSessionError(RuntimeError):
     addressed id is not its own — so a router can map it to a not-found rather
     than a not-running rejection.
     """
+
+
+class SessionTransitionError(RuntimeError):
+    """Raised when a session start or stop is rejected from the current state.
+
+    The session is opened only from ``READY`` and stopped only from a running
+    state; a request that does not fit is rejected without changing state. This
+    carries the attempted *action* and the :class:`SessionState` the session is
+    in, so a router can map the rejection to a precise client response — the
+    motive is explicit rather than a silent no-op idempotent success.
+
+    Attributes:
+        action: The control verb that was rejected (``"start"`` or ``"stop"``).
+        state: The state the session was in when the transition was rejected.
+    """
+
+    def __init__(self, action: str, state: SessionState) -> None:
+        """Record the rejected action and the state it was rejected from."""
+        self.action = action
+        self.state = state
+        super().__init__(f"cannot {action} session from state {state.name.lower()}")
 
 
 @runtime_checkable

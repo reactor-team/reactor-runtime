@@ -2,9 +2,10 @@
 
 Assembles the FastAPI application from the fixed route groups and one mount per
 transport, then runs it under uvicorn. It is a :class:`ServiceComponent` that
-starts after the runner and drains before it: draining stops accepting new
-requests, stop awaits the server's own shutdown. It never sees a ``Connection``,
-SDP, or ICE — those stay inside the routers and acceptors it mounts.
+comes up before the runner — so the surface is observable while the model loads
+— and drains then stops before it, so intake closes before the model thread is
+released. It never sees a ``Connection``, SDP, or ICE — those stay inside the
+routers and acceptors it mounts.
 """
 
 from __future__ import annotations
@@ -46,6 +47,13 @@ class HttpServer(ServiceComponent):
     Built with the runner it exposes and the transport routers that grow the
     surface per connection type. The FastAPI app is assembled at construction;
     the uvicorn server is created and run on :meth:`start`.
+
+    It holds the concrete :class:`~reactor_runtime.runner.Runner` deliberately:
+    as the assembler of the route groups it hands them the full session-control
+    and read surface they drive (start/stop session, descriptor, schema, events,
+    health, recorder, uploads), which is broader than the neutral
+    :class:`~reactor_runtime.transport.router.SessionControl` the transports it
+    mounts hold.
     """
 
     name = "http"
@@ -84,7 +92,14 @@ class HttpServer(ServiceComponent):
         self._serve_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
-        """Bind the configured address and serve the app in the background."""
+        """Bind the configured address and serve the app, returning once it accepts.
+
+        The server runs in a background task, but start does not return until the
+        socket is bound and accepting — so the component that starts after it (the
+        runner, which loads the model) comes up with the HTTP surface already
+        live, and a director subscribed to ``/events`` sees the model's
+        initialization transitions as they happen rather than only via backlog.
+        """
         # `/events` is an unbounded stream, so a client still subscribed when the
         # server drains never lets uvicorn's graceful shutdown complete on its
         # own. Bound the wait with the same grace period a draining session gets,
@@ -98,6 +113,21 @@ class HttpServer(ServiceComponent):
         )
         self._server = _ServerWithoutSignals(config)
         self._serve_task = asyncio.create_task(self._server.serve())
+        await self._await_bound(self._server, self._serve_task)
+
+    @staticmethod
+    async def _await_bound(server: uvicorn.Server, serve_task: asyncio.Task[None]) -> None:
+        """Wait until uvicorn has bound its socket, or surface a bind failure.
+
+        Polls the server's own ``started`` flag; if the serve task finishes before
+        the socket is up it failed to bind, so await it to re-raise the error
+        rather than spin forever.
+        """
+        while not server.started:
+            if serve_task.done():
+                await serve_task
+                return
+            await asyncio.sleep(0.01)
 
     async def drain(self) -> None:
         """Stop accepting new requests, letting in-flight ones finish."""

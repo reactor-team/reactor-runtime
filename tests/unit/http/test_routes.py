@@ -124,6 +124,41 @@ async def test_stop_session_closes(client: tuple[httpx.AsyncClient, Runner]) -> 
     assert response.status_code == 200
 
 
+async def test_start_session_conflicts_when_already_running(
+    client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, _ = client
+    await http_client.post("/start_session", json={})
+
+    response = await http_client.post("/start_session", json={})
+
+    assert response.status_code == 409
+
+
+async def test_stop_session_conflicts_when_nothing_is_running(
+    client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, _ = client
+
+    response = await http_client.post("/stop_session")
+
+    assert response.status_code == 409
+
+
+async def test_start_session_is_unavailable_while_the_model_loads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
+    # Constructed but never started, so the session sits in CREATED (model not loaded).
+    runner = Runner(RuntimeConfig(model_ref="fake:Model"))
+    transport = httpx.ASGITransport(app=_app(runner))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+        response = await http_client.post("/start_session", json={})
+
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "1"
+
+
 async def test_enforce_returns_ok(client: tuple[httpx.AsyncClient, Runner]) -> None:
     http_client, _ = client
     await http_client.post("/start_session", json={})

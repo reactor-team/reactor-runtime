@@ -46,6 +46,7 @@ from reactor_runtime.runner.runner import SESSION_ID, Runner
 from reactor_runtime.transport.router import (
     SessionControl,
     SessionNotRunningError,
+    SessionTransitionError,
     UnknownSessionError,
 )
 from reactor_runtime.upload_store import UnknownUploadError
@@ -357,6 +358,28 @@ async def test_stop_session_closes_the_session(started_runner: Runner) -> None:
     started_runner.start_session({})
     started_runner.stop_session()
     assert started_runner._sm.current_state is SessionState.CLOSING
+
+
+async def test_start_session_rejects_a_double_start(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    with pytest.raises(SessionTransitionError) as rejected:
+        started_runner.start_session({})
+    assert rejected.value.action == "start"
+    assert rejected.value.state is SessionState.WAITING
+
+
+def test_start_session_rejects_before_the_model_is_loaded() -> None:
+    runner = _runner()  # constructed but not started: the session is CREATED
+    with pytest.raises(SessionTransitionError) as rejected:
+        runner.start_session({})
+    assert rejected.value.state is SessionState.CREATED
+
+
+async def test_stop_session_rejects_when_no_session_is_running(started_runner: Runner) -> None:
+    with pytest.raises(SessionTransitionError) as rejected:
+        started_runner.stop_session()
+    assert rejected.value.action == "stop"
+    assert rejected.value.state is SessionState.READY
 
 
 async def test_enforce_blocks_a_running_session(started_runner: Runner) -> None:

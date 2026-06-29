@@ -57,7 +57,11 @@ from reactor_runtime.protocol import Channel, Codec, ProtocolVersion, select
 from reactor_runtime.recording import ClipResult, Recorder, RecorderError
 from reactor_runtime.runner.connection_manager import ConnectionManager
 from reactor_runtime.runner.state_machine import SessionStateMachine
-from reactor_runtime.transport.router import SessionNotRunningError, UnknownSessionError
+from reactor_runtime.transport.router import (
+    SessionNotRunningError,
+    SessionTransitionError,
+    UnknownSessionError,
+)
 from reactor_runtime.upload_store import UnknownUploadError, UploadStore
 
 _RUNNING_STATES = frozenset({SessionState.WAITING, SessionState.STREAMING, SessionState.ORPHANED})
@@ -180,6 +184,11 @@ class Runner(ServiceComponent, ConnectionSink):
         caught and turned into ``INITIALIZATION_FAIL`` (moving the session to
         ``TERMINATED``) rather than raised; the dispatch on that move asks the
         service to bring the process down. ``start`` itself always returns.
+
+        The model load runs off the event loop (it may block while it reads
+        weights), so the HTTP surface — already up by the time this runs — stays
+        responsive throughout, and a client subscribed to ``/events`` observes
+        the ``initialization_success``/``initialization_fail`` transition live.
         """
         self._loop = asyncio.get_running_loop()
         logger.info("loading model", model=self._cfg.model_ref)
@@ -187,7 +196,7 @@ class Runner(ServiceComponent, ConnectionSink):
             model_cls = import_model_class(self._cfg.model_ref)
             contract = ModelContract.of(model_cls)
             model = model_cls()
-            model.load(self._cfg.config_path)
+            await asyncio.to_thread(model.load, self._cfg.config_path)
             bridge = ModelBridge(model, contract)
             bridge.bind_outbound(
                 broadcast=self._broadcast_message,
@@ -438,17 +447,35 @@ class Runner(ServiceComponent, ConnectionSink):
         """Open a session, moving it from ready to waiting for a client.
 
         The session id is fixed (:data:`SESSION_ID`), so this only drives the
-        state machine: a start from any state but ready is rejected and leaves
-        the session untouched. The parameters seed the session's initial state.
+        state machine. The start is **not** idempotent: it is legal only from
+        ``READY``, and a request from any other state — the model still loading
+        (``CREATED``), a session already open, a previous one still ``CLOSING``,
+        or a ``TERMINATED`` process — is rejected without touching the session.
+        The rejection surfaces the current state so the caller can report the
+        precise reason. The parameters seed the session's initial state.
 
         Args:
             params: The initial session parameters supplied by the caller.
+
+        Raises:
+            SessionTransitionError: If the session is not in a startable state.
         """
-        self._sm.send(SessionEvent.START_SESSION, params=dict(params))
+        if not self._sm.send(SessionEvent.START_SESSION, params=dict(params)):
+            raise SessionTransitionError("start", self._sm.current_state)
 
     def stop_session(self) -> None:
-        """Close the active session, leaving the model loaded and ready again."""
-        self._sm.send(SessionEvent.STOP_SESSION, reason=EndReason.STOPPED)
+        """Close the active session, leaving the model loaded and ready again.
+
+        Not idempotent, like :meth:`start_session`: a stop is legal only from a
+        running state, so one with no running session (``READY``/``CREATED``),
+        a session already ``CLOSING``, or a ``TERMINATED`` process is rejected
+        and surfaces the current state.
+
+        Raises:
+            SessionTransitionError: If there is no running session to stop.
+        """
+        if not self._sm.send(SessionEvent.STOP_SESSION, reason=EndReason.STOPPED):
+            raise SessionTransitionError("stop", self._sm.current_state)
 
     def enforce(self, block: bool) -> None:
         """Apply a moderation verdict to the active session.

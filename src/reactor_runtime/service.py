@@ -1,11 +1,13 @@
 """The service — the runtime's lifecycle root.
 
-A tiny in-process supervision tree that owns the running of the process: the
-sole arbiter of start, drain, and stop ordering, the one signal owner, and the
-one readiness source. Components declare their startup dependencies; the service
-starts them in dependency order, runs one blocking main loop until a shutdown is
-requested, then drains and stops them in reverse so each component's intake
-closes before the components it depends on wind down.
+A tiny in-process supervision tree that owns the running of the process: the sole
+arbiter of start, drain, and stop ordering, the one signal owner, and the one
+readiness source. Components declare their dependencies; the service brings them
+up edge-first — the reverse of dependency order — so the HTTP surface that fronts
+the runner is accepting before the model loads and the runtime is observable from
+boot. It runs one blocking main loop until shutdown is requested, then drains and
+stops in that same edge-first order, so intake closes first and the model thread
+(the runner) is the last thing released.
 """
 
 from __future__ import annotations
@@ -24,8 +26,9 @@ class Service:
     """The control block supervising the runtime's components.
 
     Components are hooked on with :meth:`add`; none manages its own place in the
-    lifecycle. :meth:`run` starts them in dependency order, blocks on a single
-    shutdown event, and on shutdown drains then stops them in reverse.
+    lifecycle. :meth:`run` starts them edge-first (the reverse of dependency
+    order), blocks on a single shutdown event, and on shutdown drains then stops
+    them in that same edge-first order — so the model thread is released last.
     """
 
     def __init__(self) -> None:
@@ -47,16 +50,18 @@ class Service:
         self._components[component.name] = component
 
     async def run(self) -> None:
-        """Start every component, block until shutdown, then drain and stop.
+        """Start every component edge-first, block until shutdown, then drain and stop.
 
-        Components start in dependency order; the one signal handler and the one
-        main loop live here. On shutdown — requested by a signal or
-        :meth:`request_shutdown` — each started component is drained and then
-        stopped in reverse order, so a component's intake closes before the
-        components it depends on wind down. Cleanup runs for whatever started,
-        even if a later start fails.
+        Components come up in reverse dependency order — the HTTP edge before the
+        runner it fronts — so the runtime's surface is observable from boot while
+        the model is still loading. The one signal handler and the one main loop
+        live here. On shutdown — requested by a signal or :meth:`request_shutdown`
+        — each started component is drained and then stopped in that same
+        edge-first order, so intake closes first and the model thread (the runner)
+        is the last thing released. Cleanup runs for whatever started, even if a
+        later start fails.
         """
-        order = self._topological_order()
+        order = list(reversed(self._topological_order()))
         started: list[ServiceComponent] = []
         try:
             for component in order:
@@ -70,14 +75,16 @@ class Service:
         finally:
             # Shutdown is best-effort: a component that fails to drain or stop
             # must not abort the wind-down of the rest, or this supervision tree
-            # would leak exactly the resources it exists to release.
-            for component in reversed(started):
+            # would leak exactly the resources it exists to release. `started` is
+            # in edge-first order, so draining/stopping it forward closes the
+            # edge first and releases the core (the runner) last.
+            for component in started:
                 logger.info("draining component", component=component.name)
                 try:
                     await component.drain()
                 except Exception:
                     logger.exception("component failed to drain", component=component.name)
-            for component in reversed(started):
+            for component in started:
                 logger.info("stopping component", component=component.name)
                 try:
                     await component.stop()
