@@ -27,7 +27,7 @@ from reactor_runtime.transport.router import (
     UnknownSessionError,
 )
 from reactor_runtime.transport.webrtc.acceptor import WebRTCAcceptor
-from reactor_runtime.transport.webrtc.config import WebRtcConfig
+from reactor_runtime.transport.webrtc.config import IceServer, WebRtcConfig
 from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpOffer, TrackMap
 from reactor_runtime.transport.webrtc.version import protocol_for_transport
@@ -44,11 +44,37 @@ class TrackMappingEntry(BaseModel):
     direction: str
 
 
+class TurnCredentials(BaseModel):
+    """TURN authentication for an ICE server; absent on a plain STUN server."""
+
+    username: str
+    password: str
+
+
+class IceServerEntry(BaseModel):
+    """One STUN/TURN server offered for this connection's candidate gathering.
+
+    Mirrors the wire shape the platform already uses for ICE servers:
+    ``{uris, credentials: {username, password}}``, with ``credentials`` absent
+    for a STUN server.
+    """
+
+    uris: list[str]
+    credentials: TurnCredentials | None = None
+
+
 class SdpParamsRequest(BaseModel):
-    """A client's SDP offer plus the tracks it declares."""
+    """A client's SDP offer, the tracks it declares, and optional ICE servers.
+
+    ``ice_servers`` lets the caller supply the STUN/TURN servers this connection
+    gathers against. Absent, the runtime uses its own configured servers; present
+    (even empty), it is authoritative for the connection — so a reconnect can
+    carry fresh credentials.
+    """
 
     sdp_offer: str
     track_mapping: list[TrackMappingEntry] = Field(default_factory=list)
+    ice_servers: list[IceServerEntry] | None = None
 
 
 class IceCandidateEntry(BaseModel):
@@ -64,6 +90,27 @@ class IceCandidatesRequest(BaseModel):
 
     candidates: list[IceCandidateEntry] = Field(default_factory=list)
     is_final: bool = False
+
+
+def _ice_servers_from_request(
+    entries: list[IceServerEntry] | None,
+) -> tuple[IceServer, ...] | None:
+    """Convert a connect request's ICE servers to the transport's form.
+
+    ``None`` (the field absent) means "use the runtime's configured servers"; a
+    present list — even empty — is authoritative for the connection. Each entry
+    mirrors the wire shape ``{uris, credentials: {username, password}}``.
+    """
+    if entries is None:
+        return None
+    return tuple(
+        IceServer(
+            urls=tuple(entry.uris),
+            username=entry.credentials.username if entry.credentials else None,
+            credential=entry.credentials.password if entry.credentials else None,
+        )
+        for entry in entries
+    )
 
 
 def _ice_servers_payload(config: WebRtcConfig) -> dict[str, Any]:
@@ -135,6 +182,7 @@ class WebRtcRouter(TransportRouter):
                 SdpOffer(req.sdp_offer),
                 tracks,
                 protocol_for_transport(webrtc_version),
+                ice_servers=_ice_servers_from_request(req.ice_servers),
             )
             return {"connection_id": cid}
 

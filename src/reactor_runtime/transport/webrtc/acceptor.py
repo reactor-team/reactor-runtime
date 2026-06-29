@@ -19,12 +19,13 @@ exists.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 
 from reactor_runtime.core import ConnectionSink, ConnId
 from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.transport.acceptor import ConnectionAcceptor
-from reactor_runtime.transport.webrtc.config import WebRtcConfig
+from reactor_runtime.transport.webrtc.config import IceServer, WebRtcConfig
 from reactor_runtime.transport.webrtc.connection import WebRTCConnection
 from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpAnswer, SdpOffer, TrackMap
@@ -71,7 +72,12 @@ class WebRTCAcceptor(ConnectionAcceptor):
         self._answers: dict[ConnId, SdpAnswer] = {}
 
     def start_offer(
-        self, conn_id: ConnId, sdp_offer: SdpOffer, tracks: TrackMap, version: ProtocolVersion
+        self,
+        conn_id: ConnId,
+        sdp_offer: SdpOffer,
+        tracks: TrackMap,
+        version: ProtocolVersion,
+        ice_servers: tuple[IceServer, ...] | None = None,
     ) -> None:
         """Begin negotiating *sdp_offer* in the background.
 
@@ -81,13 +87,18 @@ class WebRTCAcceptor(ConnectionAcceptor):
         negotiation is cancelled and any answer it had staged is dropped.
         *version* is the wire codec negotiated for the connection, fixed for its
         life and applied to every frame it carries.
+
+        *ice_servers*, when given, are the STUN/TURN servers this connection
+        gathers against, overriding the configured ones for this connection only;
+        ``None`` falls back to the acceptor's configuration. Supplied per offer,
+        so a reconnect can carry fresh credentials.
         """
         in_flight = self._negotiating.pop(conn_id, None)
         if in_flight is not None:
             in_flight.cancel()
         self._answers.pop(conn_id, None)
         self._negotiating[conn_id] = asyncio.create_task(
-            self._negotiate(conn_id, sdp_offer, tracks, version)
+            self._negotiate(conn_id, sdp_offer, tracks, version, ice_servers)
         )
 
     def take_answer(self, conn_id: ConnId) -> SdpAnswer | None:
@@ -95,7 +106,12 @@ class WebRTCAcceptor(ConnectionAcceptor):
         return self._answers.pop(conn_id, None)
 
     async def _negotiate(
-        self, conn_id: ConnId, sdp_offer: SdpOffer, tracks: TrackMap, version: ProtocolVersion
+        self,
+        conn_id: ConnId,
+        sdp_offer: SdpOffer,
+        tracks: TrackMap,
+        version: ProtocolVersion,
+        ice_servers: tuple[IceServer, ...] | None = None,
     ) -> None:
         """Negotiate one offer into a connection and stage its answer.
 
@@ -105,7 +121,15 @@ class WebRTCAcceptor(ConnectionAcceptor):
         connection is still absent) or delivered live (it is present), never lost
         in the gap. A negotiation that fails is logged and dropped — the client's
         poll for the answer times out — rather than left as an unhandled task.
+
+        *ice_servers* override the configured STUN/TURN servers for this
+        connection when given; ``None`` uses the acceptor's configuration.
         """
+        config = (
+            self._config
+            if ice_servers is None
+            else dataclasses.replace(self._config, ice_servers=ice_servers)
+        )
         try:
             previous = self._conns.pop(conn_id, None)
             if previous is not None:
@@ -113,7 +137,7 @@ class WebRTCAcceptor(ConnectionAcceptor):
                 await previous.close()
 
             conn, answer = await WebRTCConnection.create(
-                conn_id, sdp_offer, tracks, self._config, version, peer_factory=self._peer_factory
+                conn_id, sdp_offer, tracks, config, version, peer_factory=self._peer_factory
             )
             conn.on_message(
                 lambda payload, ver, ch: self._sink.message_received(conn_id, payload, ver, ch)

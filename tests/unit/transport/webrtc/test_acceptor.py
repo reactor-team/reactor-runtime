@@ -15,6 +15,7 @@ from reactor_runtime.transport.webrtc import (
     WebRtcConfig,
     WebRtcPeerFactory,
 )
+from reactor_runtime.transport.webrtc.config import IceServer
 from reactor_runtime.transport.webrtc.signaling import IceCandidate
 
 
@@ -109,6 +110,39 @@ async def test_negotiation_produces_the_answer_without_opening(
     # The answer is reported up as a transport-agnostic fact before the wire
     # connects, alongside being stashed for the HTTP poll.
     assert sink.answered == [(ConnId(7), {"type": "answer", "sdp": "answer-sdp"})]
+
+
+async def test_offer_ice_servers_override_the_configured_ones(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    sink = FakeSink()
+    acceptor = _acceptor(sink, fake_peer, factory_for)
+    servers = (
+        IceServer(urls=("turn:turn.example:3478",), username="u", credential="p"),
+        IceServer(urls=("stun:stun.example:3478",)),
+    )
+    acceptor.start_offer(ConnId(7), SdpOffer("offer"), out_av_tracks, ProtocolVersion.V0, servers)
+    await acceptor._negotiating[ConnId(7)]
+
+    assert fake_peer.last_config is not None
+    assert fake_peer.last_config.ice_servers == servers
+
+
+async def test_offer_without_ice_servers_keeps_the_configured_ones(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    sink = FakeSink()
+    acceptor = _acceptor(sink, fake_peer, factory_for)
+    acceptor.start_offer(ConnId(7), SdpOffer("offer"), out_av_tracks, ProtocolVersion.V0)
+    await acceptor._negotiating[ConnId(7)]
+
+    assert fake_peer.last_config is not None
+    # The acceptor's configured servers (empty by default) are used untouched.
+    assert fake_peer.last_config.ice_servers == ()
 
 
 async def test_take_answer_is_none_until_negotiation_completes(
