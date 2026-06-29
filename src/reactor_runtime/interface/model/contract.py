@@ -1,16 +1,19 @@
 """The per-model contract — :class:`ModelContract`.
 
-One class-level traversal yields the whole client-facing contract of a model and
-caches it on the class: the commands a client can send (each resolved into a
-:class:`CommandSpec` with the message type its handler returns), the messages the
-model sends back, its media tracks, and its lifecycle hooks. The same resolved
-form answers both questions the runtime asks — validate an inbound payload into a
-typed :class:`Command`, and render the published :class:`ModelSchema` — so the
-two can never disagree.
+One class-level traversal resolves the parts of a model's contract that are bound
+to its class — the commands a client can send (each a :class:`CommandSpec` with
+the message type its handler returns) and its lifecycle hooks — and caches them
+on the class. The model's media tracks and the messages it sends back are read
+from the process-global registries every model definition populates, so a track
+or message reaches the schema by being declared, never by being wired onto the
+model class. The same resolved form answers both questions the runtime asks —
+validate an inbound payload into a typed :class:`Command`, and render the
+published :class:`ModelSchema` — so the two can never disagree.
 
-There is no global registry. The contract is instance-free and built once, when
-the model class is created; :meth:`ModelContract.of` is the accessor for the
-cached result.
+The handler-bound parts are built once, when the model class is created;
+:meth:`ModelContract.of` is the accessor for the cached result. The registry-backed
+parts (:attr:`tracks`, :attr:`messages`) are read lazily, so a message class
+declared after the model class still reaches the schema.
 """
 
 from __future__ import annotations
@@ -28,12 +31,13 @@ from reactor_runtime.interface.events.decorators import (
     CONNECTED_ATTR,
     DISCONNECTED_ATTR,
     EVENT_ATTR,
+    EVENT_REGISTRY,
     FILE_UPLOADED_ATTR,
     SESSION_ENDED_ATTR,
     SESSION_STARTED_ATTR,
     EventHandler,
 )
-from reactor_runtime.interface.events.messages import ModelMessage
+from reactor_runtime.interface.events.messages import MESSAGE_REGISTRY, ModelMessage
 from reactor_runtime.interface.model.schema import (
     CommandSchema,
     MessageSchema,
@@ -42,7 +46,8 @@ from reactor_runtime.interface.model.schema import (
     message_field_schema,
     track_schema,
 )
-from reactor_runtime.interface.tracks import Input, Output
+from reactor_runtime.interface.tracks.input import all_input_tracks
+from reactor_runtime.interface.tracks.output import all_output_tracks
 
 
 class ContractError(Exception):
@@ -105,21 +110,49 @@ class LifecycleHooks:
 class ModelContract:
     """The assembled, cached, client-facing contract of one model.
 
+    The handler-bound parts (:attr:`commands`, :attr:`lifecycle`) are resolved
+    once from the class. The media :attr:`tracks` and outbound :attr:`messages`
+    are read lazily from the process-global registries every declaration
+    populates.
+
     Attributes:
         model: The model identifier, lowercase.
         description: Human-readable model description.
         commands: Command name to its resolved spec.
-        messages: Message name to its type.
-        tracks: Track name to its metadata.
         lifecycle: The model's lifecycle hook methods.
     """
 
     model: str
     description: str
     commands: dict[str, CommandSpec]
-    messages: dict[str, type[ModelMessage]]
-    tracks: dict[str, TrackInfo]
     lifecycle: LifecycleHooks
+
+    @property
+    def tracks(self) -> dict[str, TrackInfo]:
+        """The model's media tracks, inbound first, from the track registries.
+
+        Reads the union of every declared :class:`Output` and :class:`Input`.
+        Inbound tracks come first so their m-line indices precede the outbound
+        ones during transport negotiation.
+
+        Raises:
+            ValueError: If a track name is declared in both directions.
+        """
+        merged: dict[str, TrackInfo] = dict(all_input_tracks())
+        for name, info in all_output_tracks().items():
+            if name in merged:
+                raise ValueError(f"track name '{name}' is declared as both input and output")
+            merged[name] = info
+        return merged
+
+    @property
+    def messages(self) -> dict[str, type[ModelMessage]]:
+        """The outbound messages the model can send, from the message registry.
+
+        Every declared :class:`ModelMessage` — whether a command's reply or one
+        the model only broadcasts — rather than only those a handler returns.
+        """
+        return dict(MESSAGE_REGISTRY)
 
     @classmethod
     def of(cls, model_cls: type) -> ModelContract:
@@ -145,8 +178,9 @@ class ModelContract:
 
         Walks the MRO for handler methods (the most-derived definition wins),
         resolving each command's response type from its handler's return
-        annotation, and reads the model's track topology from its ``Output`` /
-        ``Input`` fields.
+        annotation. The model's tracks and outbound messages are not snapshotted
+        here — they are read from the registries through :attr:`tracks` /
+        :attr:`messages` when the schema renders.
 
         Args:
             model_cls: The model class to assemble the contract for.
@@ -155,8 +189,7 @@ class ModelContract:
             The assembled contract.
 
         Raises:
-            ValueError: If two handlers claim the same command name, or an input
-                and output track share a name.
+            ValueError: If two handlers claim the same command name.
         """
         commands: dict[str, CommandSpec] = {}
         hooks: dict[str, Callable[..., Any]] = {}
@@ -180,18 +213,10 @@ class ModelContract:
                     if getattr(attr, lifecycle_attr, False):
                         hooks.setdefault(key, attr)
 
-        messages = {
-            spec.response.name: spec.response
-            for spec in commands.values()
-            if spec.response is not None
-        }
-
         return cls(
             model=pascal_to_snake(model_cls.__name__),
             description=_normalize(model_cls.__doc__),
             commands=commands,
-            messages=messages,
-            tracks=_collect_tracks(model_cls),
             lifecycle=LifecycleHooks(**hooks),
         )
 
@@ -249,13 +274,13 @@ class ModelContract:
         """
         commands = {
             name: CommandSchema(
-                description=spec.description,
+                description=self.commands[name].description if name in self.commands else "",
                 schema={
                     field_name: command_field_schema(command_field)
-                    for field_name, command_field in spec.command.__command_fields__.items()
+                    for field_name, command_field in command.__command_fields__.items()
                 },
             )
-            for name, spec in self.commands.items()
+            for name, command in EVENT_REGISTRY.items()
         }
         messages = {
             name: MessageSchema(
@@ -314,22 +339,6 @@ def _response_type(handler: Callable[..., Any]) -> type[ModelMessage] | None:
     if isinstance(returned, type) and issubclass(returned, ModelMessage):
         return returned
     return None
-
-
-def _collect_tracks(model_cls: type) -> dict[str, TrackInfo]:
-    """Merge the tracks of every ``Output`` / ``Input`` field on the model."""
-    try:
-        hints = get_type_hints(model_cls)
-    except Exception:
-        hints = {}
-    tracks: dict[str, TrackInfo] = {}
-    for annotation in hints.values():
-        if isinstance(annotation, type) and issubclass(annotation, (Output, Input)):
-            for name, info in annotation.__tracks__.items():
-                if name in tracks:
-                    raise ValueError(f"track name '{name}' is declared more than once")
-                tracks[name] = info
-    return tracks
 
 
 def _normalize(doc: str | None) -> str:

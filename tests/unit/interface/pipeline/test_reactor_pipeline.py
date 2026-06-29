@@ -1,6 +1,6 @@
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 
 import numpy as np
 import pytest
@@ -45,6 +45,13 @@ class Pipe(ReactorPipeline):
     def inference(self) -> Iterator[Frame]:
         while True:
             yield Frame(main_video=np.zeros((2, 2, 3), dtype=np.uint8))
+
+
+@pytest.fixture(autouse=True)
+def _seed_registries(
+    isolate_interface_registries: None, register_model: Callable[[type], None]
+) -> None:
+    register_model(Pipe)
 
 
 def _frame() -> Frame:

@@ -1,5 +1,6 @@
 import asyncio
 import time
+from collections.abc import Callable
 
 import numpy as np
 import pytest
@@ -39,6 +40,11 @@ class Go(Command):
 
 class Ping(ModelMessage):
     note: str
+
+
+@pytest.fixture(autouse=True)
+def _seed_registries(isolate_interface_registries: None, register: Callable[..., None]) -> None:
+    register(Out, In)
 
 
 def frame(value: int = 0) -> InputFrame:

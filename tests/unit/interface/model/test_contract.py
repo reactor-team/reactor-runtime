@@ -1,4 +1,5 @@
 import enum
+from collections.abc import Callable
 
 import pytest
 
@@ -69,6 +70,14 @@ class Speed(enum.IntEnum):
 class SpeedModel(ReactorModel):
     @event(name="set_speed")
     async def set_speed(self, speed: Speed) -> None: ...
+
+
+@pytest.fixture(autouse=True)
+def _seed_registries(
+    isolate_interface_registries: None, register_model: Callable[[type], None]
+) -> None:
+    register_model(EchoModel)
+    register_model(SpeedModel)
 
 
 def contract() -> ModelContract:
@@ -205,8 +214,6 @@ def test_a_track_declared_as_both_directions_is_rejected() -> None:
     class DupeIn(Input):
         shared: Video
 
-    with pytest.raises(ValueError, match="declared more than once"):
-
-        class Bad(ReactorModel):
-            out: Dupe
-            inp: DupeIn
+    # Both directions register globally; the clash surfaces when the union is read.
+    with pytest.raises(ValueError, match="both input and output"):
+        _ = ModelContract.of(EchoModel).tracks

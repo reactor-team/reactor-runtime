@@ -6,6 +6,7 @@ they are the conversational half of a model's contract, alongside its tracks.
 """
 
 from reactor_runtime.interface.events.decorators import (
+    EVENT_REGISTRY,
     EventHandler,
     connected,
     disconnected,
@@ -16,6 +17,7 @@ from reactor_runtime.interface.events.decorators import (
     session_started,
 )
 from reactor_runtime.interface.events.messages import (
+    MESSAGE_REGISTRY,
     MessageField,
     MessageFieldInfo,
     MessageFieldSpec,
@@ -23,6 +25,8 @@ from reactor_runtime.interface.events.messages import (
 )
 
 __all__ = [
+    "EVENT_REGISTRY",
+    "MESSAGE_REGISTRY",
     "EventHandler",
     "MessageField",
     "MessageFieldInfo",

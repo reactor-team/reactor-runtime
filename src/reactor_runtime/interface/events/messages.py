@@ -21,6 +21,15 @@ from reactor_runtime.core.fields import NO_DEFAULT, raise_if_default_not_static
 from reactor_runtime.core.naming import pascal_to_snake
 from reactor_runtime.core.typespec import TypeSpec
 
+MESSAGE_REGISTRY: dict[str, type[ModelMessage]] = {}
+"""Every :class:`ModelMessage` subclass that declared fields, by wire name.
+
+Auto-populated when a field-bearing subclass is created. A model talks back with
+any registered message — a command's reply or a message it only ever broadcasts —
+so the rendered schema reads this registry rather than inferring messages from
+command return types alone. Field-less abstract bases are left out.
+"""
+
 
 @dataclass(frozen=True)
 class MessageFieldInfo:
@@ -109,6 +118,8 @@ class ModelMessage:
             dataclasses.dataclass(cls)
         if "name" not in cls.__dict__:
             cls.name = pascal_to_snake(cls.__name__)
+        if cls.__message_fields__:
+            MESSAGE_REGISTRY[cls.name] = cls
 
     def to_wire_format(self) -> dict[str, Any]:
         """Serialise into the ``{"type": <name>, "data": {...}}`` wire envelope."""

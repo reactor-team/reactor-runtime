@@ -118,6 +118,10 @@ exclude = [
     "src/reactor_wire/",
     "src/reactor_runtime/transport/webrtc/gstreamer/",
     "tests/unit/transport/webrtc/gstreamer/",
+    # A second top-level `conftest.py` collides with the WebRTC one under mypy's
+    # bare-module mapping (neither test tree has `__init__.py`). This file is
+    # registry-isolation scaffolding, not shipped code; keep it out of the check.
+    "tests/unit/conftest.py",
 ]
 
 # The ported GStreamer subtree leans on GStreamer's dynamic GObject surface and

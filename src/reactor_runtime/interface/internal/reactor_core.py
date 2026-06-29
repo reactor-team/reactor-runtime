@@ -30,6 +30,7 @@ from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.input_buffer import InputBuffer
 from reactor_runtime.interface.internal.output_buffer import OutputBuffer
 from reactor_runtime.interface.tracks import Input, Output
+from reactor_runtime.interface.tracks.output import all_output_tracks
 
 logger = logging.getLogger(__name__)
 
@@ -80,9 +81,7 @@ class ReactorCore:
         self._out_broadcast: BroadcastSink | None = None
         self._out_addressed: AddressedSink | None = None
 
-        output_holder = self._find_holder(Output)
-        output_tracks = output_holder[1].__tracks__ if output_holder is not None else {}
-        self.output_buffer = OutputBuffer(output_tracks, queue_depth=self.buffer_size)
+        self.output_buffer = OutputBuffer(all_output_tracks(), queue_depth=self.buffer_size)
         self.output_buffer.set_fps(self.fps)
 
         self._input_buffers: dict[str, InputBuffer] = {}

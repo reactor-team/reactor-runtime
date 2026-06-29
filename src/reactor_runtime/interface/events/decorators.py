@@ -31,6 +31,16 @@ A handler opts in to one simply by declaring it; the parameter is stripped from
 the synthesised command and never appears in the schema.
 """
 
+EVENT_REGISTRY: dict[str, type[Command]] = {}
+"""Every command an ``@event`` handler declares, by wire name.
+
+Auto-populated when the decorator synthesises a handler's :class:`Command`, so
+the model's command set is discoverable without inspecting the class. The
+runtime runs one model per process, so this is that model's command surface;
+the rendered schema reads it. A directly-defined ``Command`` subclass (without a
+handler) is deliberately absent — only handler-backed events register.
+"""
+
 _RESERVED_EVENT_NAMES = frozenset({"connected", "disconnected"})
 
 EVENT_ATTR = "__reactor_event__"
@@ -96,6 +106,7 @@ def event(
 
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         command = _command_from_signature(func, name)
+        EVENT_REGISTRY[name] = command
         setattr(
             func,
             EVENT_ATTR,

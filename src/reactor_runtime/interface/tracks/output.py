@@ -13,6 +13,14 @@ from typing import Any, ClassVar
 from reactor_runtime.core.values import TrackDirection, TrackInfo
 from reactor_runtime.interface.tracks.descriptors import _resolve_tracks
 
+OUTPUT_REGISTRY: dict[str, type[Output]] = {}
+"""Every :class:`Output` subclass that declared at least one track, by class name.
+
+Auto-populated when a track-bearing subclass is created. The runtime runs one
+model per process, so this is the model's outbound topology; :func:`all_output_tracks`
+unions it into the track set the schema and output buffer read.
+"""
+
 
 class Output:
     """Base for a model's outbound media tracks.
@@ -25,6 +33,9 @@ class Output:
             main_video: Video
 
         await self.emit(GameOutput(main_video=frame))
+
+    Declaring a track-bearing subclass registers it in :data:`OUTPUT_REGISTRY`; a
+    subclass that resolves no tracks (an abstract base or mixin) is left out.
     """
 
     __tracks__: ClassVar[dict[str, TrackInfo]]
@@ -32,6 +43,8 @@ class Output:
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         cls.__tracks__ = _resolve_tracks(cls, TrackDirection.OUT)
+        if cls.__tracks__:
+            OUTPUT_REGISTRY[cls.__name__] = cls
 
     def __init__(self, **payloads: Any) -> None:
         """Bind one payload per declared track.
@@ -51,3 +64,16 @@ class Output:
             )
         for name, data in payloads.items():
             setattr(self, name, data)
+
+
+def all_output_tracks() -> dict[str, TrackInfo]:
+    """Return the union of outbound tracks across every registered :class:`Output`.
+
+    Two subclasses that declare a track of the same name collapse to one entry
+    (the later registration wins) rather than conflicting — an inheritance chain
+    re-declaring a track is not an error.
+    """
+    tracks: dict[str, TrackInfo] = {}
+    for cls in OUTPUT_REGISTRY.values():
+        tracks.update(cls.__tracks__)
+    return tracks

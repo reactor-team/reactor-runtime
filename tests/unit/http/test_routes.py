@@ -1,6 +1,6 @@
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import cast
 
@@ -52,6 +52,13 @@ def _seed_recording(runner: Runner, root: Path, *segments: str) -> Path:
     for name in segments:
         (session_dir / name).write_bytes(b"data")
     return session_dir
+
+
+@pytest.fixture(autouse=True)
+def _seed_registries(
+    isolate_interface_registries: None, register_model: Callable[[type], None]
+) -> None:
+    register_model(FakeModel)
 
 
 @pytest.fixture
