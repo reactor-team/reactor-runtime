@@ -4,6 +4,7 @@ from reactor_runtime.core import UploadedFile
 from reactor_runtime.upload_store import (
     UnknownUploadError,
     UploadAlreadyCompleteError,
+    UploadIdTakenError,
     UploadSizeMismatchError,
     UploadStore,
 )
@@ -13,6 +14,24 @@ def test_create_slot_returns_a_unique_id() -> None:
     store = UploadStore()
     ids = {store.create_slot("a.png", "image/png", 3) for _ in range(5)}
     assert len(ids) == 5
+
+
+async def test_create_slot_honours_a_supplied_id() -> None:
+    store = UploadStore()
+    returned = store.create_slot("cat.png", "image/png", 4, upload_id="platform-123")
+    store.put("platform-123", b"\x89PNG")
+
+    file = await store.fetch("platform-123")
+
+    assert returned == "platform-123"
+    assert file.data == b"\x89PNG"
+
+
+def test_create_slot_rejects_a_reserved_id() -> None:
+    store = UploadStore()
+    store.create_slot("a.bin", "application/octet-stream", 2, upload_id="dup")
+    with pytest.raises(UploadIdTakenError):
+        store.create_slot("b.bin", "application/octet-stream", 2, upload_id="dup")
 
 
 async def test_put_then_fetch_returns_the_model_facing_view() -> None:

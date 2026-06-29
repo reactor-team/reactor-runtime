@@ -22,6 +22,7 @@ from reactor_runtime.transport.router import SessionNotRunningError, UnknownSess
 from reactor_runtime.upload_store import (
     UnknownUploadError,
     UploadAlreadyCompleteError,
+    UploadIdTakenError,
     UploadSizeMismatchError,
 )
 
@@ -76,11 +77,17 @@ class SessionRoutes:
 
 
 class CreateUploadRequest(BaseModel):
-    """Metadata a client announces to reserve an upload slot."""
+    """Metadata a client announces to reserve an upload slot.
+
+    ``upload_id`` is optional: when omitted the store mints one, and when present
+    the slot is reserved under that exact id so a caller can seed bytes a later
+    reference already names.
+    """
 
     name: str
     size: int
     mime_type: str
+    upload_id: str | None = None
 
 
 class UploadRoutes:
@@ -116,7 +123,12 @@ class UploadRoutes:
                 raise HTTPException(status_code=400, detail="mime_type is required")
             if req.size <= 0:
                 raise HTTPException(status_code=400, detail="size must be > 0")
-            upload_id = runner.uploads.create_slot(req.name, req.mime_type, req.size)
+            try:
+                upload_id = runner.uploads.create_slot(
+                    req.name, req.mime_type, req.size, req.upload_id
+                )
+            except UploadIdTakenError:
+                raise HTTPException(status_code=409, detail="Upload id already reserved") from None
             base = str(request.base_url).rstrip("/")
             return JSONResponse(
                 status_code=201,
@@ -143,7 +155,7 @@ class UploadRoutes:
                 raise HTTPException(
                     status_code=400, detail=f"expected {expected} bytes, got {declared}"
                 )
-            body = await request.body()
+            body = await _read_capped(request, expected)
             try:
                 runner.uploads.put(upload_id, body)
             except UnknownUploadError:
@@ -153,6 +165,26 @@ class UploadRoutes:
             except UploadSizeMismatchError as error:
                 raise HTTPException(status_code=400, detail=str(error)) from None
             return Response(status_code=200)
+
+
+async def _read_capped(request: Request, limit: int) -> bytes:
+    """Read the request body, aborting once it runs past *limit* bytes.
+
+    Streaming the body and stopping at the slot's expected size bounds the memory
+    a single upload can take: a chunked ``PUT`` that declares no length (or lies
+    about it) cannot buffer an unbounded payload before the store rejects it. The
+    store stays the authoritative validator of the exact byte count; this only
+    caps what is read off the wire.
+
+    Raises:
+        HTTPException: 400 if the body exceeds *limit* bytes.
+    """
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > limit:
+            raise HTTPException(status_code=400, detail=f"expected {limit} bytes, got more")
+    return bytes(body)
 
 
 class EgressRoutes:

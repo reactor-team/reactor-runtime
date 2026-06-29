@@ -2,15 +2,16 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import cast
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 
 from reactor_runtime import InputField, Output, ReactorModel, Video, event
 from reactor_runtime.core import RuntimeConfig
 from reactor_runtime.http import EgressRoutes, SessionRoutes, UploadRoutes
-from reactor_runtime.http.routes import _resume_from, _stream_events
+from reactor_runtime.http.routes import _read_capped, _resume_from, _stream_events
 from reactor_runtime.runner.runner import SESSION_ID, Runner
 
 
@@ -167,6 +168,36 @@ async def test_create_upload_allocates_a_slot(
     assert body["path"] == f"sessions/{SESSION_ID}/uploads/{upload_id}/cat.png"
 
 
+async def test_create_upload_honours_a_supplied_id(
+    client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, runner = client
+    await http_client.post("/start_session", json={})
+
+    created = await http_client.post(
+        f"/sessions/{SESSION_ID}/uploads",
+        json={"name": "cat.png", "size": 4, "mime_type": "image/png", "upload_id": "platform-1"},
+    )
+    assert created.status_code == 201
+    assert created.json()["presigned_id"] == "platform-1"
+
+    await http_client.put("/uploads/platform-1", content=b"\x89PNG")
+    assert (await runner.uploads.fetch("platform-1")).data == b"\x89PNG"
+
+
+async def test_create_upload_rejects_a_reserved_id(
+    client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, _ = client
+    await http_client.post("/start_session", json={})
+    payload = {"name": "cat.png", "size": 4, "mime_type": "image/png", "upload_id": "dup"}
+    await http_client.post(f"/sessions/{SESSION_ID}/uploads", json=payload)
+
+    response = await http_client.post(f"/sessions/{SESSION_ID}/uploads", json=payload)
+
+    assert response.status_code == 409
+
+
 async def test_create_upload_rejects_an_unknown_sid(
     client: tuple[httpx.AsyncClient, Runner],
 ) -> None:
@@ -286,6 +317,31 @@ async def test_events_replays_the_backlog_as_sse(
         assert body["to"] == "ready"
     finally:
         await stream.aclose()
+
+
+class _StreamingRequest:
+    """A stand-in request that yields a fixed sequence of body chunks."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = chunks
+
+    async def stream(self) -> AsyncIterator[bytes]:
+        for chunk in self._chunks:
+            yield chunk
+
+
+async def test_read_capped_returns_a_body_within_the_limit() -> None:
+    request = cast(Request, _StreamingRequest([b"ab", b"cd"]))
+    assert await _read_capped(request, 4) == b"abcd"
+
+
+async def test_read_capped_aborts_once_the_limit_is_exceeded() -> None:
+    # A chunked body with no honest Content-Length is stopped mid-stream rather
+    # than buffered whole, so an oversized upload cannot exhaust memory.
+    request = cast(Request, _StreamingRequest([b"abcd", b"e"]))
+    with pytest.raises(HTTPException) as raised:
+        await _read_capped(request, 4)
+    assert raised.value.status_code == 400
 
 
 def test_resume_from_reads_a_numeric_last_event_id() -> None:

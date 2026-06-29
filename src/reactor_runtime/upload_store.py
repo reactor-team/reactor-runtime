@@ -44,6 +44,10 @@ class UploadSizeMismatchError(UploadError):
     """The bytes written do not match the size the slot was created with."""
 
 
+class UploadIdTakenError(UploadError):
+    """A slot is already reserved under the requested upload id."""
+
+
 @dataclass
 class _Slot:
     """A reserved upload — runtime-only metadata, plus the bytes once written.
@@ -81,18 +85,32 @@ class UploadStore:
         """Start an empty store with no reserved slots."""
         self._slots: dict[UploadId, _Slot] = {}
 
-    def create_slot(self, name: str, mime_type: str, size: int) -> UploadId:
+    def create_slot(
+        self, name: str, mime_type: str, size: int, upload_id: UploadId | None = None
+    ) -> UploadId:
         """Reserve a slot for an announced file and return its upload id.
+
+        The id is minted here by default. A caller that must address the slot by
+        an id it already holds may pass *upload_id* to reserve that exact id
+        instead, so a later reference to it resolves to these bytes.
 
         Args:
             name: Original file name.
             mime_type: Declared content type.
             size: The exact byte count the later write must match.
+            upload_id: The id to reserve the slot under; minted when omitted.
 
         Returns:
-            A fresh upload id the client writes to and references the file by.
+            The upload id the slot is reserved under -- the supplied one, or a
+            freshly minted one when none was given.
+
+        Raises:
+            UploadIdTakenError: If *upload_id* is already reserved.
         """
-        upload_id = uuid.uuid4().hex
+        if upload_id is None:
+            upload_id = uuid.uuid4().hex
+        elif upload_id in self._slots:
+            raise UploadIdTakenError(upload_id)
         self._slots[upload_id] = _Slot(
             upload_id=upload_id, name=name, mime_type=mime_type, size=size
         )
