@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from reactor_runtime.core import Health, RuntimeConfig, ServiceComponent
+from reactor_runtime.core import Health, RecordingConfig, RuntimeConfig, ServiceComponent
 
 
 class FakeComponent:
@@ -37,7 +37,8 @@ def test_runtime_config_requires_a_model_ref_and_defaults_the_rest() -> None:
     assert cfg.config_path is None
     assert cfg.port == 8080
     assert cfg.grace_period == 30.0
-    assert cfg.recording_dir is None
+    assert cfg.recording == RecordingConfig()
+    assert cfg.recording.enabled is False
 
 
 def test_runtime_config_overrides() -> None:
@@ -45,8 +46,9 @@ def test_runtime_config_overrides() -> None:
         model_ref="m:M",
         config_path=Path("/etc/model/config.yml"),
         port=9000,
-        recording_dir="/tmp/clips",
+        recording=RecordingConfig(enabled=True, recording_dir="/tmp/clips"),
     )
     assert cfg.config_path == Path("/etc/model/config.yml")
     assert cfg.port == 9000
-    assert cfg.recording_dir == "/tmp/clips"
+    assert cfg.recording.recording_dir == "/tmp/clips"
+    assert cfg.recording.enabled is True

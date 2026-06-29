@@ -12,11 +12,12 @@ from collections.abc import AsyncGenerator
 from typing import Annotated, Any
 
 from fastapi import Body, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from reactor_runtime.core import HealthStatus
 from reactor_runtime.http.events import format_sse
+from reactor_runtime.recording import ClipManifest, ClipSessionGoneError, Pending
 from reactor_runtime.runner import Runner
 from reactor_runtime.transport.router import SessionNotRunningError, UnknownSessionError
 from reactor_runtime.upload_store import (
@@ -185,6 +186,48 @@ async def _read_capped(request: Request, limit: int) -> bytes:
         if len(body) > limit:
             raise HTTPException(status_code=400, detail=f"expected {limit} bytes, got more")
     return bytes(body)
+
+
+class RecordingRoutes:
+    """Clip manifest and segment serving over HTTP.
+
+    Two endpoints reproduce the clip contract the shipped client speaks: a
+    ``GET /clips`` resolves a marker range to an HLS manifest (200), a
+    not-ready hint (202), or gone (410), and a ``GET /clips/chunks/...`` serves
+    the fMP4 segments the manifest points at, straight from local disk.
+    """
+
+    def __init__(self, runner: Runner) -> None:
+        """Bind the route group to the runner whose recorder it reads."""
+        self._runner = runner
+
+    def mount(self, app: FastAPI) -> None:
+        """Register the clip routes against *app*."""
+        runner = self._runner
+
+        @app.get("/clips")
+        async def get_clip_manifest(session_id: str, start: float, end: float) -> Response:
+            try:
+                result = runner.recorder.manifest(session_id, start, end)
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error)) from None
+            if isinstance(result, ClipManifest):
+                return Response(content=result.body, media_type=result.media_type)
+            if isinstance(result, Pending):
+                return Response(status_code=202, headers={"Retry-After": str(result.retry_after)})
+            raise HTTPException(status_code=410, detail="Recording unknown or aged out")
+
+        @app.get("/clips/chunks/{session_id}/{filename}")
+        async def get_clip_chunk(session_id: str, filename: str) -> FileResponse:
+            try:
+                path = runner.recorder.chunk_path(session_id, filename)
+            except ClipSessionGoneError:
+                detail = "Recording unknown or aged out"
+                raise HTTPException(status_code=410, detail=detail) from None
+            if path is None:
+                raise HTTPException(status_code=404, detail="Segment not found")
+            media_type = "video/mp4" if filename == "init.mp4" else "video/iso.segment"
+            return FileResponse(path, media_type=media_type)
 
 
 class EgressRoutes:

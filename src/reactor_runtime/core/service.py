@@ -9,7 +9,7 @@ the single object that configures one runtime process.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -44,6 +44,55 @@ class ServiceComponent(Protocol):
 
 
 @dataclass(frozen=True)
+class RecordingConfig:
+    """The recorder's tunables, drawn from the manifest's ``recording:`` block.
+
+    A model with no ``recording:`` block records nothing (``enabled`` is
+    ``False``); flipping ``enabled`` on is enough for the common single-track
+    case. ``video_track`` / ``audio_track`` only need naming when the model
+    declares more than one track of that kind — otherwise the recorder picks the
+    lone track of each kind automatically. The encoder fields surface straight
+    into the ffmpeg invocation.
+
+    Attributes:
+        enabled: Whether the runtime records the session at all.
+        chunk_seconds: HLS segment length and the forced-keyframe interval.
+        clip_max_seconds: Upper bound a snap-clip request is capped to.
+        skip_leading_black: Drop gap-fill frames before the first real frame and
+            anchor the timeline there, so a clip's markers and bytes share an
+            origin.
+        video_track: The output track to record, or ``None`` to auto-pick the
+            lone video track.
+        audio_track: The output track to record, or ``None`` to auto-pick the
+            lone audio track (recording stays video-only when there is none).
+        video_codec: ``"h264"`` or ``"h265"``.
+        video_preset: The libx264/libx265 preset.
+        video_crf: The constant-rate-factor quality target.
+        target_width: Fixed encode width, or ``None`` to follow the first frame.
+        target_height: Fixed encode height, or ``None`` to follow the first frame.
+        audio_codec: The audio codec, e.g. ``"aac"``.
+        audio_bitrate_kbps: The audio bitrate in kilobits per second.
+        recording_dir: Directory clips are written under, or ``None`` to use a
+            fresh temporary directory.
+    """
+
+    enabled: bool = False
+    chunk_seconds: int = 4
+    clip_max_seconds: int = 300
+    skip_leading_black: bool = True
+    video_track: str | None = None
+    audio_track: str | None = None
+    video_codec: str = "h264"
+    video_preset: str = "veryfast"
+    video_crf: int = 23
+    target_width: int | None = None
+    target_height: int | None = None
+    audio_codec: str = "aac"
+    audio_bitrate_kbps: int = 128
+    recording_dir: str | None = None
+
+
+@dataclass(frozen=True)
 class RuntimeConfig:
     """The single configuration object threaded through ``serve``.
 
@@ -61,8 +110,7 @@ class RuntimeConfig:
         port: Port the HTTP ingress binds.
         grace_period: Seconds a draining session is given to end before stop.
         orphan_timeout: Seconds a session may stay client-less before it closes.
-        recording_dir: Directory recordings are written to, or ``None`` to
-            disable recording.
+        recording: The recorder's configuration; disabled by default.
     """
 
     model_ref: str
@@ -71,4 +119,4 @@ class RuntimeConfig:
     port: int = 8080
     grace_period: float = 30.0
     orphan_timeout: float = 60.0
-    recording_dir: str | None = None
+    recording: RecordingConfig = field(default_factory=RecordingConfig)

@@ -10,9 +10,11 @@ from fastapi import FastAPI, HTTPException, Request
 
 from reactor_runtime import InputField, Output, ReactorModel, Video, event
 from reactor_runtime.core import RuntimeConfig
-from reactor_runtime.http import EgressRoutes, SessionRoutes, UploadRoutes
+from reactor_runtime.http import EgressRoutes, RecordingRoutes, SessionRoutes, UploadRoutes
 from reactor_runtime.http.routes import _read_capped, _resume_from, _stream_events
 from reactor_runtime.runner.runner import SESSION_ID, Runner
+
+_RECORDING_ID = "00000000-0000-0000-0000-000000000001"
 
 
 class FakeOut(Output):
@@ -38,7 +40,18 @@ def _app(runner: Runner) -> FastAPI:
     SessionRoutes(runner).mount(app)
     EgressRoutes(runner).mount(app)
     UploadRoutes(runner).mount(app)
+    RecordingRoutes(runner).mount(app)
     return app
+
+
+def _seed_recording(runner: Runner, root: Path, *segments: str) -> Path:
+    """Point the recorder's serving root at *root* and write fake segments."""
+    runner.recorder._root = root
+    session_dir = root / _RECORDING_ID
+    session_dir.mkdir(parents=True, exist_ok=True)
+    for name in segments:
+        (session_dir / name).write_bytes(b"data")
+    return session_dir
 
 
 @pytest.fixture
@@ -342,6 +355,86 @@ async def test_read_capped_aborts_once_the_limit_is_exceeded() -> None:
     with pytest.raises(HTTPException) as raised:
         await _read_capped(request, 4)
     assert raised.value.status_code == 400
+
+
+async def test_clips_serves_a_ready_manifest(
+    client: tuple[httpx.AsyncClient, Runner], tmp_path: Path
+) -> None:
+    http_client, runner = client
+    _seed_recording(runner, tmp_path, "init.mp4", "chunk_00000.m4s", "chunk_00001.m4s")
+
+    response = await http_client.get(f"/clips?session_id={_RECORDING_ID}&start=0&end=4")
+
+    assert response.status_code == 200
+    assert "#EXT-X-MAP" in response.text
+
+
+async def test_clips_is_pending_until_the_boundary_lands(
+    client: tuple[httpx.AsyncClient, Runner], tmp_path: Path
+) -> None:
+    http_client, runner = client
+    _seed_recording(runner, tmp_path, "init.mp4", "chunk_00000.m4s")
+
+    response = await http_client.get(f"/clips?session_id={_RECORDING_ID}&start=0&end=4")
+
+    assert response.status_code == 202
+    assert response.headers["Retry-After"] == "2"
+
+
+async def test_clips_is_gone_for_an_unknown_recording(
+    client: tuple[httpx.AsyncClient, Runner], tmp_path: Path
+) -> None:
+    http_client, runner = client
+    runner.recorder._root = tmp_path
+
+    response = await http_client.get(f"/clips?session_id={_RECORDING_ID}&start=0&end=4")
+
+    assert response.status_code == 410
+
+
+async def test_clips_rejects_a_bad_range(
+    client: tuple[httpx.AsyncClient, Runner], tmp_path: Path
+) -> None:
+    http_client, runner = client
+    _seed_recording(runner, tmp_path, "init.mp4", "chunk_00000.m4s", "chunk_00001.m4s")
+
+    response = await http_client.get(f"/clips?session_id={_RECORDING_ID}&start=5&end=4")
+
+    assert response.status_code == 400
+
+
+async def test_clip_chunk_serves_a_segment(
+    client: tuple[httpx.AsyncClient, Runner], tmp_path: Path
+) -> None:
+    http_client, runner = client
+    _seed_recording(runner, tmp_path, "init.mp4")
+
+    response = await http_client.get(f"/clips/chunks/{_RECORDING_ID}/init.mp4")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "video/mp4"
+
+
+async def test_clip_chunk_rejects_a_non_artifact_name(
+    client: tuple[httpx.AsyncClient, Runner], tmp_path: Path
+) -> None:
+    http_client, runner = client
+    _seed_recording(runner, tmp_path, "init.mp4")
+
+    response = await http_client.get(f"/clips/chunks/{_RECORDING_ID}/secrets.txt")
+
+    assert response.status_code == 404
+
+
+async def test_clip_chunk_is_gone_for_an_unknown_recording(
+    client: tuple[httpx.AsyncClient, Runner], tmp_path: Path
+) -> None:
+    http_client, runner = client
+    runner.recorder._root = tmp_path
+
+    response = await http_client.get(f"/clips/chunks/{_RECORDING_ID}/init.mp4")
+
+    assert response.status_code == 410
 
 
 def test_resume_from_reads_a_numeric_last_event_id() -> None:

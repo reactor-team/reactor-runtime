@@ -167,6 +167,45 @@ class Codec(ABC):
         )
         return self.encode(message)
 
+    def encode_clip_ready(
+        self, request_id: str, clip: Mapping[str, Any]
+    ) -> tuple[Channel, bytes | str]:
+        """Encode the runtime's reply to a client's clip or recording request.
+
+        Wraps the clip descriptor — its recording id, kind, marker range, ready
+        estimate, and playlist URL — in a ``ControlServerMessage`` and encodes it
+        for this wire version, correlated by *request_id*. The physical channel is
+        version-dependent (v0 carries the reply on the data channel, v1 on the
+        control channel) and is returned alongside the frame.
+        """
+        message = control_pb2.ControlServerMessage(
+            request_id=request_id,
+            kind=common_pb2.MessageKind.MESSAGE_KIND_RESPONSE,
+            clip_ready=platform_pb2.ClipReady(
+                session_id=str(clip["session_id"]),
+                kind=str(clip["kind"]),
+                start_marker=float(clip["start_marker"]),
+                end_marker=float(clip["end_marker"]),
+                now_marker=float(clip["now_marker"]),
+                predicted_ready_at_ms=int(clip["predicted_ready_at_ms"]),
+                playlist_url=str(clip["playlist_url"]),
+            ),
+        )
+        return self.encode(message)
+
+    def encode_clip_failed(self, request_id: str, reason: str) -> tuple[Channel, bytes | str]:
+        """Encode the runtime's refusal of a clip or recording request.
+
+        Carries the human-readable *reason* in a ``ControlServerMessage``,
+        correlated by *request_id* and encoded for this wire version.
+        """
+        message = control_pb2.ControlServerMessage(
+            request_id=request_id,
+            kind=common_pb2.MessageKind.MESSAGE_KIND_RESPONSE,
+            clip_failed=platform_pb2.ClipFailed(reason=reason),
+        )
+        return self.encode(message)
+
 
 def select(version: ProtocolVersion) -> Codec:
     """Return the codec for a negotiated wire version."""

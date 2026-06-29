@@ -1,6 +1,7 @@
 import json
 
 from reactor_runtime.core import (
+    ChunkReadyEvent,
     ClipReadyEvent,
     ConnId,
     ErrorEvent,
@@ -76,9 +77,40 @@ def test_command_event() -> None:
 
 
 def test_clip_ready_event() -> None:
-    assert runner_event_to_dict(ClipReadyEvent("clip-1")) == {
+    event = ClipReadyEvent(
+        session_id="rec-1",
+        kind="snap",
+        start_marker=10.0,
+        end_marker=40.0,
+        now_marker=40.0,
+        predicted_ready_at_ms=1234,
+        playlist_url="/clips?session_id=rec-1&start=10.000&end=40.000",
+    )
+    assert runner_event_to_dict(event) == {
         "type": "clip_ready",
-        "clip_id": "clip-1",
+        "session_id": "rec-1",
+        "kind": "snap",
+        "start_marker": 10.0,
+        "end_marker": 40.0,
+        "now_marker": 40.0,
+        "predicted_ready_at_ms": 1234,
+        "playlist_url": "/clips?session_id=rec-1&start=10.000&end=40.000",
+    }
+
+
+def test_chunk_ready_event() -> None:
+    assert runner_event_to_dict(ChunkReadyEvent(recording_id="rec-1", idx=4)) == {
+        "type": "chunk_ready",
+        "recording_id": "rec-1",
+        "idx": 4,
+    }
+
+
+def test_chunk_ready_event_for_init_segment() -> None:
+    assert runner_event_to_dict(ChunkReadyEvent(recording_id="rec-1", idx=-1)) == {
+        "type": "chunk_ready",
+        "recording_id": "rec-1",
+        "idx": -1,
     }
 
 

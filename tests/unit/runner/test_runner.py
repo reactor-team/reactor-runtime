@@ -17,8 +17,10 @@ from reactor_runtime import (
     protocol,
 )
 from reactor_runtime.core import (
+    ChunkReadyEvent,
     ClientConnected,
     ClientDisconnected,
+    ClipReadyEvent,
     ConnectionCapabilities,
     ConnId,
     EndReason,
@@ -27,6 +29,7 @@ from reactor_runtime.core import (
     HealthStatus,
     InboundCommandEvent,
     MediaBundle,
+    RecordingConfig,
     RuntimeConfig,
     SessionEnded,
     SessionEvent,
@@ -38,6 +41,7 @@ from reactor_runtime.interface.internal.bridge import CommandOutcome
 from reactor_runtime.interface.internal.reactor_core import AddressedSink, BroadcastSink
 from reactor_runtime.message_gateway import InboundCommand
 from reactor_runtime.protocol.common import struct_to_dict
+from reactor_runtime.recording import ClipResult
 from reactor_runtime.runner.runner import SESSION_ID, Runner
 from reactor_runtime.transport.router import (
     SessionControl,
@@ -388,6 +392,8 @@ async def test_descriptor_renders_the_v0_shape(started_runner: Runner) -> None:
     # Commands are not carried on the descriptor; a client reads them from /schema.
     assert caps["commands"] == []
     assert "emission_fps" not in caps
+    # Recording metadata rides the descriptor so a consumer can mirror it at start.
+    assert descriptor["recording"] == {"enabled": False, "chunk_seconds": 4}
 
 
 async def test_schema_renders_the_model_contract(started_runner: Runner) -> None:
@@ -751,6 +757,116 @@ async def test_upload_store_is_cleared_on_session_stop(started_runner: Runner) -
 
     with pytest.raises(UnknownUploadError):
         await started_runner.uploads.fetch(upload_id)
+
+
+# --- recording -----------------------------------------------------------
+
+
+def _clip() -> ClipResult:
+    return ClipResult(
+        session_id="rec-1",
+        kind="snap",
+        start_marker=1.0,
+        end_marker=2.0,
+        now_marker=2.0,
+        predicted_ready_at_ms=123,
+        playlist_url="/clips?session_id=rec-1&start=1.000&end=2.000",
+    )
+
+
+def test_clip_request_replies_clip_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = _runner()
+    conn = FakeConnection(1)
+    runner.connection_opened(conn)
+    monkeypatch.setattr(runner._recorder, "request_clip", lambda _d: _clip())
+
+    runner.clip_requested(ConnId(1), 30.0, "ctrl_c")
+
+    # v0 carries the clip reply on the data channel.
+    decoded = protocol.select(V0).decode(conn.sent[0], DATA, SERVER)
+    assert isinstance(decoded, control_pb2.ControlServerMessage)
+    assert decoded.WhichOneof("payload") == "clip_ready"
+    assert decoded.clip_ready.session_id == "rec-1"
+
+
+def test_clip_request_on_a_disabled_recorder_replies_clip_failed() -> None:
+    runner = _runner()  # recording is off by default
+    conn = FakeConnection(1)
+    runner.connection_opened(conn)
+
+    runner.clip_requested(ConnId(1), 30.0, "ctrl_c")
+
+    decoded = protocol.select(V0).decode(conn.sent[0], DATA, SERVER)
+    assert isinstance(decoded, control_pb2.ControlServerMessage)
+    assert decoded.WhichOneof("payload") == "clip_failed"
+
+
+def test_recording_request_reply_is_correlated_on_v1() -> None:
+    runner = _runner()
+    conn = FakeConnection(2)
+    conn.protocol_version = V1
+    runner.connection_opened(conn)
+
+    runner.recording_requested(ConnId(2), "ctrl_r")
+
+    decoded = protocol.select(V1).decode(conn.control[0], CONTROL, SERVER)
+    assert isinstance(decoded, control_pb2.ControlServerMessage)
+    assert decoded.request_id == "ctrl_r"
+    assert decoded.WhichOneof("payload") == "clip_failed"
+
+
+async def _recording_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Runner:
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
+    runner = Runner(
+        RuntimeConfig(
+            model_ref="fake:Model",
+            recording=RecordingConfig(enabled=True, recording_dir=str(tmp_path)),
+        )
+    )
+    await runner.start()
+    return runner
+
+
+async def test_recorder_starts_on_session_start_and_stops_on_close(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runner = await _recording_runner(monkeypatch, tmp_path)
+    try:
+        runner.start_session({})
+        assert runner.recorder._started is True
+        runner.stop_session()
+        await asyncio.sleep(0.1)
+        assert runner.recorder._started is False
+    finally:
+        await runner.stop()
+
+
+async def test_clip_ready_is_journalled_on_the_egress(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runner = await _recording_runner(monkeypatch, tmp_path)
+    try:
+        runner._on_clip_ready(_clip())
+        await asyncio.sleep(0.01)
+        ready = [e for e in _egress(runner) if isinstance(e, ClipReadyEvent)]
+        assert len(ready) == 1
+        assert ready[0].session_id == "rec-1"
+        assert ready[0].kind == "snap"
+    finally:
+        await runner.stop()
+
+
+async def test_chunk_ready_is_journalled_on_the_egress(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runner = await _recording_runner(monkeypatch, tmp_path)
+    try:
+        runner._on_chunk_ready("rec-1", 4)
+        await asyncio.sleep(0.01)
+        chunks = [e for e in _egress(runner) if isinstance(e, ChunkReadyEvent)]
+        assert chunks == [ChunkReadyEvent(recording_id="rec-1", idx=4)]
+    finally:
+        await runner.stop()
 
 
 async def test_transitions_are_logged(

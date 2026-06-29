@@ -459,3 +459,44 @@ def test_sniff(frame: bytes | str, expected: protocol.ProtocolVersion) -> None:
 def test_select_returns_versioned_codec() -> None:
     assert protocol.select(protocol.ProtocolVersion.V0).version is protocol.ProtocolVersion.V0
     assert protocol.select(protocol.ProtocolVersion.V1).version is protocol.ProtocolVersion.V1
+
+
+_CLIP = {
+    "session_id": "rec-1",
+    "kind": "snap",
+    "start_marker": 1.0,
+    "end_marker": 2.0,
+    "now_marker": 2.0,
+    "predicted_ready_at_ms": 123,
+    "playlist_url": "/clips?session_id=rec-1&start=1.000&end=2.000",
+}
+
+
+def test_v0_clip_ready_rides_the_data_channel_without_an_id() -> None:
+    codec = protocol.select(protocol.ProtocolVersion.V0)
+    channel, frame = codec.encode_clip_ready("ctrl_1", _CLIP)
+    assert channel is DATA
+    decoded = codec.decode(frame, DATA, SERVER)
+    assert isinstance(decoded, control_pb2.ControlServerMessage)
+    assert decoded.WhichOneof("payload") == "clip_ready"
+    assert decoded.clip_ready.session_id == "rec-1"
+
+
+def test_v1_clip_ready_rides_control_correlated_by_id() -> None:
+    codec = protocol.select(protocol.ProtocolVersion.V1)
+    channel, frame = codec.encode_clip_ready("ctrl_1", _CLIP)
+    assert channel is CONTROL
+    decoded = codec.decode(frame, CONTROL, SERVER)
+    assert isinstance(decoded, control_pb2.ControlServerMessage)
+    assert decoded.request_id == "ctrl_1"
+    assert decoded.clip_ready.kind == "snap"
+
+
+def test_v1_clip_failed_carries_its_reason_and_id() -> None:
+    codec = protocol.select(protocol.ProtocolVersion.V1)
+    channel, frame = codec.encode_clip_failed("ctrl_2", "recorder disabled")
+    assert channel is CONTROL
+    decoded = codec.decode(frame, CONTROL, SERVER)
+    assert isinstance(decoded, control_pb2.ControlServerMessage)
+    assert decoded.request_id == "ctrl_2"
+    assert decoded.clip_failed.reason == "recorder disabled"

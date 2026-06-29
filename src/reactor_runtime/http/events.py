@@ -13,6 +13,7 @@ import json
 from typing import Any
 
 from reactor_runtime.core import (
+    ChunkReadyEvent,
     ClipReadyEvent,
     ErrorEvent,
     InboundCommandEvent,
@@ -45,7 +46,18 @@ def runner_event_to_dict(event: RunnerEvent) -> dict[str, Any]:
         conn_id = None if event.conn_id is None else int(event.conn_id)
         return {"type": "command", "name": event.name, "args": dict(event.args), "conn_id": conn_id}
     if isinstance(event, ClipReadyEvent):
-        return {"type": "clip_ready", "clip_id": event.clip_id}
+        return {
+            "type": "clip_ready",
+            "session_id": event.session_id,
+            "kind": event.kind,
+            "start_marker": event.start_marker,
+            "end_marker": event.end_marker,
+            "now_marker": event.now_marker,
+            "predicted_ready_at_ms": event.predicted_ready_at_ms,
+            "playlist_url": event.playlist_url,
+        }
+    if isinstance(event, ChunkReadyEvent):
+        return {"type": "chunk_ready", "recording_id": event.recording_id, "idx": event.idx}
     if isinstance(event, SessionMetricEvent):
         return {"type": "metric", "name": event.name, "value": event.value}
     if isinstance(event, ErrorEvent):

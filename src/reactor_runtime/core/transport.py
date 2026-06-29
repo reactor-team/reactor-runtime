@@ -159,6 +159,22 @@ class ConnectionSink(Protocol):
         version places it (data for v0, control for v1).
         """
 
+    def clip_requested(self, conn_id: ConnId, duration_seconds: float, request_id: str) -> None:
+        """Answer a client's request for a snap clip of recent output.
+
+        The recorder resolves the last *duration_seconds* to a marker range and a
+        playlist URL the client polls, and the result is sent back to the
+        requesting connection correlated by *request_id*. A request the recorder
+        cannot serve is answered with a clip-failed reply instead.
+        """
+
+    def recording_requested(self, conn_id: ConnId, request_id: str) -> None:
+        """Answer a client's request for a recording of the whole session.
+
+        Resolves the same way as :meth:`clip_requested` but over the full session
+        timeline, correlated by *request_id*.
+        """
+
     def connection_answered(self, conn_id: ConnId, answer: Mapping[str, str]) -> None:
         """Relay the transport's negotiation answer for one connection.
 

@@ -23,8 +23,10 @@ from collections.abc import Callable, Coroutine, Mapping
 from typing import Any
 
 from reactor_runtime.core import (
+    ChunkReadyEvent,
     ClientConnected,
     ClientDisconnected,
+    ClipReadyEvent,
     Connection,
     ConnectionSink,
     ConnId,
@@ -52,6 +54,7 @@ from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.log import get_logger
 from reactor_runtime.message_gateway import InboundCommand, MessageGateway
 from reactor_runtime.protocol import Channel, Codec, ProtocolVersion, select
+from reactor_runtime.recording import ClipResult, Recorder, RecorderError
 from reactor_runtime.runner.connection_manager import ConnectionManager
 from reactor_runtime.runner.state_machine import SessionStateMachine
 from reactor_runtime.transport.router import SessionNotRunningError, UnknownSessionError
@@ -137,6 +140,11 @@ class Runner(ServiceComponent, ConnectionSink):
         self._sm.on_transition(self._dispatch_transition)
         self._events = EventStream()
         self._uploads = UploadStore()
+        self._recorder = Recorder(
+            cfg.recording,
+            on_clip_ready=self._on_clip_ready,
+            on_chunk_ready=self._on_chunk_ready,
+        )
         self._connections = ConnectionManager(state_machine=self._sm)
         # One codec per wire version, built on first use. Inbound decode is
         # driven by the version a connection negotiated; outbound encode picks
@@ -355,6 +363,75 @@ class Runner(ServiceComponent, ConnectionSink):
             lambda version: self._codec_for(version).encode_schema_response(request_id, openapi),
         )
 
+    def clip_requested(self, conn_id: ConnId, duration_seconds: float, request_id: str) -> None:
+        """Resolve a snap-clip request and reply, correlated by *request_id*.
+
+        The recorder returns the clip's marker range and playlist URL at once;
+        the reply rides whichever channel the connection's codec places it on. A
+        request the recorder cannot serve is answered with a clip-failed reply.
+        """
+        self._reply_clip(conn_id, request_id, lambda: self._recorder.request_clip(duration_seconds))
+
+    def recording_requested(self, conn_id: ConnId, request_id: str) -> None:
+        """Resolve a full-session recording request and reply, correlated by *request_id*."""
+        self._reply_clip(conn_id, request_id, lambda: self._recorder.request_recording())
+
+    def _reply_clip(
+        self, conn_id: ConnId, request_id: str, resolve: Callable[[], ClipResult]
+    ) -> None:
+        """Resolve a clip request and send the clip-ready or clip-failed reply."""
+        try:
+            clip = resolve().to_dict()
+        except (RecorderError, ValueError) as error:
+            reason = str(error) or "clip request failed"
+            self._connections.send_response(
+                conn_id,
+                lambda version: self._codec_for(version).encode_clip_failed(request_id, reason),
+            )
+            return
+        self._connections.send_response(
+            conn_id,
+            lambda version: self._codec_for(version).encode_clip_ready(request_id, clip),
+        )
+
+    def _on_clip_ready(self, clip: ClipResult) -> None:
+        """Journal a clip once its boundary segment lands, hopping onto the loop.
+
+        The recorder fires this from its own watcher thread, so the emit is
+        scheduled on the runtime loop where the egress journal is single-writer.
+        """
+        loop = self._loop
+        if loop is not None:
+            loop.call_soon_threadsafe(self._emit_clip_ready, clip)
+
+    def _emit_clip_ready(self, clip: ClipResult) -> None:
+        """Emit a clip-ready fact on the egress journal."""
+        self._events.emit(
+            ClipReadyEvent(
+                session_id=clip.session_id,
+                kind=clip.kind,
+                start_marker=clip.start_marker,
+                end_marker=clip.end_marker,
+                now_marker=clip.now_marker,
+                predicted_ready_at_ms=clip.predicted_ready_at_ms,
+                playlist_url=clip.playlist_url,
+            )
+        )
+
+    def _on_chunk_ready(self, recording_id: str, idx: int) -> None:
+        """Journal a recording segment once it closes, hopping onto the loop.
+
+        The recorder fires this from its own watcher thread, so the emit is
+        scheduled on the runtime loop where the egress journal is single-writer.
+        """
+        loop = self._loop
+        if loop is not None:
+            loop.call_soon_threadsafe(self._emit_chunk_ready, recording_id, idx)
+
+    def _emit_chunk_ready(self, recording_id: str, idx: int) -> None:
+        """Emit a chunk-ready fact on the egress journal."""
+        self._events.emit(ChunkReadyEvent(recording_id=recording_id, idx=idx))
+
     # -- session control (driven by the HTTP routes) --------------------------
 
     def start_session(self, params: Mapping[str, Any]) -> None:
@@ -438,6 +515,11 @@ class Runner(ServiceComponent, ConnectionSink):
         """The upload store the HTTP upload routes write into and the runner reads."""
         return self._uploads
 
+    @property
+    def recorder(self) -> Recorder:
+        """The recorder the HTTP clip routes read and the runner drives."""
+        return self._recorder
+
     def descriptor(self) -> dict[str, Any]:
         """Describe the session in the shape the client validates against.
 
@@ -459,6 +541,10 @@ class Runner(ServiceComponent, ConnectionSink):
             "selected_transport": {
                 "protocol": "webrtc",
                 "version": _WEBRTC_TRANSPORT_VERSION,
+            },
+            "recording": {
+                "enabled": self._cfg.recording.enabled,
+                "chunk_seconds": self._cfg.recording.chunk_seconds,
             },
         }
         if self._bridge is None:
@@ -597,14 +683,28 @@ class Runner(ServiceComponent, ConnectionSink):
         self._events.emit(TransitionEvent(transition))
         if self._bridge is not None:
             self._dispatch_reactor_events(transition, self._bridge)
+        if transition.is_session_start and self._bridge is not None:
+            self._start_recorder(self._bridge)
         if transition.from_state is not transition.to_state:
             self._reset_orphan_timeout(transition.to_state)
         if transition.to_state is SessionState.CLOSING and self._loop is not None:
             reason = transition.detail.get("reason", EndReason.STOPPED)
             self._uploads.clear()
+            self._spawn_teardown(asyncio.to_thread(self._recorder.stop))
             self._spawn_teardown(self._close_session(reason))
         if transition.to_state is SessionState.TERMINATED:
             self.request_shutdown()
+
+    def _start_recorder(self, bridge: ModelBridge) -> None:
+        """Tap the model's output buffer for recording, best-effort.
+
+        Recording must never break the session: a recorder that fails to start
+        logs and is left disabled rather than raising into the transition path.
+        """
+        try:
+            self._recorder.start(self._session_id, bridge.output_buffer)
+        except Exception:
+            logger.exception("failed to start the recorder; continuing without recording")
 
     def _dispatch_reactor_events(self, transition: Transition, bridge: ModelBridge) -> None:
         """Cross session and connection facts into the model as reactor events.

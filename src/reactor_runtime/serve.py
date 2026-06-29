@@ -28,7 +28,7 @@ from typing import Any
 import yaml
 
 from reactor_runtime import log
-from reactor_runtime.core import RuntimeConfig
+from reactor_runtime.core import RecordingConfig, RuntimeConfig
 from reactor_runtime.http import HttpServer
 from reactor_runtime.runner import Runner
 from reactor_runtime.service import Service
@@ -166,12 +166,17 @@ def _apply_env(cfg: RuntimeConfig) -> RuntimeConfig:
         port = int(port_raw) if port_raw else cfg.port
     except ValueError:
         raise SystemExit(f"PORT {port_raw!r} must be an integer") from None
+    recording = cfg.recording
+    recordings_dir = os.getenv("REACTOR_RECORDINGS_DIR", "").strip()
+    if recordings_dir:
+        recording = dataclasses.replace(recording, recording_dir=recordings_dir)
     return dataclasses.replace(
         cfg,
         host=os.getenv("HOST", cfg.host),
         port=port,
         orphan_timeout=_float_env("ORPHAN_TIMEOUT_SECONDS", cfg.orphan_timeout),
         grace_period=_float_env("SIGTERM_GRACE_PERIOD", cfg.grace_period),
+        recording=recording,
     )
 
 
@@ -221,8 +226,9 @@ async def serve(cfg: RuntimeConfig, webrtc: WebRtcConfig | None = None) -> None:
 def _load_config(manifest: Path) -> RuntimeConfig:
     """Read a ``reactor.yaml`` manifest into a :class:`RuntimeConfig`.
 
-    Only ``runtime.import`` — the ``"module:Class"`` model reference — and
-    ``runtime.config`` — the path to the model's own config file — are read; the
+    ``runtime.import`` — the ``"module:Class"`` model reference — and
+    ``runtime.config`` — the path to the model's own config file — name the
+    model, and the top-level ``recording:`` block configures the recorder; the
     rest of the manifest describes the model to the platform and is not the
     runtime's concern. The config path is passed to the model verbatim (resolved
     to an absolute path); the runtime never parses its contents.
@@ -231,8 +237,8 @@ def _load_config(manifest: Path) -> RuntimeConfig:
         manifest: Path to the ``reactor.yaml`` file.
 
     Returns:
-        A configuration naming the model the manifest points at and, when
-        present, the path to its config file.
+        A configuration naming the model the manifest points at, the path to its
+        config file when present, and the recorder's settings.
 
     Raises:
         SystemExit: If the manifest is not valid YAML, is not a mapping, or
@@ -249,7 +255,53 @@ def _load_config(manifest: Path) -> RuntimeConfig:
     model_ref = runtime.get("import")
     if not isinstance(model_ref, str) or not model_ref:
         raise SystemExit(f"{manifest}: missing runtime.import (the model reference)")
-    return RuntimeConfig(model_ref=model_ref, config_path=_resolve_config_path(runtime, manifest))
+    return RuntimeConfig(
+        model_ref=model_ref,
+        config_path=_resolve_config_path(runtime, manifest),
+        recording=_recording_from_manifest(document.get("recording")),
+    )
+
+
+def _recording_from_manifest(block: Any) -> RecordingConfig:
+    """Parse the manifest's ``recording:`` block into a :class:`RecordingConfig`.
+
+    A missing or non-mapping block leaves recording disabled at its defaults.
+    Unknown keys are ignored so a manifest can carry forward-looking settings
+    without breaking an older runtime.
+
+    Args:
+        block: The raw ``recording:`` value from the manifest, if any.
+
+    Returns:
+        The parsed recorder configuration.
+    """
+    if not isinstance(block, dict):
+        return RecordingConfig()
+    raw_video = block.get("video")
+    video: dict[str, Any] = raw_video if isinstance(raw_video, dict) else {}
+    raw_audio = block.get("audio")
+    audio: dict[str, Any] = raw_audio if isinstance(raw_audio, dict) else {}
+    defaults = RecordingConfig()
+    return RecordingConfig(
+        enabled=bool(block.get("enabled", defaults.enabled)),
+        chunk_seconds=int(block.get("chunk_seconds", defaults.chunk_seconds)),
+        clip_max_seconds=int(block.get("clip_max_seconds", defaults.clip_max_seconds)),
+        skip_leading_black=bool(block.get("skip_leading_black", defaults.skip_leading_black)),
+        video_track=block.get("video_track"),
+        audio_track=block.get("audio_track"),
+        video_codec=str(video.get("codec", defaults.video_codec)),
+        video_preset=str(video.get("preset", defaults.video_preset)),
+        video_crf=int(video.get("crf", defaults.video_crf)),
+        target_width=_optional_int(video.get("target_width")),
+        target_height=_optional_int(video.get("target_height")),
+        audio_codec=str(audio.get("codec", defaults.audio_codec)),
+        audio_bitrate_kbps=int(audio.get("bitrate_kbps", defaults.audio_bitrate_kbps)),
+    )
+
+
+def _optional_int(value: Any) -> int | None:
+    """Coerce an optional manifest value to ``int``, leaving ``None`` as is."""
+    return None if value is None else int(value)
 
 
 def _resolve_config_path(runtime: dict[str, Any], manifest: Path) -> Path | None:

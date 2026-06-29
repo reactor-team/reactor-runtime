@@ -300,13 +300,50 @@ class InboundCommandEvent:
 
 @dataclass(frozen=True)
 class ClipReadyEvent:
-    """A recorded clip is on disk and ready to fetch.
+    """A recorded clip's segments are on disk and ready to fetch.
+
+    Journalled once the clip's boundary segment has actually landed — distinct
+    from the immediate, still-uploading reply the requesting client receives — so
+    an external consumer learns a clip is genuinely fetchable from ``/clips``.
 
     Attributes:
-        clip_id: Identifier for the clip.
+        session_id: The recording id the clip belongs to.
+        kind: ``"snap"`` for a tail clip, ``"recording"`` for the whole session.
+        start_marker: Clip start, in seconds on the recording timeline.
+        end_marker: Clip end, in seconds on the recording timeline.
+        now_marker: The timeline position when the clip was requested.
+        predicted_ready_at_ms: Unix epoch in milliseconds the clip was estimated
+            to become servable.
+        playlist_url: A path-only ``/clips?...`` URL the consumer absolutises.
     """
 
-    clip_id: str
+    session_id: str
+    kind: str
+    start_marker: float
+    end_marker: float
+    now_marker: float
+    predicted_ready_at_ms: int
+    playlist_url: str
+
+
+@dataclass(frozen=True)
+class ChunkReadyEvent:
+    """A recording segment has closed on disk and is fetchable.
+
+    Emitted once per segment as the recorder rolls over to the next one, and once
+    more for the final segment when the recording finishes. It lets an external
+    consumer mirror the recording into its own store as it is produced, rather
+    than only when a clip is requested.
+
+    Attributes:
+        recording_id: The recording the segment belongs to, as it appears in the
+            clip-serving path.
+        idx: The segment's index — ``-1`` for the initialisation segment, then
+            ``0`` upward for the media segments in order.
+    """
+
+    recording_id: str
+    idx: int
 
 
 @dataclass(frozen=True)
@@ -334,7 +371,12 @@ class ErrorEvent:
 
 
 RunnerEvent = (
-    TransitionEvent | InboundCommandEvent | ClipReadyEvent | SessionMetricEvent | ErrorEvent
+    TransitionEvent
+    | InboundCommandEvent
+    | ClipReadyEvent
+    | ChunkReadyEvent
+    | SessionMetricEvent
+    | ErrorEvent
 )
 """The egress union the runtime journals out for an external consumer to mirror.
 

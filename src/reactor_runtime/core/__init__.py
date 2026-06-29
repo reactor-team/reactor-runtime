@@ -8,6 +8,7 @@ small pure helpers, so it sits at the root of the dependency graph.
 
 from reactor_runtime.core.fields import FieldInfo, InputField
 from reactor_runtime.core.model import (
+    ChunkReadyEvent,
     ClientConnected,
     ClientDisconnected,
     ClipReadyEvent,
@@ -25,7 +26,7 @@ from reactor_runtime.core.model import (
     TransitionEvent,
     UploadedFile,
 )
-from reactor_runtime.core.service import RuntimeConfig, ServiceComponent
+from reactor_runtime.core.service import RecordingConfig, RuntimeConfig, ServiceComponent
 from reactor_runtime.core.session import SessionEvent, SessionState, Transition
 from reactor_runtime.core.transport import Connection, ConnectionSink
 from reactor_runtime.core.typespec import TypeSpec
@@ -43,6 +44,7 @@ from reactor_runtime.core.values import (
 )
 
 __all__ = [
+    "ChunkReadyEvent",
     "ClientConnected",
     "ClientDisconnected",
     "ClipReadyEvent",
@@ -63,6 +65,7 @@ __all__ = [
     "InputFrame",
     "MediaBundle",
     "ReactorEvent",
+    "RecordingConfig",
     "RunnerEvent",
     "RuntimeConfig",
     "ServiceComponent",
