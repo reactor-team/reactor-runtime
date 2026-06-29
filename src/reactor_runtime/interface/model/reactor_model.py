@@ -142,8 +142,11 @@ class ReactorModel(ReactorCore):
 
         Connection events keep :attr:`connected` and the per-client registry in
         step before and after the hook runs, so a ``@connected`` hook sees its
-        client and a ``@disconnected`` hook can still address it. Session and
-        upload events run their hooks directly.
+        client and a ``@disconnected`` hook can still address it. A session end
+        clears occupancy outright — the session's connections are torn down
+        wholesale without a per-connection close — so :attr:`connected` reads
+        false for a ``run`` loop gating on it and the client registry does not
+        leak across sessions. Upload events run their hooks directly.
         """
         hooks = self.__reactor_contract__.lifecycle
         if isinstance(event, ClientConnected):
@@ -157,7 +160,9 @@ class ReactorModel(ReactorCore):
         elif isinstance(event, SessionStarted):
             await self._invoke_hook(hooks.session_started, None)
         elif isinstance(event, SessionEnded):
+            self._set_connected(0)
             await self._invoke_hook(hooks.session_ended, None)
+            self._clients.clear()
         elif isinstance(event, FileUploaded):
             await self._invoke_hook(hooks.file_uploaded, event.conn_id, uploaded_file=event.file)
 

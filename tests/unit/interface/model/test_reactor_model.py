@@ -162,6 +162,16 @@ async def test_session_started_and_ended_hooks_fire() -> None:
     assert ("session_ended",) in model.calls
 
 
+async def test_session_end_clears_occupancy_without_a_per_client_close() -> None:
+    model = Model()
+    _ready(model)
+    await model._dispatch_reactor_event(ClientConnected(ConnId(1001), 1))
+    assert model.connected.is_set()
+    await model._dispatch_reactor_event(SessionEnded("s-1", EndReason.STOPPED))
+    assert not model.connected.is_set()
+    assert model._clients == {}
+
+
 async def test_client_send_routes_addressed_without_a_request_id() -> None:
     model = Model()
     addressed = _ready(model)
