@@ -361,13 +361,22 @@ class ChunkEncoder:
             self._proc = None
         if proc is None:
             return
-        if proc.poll() is None:
-            try:
-                proc.send_signal(signal.SIGTERM)
-            except ProcessLookupError:
-                return
-            try:
-                proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=2.0)
+        if proc.poll() is not None:
+            # ffmpeg exited on its own before teardown — the feed worker would
+            # have seen a broken pipe and disabled recording. A non-zero code is
+            # a silent encode failure, so surface it rather than let it vanish.
+            if proc.returncode:
+                logger.warning(
+                    "recorder ffmpeg exited before teardown with a non-zero code",
+                    returncode=proc.returncode,
+                )
+            return
+        try:
+            proc.send_signal(signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=2.0)

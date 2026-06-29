@@ -327,6 +327,26 @@ class ClipReadyEvent:
 
 
 @dataclass(frozen=True)
+class ChunkReadyEvent:
+    """A recording segment has closed on disk and is fetchable.
+
+    Emitted once per segment as the recorder rolls over to the next one, and once
+    more for the final segment when the recording finishes. It lets an external
+    consumer mirror the recording into its own store as it is produced, rather
+    than only when a clip is requested.
+
+    Attributes:
+        recording_id: The recording the segment belongs to, as it appears in the
+            clip-serving path.
+        idx: The segment's index — ``-1`` for the initialisation segment, then
+            ``0`` upward for the media segments in order.
+    """
+
+    recording_id: str
+    idx: int
+
+
+@dataclass(frozen=True)
 class SessionMetricEvent:
     """A named session counter sample.
 
@@ -351,7 +371,12 @@ class ErrorEvent:
 
 
 RunnerEvent = (
-    TransitionEvent | InboundCommandEvent | ClipReadyEvent | SessionMetricEvent | ErrorEvent
+    TransitionEvent
+    | InboundCommandEvent
+    | ClipReadyEvent
+    | ChunkReadyEvent
+    | SessionMetricEvent
+    | ErrorEvent
 )
 """The egress union the runtime journals out for an external consumer to mirror.
 

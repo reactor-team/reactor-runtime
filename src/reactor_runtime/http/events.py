@@ -13,6 +13,7 @@ import json
 from typing import Any
 
 from reactor_runtime.core import (
+    ChunkReadyEvent,
     ClipReadyEvent,
     ErrorEvent,
     InboundCommandEvent,
@@ -55,6 +56,8 @@ def runner_event_to_dict(event: RunnerEvent) -> dict[str, Any]:
             "predicted_ready_at_ms": event.predicted_ready_at_ms,
             "playlist_url": event.playlist_url,
         }
+    if isinstance(event, ChunkReadyEvent):
+        return {"type": "chunk_ready", "recording_id": event.recording_id, "idx": event.idx}
     if isinstance(event, SessionMetricEvent):
         return {"type": "metric", "name": event.name, "value": event.value}
     if isinstance(event, ErrorEvent):

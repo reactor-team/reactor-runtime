@@ -17,6 +17,7 @@ from reactor_runtime import (
     protocol,
 )
 from reactor_runtime.core import (
+    ChunkReadyEvent,
     ClientConnected,
     ClientDisconnected,
     ClipReadyEvent,
@@ -391,6 +392,8 @@ async def test_descriptor_renders_the_v0_shape(started_runner: Runner) -> None:
     # Commands are not carried on the descriptor; a client reads them from /schema.
     assert caps["commands"] == []
     assert "emission_fps" not in caps
+    # Recording metadata rides the descriptor so a consumer can mirror it at start.
+    assert descriptor["recording"] == {"enabled": False, "chunk_seconds": 4}
 
 
 async def test_schema_renders_the_model_contract(started_runner: Runner) -> None:
@@ -849,6 +852,19 @@ async def test_clip_ready_is_journalled_on_the_egress(
         assert len(ready) == 1
         assert ready[0].session_id == "rec-1"
         assert ready[0].kind == "snap"
+    finally:
+        await runner.stop()
+
+
+async def test_chunk_ready_is_journalled_on_the_egress(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runner = await _recording_runner(monkeypatch, tmp_path)
+    try:
+        runner._on_chunk_ready("rec-1", 4)
+        await asyncio.sleep(0.01)
+        chunks = [e for e in _egress(runner) if isinstance(e, ChunkReadyEvent)]
+        assert chunks == [ChunkReadyEvent(recording_id="rec-1", idx=4)]
     finally:
         await runner.stop()
 

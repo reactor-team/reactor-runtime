@@ -1,4 +1,5 @@
 import shutil
+import threading
 import time
 from pathlib import Path
 
@@ -198,6 +199,78 @@ def test_a_landed_clip_notifies_the_consumer(tmp_path: Path) -> None:
         assert fired == [clip]
     finally:
         recorder.stop()
+
+
+def test_a_landed_clip_fires_once_under_concurrent_callers(tmp_path: Path) -> None:
+    # stop() and the watch thread can both call _fire_ready_clips at once; a
+    # clip whose boundary has landed must still be announced exactly once.
+    fired: list[ClipResult] = []
+    recorder = Recorder(
+        RecordingConfig(enabled=True, chunk_seconds=4),
+        on_clip_ready=fired.append,
+    )
+    session_dir = _write_segments(tmp_path, "init.mp4", "chunk_00000.m4s", "chunk_00001.m4s")
+    recorder._root = tmp_path
+    recorder._session_dir = session_dir
+    recorder._session_id = _SID
+    clip = ClipResult(
+        session_id=_SID,
+        kind="snap",
+        start_marker=0.0,
+        end_marker=4.0,
+        now_marker=4.0,
+        predicted_ready_at_ms=0,
+        playlist_url="/clips?x",
+    )
+    recorder._pending.append((0, clip))
+
+    threads = [threading.Thread(target=recorder._fire_ready_clips) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert fired == [clip]
+
+
+# -- chunk announcements ---------------------------------------------------
+
+
+def test_closed_chunks_are_announced_in_order(tmp_path: Path) -> None:
+    fired: list[tuple[str, int]] = []
+    recorder = _serving_recorder(tmp_path)
+    recorder._on_chunk_ready = lambda rec, idx: fired.append((rec, idx))
+    session_dir = _write_segments(tmp_path, "init.mp4", "chunk_00000.m4s", "chunk_00001.m4s")
+    recorder._session_dir = session_dir
+    recorder._session_id = _SID
+
+    # init is readable and chunk 0 is closed (chunk 1 is its successor); chunk 1
+    # has no successor yet, so it is not announced.
+    recorder._fire_ready_chunks()
+    assert fired == [(_SID, -1), (_SID, 0)]
+
+    # chunk 1 closes once chunk 2 appears; earlier segments are not re-announced.
+    (session_dir / "chunk_00002.m4s").write_bytes(b"data")
+    recorder._fire_ready_chunks()
+    assert fired == [(_SID, -1), (_SID, 0), (_SID, 1)]
+
+
+def test_the_final_chunk_is_announced_on_completion(tmp_path: Path) -> None:
+    fired: list[tuple[str, int]] = []
+    recorder = _serving_recorder(tmp_path)
+    recorder._on_chunk_ready = lambda rec, idx: fired.append((rec, idx))
+    session_dir = _write_segments(tmp_path, "init.mp4", "chunk_00000.m4s")
+    recorder._session_dir = session_dir
+    recorder._session_id = _SID
+
+    # No successor yet, so only the init segment is announced.
+    recorder._fire_ready_chunks()
+    assert fired == [(_SID, -1)]
+
+    # The completion marker closes the final segment.
+    (session_dir / ".complete").write_bytes(b"")
+    recorder._fire_ready_chunks()
+    assert fired == [(_SID, -1), (_SID, 0)]
 
 
 def test_disabled_recorder_never_starts(tmp_path: Path) -> None:

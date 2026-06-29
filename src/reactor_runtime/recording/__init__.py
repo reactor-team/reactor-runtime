@@ -8,6 +8,7 @@ the clip math. There is no object store here: a director pulls the bytes from
 """
 
 from reactor_runtime.recording.recorder import (
+    ChunkReadyCallback,
     ClipManifest,
     ClipReadyCallback,
     ClipResult,
@@ -21,6 +22,7 @@ from reactor_runtime.recording.recorder import (
 )
 
 __all__ = [
+    "ChunkReadyCallback",
     "ClipManifest",
     "ClipReadyCallback",
     "ClipResult",

@@ -23,6 +23,7 @@ from collections.abc import Callable, Coroutine, Mapping
 from typing import Any
 
 from reactor_runtime.core import (
+    ChunkReadyEvent,
     ClientConnected,
     ClientDisconnected,
     ClipReadyEvent,
@@ -139,7 +140,11 @@ class Runner(ServiceComponent, ConnectionSink):
         self._sm.on_transition(self._dispatch_transition)
         self._events = EventStream()
         self._uploads = UploadStore()
-        self._recorder = Recorder(cfg.recording, on_clip_ready=self._on_clip_ready)
+        self._recorder = Recorder(
+            cfg.recording,
+            on_clip_ready=self._on_clip_ready,
+            on_chunk_ready=self._on_chunk_ready,
+        )
         self._connections = ConnectionManager(state_machine=self._sm)
         # One codec per wire version, built on first use. Inbound decode is
         # driven by the version a connection negotiated; outbound encode picks
@@ -413,6 +418,20 @@ class Runner(ServiceComponent, ConnectionSink):
             )
         )
 
+    def _on_chunk_ready(self, recording_id: str, idx: int) -> None:
+        """Journal a recording segment once it closes, hopping onto the loop.
+
+        The recorder fires this from its own watcher thread, so the emit is
+        scheduled on the runtime loop where the egress journal is single-writer.
+        """
+        loop = self._loop
+        if loop is not None:
+            loop.call_soon_threadsafe(self._emit_chunk_ready, recording_id, idx)
+
+    def _emit_chunk_ready(self, recording_id: str, idx: int) -> None:
+        """Emit a chunk-ready fact on the egress journal."""
+        self._events.emit(ChunkReadyEvent(recording_id=recording_id, idx=idx))
+
     # -- session control (driven by the HTTP routes) --------------------------
 
     def start_session(self, params: Mapping[str, Any]) -> None:
@@ -522,6 +541,10 @@ class Runner(ServiceComponent, ConnectionSink):
             "selected_transport": {
                 "protocol": "webrtc",
                 "version": _WEBRTC_TRANSPORT_VERSION,
+            },
+            "recording": {
+                "enabled": self._cfg.recording.enabled,
+                "chunk_seconds": self._cfg.recording.chunk_seconds,
             },
         }
         if self._bridge is None:

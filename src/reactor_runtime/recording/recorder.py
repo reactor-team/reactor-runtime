@@ -136,6 +136,9 @@ class Gone:
 ClipReadyCallback = Callable[[ClipResult], None]
 """Notified once a requested clip's boundary segment is on disk."""
 
+ChunkReadyCallback = Callable[[str, int], None]
+"""Notified with ``(recording_id, idx)`` once a recording segment has closed."""
+
 
 class Recorder:
     """Records one session's output and serves its clips from local disk.
@@ -156,20 +159,25 @@ class Recorder:
         config: RecordingConfig,
         *,
         on_clip_ready: ClipReadyCallback | None = None,
+        on_chunk_ready: ChunkReadyCallback | None = None,
         keepalive_interval: float = 1.0,
     ) -> None:
-        """Bind the recorder to its config and the clip-ready notification.
+        """Bind the recorder to its config and the readiness notifications.
 
         Args:
             config: The recorder's tunables, including the directory clips are
                 written under.
             on_clip_ready: Called when a requested clip's boundary segment lands
                 on disk, on a recorder-owned thread.
+            on_chunk_ready: Called with ``(recording_id, idx)`` when a recording
+                segment has closed, on a recorder-owned thread, so the recording
+                can be mirrored as it is produced.
             keepalive_interval: Seconds between idle gap-fill frames fed to the
                 encoder so a paused model still advances the recording timeline.
         """
         self._config = config
         self._on_clip_ready = on_clip_ready
+        self._on_chunk_ready = on_chunk_ready
         self._keepalive_interval = max(0.0, keepalive_interval)
         # The recordings root is materialised on the first start, so a disabled
         # recorder (the common case) never creates a directory.
@@ -195,6 +203,13 @@ class Recorder:
 
         self._pending: list[tuple[int, ClipResult]] = []
         self._pending_lock = threading.Lock()
+
+        # The highest media-segment index already announced as closed, and whether
+        # the init segment has been, so each segment is announced exactly once.
+        # Guarded so the watch thread and a concurrent stop never double-announce.
+        self._announced_init = False
+        self._announced_chunk_idx = -1
+        self._chunk_lock = threading.Lock()
 
         self._dropped_frames = 0
         self._last_fed_t = 0.0
@@ -292,6 +307,7 @@ class Recorder:
                 (self._session_dir / _COMPLETE_MARKER).write_text("")
             except OSError:
                 logger.exception("failed to write recording completion marker")
+        self._fire_ready_chunks()
         self._fire_ready_clips()
         self._watch_stop.set()
         watch_thread = self._watch_thread
@@ -320,6 +336,9 @@ class Recorder:
         self._audio_buffered_samples = 0
         with self._pending_lock:
             self._pending = []
+        with self._chunk_lock:
+            self._announced_init = False
+            self._announced_chunk_idx = -1
         self._drain_feed_queue()
 
     # -- output-buffer tap ----------------------------------------------------
@@ -568,25 +587,30 @@ class Recorder:
     # -- clip-ready notification ----------------------------------------------
 
     def _watch_loop(self) -> None:
-        """Poll for landed boundary segments and notify ready clips."""
+        """Poll for landed segments and notify ready clips and closed chunks."""
         while not self._watch_stop.is_set():
+            self._fire_ready_chunks()
             self._fire_ready_clips()
             self._watch_stop.wait(0.1)
 
     def _fire_ready_clips(self) -> None:
-        """Notify the consumer for every pending clip whose boundary has landed."""
+        """Notify the consumer for every pending clip whose boundary has landed.
+
+        Selection and removal happen under a single lock hold, so each pending
+        clip is claimed by exactly one caller: ``stop()`` and the watch thread can
+        run this concurrently without both firing the same clip (and journalling a
+        duplicate ``ClipReadyEvent``). Callbacks fire outside the lock, on only the
+        entries this caller removed.
+        """
         session_dir = self._session_dir
         if session_dir is None:
             return
         with self._pending_lock:
-            pending = list(self._pending)
-        ready = [entry for entry in pending if self._boundary_ready(session_dir, entry[0])]
-        if not ready:
-            return
-        with self._pending_lock:
+            ready = [
+                entry for entry in self._pending if self._boundary_ready(session_dir, entry[0])
+            ]
             for entry in ready:
-                if entry in self._pending:
-                    self._pending.remove(entry)
+                self._pending.remove(entry)
         callback = self._on_clip_ready
         if callback is None:
             return
@@ -595,6 +619,33 @@ class Recorder:
                 callback(clip)
             except Exception:
                 logger.exception("clip-ready callback raised")
+
+    def _fire_ready_chunks(self) -> None:
+        """Announce every recording segment that has closed since the last poll.
+
+        Walks the closed media segments in order (and the init segment once it is
+        readable), notifying the consumer once per segment so a recording can be
+        mirrored as it is produced. A segment counts as closed the same way the
+        clip manifest treats it: its successor exists, or the recording finished.
+        """
+        session_dir = self._session_dir
+        recording_id = self._session_id
+        callback = self._on_chunk_ready
+        if session_dir is None or recording_id is None or callback is None:
+            return
+        ready: list[int] = []
+        with self._chunk_lock:
+            if not self._announced_init and self._init_ready(session_dir):
+                self._announced_init = True
+                ready.append(-1)
+            while self._boundary_ready(session_dir, self._announced_chunk_idx + 1):
+                self._announced_chunk_idx += 1
+                ready.append(self._announced_chunk_idx)
+        for idx in ready:
+            try:
+                callback(recording_id, idx)
+            except Exception:
+                logger.exception("chunk-ready callback raised")
 
     # -- HTTP serving ---------------------------------------------------------
 
