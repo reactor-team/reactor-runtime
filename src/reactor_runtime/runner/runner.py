@@ -18,20 +18,26 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Coroutine, Mapping
 from typing import Any
 
 from reactor_runtime.core import (
+    ClientConnected,
+    ClientDisconnected,
     Connection,
     ConnectionSink,
     ConnId,
     EndReason,
+    ErrorEvent,
     Health,
     HealthStatus,
+    InboundCommandEvent,
     InputFrame,
     RuntimeConfig,
     ServiceComponent,
+    SessionEnded,
     SessionEvent,
+    SessionStarted,
     SessionState,
     Transition,
     TransitionEvent,
@@ -119,6 +125,8 @@ class Runner(ServiceComponent, ConnectionSink):
         self._bridge: ModelBridge | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._inbound: set[asyncio.Task[None]] = set()
+        self._teardown: set[asyncio.Task[None]] = set()
+        self._orphan_task: asyncio.Task[None] | None = None
         self._session_id = SESSION_ID
         self._accepting = True
         # The process-shutdown hook, wired by the assembly so the runner can ask
@@ -171,13 +179,42 @@ class Runner(ServiceComponent, ConnectionSink):
         )
 
     async def drain(self) -> None:
-        """Stop accepting new work."""
+        """Stop accepting new sessions and let an active one end on grace.
+
+        A running session is asked to stop and given the grace period to unwind
+        to ready; the model itself stays up until :meth:`stop`.
+        """
         self._accepting = False
+        if self._sm.current_state in _RUNNING_STATES:
+            self._sm.send(SessionEvent.STOP_SESSION, reason=EndReason.STOPPED)
+            await self._await_ready(self._cfg.grace_period)
 
     async def stop(self) -> None:
-        """Release the model, bringing its thread down last."""
+        """Release the model, bringing its thread down last.
+
+        Any session teardown still in flight is awaited first, so connection
+        closes finish before the model thread goes down — the model is the last
+        thing released even when ``stop`` races a session that is still closing.
+        """
+        self._cancel_orphan_timeout()
+        await self._drain_teardown()
         if self._bridge is not None:
             await self._bridge.stop()
+
+    async def _await_ready(self, grace: float) -> None:
+        """Wait up to *grace* seconds for the session to unwind to ready.
+
+        The loop yields to the event loop before testing the deadline, so even a
+        zero grace period gives an already-scheduled cleanup a turn to run rather
+        than returning while the session is still closing.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + grace
+        while self._sm.current_state is not SessionState.READY:
+            await asyncio.sleep(0)
+            if loop.time() >= deadline:
+                return
+            await asyncio.sleep(0.01)
 
     def health(self) -> Health:
         """Report readiness from the session state and whether the model is up."""
@@ -354,15 +391,28 @@ class Runner(ServiceComponent, ConnectionSink):
     # -- internals ------------------------------------------------------------
 
     async def _submit_command(self, command: InboundCommand) -> None:
-        """Submit a decoded client command to the model through the bridge."""
+        """Submit a decoded client command to the model through the bridge.
+
+        An accepted command is journalled on the egress stream so a consumer
+        can audit or moderate it; a command the contract rejects is journalled
+        as an error instead and never reaches the model.
+        """
         if self._bridge is None:
             return
-        await self._bridge.submit_command(
+        outcome = await self._bridge.submit_command(
             command.name,
             dict(command.args),
             conn_id=command.conn_id,
             request_id=command.request_id,
         )
+        if outcome.accepted:
+            self._events.emit(
+                InboundCommandEvent(command.name, dict(command.args), command.conn_id)
+            )
+        else:
+            self._events.emit(
+                ErrorEvent(f"command {command.name!r} rejected ({outcome.field}: {outcome.reason})")
+            )
 
     def _codec_for(self, version: ProtocolVersion) -> Codec:
         """Return the codec for *version*, building and caching it on first use."""
@@ -392,5 +442,115 @@ class Runner(ServiceComponent, ConnectionSink):
         )
 
     def _dispatch_transition(self, transition: Transition) -> None:
-        """Journal each session transition on the egress stream."""
+        """Run every side effect a session transition drives, in one place.
+
+        Each move is journalled on the egress stream as a single transition fact
+        whose detail carries whatever the move recorded — a connection id, the
+        negotiation answer, an end reason. Session-boundary and per-connection
+        moves cross into the model as authoritative reactor events. A move that
+        changes the state re-arms the orphan timer for the state just entered,
+        so a session left without a client closes itself; a self-loop (such as a
+        negotiation answer) leaves the timer untouched. Entering ``CLOSING``
+        tears the connections down and, once they have closed, unwinds the
+        session to ready, carrying the end reason through; and reaching
+        ``TERMINATED`` asks the service to bring the process down.
+        """
+        logger.info(
+            "session transition",
+            session_id=self._session_id,
+            event=transition.event.name.lower(),
+            from_state=transition.from_state.name.lower(),
+            to_state=transition.to_state.name.lower(),
+        )
         self._events.emit(TransitionEvent(transition))
+        if self._bridge is not None:
+            self._dispatch_reactor_events(transition, self._bridge)
+        if transition.from_state is not transition.to_state:
+            self._reset_orphan_timeout(transition.to_state)
+        if transition.to_state is SessionState.CLOSING and self._loop is not None:
+            reason = transition.detail.get("reason", EndReason.STOPPED)
+            self._spawn_teardown(self._close_session(reason))
+        if transition.to_state is SessionState.TERMINATED:
+            self.request_shutdown()
+
+    def _dispatch_reactor_events(self, transition: Transition, bridge: ModelBridge) -> None:
+        """Cross session and connection facts into the model as reactor events.
+
+        Lifecycle facts are authoritative — authored by the runtime, never the
+        client — so they pass to the model unvalidated.
+        """
+        if transition.is_session_start:
+            bridge.dispatch_reactor_event(SessionStarted(self._session_id))
+        if transition.is_session_end:
+            reason = transition.detail.get("reason", EndReason.STOPPED)
+            bridge.dispatch_reactor_event(SessionEnded(self._session_id, reason))
+        if transition.event is SessionEvent.CONNECTION_OPENED:
+            bridge.dispatch_reactor_event(
+                ClientConnected(transition.detail["conn_id"], self._connections.count)
+            )
+        if transition.event is SessionEvent.CONNECTION_CLOSED:
+            bridge.dispatch_reactor_event(
+                ClientDisconnected(transition.detail["conn_id"], self._connections.count)
+            )
+
+    # -- orphan timeout + teardown --------------------------------------------
+
+    def _reset_orphan_timeout(self, state: SessionState) -> None:
+        """Re-arm the orphan timer for the state just entered.
+
+        A session waiting for its first client or left without one (``WAITING`` /
+        ``ORPHANED``) is given ``orphan_timeout`` seconds to gain a client before
+        it times out and closes; entering any other state cancels the timer.
+        """
+        self._cancel_orphan_timeout()
+        if state in (SessionState.WAITING, SessionState.ORPHANED):
+            self._arm_orphan_timeout()
+
+    def _arm_orphan_timeout(self) -> None:
+        """Start the orphan timer, unless it is disabled or the loop is absent."""
+        if self._loop is None or self._cfg.orphan_timeout <= 0:
+            return
+        self._orphan_task = self._loop.create_task(self._orphan_timeout())
+
+    def _cancel_orphan_timeout(self) -> None:
+        """Cancel a pending orphan timer, if any."""
+        if self._orphan_task is not None:
+            self._orphan_task.cancel()
+            self._orphan_task = None
+
+    async def _orphan_timeout(self) -> None:
+        """Close a session that has stayed client-less past the orphan timeout."""
+        try:
+            await asyncio.sleep(self._cfg.orphan_timeout)
+        except asyncio.CancelledError:
+            return
+        self._sm.send(SessionEvent.TIMEOUT, reason=EndReason.TIMED_OUT)
+
+    async def _close_session(self, reason: EndReason) -> None:
+        """Close the session's connections, then mark cleanup complete.
+
+        Closing the wires and signalling ``CLEANUP_COMPLETE`` are sequenced, not
+        raced: the session only unwinds to ready once its connections have
+        actually closed, so the model thread :meth:`stop` releases last cannot go
+        while connection-close coroutines are still in flight. A wire that fails
+        to close is logged rather than left to abort the teardown, so one bad
+        connection cannot strand the session in ``CLOSING``.
+        """
+        try:
+            await self._connections.close_all()
+        except Exception:
+            logger.exception("error closing session connections during teardown")
+        self._sm.send(SessionEvent.CLEANUP_COMPLETE, reason=reason)
+
+    def _spawn_teardown(self, coro: Coroutine[Any, Any, None]) -> None:
+        """Run a session-teardown coroutine in the background, tracked to completion."""
+        if self._loop is None:
+            return
+        task = self._loop.create_task(coro)
+        self._teardown.add(task)
+        task.add_done_callback(self._teardown.discard)
+
+    async def _drain_teardown(self) -> None:
+        """Await every outstanding teardown task, surfacing none of their errors."""
+        if self._teardown:
+            await asyncio.gather(*tuple(self._teardown), return_exceptions=True)
