@@ -184,14 +184,17 @@ class EndReason(StrEnum):
 class UploadedFile:
     """A file the runtime has fetched and vouched for, ready for the model.
 
+    The model-facing view of an upload — only what a handler needs to act on the
+    file. The reference the client used to address it (its upload id) and any
+    other runtime-only metadata stay inside the upload store and never cross the
+    model boundary.
+
     Attributes:
-        upload_id: Identifier the client used to reference the file.
         name: Original file name.
         mime_type: Declared content type.
         data: The fetched bytes.
     """
 
-    upload_id: str
     name: str
     mime_type: str
     data: bytes

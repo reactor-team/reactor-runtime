@@ -41,12 +41,17 @@ def test_reactor_events_are_a_closed_authoritative_set() -> None:
 
 def test_file_uploaded_carries_the_fetched_bytes() -> None:
     event = FileUploaded(
-        file=UploadedFile(upload_id="u-1", name="cat.png", mime_type="image/png", data=b"\x89PNG"),
+        file=UploadedFile(name="cat.png", mime_type="image/png", data=b"\x89PNG"),
         conn_id=ConnId(2),
     )
     assert isinstance(event, ReactorEvent)
     assert event.file.data == b"\x89PNG"
     assert event.conn_id == ConnId(2)
+
+
+def test_uploaded_file_does_not_carry_the_upload_id() -> None:
+    file = UploadedFile(name="cat.png", mime_type="image/png", data=b"\x89PNG")
+    assert not hasattr(file, "upload_id")
 
 
 def test_runner_event_union_membership() -> None:

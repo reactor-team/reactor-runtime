@@ -30,6 +30,7 @@ from reactor_runtime.core import (
     ConnId,
     EndReason,
     ErrorEvent,
+    FileUploaded,
     Health,
     HealthStatus,
     InboundCommandEvent,
@@ -54,6 +55,7 @@ from reactor_runtime.protocol import Channel, Codec, ProtocolVersion, select
 from reactor_runtime.runner.connection_manager import ConnectionManager
 from reactor_runtime.runner.state_machine import SessionStateMachine
 from reactor_runtime.transport.router import SessionNotRunningError, UnknownSessionError
+from reactor_runtime.upload_store import UnknownUploadError, UploadStore
 
 _RUNNING_STATES = frozenset({SessionState.WAITING, SessionState.STREAMING, SessionState.ORPHANED})
 
@@ -134,6 +136,7 @@ class Runner(ServiceComponent, ConnectionSink):
         self._sm = SessionStateMachine()
         self._sm.on_transition(self._dispatch_transition)
         self._events = EventStream()
+        self._uploads = UploadStore()
         self._connections = ConnectionManager(state_machine=self._sm)
         # One codec per wire version, built on first use. Inbound decode is
         # driven by the version a connection negotiated; outbound encode picks
@@ -321,6 +324,22 @@ class Runner(ServiceComponent, ConnectionSink):
         """Release an inbound track a connection had claimed."""
         self._connections.unpublish_track(conn_id, name)
 
+    def file_uploaded(self, conn_id: ConnId, upload_id: str) -> None:
+        """Resolve a client's out-of-band upload and cross it into the model.
+
+        Only fetched and dispatched when the model declares a ``@file_uploaded``
+        hook, so an upload no model reads costs no byte copy. The fetch is
+        asynchronous, so it is scheduled on the runtime loop and tracked until it
+        completes.
+        """
+        if self._loop is None or self._bridge is None:
+            return
+        if self._bridge.contract.lifecycle.file_uploaded is None:
+            return
+        task = self._loop.create_task(self._dispatch_file_uploaded(conn_id, upload_id))
+        self._inbound.add(task)
+        task.add_done_callback(self._inbound.discard)
+
     def schema_requested(self, conn_id: ConnId, request_id: str) -> None:
         """Answer a client's schema request, correlated by *request_id*.
 
@@ -414,6 +433,11 @@ class Runner(ServiceComponent, ConnectionSink):
         """The egress journal an HTTP egress route streams out."""
         return self._events
 
+    @property
+    def uploads(self) -> UploadStore:
+        """The upload store the HTTP upload routes write into and the runner reads."""
+        return self._uploads
+
     def descriptor(self) -> dict[str, Any]:
         """Describe the session in the shape the client validates against.
 
@@ -470,15 +494,30 @@ class Runner(ServiceComponent, ConnectionSink):
     async def _submit_command(self, command: InboundCommand) -> None:
         """Submit a decoded client command to the model through the bridge.
 
-        An accepted command is journalled on the egress stream so a consumer
-        can audit or moderate it; a command the contract rejects is journalled
-        as an error instead and never reaches the model.
+        Each upload the command references is resolved to its bytes through the
+        store and merged into the arguments before validation, so the model
+        receives a file rather than a reference. A command that references an
+        upload the store cannot produce is journalled as an error and dropped
+        rather than submitted half-resolved. An accepted command is journalled on
+        the egress stream so a consumer can audit or moderate it; a command the
+        contract rejects is journalled as an error instead and never reaches the
+        model. The journalled argument record carries the scalar arguments, never
+        the resolved file bytes.
         """
         if self._bridge is None:
             return
+        args = dict(command.args)
+        try:
+            for param, upload_id in command.uploads.items():
+                args[param] = await self._uploads.fetch(upload_id)
+        except UnknownUploadError:
+            self._events.emit(
+                ErrorEvent(f"command {command.name!r} references an unresolved upload")
+            )
+            return
         outcome = await self._bridge.submit_command(
             command.name,
-            dict(command.args),
+            args,
             conn_id=command.conn_id,
             request_id=command.request_id,
         )
@@ -490,6 +529,21 @@ class Runner(ServiceComponent, ConnectionSink):
             self._events.emit(
                 ErrorEvent(f"command {command.name!r} rejected ({outcome.field}: {outcome.reason})")
             )
+
+    async def _dispatch_file_uploaded(self, conn_id: ConnId, upload_id: str) -> None:
+        """Fetch an out-of-band upload and hand it to the model as a reactor event.
+
+        An upload the store cannot produce is journalled as an error and dropped;
+        a resolved one crosses into the model as a trusted :class:`FileUploaded`.
+        """
+        if self._bridge is None:
+            return
+        try:
+            file = await self._uploads.fetch(upload_id)
+        except UnknownUploadError:
+            self._events.emit(ErrorEvent(f"file upload {upload_id!r} could not be resolved"))
+            return
+        self._bridge.dispatch_reactor_event(FileUploaded(file=file, conn_id=conn_id))
 
     def _codec_for(self, version: ProtocolVersion) -> Codec:
         """Return the codec for *version*, building and caching it on first use."""
@@ -528,9 +582,10 @@ class Runner(ServiceComponent, ConnectionSink):
         changes the state re-arms the orphan timer for the state just entered,
         so a session left without a client closes itself; a self-loop (such as a
         negotiation answer) leaves the timer untouched. Entering ``CLOSING``
-        tears the connections down and, once they have closed, unwinds the
-        session to ready, carrying the end reason through; and reaching
-        ``TERMINATED`` asks the service to bring the process down.
+        clears the session's uploaded files, tears the connections down, and,
+        once they have closed, unwinds the session to ready, carrying the end
+        reason through; and reaching ``TERMINATED`` asks the service to bring the
+        process down.
         """
         logger.info(
             "session transition",
@@ -546,6 +601,7 @@ class Runner(ServiceComponent, ConnectionSink):
             self._reset_orphan_timeout(transition.to_state)
         if transition.to_state is SessionState.CLOSING and self._loop is not None:
             reason = transition.detail.get("reason", EndReason.STOPPED)
+            self._uploads.clear()
             self._spawn_teardown(self._close_session(reason))
         if transition.to_state is SessionState.TERMINATED:
             self.request_shutdown()
