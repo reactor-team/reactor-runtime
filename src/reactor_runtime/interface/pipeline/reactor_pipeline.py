@@ -29,6 +29,7 @@ import time
 from collections.abc import Callable
 from typing import Any, ClassVar, get_type_hints
 
+from reactor_runtime.core.model import ReactorEvent, SessionEnded, SessionStarted
 from reactor_runtime.core.values import ConnId
 from reactor_runtime.interface.events.decorators import EVENT_ATTR, EventHandler, make_command
 from reactor_runtime.interface.internal.input_buffer import BufferClosed
@@ -68,11 +69,15 @@ class ReactorPipeline(ReactorModel):
       :class:`Output` per produced frame. Yield :data:`Idle` (or ``None``) to
       skip a turn.
 
-    A fresh ``self.state`` is built for each client connection and cleared on
-    disconnect, so a public state field is reset between viewers. Public state
-    fields become ``set_<field>`` commands automatically; everything
+    A fresh ``self.state`` is built each time generation starts and cleared when
+    it stops, so a public state field is reset between runs. Public state fields
+    become ``set_<field>`` commands automatically; everything
     :class:`ReactorModel` offers — ``@event``, the lifecycle hooks, ``emit``,
     ``send`` — still applies.
+
+    Generation runs only while the session is live and a client is connected.
+    Ending the session (or the last client leaving) stops the generator at the
+    next turn boundary; a fresh session with a connected client starts it again.
 
     When the subclass declares no ``fps``, the emission rate adapts to the
     measured inference time; declaring ``fps`` pins it to a fixed rate.
@@ -81,9 +86,11 @@ class ReactorPipeline(ReactorModel):
     __pipeline_state__: ClassVar[type[InputState]]
 
     state: Any
-    """The live :class:`InputState` instance, or ``None`` between connections."""
+    """The live :class:`InputState` instance, or ``None`` while stopped."""
 
     _gen_lock: asyncio.Lock | None
+    _session_active: bool
+    _runnable: asyncio.Event
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         # Resolve the state class and stamp its auto-setters onto the subclass
@@ -111,6 +118,37 @@ class ReactorPipeline(ReactorModel):
     def _on_loop_ready(self) -> None:
         super()._on_loop_ready()
         self._gen_lock = asyncio.Lock()
+        self._session_active = False
+        self._runnable = asyncio.Event()
+
+    # -- session-aware gating -------------------------------------------------
+
+    async def _dispatch_reactor_event(self, event: ReactorEvent) -> None:
+        """Track session liveness so the driver stops when the session ends.
+
+        The session-boundary facts are authoritative: a session start permits
+        generation, a session end forbids it. Combined with the connection
+        count the base maintains, this is what gates :meth:`run` — so a
+        ``stop_session`` halts the generator even though its connections are
+        torn down without a per-client disconnect.
+        """
+        if isinstance(event, SessionStarted):
+            self._session_active = True
+        elif isinstance(event, SessionEnded):
+            # Forbid generation before the hook runs so the driver, which checks
+            # between turns without the lock, breaks at the next boundary rather
+            # than waiting on the @session_ended handler to acquire it.
+            self._session_active = False
+            self._update_runnable()
+        await super()._dispatch_reactor_event(event)
+        self._update_runnable()
+
+    def _update_runnable(self) -> None:
+        """Reconcile the run gate from session liveness and the client count."""
+        if self.connected.is_set() and self._session_active:
+            self._runnable.set()
+        else:
+            self._runnable.clear()
 
     # -- handler serialisation ------------------------------------------------
 
@@ -137,12 +175,15 @@ class ReactorPipeline(ReactorModel):
     # -- the driver -----------------------------------------------------------
 
     async def run(self) -> None:
-        """Drive ``inference()`` across client connection cycles.
+        """Drive ``inference()`` across session cycles.
 
-        Each connection gets a fresh ``self.state`` and a new generator. The
-        inference callable is resolved from ``self.inference`` once, so ``load``
-        may replace it with an instance-bound generator; whether it is async is
-        inferred from that callable.
+        Each run gets a fresh ``self.state`` and a new generator, and lasts while
+        the session is live and a client is connected. When that gate drops — the
+        session ends or the last client leaves — the generator is closed, the
+        state and buffers reset, and the driver waits for the next live session.
+        The inference callable is resolved from ``self.inference`` once, so
+        ``load`` may replace it with an instance-bound generator; whether it is
+        async is inferred from that callable.
         """
         lock = self._gen_lock
         if lock is None:
@@ -154,11 +195,11 @@ class ReactorPipeline(ReactorModel):
 
         while True:
             self.state = self.__pipeline_state__()
-            await self.connected.wait()
+            await self._runnable.wait()
 
             gen = inference_fn()
             try:
-                while self.connected.is_set():
+                while self._runnable.is_set():
                     try:
                         async with lock:
                             output, compute_time = await self._advance(gen, is_async)

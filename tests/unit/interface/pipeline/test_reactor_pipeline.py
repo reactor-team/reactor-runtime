@@ -14,6 +14,13 @@ from reactor_runtime import (
     Video,
     event,
 )
+from reactor_runtime.core.model import (
+    ClientConnected,
+    ClientDisconnected,
+    EndReason,
+    SessionEnded,
+    SessionStarted,
+)
 from reactor_runtime.core.values import ConnId
 from reactor_runtime.interface.internal.reactor_core import CommandEnvelope
 from reactor_runtime.interface.model.contract import ModelContract
@@ -228,7 +235,7 @@ class FixedRecorder(ReactorPipeline):
     ) -> None:
         self.emitted.append((output, compute_time))
         if len(self.emitted) >= 3:
-            self.connected.clear()
+            self._runnable.clear()
 
 
 class DynamicRecorder(ReactorPipeline):
@@ -248,12 +255,19 @@ class DynamicRecorder(ReactorPipeline):
     ) -> None:
         self.emitted.append((output, compute_time))
         if len(self.emitted) >= 3:
-            self.connected.clear()
+            self._runnable.clear()
+
+
+def _open_session(pipe: ReactorPipeline) -> None:
+    """Make a readied pipeline runnable, as a live session with a client would."""
+    pipe._session_active = True
+    pipe.connected.set()
+    pipe._runnable.set()
 
 
 async def _drive(pipe: ReactorPipeline) -> None:
     _ready(pipe)
-    pipe.connected.set()
+    _open_session(pipe)
     task = asyncio.create_task(pipe.run())
     await asyncio.sleep(0.05)
     task.cancel()
@@ -279,3 +293,73 @@ async def test_dynamic_fps_emits_with_a_compute_time() -> None:
     await _drive(pipe)
     assert pipe.emitted
     assert all(compute_time is not None for _, compute_time in pipe.emitted)
+
+
+# -- session-aware gating -----------------------------------------------------
+
+
+async def test_a_started_session_with_a_client_is_runnable() -> None:
+    pipe = Pipe()
+    _ready(pipe)
+    await pipe._dispatch_reactor_event(SessionStarted("s"))
+    await pipe._dispatch_reactor_event(ClientConnected(ConnId(1001), 1))
+    assert pipe._runnable.is_set()
+
+
+async def test_session_ended_clears_the_run_gate() -> None:
+    pipe = Pipe()
+    _ready(pipe)
+    await pipe._dispatch_reactor_event(SessionStarted("s"))
+    await pipe._dispatch_reactor_event(ClientConnected(ConnId(1001), 1))
+    await pipe._dispatch_reactor_event(SessionEnded("s", EndReason.STOPPED))
+    assert not pipe._runnable.is_set()
+
+
+async def test_the_last_client_leaving_clears_the_run_gate() -> None:
+    pipe = Pipe()
+    _ready(pipe)
+    await pipe._dispatch_reactor_event(SessionStarted("s"))
+    await pipe._dispatch_reactor_event(ClientConnected(ConnId(1001), 1))
+    await pipe._dispatch_reactor_event(ClientDisconnected(ConnId(1001), 0))
+    assert not pipe._runnable.is_set()
+
+
+class Streamer(ReactorPipeline):
+    state: State
+    output: Frame
+    fps = 12
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.count = 0
+
+    def inference(self) -> Iterator[Frame]:
+        while True:
+            yield _frame()
+
+    async def emit(
+        self, output: Output, *, compute_time: float | None = None, drop: bool = False
+    ) -> None:
+        self.count += 1
+        await asyncio.sleep(0)  # yield so other tasks (and a stop) get scheduled
+
+
+async def test_session_end_stops_the_running_driver() -> None:
+    pipe = Streamer()
+    _ready(pipe)
+    await pipe._dispatch_reactor_event(SessionStarted("s"))
+    await pipe._dispatch_reactor_event(ClientConnected(ConnId(1001), 1))
+    task = asyncio.create_task(pipe.run())
+    try:
+        await asyncio.sleep(0.02)
+        assert pipe.count > 0  # generating while the session is live
+        await pipe._dispatch_reactor_event(SessionEnded("s", EndReason.STOPPED))
+        await asyncio.sleep(0.01)
+        settled = pipe.count
+        await asyncio.sleep(0.03)
+        # No further frames are produced once the session has ended.
+        assert pipe.count == settled
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
