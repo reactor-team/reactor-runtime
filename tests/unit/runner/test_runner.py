@@ -1,6 +1,6 @@
 import asyncio
 from pathlib import Path
-from typing import ClassVar
+from typing import Any
 
 import pytest
 
@@ -11,11 +11,18 @@ from reactor_runtime.core import (
     HealthStatus,
     MediaBundle,
     RuntimeConfig,
+    SessionEvent,
     SessionState,
+    TransitionEvent,
 )
 from reactor_runtime.interface.internal.reactor_core import AddressedSink, BroadcastSink
 from reactor_runtime.protocol.common import struct_to_dict
-from reactor_runtime.runner.runner import Runner
+from reactor_runtime.runner.runner import SESSION_ID, Runner
+from reactor_runtime.transport.router import (
+    SessionControl,
+    SessionNotRunningError,
+    UnknownSessionError,
+)
 from reactor_wire.v1 import control_pb2, data_pb2
 
 DATA = protocol.Channel.DATA
@@ -38,13 +45,11 @@ class FakeModel(ReactorModel):
 
     output: FakeOut
 
-    created: ClassVar[list["FakeModel"]] = []
-
     def __init__(self) -> None:
         super().__init__()
         self.events: list[str] = []
         self.loaded: Path | None = None
-        FakeModel.created.append(self)
+        created_models.append(self)
 
     @event(name="set_mode")
     async def set_mode(self, mode: str = InputField(min_length=1)) -> None: ...
@@ -63,6 +68,12 @@ class FakeModel(ReactorModel):
 
     async def run(self) -> None:
         await asyncio.sleep(60)
+
+
+# Instances FakeModel records as it is constructed, so a test can inspect the
+# model the runner built. Kept off the model class: an annotation on the model
+# would be read as part of its contract.
+created_models: list[FakeModel] = []
 
 
 class FakeConnection:
@@ -94,28 +105,40 @@ def _runner() -> Runner:
     return Runner(RuntimeConfig(model_ref="fake:Model"))
 
 
+@pytest.fixture
+async def started_runner(monkeypatch: pytest.MonkeyPatch) -> Any:
+    created_models.clear()
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
+    runner = _runner()
+    await runner.start()
+    try:
+        yield runner
+    finally:
+        await runner.stop()
+
+
 async def test_start_resolves_loads_and_readies(monkeypatch: pytest.MonkeyPatch) -> None:
-    FakeModel.created.clear()
+    created_models.clear()
     monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
     runner = Runner(RuntimeConfig(model_ref="fake:Model", config_path=Path("/cfg/config.yml")))
 
     await runner.start()
     try:
         assert runner._sm.current_state is SessionState.READY
-        model = FakeModel.created[-1]
+        model = created_models[-1]
         assert model.loaded == Path("/cfg/config.yml")
     finally:
         await runner.stop()
 
 
 async def test_start_binds_outbound_before_spawn(monkeypatch: pytest.MonkeyPatch) -> None:
-    FakeModel.created.clear()
+    created_models.clear()
     monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
     runner = _runner()
 
     await runner.start()
     try:
-        model = FakeModel.created[-1]
+        model = created_models[-1]
         assert model.events == ["load", "bind", "start"]
     finally:
         await runner.stop()
@@ -232,3 +255,89 @@ async def test_schema_request_v1_replies_on_control_correlated_by_id(
         assert decoded.request_id == "ctrl_9"
     finally:
         await runner.stop()
+
+
+# --- the session-control face --------------------------------------------
+
+
+def test_runner_satisfies_the_session_control_surface() -> None:
+    runner = _runner()
+    control: SessionControl = runner
+    assert isinstance(control, SessionControl)
+
+
+def test_new_conn_id_is_unique() -> None:
+    runner = _runner()
+    ids = {runner.new_conn_id() for _ in range(5)}
+    assert len(ids) == 5
+
+
+def test_require_session_running_raises_when_idle() -> None:
+    runner = _runner()
+    with pytest.raises(SessionNotRunningError):
+        runner.require_session_running(SESSION_ID)
+
+
+def test_connection_opened_registers_the_connection() -> None:
+    runner = _runner()
+    runner.connection_opened(FakeConnection(1))
+    assert runner._connections.count == 1
+    runner.connection_closed(ConnId(1))
+    assert runner._connections.count == 0
+
+
+async def test_connection_answered_rides_a_self_loop_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = await _started_runner(monkeypatch)
+    try:
+        runner.start_session({})
+        stream = runner._events.subscribe()
+        runner.connection_answered(ConnId(1), {"type": "answer", "sdp": "v=0..."})
+        event = await asyncio.wait_for(anext(stream), timeout=1.0)
+        assert isinstance(event, TransitionEvent)
+        assert event.transition.event is SessionEvent.CONNECTION_ANSWERED
+        assert event.transition.from_state is SessionState.WAITING
+        assert event.transition.to_state is SessionState.WAITING
+        assert event.transition.detail == {
+            "conn_id": ConnId(1),
+            "answer": {"type": "answer", "sdp": "v=0..."},
+        }
+    finally:
+        await runner.stop()
+
+
+async def test_start_session_opens_the_session(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    assert started_runner._sm.current_state is SessionState.WAITING
+    started_runner.require_session_running(SESSION_ID)
+
+
+async def test_require_session_running_rejects_an_unknown_sid(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    with pytest.raises(UnknownSessionError):
+        started_runner.require_session_running("not-the-session")
+
+
+async def test_stop_session_closes_the_session(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    started_runner.stop_session()
+    assert started_runner._sm.current_state is SessionState.CLOSING
+
+
+async def test_enforce_blocks_a_running_session(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    started_runner.enforce(block=True)
+    assert started_runner._sm.current_state is SessionState.CLOSING
+
+
+async def test_enforce_without_block_is_a_noop(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    started_runner.enforce(block=False)
+    assert started_runner._sm.current_state is SessionState.WAITING
+
+
+async def test_track_map_reports_declared_tracks(started_runner: Runner) -> None:
+    tracks = started_runner.track_map()
+    assert tracks["main"]["kind"] == "video"
+    assert tracks["main"]["direction"] == "out"

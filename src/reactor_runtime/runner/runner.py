@@ -19,11 +19,13 @@ from __future__ import annotations
 import asyncio
 import importlib
 from collections.abc import Callable, Mapping
+from typing import Any
 
 from reactor_runtime.core import (
     Connection,
     ConnectionSink,
     ConnId,
+    EndReason,
     Health,
     HealthStatus,
     InputFrame,
@@ -44,6 +46,14 @@ from reactor_runtime.message_gateway import InboundCommand, MessageGateway
 from reactor_runtime.protocol import Channel, Codec, ProtocolVersion, select
 from reactor_runtime.runner.connection_manager import ConnectionManager
 from reactor_runtime.runner.state_machine import SessionStateMachine
+from reactor_runtime.transport.router import SessionNotRunningError, UnknownSessionError
+
+_RUNNING_STATES = frozenset({SessionState.WAITING, SessionState.STREAMING, SessionState.ORPHANED})
+
+# A runtime process hosts exactly one session, so its id is fixed rather than
+# minted: an all-zero UUID every client addresses. Routes still carry and
+# validate the id, but this is the only value the runtime accepts.
+SESSION_ID = "00000000-0000-0000-0000-000000000000"
 
 logger = get_logger(__name__)
 
@@ -109,7 +119,7 @@ class Runner(ServiceComponent, ConnectionSink):
         self._bridge: ModelBridge | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._inbound: set[asyncio.Task[None]] = set()
-        self._used_conn_ids: set[ConnId] = set()
+        self._session_id = SESSION_ID
         self._accepting = True
         # The process-shutdown hook, wired by the assembly so the runner can ask
         # the service to bring the process down when the session is terminated
@@ -269,6 +279,77 @@ class Runner(ServiceComponent, ConnectionSink):
             conn_id,
             lambda version: self._codec_for(version).encode_schema_response(request_id, openapi),
         )
+
+    # -- session control (driven by the HTTP routes) --------------------------
+
+    def start_session(self, params: Mapping[str, Any]) -> None:
+        """Open a session, moving it from ready to waiting for a client.
+
+        The session id is fixed (:data:`SESSION_ID`), so this only drives the
+        state machine: a start from any state but ready is rejected and leaves
+        the session untouched. The parameters seed the session's initial state.
+
+        Args:
+            params: The initial session parameters supplied by the caller.
+        """
+        self._sm.send(SessionEvent.START_SESSION, params=dict(params))
+
+    def stop_session(self) -> None:
+        """Close the active session, leaving the model loaded and ready again."""
+        self._sm.send(SessionEvent.STOP_SESSION, reason=EndReason.STOPPED)
+
+    def enforce(self, block: bool) -> None:
+        """Apply a moderation verdict to the active session.
+
+        A blocking verdict ends the running session as moderated; a non-blocking
+        verdict is a no-op. This is the minimal enforcement surface — the
+        moderation tap that feeds richer verdicts layers on later.
+
+        Args:
+            block: Whether the verdict blocks the session.
+        """
+        if block and self._sm.current_state in _RUNNING_STATES:
+            self._sm.send(SessionEvent.STOP_SESSION, reason=EndReason.MODERATED)
+
+    def new_conn_id(self) -> ConnId:
+        """Mint a fresh connection id, delegating to the manager that owns the namespace.
+
+        The connection manager is the single owner of the id namespace, so the
+        runner forwards rather than keeping a second counter that could diverge.
+        """
+        return self._connections.new_conn_id()
+
+    def require_session_running(self, sid: str) -> None:
+        """Admit a request only against the live, correctly-addressed session.
+
+        Args:
+            sid: The session id the request addressed.
+
+        Raises:
+            SessionNotRunningError: If no session is currently live.
+            UnknownSessionError: If *sid* is not this runtime's session id.
+        """
+        if self._sm.current_state not in _RUNNING_STATES:
+            raise SessionNotRunningError
+        if sid != self._session_id:
+            raise UnknownSessionError
+
+    def track_map(self) -> Mapping[str, Any]:
+        """Return the model's declared track manifest for connection setup.
+
+        Empty until the model is loaded; a transport reads it to negotiate the
+        media a connection carries.
+        """
+        if self._bridge is None:
+            return {}
+        return {
+            name: {
+                "kind": info.kind.value,
+                "direction": info.direction.value,
+                "rate": info.rate,
+            }
+            for name, info in self._bridge.contract.tracks.items()
+        }
 
     # -- internals ------------------------------------------------------------
 
