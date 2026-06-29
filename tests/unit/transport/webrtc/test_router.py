@@ -135,6 +135,49 @@ def test_ice_servers_render_configured_servers(
     }
 
 
+def test_offer_ice_servers_reach_the_peer_config(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+) -> None:
+    with _client(FakeRunner(), fake_peer, factory_for) as client:
+        accepted = client.post(
+            f"{_PREFIX}/connections/5001/sdp_params",
+            json={
+                "sdp_offer": "the-offer",
+                "ice_servers": [
+                    {
+                        "uris": ["turn:turn.example:3478"],
+                        "credentials": {"username": "u", "password": "p"},
+                    },
+                    {"uris": ["stun:stun.example:3478"]},
+                ],
+            },
+        )
+        assert accepted.status_code == 202
+        _poll_answer(client, 5001)
+    assert fake_peer.last_config is not None
+    assert fake_peer.last_config.ice_servers == (
+        IceServer(urls=("turn:turn.example:3478",), username="u", credential="p"),
+        IceServer(urls=("stun:stun.example:3478",)),
+    )
+
+
+def test_offer_without_ice_servers_uses_configured_servers(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+) -> None:
+    config = WebRtcConfig(ping_timeout=0.0, ice_servers=(IceServer(urls=("stun:base:3478",)),))
+    with _client(FakeRunner(), fake_peer, factory_for, config=config) as client:
+        accepted = client.post(
+            f"{_PREFIX}/connections/5001/sdp_params",
+            json={"sdp_offer": "the-offer"},
+        )
+        assert accepted.status_code == 202
+        _poll_answer(client, 5001)
+    assert fake_peer.last_config is not None
+    assert fake_peer.last_config.ice_servers == (IceServer(urls=("stun:base:3478",)),)
+
+
 def test_offer_is_accepted_then_answer_is_polled(
     fake_peer: FakePeer,
     factory_for: Callable[..., WebRtcPeerFactory],

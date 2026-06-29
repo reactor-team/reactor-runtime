@@ -27,6 +27,7 @@ class FakePeer:
         self.paused: list[str] = []
         self.closed = False
         self.protocol_version = ProtocolVersion.V0
+        self.last_config: WebRtcConfig | None = None
         self.stats_fail_times = 0
         self._stats = stats if stats is not None else PeerStats(rtt_seconds=0.1)
         self._on_message: Callable[[bytes | str, ProtocolVersion, Channel], None] | None = None
@@ -116,6 +117,7 @@ def factory_for() -> Callable[..., WebRtcPeerFactory]:
             version: ProtocolVersion,
         ) -> tuple[FakePeer, SdpAnswer]:
             peer.protocol_version = version
+            peer.last_config = config
             return peer, SdpAnswer(answer)
 
         return factory
