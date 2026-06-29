@@ -295,6 +295,68 @@ async def test_dynamic_fps_emits_with_a_compute_time() -> None:
     assert all(compute_time is not None for _, compute_time in pipe.emitted)
 
 
+class _PinnedBase(ReactorPipeline):
+    """An intermediate base that pins fps without declaring state itself."""
+
+    fps = 7
+
+
+class InheritedFpsRecorder(_PinnedBase):
+    state: State
+    output: Frame
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.emitted: list[tuple[Output, float | None]] = []
+
+    def inference(self) -> Iterator[Frame]:
+        while True:
+            yield _frame()
+
+    async def emit(
+        self, output: Output, *, compute_time: float | None = None, drop: bool = False
+    ) -> None:
+        self.emitted.append((output, compute_time))
+        if len(self.emitted) >= 3:
+            self._runnable.clear()
+
+
+async def test_fps_pinned_on_an_intermediate_base_is_treated_as_fixed() -> None:
+    # The leaf does not redeclare fps, but inherits a pinned rate from its base,
+    # so emission stays fixed rather than adapting to measured compute.
+    pipe = InheritedFpsRecorder()
+    await _drive(pipe)
+    assert pipe.emitted
+    assert all(compute_time is None for _, compute_time in pipe.emitted)
+
+
+class FatalInferencePipe(ReactorPipeline):
+    state: State
+    output: Frame
+    fps = 12
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed = False
+
+    def inference(self) -> Iterator[object]:
+        try:
+            yield 123  # not an Output, Idle, or None
+        finally:
+            self.closed = True
+
+
+async def test_an_inference_error_is_fatal_and_closes_the_generator() -> None:
+    pipe = FatalInferencePipe()
+    _ready(pipe)
+    _open_session(pipe)
+    # A bad yield ends the whole driver rather than just the turn, and the
+    # generator is closed on the way out so teardown does not hang.
+    with pytest.raises(TypeError):
+        await pipe.run()
+    assert pipe.closed is True
+
+
 # -- session-aware gating -----------------------------------------------------
 
 

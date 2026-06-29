@@ -33,7 +33,7 @@ from reactor_runtime.core.model import ReactorEvent, SessionEnded, SessionStarte
 from reactor_runtime.core.values import ConnId
 from reactor_runtime.interface.events.decorators import EVENT_ATTR, EventHandler, make_command
 from reactor_runtime.interface.internal.input_buffer import BufferClosed
-from reactor_runtime.interface.internal.reactor_core import CommandEnvelope
+from reactor_runtime.interface.internal.reactor_core import CommandEnvelope, ReactorCore
 from reactor_runtime.interface.model.reactor_model import ReactorModel
 from reactor_runtime.interface.pipeline.idle import Idle
 from reactor_runtime.interface.pipeline.input_state import InputState
@@ -184,6 +184,12 @@ class ReactorPipeline(ReactorModel):
         The inference callable is resolved from ``self.inference`` once, so
         ``load`` may replace it with an instance-bound generator; whether it is
         async is inferred from that callable.
+
+        An uncaught exception in ``inference()`` — including a yield that is not
+        an :class:`Output`, :data:`Idle`, or ``None`` — is fatal: it propagates
+        out of this driver and permanently ends the model loop, not just the
+        current session. The generator is still closed on the way out, so the
+        teardown stays clean.
         """
         lock = self._gen_lock
         if lock is None:
@@ -191,7 +197,7 @@ class ReactorPipeline(ReactorModel):
 
         inference_fn = self.inference
         is_async = inspect.isasyncgenfunction(inference_fn)
-        dynamic_fps = "fps" not in type(self).__dict__
+        dynamic_fps = not _fps_is_author_pinned(type(self))
 
         while True:
             self.state = self.__pipeline_state__()
@@ -284,6 +290,23 @@ class ReactorPipeline(ReactorModel):
                     yield MyOutput(main_video=frame)
         """
         raise NotImplementedError(f"{type(self).__name__} must implement inference()")
+
+
+def _fps_is_author_pinned(cls: type) -> bool:
+    """Return whether the model (or an intermediate base) pins ``fps`` itself.
+
+    The emission rate is adaptive unless the author declares ``fps``. The walk
+    covers the model's own classes but stops at :class:`ReactorCore`, whose
+    ``fps`` is the framework default rather than an author's choice — so a
+    subclass that inherits a pinned rate from an intermediate
+    :class:`ReactorPipeline` base counts as pinned even without redeclaring it.
+    """
+    for klass in cls.__mro__:
+        if klass is ReactorCore:
+            break
+        if "fps" in vars(klass):
+            return True
+    return False
 
 
 def _resolve_state_class(cls: type) -> type[InputState] | None:
