@@ -184,16 +184,31 @@ def test_validate_coerces_an_enum_value_to_its_member() -> None:
     assert vars(cmd)["speed"] is Speed.FAST
 
 
-def test_override_that_drops_the_decorator_removes_the_command() -> None:
+def test_a_command_is_inherited_by_a_subclass() -> None:
     class Base(ReactorModel):
         @event(name="go")
         async def go(self) -> None: ...
 
     class Derived(Base):
-        async def go(self) -> None: ...  # overrides without the decorator
+        async def go(self) -> None: ...  # plain override does not un-declare it
 
     assert "go" in ModelContract.of(Base).commands
-    assert "go" not in ModelContract.of(Derived).commands
+    assert "go" in ModelContract.of(Derived).commands
+
+
+def test_redeclaring_with_event_overrides_the_inherited_command() -> None:
+    class Base(ReactorModel):
+        @event(name="go", description="base")
+        async def go(self, x: int = 0) -> None: ...
+
+    class Derived(Base):
+        @event(name="go", description="derived")
+        async def go(self, y: str = "a") -> None: ...
+
+    spec = ModelContract.of(Derived).commands["go"]
+    assert spec.description == "derived"
+    assert "y" in spec.command.__command_fields__
+    assert "x" not in spec.command.__command_fields__
 
 
 def test_duplicate_command_name_is_rejected_at_build() -> None:

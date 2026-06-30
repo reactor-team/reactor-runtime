@@ -1,19 +1,20 @@
 """The per-model contract — :class:`ModelContract`.
 
-One class-level traversal resolves the parts of a model's contract that are bound
-to its class — the commands a client can send (each a :class:`CommandSpec` with
-the message type its handler returns) and its lifecycle hooks — and caches them
-on the class. The model's media tracks and the messages it sends back are read
-from the process-global registries every model definition populates, so a track
-or message reaches the schema by being declared, never by being wired onto the
-model class. The same resolved form answers both questions the runtime asks —
-validate an inbound payload into a typed :class:`Command`, and render the
-published :class:`ModelSchema` — so the two can never disagree.
+A model's whole client-facing surface — its commands, the messages it sends
+back, and its media tracks — is read from the process-global registries every
+declaration populates, so a class reaches the schema by being declared, never by
+being wired onto the model class. One class-level traversal additionally binds
+each command to its handler method (and resolves its response type) and collects
+the lifecycle hooks, caching that on the class; this is what dispatch and
+validation need and what a registry cannot carry. Because a command registers
+exactly as it resolves — a subclass inherits its bases' commands and overrides
+one only by re-applying ``@event`` — the registry's command set and the resolved
+one always agree, so the schema and :meth:`validate` can never disagree.
 
 The handler-bound parts are built once, when the model class is created;
-:meth:`ModelContract.of` is the accessor for the cached result. The registry-backed
-parts (:attr:`tracks`, :attr:`messages`) are read lazily, so a message class
-declared after the model class still reaches the schema.
+:meth:`ModelContract.of` is the accessor for the cached result. The registries
+are read lazily, so a message class declared after the model class still reaches
+the schema.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ from reactor_runtime.interface.events.decorators import (
     CONNECTED_ATTR,
     DISCONNECTED_ATTR,
     EVENT_ATTR,
+    EVENT_REGISTRY,
     FILE_UPLOADED_ATTR,
     SESSION_ENDED_ATTR,
     SESSION_STARTED_ATTR,
@@ -175,11 +177,14 @@ class ModelContract:
     def build(cls, model_cls: type) -> ModelContract:
         """Assemble the contract from a single traversal of *model_cls*.
 
-        Walks the MRO for handler methods (the most-derived definition wins),
-        resolving each command's response type from its handler's return
-        annotation. The model's tracks and outbound messages are not snapshotted
-        here — they are read from the registries through :attr:`tracks` /
-        :attr:`messages` when the schema renders.
+        Walks the MRO binding each command and lifecycle hook to its handler
+        method, resolving a command's response type from its handler's return
+        annotation. Inheritance is ordinary: a subclass inherits every command
+        its bases declare, and overrides one by re-applying ``@event`` (the
+        most-derived ``@event`` definition wins). A plain, undecorated override
+        does not un-declare an inherited command. The model's tracks and outbound
+        messages are not snapshotted here — they are read from the registries
+        through :attr:`tracks` / :attr:`messages` when the schema renders.
 
         Args:
             model_cls: The model class to assemble the contract for.
@@ -188,25 +193,24 @@ class ModelContract:
             The assembled contract.
 
         Raises:
-            ValueError: If two handlers claim the same command name.
+            ValueError: If two distinct handlers claim the same command name.
         """
         commands: dict[str, CommandSpec] = {}
+        claimed_by: dict[str, str] = {}
         hooks: dict[str, Callable[..., Any]] = {}
-        seen: set[str] = set()
 
         for klass in model_cls.__mro__:
             for attr_name, attr in vars(klass).items():
-                # The most-derived definition of a name wins, even when it drops
-                # the decorator: marking every name on first sight stops a base's
-                # decorated copy from registering behind a plain override.
-                if attr_name in seen:
-                    continue
-                seen.add(attr_name)
                 handler = getattr(attr, EVENT_ATTR, None)
                 if isinstance(handler, EventHandler):
                     if handler.name in commands:
-                        raise ValueError(f"duplicate command name '{handler.name}'")
+                        # A less-derived copy of the same method is the inherited
+                        # original; a different method is a genuine name clash.
+                        if claimed_by[handler.name] != attr_name:
+                            raise ValueError(f"duplicate command name '{handler.name}'")
+                        continue
                     commands[handler.name] = _command_spec(handler, attr)
+                    claimed_by[handler.name] = attr_name
                     continue
                 for lifecycle_attr, key in _LIFECYCLE_ATTRS.items():
                     if getattr(attr, lifecycle_attr, False):
@@ -273,13 +277,13 @@ class ModelContract:
         """
         commands = {
             name: CommandSchema(
-                description=spec.description,
+                description=self.commands[name].description if name in self.commands else "",
                 schema={
                     field_name: command_field_schema(command_field)
-                    for field_name, command_field in spec.command.__command_fields__.items()
+                    for field_name, command_field in command.__command_fields__.items()
                 },
             )
-            for name, spec in self.commands.items()
+            for name, command in EVENT_REGISTRY.items()
         }
         messages = {
             name: MessageSchema(

@@ -122,21 +122,20 @@ def test_a_track_declared_in_both_directions_is_rejected_on_read() -> None:
         _ = ModelContract.of(Model).tracks
 
 
-def test_an_override_dropping_the_decorator_is_absent_from_the_schema() -> None:
+def test_an_inherited_command_is_published_without_redeclaration() -> None:
     class Base(ReactorModel):
         @event(name="go")
         async def go(self) -> None: ...
 
     class Derived(Base):
-        async def go(self) -> None: ...  # overrides without the decorator
+        async def go(self) -> None: ...  # plain override keeps the inherited command
 
-    # `go` lingers in EVENT_REGISTRY because the base registered it, but the schema
-    # is built from the resolved command set (which the override drops), so the
-    # schema and `validate()` stay in lockstep rather than publishing a command the
-    # runtime would reject.
+    # The command is inherited like any other registered surface, so it stays in
+    # the schema; the resolved command set agrees, so validate would accept it too.
     assert "go" in EVENT_REGISTRY
+    assert "go" in ModelContract.of(Derived).commands
     schema = ModelContract.of(Derived).render_schema().to_openapi()
-    assert "/events/go" not in schema.get("paths", {})
+    assert "/events/go" in schema["paths"]
 
 
 def test_isolation_first_model_sees_only_its_own_surface() -> None:
