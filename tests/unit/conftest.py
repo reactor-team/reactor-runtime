@@ -51,7 +51,7 @@ def _register(*classes: type) -> None:
             OUTPUT_REGISTRY[cls.__name__] = cls
         elif issubclass(cls, Input) and cls is not Input and cls.__tracks__:
             INPUT_REGISTRY[cls.__name__] = cls
-        elif issubclass(cls, ModelMessage) and cls is not ModelMessage and cls.__message_fields__:
+        elif issubclass(cls, ModelMessage) and cls is not ModelMessage:
             MESSAGE_REGISTRY[cls.name] = cls
 
 

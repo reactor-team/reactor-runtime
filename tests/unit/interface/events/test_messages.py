@@ -29,6 +29,13 @@ def test_user_docstring_is_snapshotted() -> None:
     assert Progress.user_doc == "How far generation has got."
 
 
+def test_payload_less_message_serialises_with_empty_data() -> None:
+    class Done(ModelMessage):
+        pass
+
+    assert Done().to_wire_format() == {"type": "done", "data": {}}
+
+
 def test_message_without_docstring_keeps_user_doc_none() -> None:
     class CurrentMode(ModelMessage):
         mode: str

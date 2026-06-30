@@ -50,15 +50,42 @@ def test_an_event_handler_registers_its_command() -> None:
     assert "go" in EVENT_REGISTRY
 
 
-def test_a_field_less_base_is_not_registered() -> None:
+def test_a_track_less_output_base_is_not_registered() -> None:
     class AbstractOut(Output):
         pass
 
-    class AbstractMessage(ModelMessage):
-        pass
-
     assert OUTPUT_REGISTRY == {}
-    assert MESSAGE_REGISTRY == {}
+
+
+def test_a_payload_less_message_is_registered() -> None:
+    class Done(ModelMessage):
+        """Generation has finished."""
+
+    # A signal message carries no body; it registers like any other and
+    # serialises with an empty data envelope.
+    assert MESSAGE_REGISTRY["done"] is Done
+    assert Done().to_wire_format() == {"type": "done", "data": {}}
+
+
+def test_a_payload_less_message_is_published_as_a_webhook() -> None:
+    class Done(ModelMessage):
+        """Generation has finished."""
+
+    class Out(Output):
+        main: Video
+
+    class Model(ReactorModel):
+        output: Out
+
+        @event(name="go")
+        async def go(self) -> None: ...
+
+    schema = ModelContract.of(Model).render_schema().to_openapi()
+    assert "done" in schema["webhooks"]
+    content = schema["webhooks"]["done"]["post"]["requestBody"]["content"]
+    body = content["application/json"]["schema"]
+    assert body.get("properties", {}) == {}
+    assert "required" not in body
 
 
 def test_a_broadcast_only_message_is_published_in_the_schema() -> None:
