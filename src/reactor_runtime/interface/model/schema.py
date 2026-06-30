@@ -50,18 +50,36 @@ class TrackSchema:
 
 @dataclass
 class CommandSchema:
-    """A single command's description and per-field schema."""
+    """A single command's description, per-field schema, and reply message.
+
+    Attributes:
+        description: Human-readable description, surfaced as the operation summary.
+        schema: Per-field request schema.
+        response: The PascalCase name of the message the handler returns, or
+            ``None`` when it returns nothing. Drives the operation's rendered
+            response: a reference to that message's component, or a bare accepted.
+    """
 
     description: str = ""
     schema: dict[str, dict[str, Any]] = field(default_factory=dict)
+    response: str | None = None
 
 
 @dataclass
 class MessageSchema:
-    """A single outbound message's description and per-field schema."""
+    """A single outbound message's description, per-field schema, and type name.
+
+    Attributes:
+        description: Human-readable description, surfaced as the webhook summary.
+        schema: Per-field schema.
+        type_name: The message's PascalCase class name, used as its
+            ``components/schemas`` key so commands and webhooks reference one
+            shared definition.
+    """
 
     description: str = ""
     schema: dict[str, dict[str, Any]] = field(default_factory=dict)
+    type_name: str = ""
 
 
 @dataclass
@@ -89,7 +107,11 @@ class ModelSchema:
 
         Commands become ``post`` operations under ``paths`` (a required field is
         one with no default); messages become ``webhooks``; tracks ride on the
-        ``x-reactor`` extension. The upload reference is the one shared component.
+        ``x-reactor`` extension. Every message is defined once under
+        ``components/schemas`` by its type name, and both its webhook and any
+        command that returns it reference that one definition — so a command's
+        reply shape is never duplicated. A command that returns nothing renders a
+        bare ``202``. The upload reference is another shared component.
         """
         paths: dict[str, Any] = {}
         for name, command in self.commands.items():
@@ -101,7 +123,7 @@ class ModelSchema:
                         "required": True,
                         "content": {"application/json": {"schema": _body(command.schema)}},
                     },
-                    "responses": {"202": {"description": "Command accepted"}},
+                    "responses": _command_responses(command.response),
                 }
             }
 
@@ -111,12 +133,18 @@ class ModelSchema:
                 "operationId": name,
                 "requestBody": {
                     "required": True,
-                    "content": {"application/json": {"schema": _body(message.schema)}},
+                    "content": {"application/json": {"schema": _ref(message.type_name)}},
                 },
             }
             if message.description:
                 operation["summary"] = message.description
             webhooks[name] = {"post": operation}
+
+        schemas: dict[str, Any] = {
+            "ReactorUploadReference": copy.deepcopy(_UPLOAD_REFERENCE_SCHEMA)
+        }
+        for message in self.messages.values():
+            schemas[message.type_name] = _body(message.schema)
 
         doc: dict[str, Any] = {
             "openapi": "3.1.0",
@@ -136,19 +164,38 @@ class ModelSchema:
             doc["paths"] = paths
         if webhooks:
             doc["webhooks"] = webhooks
-        doc["components"] = {
-            "schemas": {"ReactorUploadReference": copy.deepcopy(_UPLOAD_REFERENCE_SCHEMA)}
-        }
+        doc["components"] = {"schemas": schemas}
         return doc
 
 
 def _body(properties: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    """Wrap per-field schemas into a request-body object schema."""
+    """Wrap per-field schemas into an object schema."""
     required = [name for name, schema in properties.items() if "default" not in schema]
     body: dict[str, Any] = {"type": "object", "properties": properties}
     if required:
         body["required"] = required
     return body
+
+
+def _ref(component: str) -> dict[str, Any]:
+    """Build a JSON Schema reference to a named ``components/schemas`` entry."""
+    return {"$ref": f"#/components/schemas/{component}"}
+
+
+def _command_responses(response: str | None) -> dict[str, Any]:
+    """Render a command operation's responses from its reply message, if any.
+
+    A command that returns a message renders a ``200`` whose body references that
+    message's shared component; one that returns nothing renders a bare ``202``.
+    """
+    if response is None:
+        return {"202": {"description": "Command accepted"}}
+    return {
+        "200": {
+            "description": response,
+            "content": {"application/json": {"schema": _ref(response)}},
+        }
+    }
 
 
 def command_field_schema(command_field: CommandField) -> dict[str, Any]:
