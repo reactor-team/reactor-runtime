@@ -15,11 +15,15 @@ from fastapi import Body, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
-from reactor_runtime.core import HealthStatus
+from reactor_runtime.core import HealthStatus, SessionState
 from reactor_runtime.http.events import format_sse
 from reactor_runtime.recording import ClipManifest, ClipSessionGoneError, Pending
 from reactor_runtime.runner import Runner
-from reactor_runtime.transport.router import SessionNotRunningError, UnknownSessionError
+from reactor_runtime.transport.router import (
+    SessionNotRunningError,
+    SessionTransitionError,
+    UnknownSessionError,
+)
 from reactor_runtime.upload_store import (
     UnknownUploadError,
     UploadAlreadyCompleteError,
@@ -32,6 +36,29 @@ class EnforceRequest(BaseModel):
     """A moderation verdict posted against the active session."""
 
     block: bool = True
+
+
+def _transition_rejection(error: SessionTransitionError) -> HTTPException:
+    """Map a rejected session start/stop to its HTTP response.
+
+    The session's current state is the motive. A model still loading
+    (``CREATED``) is a transient unavailability, so it answers ``503`` with a
+    ``Retry-After``; a terminated process is a permanent ``503``. Every other
+    wrong-state — a session already running, one still closing, or nothing to
+    stop — is a ``409`` conflict. The detail names the action and the state, so
+    the caller sees exactly why the transition was refused.
+    """
+    state = error.state
+    detail = f"cannot {error.action} session while {state.name.lower()}"
+    if state is SessionState.CREATED:
+        return HTTPException(
+            status_code=503,
+            detail=f"{detail}: the model is still loading",
+            headers={"Retry-After": "1"},
+        )
+    if state is SessionState.TERMINATED:
+        return HTTPException(status_code=503, detail=f"{detail}: the model is terminated")
+    return HTTPException(status_code=409, detail=detail)
 
 
 class SessionRoutes:
@@ -49,7 +76,10 @@ class SessionRoutes:
         async def start_session(
             params: Annotated[dict[str, Any] | None, Body()] = None,
         ) -> dict[str, Any]:
-            runner.start_session(params or {})
+            try:
+                runner.start_session(params or {})
+            except SessionTransitionError as rejected:
+                raise _transition_rejection(rejected) from None
             return runner.descriptor()
 
         @app.get("/session")
@@ -62,7 +92,10 @@ class SessionRoutes:
 
         @app.post("/stop_session")
         async def stop_session() -> Response:
-            runner.stop_session()
+            try:
+                runner.stop_session()
+            except SessionTransitionError as rejected:
+                raise _transition_rejection(rejected) from None
             return Response(status_code=200)
 
         @app.post("/sessions/{sid}/enforce")

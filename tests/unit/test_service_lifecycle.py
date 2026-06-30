@@ -1,9 +1,21 @@
 import asyncio
 import logging
+import threading
+from pathlib import Path
 
 import pytest
 
-from reactor_runtime.core import Health, HealthStatus
+from reactor_runtime import Output, ReactorModel, Video
+from reactor_runtime.core import (
+    Health,
+    HealthStatus,
+    RuntimeConfig,
+    SessionEvent,
+    SessionState,
+    TransitionEvent,
+)
+from reactor_runtime.http import HttpServer
+from reactor_runtime.runner.runner import Runner
 from reactor_runtime.service import Service
 
 
@@ -53,13 +65,15 @@ def _no_signals(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(Service, "_install_signal_handlers", lambda self: None)
 
 
-async def test_starts_in_dependency_order_then_reverses_on_shutdown(
+async def test_starts_edge_first_and_winds_down_edge_first(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _no_signals(monkeypatch)
     trace: list[str] = []
     service = Service()
-    # Added out of dependency order to prove the topological sort drives ordering.
+    # Added out of order to prove the edge-first ordering (the reverse of
+    # dependency order) drives every phase: the HTTP edge that fronts the runner
+    # comes up first and the runner — the core — is the last thing released.
     service.add(FakeComponent("http", ("runner",), trace=trace))
     service.add(FakeComponent("runner", (), trace=trace))
 
@@ -68,8 +82,8 @@ async def test_starts_in_dependency_order_then_reverses_on_shutdown(
     await asyncio.wait_for(task, timeout=2.0)
 
     assert trace == [
-        "start:runner",
         "start:http",
+        "start:runner",
         "drain:http",
         "drain:runner",
         "stop:http",
@@ -127,13 +141,15 @@ async def test_failed_start_drains_and_stops_only_what_started(
     _no_signals(monkeypatch)
     trace: list[str] = []
     service = Service()
-    service.add(FakeComponent("runner", (), trace=trace))
-    service.add(FakeComponent("http", ("runner",), trace=trace, fail_start=True))
+    # http (the edge) starts first; the runner fails to start, so only http —
+    # the one component that came up — is drained and stopped.
+    service.add(FakeComponent("runner", (), trace=trace, fail_start=True))
+    service.add(FakeComponent("http", ("runner",), trace=trace))
 
     with pytest.raises(RuntimeError):
         await service.run()
 
-    assert trace == ["start:runner", "start-fail:http", "drain:runner", "stop:runner"]
+    assert trace == ["start:http", "start-fail:runner", "drain:http", "stop:http"]
 
 
 async def test_shutdown_winds_down_the_rest_when_a_component_fails(
@@ -149,11 +165,11 @@ async def test_shutdown_winds_down_the_rest_when_a_component_fails(
     service.request_shutdown()
     await asyncio.wait_for(task, timeout=2.0)
 
-    # `http` drains and stops first (reverse order) and raises on both, but the
+    # `http` (the edge) drains and stops first and raises on both, but the
     # failure is isolated: `runner` still drains and stops all the way down.
     assert trace == [
-        "start:runner",
         "start:http",
+        "start:runner",
         "drain:http",
         "drain:runner",
         "stop:http",
@@ -167,3 +183,75 @@ def test_health_aggregates_to_the_worst_status() -> None:
     service.add(FakeComponent("http", health=Health(HealthStatus.DEGRADED, "warming up")))
 
     assert service.health().status is HealthStatus.DEGRADED
+
+
+# --- the HTTP edge is up before the model finishes loading (REA-3604) ---------
+
+_LOAD_GATE = threading.Event()
+
+
+class _GatedOut(Output):
+    main: Video
+
+
+class _GatedModel(ReactorModel):
+    """A model whose load blocks off the event loop until a test releases it."""
+
+    output: _GatedOut
+
+    def load(self, config_path: Path | None) -> None:
+        _LOAD_GATE.wait(timeout=5.0)
+
+    async def run(self) -> None:
+        await asyncio.sleep(60)
+
+
+def _state(runner: Runner) -> SessionState:
+    # A call boundary so the type checker does not narrow the session state
+    # across the awaits that change it.
+    return runner._sm.current_state
+
+
+async def test_http_surface_is_up_before_the_model_finishes_loading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_signals(monkeypatch)
+    _LOAD_GATE.clear()
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: _GatedModel)
+    cfg = RuntimeConfig(model_ref="x:_GatedModel", host="127.0.0.1", port=0)
+    runner = Runner(cfg)
+    http = HttpServer(cfg, runner, [])
+    service = Service()
+    service.add(runner)
+    service.add(http)
+
+    task = asyncio.create_task(service.run())
+    try:
+        # The edge binds first: HTTP is accepting while the model is still loading.
+        for _ in range(500):
+            if http._server is not None and http._server.started:
+                break
+            await asyncio.sleep(0.01)
+        assert http._server is not None
+        assert http._server.started
+        assert _state(runner) is SessionState.CREATED
+        assert runner.health().status is HealthStatus.DEGRADED
+
+        # Releasing the load lets the runner reach READY and journal the init fact,
+        # which is emitted while the HTTP surface is already live.
+        _LOAD_GATE.set()
+        for _ in range(500):
+            if _state(runner) is SessionState.READY:
+                break
+            await asyncio.sleep(0.01)
+        assert _state(runner) is SessionState.READY
+        journalled = [event for _seq, event in runner._events._history]
+        assert any(
+            isinstance(event, TransitionEvent)
+            and event.transition.event is SessionEvent.INITIALIZATION_SUCCESS
+            for event in journalled
+        )
+    finally:
+        _LOAD_GATE.set()
+        service.request_shutdown()
+        await asyncio.wait_for(task, timeout=5.0)
