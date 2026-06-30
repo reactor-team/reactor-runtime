@@ -31,7 +31,6 @@ from reactor_runtime.interface.events.decorators import (
     CONNECTED_ATTR,
     DISCONNECTED_ATTR,
     EVENT_ATTR,
-    EVENT_REGISTRY,
     FILE_UPLOADED_ATTR,
     SESSION_ENDED_ATTR,
     SESSION_STARTED_ATTR,
@@ -274,13 +273,13 @@ class ModelContract:
         """
         commands = {
             name: CommandSchema(
-                description=self.commands[name].description if name in self.commands else "",
+                description=spec.description,
                 schema={
                     field_name: command_field_schema(command_field)
-                    for field_name, command_field in command.__command_fields__.items()
+                    for field_name, command_field in spec.command.__command_fields__.items()
                 },
             )
-            for name, command in EVENT_REGISTRY.items()
+            for name, spec in self.commands.items()
         }
         messages = {
             name: MessageSchema(

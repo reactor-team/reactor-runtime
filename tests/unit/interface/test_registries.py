@@ -122,6 +122,23 @@ def test_a_track_declared_in_both_directions_is_rejected_on_read() -> None:
         _ = ModelContract.of(Model).tracks
 
 
+def test_an_override_dropping_the_decorator_is_absent_from_the_schema() -> None:
+    class Base(ReactorModel):
+        @event(name="go")
+        async def go(self) -> None: ...
+
+    class Derived(Base):
+        async def go(self) -> None: ...  # overrides without the decorator
+
+    # `go` lingers in EVENT_REGISTRY because the base registered it, but the schema
+    # is built from the resolved command set (which the override drops), so the
+    # schema and `validate()` stay in lockstep rather than publishing a command the
+    # runtime would reject.
+    assert "go" in EVENT_REGISTRY
+    schema = ModelContract.of(Derived).render_schema().to_openapi()
+    assert "/events/go" not in schema.get("paths", {})
+
+
 def test_isolation_first_model_sees_only_its_own_surface() -> None:
     class OnlyFirst(ModelMessage):
         a: str
