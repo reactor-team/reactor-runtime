@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from reactor_runtime import (
+    EVENT_REGISTRY,
     Idle,
     InputField,
     InputState,
@@ -88,6 +89,26 @@ def test_auto_setter_is_rendered_in_the_schema() -> None:
     schema = ModelContract.of(Pipe).render_schema()
     assert "set_speed" in schema.commands
     assert "set_seed" in schema.commands
+
+
+def test_auto_setters_render_though_they_never_enter_the_event_registry() -> None:
+    # A pipeline stamps its set_<field> handlers directly, bypassing the @event
+    # decorator that fills EVENT_REGISTRY — so the registry is not a complete
+    # command set. The schema must render them from the resolved contract instead.
+    class LocalState(InputState):
+        gain: float = InputField(default=1.0, ge=0.0, le=2.0)
+
+    class LocalPipe(ReactorPipeline):
+        state: LocalState
+        output: Frame
+
+        def inference(self) -> Iterator[Frame]:
+            while True:
+                yield _frame()
+
+    assert "set_gain" not in EVENT_REGISTRY  # the gap this guards against
+    doc = ModelContract.of(LocalPipe).render_schema().to_openapi()
+    assert "/events/set_gain" in doc["paths"]
 
 
 def test_a_custom_event_shadows_the_generated_setter() -> None:

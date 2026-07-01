@@ -1,20 +1,21 @@
 """The per-model contract — :class:`ModelContract`.
 
-A model's whole client-facing surface — its commands, the messages it sends
-back, and its media tracks — is read from the process-global registries every
-declaration populates, so a class reaches the schema by being declared, never by
-being wired onto the model class. One class-level traversal additionally binds
-each command to its handler method (and resolves its response type) and collects
-the lifecycle hooks, caching that on the class; this is what dispatch and
-validation need and what a registry cannot carry. Because a command registers
-exactly as it resolves — a subclass inherits its bases' commands and overrides
-one only by re-applying ``@event`` — the registry's command set and the resolved
-one always agree, so the schema and :meth:`validate` can never disagree.
+The messages a model sends back and its media tracks are read from the
+process-global registries every declaration populates, so a message or track
+reaches the schema by being declared, never by being wired onto the model class.
+Commands are the exception: they are handler-bound, and a command can be
+*synthesised* (a pipeline's ``set_<field>`` setters stamp their handlers directly
+rather than through the ``@event`` decorator that fills the registry), so the
+registry is not a complete command set. The complete set is the one a single
+class-level traversal resolves — binding each command to its handler method and
+its response type, and collecting the lifecycle hooks — cached on the class. That
+resolved set is what validation, dispatch, and the rendered schema all read, so
+they can never disagree.
 
 The handler-bound parts are built once, when the model class is created;
-:meth:`ModelContract.of` is the accessor for the cached result. The registries
-are read lazily, so a message class declared after the model class still reaches
-the schema.
+:meth:`ModelContract.of` is the accessor for the cached result. The message and
+track registries are read lazily, so a message class declared after the model
+class still reaches the schema.
 """
 
 from __future__ import annotations
@@ -32,7 +33,6 @@ from reactor_runtime.interface.events.decorators import (
     CONNECTED_ATTR,
     DISCONNECTED_ATTR,
     EVENT_ATTR,
-    EVENT_REGISTRY,
     FILE_UPLOADED_ATTR,
     SESSION_ENDED_ATTR,
     SESSION_STARTED_ATTR,
@@ -280,13 +280,13 @@ class ModelContract:
         """
         commands = {
             name: CommandSchema(
-                description=self.commands[name].description if name in self.commands else "",
+                description=spec.description,
                 schema={
                     field_name: command_field_schema(command_field)
-                    for field_name, command_field in command.__command_fields__.items()
+                    for field_name, command_field in spec.command.__command_fields__.items()
                 },
             )
-            for name, command in EVENT_REGISTRY.items()
+            for name, spec in self.commands.items()
         }
         messages = {
             name: MessageSchema(
