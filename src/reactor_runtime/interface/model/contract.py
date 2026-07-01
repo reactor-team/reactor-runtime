@@ -285,7 +285,7 @@ class ModelContract:
                     field_name: command_field_schema(command_field)
                     for field_name, command_field in spec.command.__command_fields__.items()
                 },
-                response=_response_name(self.commands.get(name)),
+                response=_response_name(spec),
             )
             for name, spec in self.commands.items()
         }
