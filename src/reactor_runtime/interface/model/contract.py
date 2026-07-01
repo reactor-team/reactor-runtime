@@ -285,6 +285,7 @@ class ModelContract:
                     field_name: command_field_schema(command_field)
                     for field_name, command_field in spec.command.__command_fields__.items()
                 },
+                response=_response_name(spec),
             )
             for name, spec in self.commands.items()
         }
@@ -295,6 +296,7 @@ class ModelContract:
                     field_name: message_field_schema(message_field)
                     for field_name, message_field in message.__message_fields__.items()
                 },
+                type_name=message.__name__,
             )
             for name, message in self.messages.items()
         }
@@ -345,6 +347,13 @@ def _response_type(handler: Callable[..., Any]) -> type[ModelMessage] | None:
     if isinstance(returned, type) and issubclass(returned, ModelMessage):
         return returned
     return None
+
+
+def _response_name(spec: CommandSpec | None) -> str | None:
+    """Return the PascalCase type name of a command's reply message, if any."""
+    if spec is None or spec.response is None:
+        return None
+    return spec.response.__name__
 
 
 def _normalize(doc: str | None) -> str:

@@ -3,9 +3,18 @@
 The smallest complete :class:`ReactorPipeline`: no model weights, no client
 media. It generates an animated gradient on ``main_video`` and a matching sine
 tone on ``main_audio``, driven entirely by a typed :class:`InputState`. The
-public state fields become ``set_brightness`` / ``set_paused`` /
-``set_resolution`` commands automatically — no handler boilerplate — and pausing
-yields :data:`Idle` so the stream holds without producing frames.
+public state fields become ``set_paused`` / ``set_resolution`` commands
+automatically — no handler boilerplate — and pausing yields :data:`Idle` so the
+stream holds without producing frames.
+
+It also shows commands that reply with a typed message, so the schema links a
+command to its response: ``set_brightness`` overrides the auto-generated setter
+to return a :class:`BrightnessSet` confirming the value now in effect, and
+``set_image`` takes an uploaded file and returns an :class:`ImageSet` ack, while
+``get_state`` returns a full :class:`BrightnessSnapshot`. Run this module directly
+to print the model's OpenAPI schema and see each message defined once under
+``components/schemas`` and referenced by ``$ref`` from both its webhook and the
+command's ``responses.200``.
 
 It exercises the pipeline spine end to end: the ``inference()`` generator, typed
 state with auto-generated setters, ``Idle`` skips, adaptive-free fixed FPS, and
@@ -25,9 +34,13 @@ from reactor_runtime import (
     Idle,
     InputField,
     InputState,
+    MessageField,
+    ModelMessage,
     Output,
     ReactorPipeline,
+    UploadedFile,
     Video,
+    event,
 )
 from reactor_runtime.interface.pipeline.idle import _IdleType
 from reactor_runtime.log import get_logger
@@ -52,6 +65,26 @@ class BrightnessOutput(Output):
 
     main_video: Video
     main_audio: Audio
+
+
+class BrightnessSnapshot(ModelMessage):
+    """The live generation parameters, returned when a client asks for them."""
+
+    brightness: float = MessageField(description="Active brightness multiplier.")
+    paused: bool = MessageField(description="Whether frame generation is paused.")
+    resolution: str = MessageField(description="Active output resolution.")
+
+
+class BrightnessSet(ModelMessage):
+    """Confirmation that the brightness was applied, echoing the value in effect."""
+
+    brightness: float = MessageField(description="Brightness multiplier now in effect.")
+
+
+class ImageSet(ModelMessage):
+    """Acknowledgement that an uploaded reference image was accepted."""
+
+    filename: str = MessageField(description="Name of the image now in effect.")
 
 
 class BrightnessState(InputState):
@@ -79,10 +112,55 @@ class Brightness(ReactorPipeline):
     output: BrightnessOutput
     fps = FPS
     buffer_size = 2
+    _reference: UploadedFile | None = None
 
     def load(self, config_path: Path | None) -> None:
         """Nothing to load — the generator is pure NumPy. Reads no config."""
         logger.info("brightness pipeline ready")
+
+    @event(name="get_state", description="Return the current generation parameters.")
+    def get_state(self) -> BrightnessSnapshot:
+        """Reply to the caller with a snapshot of the live state.
+
+        Returning a :class:`ModelMessage` makes this a request/response command:
+        the schema renders its ``responses.200`` as a reference to the
+        ``BrightnessSnapshot`` component.
+        """
+        return BrightnessSnapshot(
+            brightness=self.state.brightness,
+            paused=self.state.paused,
+            resolution=self.state.resolution,
+        )
+
+    @event(name="set_brightness", description="Set the brightness and confirm the value in effect.")
+    def set_brightness(
+        self,
+        brightness: float = InputField(
+            default=1.0,
+            ge=0.0,
+            le=2.0,
+            description="Brightness multiplier (0=black, 1=half, 2=white).",
+        ),
+    ) -> BrightnessSet:
+        """Override the auto-generated setter to reply with a typed confirmation.
+
+        Applies the value and returns a :class:`BrightnessSet`, so the schema
+        renders this command's ``responses.200`` as a reference to that message.
+        """
+        self.state.brightness = brightness
+        return BrightnessSet(brightness=brightness)
+
+    @event(name="set_image", description="Set the reference image and acknowledge it.")
+    def set_image(self, image: UploadedFile) -> ImageSet:
+        """Accept an uploaded image and reply with a typed acknowledgement.
+
+        The ``UploadedFile`` parameter makes the command carry an upload reference
+        in its request body; returning an :class:`ImageSet` gives the client a
+        confirmation carrying the accepted file's name.
+        """
+        self._reference = image
+        logger.info("reference image set", name=image.name, size=len(image.data))
+        return ImageSet(filename=image.name)
 
     def inference(self) -> Iterator[BrightnessOutput | _IdleType]:
         """Emit a gradient frame and a tone each turn; yield Idle while paused."""
@@ -132,3 +210,13 @@ def _generate_tone(brightness: float, phase: float) -> tuple[np.ndarray, float]:
     next_phase = (phase + 2.0 * math.pi * freq * n_samples / SAMPLE_RATE) % (2.0 * math.pi)
     samples: np.ndarray = wave.astype(np.int16).reshape(1, -1)
     return samples, next_phase
+
+
+if __name__ == "__main__":
+    # Print the model's OpenAPI schema so the command/message/response wiring is
+    # inspectable without standing up the server: `python brightness.py`.
+    import json
+
+    from reactor_runtime.interface.model import ModelContract
+
+    print(json.dumps(ModelContract.of(Brightness).render_schema().to_openapi(), indent=2))

@@ -83,9 +83,10 @@ def test_a_payload_less_message_is_published_as_a_webhook() -> None:
     schema = ModelContract.of(Model).render_schema().to_openapi()
     assert "done" in schema["webhooks"]
     content = schema["webhooks"]["done"]["post"]["requestBody"]["content"]
-    body = content["application/json"]["schema"]
-    assert body.get("properties", {}) == {}
-    assert "required" not in body
+    assert content["application/json"]["schema"] == {"$ref": "#/components/schemas/Done"}
+    component = schema["components"]["schemas"]["Done"]
+    assert component.get("properties", {}) == {}
+    assert "required" not in component
 
 
 def test_a_broadcast_only_message_is_published_in_the_schema() -> None:

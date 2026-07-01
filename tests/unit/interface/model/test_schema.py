@@ -106,14 +106,35 @@ def test_upload_field_renders_as_a_reference() -> None:
     assert props["file"] == {"$ref": "#/components/schemas/ReactorUploadReference"}
 
 
-def test_messages_render_as_webhooks() -> None:
+def test_messages_render_as_webhooks_referencing_their_component() -> None:
     webhooks = schema()["webhooks"]
     assert set(webhooks) == {"status"}
     op = webhooks["status"]["post"]
     assert op["operationId"] == "status"
     assert op["summary"] == "How the run is going."
-    props = op["requestBody"]["content"]["application/json"]["schema"]["properties"]
-    assert props["progress"]["type"] == "number"
+    # The webhook body references the shared component rather than inlining it.
+    assert op["requestBody"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/Status"
+    }
+
+
+def test_each_message_is_a_component_keyed_by_its_class_name() -> None:
+    components = schema()["components"]["schemas"]
+    assert "Status" in components
+    assert components["Status"]["properties"]["progress"]["type"] == "number"
+
+
+def test_a_command_with_a_return_type_references_the_message_component() -> None:
+    # set_mode is annotated `-> Status`.
+    responses = schema()["paths"]["/events/set_mode"]["post"]["responses"]
+    assert responses["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/Status"
+    }
+
+
+def test_a_command_returning_nothing_renders_accepted() -> None:
+    responses = schema()["paths"]["/events/set_level"]["post"]["responses"]
+    assert responses == {"202": {"description": "Command accepted"}}
 
 
 def test_tracks_ride_on_the_x_reactor_extension() -> None:
