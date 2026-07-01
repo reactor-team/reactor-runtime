@@ -340,7 +340,7 @@ async def test_connection_answered_rides_a_self_loop_transition(
         runner.start_session({})
         stream = runner._events.subscribe()
         runner.connection_answered(ConnId(1), {"type": "answer", "sdp": "v=0..."})
-        event = await asyncio.wait_for(anext(stream), timeout=1.0)
+        _seq, event = await asyncio.wait_for(anext(stream), timeout=1.0)
         assert isinstance(event, TransitionEvent)
         assert event.transition.event is SessionEvent.CONNECTION_ANSWERED
         assert event.transition.from_state is SessionState.WAITING
