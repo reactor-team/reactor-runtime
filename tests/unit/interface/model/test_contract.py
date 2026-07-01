@@ -184,16 +184,21 @@ def test_validate_coerces_an_enum_value_to_its_member() -> None:
     assert vars(cmd)["speed"] is Speed.FAST
 
 
-def test_a_command_is_inherited_by_a_subclass() -> None:
+def test_a_plain_override_keeps_the_inherited_command_and_base_handler() -> None:
     class Base(ReactorModel):
         @event(name="go")
         async def go(self) -> None: ...
 
     class Derived(Base):
-        async def go(self) -> None: ...  # plain override does not un-declare it
+        async def go(self) -> None: ...  # plain override is not an override
 
+    # A plain (undecorated) override neither un-declares the command nor rebinds
+    # it: the command stands and runs the base method. Overriding requires
+    # re-applying @event — see test_redeclaring_with_event_overrides_the_inherited_command.
     assert "go" in ModelContract.of(Base).commands
-    assert "go" in ModelContract.of(Derived).commands
+    derived = ModelContract.of(Derived).commands["go"]
+    assert derived.handler is Base.__dict__["go"]
+    assert derived.handler is not Derived.__dict__["go"]
 
 
 def test_redeclaring_with_event_overrides_the_inherited_command() -> None:
@@ -205,10 +210,12 @@ def test_redeclaring_with_event_overrides_the_inherited_command() -> None:
         @event(name="go", description="derived")
         async def go(self, y: str = "a") -> None: ...
 
+    # Re-applying @event overrides both the wire contract and the bound handler.
     spec = ModelContract.of(Derived).commands["go"]
     assert spec.description == "derived"
     assert "y" in spec.command.__command_fields__
     assert "x" not in spec.command.__command_fields__
+    assert spec.handler is Derived.__dict__["go"]
 
 
 def test_duplicate_command_name_is_rejected_at_build() -> None:

@@ -88,6 +88,13 @@ def event(
     ``type``. The method's annotated parameters define the payload; use
     :func:`InputField` as a default to attach validation constraints.
 
+    A subclass inherits its bases' commands. Overriding one — its wire contract
+    *or* the implementation that runs — requires re-applying ``@event``; the
+    most-derived ``@event`` for a name wins. A plain, undecorated method of the
+    same name is *not* an override: the inherited command stands, contract and
+    handler both, and the base method is what runs. This keeps "declare a command
+    with ``@event``" the single, explicit rule, with no implicit override.
+
     Args:
         name: The wire name a client sends as the ``type`` string.
         description: Human-readable description, surfaced in the rendered schema.

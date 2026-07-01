@@ -181,10 +181,13 @@ class ModelContract:
         method, resolving a command's response type from its handler's return
         annotation. Inheritance is ordinary: a subclass inherits every command
         its bases declare, and overrides one by re-applying ``@event`` (the
-        most-derived ``@event`` definition wins). A plain, undecorated override
-        does not un-declare an inherited command. The model's tracks and outbound
-        messages are not snapshotted here — they are read from the registries
-        through :attr:`tracks` / :attr:`messages` when the schema renders.
+        most-derived ``@event`` definition wins, binding that class's method as
+        the handler). A plain, undecorated method of the same name is not an
+        override — it neither un-declares the inherited command nor rebinds it, so
+        the command keeps the base's ``@event`` definition and runs the base
+        method. The model's tracks and outbound messages are not snapshotted
+        here — they are read from the registries through :attr:`tracks` /
+        :attr:`messages` when the schema renders.
 
         Args:
             model_cls: The model class to assemble the contract for.
