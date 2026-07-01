@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,13 @@ def _clear_adapter_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Run every test against a clean environment for the serve adapter."""
     for name in (*_WEBRTC_ENV, *_RUNTIME_ENV):
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _seed_registries(
+    isolate_interface_registries: None, register_model: Callable[[type], None]
+) -> None:
+    register_model(Passthrough)
 
 
 _MANIFEST = """\

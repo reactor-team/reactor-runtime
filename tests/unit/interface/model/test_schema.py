@@ -1,5 +1,8 @@
 import enum
+from collections.abc import Callable
 from typing import Any
+
+import pytest
 
 from reactor_runtime import (
     InputField,
@@ -42,6 +45,13 @@ class DemoModel(ReactorModel):
 
     @event(name="attach")
     async def attach(self, file: UploadedFile) -> None: ...
+
+
+@pytest.fixture(autouse=True)
+def _seed_registries(
+    isolate_interface_registries: None, register_model: Callable[[type], None]
+) -> None:
+    register_model(DemoModel)
 
 
 def schema() -> dict[str, Any]:

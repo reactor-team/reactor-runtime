@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -138,6 +139,16 @@ class FakeConnection:
 
 def _runner() -> Runner:
     return Runner(RuntimeConfig(model_ref="fake:Model"))
+
+
+@pytest.fixture(autouse=True)
+def _seed_registries(
+    isolate_interface_registries: None,
+    register_model: Callable[[type], None],
+    register: Callable[..., None],
+) -> None:
+    register_model(FakeModel)
+    register(Greeting)
 
 
 @pytest.fixture

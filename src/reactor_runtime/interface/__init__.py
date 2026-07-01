@@ -19,6 +19,8 @@ from reactor_runtime.core import (
 )
 from reactor_runtime.interface.client import ClientInfo
 from reactor_runtime.interface.events import (
+    EVENT_REGISTRY,
+    MESSAGE_REGISTRY,
     MessageField,
     ModelMessage,
     connected,
@@ -35,9 +37,23 @@ from reactor_runtime.interface.internal.input_buffer import (
 )
 from reactor_runtime.interface.model import ReactorModel
 from reactor_runtime.interface.pipeline import Idle, InputState, ReactorPipeline
-from reactor_runtime.interface.tracks import Audio, Input, Output, Track, Video
+from reactor_runtime.interface.tracks import (
+    INPUT_REGISTRY,
+    OUTPUT_REGISTRY,
+    Audio,
+    Input,
+    Output,
+    Track,
+    Video,
+    all_input_tracks,
+    all_output_tracks,
+)
 
 __all__ = [
+    "EVENT_REGISTRY",
+    "INPUT_REGISTRY",
+    "MESSAGE_REGISTRY",
+    "OUTPUT_REGISTRY",
     "Audio",
     "BufferClosed",
     "ClientInfo",
@@ -58,6 +74,8 @@ __all__ = [
     "Track",
     "UploadedFile",
     "Video",
+    "all_input_tracks",
+    "all_output_tracks",
     "connected",
     "disconnected",
     "event",
