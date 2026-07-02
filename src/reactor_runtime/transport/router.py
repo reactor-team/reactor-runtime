@@ -21,8 +21,21 @@ from collections.abc import Mapping
 from typing import Any, Protocol, runtime_checkable
 
 from fastapi import FastAPI
+from pydantic import BaseModel
 
 from reactor_runtime.core import ConnectionSink, ConnId, SessionState
+
+
+class ErrorDetail(BaseModel):
+    """The body every rejected request carries: a human-readable motive.
+
+    The one error shape of the HTTP surface — the fixed route groups and the
+    transport route groups alike declare their non-2xx responses with it, so a
+    client generating types from the published contract sees the same
+    ``{"detail": ...}`` body everywhere.
+    """
+
+    detail: str
 
 
 class SessionNotRunningError(RuntimeError):

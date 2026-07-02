@@ -36,6 +36,30 @@
         "title": "CreateUploadRequest",
         "type": "object"
       },
+      "CreateUploadResponse": {
+        "description": "The reserved slot: its id, the URL to PUT the bytes to, and its path.",
+        "properties": {
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "presigned_id": {
+            "title": "Presigned Id",
+            "type": "string"
+          },
+          "presigned_url": {
+            "title": "Presigned Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "presigned_id",
+          "presigned_url",
+          "path"
+        ],
+        "title": "CreateUploadResponse",
+        "type": "object"
+      },
       "EnforceRequest": {
         "description": "A moderation verdict posted against the active session.",
         "properties": {
@@ -46,6 +70,20 @@
           }
         },
         "title": "EnforceRequest",
+        "type": "object"
+      },
+      "ErrorDetail": {
+        "description": "The body every rejected request carries: a human-readable motive.\n\nThe one error shape of the HTTP surface \u2014 the fixed route groups and the\ntransport route groups alike declare their non-2xx responses with it, so a\nclient generating types from the published contract sees the same\n``{\"detail\": ...}`` body everywhere.",
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "ErrorDetail",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -141,6 +179,59 @@
           "uris"
         ],
         "title": "IceServerEntry",
+        "type": "object"
+      },
+      "OfferAccepted": {
+        "description": "The offer is accepted for asynchronous negotiation; poll for the answer.",
+        "properties": {
+          "connection_id": {
+            "title": "Connection Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "connection_id"
+        ],
+        "title": "OfferAccepted",
+        "type": "object"
+      },
+      "RegisterConnectionResponse": {
+        "description": "A minted connection id and the model's track manifest for transceiver setup.",
+        "properties": {
+          "connection_id": {
+            "title": "Connection Id",
+            "type": "integer"
+          },
+          "track_map": {
+            "additionalProperties": true,
+            "title": "Track Map",
+            "type": "object"
+          }
+        },
+        "required": [
+          "connection_id",
+          "track_map"
+        ],
+        "title": "RegisterConnectionResponse",
+        "type": "object"
+      },
+      "SdpAnswerResponse": {
+        "description": "The negotiated SDP answer for a connection.",
+        "properties": {
+          "connection_id": {
+            "title": "Connection Id",
+            "type": "integer"
+          },
+          "sdp_answer": {
+            "title": "Sdp Answer",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sdp_answer",
+          "connection_id"
+        ],
+        "title": "SdpAnswerResponse",
         "type": "object"
       },
       "SdpParamsRequest": {
@@ -309,11 +400,36 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": {
-                "schema": {}
+              "application/vnd.apple.mpegurl": {
+                "schema": {
+                  "type": "string"
+                }
               }
             },
-            "description": "Successful Response"
+            "description": "The clip's HLS manifest."
+          },
+          "202": {
+            "description": "Still being prepared; retry later."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Gone"
           },
           "422": {
             "content": {
@@ -355,11 +471,40 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": {
-                "schema": {}
+              "video/iso.segment": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/mp4": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
               }
             },
-            "description": "Successful Response"
+            "description": "The fMP4 segment bytes."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Gone"
           },
           "422": {
             "content": {
@@ -415,11 +560,13 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": {
-                "schema": {}
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
               }
             },
-            "description": "Successful Response"
+            "description": "The egress journal as a server-sent event stream."
           },
           "422": {
             "content": {
@@ -446,6 +593,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "503": {
+            "description": "The process is unhealthy."
           }
         },
         "summary": "Health"
@@ -524,6 +674,26 @@
             },
             "description": "Successful Response"
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -557,13 +727,31 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Register Sessions  Sid  Transport Webrtc Connections Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/RegisterConnectionResponse"
                 }
               }
             },
             "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Not Found"
           },
           "422": {
             "content": {
@@ -613,13 +801,33 @@
           "required": true
         },
         "responses": {
-          "200": {
+          "202": {
             "content": {
               "application/json": {
                 "schema": {}
               }
             },
             "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Not Found"
           },
           "422": {
             "content": {
@@ -662,10 +870,35 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SdpAnswerResponse"
+                }
               }
             },
             "description": "Successful Response"
+          },
+          "202": {
+            "description": "Negotiation still in flight; poll again."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Not Found"
           },
           "422": {
             "content": {
@@ -733,13 +966,31 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Offer Sessions  Sid  Transport Webrtc Connections  Cid  Sdp Params Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/OfferAccepted"
                 }
               }
             },
             "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Not Found"
           },
           "422": {
             "content": {
@@ -807,13 +1058,31 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Offer Sessions  Sid  Transport Webrtc Connections  Cid  Sdp Params Put",
-                  "type": "object"
+                  "$ref": "#/components/schemas/OfferAccepted"
                 }
               }
             },
             "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Not Found"
           },
           "422": {
             "content": {
@@ -856,6 +1125,26 @@
             },
             "description": "Successful Response"
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -895,13 +1184,45 @@
           "required": true
         },
         "responses": {
-          "200": {
+          "201": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CreateUploadResponse"
+                }
               }
             },
             "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Conflict"
           },
           "422": {
             "content": {
@@ -951,6 +1272,16 @@
             },
             "description": "Successful Response"
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -960,6 +1291,16 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "Start Session"
@@ -976,6 +1317,26 @@
               }
             },
             "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "Stop Session"
@@ -995,6 +1356,17 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
@@ -1003,6 +1375,36 @@
               }
             },
             "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Conflict"
           },
           "422": {
             "content": {

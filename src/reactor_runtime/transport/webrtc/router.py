@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from reactor_runtime.core import ConnId
 from reactor_runtime.transport.router import (
+    ErrorDetail,
     SessionControl,
     SessionNotRunningError,
     TransportRouter,
@@ -33,6 +34,35 @@ from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpOffer, T
 from reactor_runtime.transport.webrtc.version import protocol_for_transport
 
 _PREFIX = "/sessions/{sid}/transport/webrtc"
+
+# Every route in the group is guarded by require_session_running, whose
+# rejections the app-level exception handlers render. Declared bare — statuses
+# and the shared error shape — so the published contract carries the codes a
+# client branches on.
+_GUARD_RESPONSES: dict[int | str, dict[str, Any]] = {
+    400: {"model": ErrorDetail},
+    404: {"model": ErrorDetail},
+}
+
+
+class RegisterConnectionResponse(BaseModel):
+    """A minted connection id and the model's track manifest for transceiver setup."""
+
+    connection_id: int
+    track_map: dict[str, Any]
+
+
+class OfferAccepted(BaseModel):
+    """The offer is accepted for asynchronous negotiation; poll for the answer."""
+
+    connection_id: int
+
+
+class SdpAnswerResponse(BaseModel):
+    """The negotiated SDP answer for a connection."""
+
+    sdp_answer: str
+    connection_id: int
 
 
 class TrackMappingEntry(BaseModel):
@@ -154,15 +184,17 @@ class WebRtcRouter(TransportRouter):
         app.add_exception_handler(SessionNotRunningError, _session_not_running)
         app.add_exception_handler(UnknownSessionError, _unknown_session)
 
-        @app.get(f"{_PREFIX}/ice_servers")
+        @app.get(f"{_PREFIX}/ice_servers", responses=_GUARD_RESPONSES)
         async def ice_servers(sid: str) -> dict[str, Any]:
             runner.require_session_running(sid)
             return _ice_servers_payload(self._config)
 
-        @app.post(f"{_PREFIX}/connections", status_code=201)
-        async def register(sid: str) -> dict[str, Any]:
+        @app.post(f"{_PREFIX}/connections", status_code=201, responses=_GUARD_RESPONSES)
+        async def register(sid: str) -> RegisterConnectionResponse:
             runner.require_session_running(sid)
-            return {"connection_id": runner.new_conn_id(), "track_map": runner.track_map()}
+            return RegisterConnectionResponse(
+                connection_id=runner.new_conn_id(), track_map=dict(runner.track_map())
+            )
 
         # One handler, registered once per method: a POST opens a connection's
         # first negotiation and a PUT re-offers on the same id. Separate
@@ -174,7 +206,7 @@ class WebRtcRouter(TransportRouter):
             cid: int,
             req: SdpParamsRequest,
             webrtc_version: Annotated[str | None, Header(alias="reactor-webrtc-version")] = None,
-        ) -> dict[str, Any]:
+        ) -> OfferAccepted:
             runner.require_session_running(sid)
             tracks = TrackMap.from_client(entry.model_dump() for entry in req.track_mapping)
             acceptor.start_offer(
@@ -184,23 +216,33 @@ class WebRtcRouter(TransportRouter):
                 protocol_for_transport(webrtc_version),
                 ice_servers=_ice_servers_from_request(req.ice_servers),
             )
-            return {"connection_id": cid}
+            return OfferAccepted(connection_id=cid)
 
         offer_path = f"{_PREFIX}/connections/{{cid}}/sdp_params"
-        app.post(offer_path, status_code=202)(offer)
-        app.put(offer_path, status_code=202)(offer)
+        app.post(offer_path, status_code=202, responses=_GUARD_RESPONSES)(offer)
+        app.put(offer_path, status_code=202, responses=_GUARD_RESPONSES)(offer)
 
-        @app.get(f"{_PREFIX}/connections/{{cid}}/sdp_params")
+        @app.get(
+            f"{_PREFIX}/connections/{{cid}}/sdp_params",
+            responses={
+                200: {"model": SdpAnswerResponse},
+                202: {"description": "Negotiation still in flight; poll again."},
+                **_GUARD_RESPONSES,
+            },
+        )
         async def sdp_answer(sid: str, cid: int) -> Response:
             runner.require_session_running(sid)
             answer = acceptor.take_answer(ConnId(cid))
             if answer is None:
                 return Response(status_code=202)
-            return JSONResponse(
-                status_code=200, content={"sdp_answer": answer.sdp, "connection_id": cid}
-            )
+            payload = SdpAnswerResponse(sdp_answer=answer.sdp, connection_id=cid)
+            return JSONResponse(status_code=200, content=payload.model_dump())
 
-        @app.post(f"{_PREFIX}/connections/{{cid}}/ice_candidates")
+        @app.post(
+            f"{_PREFIX}/connections/{{cid}}/ice_candidates",
+            status_code=202,
+            responses=_GUARD_RESPONSES,
+        )
         async def ice(sid: str, cid: int, req: IceCandidatesRequest) -> Response:
             runner.require_session_running(sid)
             for entry in req.candidates:
