@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="[General] Display the current version"
+#MISE quiet=true
+set -euo pipefail
+uv version --short

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="[Protobuf] Download the pinned wire/v* release and vendor its bindings into src/"
+set -euo pipefail
+# fetch-wire.py is stdlib-only; run it through uv on the floor interpreter, the
+# same one the build uses, since mise provisions uv rather than a project python.
+uv run --python "$PYTHON_FLOOR" python scripts/fetch-wire.py

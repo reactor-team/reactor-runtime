@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="[Setup] Install deps, generate wire bindings, and install git hooks"
+set -euo pipefail
+uv sync --python "$PYTHON_FLOOR"
+mise run //proto:gen
+mise run install-hooks

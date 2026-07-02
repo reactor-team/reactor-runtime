@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="[Quality] Format the codebase and fix auto-fixable lints"
+set -euo pipefail
+ruff format
+ruff check --fix

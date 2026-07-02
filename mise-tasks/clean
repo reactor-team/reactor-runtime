@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+#MISE description="[Cleanup] Remove build artifacts and caches"
+set -euo pipefail
+rm -rf dist/ .pytest_cache/ .ruff_cache/ .ty_cache/

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="[General] Display the release (version + git SHA)"
+#MISE quiet=true
+set -euo pipefail
+echo "v$(uv version --short)-g$(git rev-parse --short HEAD)"

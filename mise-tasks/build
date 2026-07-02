@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="[Build] Build sdist and wheel into dist/ (bundles vendored wire bindings)"
+#USAGE flag "--force" help="passed through by the make shim; ignored here"
+set -euo pipefail
+mise run wire-vendor
+uv build --python "$PYTHON_FLOOR"

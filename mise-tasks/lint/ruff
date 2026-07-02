@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="[Quality] Run ruff lint and format checks"
+set -euo pipefail
+ruff check
+ruff format --check
