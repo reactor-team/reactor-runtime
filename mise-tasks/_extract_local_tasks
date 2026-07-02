@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+# fmt: off
+#MISE description="Filter 'mise tasks ls -J' (stdin) to a module's targets (Makefile shim helper)"
+#MISE hide=true
+#MISE quiet=true
+# fmt: on
+"""Discovery helper for the canonical Makefile shim (Makefile.mise).
+
+The #MISE directives are wrapped in `fmt: off` because ruff's formatter would
+rewrite "#MISE" to "# MISE", which mise does not recognize (the directives are
+then silently ignored). mise still parses #MISE through the fmt:off marker.
+
+Hidden + quiet, addressed as //:_extract_local_tasks. The shim pipes
+`mise tasks ls -l -J` into it, so this is a pure stdin->stdout filter with NO
+subprocess of its own (the Makefile already ran the listing).
+
+argv[1] is the module directory the listing was taken from. Prints the tasks that
+BELONG to that module, so `make lint` in proto/ is proto's lint, not an inherited
+repo-root task. The module's mise address prefix is //<dir-relative-to-REPO_ROOT>:
+(REPO_ROOT comes from mise [env], since this runs as a task), or //: at the repo
+root - which startswith() handles without special-casing. Keeps names under that
+prefix, strips it, maps remaining ':' -> '-' for the make target. Output:
+"<target>|<full //module:verb name>" lines; the shim runs the full name.
+"""
+import json
+import os
+import sys
+
+module_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+
+# REPO_ROOT is provided by mise [env] (this runs as a mise task) - no git needed.
+root = os.environ.get("REPO_ROOT", "")
+rel = (
+    module_dir[len(root) :].lstrip("/") if root and module_dir.startswith(root) else ""
+)
+prefix = "//%s:" % rel if rel else "//:"
+
+try:
+    tasks = json.load(sys.stdin)
+except ValueError:
+    sys.exit(0)
+
+if isinstance(tasks, dict):
+    tasks = list(tasks.values())
+
+seen = set()
+for task in tasks:
+    name = task.get("name", "") if isinstance(task, dict) else str(task)
+    if not name.startswith(prefix):
+        continue
+    target = name[len(prefix) :].replace(":", "-")
+    if target and target not in seen:
+        seen.add(target)
+        print("%s|%s" % (target, name))
