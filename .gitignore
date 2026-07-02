@@ -17,8 +17,9 @@ venv/
 env/
 
 # Tooling caches
-.mypy_cache/
+.nox/
 .ruff_cache/
+.ty_cache/
 .pytest_cache/
 .tox/
 .coverage
