@@ -101,7 +101,17 @@ class EventStream:
             history_limit: The number of recent events retained for replay.
             subscriber_limit: The number of undelivered events a single
                 subscriber's queue holds before its oldest is dropped.
+
+        Raises:
+            ValueError: If either limit is less than 1.
         """
+        # A limit below 1 would not shrink the bound — it would remove it on
+        # one axis and empty the other: asyncio.Queue treats sizes <= 0 as
+        # unbounded, while deque(maxlen=0) retains nothing.
+        if history_limit < 1:
+            raise ValueError(f"history_limit must be at least 1, got {history_limit}")
+        if subscriber_limit < 1:
+            raise ValueError(f"subscriber_limit must be at least 1, got {subscriber_limit}")
         self._seq = 0
         self._history: deque[tuple[int, RunnerEvent]] = deque(maxlen=history_limit)
         self._subscriber_limit = subscriber_limit

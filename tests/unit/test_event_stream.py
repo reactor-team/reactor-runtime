@@ -2,6 +2,8 @@ import asyncio
 from collections.abc import AsyncGenerator, AsyncIterator
 from typing import cast
 
+import pytest
+
 from reactor_runtime.core import (
     ErrorEvent,
     RunnerEvent,
@@ -157,6 +159,16 @@ async def test_ending_a_subscription_deregisters_it() -> None:
     await _aclose(agen)
 
     assert len(stream._subscribers) == 0
+
+
+def test_limits_below_one_are_rejected() -> None:
+    # asyncio.Queue treats sizes <= 0 as unbounded, so a zero subscriber limit
+    # would silently disable the memory bound; a zero history limit would
+    # retain nothing. Both are constructor errors.
+    with pytest.raises(ValueError, match="history_limit"):
+        EventStream(history_limit=0)
+    with pytest.raises(ValueError, match="subscriber_limit"):
+        EventStream(subscriber_limit=0)
 
 
 def test_history_is_bounded_to_the_limit() -> None:
