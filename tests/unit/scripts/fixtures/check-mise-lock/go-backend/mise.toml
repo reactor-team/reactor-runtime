@@ -1,0 +1,6 @@
+[tools]
+tool-a = "1.0.0"
+"go:example.com/cmd/some-tool" = "2.0.0"
+
+[settings]
+lockfile_platforms = ["linux-x64", "macos-arm64"]

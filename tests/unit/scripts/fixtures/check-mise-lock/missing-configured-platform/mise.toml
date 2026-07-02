@@ -1,0 +1,7 @@
+[tools]
+tool-a = "1.0.0"
+
+# linux-arm64 is configured but no tool has entries for it in the lockfile -
+# this is the drift case the check must catch.
+[settings]
+lockfile_platforms = ["linux-x64", "linux-arm64", "macos-arm64"]

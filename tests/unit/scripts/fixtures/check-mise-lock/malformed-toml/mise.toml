@@ -1,0 +1,3 @@
+# Intentionally malformed TOML: unclosed section header.
+[tools
+tool-a = "1.0.0"

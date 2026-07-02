@@ -1,0 +1,6 @@
+[tools]
+tool-a = "1.0.0"
+"pipx:nox" = { version = "2025.11.12", uvx = true }
+
+[settings]
+lockfile_platforms = ["linux-x64", "macos-arm64"]

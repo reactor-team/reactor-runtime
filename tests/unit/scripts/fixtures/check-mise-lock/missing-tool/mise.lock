@@ -1,0 +1,21 @@
+# @generated - fixture: tool-c declared in mise.toml but not in mise.lock.
+
+[[tools.tool-a]]
+version = "1.0.0"
+backend = "test:a"
+
+[tools.tool-a."platforms.linux-x64"]
+url = "https://example.com/a-linux-x64.tar.gz"
+
+[tools.tool-a."platforms.macos-arm64"]
+url = "https://example.com/a-macos-arm64.tar.gz"
+
+[[tools.tool-b]]
+version = "2.0.1"
+backend = "test:b"
+
+[tools.tool-b."platforms.linux-x64"]
+url = "https://example.com/b-linux-x64.tar.gz"
+
+[tools.tool-b."platforms.macos-arm64"]
+url = "https://example.com/b-macos-arm64.tar.gz"

@@ -1,0 +1,15 @@
+# @generated - fixture for check-mise-lock.py tests: go: backend tools have no platform entries
+
+[[tools.tool-a]]
+version = "1.0.0"
+backend = "test:a"
+
+[tools.tool-a."platforms.linux-x64"]
+url = "https://example.com/a-linux-x64.tar.gz"
+
+[tools.tool-a."platforms.macos-arm64"]
+url = "https://example.com/a-macos-arm64.tar.gz"
+
+[[tools."go:example.com/cmd/some-tool"]]
+version = "2.0.0"
+backend = "go:example.com/cmd/some-tool"
