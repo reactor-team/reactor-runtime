@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+#MISE description="[Quality] Run ty (strict type check)"
+set -euo pipefail
+ty check

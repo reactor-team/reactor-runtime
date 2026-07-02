@@ -48,11 +48,8 @@ Source = "https://github.com/reactor-team/reactor-runtime"
 [dependency-groups]
 dev = [
     "httpx>=0.28.1",
-    "lefthook",
-    "mypy",
     "pytest",
     "pytest-asyncio",
-    "ruff",
     "types-protobuf",
     "types-pyyaml>=6.0.12.20260518",
 ]
@@ -105,34 +102,30 @@ convention = "google"
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["D"]
 
-[tool.mypy]
-strict = true
-python_version = "3.12"
-files = ["src", "tests", "examples"]
-mypy_path = "."
-# Vendored protobuf bindings ship their own .pyi stubs; do not type-check the
-# generated .py bodies (callers still get types from the stubs). The GStreamer
-# media engine is a faithful port of dynamic GStreamer code and is not held to
-# strict typing (see the override below).
+[tool.ty.environment]
+python = ".venv"
+python-version = "3.12"
+# Import roots ty would not otherwise search: the repo root, so the example
+# models (`examples`, first-party but outside the package) resolve the way
+# pytest's pythonpath makes them importable; and the WebRTC test directory, so
+# its tests can import their sibling `conftest` for the shared peer fakes.
+extra-paths = [".", "tests/unit/transport/webrtc"]
+
+[tool.ty.src]
+# Check the package, its tests, and the example models; scripts/ ships developer
+# tooling that is not part of the published package surface.
+include = ["src", "tests", "examples"]
+# Generated bindings ship their own stubs; the GStreamer subtree is a faithful
+# port verified by behaviour, not strict types.
 exclude = [
-    "src/reactor_wire/",
-    "src/reactor_runtime/transport/webrtc/gstreamer/",
-    "tests/unit/transport/webrtc/gstreamer/",
-    # A second top-level `conftest.py` collides with the WebRTC one under mypy's
-    # bare-module mapping (neither test tree has `__init__.py`). This file is
-    # registry-isolation scaffolding, not shipped code; keep it out of the check.
+    "src/reactor_wire",
+    "src/reactor_runtime/transport/webrtc/gstreamer",
+    "tests/unit/transport/webrtc/gstreamer",
+    # Registry-isolation scaffolding: it saves and restores the process-global
+    # registries through their dynamic mapping surface, so it is not shipped
+    # code and is kept out of the strict check.
     "tests/unit/conftest.py",
 ]
-
-# The ported GStreamer subtree leans on GStreamer's dynamic GObject surface and
-# is verified by behaviour, not by the strict type checker.
-[[tool.mypy.overrides]]
-module = "reactor_runtime.transport.webrtc.gstreamer.*"
-ignore_errors = true
-
-[[tool.mypy.overrides]]
-module = "gi.*"
-ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
