@@ -53,5 +53,5 @@ description = "[Quality] Run all linters"
 depends = ["lint:ruff", "lint:mise-lock"]
 
 [tasks.check]
-description = "[Quality] Run all checks (proto, lint, typecheck, test)"
-depends = ["//proto:lint", "//proto:breaking", "lint", "typecheck", "test"]
+description = "[Quality] Run all checks (proto, http contract, lint, typecheck, test)"
+depends = ["//proto:lint", "//proto:breaking", "http-breaking", "lint", "typecheck", "test"]

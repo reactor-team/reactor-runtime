@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+#MISE description="[HTTP contract] Guard the release: the contract diff since the last v* tag mandates the bump"
+set -euo pipefail
+current="$(uv version --short)"
+tag=$(git tag --list 'v*' --sort=-v:refname | grep -v -x "v$current" | head -n1 || true)
+if [ -z "$tag" ]; then
+  echo "--- No prior v* release tag; skipping contract bump check"
+elif ! git cat-file -e "$tag:api/openapi.json" 2>/dev/null; then
+  echo "--- $tag predates api/openapi.json; skipping contract bump check"
+else
+  echo "--- Enforcing the contract-mandated bump: $tag -> v$current"
+  prev=$(mktemp)
+  git show "$tag:api/openapi.json" > "$prev"
+  # check-http-spec.py is stdlib-only (oasdiff runs in docker); skip the project
+  # sync so the gate needs no build deps in the release job.
+  uv run --no-project --python "$PYTHON_FLOOR" python scripts/check-http-spec.py enforce \
+    --previous "$prev" --current api/openapi.json \
+    --previous-version "${tag#v}" --current-version "$current"
+fi

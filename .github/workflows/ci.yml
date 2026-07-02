@@ -37,6 +37,24 @@ jobs:
       - run: mise run //proto:lint
       - run: mise run //proto:breaking
 
+  # The HTTP contract check diffs the committed api/openapi.json against the
+  # merge base with the pinned oasdiff image. It is informational: a breaking
+  # diff is legal (it mandates a minor bump, enforced at release), so the job
+  # fails only on tool errors. The changelog lands in the step summary.
+  http-surface:
+    name: HTTP Contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: jdx/mise-action@v2
+        with:
+          version: ${{ env.MISE_VERSION }}
+
+      - run: mise run http-breaking
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

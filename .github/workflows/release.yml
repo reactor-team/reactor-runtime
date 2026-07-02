@@ -28,6 +28,10 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The contract bump check compares against the previous v* tag, so
+          # the full history and tag set must be present.
+          fetch-depth: 0
 
       - uses: jdx/mise-action@v2
         with:
@@ -42,6 +46,12 @@ jobs:
             echo "::error::Tag $GITHUB_REF_NAME does not match pyproject version $project_version."
             exit 1
           fi
+
+      # The HTTP contract dictates the floor for this release's version bump:
+      # a breaking contract diff since the previous release mandates a minor
+      # bump, any other contract diff a patch bump — never a major.
+      - name: Enforce the contract-mandated version bump
+        run: mise run http-breaking-release
 
       - run: mise run build
       - run: mise run publish
