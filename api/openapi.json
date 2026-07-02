@@ -1,0 +1,1022 @@
+{
+  "components": {
+    "schemas": {
+      "CreateUploadRequest": {
+        "description": "Metadata a client announces to reserve an upload slot.\n\n``upload_id`` is optional: when omitted the store mints one, and when present\nthe slot is reserved under that exact id so a caller can seed bytes a later\nreference already names.",
+        "properties": {
+          "mime_type": {
+            "title": "Mime Type",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "upload_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upload Id"
+          }
+        },
+        "required": [
+          "name",
+          "size",
+          "mime_type"
+        ],
+        "title": "CreateUploadRequest",
+        "type": "object"
+      },
+      "EnforceRequest": {
+        "description": "A moderation verdict posted against the active session.",
+        "properties": {
+          "block": {
+            "default": true,
+            "title": "Block",
+            "type": "boolean"
+          }
+        },
+        "title": "EnforceRequest",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "IceCandidateEntry": {
+        "description": "One trickle-ICE candidate from a client.",
+        "properties": {
+          "candidate": {
+            "title": "Candidate",
+            "type": "string"
+          },
+          "sdp_mid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sdp Mid"
+          },
+          "sdp_mline_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sdp Mline Index"
+          }
+        },
+        "required": [
+          "candidate"
+        ],
+        "title": "IceCandidateEntry",
+        "type": "object"
+      },
+      "IceCandidatesRequest": {
+        "description": "A batch of trickle-ICE candidates from a client.",
+        "properties": {
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/IceCandidateEntry"
+            },
+            "title": "Candidates",
+            "type": "array"
+          },
+          "is_final": {
+            "default": false,
+            "title": "Is Final",
+            "type": "boolean"
+          }
+        },
+        "title": "IceCandidatesRequest",
+        "type": "object"
+      },
+      "IceServerEntry": {
+        "description": "One STUN/TURN server offered for this connection's candidate gathering.\n\nMirrors the wire shape the platform already uses for ICE servers:\n``{uris, credentials: {username, password}}``, with ``credentials`` absent\nfor a STUN server.",
+        "properties": {
+          "credentials": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TurnCredentials"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "uris": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Uris",
+            "type": "array"
+          }
+        },
+        "required": [
+          "uris"
+        ],
+        "title": "IceServerEntry",
+        "type": "object"
+      },
+      "SdpParamsRequest": {
+        "description": "A client's SDP offer, the tracks it declares, and optional ICE servers.\n\n``ice_servers`` lets the caller supply the STUN/TURN servers this connection\ngathers against. Absent, the runtime uses its own configured servers; present\n(even empty), it is authoritative for the connection \u2014 so a reconnect can\ncarry fresh credentials.",
+        "properties": {
+          "ice_servers": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/IceServerEntry"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ice Servers"
+          },
+          "sdp_offer": {
+            "title": "Sdp Offer",
+            "type": "string"
+          },
+          "track_mapping": {
+            "items": {
+              "$ref": "#/components/schemas/TrackMappingEntry"
+            },
+            "title": "Track Mapping",
+            "type": "array"
+          }
+        },
+        "required": [
+          "sdp_offer"
+        ],
+        "title": "SdpParamsRequest",
+        "type": "object"
+      },
+      "TrackMappingEntry": {
+        "description": "One track a client declares with its offer.",
+        "properties": {
+          "direction": {
+            "title": "Direction",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "mid": {
+            "title": "Mid",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mid",
+          "name",
+          "kind",
+          "direction"
+        ],
+        "title": "TrackMappingEntry",
+        "type": "object"
+      },
+      "TurnCredentials": {
+        "description": "TURN authentication for an ICE server; absent on a plain STUN server.",
+        "properties": {
+          "password": {
+            "title": "Password",
+            "type": "string"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "password"
+        ],
+        "title": "TurnCredentials",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "reactor-runtime",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/clips": {
+      "get": {
+        "operationId": "get_clip_manifest_clips_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "start",
+            "required": true,
+            "schema": {
+              "title": "Start",
+              "type": "number"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end",
+            "required": true,
+            "schema": {
+              "title": "End",
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Clip Manifest"
+      }
+    },
+    "/clips/chunks/{session_id}/{filename}": {
+      "get": {
+        "operationId": "get_clip_chunk_clips_chunks__session_id___filename__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "filename",
+            "required": true,
+            "schema": {
+              "title": "Filename",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Clip Chunk"
+      }
+    },
+    "/events": {
+      "get": {
+        "operationId": "events_events_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "since",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Since"
+            }
+          },
+          {
+            "in": "header",
+            "name": "last-event-id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Last-Event-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Events"
+      }
+    },
+    "/health": {
+      "get": {
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health"
+      }
+    },
+    "/schema": {
+      "get": {
+        "operationId": "get_schema_schema_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Schema Schema Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Schema"
+      }
+    },
+    "/session": {
+      "get": {
+        "operationId": "get_session_session_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Session Session Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Session"
+      }
+    },
+    "/sessions/{sid}/enforce": {
+      "post": {
+        "operationId": "enforce_sessions__sid__enforce_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sid",
+            "required": true,
+            "schema": {
+              "title": "Sid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnforceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Enforce"
+      }
+    },
+    "/sessions/{sid}/transport/webrtc/connections": {
+      "post": {
+        "operationId": "register_sessions__sid__transport_webrtc_connections_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sid",
+            "required": true,
+            "schema": {
+              "title": "Sid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Register Sessions  Sid  Transport Webrtc Connections Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Register"
+      }
+    },
+    "/sessions/{sid}/transport/webrtc/connections/{cid}/ice_candidates": {
+      "post": {
+        "operationId": "ice_sessions__sid__transport_webrtc_connections__cid__ice_candidates_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sid",
+            "required": true,
+            "schema": {
+              "title": "Sid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "cid",
+            "required": true,
+            "schema": {
+              "title": "Cid",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IceCandidatesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ice"
+      }
+    },
+    "/sessions/{sid}/transport/webrtc/connections/{cid}/sdp_params": {
+      "get": {
+        "operationId": "sdp_answer_sessions__sid__transport_webrtc_connections__cid__sdp_params_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sid",
+            "required": true,
+            "schema": {
+              "title": "Sid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "cid",
+            "required": true,
+            "schema": {
+              "title": "Cid",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Sdp Answer"
+      },
+      "post": {
+        "operationId": "offer_sessions__sid__transport_webrtc_connections__cid__sdp_params_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sid",
+            "required": true,
+            "schema": {
+              "title": "Sid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "cid",
+            "required": true,
+            "schema": {
+              "title": "Cid",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "reactor-webrtc-version",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Reactor-Webrtc-Version"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SdpParamsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Offer Sessions  Sid  Transport Webrtc Connections  Cid  Sdp Params Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Offer"
+      },
+      "put": {
+        "operationId": "offer_sessions__sid__transport_webrtc_connections__cid__sdp_params_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sid",
+            "required": true,
+            "schema": {
+              "title": "Sid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "cid",
+            "required": true,
+            "schema": {
+              "title": "Cid",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "reactor-webrtc-version",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Reactor-Webrtc-Version"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SdpParamsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Offer Sessions  Sid  Transport Webrtc Connections  Cid  Sdp Params Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Offer"
+      }
+    },
+    "/sessions/{sid}/transport/webrtc/ice_servers": {
+      "get": {
+        "operationId": "ice_servers_sessions__sid__transport_webrtc_ice_servers_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sid",
+            "required": true,
+            "schema": {
+              "title": "Sid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Ice Servers Sessions  Sid  Transport Webrtc Ice Servers Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ice Servers"
+      }
+    },
+    "/sessions/{sid}/uploads": {
+      "post": {
+        "operationId": "create_upload_sessions__sid__uploads_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sid",
+            "required": true,
+            "schema": {
+              "title": "Sid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateUploadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Upload"
+      }
+    },
+    "/start_session": {
+      "post": {
+        "operationId": "start_session_start_session_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Params"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Start Session Start Session Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Session"
+      }
+    },
+    "/stop_session": {
+      "post": {
+        "operationId": "stop_session_stop_session_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Stop Session"
+      }
+    },
+    "/uploads/{upload_id}": {
+      "put": {
+        "operationId": "put_upload_uploads__upload_id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "upload_id",
+            "required": true,
+            "schema": {
+              "title": "Upload Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Upload"
+      }
+    }
+  }
+}

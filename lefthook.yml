@@ -17,6 +17,12 @@ pre-commit:
     mise-lock:
       glob: "{mise.toml,mise.lock,.python-version}"
       run: MISE_LOCK_CHECK_FROM=index mise run lint:mise-lock
+    http-spec:
+      # The committed OpenAPI contract tracks the code: regenerate and stage it
+      # whenever a commit touches the HTTP surface, so it never drifts and the
+      # spec change rides the same commit reviewers see.
+      glob: "src/reactor_runtime/{http,transport,runner}/**/*.py"
+      run: mise run http-spec && git add api/openapi.json
 
 post-checkout:
   commands:
