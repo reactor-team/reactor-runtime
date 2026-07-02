@@ -202,6 +202,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 broadcast=self._broadcast_message,
                 addressed=self._send_addressed,
                 media=self._connections.broadcast_media,
+                failure=self._on_model_failure,
             )
             bridge.start()
         except Exception:
@@ -426,6 +427,21 @@ class Runner(ServiceComponent, ConnectionSink):
                 playlist_url=clip.playlist_url,
             )
         )
+
+    def _on_model_failure(self, error: BaseException) -> None:
+        """End the session for a model that crashed, hopping onto the loop.
+
+        The model reports its run-loop crash from its own thread, so the
+        terminal move is scheduled on the runtime loop, where the state machine
+        and the egress journal are single-writer.
+        """
+        loop = self._loop
+        if loop is not None:
+            loop.call_soon_threadsafe(self._evict_on_failure, str(error) or repr(error))
+
+    def _evict_on_failure(self, error: str) -> None:
+        """Evict the session to terminated, carrying the crash as its reason."""
+        self._sm.send(SessionEvent.EVICTION, reason=EndReason.ERROR, error=error)
 
     def _on_chunk_ready(self, recording_id: str, idx: int) -> None:
         """Journal a recording segment once it closes, hopping onto the loop.
@@ -698,7 +714,10 @@ class Runner(ServiceComponent, ConnectionSink):
         clears the session's uploaded files, tears the connections down, and,
         once they have closed, unwinds the session to ready, carrying the end
         reason through; and reaching ``TERMINATED`` asks the service to bring the
-        process down.
+        process down. A crash evicts straight to ``TERMINATED`` without passing
+        through ``CLOSING``, so that move runs the same teardown on its way out
+        — minus the ``CLEANUP_COMPLETE`` unwind, which would declare a dead
+        model ready again.
         """
         logger.info(
             "session transition",
@@ -720,6 +739,10 @@ class Runner(ServiceComponent, ConnectionSink):
             self._spawn_teardown(asyncio.to_thread(self._recorder.stop))
             self._spawn_teardown(self._close_session(reason))
         if transition.to_state is SessionState.TERMINATED:
+            if transition.event is SessionEvent.EVICTION and self._loop is not None:
+                self._uploads.clear()
+                self._spawn_teardown(asyncio.to_thread(self._recorder.stop))
+                self._spawn_teardown(self._connections.close_all())
             self.request_shutdown()
 
     def _start_recorder(self, bridge: ModelBridge) -> None:

@@ -678,6 +678,67 @@ async def test_init_failure_requests_shutdown(monkeypatch: pytest.MonkeyPatch) -
     assert called == [True]
 
 
+# --- model run-loop crash -------------------------------------------------
+
+
+class CrashingModel(FakeModel):
+    """A model whose run loop dies as soon as it starts."""
+
+    async def run(self) -> None:
+        raise RuntimeError("gpu fell off")
+
+
+async def test_model_crash_terminates_the_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    created_models.clear()
+    monkeypatch.setattr(
+        "reactor_runtime.runner.runner.import_model_class", lambda ref: CrashingModel
+    )
+    runner = _runner()
+    called: list[bool] = []
+    runner.request_shutdown = lambda: called.append(True)
+
+    await runner.start()
+    try:
+        # The crash reports from the model thread; joining it and letting the
+        # loop run the scheduled eviction callback settles the terminal move.
+        model = created_models[-1]
+        assert model._thread is not None
+        model._thread.join(timeout=2)
+        await asyncio.sleep(0.05)
+
+        assert runner._sm.current_state is SessionState.TERMINATED
+        assert runner.health().status is HealthStatus.UNHEALTHY
+        assert called == [True]
+        moves = [
+            e.transition
+            for e in _egress(runner)
+            if isinstance(e, TransitionEvent) and e.transition.event is SessionEvent.EVICTION
+        ]
+        assert len(moves) == 1
+        assert moves[0].to_state is SessionState.TERMINATED
+        assert moves[0].detail["reason"] is EndReason.ERROR
+        assert moves[0].detail["error"] == "gpu fell off"
+    finally:
+        await runner.stop()
+
+
+async def test_model_crash_mid_session_tears_the_connections_down(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    conn = FakeConnection(1)
+    started_runner.connection_opened(conn)
+    _expect_state(started_runner, SessionState.STREAMING)
+
+    started_runner._on_model_failure(RuntimeError("gpu fell off"))
+    await asyncio.sleep(0.05)  # let the loop run the scheduled eviction callback
+    _expect_state(started_runner, SessionState.TERMINATED)
+    await started_runner._drain_teardown()
+
+    assert conn.closed
+    assert started_runner.health().status is HealthStatus.UNHEALTHY
+
+
 # --- file uploads --------------------------------------------------------
 
 

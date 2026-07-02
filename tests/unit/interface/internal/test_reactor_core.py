@@ -132,6 +132,45 @@ def test_run_is_not_implemented_by_the_core() -> None:
         asyncio.run(Bare().run())
 
 
+def test_run_crash_reaches_the_bound_failure_sink() -> None:
+    class CrashCore(OutputOnlyCore):
+        async def run(self) -> None:
+            raise RuntimeError("boom")
+
+    core = CrashCore()
+    failures: list[BaseException] = []
+    core.bind_failure(failures.append)
+    core.start_thread()
+    assert core._thread is not None
+    core._thread.join(timeout=2)
+    assert not core._thread.is_alive()
+    assert [str(failure) for failure in failures] == ["boom"]
+
+
+def test_cancellation_does_not_reach_the_failure_sink() -> None:
+    core = OutputOnlyCore()
+    failures: list[BaseException] = []
+    core.bind_failure(failures.append)
+    core.start_thread()
+    time.sleep(0.1)  # let the loop bootstrap before cancelling it
+    core.stop()
+    assert core._thread is not None
+    core._thread.join(timeout=2)
+    assert failures == []
+
+
+def test_run_crash_without_a_bound_sink_still_ends_the_thread() -> None:
+    class CrashCore(OutputOnlyCore):
+        async def run(self) -> None:
+            raise RuntimeError("boom")
+
+    core = CrashCore()
+    core.start_thread()
+    assert core._thread is not None
+    core._thread.join(timeout=2)
+    assert not core._thread.is_alive()
+
+
 def test_send_routes_to_the_bound_broadcast_sink() -> None:
     core = OutputOnlyCore()
     sent: list[ModelMessage] = []

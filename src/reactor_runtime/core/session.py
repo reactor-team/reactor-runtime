@@ -31,8 +31,8 @@ class SessionState(Enum):
             it awaits a reconnection or the orphan timeout.
         CLOSING: The session is tearing its connections down and unwinding back
             to ``READY`` once cleanup completes.
-        TERMINATED: The process is finished — the model failed to load or it was
-            evicted — and will not serve again.
+        TERMINATED: The process is finished — the model failed to load, its run
+            loop crashed, or it was evicted — and will not serve again.
     """
 
     CREATED = auto()
@@ -60,6 +60,12 @@ class SessionEvent(Enum):
     ``ORPHANED``): it changes no state and, unlike the open/close facts, leaves
     the live-connection count untouched. It carries the connection id (and the
     opaque answer) so the move journals everything a consumer needs.
+
+    ``EVICTION`` records that the model will not serve again — it was evicted
+    while idle or its run loop crashed. It is terminal from any live state,
+    moving the session straight to ``TERMINATED`` rather than unwinding through
+    ``CLOSING``, and carries an :class:`~reactor_runtime.core.model.EndReason`
+    in ``detail.reason`` (and, for a crash, the error) so a consumer learns why.
     """
 
     INITIALIZATION_SUCCESS = auto()
