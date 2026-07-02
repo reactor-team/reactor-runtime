@@ -1,4 +1,4 @@
-# Git hooks. Install with: uv run lefthook install
+# Git hooks. Install with: mise run install-hooks
 # Skip all: LEFTHOOK=0 git commit
 # Skip one: LEFTHOOK_EXCLUDE=ruff-check git commit
 
@@ -7,28 +7,28 @@ pre-commit:
   commands:
     ruff-check:
       glob: "*.py"
-      run: uv run ruff check {staged_files}
+      run: mise exec -- ruff check {staged_files}
     ruff-format:
       glob: "*.py"
-      run: uv run ruff format --check {staged_files}
+      run: mise exec -- ruff format --check {staged_files}
     proto-lint:
       glob: "proto/**/*.proto"
-      run: buf lint
+      run: mise run //proto:lint
+    mise-lock:
+      glob: "{mise.toml,mise.lock,.python-version}"
+      run: MISE_LOCK_CHECK_FROM=index mise run lint:mise-lock
+
+post-checkout:
+  commands:
+    mise-trust:
+      # Trust this checkout's mise config so tasks and hooks resolve after a
+      # clone, branch switch, or fresh worktree. Silent; never blocks checkout.
+      run: mise trust --yes --quiet 2>/dev/null || true
 
 pre-push:
   parallel: true
   commands:
-    mypy:
-      run: uv run mypy
-    pytest:
-      # macOS SIP strips DYLD_* from this hook's subprocess, so PyGObject cannot
-      # find the Homebrew GStreamer libraries the transport tests load. Re-add
-      # Homebrew's library and typelib paths there. A no-op on Linux/CI, where
-      # the loader finds them through the standard search paths.
-      run: |
-        if [ "$(uname)" = "Darwin" ] && command -v brew >/dev/null 2>&1; then
-          brew_prefix="$(brew --prefix)"
-          export DYLD_LIBRARY_PATH="$brew_prefix/lib:${DYLD_LIBRARY_PATH:-}"
-          export GI_TYPELIB_PATH="$brew_prefix/lib/girepository-1.0:${GI_TYPELIB_PATH:-}"
-        fi
-        uv run pytest -q
+    typecheck:
+      run: mise run typecheck
+    test:
+      run: mise run test

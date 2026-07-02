@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+#MISE description="[Setup] Uninstall git hooks (works from the main repo and worktrees)"
+set -euo pipefail
+lefthook uninstall
+common="$(git rev-parse --git-common-dir)"
+common_abs="$(cd "$common" && pwd)"
+git config --file "$common_abs/config" --unset core.hooksPath || true
