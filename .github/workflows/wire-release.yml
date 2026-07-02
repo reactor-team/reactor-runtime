@@ -16,11 +16,13 @@ on:
     branches: [main]
     paths:
       - "proto/**"
-      - "buf.yaml"
-      - "buf.gen.yaml"
 
 permissions:
   contents: write
+
+env:
+  # Shared with the other workflows; bump the toolchain pin in one place.
+  MISE_VERSION: "2026.6.14"
 
 jobs:
   release:
@@ -32,57 +34,60 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - uses: bufbuild/buf-setup-action@v1
+      - uses: jdx/mise-action@v2
         with:
-          github_token: ${{ github.token }}
+          version: ${{ env.MISE_VERSION }}
 
       # Authoritative compatibility gate: the about-to-be-released sources must
       # not break the previously published wire/v* artifact.
       - name: Breaking-change gate against the last release
-        run: make proto-breaking-release
+        run: mise run //proto:breaking-release
 
       - name: Compute CalVer version
         id: version
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
-          version="1.$(date -u +%Y%m%d).${{ github.run_number }}"
+          version="1.$(date -u +%Y%m%d).${RUN_NUMBER}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "tag=wire/v${version}" >> "$GITHUB_OUTPUT"
           echo "Releasing wire/v${version}"
 
       - name: Generate bindings
-        run: buf generate
+        run: mise run //proto:gen
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Build the language package and source archive
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          version="${{ steps.version.outputs.version }}"
           pkg="build/wire-pkg"
           mkdir -p "${pkg}" dist
           cp proto/packaging/pyproject.toml "${pkg}/pyproject.toml"
           cp -r src/reactor_wire "${pkg}/reactor_wire"
-          sed -i "s/^version = \".*\"/version = \"${version}\"/" "${pkg}/pyproject.toml"
+          sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" "${pkg}/pyproject.toml"
           python -m pip install --quiet build
           python -m build --wheel "${pkg}" --outdir dist/
-          tar -czf "dist/reactor-wire-${version}-protos.tar.gz" proto
+          tar -czf "dist/reactor-wire-${VERSION}-protos.tar.gz" proto
           ls -l dist/
 
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
           set -euo pipefail
-          version="${{ steps.version.outputs.version }}"
-          tag="${{ steps.version.outputs.tag }}"
-          gh release create "${tag}" dist/* \
-            --title "Wire protocol ${version}" \
-            --notes "Reactor wire-protocol \`reactor_wire.v1\` release \`${version}\`.
+          gh release create "${TAG}" dist/* \
+            --title "Wire protocol ${VERSION}" \
+            --notes "Reactor wire-protocol \`reactor_wire.v1\` release \`${VERSION}\`.
 
-          - \`reactor_wire-${version}-py3-none-any.whl\` — generated Python bindings, vendored by the runtime build.
-          - \`reactor-wire-${version}-protos.tar.gz\` — \`.proto\` sources for building bindings in other languages.
+          - \`reactor_wire-${VERSION}-py3-none-any.whl\` - generated Python bindings, vendored by the runtime build.
+          - \`reactor-wire-${VERSION}-protos.tar.gz\` - \`.proto\` sources for building bindings in other languages.
 
-          Pin in the runtime by setting \`[tool.reactor-wire] version = \"${version}\"\` in \`pyproject.toml\`."
+          Pin in the runtime by setting \`[tool.reactor-wire] version = \"${VERSION}\"\` in \`pyproject.toml\`."

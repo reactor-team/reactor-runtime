@@ -1,7 +1,8 @@
-# Per-push CI: lint, format, type check, and unit tests. Every step delegates
-# to a make target so the same commands are runnable locally. Test jobs run on
-# every supported Python version; lint and type checks run once on the floor
-# version since their results are version-independent.
+# Per-push CI: proto checks, lint, type check, and unit tests. Every step runs a
+# mise task, so the same commands work locally. Lint and type checks run once on
+# the floor Python; the unit tests fan out across the supported versions with a
+# GitHub Actions matrix, each leg running a single nox session pinned to that
+# version. mise pins the toolchain and jdx/mise-action installs it.
 
 name: CI
 
@@ -15,6 +16,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # The mise release CI standardizes on; every job installs the toolchain at
+  # this pin, so bump it here once rather than per job.
+  MISE_VERSION: "2026.6.14"
+
 jobs:
   proto:
     name: Proto
@@ -24,12 +30,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: bufbuild/buf-setup-action@v1
+      - uses: jdx/mise-action@v2
         with:
-          github_token: ${{ github.token }}
+          version: ${{ env.MISE_VERSION }}
 
-      - run: make proto-lint
-      - run: make proto-breaking
+      - run: mise run //proto:lint
+      - run: mise run //proto:breaking
 
   lint:
     name: Lint
@@ -37,23 +43,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # PyGObject builds from source against the GObject-introspection and
-      # Cairo development libraries; without them the locked sync cannot
-      # compile its pycairo/pygobject wheels.
-      - run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libcairo2-dev libgirepository-2.0-dev libglib2.0-dev pkg-config
-
-      - uses: astral-sh/setup-uv@v7
+      - uses: jdx/mise-action@v2
         with:
-          python-version: "3.12"
+          version: ${{ env.MISE_VERSION }}
 
-      - run: make install-locked
-      - run: make wire-vendor
+      - run: mise run lint
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-      - run: make lint
+          MISE_LOCK_CHECK_FROM: head
 
   typecheck:
     name: Type Check
@@ -61,28 +57,29 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # PyGObject builds from source against the GObject-introspection and
-      # Cairo development libraries; without them the locked sync cannot
-      # compile its pycairo/pygobject wheels.
+      # PyGObject builds from source against the GObject-introspection and Cairo
+      # development libraries; without them the locked sync cannot compile its
+      # pycairo/pygobject wheels.
       - run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libcairo2-dev libgirepository-2.0-dev libglib2.0-dev pkg-config
 
-      - uses: astral-sh/setup-uv@v7
+      - uses: jdx/mise-action@v2
         with:
-          python-version: "3.12"
+          version: ${{ env.MISE_VERSION }}
 
-      - run: make install-locked
-      - run: make wire-vendor
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-      - run: make typecheck
+      - run: mise run install-locked
+      # Generate the wire bindings from the in-repo proto (no released wheel or
+      # token needed) so ty can resolve reactor_wire.
+      - run: mise run //proto:gen
+      - run: mise run typecheck
 
   unit-tests:
     name: Unit Tests (${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.12", "3.13"]
     steps:
@@ -103,12 +100,15 @@ jobs:
             gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
             gir1.2-gst-plugins-bad-1.0
 
-      - uses: astral-sh/setup-uv@v7
+      - uses: jdx/mise-action@v2
         with:
-          python-version: ${{ matrix.python-version }}
+          version: ${{ env.MISE_VERSION }}
 
-      - run: make install-locked
-      - run: make wire-vendor
+      # The workflow matrix above fans out the supported versions; this leg runs
+      # the single nox session dedicated to its version. Keep the matrix list in
+      # step with noxfile.py's PYTHON_VERSIONS. uv (nox's backend) downloads the
+      # interpreter, and the session generates the wire bindings from the in-repo
+      # proto.
+      - run: mise exec -- nox -s "tests-$PYTHON_VERSION"
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-      - run: make test
+          PYTHON_VERSION: ${{ matrix.python-version }}

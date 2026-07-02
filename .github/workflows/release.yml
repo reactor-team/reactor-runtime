@@ -14,6 +14,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # Keep this in step with the other workflows; the toolchain pin lives here so
+  # a bump is a one-line change rather than a per-job edit.
+  MISE_VERSION: "2026.6.14"
+
 jobs:
   publish:
     name: Build and publish to PyPI
@@ -24,19 +29,19 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v7
+      - uses: jdx/mise-action@v2
         with:
-          python-version: "3.12"
+          version: ${{ env.MISE_VERSION }}
 
       - name: Verify tag matches pyproject version
         run: |
           set -euo pipefail
           tag_version="${GITHUB_REF_NAME#v}"
-          project_version="$(make -s version)"
+          project_version="$(mise run version)"
           if [[ "$tag_version" != "$project_version" ]]; then
             echo "::error::Tag $GITHUB_REF_NAME does not match pyproject version $project_version."
             exit 1
           fi
 
-      - run: make build
-      - run: make publish
+      - run: mise run build
+      - run: mise run publish
