@@ -315,10 +315,10 @@ def _resume_from(last_event_id: str | None) -> int | None:
 async def _stream_events(runner: Runner, since: int | None) -> AsyncGenerator[str, None]:
     """Yield the runner's events as SSE messages, resuming after *since*.
 
-    Sequence numbers are gap-free, so the running count started from *since* (or
-    the journal's current end when *since* is absent) labels each message.
+    Each event carries its own sequence number, emitted as the SSE ``id``. The
+    journal bounds its memory and may drop events for a consumer that falls
+    behind, so the numbers are not necessarily contiguous: a jump is how a
+    consumer learns it missed events and should reconcile from ``GET /session``.
     """
-    seq = since if since is not None else runner.events.snapshot().last_seq
-    async for event in runner.events.subscribe(since):
-        seq += 1
+    async for seq, event in runner.events.subscribe(since):
         yield format_sse(seq, event)
