@@ -42,6 +42,9 @@ _Holder = TypeVar("_Holder")
 BroadcastSink = Callable[[ModelMessage], None]
 AddressedSink = Callable[[ConnId, ModelMessage, RequestId | None], None]
 
+FailureSink = Callable[[BaseException], None]
+"""Receives the exception that ended :meth:`ReactorCore.run`, on the model thread."""
+
 
 @dataclass(frozen=True)
 class CommandEnvelope:
@@ -80,6 +83,7 @@ class ReactorCore:
 
         self._out_broadcast: BroadcastSink | None = None
         self._out_addressed: AddressedSink | None = None
+        self._on_failure: FailureSink | None = None
 
         self.output_buffer = OutputBuffer(all_output_tracks(), queue_depth=self.buffer_size)
         self.output_buffer.set_fps(self.fps)
@@ -135,6 +139,15 @@ class ReactorCore:
         self._out_broadcast = broadcast
         self._out_addressed = addressed
 
+    def bind_failure(self, callback: FailureSink) -> None:
+        """Bind the sink that receives an unrecoverable crash of :meth:`run`.
+
+        The callback fires at most once, on the model thread, after the loop's
+        background tasks have been cancelled. A caller that lives on another
+        loop marshals from within the callback.
+        """
+        self._on_failure = callback
+
     # -- thread-safe ingress (called by the bridge from the runtime thread) ---
 
     def submit_command(
@@ -185,21 +198,32 @@ class ReactorCore:
             self._loop.close()
 
     async def _lifecycle(self) -> None:
-        """Bootstrap loop-bound state, start the drain loops, then run the model."""
+        """Bootstrap loop-bound state, start the drain loops, then run the model.
+
+        A ``run()`` that raises anything but cancellation is an unrecoverable
+        crash: the model loop is gone and there is nothing left to serve. The
+        crash is reported through the bound failure sink once the background
+        tasks are cancelled, so the owner can end the session rather than keep
+        serving a dead loop. Cancellation is the normal stop and reports nothing.
+        """
         self._command_q = asyncio.Queue()
         self._reactor_q = asyncio.Queue()
         self._loop_task = asyncio.current_task()
         self._on_loop_ready()
         tasks = [asyncio.create_task(coro) for coro in self._background_coros()]
+        crash: BaseException | None = None
         try:
             await self.run()
         except asyncio.CancelledError:
             logger.info("model loop cancelled")
-        except Exception:
+        except Exception as exc:
+            crash = exc
             logger.exception("model run() crashed")
         finally:
             for task in tasks:
                 task.cancel()
+        if crash is not None and self._on_failure is not None:
+            self._on_failure(crash)
 
     # -- subclass loop hooks --------------------------------------------------
 

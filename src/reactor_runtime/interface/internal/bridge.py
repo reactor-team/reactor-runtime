@@ -25,6 +25,7 @@ from reactor_runtime.interface.internal.output_buffer import OutputBuffer
 from reactor_runtime.interface.internal.reactor_core import (
     AddressedSink,
     BroadcastSink,
+    FailureSink,
     ReactorCore,
     RequestId,
 )
@@ -154,18 +155,22 @@ class ModelBridge:
         broadcast: BroadcastSink,
         addressed: AddressedSink,
         media: MediaSink,
+        failure: FailureSink | None = None,
     ) -> None:
         """Wire the model's outbound paths down into the runner. Call once.
 
         ``broadcast`` delivers a message to every client; ``addressed`` delivers
         one to a single connection, correlated to a request id when it is a reply;
         ``media`` receives each emitted frame. The media sink is registered as a
-        per-tick observer on the emission buffer.
+        per-tick observer on the emission buffer. ``failure`` receives the
+        exception that ends the model's run loop, at most once, on the model
+        thread — it is how the owner learns the model died rather than idled.
 
         Args:
             broadcast: Sink for a message sent to all clients.
             addressed: Sink for a message sent to one connection.
             media: Sink for each emitted frame.
+            failure: Sink for an unrecoverable crash of the model's run loop.
 
         Raises:
             RuntimeError: If outbound has already been bound.
@@ -173,6 +178,8 @@ class ModelBridge:
         if self._outbound_bound:
             raise RuntimeError("bind_outbound must be called once")
         self._model.bind_output(broadcast=broadcast, addressed=addressed)
+        if failure is not None:
+            self._model.bind_failure(failure)
         self._media = media
         self._model.output_buffer.add_callback(self._on_emission)
         self._outbound_bound = True

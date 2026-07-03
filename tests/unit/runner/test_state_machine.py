@@ -10,7 +10,13 @@ LEGAL_EDGES: list[tuple[SessionState, SessionEvent, SessionState]] = [
     (SessionState.CREATED, SessionEvent.INITIALIZATION_SUCCESS, SessionState.READY),
     (SessionState.CREATED, SessionEvent.INITIALIZATION_FAIL, SessionState.TERMINATED),
     (SessionState.READY, SessionEvent.START_SESSION, SessionState.WAITING),
+    # Eviction is terminal from every live state — an idle eviction or a crash.
+    (SessionState.CREATED, SessionEvent.EVICTION, SessionState.TERMINATED),
     (SessionState.READY, SessionEvent.EVICTION, SessionState.TERMINATED),
+    (SessionState.WAITING, SessionEvent.EVICTION, SessionState.TERMINATED),
+    (SessionState.STREAMING, SessionEvent.EVICTION, SessionState.TERMINATED),
+    (SessionState.ORPHANED, SessionEvent.EVICTION, SessionState.TERMINATED),
+    (SessionState.CLOSING, SessionEvent.EVICTION, SessionState.TERMINATED),
     (SessionState.WAITING, SessionEvent.STOP_SESSION, SessionState.CLOSING),
     (SessionState.WAITING, SessionEvent.TIMEOUT, SessionState.CLOSING),
     (SessionState.STREAMING, SessionEvent.STOP_SESSION, SessionState.CLOSING),

@@ -46,7 +46,19 @@ _TRANSITIONS: dict[SessionEvent, dict[SessionState, SessionState]] = {
         SessionState.ORPHANED: SessionState.CLOSING,
     },
     SessionEvent.CLEANUP_COMPLETE: {SessionState.CLOSING: SessionState.READY},
-    SessionEvent.EVICTION: {SessionState.READY: SessionState.TERMINATED},
+    # Eviction is terminal from every live state, not just READY: a model that
+    # will not serve again — an idle eviction or a crashed run loop — lands
+    # straight in TERMINATED wherever it was. CREATED is included so a crash
+    # racing the initialization edge is recorded rather than rejected into
+    # silence. The detail's reason distinguishes why (see EndReason).
+    SessionEvent.EVICTION: {
+        SessionState.CREATED: SessionState.TERMINATED,
+        SessionState.READY: SessionState.TERMINATED,
+        SessionState.WAITING: SessionState.TERMINATED,
+        SessionState.STREAMING: SessionState.TERMINATED,
+        SessionState.ORPHANED: SessionState.TERMINATED,
+        SessionState.CLOSING: SessionState.TERMINATED,
+    },
     # A negotiation answer is a fact about a connection that has not yet
     # connected, so it self-loops in every active state and leaves occupancy
     # alone (see _update_count). It carries the connection id and the answer
