@@ -94,7 +94,10 @@ ignore = [
 
 [tool.ruff.lint.isort]
 # The example models are first-party even though they live outside the package.
-known-first-party = ["examples"]
+# The generated wire bindings (reactor_wire) are first-party too, but they are
+# gitignored and generated on demand, so declare them explicitly to keep import
+# order deterministic whether or not codegen has run in the checkout.
+known-first-party = ["examples", "reactor_wire"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
