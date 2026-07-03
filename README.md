@@ -31,15 +31,17 @@ Early development. The public API and wire protocol are not yet stable.
 
 ## Development
 
-The project is managed with [uv](https://docs.astral.sh/uv/):
+The project uses [mise](https://mise.jdx.dev/) as its task runner; it pins the
+toolchain and installs [uv](https://docs.astral.sh/uv/), which owns Python. A
+thin `make` shim forwards the same names, so `make lint` runs `mise run lint`.
 
 ```sh
-uv sync                     # install dependencies (creates .venv)
-uv run lefthook install     # install git hooks (once per clone)
-uv run ruff check           # lint
-uv run ruff format --check  # format
-uv run mypy                 # type check (strict)
-uv run pytest               # tests
+mise run install      # install deps, generate wire bindings, and git hooks
+mise run lint         # ruff check, ruff format --check, and mise.lock drift
+mise run format       # apply ruff formatting
+mise run typecheck    # ty (strict)
+mise run test         # unit tests on the floor Python
+mise run test-matrix  # unit tests on every supported Python
 ```
 
 The GStreamer media engine under `transport/webrtc/gstreamer/` is a faithful
