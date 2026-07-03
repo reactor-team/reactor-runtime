@@ -1,0 +1,11 @@
+# @generated - fixture: lock has 1.0.0 but mise.toml wants 2.0.0.
+
+[[tools.tool-a]]
+version = "1.0.0"
+backend = "test:a"
+
+[tools.tool-a."platforms.linux-x64"]
+url = "https://example.com/a-linux-x64.tar.gz"
+
+[tools.tool-a."platforms.macos-arm64"]
+url = "https://example.com/a-macos-arm64.tar.gz"

@@ -46,14 +46,14 @@ def test_required_field_has_no_default_info() -> None:
 
     assert Required.__command_fields__["prompt"].info.default is NO_DEFAULT
     with pytest.raises(TypeError):
-        Required()  # type: ignore[call-arg]
+        Required()  # type: ignore[ty:missing-argument]
 
 
 def test_fields_without_defaults_are_ordered_first() -> None:
     # Declared default-first; the hook reorders so the dataclass accepts it.
     class Mixed(Command):
         with_default: int = 3
-        required: str  # type: ignore[misc]  # mypy can't see the runtime reorder
+        required: str  # type: ignore[ty:dataclass-field-order]  # runtime reorders it
 
     cmd = Mixed(required="hi")
     assert cmd.required == "hi"
@@ -87,7 +87,7 @@ def test_type_mismatched_static_default_raises_at_definition_time() -> None:
     with pytest.raises(TypeError, match="does not match its type"):
 
         class Bad(Command):
-            level: int = "hello"  # type: ignore[assignment]
+            level: int = "hello"  # type: ignore[ty:invalid-assignment]
 
 
 def test_type_mismatched_input_field_default_raises_at_definition_time() -> None:

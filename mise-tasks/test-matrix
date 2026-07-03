@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+#MISE description="[Testing] Run the unit tests on every supported Python (one nox session per version)"
+set -euo pipefail
+nox -s tests

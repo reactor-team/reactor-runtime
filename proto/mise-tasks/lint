@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+#MISE description="[Protobuf] Lint the proto sources"
+set -euo pipefail
+buf lint

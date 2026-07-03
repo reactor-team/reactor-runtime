@@ -1,0 +1,3 @@
+# Makes proto a monorepo config_root so its buf tasks are addressable as
+# //proto:gen / lint / breaking / breaking-release. Inherits [tools]/[settings]
+# from the root config. Tasks live in proto/mise-tasks/.

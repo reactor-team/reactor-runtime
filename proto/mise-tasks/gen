@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+#MISE description="[Protobuf] Generate the wire-protocol bindings into src/ (dev only)"
+set -euo pipefail
+buf generate

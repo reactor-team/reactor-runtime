@@ -1,0 +1,57 @@
+# mise is the task runner. Monorepo mode: tasks are addressable as //:verb (root)
+# and //proto:verb (proto). New language modules (crates, etc.) join config_roots
+# as they land. Run `mise run <task>` or `make <target>` (a thin shim forwards to
+# mise). `mise install` installs the pinned toolchain; `mise lock` refreshes the
+# committed mise.lock.
+monorepo_root = true
+
+[monorepo]
+# proto is the one module today (proto sources + buf config). The root carries
+# the Python tasks. An empty config_roots drops mise to deprecated auto-discovery,
+# so we list the one real module.
+config_roots = ["proto"]
+
+[tools]
+uv = "0.11.25"
+ruff = "0.15.20"
+ty = "0.0.55"
+lefthook = "2.1.9"
+"aqua:bufbuild/buf" = "1.71.0"
+# nox runs the Python test matrix (noxfile.py). It is a Python tool, so mise
+# provisions it through uv (uvx) rather than a native backend.
+"pipx:nox" = { version = "2025.11.12", uvx = true }
+# python is owned by uv, not mise. The supported floor is requires-python in
+# pyproject.toml (>=3.12); uv resolves and downloads the interpreter, and nox
+# selects each matrix version itself.
+
+[settings]
+experimental = true
+lockfile = true
+lockfile_platforms = ["linux-x64", "linux-arm64", "macos-arm64"]
+
+[env]
+# Homed at this root config so config_root resolves to the repo root for every
+# inheriting module; the Makefile shim helpers read it to compute a module's
+# // address.
+REPO_ROOT = "{{ env.REPO_ROOT | default(value=config_root) }}"
+# The supported floor (requires-python in pyproject.toml). uv picks whatever
+# interpreter is around unless told otherwise, so the non-matrix Python tasks
+# pass `--python "$PYTHON_FLOOR"` to stay deterministic. The test matrix is
+# owned by nox (noxfile.py), which selects each version itself.
+PYTHON_FLOOR = "3.12"
+# uv owns Python here: prefer its own managed interpreters and download any a
+# task or the nox matrix needs. Set explicitly so a restrictive global mise/uv
+# config (only-system, downloads=never) cannot starve the matrix; a contributor
+# gets the same interpreters CI does without a system install.
+UV_PYTHON_PREFERENCE = "managed"
+UV_PYTHON_DOWNLOADS = "automatic"
+
+# -- aggregators (file tasks live in mise-tasks/) ----------------------------
+
+[tasks.lint]
+description = "[Quality] Run all linters"
+depends = ["lint:ruff", "lint:mise-lock"]
+
+[tasks.check]
+description = "[Quality] Run all checks (proto, lint, typecheck, test)"
+depends = ["//proto:lint", "//proto:breaking", "lint", "typecheck", "test"]

@@ -1,0 +1,8 @@
+# @generated - fixture paired with malformed mise.toml.
+
+[[tools.tool-a]]
+version = "1.0.0"
+backend = "test:a"
+
+[tools.tool-a."platforms.linux-x64"]
+url = "https://example.com/a-linux-x64.tar.gz"

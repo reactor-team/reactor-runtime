@@ -37,7 +37,7 @@ def test_public_field_carries_its_constraints() -> None:
 
 def test_a_field_without_a_default_is_required() -> None:
     with pytest.raises(TypeError):
-        State()  # type: ignore[call-arg]  # omitting the required field is the case under test
+        State()  # type: ignore[ty:missing-argument]  # omitting the required field is the case under test
     state = State(required_axis=2.5)
     assert state.required_axis == 2.5
 

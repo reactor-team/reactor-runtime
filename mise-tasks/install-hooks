@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#MISE description="[Setup] Install git hooks (works from the main repo and worktrees)"
+set -euo pipefail
+# Pin core.hooksPath to the shared git dir so hooks fire in every worktree.
+common="$(git rev-parse --git-common-dir)"
+common_abs="$(cd "$common" && pwd)"
+git config --file "$common_abs/config" core.hooksPath "$common_abs/hooks"
+lefthook install --force

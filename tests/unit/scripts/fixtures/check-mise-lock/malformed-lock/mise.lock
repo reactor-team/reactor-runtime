@@ -1,0 +1,3 @@
+# Intentionally malformed TOML: broken assignment.
+[[tools.tool-a]]
+version = "1.0.0

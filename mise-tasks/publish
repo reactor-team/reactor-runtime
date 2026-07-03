@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+#MISE description="[Build] Publish dist/ to PyPI (trusted publishing in CI)"
+set -euo pipefail
+uv publish

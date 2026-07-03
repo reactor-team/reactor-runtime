@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+#MISE description="[Setup] Install dependencies exactly as locked (used by CI)"
+set -euo pipefail
+uv sync --locked --python "$PYTHON_FLOOR"

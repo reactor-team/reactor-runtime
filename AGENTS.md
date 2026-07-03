@@ -20,21 +20,28 @@ of this runtime."
 
 ## Toolchain
 
-`uv` manages everything. The commands below are also exposed as `make` targets.
+`mise` is the task runner and pins the toolchain (uv, ruff, ty, lefthook, buf,
+and nox) from `mise.lock`. Every command below is a mise task; a thin `make`
+shim forwards the same names, so `make lint` runs `mise run lint`. `mise run
+install` sets up a clone: deps, wire bindings, and git hooks.
 
 ```sh
-uv sync                     # install deps (creates .venv)
-uv run lefthook install     # install git hooks (once per clone)
-uv run ruff check           # lint
-uv run ruff format          # format
-uv run mypy                 # type check (strict)
-uv run pytest               # tests
+mise run install      # deps + wire bindings + git hooks (first-time setup)
+mise run lint         # ruff check, ruff format --check, and mise.lock drift
+mise run format       # apply ruff formatting
+mise run typecheck    # ty (strict)
+mise run test         # unit tests on the floor Python
+mise run test-matrix  # unit tests on every supported Python
 ```
 
-- Python floor is 3.12. Write modern syntax: `X | None`, builtin generics,
-  `type` statements where they help. Never `Optional[...]`/`Dict[...]`.
-- mypy runs strict. Do not weaken it with blanket ignores; a targeted
-  `# type: ignore[code]` needs a reason the reader can verify.
+- Python is owned by uv, not mise: `requires-python` in `pyproject.toml`
+  (`>=3.12`) is the sole floor. Write modern syntax: `X | None`, builtin
+  generics, `type` statements where they help. Never `Optional[...]`/`Dict[...]`.
+- nox owns the supported-Python matrix (`noxfile.py`): each version is its own
+  session, `mise run test-matrix` runs them all, and CI declares the same list
+  in its workflow matrix.
+- ty type-checks strictly. Do not weaken it with blanket ignores; a targeted
+  `# type: ignore[ty:code]` needs a reason the reader can verify.
 - Releases are tag-driven: `uv version X.Y.Z` commit + matching `vX.Y.Z` tag.
   Never edit the version field by hand in an unrelated change.
 
@@ -48,9 +55,10 @@ from worker threads or event loops.
 
 ## Lints
 
-`ruff check`, `ruff format --check`, and `mypy` must pass before a PR is
-opened. Do not disable rules file-wide to silence a finding; fix the code or
-narrowly suppress with a justification.
+`mise run lint` (ruff check, ruff format --check, and the mise.lock drift check)
+and `mise run typecheck` (ty) must pass before a PR is opened. Do not disable
+rules file-wide to silence a finding; fix the code or narrowly suppress with a
+justification.
 
 ## Docstrings
 

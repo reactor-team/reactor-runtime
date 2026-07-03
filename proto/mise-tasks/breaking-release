@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+#MISE description="[Protobuf] Guard the published contract: breaking-check against the latest wire/v* tag"
+set -euo pipefail
+tag=$(git tag --list 'wire/v*' --sort=-v:refname | head -n1)
+if [ -z "$tag" ]; then
+  echo "--- No prior wire/v* release tag; skipping release breaking check"
+else
+  echo "--- Checking protos for breaking changes against $tag"
+  buf breaking --against ".git#tag=$tag,subdir=proto"
+fi
