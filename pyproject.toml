@@ -35,7 +35,7 @@ classifiers = [
 ]
 dependencies = [
     "fastapi>=0.138.0",
-    "numpy>=2.1",
+    "numpy>=2.5.0",
     "protobuf>=7.35.1",
     "pygobject>=3.56.3",
     "pyyaml>=6.0.3",
