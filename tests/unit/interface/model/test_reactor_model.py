@@ -86,6 +86,7 @@ def _ready(model: Model) -> Addressed:
         addressed=lambda conn_id, message, request_id: addressed.append(
             (conn_id, message, request_id)
         ),
+        media=lambda chunk: None,
     )
     return addressed
 
@@ -197,6 +198,7 @@ def test_loops_drain_the_queues_on_the_model_thread() -> None:
         addressed=lambda conn_id, message, request_id: addressed.append(
             (conn_id, message, request_id)
         ),
+        media=lambda chunk: None,
     )
     model.start_thread()
     try:

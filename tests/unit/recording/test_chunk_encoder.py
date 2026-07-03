@@ -5,7 +5,7 @@ from typing import cast
 import pytest
 
 from reactor_runtime.core import RecordingConfig
-from reactor_runtime.recording.chunk_encoder import ChunkEncoder
+from reactor_runtime.recording.chunk_encoder import ChunkEncoder, _build_argv
 
 
 class _ExitedProc:
@@ -35,6 +35,24 @@ def _encoder(tmp_path: Path) -> ChunkEncoder:
         has_audio=False,
         audio_sample_rate=48_000,
     )
+
+
+def test_argv_stamps_pts_from_a_fixed_input_framerate(tmp_path: Path) -> None:
+    argv = _build_argv(
+        output_dir=tmp_path,
+        width=64,
+        height=48,
+        has_audio=False,
+        audio_sample_rate=48_000,
+        frame_rate=24,
+        config=RecordingConfig(enabled=True),
+        video_read_fd=7,
+        audio_read_fd=None,
+    )
+    # PTS derives from the declared input frame rate, not from wall-clock arrival.
+    assert "-framerate" in argv
+    assert argv[argv.index("-framerate") + 1] == "24"
+    assert "-use_wallclock_as_timestamps" not in argv
 
 
 def test_stop_logs_a_non_zero_ffmpeg_self_exit(

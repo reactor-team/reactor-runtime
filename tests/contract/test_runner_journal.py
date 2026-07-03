@@ -32,7 +32,7 @@ def _capture_recorder_starts(harness: Harness, monkeypatch: pytest.MonkeyPatch) 
     """Intercept the recorder's start to observe the id a session records under."""
     captured: list[str] = []
 
-    def capture(session_id: str, output_buffer: object) -> None:
+    def capture(session_id: str) -> None:
         captured.append(session_id)
 
     monkeypatch.setattr(harness.runner.recorder, "start", capture)

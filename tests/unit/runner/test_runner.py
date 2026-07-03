@@ -26,7 +26,7 @@ from reactor_runtime.core import (
     EndReason,
     FileUploaded,
     HealthStatus,
-    MediaBundle,
+    MediaChunk,
     RecordingConfig,
     RuntimeConfig,
     SessionEnded,
@@ -37,7 +37,11 @@ from reactor_runtime.core import (
     TransitionEvent,
 )
 from reactor_runtime.interface.internal.bridge import CommandOutcome
-from reactor_runtime.interface.internal.reactor_core import AddressedSink, BroadcastSink
+from reactor_runtime.interface.internal.reactor_core import (
+    AddressedSink,
+    BroadcastSink,
+    MediaSink,
+)
 from reactor_runtime.message_gateway import InboundCommand
 from reactor_runtime.protocol.common import struct_to_dict
 from reactor_runtime.recording import ClipResult
@@ -90,9 +94,11 @@ class FakeModel(ReactorModel):
         self.events.append("load")
         self.loaded = config_path
 
-    def bind_output(self, *, broadcast: BroadcastSink, addressed: AddressedSink) -> None:
+    def bind_output(
+        self, *, broadcast: BroadcastSink, addressed: AddressedSink, media: MediaSink
+    ) -> None:
         self.events.append("bind")
-        super().bind_output(broadcast=broadcast, addressed=addressed)
+        super().bind_output(broadcast=broadcast, addressed=addressed, media=media)
 
     def start_thread(self) -> None:
         self.events.append("start")
@@ -125,7 +131,7 @@ class FakeConnection:
     def send_control(self, payload: bytes | str) -> None:
         self.control.append(payload)
 
-    def send_media(self, bundle: MediaBundle) -> None: ...
+    def send_media(self, chunk: MediaChunk) -> None: ...
 
     def resume_track(self, name: str) -> None: ...
 

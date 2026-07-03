@@ -8,13 +8,13 @@ import pytest
 
 from reactor_runtime.core import (
     MediaBundle,
+    MediaChunk,
     RecordingConfig,
     TrackData,
     TrackDirection,
     TrackInfo,
     TrackKind,
 )
-from reactor_runtime.interface.internal.output_buffer import OutputBuffer
 from reactor_runtime.recording import (
     ClipManifest,
     ClipResult,
@@ -132,7 +132,7 @@ def test_request_clip_on_a_disabled_recorder_fails() -> None:
 
 def test_request_clip_before_any_media_fails(tmp_path: Path) -> None:
     recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
-    recorder.start("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", OutputBuffer({}))
+    recorder.start("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
     try:
         with pytest.raises(NoMediaYetError):
             recorder.request_clip(5.0)
@@ -142,10 +142,10 @@ def test_request_clip_before_any_media_fails(tmp_path: Path) -> None:
 
 def test_request_clip_resolves_to_a_pollable_result(tmp_path: Path) -> None:
     recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
-    recorder.start("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", OutputBuffer({}))
+    recorder.start("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
     try:
         assert recorder._markers is not None
-        recorder._markers.mark_first_real_frame()
+        recorder._markers.advance(1.0)
         clip = recorder.request_clip(30.0)
         assert clip.kind == "snap"
         assert clip.session_id == recorder._session_id
@@ -157,10 +157,10 @@ def test_request_clip_resolves_to_a_pollable_result(tmp_path: Path) -> None:
 
 def test_request_recording_covers_the_whole_session(tmp_path: Path) -> None:
     recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
-    recorder.start("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", OutputBuffer({}))
+    recorder.start("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
     try:
         assert recorder._markers is not None
-        recorder._markers.mark_first_real_frame()
+        recorder._markers.advance(1.0)
         clip = recorder.request_recording()
         assert clip.kind == "recording"
         assert clip.start_marker == 0.0
@@ -170,10 +170,10 @@ def test_request_recording_covers_the_whole_session(tmp_path: Path) -> None:
 
 def test_request_clip_rejects_a_non_positive_duration(tmp_path: Path) -> None:
     recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
-    recorder.start("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", OutputBuffer({}))
+    recorder.start("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
     try:
         assert recorder._markers is not None
-        recorder._markers.mark_first_real_frame()
+        recorder._markers.advance(1.0)
         with pytest.raises(ValueError, match="positive"):
             recorder.request_clip(0.0)
     finally:
@@ -186,11 +186,11 @@ def test_a_landed_clip_notifies_the_consumer(tmp_path: Path) -> None:
         RecordingConfig(enabled=True, recording_dir=str(tmp_path)),
         on_clip_ready=fired.append,
     )
-    recorder.start("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", OutputBuffer({}))
+    recorder.start("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
     try:
         assert recorder._markers is not None
         assert recorder._session_dir is not None
-        recorder._markers.mark_first_real_frame()
+        recorder._markers.advance(1.0)
         clip = recorder.request_clip(30.0)
         # The boundary segment lands once the encoder has rolled to the next one.
         for name in ("init.mp4", "chunk_00000.m4s", "chunk_00001.m4s"):
@@ -275,7 +275,7 @@ def test_the_final_chunk_is_announced_on_completion(tmp_path: Path) -> None:
 
 def test_disabled_recorder_never_starts(tmp_path: Path) -> None:
     recorder = Recorder(RecordingConfig(enabled=False, recording_dir=str(tmp_path)))
-    recorder.start("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", OutputBuffer({}))
+    recorder.start("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
     assert recorder._session_dir is None
 
 
@@ -293,7 +293,7 @@ def _video_bundle() -> MediaBundle:
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is not installed")
 def test_encodes_segments_and_serves_a_manifest(tmp_path: Path) -> None:
     recorder = Recorder(RecordingConfig(enabled=True, chunk_seconds=1, recording_dir=str(tmp_path)))
-    recorder.start("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", OutputBuffer({}))
+    recorder.start("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
     try:
         bundle = _video_bundle()
         deadline = time.monotonic() + 6.0
@@ -301,7 +301,7 @@ def test_encodes_segments_and_serves_a_manifest(tmp_path: Path) -> None:
         assert recording_id is not None
         manifest: object = Pending()
         while time.monotonic() < deadline:
-            recorder._on_bundle(bundle, duplicate=False, is_fresh_black=False)
+            recorder.on_chunk(MediaChunk(bundle=bundle, fps=30.0, n_frames=1))
             time.sleep(1.0 / 30.0)
             if recorder._markers is not None and recorder._markers.recording_started:
                 manifest = recorder.manifest(recording_id, 0.0, 1.0)

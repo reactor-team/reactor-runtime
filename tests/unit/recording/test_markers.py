@@ -1,51 +1,48 @@
-import time
-
 from reactor_runtime.recording.markers import MarkerBookkeeper
 
 
-def test_now_marker_advances_from_construction() -> None:
+def test_timeline_starts_at_zero_and_unstarted() -> None:
     markers = MarkerBookkeeper()
-    first = markers.now_marker()
-    time.sleep(0.02)
-    assert markers.now_marker() > first
-
-
-def test_unanchored_timeline_reports_started_immediately() -> None:
-    markers = MarkerBookkeeper(anchor_at_first_frame=False)
-    assert markers.recording_started is True
-
-
-def test_anchored_timeline_waits_for_the_first_frame() -> None:
-    markers = MarkerBookkeeper(anchor_at_first_frame=True)
+    assert markers.now_marker() == 0.0
     assert markers.recording_started is False
-    markers.mark_first_real_frame()
+    assert markers.first_real_frame_marker is None
+
+
+def test_advance_moves_the_media_timeline_and_latches_started() -> None:
+    markers = MarkerBookkeeper()
+    markers.advance(0.5)
+    markers.advance(0.25)
+    assert markers.now_marker() == 0.75
     assert markers.recording_started is True
-    assert markers.first_real_frame_marker is not None
+    assert markers.first_real_frame_marker == 0.0
 
 
-def test_anchoring_resets_the_origin_to_the_first_frame() -> None:
-    markers = MarkerBookkeeper(anchor_at_first_frame=True)
-    time.sleep(0.05)
-    markers.mark_first_real_frame()
-    # The origin moved to the first frame, so the timeline is near zero again.
-    assert markers.now_marker() < 0.05
+def test_non_positive_advance_is_ignored() -> None:
+    markers = MarkerBookkeeper()
+    markers.advance(0.0)
+    markers.advance(-1.0)
+    assert markers.now_marker() == 0.0
+    assert markers.recording_started is False
 
 
 def test_clip_range_is_the_tail_ending_now() -> None:
     markers = MarkerBookkeeper()
+    markers.advance(30.0)
     start, end = markers.compute_clip_range(10.0)
-    assert end >= start
-    assert start == max(0.0, end - 10.0)
+    assert end == 30.0
+    assert start == 20.0
 
 
 def test_clip_range_clamps_to_zero_when_short() -> None:
     markers = MarkerBookkeeper()
+    markers.advance(3.0)
     start, _ = markers.compute_clip_range(10_000.0)
     assert start == 0.0
 
 
 def test_recording_range_starts_at_zero() -> None:
     markers = MarkerBookkeeper()
+    markers.advance(12.0)
     start, end = markers.compute_recording_range()
     assert start == 0.0
-    assert end >= 0.0
+    assert end == 12.0

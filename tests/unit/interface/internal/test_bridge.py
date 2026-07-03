@@ -18,11 +18,7 @@ from reactor_runtime.core import SessionStarted
 from reactor_runtime.core.values import (
     ConnId,
     InputFrame,
-    MediaBundle,
-    TrackData,
-    TrackDirection,
-    TrackInfo,
-    TrackKind,
+    MediaChunk,
 )
 from reactor_runtime.interface.internal.bridge import ModelBridge
 from reactor_runtime.interface.internal.reactor_core import RequestId
@@ -66,11 +62,11 @@ class Sinks:
     def __init__(self) -> None:
         self.broadcast: list[ModelMessage] = []
         self.addressed: list[tuple[ConnId, ModelMessage | None, RequestId | None]] = []
-        self.media: list[tuple[MediaBundle, bool]] = []
+        self.media: list[MediaChunk] = []
 
     def bind(self, bridge: ModelBridge) -> None:
         bridge.bind_outbound(
-            broadcast=self.broadcast.append, addressed=self._addr, media=self._media
+            broadcast=self.broadcast.append, addressed=self._addr, media=self.media.append
         )
 
     def _addr(
@@ -78,19 +74,10 @@ class Sinks:
     ) -> None:
         self.addressed.append((conn, message, request_id))
 
-    def _media(self, bundle: MediaBundle, is_fresh_black: bool) -> None:
-        self.media.append((bundle, is_fresh_black))
-
 
 def make_bridge() -> tuple[ModelBridge, EchoModel]:
     model = EchoModel()
     return ModelBridge(model, ModelContract.of(EchoModel)), model
-
-
-def video_bundle(value: int = 0) -> MediaBundle:
-    info = TrackInfo(name="main", kind=TrackKind.VIDEO, direction=TrackDirection.OUT)
-    data = np.full((2, 2, 3), value, np.uint8)
-    return MediaBundle(tracks={"main": TrackData(info=info, data=data)})
 
 
 def frame() -> InputFrame:
@@ -177,18 +164,17 @@ def test_bind_outbound_wires_the_broadcast_sink() -> None:
     assert sinks.broadcast == [Reply(text="x")]
 
 
-def test_emit_reaches_the_media_sink_with_the_fresh_black_flag() -> None:
+def test_emit_reaches_the_media_sink_as_a_chunk() -> None:
     bridge, model = make_bridge()
     sinks = Sinks()
     sinks.bind(bridge)
 
-    model.output_buffer.submit(video_bundle(1), drop=True)
-    model.output_buffer._emit_one_tick()
-    assert sinks.media[-1][1] is False  # a real frame
-
-    model.output_buffer.flush()
-    model.output_buffer._emit_one_tick()
-    assert sinks.media[-1][1] is True  # the session-boundary black
+    asyncio.run(model.emit(Out(main=np.full((2, 2, 3), 1, np.uint8)), compute_time=0.05))
+    assert len(sinks.media) == 1
+    chunk = sinks.media[0]
+    assert chunk.n_frames == 1
+    assert chunk.fps == 20.0  # one frame in 0.05s
+    assert chunk.bundle.tracks["main"].data.shape == (2, 2, 3)
 
 
 # --- lifecycle + surface -------------------------------------------------
@@ -207,7 +193,6 @@ def test_bind_outbound_rejects_a_second_call() -> None:
         Sinks().bind(bridge)
 
 
-def test_contract_and_output_buffer_are_exposed() -> None:
-    bridge, model = make_bridge()
+def test_contract_is_exposed() -> None:
+    bridge, _ = make_bridge()
     assert bridge.contract is ModelContract.of(EchoModel)
-    assert bridge.output_buffer is model.output_buffer
