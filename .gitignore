@@ -41,3 +41,6 @@ htmlcov/
 .env
 .env.*
 !.env.example
+*.local.md
+mise.local.toml
+.mise.local.toml
