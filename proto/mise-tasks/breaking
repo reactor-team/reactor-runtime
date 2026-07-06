@@ -5,7 +5,11 @@ base=main
 git rev-parse --verify --quiet "$base" >/dev/null 2>&1 || base=origin/main
 if git cat-file -e "$base:proto/buf.yaml" 2>/dev/null; then
   echo "--- Checking protos for breaking changes against $base"
-  buf breaking --against ".git#ref=$base,subdir=proto"
+  # buf resolves the git input path relative to the working directory, which is
+  # this module's config_root (proto/), not the repo root. Anchor it at the
+  # top-level .git so subdir=proto resolves from the repository root.
+  root=$(git rev-parse --show-toplevel)
+  buf breaking --against "$root/.git#ref=$base,subdir=proto"
 else
   echo "--- No proto module on $base yet; skipping breaking check"
 fi

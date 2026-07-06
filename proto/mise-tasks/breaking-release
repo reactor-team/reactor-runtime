@@ -6,5 +6,9 @@ if [ -z "$tag" ]; then
   echo "--- No prior wire/v* release tag; skipping release breaking check"
 else
   echo "--- Checking protos for breaking changes against $tag"
-  buf breaking --against ".git#tag=$tag,subdir=proto"
+  # buf resolves the git input path relative to the working directory, which is
+  # this module's config_root (proto/), not the repo root. Anchor it at the
+  # top-level .git so subdir=proto resolves from the repository root.
+  root=$(git rev-parse --show-toplevel)
+  buf breaking --against "$root/.git#tag=$tag,subdir=proto"
 fi
