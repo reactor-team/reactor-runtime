@@ -8,8 +8,7 @@ if git cat-file -e "$base:proto/buf.yaml" 2>/dev/null; then
   # buf resolves the git input path relative to the working directory, which is
   # this module's config_root (proto/), not the repo root. Anchor it at the
   # top-level .git so subdir=proto resolves from the repository root.
-  root=$(git rev-parse --show-toplevel)
-  buf breaking --against "$root/.git#ref=$base,subdir=proto"
+  buf breaking --against "$REPO_ROOT/.git#ref=$base,subdir=proto"
 else
   echo "--- No proto module on $base yet; skipping breaking check"
 fi
