@@ -34,7 +34,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "fastapi>=0.138.0",
+    "fastapi>=0.139.0",
     "numpy>=2.1",
     "protobuf>=7.35.1",
     "pygobject>=3.56.3",
