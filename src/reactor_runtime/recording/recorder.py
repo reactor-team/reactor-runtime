@@ -22,7 +22,6 @@ import re
 import tempfile
 import threading
 import time
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -234,15 +233,16 @@ class Recorder:
     # -- lifecycle ------------------------------------------------------------
 
     def start(self, session_id: str, output_buffer: OutputBuffer) -> None:
-        """Begin recording the session's output.
+        """Begin recording the session's output under *session_id*.
 
-        Mints a fresh recording id (independent of the process's fixed session
-        id, so sequential sessions never overwrite each other's clips), opens its
-        directory, taps *output_buffer*, and starts the feed and watch workers.
-        A no-op when recording is disabled or already running.
+        The recording is stored and addressed under *session_id*: a director
+        passes the platform's session id so a clip is fetched by the same id the
+        platform stores it under, and a standalone runtime passes its fixed id.
+        Opens the recording directory, taps *output_buffer*, and starts the feed
+        and watch workers. A no-op when recording is disabled or already running.
 
         Args:
-            session_id: The runtime session id, kept for log correlation.
+            session_id: The id this recording is stored and addressed under.
             output_buffer: The model's emission buffer to tap for frames.
         """
         if not self._config.enabled or self._started:
@@ -255,7 +255,7 @@ class Recorder:
                 else Path(tempfile.mkdtemp(prefix="reactor-recordings-"))
             )
             self._root.mkdir(parents=True, exist_ok=True)
-        self._session_id = str(uuid.uuid4())
+        self._session_id = session_id
         self._session_dir = self._root / self._session_id
         self._session_dir.mkdir(parents=True, exist_ok=True)
         self._markers = MarkerBookkeeper(anchor_at_first_frame=self._config.skip_leading_black)

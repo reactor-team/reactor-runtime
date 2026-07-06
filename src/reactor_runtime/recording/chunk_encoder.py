@@ -11,9 +11,11 @@ synthetic track stands in so every segment still carries audio.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import os
 import signal
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Any
@@ -25,6 +27,32 @@ from reactor_runtime.core import RecordingConfig
 from reactor_runtime.log import get_logger
 
 logger = get_logger(__name__)
+
+# Linux fcntl command to resize a pipe's kernel buffer (absent from the fcntl
+# module). The floor a resized pipe is grown to, so even a small-frame recording
+# gets comfortable headroom.
+_F_SETPIPE_SZ = 1031
+_MIN_PIPE_BYTES = 1 << 20
+
+
+def _enlarge_pipe(write_fd: int, frame_bytes: int) -> None:
+    """Grow a feed pipe's buffer to hold at least one whole video frame.
+
+    ffmpeg interleaves its two piped inputs, so if a single rawvideo frame is
+    larger than the default pipe buffer (64 KiB) the feed write blocks mid-frame
+    while ffmpeg is parked reading the *other* input — a deadlock that stalls the
+    encoder before it writes a single segment. Sizing the buffer to a whole frame
+    lets the feed thread hand over a frame and its audio without blocking.
+
+    Best-effort and Linux-only: the kernel caps the request at ``fs.pipe-max-size``
+    and any failure is ignored (the pre-existing 64 KiB buffer still works for
+    small frames).
+    """
+    if sys.platform != "linux":
+        return
+    desired = max(_MIN_PIPE_BYTES, frame_bytes * 2)
+    with contextlib.suppress(OSError):
+        fcntl.fcntl(write_fd, _F_SETPIPE_SZ, desired)
 
 
 def _resize_nearest(frame: npt.NDArray[Any], target_w: int, target_h: int) -> npt.NDArray[Any]:
@@ -297,6 +325,13 @@ class ChunkEncoder:
             audio_r, audio_w = os.pipe()
         else:
             audio_r, audio_w = None, None
+
+        # Size both pipes to hold a whole frame so a feed write never blocks
+        # mid-frame and deadlocks against ffmpeg reading the other input.
+        frame_bytes = width * height * 3
+        _enlarge_pipe(video_w, frame_bytes)
+        if audio_w is not None:
+            _enlarge_pipe(audio_w, frame_bytes)
 
         argv = _build_argv(
             output_dir=self._output_dir,

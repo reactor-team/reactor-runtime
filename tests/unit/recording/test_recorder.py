@@ -132,7 +132,7 @@ def test_request_clip_on_a_disabled_recorder_fails() -> None:
 
 def test_request_clip_before_any_media_fails(tmp_path: Path) -> None:
     recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
-    recorder.start("sess", OutputBuffer({}))
+    recorder.start("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", OutputBuffer({}))
     try:
         with pytest.raises(NoMediaYetError):
             recorder.request_clip(5.0)
@@ -142,7 +142,7 @@ def test_request_clip_before_any_media_fails(tmp_path: Path) -> None:
 
 def test_request_clip_resolves_to_a_pollable_result(tmp_path: Path) -> None:
     recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
-    recorder.start("sess", OutputBuffer({}))
+    recorder.start("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", OutputBuffer({}))
     try:
         assert recorder._markers is not None
         recorder._markers.mark_first_real_frame()
@@ -157,7 +157,7 @@ def test_request_clip_resolves_to_a_pollable_result(tmp_path: Path) -> None:
 
 def test_request_recording_covers_the_whole_session(tmp_path: Path) -> None:
     recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
-    recorder.start("sess", OutputBuffer({}))
+    recorder.start("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", OutputBuffer({}))
     try:
         assert recorder._markers is not None
         recorder._markers.mark_first_real_frame()
@@ -170,7 +170,7 @@ def test_request_recording_covers_the_whole_session(tmp_path: Path) -> None:
 
 def test_request_clip_rejects_a_non_positive_duration(tmp_path: Path) -> None:
     recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
-    recorder.start("sess", OutputBuffer({}))
+    recorder.start("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", OutputBuffer({}))
     try:
         assert recorder._markers is not None
         recorder._markers.mark_first_real_frame()
@@ -186,7 +186,7 @@ def test_a_landed_clip_notifies_the_consumer(tmp_path: Path) -> None:
         RecordingConfig(enabled=True, recording_dir=str(tmp_path)),
         on_clip_ready=fired.append,
     )
-    recorder.start("sess", OutputBuffer({}))
+    recorder.start("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", OutputBuffer({}))
     try:
         assert recorder._markers is not None
         assert recorder._session_dir is not None
@@ -275,7 +275,7 @@ def test_the_final_chunk_is_announced_on_completion(tmp_path: Path) -> None:
 
 def test_disabled_recorder_never_starts(tmp_path: Path) -> None:
     recorder = Recorder(RecordingConfig(enabled=False, recording_dir=str(tmp_path)))
-    recorder.start("sess", OutputBuffer({}))
+    recorder.start("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", OutputBuffer({}))
     assert recorder._session_dir is None
 
 
@@ -293,7 +293,7 @@ def _video_bundle() -> MediaBundle:
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is not installed")
 def test_encodes_segments_and_serves_a_manifest(tmp_path: Path) -> None:
     recorder = Recorder(RecordingConfig(enabled=True, chunk_seconds=1, recording_dir=str(tmp_path)))
-    recorder.start("sess", OutputBuffer({}))
+    recorder.start("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", OutputBuffer({}))
     try:
         bundle = _video_bundle()
         deadline = time.monotonic() + 6.0
