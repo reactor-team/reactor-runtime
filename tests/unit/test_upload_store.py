@@ -102,7 +102,7 @@ async def test_fetch_waits_for_a_late_put() -> None:
 
 
 async def test_fetch_waits_for_a_slot_reserved_after_the_reference() -> None:
-    # The reference can arrive before babysitter has even reserved the slot; the
+    # The reference can arrive before the director has even reserved the slot; the
     # wait is keyed by id, so a create_slot + put that lands during the wait still
     # resolves it.
     store = UploadStore()
