@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import importlib.metadata
+import uuid
 from collections.abc import Callable, Coroutine, Mapping
 from typing import Any
 
@@ -170,10 +171,11 @@ class Runner(ServiceComponent, ConnectionSink):
         self._teardown: set[asyncio.Task[None]] = set()
         self._orphan_task: asyncio.Task[None] | None = None
         self._session_id = SESSION_ID
-        # The id a recording is stored and addressed under. The transport session
-        # id stays fixed (SESSION_ID); this is separate so a director can align a
-        # recording with the platform's session id (supplied on start_session)
-        # while a standalone runtime falls back to the fixed id.
+        # The id a recording is stored and addressed under, set per session in
+        # start_session. Separate from the fixed transport session id so a director
+        # can align a recording with the platform's session id; a session started
+        # without one mints a fresh id, so sequential recordings in a reused process
+        # never share a directory. The construction value is an unused placeholder.
         self._recording_id = SESSION_ID
         self._accepting = True
         # The process-shutdown hook, wired by the assembly so the runner can ask
@@ -485,8 +487,9 @@ class Runner(ServiceComponent, ConnectionSink):
 
         A ``session_id`` in *params* is adopted as the id this session's recording
         is stored and addressed under, so a director can align clips with the
-        platform's session id; it defaults to the fixed :data:`SESSION_ID`. The
-        transport session id is unaffected — it is always :data:`SESSION_ID`.
+        platform's session id; absent one, a fresh id is minted per session so
+        sequential recordings never overwrite each other. The transport session id
+        is unaffected — it is always :data:`SESSION_ID`.
 
         Args:
             params: The initial session parameters supplied by the caller.
@@ -494,7 +497,7 @@ class Runner(ServiceComponent, ConnectionSink):
         Raises:
             SessionTransitionError: If the session is not in a startable state.
         """
-        self._recording_id = str(params.get("session_id") or SESSION_ID)
+        self._recording_id = str(params.get("session_id") or uuid.uuid4())
         if not self._sm.send(SessionEvent.START_SESSION, params=dict(params)):
             raise SessionTransitionError("start", self._sm.current_state)
 

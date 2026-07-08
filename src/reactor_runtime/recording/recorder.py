@@ -237,7 +237,8 @@ class Recorder:
 
         The recording is stored and addressed under *session_id*: a director
         passes the platform's session id so a clip is fetched by the same id the
-        platform stores it under, and a standalone runtime passes its fixed id.
+        platform stores it under, and a session started without one is given a
+        freshly minted id so sequential recordings never share a directory.
         Opens the recording directory, taps *output_buffer*, and starts the feed
         and watch workers. A no-op when recording is disabled or already running.
 
