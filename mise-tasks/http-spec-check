@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+#MISE description="[HTTP contract] Fail if the committed OpenAPI contract has drifted from the code"
+set -euo pipefail
+# The renderer imports the runtime, so the committed spec must be reproduced
+# from the runtime's own deps at their locked versions — a floating resolve
+# could render a different document and flag false drift. Generate the wire
+# bindings from the in-repo proto, then sync the lockfile into a throwaway
+# environment so the gate never disturbs the dev venv. pygobject/pycairo drive
+# the media engine the spec renderer never touches; skip them so the gate needs
+# no native GObject/Cairo build in its CI job.
+mise run //proto:gen
+env_dir="$(mktemp -d)/venv"
+export UV_PROJECT_ENVIRONMENT="$env_dir"
+uv sync --locked --no-dev \
+  --no-install-package pygobject --no-install-package pycairo
+uv run --no-sync --python "$PYTHON_FLOOR" python scripts/dump-http-openapi.py --check

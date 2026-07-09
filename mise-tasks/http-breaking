@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+#MISE description="[HTTP contract] Report the HTTP contract diff against main and the bump it mandates"
+set -euo pipefail
+base=main
+git rev-parse --verify --quiet "$base" >/dev/null 2>&1 || base=origin/main
+if git cat-file -e "$base:api/openapi.json" 2>/dev/null; then
+  echo "--- Classifying the HTTP contract diff against $base"
+  prev=$(mktemp)
+  git show "$base:api/openapi.json" > "$prev"
+  # check-http-spec.py is stdlib-only (oasdiff runs in docker); skip the project
+  # sync so the gate needs no build deps in its CI job.
+  uv run --no-project --python "$PYTHON_FLOOR" python scripts/check-http-spec.py report \
+    --previous "$prev" --current api/openapi.json
+else
+  echo "--- No api/openapi.json on $base yet; skipping contract check"
+fi
