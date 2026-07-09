@@ -20,6 +20,7 @@ from reactor_runtime.http.events import format_sse
 from reactor_runtime.recording import ClipManifest, ClipSessionGoneError, Pending
 from reactor_runtime.runner import Runner
 from reactor_runtime.transport.router import (
+    ErrorDetail,
     SessionNotRunningError,
     SessionTransitionError,
     UnknownSessionError,
@@ -36,6 +37,19 @@ class EnforceRequest(BaseModel):
     """A moderation verdict posted against the active session."""
 
     block: bool = True
+
+
+# The non-2xx statuses a route can answer, declared so the published contract
+# carries every code a client branches on (FastAPI cannot infer a runtime
+# raise). Bare statuses + the error shape only; the motives live in the code.
+_TRANSITION_RESPONSES: dict[int | str, dict[str, Any]] = {
+    409: {"model": ErrorDetail},
+    503: {"model": ErrorDetail},
+}
+_GUARD_RESPONSES: dict[int | str, dict[str, Any]] = {
+    400: {"model": ErrorDetail},
+    404: {"model": ErrorDetail},
+}
 
 
 def _transition_rejection(error: SessionTransitionError) -> HTTPException:
@@ -61,6 +75,16 @@ def _transition_rejection(error: SessionTransitionError) -> HTTPException:
     return HTTPException(status_code=409, detail=detail)
 
 
+def _require_session(runner: Runner, sid: str) -> None:
+    """Admit a request against *sid*, or answer 400 (no session) / 404 (wrong id)."""
+    try:
+        runner.require_session_running(sid)
+    except SessionNotRunningError:
+        raise HTTPException(status_code=400, detail="No session running") from None
+    except UnknownSessionError:
+        raise HTTPException(status_code=404, detail="Unknown session") from None
+
+
 class SessionRoutes:
     """Session lifecycle control, driving the runner's session-control face."""
 
@@ -72,7 +96,7 @@ class SessionRoutes:
         """Register the session-control routes against *app*."""
         runner = self._runner
 
-        @app.post("/start_session")
+        @app.post("/start_session", responses=_TRANSITION_RESPONSES)
         async def start_session(
             params: Annotated[dict[str, Any] | None, Body()] = None,
         ) -> dict[str, Any]:
@@ -90,7 +114,7 @@ class SessionRoutes:
         async def get_schema() -> dict[str, Any]:
             return runner.schema()
 
-        @app.post("/stop_session")
+        @app.post("/stop_session", responses=_TRANSITION_RESPONSES)
         async def stop_session() -> Response:
             try:
                 runner.stop_session()
@@ -98,14 +122,9 @@ class SessionRoutes:
                 raise _transition_rejection(rejected) from None
             return Response(status_code=200)
 
-        @app.post("/sessions/{sid}/enforce")
+        @app.post("/sessions/{sid}/enforce", responses=_GUARD_RESPONSES)
         async def enforce(sid: str, req: EnforceRequest) -> Response:
-            try:
-                runner.require_session_running(sid)
-            except SessionNotRunningError:
-                raise HTTPException(status_code=400, detail="No session running") from None
-            except UnknownSessionError:
-                raise HTTPException(status_code=404, detail="Unknown session") from None
+            _require_session(runner, sid)
             runner.enforce(req.block)
             return Response(status_code=200)
 
@@ -122,6 +141,14 @@ class CreateUploadRequest(BaseModel):
     size: int
     mime_type: str
     upload_id: str | None = None
+
+
+class CreateUploadResponse(BaseModel):
+    """The reserved slot: its id, the URL to PUT the bytes to, and its path."""
+
+    presigned_id: str
+    presigned_url: str
+    path: str
 
 
 class UploadRoutes:
@@ -141,16 +168,15 @@ class UploadRoutes:
         """Register the upload routes against *app*."""
         runner = self._runner
 
-        @app.post("/sessions/{sid}/uploads")
+        @app.post(
+            "/sessions/{sid}/uploads",
+            status_code=201,
+            responses={**_GUARD_RESPONSES, 409: {"model": ErrorDetail}},
+        )
         async def create_upload(
             sid: str, req: CreateUploadRequest, request: Request
-        ) -> JSONResponse:
-            try:
-                runner.require_session_running(sid)
-            except SessionNotRunningError:
-                raise HTTPException(status_code=400, detail="No session running") from None
-            except UnknownSessionError:
-                raise HTTPException(status_code=404, detail="Unknown session") from None
+        ) -> CreateUploadResponse:
+            _require_session(runner, sid)
             if not req.name:
                 raise HTTPException(status_code=400, detail="name is required")
             if not req.mime_type:
@@ -164,16 +190,26 @@ class UploadRoutes:
             except UploadIdTakenError:
                 raise HTTPException(status_code=409, detail="Upload id already reserved") from None
             base = str(request.base_url).rstrip("/")
-            return JSONResponse(
-                status_code=201,
-                content={
-                    "presigned_id": upload_id,
-                    "presigned_url": f"{base}/uploads/{upload_id}",
-                    "path": f"sessions/{sid}/uploads/{upload_id}/{req.name}",
-                },
+            return CreateUploadResponse(
+                presigned_id=upload_id,
+                presigned_url=f"{base}/uploads/{upload_id}",
+                path=f"sessions/{sid}/uploads/{upload_id}/{req.name}",
             )
 
-        @app.put("/uploads/{upload_id}")
+        @app.put(
+            "/uploads/{upload_id}",
+            openapi_extra={
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/octet-stream": {
+                            "schema": {"type": "string", "format": "binary"}
+                        }
+                    },
+                }
+            },
+            responses={**_GUARD_RESPONSES, 409: {"model": ErrorDetail}},
+        )
         async def put_upload(upload_id: str, request: Request) -> Response:
             # The slot knows the exact byte count it expects, so a write whose
             # declared length is wrong is rejected before the body is read —
@@ -238,7 +274,21 @@ class RecordingRoutes:
         """Register the clip routes against *app*."""
         runner = self._runner
 
-        @app.get("/clips")
+        # response_class=Response keeps FastAPI from advertising a default
+        # application/json body these responses never carry.
+        @app.get(
+            "/clips",
+            response_class=Response,
+            responses={
+                200: {
+                    "description": "The clip's HLS manifest.",
+                    "content": {"application/vnd.apple.mpegurl": {"schema": {"type": "string"}}},
+                },
+                202: {"description": "Still being prepared; retry later."},
+                400: {"model": ErrorDetail},
+                410: {"model": ErrorDetail},
+            },
+        )
         async def get_clip_manifest(session_id: str, start: float, end: float) -> Response:
             try:
                 result = runner.recorder.manifest(session_id, start, end)
@@ -250,7 +300,21 @@ class RecordingRoutes:
                 return Response(status_code=202, headers={"Retry-After": str(result.retry_after)})
             raise HTTPException(status_code=410, detail="Recording unknown or aged out")
 
-        @app.get("/clips/chunks/{session_id}/{filename}")
+        @app.get(
+            "/clips/chunks/{session_id}/{filename}",
+            response_class=Response,
+            responses={
+                200: {
+                    "description": "The fMP4 segment bytes.",
+                    "content": {
+                        "video/mp4": {"schema": {"type": "string", "format": "binary"}},
+                        "video/iso.segment": {"schema": {"type": "string", "format": "binary"}},
+                    },
+                },
+                404: {"model": ErrorDetail},
+                410: {"model": ErrorDetail},
+            },
+        )
         async def get_clip_chunk(session_id: str, filename: str) -> FileResponse:
             try:
                 path = runner.recorder.chunk_path(session_id, filename)
@@ -274,7 +338,16 @@ class EgressRoutes:
         """Register the egress and health routes against *app*."""
         runner = self._runner
 
-        @app.get("/events")
+        @app.get(
+            "/events",
+            response_class=Response,
+            responses={
+                200: {
+                    "description": "The egress journal as a server-sent event stream.",
+                    "content": {"text/event-stream": {"schema": {"type": "string"}}},
+                }
+            },
+        )
         async def events(
             since: int | None = None,
             last_event_id: Annotated[str | None, Header()] = None,
@@ -282,7 +355,7 @@ class EgressRoutes:
             resume = since if since is not None else _resume_from(last_event_id)
             return StreamingResponse(_stream_events(runner, resume), media_type="text/event-stream")
 
-        @app.get("/health")
+        @app.get("/health", responses={503: {"description": "The process is unhealthy."}})
         async def health() -> JSONResponse:
             report = runner.health()
             code = 503 if report.status is HealthStatus.UNHEALTHY else 200
