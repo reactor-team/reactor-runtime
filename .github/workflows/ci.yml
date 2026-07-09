@@ -37,10 +37,13 @@ jobs:
       - run: mise run //proto:lint
       - run: mise run //proto:breaking
 
-  # The HTTP contract check diffs the committed api/openapi.json against the
-  # merge base with the pinned oasdiff image. It is informational: a breaking
-  # diff is legal (it mandates a minor bump, enforced at release), so the job
-  # fails only on tool errors. The changelog lands in the step summary.
+  # Two checks guard the committed api/openapi.json. The drift gate is blocking:
+  # a fresh render of the HTTP surface must equal the committed file byte for
+  # byte, so the contract the release gate diffs is always the surface the code
+  # actually serves — a stale file fails the build rather than silently diffing
+  # a surface that no longer exists. The breaking-diff report is informational:
+  # a breaking diff is legal (it mandates a minor bump, enforced at release), so
+  # it fails only on tool errors and lands its changelog in the step summary.
   http-surface:
     name: HTTP Contract
     runs-on: ubuntu-latest
@@ -53,6 +56,7 @@ jobs:
         with:
           version: ${{ env.MISE_VERSION }}
 
+      - run: mise run http-spec-check
       - run: mise run http-breaking
 
   lint:
