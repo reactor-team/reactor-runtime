@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+#MISE description="[HTTP contract] Regenerate the committed OpenAPI contract (api/openapi.json)"
+set -euo pipefail
+# The renderer imports the runtime, whose protocol layer needs the wire
+# bindings; generate them from the in-repo proto so the task needs no token.
+mise run //proto:gen
+uv run --python "$PYTHON_FLOOR" python scripts/dump-http-openapi.py

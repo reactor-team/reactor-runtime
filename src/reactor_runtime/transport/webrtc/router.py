@@ -164,11 +164,11 @@ class WebRtcRouter(TransportRouter):
             runner.require_session_running(sid)
             return {"connection_id": runner.new_conn_id(), "track_map": runner.track_map()}
 
-        @app.api_route(
-            f"{_PREFIX}/connections/{{cid}}/sdp_params",
-            methods=["POST", "PUT"],
-            status_code=202,
-        )
+        # One handler, registered once per method: a POST opens a connection's
+        # first negotiation and a PUT re-offers on the same id. Separate
+        # registrations give each verb its own stable operation id in the
+        # OpenAPI document (a multi-method api_route derives one id from an
+        # unordered method set — unstable and duplicated).
         async def offer(
             sid: str,
             cid: int,
@@ -185,6 +185,10 @@ class WebRtcRouter(TransportRouter):
                 ice_servers=_ice_servers_from_request(req.ice_servers),
             )
             return {"connection_id": cid}
+
+        offer_path = f"{_PREFIX}/connections/{{cid}}/sdp_params"
+        app.post(offer_path, status_code=202)(offer)
+        app.put(offer_path, status_code=202)(offer)
 
         @app.get(f"{_PREFIX}/connections/{{cid}}/sdp_params")
         async def sdp_answer(sid: str, cid: int) -> Response:

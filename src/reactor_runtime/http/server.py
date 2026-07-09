@@ -30,6 +30,42 @@ from reactor_runtime.transport.router import TransportRouter
 logger = get_logger(__name__)
 
 
+def build_app(runner: Runner, transports: list[TransportRouter]) -> FastAPI:
+    """Assemble the runtime's ASGI application from its route groups.
+
+    The one place the HTTP surface is composed: the fixed route groups, the
+    CORS policy, and one mount per transport. :class:`HttpServer` serves the
+    result; the OpenAPI spec renderer reads the same assembly so the published
+    contract is exactly the served surface.
+
+    Args:
+        runner: The runner the routes drive and the transports report into.
+        transports: One router per connection type, each mounted onto the app.
+
+    Returns:
+        The fully assembled FastAPI application.
+    """
+    app = FastAPI(title="reactor-runtime")
+    # A standalone runtime is called directly by browser clients from their
+    # own origin, so the session and signalling routes must answer the
+    # cross-origin preflight. Auth rides the Authorization header, never a
+    # cookie, so credentialed CORS is unnecessary and a wildcard origin is
+    # safe; an operator fronting the runtime can tighten this upstream.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    SessionRoutes(runner).mount(app)
+    EgressRoutes(runner).mount(app)
+    UploadRoutes(runner).mount(app)
+    RecordingRoutes(runner).mount(app)
+    for transport in transports:
+        transport.mount(app, runner)
+    return app
+
+
 class _ServerWithoutSignals(uvicorn.Server):
     """A uvicorn server that leaves signal handling to the service.
 
@@ -70,24 +106,7 @@ class HttpServer(ServiceComponent):
             transports: One router per connection type, each mounted onto the app.
         """
         self._cfg = cfg
-        self._app = FastAPI(title="reactor-runtime")
-        # A standalone runtime is called directly by browser clients from their
-        # own origin, so the session and signalling routes must answer the
-        # cross-origin preflight. Auth rides the Authorization header, never a
-        # cookie, so credentialed CORS is unnecessary and a wildcard origin is
-        # safe; an operator fronting the runtime can tighten this upstream.
-        self._app.add_middleware(
-            CORSMiddleware,
-            allow_origins=["*"],
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
-        SessionRoutes(runner).mount(self._app)
-        EgressRoutes(runner).mount(self._app)
-        UploadRoutes(runner).mount(self._app)
-        RecordingRoutes(runner).mount(self._app)
-        for transport in transports:
-            transport.mount(self._app, runner)
+        self._app = build_app(runner, transports)
         self._server: uvicorn.Server | None = None
         self._serve_task: asyncio.Task[None] | None = None
 
