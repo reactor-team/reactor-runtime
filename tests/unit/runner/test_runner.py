@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -357,6 +358,40 @@ async def test_start_session_opens_the_session(started_runner: Runner) -> None:
     started_runner.start_session({})
     assert started_runner._sm.current_state is SessionState.WAITING
     started_runner.require_session_running(SESSION_ID)
+
+
+async def test_start_session_adopts_a_supplied_recording_id(started_runner: Runner) -> None:
+    supplied = "11111111-2222-3333-4444-555555555555"
+    started_runner.start_session({"session_id": supplied})
+    assert started_runner._recording_id == supplied
+
+
+async def test_start_session_without_a_session_id_mints_a_recording_id(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    # A director aligns clips by supplying an id; without one the recording gets a
+    # freshly minted id rather than the fixed transport id, so sequential recordings
+    # in a reused process never write to the same directory.
+    assert started_runner._recording_id != SESSION_ID
+    assert uuid.UUID(started_runner._recording_id)
+
+
+async def test_sessions_without_a_session_id_get_distinct_recording_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_models.clear()
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
+    minted: list[str] = []
+    for _ in range(2):
+        runner = _runner()
+        await runner.start()
+        try:
+            runner.start_session({})
+            minted.append(runner._recording_id)
+        finally:
+            await runner.stop()
+    assert minted[0] != minted[1]
 
 
 async def test_require_session_running_rejects_an_unknown_sid(started_runner: Runner) -> None:

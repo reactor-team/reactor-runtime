@@ -15,6 +15,7 @@ bytes a handler needs.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass
 
@@ -84,6 +85,12 @@ class UploadStore:
     def __init__(self) -> None:
         """Start an empty store with no reserved slots."""
         self._slots: dict[UploadId, _Slot] = {}
+        # One event per upload id, set the moment its bytes are written. fetch
+        # awaits it so a reference that arrives before the bytes waits for them
+        # rather than failing: a client references an upload over the data
+        # channel while its bytes are still being delivered on a separate
+        # request, and the two races are won either way.
+        self._filled: dict[UploadId, asyncio.Event] = {}
 
     def create_slot(
         self, name: str, mime_type: str, size: int, upload_id: UploadId | None = None
@@ -160,27 +167,61 @@ class UploadStore:
         if len(data) != slot.size:
             raise UploadSizeMismatchError(f"expected {slot.size} bytes, got {len(data)}")
         slot.data = data
+        self._waiter(upload_id).set()
 
-    async def fetch(self, upload_id: UploadId) -> UploadedFile:
+    async def fetch(self, upload_id: UploadId, wait_seconds: float = 0.0) -> UploadedFile:
         """Read a completed slot back as the model-facing upload.
 
         Async so the in-memory store and a future remote fetch share one shape.
 
+        When the bytes have not arrived yet and *wait_seconds* is positive, wait up
+        to that many seconds for a :meth:`put` to complete them before giving up.
+        The wait is keyed by *upload_id* alone, so it also covers a slot that has
+        not even been reserved yet — the reference can arrive before either the
+        reservation or the bytes.
+
         Args:
             upload_id: The slot's id.
+            wait_seconds: Seconds to wait for the bytes when they are not yet
+                present; ``0`` (the default) fails immediately, preserving the
+                resolve-now behaviour for callers that do not want to block.
 
         Returns:
             The upload's name, mime type, and bytes — without the upload id.
 
         Raises:
-            UnknownUploadError: If no slot exists for *upload_id* or its bytes
-                have not been written.
+            UnknownUploadError: If no slot's bytes exist for *upload_id* within
+                the wait.
         """
+        slot = self._slots.get(upload_id)
+        if slot is not None and slot.data is not None:
+            return UploadedFile(name=slot.name, mime_type=slot.mime_type, data=slot.data)
+        if wait_seconds <= 0:
+            raise UnknownUploadError(upload_id)
+        try:
+            await asyncio.wait_for(self._waiter(upload_id).wait(), wait_seconds)
+        except TimeoutError:
+            raise UnknownUploadError(upload_id) from None
         slot = self._slots.get(upload_id)
         if slot is None or slot.data is None:
             raise UnknownUploadError(upload_id)
         return UploadedFile(name=slot.name, mime_type=slot.mime_type, data=slot.data)
 
     def clear(self) -> None:
-        """Drop every slot, releasing the session's uploaded bytes."""
+        """Drop every slot, releasing the session's uploaded bytes.
+
+        Wake any fetch still waiting on an unfilled id so it re-checks, finds the
+        slot gone, and raises promptly instead of blocking to its timeout.
+        """
         self._slots.clear()
+        for waiter in self._filled.values():
+            waiter.set()
+        self._filled.clear()
+
+    def _waiter(self, upload_id: UploadId) -> asyncio.Event:
+        """Return the fill event for *upload_id*, creating it on first use."""
+        waiter = self._filled.get(upload_id)
+        if waiter is None:
+            waiter = asyncio.Event()
+            self._filled[upload_id] = waiter
+        return waiter

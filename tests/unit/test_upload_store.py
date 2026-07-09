@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from reactor_runtime.core import UploadedFile
@@ -82,6 +84,45 @@ async def test_fetch_before_put_is_unknown() -> None:
     upload_id = store.create_slot("a.bin", "application/octet-stream", 2)
     with pytest.raises(UnknownUploadError):
         await store.fetch(upload_id)
+
+
+async def test_fetch_waits_for_a_late_put() -> None:
+    store = UploadStore()
+    upload_id = store.create_slot("cat.png", "image/png", 4)
+
+    async def deliver() -> None:
+        await asyncio.sleep(0.01)
+        store.put(upload_id, b"\x89PNG")
+
+    task = asyncio.create_task(deliver())
+    file = await store.fetch(upload_id, wait_seconds=1.0)
+    await task
+
+    assert file.data == b"\x89PNG"
+
+
+async def test_fetch_waits_for_a_slot_reserved_after_the_reference() -> None:
+    # The reference can arrive before the director has even reserved the slot; the
+    # wait is keyed by id, so a create_slot + put that lands during the wait still
+    # resolves it.
+    store = UploadStore()
+
+    async def deliver() -> None:
+        await asyncio.sleep(0.01)
+        store.create_slot("cat.png", "image/png", 4, upload_id="late")
+        store.put("late", b"\x89PNG")
+
+    task = asyncio.create_task(deliver())
+    file = await store.fetch("late", wait_seconds=1.0)
+    await task
+
+    assert file.data == b"\x89PNG"
+
+
+async def test_fetch_times_out_when_bytes_never_arrive() -> None:
+    store = UploadStore()
+    with pytest.raises(UnknownUploadError):
+        await store.fetch("missing", wait_seconds=0.02)
 
 
 async def test_clear_drops_every_slot() -> None:
