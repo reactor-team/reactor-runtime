@@ -1,4 +1,6 @@
-from reactor_runtime.core import SessionEvent, SessionState, Transition
+import time
+
+from reactor_runtime.core import JOURNAL_EVENTS, SessionEvent, SessionState, Transition
 
 
 def test_transition_records_the_move() -> None:
@@ -17,6 +19,24 @@ def test_transition_records_the_move() -> None:
 def test_detail_defaults_to_empty() -> None:
     t = Transition(SessionEvent.CONNECTION_OPENED, SessionState.STREAMING, SessionState.STREAMING)
     assert t.detail == {}
+
+
+def test_transition_is_stamped_with_epoch_milliseconds() -> None:
+    before = time.time_ns() // 1_000_000
+    t = Transition(SessionEvent.START_SESSION, SessionState.READY, SessionState.WAITING)
+    after = time.time_ns() // 1_000_000
+    assert before <= t.ts_ms <= after
+
+
+def test_journal_events_are_the_five_feature_signals() -> None:
+    expected = {
+        SessionEvent.CHUNK_READY,
+        SessionEvent.CLIP_READY,
+        SessionEvent.COMMAND,
+        SessionEvent.ERROR,
+        SessionEvent.METRIC,
+    }
+    assert expected == JOURNAL_EVENTS
 
 
 def test_session_start_is_only_ready_to_waiting() -> None:

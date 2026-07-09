@@ -600,7 +600,7 @@ class Recorder:
         Selection and removal happen under a single lock hold, so each pending
         clip is claimed by exactly one caller: ``stop()`` and the watch thread can
         run this concurrently without both firing the same clip (and journalling a
-        duplicate ``ClipReadyEvent``). Callbacks fire outside the lock, on only the
+        duplicate ``clip_ready`` fact). Callbacks fire outside the lock, on only the
         entries this caller removed.
         """
         session_dir = self._session_dir

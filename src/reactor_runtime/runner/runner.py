@@ -24,19 +24,16 @@ from collections.abc import Callable, Coroutine, Mapping
 from typing import Any
 
 from reactor_runtime.core import (
-    ChunkReadyEvent,
+    JOURNAL_EVENTS,
     ClientConnected,
     ClientDisconnected,
-    ClipReadyEvent,
     Connection,
     ConnectionSink,
     ConnId,
     EndReason,
-    ErrorEvent,
     FileUploaded,
     Health,
     HealthStatus,
-    InboundCommandEvent,
     InputFrame,
     RuntimeConfig,
     ServiceComponent,
@@ -430,17 +427,16 @@ class Runner(ServiceComponent, ConnectionSink):
             loop.call_soon_threadsafe(self._emit_clip_ready, clip)
 
     def _emit_clip_ready(self, clip: ClipResult) -> None:
-        """Emit a clip-ready fact on the egress journal."""
-        self._events.emit(
-            ClipReadyEvent(
-                session_id=clip.session_id,
-                kind=clip.kind,
-                start_marker=clip.start_marker,
-                end_marker=clip.end_marker,
-                now_marker=clip.now_marker,
-                predicted_ready_at_ms=clip.predicted_ready_at_ms,
-                playlist_url=clip.playlist_url,
-            )
+        """Journal a clip-ready fact as a self-loop move on the session machine."""
+        self._sm.send(
+            SessionEvent.CLIP_READY,
+            session_id=clip.session_id,
+            kind=clip.kind,
+            start_marker=clip.start_marker,
+            end_marker=clip.end_marker,
+            now_marker=clip.now_marker,
+            predicted_ready_at_ms=clip.predicted_ready_at_ms,
+            playlist_url=clip.playlist_url,
         )
 
     def _on_model_failure(self, error: BaseException) -> None:
@@ -469,8 +465,8 @@ class Runner(ServiceComponent, ConnectionSink):
             loop.call_soon_threadsafe(self._emit_chunk_ready, recording_id, idx)
 
     def _emit_chunk_ready(self, recording_id: str, idx: int) -> None:
-        """Emit a chunk-ready fact on the egress journal."""
-        self._events.emit(ChunkReadyEvent(recording_id=recording_id, idx=idx))
+        """Journal a chunk-ready fact as a self-loop move on the session machine."""
+        self._sm.send(SessionEvent.CHUNK_READY, recording_id=recording_id, idx=idx)
 
     # -- session control (driven by the HTTP routes) --------------------------
 
@@ -664,8 +660,9 @@ class Runner(ServiceComponent, ConnectionSink):
                     upload_id, wait_seconds=_UPLOAD_RESOLVE_TIMEOUT_SECONDS
                 )
         except UnknownUploadError:
-            self._events.emit(
-                ErrorEvent(f"command {command.name!r} references an unresolved upload")
+            self._sm.send(
+                SessionEvent.ERROR,
+                message=f"command {command.name!r} references an unresolved upload",
             )
             return
         outcome = await self._bridge.submit_command(
@@ -675,12 +672,16 @@ class Runner(ServiceComponent, ConnectionSink):
             request_id=command.request_id,
         )
         if outcome.accepted:
-            self._events.emit(
-                InboundCommandEvent(command.name, dict(command.args), command.conn_id)
+            self._sm.send(
+                SessionEvent.COMMAND,
+                name=command.name,
+                args=dict(command.args),
+                conn_id=command.conn_id,
             )
         else:
-            self._events.emit(
-                ErrorEvent(f"command {command.name!r} rejected ({outcome.field}: {outcome.reason})")
+            self._sm.send(
+                SessionEvent.ERROR,
+                message=f"command {command.name!r} rejected ({outcome.field}: {outcome.reason})",
             )
 
     async def _dispatch_file_uploaded(self, conn_id: ConnId, upload_id: str) -> None:
@@ -696,7 +697,9 @@ class Runner(ServiceComponent, ConnectionSink):
                 upload_id, wait_seconds=_UPLOAD_RESOLVE_TIMEOUT_SECONDS
             )
         except UnknownUploadError:
-            self._events.emit(ErrorEvent(f"file upload {upload_id!r} could not be resolved"))
+            self._sm.send(
+                SessionEvent.ERROR, message=f"file upload {upload_id!r} could not be resolved"
+            )
             return
         self._bridge.dispatch_reactor_event(FileUploaded(file=file, conn_id=conn_id))
 
@@ -732,20 +735,25 @@ class Runner(ServiceComponent, ConnectionSink):
 
         Each move is journalled on the egress stream as a single transition fact
         whose detail carries whatever the move recorded — a connection id, the
-        negotiation answer, an end reason. Session-boundary and per-connection
-        moves cross into the model as authoritative reactor events. A move that
-        changes the state re-arms the orphan timer for the state just entered,
-        so a session left without a client closes itself; a self-loop (such as a
-        negotiation answer) leaves the timer untouched. Entering ``CLOSING``
-        clears the session's uploaded files, tears the connections down, and,
-        once they have closed, unwinds the session to ready, carrying the end
-        reason through; and reaching ``TERMINATED`` asks the service to bring the
-        process down. A crash evicts straight to ``TERMINATED`` without passing
-        through ``CLOSING``, so that move runs the same teardown on its way out
-        — minus the ``CLEANUP_COMPLETE`` unwind, which would declare a dead
-        model ready again.
+        negotiation answer, an end reason, or a journal signal's payload.
+        Session-boundary and per-connection moves cross into the model as
+        authoritative reactor events. State-entry side effects run only when the
+        state actually changes, so a self-loop — a negotiation answer or a
+        journal fact riding out during teardown — can never re-run them: a move
+        that changes the state re-arms the orphan timer for the state just
+        entered, so a session left without a client closes itself; entering
+        ``CLOSING`` clears the session's uploaded files, tears the connections
+        down, and, once they have closed, unwinds the session to ready, carrying
+        the end reason through; and entering ``TERMINATED`` asks the service to
+        bring the process down. A crash evicts straight to ``TERMINATED``
+        without passing through ``CLOSING``, so that move runs the same teardown
+        on its way out — minus the ``CLEANUP_COMPLETE`` unwind, which would
+        declare a dead model ready again. Real moves log at info; journal
+        self-loops log at debug so a per-segment ``chunk_ready`` does not flood
+        the log.
         """
-        logger.info(
+        log = logger.debug if transition.event in JOURNAL_EVENTS else logger.info
+        log(
             "session transition",
             session_id=self._session_id,
             event=transition.event.name.lower(),
@@ -757,14 +765,15 @@ class Runner(ServiceComponent, ConnectionSink):
             self._dispatch_reactor_events(transition, self._bridge)
         if transition.is_session_start and self._bridge is not None:
             self._start_recorder(self._bridge)
-        if transition.from_state is not transition.to_state:
+        entered = transition.from_state is not transition.to_state
+        if entered:
             self._reset_orphan_timeout(transition.to_state)
-        if transition.to_state is SessionState.CLOSING and self._loop is not None:
+        if entered and transition.to_state is SessionState.CLOSING and self._loop is not None:
             reason = transition.detail.get("reason", EndReason.STOPPED)
             self._uploads.clear()
             self._spawn_teardown(asyncio.to_thread(self._recorder.stop))
             self._spawn_teardown(self._close_session(reason))
-        if transition.to_state is SessionState.TERMINATED:
+        if entered and transition.to_state is SessionState.TERMINATED:
             if transition.event is SessionEvent.EVICTION and self._loop is not None:
                 self._uploads.clear()
                 self._spawn_teardown(asyncio.to_thread(self._recorder.stop))

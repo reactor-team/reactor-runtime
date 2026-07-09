@@ -3,14 +3,15 @@
 The types the model bridge keys off, split by authority. ``Command`` is the open
 set a client authors and the contract validates before it reaches a handler. The
 ``ReactorEvent`` set is the closed, reactor-authoritative facts the runtime hands
-the model directly — never from the wire, never validated. The ``RunnerEvent``
-union is what the runtime journals outward for an external consumer to mirror.
+the model directly — never from the wire, never validated. ``TransitionEvent``
+is the single fact the runtime journals outward for an external consumer to
+mirror: every egress signal is a session-state move whose payload rides the
+transition's ``detail``.
 """
 
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, ClassVar, dataclass_transform, get_origin, get_type_hints
@@ -276,110 +277,13 @@ class FileUploaded(ReactorEvent):
 class TransitionEvent:
     """A session-state move, journalled for an external consumer.
 
+    The one fact type the egress journal carries. Lifecycle moves and the
+    journal-only self-loops (``chunk_ready``, ``clip_ready``, ``command``,
+    ``error``, ``metric``) all ride it, each with its payload in the
+    transition's ``detail``.
+
     Attributes:
         transition: The move that was applied.
     """
 
     transition: Transition
-
-
-@dataclass(frozen=True)
-class InboundCommandEvent:
-    """A validated inbound command, journalled for moderation or audit.
-
-    Attributes:
-        name: The command name.
-        args: The validated argument mapping.
-        conn_id: The connection that sent it, when known.
-    """
-
-    name: str
-    args: Mapping[str, Any]
-    conn_id: ConnId | None = None
-
-
-@dataclass(frozen=True)
-class ClipReadyEvent:
-    """A recorded clip's segments are on disk and ready to fetch.
-
-    Journalled once the clip's boundary segment has actually landed — distinct
-    from the immediate, still-uploading reply the requesting client receives — so
-    an external consumer learns a clip is genuinely fetchable from ``/clips``.
-
-    Attributes:
-        session_id: The recording id the clip belongs to.
-        kind: ``"snap"`` for a tail clip, ``"recording"`` for the whole session.
-        start_marker: Clip start, in seconds on the recording timeline.
-        end_marker: Clip end, in seconds on the recording timeline.
-        now_marker: The timeline position when the clip was requested.
-        predicted_ready_at_ms: Unix epoch in milliseconds the clip was estimated
-            to become servable.
-        playlist_url: A path-only ``/clips?...`` URL the consumer absolutises.
-    """
-
-    session_id: str
-    kind: str
-    start_marker: float
-    end_marker: float
-    now_marker: float
-    predicted_ready_at_ms: int
-    playlist_url: str
-
-
-@dataclass(frozen=True)
-class ChunkReadyEvent:
-    """A recording segment has closed on disk and is fetchable.
-
-    Emitted once per segment as the recorder rolls over to the next one, and once
-    more for the final segment when the recording finishes. It lets an external
-    consumer mirror the recording into its own store as it is produced, rather
-    than only when a clip is requested.
-
-    Attributes:
-        recording_id: The recording the segment belongs to, as it appears in the
-            clip-serving path.
-        idx: The segment's index — ``-1`` for the initialisation segment, then
-            ``0`` upward for the media segments in order.
-    """
-
-    recording_id: str
-    idx: int
-
-
-@dataclass(frozen=True)
-class SessionMetricEvent:
-    """A named session counter sample.
-
-    Attributes:
-        name: The metric name.
-        value: The sampled value.
-    """
-
-    name: str
-    value: float
-
-
-@dataclass(frozen=True)
-class ErrorEvent:
-    """A notable error worth surfacing on the egress journal.
-
-    Attributes:
-        message: Human-readable description.
-    """
-
-    message: str
-
-
-RunnerEvent = (
-    TransitionEvent
-    | InboundCommandEvent
-    | ClipReadyEvent
-    | ChunkReadyEvent
-    | SessionMetricEvent
-    | ErrorEvent
-)
-"""The egress union the runtime journals out for an external consumer to mirror.
-
-The runtime records one of these facts and surfaces it for a consumer to map
-onto its own world, rather than composing a platform object in directly.
-"""
