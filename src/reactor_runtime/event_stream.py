@@ -1,11 +1,13 @@
 """The egress journal.
 
-The single-writer journal the runtime records its facts on. The runner emits
-every transition and notable signal here; an HTTP egress route streams them out.
-This is the egress half of the public/private inversion: instead of composing a
-platform reporter object in, the runtime journals neutral
-:data:`~reactor_runtime.core.model.RunnerEvent` facts and lets an external
-consumer mirror them.
+The single-writer journal the runtime records its facts on. The journal is
+transitions only: every fact — a lifecycle move or a journal self-loop carrying
+a feature signal in its ``detail`` — is a
+:class:`~reactor_runtime.core.model.TransitionEvent` the runner emits here, and
+an HTTP egress route streams them out. This is the egress half of the
+public/private inversion: instead of composing a platform reporter object in,
+the runtime journals neutral transition facts and lets an external consumer
+mirror them.
 
 A consumer reconciles against the runtime as the source of truth — it reads a
 :class:`SessionSnapshot` for the current state, then subscribes from the
@@ -29,12 +31,7 @@ from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
-from reactor_runtime.core import (
-    RunnerEvent,
-    SessionEvent,
-    SessionState,
-    TransitionEvent,
-)
+from reactor_runtime.core import SessionEvent, SessionState, TransitionEvent
 
 DEFAULT_HISTORY_LIMIT = 4096
 """How many recent events the journal retains for replay by default.
@@ -51,7 +48,7 @@ Past this, the oldest queued event is dropped to admit the newest, so a stalled
 or slow consumer bounds its own memory instead of the writer's.
 """
 
-_SubscriberQueue = asyncio.Queue[tuple[int, "RunnerEvent"]]
+_SubscriberQueue = asyncio.Queue[tuple[int, "TransitionEvent"]]
 
 
 @dataclass(frozen=True)
@@ -72,7 +69,7 @@ class SessionSnapshot:
 
 
 class EventStream:
-    """A single-writer journal of runner events with resumable subscription.
+    """A single-writer journal of transition events with resumable subscription.
 
     Only the runner emits; many consumers may subscribe. Each event is assigned a
     monotonic sequence number, so a consumer that drops can resume from the last
@@ -113,13 +110,13 @@ class EventStream:
         if subscriber_limit < 1:
             raise ValueError(f"subscriber_limit must be at least 1, got {subscriber_limit}")
         self._seq = 0
-        self._history: deque[tuple[int, RunnerEvent]] = deque(maxlen=history_limit)
+        self._history: deque[tuple[int, TransitionEvent]] = deque(maxlen=history_limit)
         self._subscriber_limit = subscriber_limit
         self._subscribers: set[_SubscriberQueue] = set()
         self._state: SessionState | None = None
         self._connections = 0
 
-    def emit(self, event: RunnerEvent) -> None:
+    def emit(self, event: TransitionEvent) -> None:
         """Append an event to the journal and deliver it to live subscribers.
 
         Assigns the next sequence number, folds the event into the tracked
@@ -140,7 +137,7 @@ class EventStream:
         for queue in self._subscribers:
             self._offer(queue, item)
 
-    def _offer(self, queue: _SubscriberQueue, item: tuple[int, RunnerEvent]) -> None:
+    def _offer(self, queue: _SubscriberQueue, item: tuple[int, TransitionEvent]) -> None:
         """Hand *item* to a subscriber, shedding its oldest event if the queue is full.
 
         A full queue means the consumer is not keeping up. Dropping the oldest
@@ -157,7 +154,7 @@ class EventStream:
                 queue.get_nowait()
             queue.put_nowait(item)
 
-    def subscribe(self, since: int | None = None) -> AsyncIterator[tuple[int, RunnerEvent]]:
+    def subscribe(self, since: int | None = None) -> AsyncIterator[tuple[int, TransitionEvent]]:
         """Return an iterator over ``(seq, event)`` pairs after *since*, then live ones.
 
         Registers immediately — before the first iteration — so an event emitted
@@ -177,8 +174,8 @@ class EventStream:
         return self._stream(queue, backlog)
 
     async def _stream(
-        self, queue: _SubscriberQueue, backlog: list[tuple[int, RunnerEvent]]
-    ) -> AsyncIterator[tuple[int, RunnerEvent]]:
+        self, queue: _SubscriberQueue, backlog: list[tuple[int, TransitionEvent]]
+    ) -> AsyncIterator[tuple[int, TransitionEvent]]:
         """Yield the captured backlog, then live events, deregistering on exit.
 
         The queue is registered before the backlog is captured with no await in
@@ -202,18 +199,17 @@ class EventStream:
             last_seq=self._seq,
         )
 
-    def _fold(self, event: RunnerEvent) -> None:
+    def _fold(self, event: TransitionEvent) -> None:
         """Update the tracked session view from one event.
 
         Connection occupancy rides the transition itself: a move whose event is
         ``CONNECTION_OPENED`` or ``CONNECTION_CLOSED`` adjusts the count, and
-        every other move (including a ``CONNECTION_ANSWERED`` self-loop) leaves
+        every other move (a ``CONNECTION_ANSWERED`` or journal self-loop) leaves
         it alone.
         """
-        if isinstance(event, TransitionEvent):
-            transition = event.transition
-            self._state = transition.to_state
-            if transition.event is SessionEvent.CONNECTION_OPENED:
-                self._connections += 1
-            elif transition.event is SessionEvent.CONNECTION_CLOSED:
-                self._connections = max(0, self._connections - 1)
+        transition = event.transition
+        self._state = transition.to_state
+        if transition.event is SessionEvent.CONNECTION_OPENED:
+            self._connections += 1
+        elif transition.event is SessionEvent.CONNECTION_CLOSED:
+            self._connections = max(0, self._connections - 1)

@@ -6,9 +6,7 @@ from reactor_runtime.core import (
     ConnId,
     EndReason,
     FileUploaded,
-    InboundCommandEvent,
     ReactorEvent,
-    RunnerEvent,
     SessionEnded,
     SessionStarted,
     TransitionEvent,
@@ -54,17 +52,8 @@ def test_uploaded_file_does_not_carry_the_upload_id() -> None:
     assert not hasattr(file, "upload_id")
 
 
-def test_runner_event_union_membership() -> None:
+def test_transition_event_wraps_the_move() -> None:
     transition = Transition(SessionEvent.START_SESSION, SessionState.READY, SessionState.WAITING)
-    egress: list[RunnerEvent] = [
-        TransitionEvent(transition),
-        InboundCommandEvent(name="set_prompt", args={"prompt": "hi"}, conn_id=ConnId(1)),
-    ]
-    for event in egress:
-        assert isinstance(event, RunnerEvent)
-
-    assert not isinstance(SessionStarted(session_id="s-1"), RunnerEvent)
-
-
-def test_inbound_command_event_conn_id_is_optional() -> None:
-    assert InboundCommandEvent(name="ping", args={}).conn_id is None
+    event = TransitionEvent(transition)
+    assert event.transition is transition
+    assert not isinstance(SessionStarted(session_id="s-1"), TransitionEvent)

@@ -19,17 +19,13 @@ from reactor_runtime import (
     protocol,
 )
 from reactor_runtime.core import (
-    ChunkReadyEvent,
     ClientConnected,
     ClientDisconnected,
-    ClipReadyEvent,
     ConnectionCapabilities,
     ConnId,
     EndReason,
-    ErrorEvent,
     FileUploaded,
     HealthStatus,
-    InboundCommandEvent,
     MediaBundle,
     RecordingConfig,
     RuntimeConfig,
@@ -37,6 +33,7 @@ from reactor_runtime.core import (
     SessionEvent,
     SessionStarted,
     SessionState,
+    Transition,
     TransitionEvent,
 )
 from reactor_runtime.interface.internal.bridge import CommandOutcome
@@ -541,6 +538,14 @@ def _egress(runner: Runner) -> list[Any]:
     return [event for _seq, event in runner._events._history]
 
 
+def _moves(runner: Runner, event: SessionEvent) -> list[Transition]:
+    return [
+        e.transition
+        for e in _egress(runner)
+        if isinstance(e, TransitionEvent) and e.transition.event is event
+    ]
+
+
 def _expect_state(runner: Runner, state: SessionState) -> None:
     # The call boundary keeps the type checker from narrowing the property to a
     # single literal across the consecutive asserts of a walk.
@@ -674,16 +679,20 @@ async def test_connection_open_and_close_are_journalled(started_runner: Runner) 
     ]
 
 
-async def test_accepted_command_is_journalled(started_runner: Runner) -> None:
+async def test_accepted_command_is_journalled_as_a_self_loop(started_runner: Runner) -> None:
     started_runner.start_session({})
     command = InboundCommand(
         name="set_mode", args={"mode": "fast"}, uploads={}, conn_id=ConnId(1), request_id="r1"
     )
     await started_runner._submit_command(command)
-    journalled = [e for e in _egress(started_runner) if isinstance(e, InboundCommandEvent)]
+    journalled = _moves(started_runner, SessionEvent.COMMAND)
     assert len(journalled) == 1
-    assert journalled[0].name == "set_mode"
-    assert dict(journalled[0].args) == {"mode": "fast"}
+    assert journalled[0].from_state is journalled[0].to_state
+    assert journalled[0].detail == {
+        "name": "set_mode",
+        "args": {"mode": "fast"},
+        "conn_id": ConnId(1),
+    }
 
 
 async def test_rejected_command_is_journalled_as_an_error(started_runner: Runner) -> None:
@@ -692,10 +701,10 @@ async def test_rejected_command_is_journalled_as_an_error(started_runner: Runner
         name="set_mode", args={"mode": ""}, uploads={}, conn_id=ConnId(1), request_id="r1"
     )
     await started_runner._submit_command(command)
-    errors = [e for e in _egress(started_runner) if isinstance(e, ErrorEvent)]
+    errors = _moves(started_runner, SessionEvent.ERROR)
     assert len(errors) == 1
-    assert "set_mode" in errors[0].message
-    assert not [e for e in _egress(started_runner) if isinstance(e, InboundCommandEvent)]
+    assert "set_mode" in errors[0].detail["message"]
+    assert not _moves(started_runner, SessionEvent.COMMAND)
 
 
 async def test_init_failure_requests_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -841,9 +850,9 @@ async def test_command_with_an_unresolved_upload_is_dropped(
     await started_runner._submit_command(command)
 
     assert submitted == []
-    errors = [e for e in _egress(started_runner) if isinstance(e, ErrorEvent)]
+    errors = _moves(started_runner, SessionEvent.ERROR)
     assert len(errors) == 1
-    assert "set_image" in errors[0].message
+    assert "set_image" in errors[0].detail["message"]
 
 
 async def test_file_uploaded_dispatches_when_a_hook_exists(
@@ -978,10 +987,18 @@ async def test_clip_ready_is_journalled_on_the_egress(
     try:
         runner._on_clip_ready(_clip())
         await asyncio.sleep(0.01)
-        ready = [e for e in _egress(runner) if isinstance(e, ClipReadyEvent)]
+        ready = _moves(runner, SessionEvent.CLIP_READY)
         assert len(ready) == 1
-        assert ready[0].session_id == "rec-1"
-        assert ready[0].kind == "snap"
+        assert ready[0].from_state is ready[0].to_state
+        assert ready[0].detail == {
+            "session_id": "rec-1",
+            "kind": "snap",
+            "start_marker": 1.0,
+            "end_marker": 2.0,
+            "now_marker": 2.0,
+            "predicted_ready_at_ms": 123,
+            "playlist_url": "/clips?session_id=rec-1&start=1.000&end=2.000",
+        }
     finally:
         await runner.stop()
 
@@ -993,10 +1010,56 @@ async def test_chunk_ready_is_journalled_on_the_egress(
     try:
         runner._on_chunk_ready("rec-1", 4)
         await asyncio.sleep(0.01)
-        chunks = [e for e in _egress(runner) if isinstance(e, ChunkReadyEvent)]
-        assert chunks == [ChunkReadyEvent(recording_id="rec-1", idx=4)]
+        chunks = _moves(runner, SessionEvent.CHUNK_READY)
+        assert [c.detail for c in chunks] == [{"recording_id": "rec-1", "idx": 4}]
+        assert chunks[0].from_state is chunks[0].to_state
     finally:
         await runner.stop()
+
+
+async def test_closing_self_loop_does_not_rerun_teardown(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    conn = SlowCloseConnection(1)
+    started_runner.connection_opened(conn)
+    started_runner.stop_session()
+    await asyncio.sleep(0.01)
+    _expect_state(started_runner, SessionState.CLOSING)
+    pending = set(started_runner._teardown)
+
+    # The recording's final segment lands while the session is tearing down; its
+    # self-loop is journalled but must not re-clear uploads or spawn a second
+    # teardown, which would race the one already unwinding the session.
+    started_runner._on_chunk_ready("rec-1", 7)
+    await asyncio.sleep(0.01)
+
+    _expect_state(started_runner, SessionState.CLOSING)
+    assert started_runner._teardown.issubset(pending)
+    assert [c.detail for c in _moves(started_runner, SessionEvent.CHUNK_READY)] == [
+        {"recording_id": "rec-1", "idx": 7}
+    ]
+    conn.release.set()
+    await asyncio.sleep(0.01)
+    _expect_state(started_runner, SessionState.READY)
+
+
+async def test_terminated_self_loop_does_not_rerequest_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(ref: str) -> type:
+        raise RuntimeError("no such model")
+
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", boom)
+    runner = _runner()
+    called: list[bool] = []
+    runner.request_shutdown = lambda: called.append(True)
+    await runner.start()
+    assert called == [True]
+
+    # An error journalled after the terminal move self-loops in TERMINATED
+    # without asking the service to bring the process down a second time.
+    assert runner._sm.send(SessionEvent.ERROR, message="late") is True
+    assert runner._sm.current_state is SessionState.TERMINATED
+    assert called == [True]
 
 
 async def test_transitions_are_logged(
@@ -1005,7 +1068,23 @@ async def test_transitions_are_logged(
     with caplog.at_level(logging.INFO, logger="reactor_runtime.runner.runner"):
         started_runner.start_session({})
     record = next(r for r in caplog.records if r.getMessage() == "session transition")
+    assert record.levelno == logging.INFO
     fields = getattr(record, "reactor_fields", {})
     assert fields["event"] == "start_session"
     assert fields["from_state"] == "ready"
     assert fields["to_state"] == "waiting"
+
+
+async def test_journal_self_loops_are_logged_at_debug(
+    started_runner: Runner, caplog: pytest.LogCaptureFixture
+) -> None:
+    started_runner.start_session({})
+    with caplog.at_level(logging.DEBUG, logger="reactor_runtime.runner.runner"):
+        started_runner._sm.send(SessionEvent.CHUNK_READY, recording_id="rec-1", idx=0)
+    record = next(
+        r
+        for r in caplog.records
+        if r.getMessage() == "session transition"
+        and getattr(r, "reactor_fields", {}).get("event") == "chunk_ready"
+    )
+    assert record.levelno == logging.DEBUG

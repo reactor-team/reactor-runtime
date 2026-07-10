@@ -9,6 +9,7 @@ properties.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -56,16 +57,26 @@ class SessionEvent(Enum):
 
     ``CONNECTION_ANSWERED`` records that a transport produced its negotiation
     answer for one connection, before that connection's wire is live. It is a
-    pure self-loop in every active state (``WAITING``, ``STREAMING``,
-    ``ORPHANED``): it changes no state and, unlike the open/close facts, leaves
-    the live-connection count untouched. It carries the connection id (and the
-    opaque answer) so the move journals everything a consumer needs.
+    pure self-loop in every state: it changes no state and, unlike the
+    open/close facts, leaves the live-connection count untouched. An answer is
+    always journalled, whatever state the session is in when it arrives. It
+    carries the connection id (and the opaque answer) so the move journals
+    everything a consumer needs.
 
     ``EVICTION`` records that the model will not serve again — it was evicted
     while idle or its run loop crashed. It is terminal from any live state,
     moving the session straight to ``TERMINATED`` rather than unwinding through
     ``CLOSING``, and carries an :class:`~reactor_runtime.core.model.EndReason`
     in ``detail.reason`` (and, for a crash, the error) so a consumer learns why.
+
+    ``CHUNK_READY``, ``CLIP_READY``, ``COMMAND``, ``ERROR``, and ``METRIC`` are
+    the journal-only events (:data:`JOURNAL_EVENTS`): facts recorded for an
+    external consumer rather than moves of the lifecycle. Each is a pure
+    self-loop legal in **every** state — a journal fact must never be silently
+    dropped by the transition table (the final ``CHUNK_READY`` fires during
+    ``CLOSING``; an ``ERROR`` can fire while ``ORPHANED``) — that changes no
+    state, runs no side effect, and leaves the live-connection count untouched.
+    Its payload rides the transition's ``detail``.
     """
 
     INITIALIZATION_SUCCESS = auto()
@@ -78,6 +89,28 @@ class SessionEvent(Enum):
     CONNECTION_ANSWERED = auto()
     CLEANUP_COMPLETE = auto()
     EVICTION = auto()
+    CHUNK_READY = auto()
+    CLIP_READY = auto()
+    COMMAND = auto()
+    ERROR = auto()
+    METRIC = auto()
+
+
+JOURNAL_EVENTS: frozenset[SessionEvent] = frozenset(
+    {
+        SessionEvent.CHUNK_READY,
+        SessionEvent.CLIP_READY,
+        SessionEvent.COMMAND,
+        SessionEvent.ERROR,
+        SessionEvent.METRIC,
+    }
+)
+"""The journal-only events: pure self-loops in every state, payload in ``detail``."""
+
+
+def _now_ms() -> int:
+    """Return the current Unix epoch time in milliseconds."""
+    return time.time_ns() // 1_000_000
 
 
 @dataclass(frozen=True)
@@ -90,12 +123,15 @@ class Transition:
         to_state: The state now current.
         detail: Out-of-band context for the move (e.g. a connection id or an
             end reason), keyed by name.
+        ts_ms: When the move was applied, as Unix epoch milliseconds. Stamped
+            at construction, the moment the state machine records the move.
     """
 
     event: SessionEvent
     from_state: SessionState
     to_state: SessionState
     detail: Mapping[str, Any] = field(default_factory=dict)
+    ts_ms: int = field(default_factory=_now_ms)
 
     @property
     def is_session_start(self) -> bool:

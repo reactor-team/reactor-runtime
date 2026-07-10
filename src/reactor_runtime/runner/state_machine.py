@@ -12,8 +12,15 @@ the per-connection ``CONNECTION_OPENED`` / ``CONNECTION_CLOSED`` facts; the
 machine counts live connections and moves ``WAITING``/``ORPHANED`` to
 ``STREAMING`` on the first connection and ``STREAMING`` to ``ORPHANED`` on the
 last, while connections in between ride as self-loops. ``CONNECTION_ANSWERED``
-also self-loops in every active state but leaves the count untouched: it records
-a negotiation answer for a connection that has not yet connected.
+self-loops in every state and leaves the count untouched: it records a
+negotiation answer for a connection that has not yet connected, so the answer is
+always journalled regardless of the state the session is in.
+
+The journal-only events (:data:`~reactor_runtime.core.session.JOURNAL_EVENTS`)
+ride the machine the same way: each is a pure self-loop legal in every state,
+so a journal fact is never dropped by the table, and each leaves the
+live-connection count untouched. Their payloads land in the transition's
+``detail``, making the transition journal the single egress fact stream.
 
 Because the core is synchronous and side-effect-free, the whole machine is
 exercised with ``send()`` and ``current_state`` alone, with no transport, model,
@@ -25,7 +32,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from reactor_runtime.core import SessionEvent, SessionState, Transition
+from reactor_runtime.core import JOURNAL_EVENTS, SessionEvent, SessionState, Transition
 
 # The static edges: events whose target is a pure function of the current state.
 # For each event, the state it may be sent from mapped to the state it lands in;
@@ -60,14 +67,17 @@ _TRANSITIONS: dict[SessionEvent, dict[SessionState, SessionState]] = {
         SessionState.CLOSING: SessionState.TERMINATED,
     },
     # A negotiation answer is a fact about a connection that has not yet
-    # connected, so it self-loops in every active state and leaves occupancy
-    # alone (see _update_count). It carries the connection id and the answer
-    # on the transition, journalled but driving no state change.
-    SessionEvent.CONNECTION_ANSWERED: {
-        SessionState.WAITING: SessionState.WAITING,
-        SessionState.STREAMING: SessionState.STREAMING,
-        SessionState.ORPHANED: SessionState.ORPHANED,
-    },
+    # connected, so it self-loops in every state and leaves occupancy alone
+    # (see _update_count). An answer arriving in any state is journalled rather
+    # than dropped by the table; it carries the connection id and the answer on
+    # the transition, driving no state change.
+    SessionEvent.CONNECTION_ANSWERED: {state: state for state in SessionState},
+    # The journal-only events self-loop in every state: a journal fact must
+    # never be rejected by the table wherever the session happens to be — the
+    # final chunk_ready fires during CLOSING, an error can fire in ORPHANED or
+    # after a crash lands the session in TERMINATED. They change no state and
+    # leave the count alone (see _update_count); their payloads ride detail.
+    **{event: {state: state for state in SessionState} for event in JOURNAL_EVENTS},
 }
 
 # The states a connection may open from. WAITING and ORPHANED both mean "no live
@@ -121,7 +131,8 @@ class SessionStateMachine:
         listener fires. On a legal edge the count is updated, the state flips, and
         every listener is notified with the ``Transition``, whose ``detail``
         carries the keyword context the caller passed (a connection id, an end
-        reason, and the like).
+        reason, and the like) and whose ``ts_ms`` is stamped at the moment the
+        move is applied.
 
         Args:
             event: The event driving the move.
@@ -160,17 +171,17 @@ class SessionStateMachine:
         """Track live connections so occupancy can be resolved.
 
         Rises on an open and falls on a close (never below zero). A negotiation
-        answer leaves the count alone: it is a self-loop about a connection that
-        has not yet connected, so it neither opens nor unwinds the session. Any
-        other move clears the count, since a non-connection transition either
-        begins a fresh session or unwinds the current one — both of which leave
-        no connection behind.
+        answer and the journal-only events leave the count alone: each is a
+        self-loop that neither opens nor unwinds the session. Any other move
+        clears the count, since a non-connection transition either begins a
+        fresh session or unwinds the current one — both of which leave no
+        connection behind.
         """
         if event is SessionEvent.CONNECTION_OPENED:
             self._live += 1
         elif event is SessionEvent.CONNECTION_CLOSED:
             self._live = max(0, self._live - 1)
-        elif event is SessionEvent.CONNECTION_ANSWERED:
+        elif event is SessionEvent.CONNECTION_ANSWERED or event in JOURNAL_EVENTS:
             pass
         else:
             self._live = 0

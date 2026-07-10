@@ -1,6 +1,8 @@
+import time
+
 import pytest
 
-from reactor_runtime.core import SessionEvent, SessionState, Transition
+from reactor_runtime.core import JOURNAL_EVENTS, SessionEvent, SessionState, Transition
 from reactor_runtime.runner import SessionStateMachine
 
 # Every static (count-independent) edge as (start, event, end). Each is a single
@@ -23,9 +25,9 @@ LEGAL_EDGES: list[tuple[SessionState, SessionEvent, SessionState]] = [
     (SessionState.ORPHANED, SessionEvent.STOP_SESSION, SessionState.CLOSING),
     (SessionState.ORPHANED, SessionEvent.TIMEOUT, SessionState.CLOSING),
     (SessionState.CLOSING, SessionEvent.CLEANUP_COMPLETE, SessionState.READY),
-    (SessionState.WAITING, SessionEvent.CONNECTION_ANSWERED, SessionState.WAITING),
-    (SessionState.STREAMING, SessionEvent.CONNECTION_ANSWERED, SessionState.STREAMING),
-    (SessionState.ORPHANED, SessionEvent.CONNECTION_ANSWERED, SessionState.ORPHANED),
+    # A negotiation answer self-loops in every state, so the answer is always
+    # journalled wherever the session happens to be.
+    *[(state, SessionEvent.CONNECTION_ANSWERED, state) for state in SessionState],
 ]
 
 
@@ -136,11 +138,11 @@ def test_count_resets_across_a_session_restart() -> None:
     expect_state(sm, SessionState.ORPHANED)
 
 
-# -- connection answered, a count-neutral self-loop ---------------------------
+# -- connection answered, a count-neutral self-loop legal in every state ------
 
 
-def test_answer_self_loops_in_every_active_state_without_changing_state() -> None:
-    for state in (SessionState.WAITING, SessionState.STREAMING, SessionState.ORPHANED):
+def test_answer_self_loops_in_every_state_without_changing_state() -> None:
+    for state in SessionState:
         sm = SessionStateMachine(initial_state=state)
         seen: list[Transition] = []
         sm.on_transition(seen.append)
@@ -164,6 +166,52 @@ def test_answer_does_not_reset_the_live_count() -> None:
     expect_state(sm, SessionState.STREAMING)
     assert sm.send(SessionEvent.CONNECTION_CLOSED, conn_id=2) is True
     expect_state(sm, SessionState.ORPHANED)
+
+
+# -- journal events, count-neutral self-loops legal in every state ------------
+
+
+@pytest.mark.parametrize("event", sorted(JOURNAL_EVENTS, key=lambda e: e.name))
+@pytest.mark.parametrize("state", list(SessionState))
+def test_journal_event_self_loops_in_every_state(event: SessionEvent, state: SessionState) -> None:
+    sm = SessionStateMachine(initial_state=state)
+    seen: list[Transition] = []
+    sm.on_transition(seen.append)
+    assert sm.send(event, payload="x") is True
+    assert sm.current_state is state
+    (transition,) = seen
+    assert transition.from_state is state
+    assert transition.to_state is state
+    assert transition.detail == {"payload": "x"}
+    assert transition.is_session_start is False
+    assert transition.is_session_end is False
+
+
+def test_journal_event_does_not_reset_the_live_count() -> None:
+    # A journal self-loop must leave occupancy alone, or a chunk_ready between
+    # two closes would zero the count and the last close would fail to orphan
+    # the session.
+    sm = SessionStateMachine(initial_state=SessionState.WAITING)
+    sm.send(SessionEvent.CONNECTION_OPENED, conn_id=1)
+    sm.send(SessionEvent.CONNECTION_OPENED, conn_id=2)
+    for event in JOURNAL_EVENTS:
+        assert sm.send(event) is True
+    expect_state(sm, SessionState.STREAMING)
+    assert sm.send(SessionEvent.CONNECTION_CLOSED, conn_id=1) is True
+    expect_state(sm, SessionState.STREAMING)
+    assert sm.send(SessionEvent.CONNECTION_CLOSED, conn_id=2) is True
+    expect_state(sm, SessionState.ORPHANED)
+
+
+def test_send_stamps_the_transition_with_the_apply_time() -> None:
+    sm = SessionStateMachine(initial_state=SessionState.READY)
+    seen: list[Transition] = []
+    sm.on_transition(seen.append)
+    before = time.time_ns() // 1_000_000
+    assert sm.send(SessionEvent.START_SESSION) is True
+    after = time.time_ns() // 1_000_000
+    (transition,) = seen
+    assert before <= transition.ts_ms <= after
 
 
 # -- the move record and listener contract ------------------------------------
