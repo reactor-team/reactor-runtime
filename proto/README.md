@@ -34,8 +34,9 @@ it builds the Python bindings wheel and publishes a GitHub release.
 - **Tag:** `wire/v<version>`. The `wire/` prefix keeps these off the runtime's
   own `vX.Y.Z` package tags.
 - **Artifacts:** `reactor_wire-<version>-py3-none-any.whl` (vendored by the
-  runtime) and `reactor-wire-<version>-protos.tar.gz` (the `.proto` sources, for
-  building bindings in other languages).
+  runtime), `reactor-wire-<version>-ts.tar.gz` (generated TypeScript sources,
+  see below), and `reactor-wire-<version>-protos.tar.gz` (the `.proto` sources,
+  for building bindings in other languages).
 
 ## Compatibility is enforced by `buf breaking`, not the version
 
@@ -64,6 +65,15 @@ version = "1.20260618.42"
 which downloads the pinned wheel and vendors `reactor_wire/` into `src/`
 (gitignored). To adopt a newer protocol, bump the pin and re-run `make install`.
 
+**TypeScript consumers** vendor the release's `reactor-wire-<version>-ts.tar.gz`
+instead of running codegen themselves. It contains the raw `.ts` sources
+generated with protobuf-es v2 ([`buf.gen.ts.yaml`](./buf.gen.ts.yaml)) and
+extracts to `reactor_wire/v1/*_pb.ts`. Compile them with your own toolchain and
+add [`@bufbuild/protobuf`](https://www.npmjs.com/package/@bufbuild/protobuf)
+(v2) as a runtime dependency — it is the only import the generated code makes.
+
 For local iteration on the `.proto` files *before* a release exists, generate
-straight from the local sources with `make proto-gen` (`buf generate`). The
-published wheel always vendors the pinned release, never a local generation.
+straight from the local sources with `make proto-gen` (`buf generate`) or, for
+the TypeScript output, `mise run //proto:gen-ts` (emits into `build/wire-ts/`,
+gitignored). The published artifacts always come from the release workflow,
+never a local generation.
