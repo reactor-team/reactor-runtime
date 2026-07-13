@@ -110,9 +110,10 @@ python = ".venv"
 python-version = "3.12"
 # Import roots ty would not otherwise search: the repo root, so the example
 # models (`examples`, first-party but outside the package) resolve the way
-# pytest's pythonpath makes them importable; and the WebRTC test directory, so
-# its tests can import their sibling `conftest` for the shared peer fakes.
-extra-paths = [".", "tests/unit/transport/webrtc"]
+# pytest's pythonpath makes them importable; the WebRTC test directory, so
+# its tests can import their sibling `conftest` for the shared peer fakes; and
+# the contract suite, so its tests can import their sibling `contract_helpers`.
+extra-paths = [".", "tests/unit/transport/webrtc", "tests/contract"]
 
 [tool.ty.src]
 # Check the package, its tests, and the example models; scripts/ ships developer
