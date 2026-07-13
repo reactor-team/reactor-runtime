@@ -1938,8 +1938,9 @@ async def gstreamer_peer_factory(
     Conforms to :data:`~reactor_runtime.transport.webrtc.peer.WebRtcPeerFactory`.
     Threads the connection's config into the pipeline and builds, from the
     client's declared track map, the mid/name lookups the media setup needs.
-    *version* is the wire codec negotiated for the connection, which the peer
-    holds for its life and applies to every frame it relays.
+    *version* seeds the wire codec as the pre-first-frame default; the first
+    inbound data-channel frame is sniffed and latches the codec the peer then
+    holds for its life.
     """
     logger.debug("negotiating GStreamer peer", conn_id=conn_id)
     peer = GStreamerPeer(ping_timeout_seconds=config.ping_timeout)
