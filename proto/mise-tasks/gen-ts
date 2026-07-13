@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="[Protobuf] Generate the TypeScript bindings into build/wire-ts/ (release packaging)"
+set -euo pipefail
+rm -rf ../build/wire-ts
+buf generate --template buf.gen.ts.yaml

@@ -1,0 +1,8 @@
+# TypeScript bindings (protobuf-es v2) for the wire release's -ts tarball.
+# Output goes to build/, never src/: the runtime itself only consumes the
+# Python bindings from buf.gen.yaml.
+version: v2
+plugins:
+  - remote: buf.build/bufbuild/es:v2.12.1
+    out: ../build/wire-ts
+    opt: target=ts
