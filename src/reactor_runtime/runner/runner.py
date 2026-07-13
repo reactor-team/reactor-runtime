@@ -47,7 +47,7 @@ from reactor_runtime.core import (
 from reactor_runtime.event_stream import EventStream
 from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.bridge import ModelBridge
-from reactor_runtime.interface.internal.reactor_core import ReactorCore
+from reactor_runtime.interface.internal.reactor_core import AckError, ReactorCore
 from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.log import get_logger
 from reactor_runtime.message_gateway import InboundCommand, MessageGateway
@@ -214,6 +214,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 broadcast=self._broadcast_message,
                 addressed=self._send_addressed,
                 media=self._connections.broadcast_media,
+                ack=self._ack_command,
                 failure=self._on_model_failure,
             )
             bridge.start()
@@ -664,6 +665,15 @@ class Runner(ServiceComponent, ConnectionSink):
                 SessionEvent.ERROR,
                 message=f"command {command.name!r} references an unresolved upload",
             )
+            if command.conn_id is not None:
+                self._ack_command(
+                    command.conn_id,
+                    command.request_id,
+                    (
+                        "unresolved_upload",
+                        f"command {command.name!r} references an unresolved upload",
+                    ),
+                )
             return
         outcome = await self._bridge.submit_command(
             command.name,
@@ -683,6 +693,12 @@ class Runner(ServiceComponent, ConnectionSink):
                 SessionEvent.ERROR,
                 message=f"command {command.name!r} rejected ({outcome.field}: {outcome.reason})",
             )
+            if command.conn_id is not None:
+                self._ack_command(
+                    command.conn_id,
+                    command.request_id,
+                    ("invalid_command", outcome.reason or "command rejected"),
+                )
 
     async def _dispatch_file_uploaded(self, conn_id: ConnId, upload_id: str) -> None:
         """Fetch an out-of-band upload and hand it to the model as a reactor event.
@@ -729,6 +745,24 @@ class Runner(ServiceComponent, ConnectionSink):
                 message.name, data, request_id=request_id
             )[1],
         )
+
+    def _ack_command(self, conn_id: ConnId, request_id: str, error: AckError | None) -> None:
+        """Acknowledge a processed command to its sender, correlated by *request_id*.
+
+        A command that returned no message is acknowledged with an empty reply so
+        the client's awaited call resolves; a command that failed validation or
+        raised carries an ``(code, detail)`` so the call rejects with a reason.
+        The ack rides the data channel in the connection's own codec.
+        """
+
+        def encode(version: ProtocolVersion) -> bytes | str:
+            codec = self._codec_for(version)
+            if error is None:
+                return codec.encode_command_ack(request_id)[1]
+            code, detail = error
+            return codec.encode_command_error(request_id, code, detail)[1]
+
+        self._connections.send_command_ack(conn_id, encode)
 
     def _dispatch_transition(self, transition: Transition) -> None:
         """Run every side effect a session transition drives, in one place.

@@ -26,6 +26,7 @@ from reactor_runtime.core.values import ConnId
 from reactor_runtime.interface.internal.reactor_core import CommandEnvelope, RequestId
 
 Addressed = list[tuple[ConnId, ModelMessage, RequestId | None]]
+Acks = list[tuple[ConnId, RequestId, tuple[str, str] | None]]
 
 
 class Out(Output):
@@ -90,6 +91,21 @@ def _ready(model: Model) -> Addressed:
     return addressed
 
 
+def _ready_with_ack(model: Model) -> tuple[Addressed, Acks]:
+    """Bring a model up capturing both its addressed sends and its command acks."""
+    addressed: Addressed = []
+    acks: Acks = []
+    model._on_loop_ready()
+    model.bind_output(
+        broadcast=lambda message: None,
+        addressed=lambda conn_id, message, request_id: addressed.append(
+            (conn_id, message, request_id)
+        ),
+        ack=lambda conn_id, request_id, error: acks.append((conn_id, request_id, error)),
+    )
+    return addressed, acks
+
+
 def _cmd(name: str, **args: Any) -> Command:
     """Validate raw args into the typed command the contract resolves."""
     return Model.__reactor_contract__.validate(name, args)
@@ -132,6 +148,35 @@ async def test_return_value_is_dropped_without_an_originating_connection() -> No
     await model._dispatch_command(CommandEnvelope(_cmd("set_value", value=3), None, "req-5"))
     assert model.value == 3
     assert addressed == []
+
+
+async def test_command_returning_none_acks_completion() -> None:
+    model = Model()
+    _, acks = _ready_with_ack(model)
+    await model._dispatch_command(CommandEnvelope(_cmd("touch"), ConnId(1001), "req-2"))
+    assert acks == [(ConnId(1001), "req-2", None)]
+
+
+async def test_handler_exception_acks_an_error() -> None:
+    model = Model()
+    addressed, acks = _ready_with_ack(model)
+    await model._dispatch_command(CommandEnvelope(_cmd("boom"), ConnId(1001), "req-4"))
+    assert addressed == []
+    assert len(acks) == 1
+    conn_id, request_id, error = acks[0]
+    assert (conn_id, request_id) == (ConnId(1001), "req-4")
+    assert error is not None
+    assert error[0] == "handler_error"
+
+
+async def test_command_reply_is_not_also_acked() -> None:
+    model = Model()
+    addressed, acks = _ready_with_ack(model)
+    await model._dispatch_command(
+        CommandEnvelope(_cmd("set_value", value=7), ConnId(1001), "req-1")
+    )
+    assert addressed == [(ConnId(1001), BrightnessSet(value=7), "req-1")]
+    assert acks == []
 
 
 async def test_client_connected_sets_the_event_and_fires_the_hook() -> None:

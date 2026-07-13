@@ -134,6 +134,45 @@ async def test_inbound_control_frame_surfaces_up_and_pings() -> None:
     assert pings == [1]
 
 
+async def test_binary_first_frame_sniffs_and_latches_v1() -> None:
+    peer = _peer()  # defaults to v0 until a frame reveals the codec
+    peer._loop = asyncio.get_running_loop()
+    messages: list[tuple[bytes | str, ProtocolVersion, Channel]] = []
+    peer.on_message(lambda payload, version, channel: messages.append((payload, version, channel)))
+
+    peer._gst_on_data_channel_data(None, _FakeBytes(b"\x08\x01"))
+    await asyncio.sleep(0)
+
+    assert peer.protocol_version is ProtocolVersion.V1
+    assert messages == [(b"\x08\x01", ProtocolVersion.V1, Channel.DATA)]
+
+
+async def test_json_text_first_frame_sniffs_v0() -> None:
+    peer = _peer()
+    peer._loop = asyncio.get_running_loop()
+    peer.on_message(lambda payload, version, channel: None)
+
+    peer._gst_on_control_channel_message(None, '{"type":"notification"}')
+    await asyncio.sleep(0)
+
+    assert peer.protocol_version is ProtocolVersion.V0
+
+
+async def test_first_frame_latches_the_codec_for_the_connections_life() -> None:
+    peer = _peer()
+    peer._loop = asyncio.get_running_loop()
+    versions: list[ProtocolVersion] = []
+    peer.on_message(lambda payload, version, channel: versions.append(version))
+
+    # A binary frame latches v1; a later text frame does not flip the codec.
+    peer._gst_on_control_channel_data(None, _FakeBytes(b"\x08\x01"))
+    peer._gst_on_control_channel_message(None, '{"type":"notification"}')
+    await asyncio.sleep(0)
+
+    assert peer.protocol_version is ProtocolVersion.V1
+    assert versions == [ProtocolVersion.V1, ProtocolVersion.V1]
+
+
 async def test_fire_is_a_noop_without_a_registered_callback() -> None:
     peer = _peer()
     peer._loop = asyncio.get_running_loop()

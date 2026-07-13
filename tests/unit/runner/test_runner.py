@@ -37,7 +37,7 @@ from reactor_runtime.core import (
     TransitionEvent,
 )
 from reactor_runtime.interface.internal.bridge import CommandOutcome
-from reactor_runtime.interface.internal.reactor_core import AddressedSink, BroadcastSink
+from reactor_runtime.interface.internal.reactor_core import AckSink, AddressedSink, BroadcastSink
 from reactor_runtime.message_gateway import InboundCommand
 from reactor_runtime.protocol.common import struct_to_dict
 from reactor_runtime.recording import ClipResult
@@ -49,7 +49,7 @@ from reactor_runtime.transport.router import (
     UnknownSessionError,
 )
 from reactor_runtime.upload_store import UnknownUploadError
-from reactor_wire.v1 import control_pb2, data_pb2
+from reactor_wire.v1 import common_pb2, control_pb2, data_pb2
 
 DATA = protocol.Channel.DATA
 CONTROL = protocol.Channel.CONTROL
@@ -90,9 +90,15 @@ class FakeModel(ReactorModel):
         self.events.append("load")
         self.loaded = config_path
 
-    def bind_output(self, *, broadcast: BroadcastSink, addressed: AddressedSink) -> None:
+    def bind_output(
+        self,
+        *,
+        broadcast: BroadcastSink,
+        addressed: AddressedSink,
+        ack: AckSink | None = None,
+    ) -> None:
         self.events.append("bind")
-        super().bind_output(broadcast=broadcast, addressed=addressed)
+        super().bind_output(broadcast=broadcast, addressed=addressed, ack=ack)
 
     def start_thread(self) -> None:
         self.events.append("start")
@@ -299,6 +305,48 @@ async def test_schema_request_v1_replies_on_control_correlated_by_id(
         assert decoded.request_id == "ctrl_9"
     finally:
         await runner.stop()
+
+
+def test_command_ack_reaches_a_v1_connection() -> None:
+    runner = _runner()
+    conn = FakeConnection(1)
+    conn.protocol_version = V1
+    runner.connection_opened(conn)
+
+    runner._ack_command(ConnId(1), "req-1", None)
+
+    assert len(conn.sent) == 1
+    decoded = protocol.select(V1).decode(conn.sent[0], DATA, SERVER)
+    assert isinstance(decoded, data_pb2.DataServerMessage)
+    assert decoded.request_id == "req-1"
+    assert decoded.kind == common_pb2.MessageKind.MESSAGE_KIND_RESPONSE
+    assert decoded.WhichOneof("payload") is None
+
+
+def test_command_error_ack_carries_its_reason_on_v1() -> None:
+    runner = _runner()
+    conn = FakeConnection(1)
+    conn.protocol_version = V1
+    runner.connection_opened(conn)
+
+    runner._ack_command(ConnId(1), "req-2", ("invalid_command", "value out of range"))
+
+    decoded = protocol.select(V1).decode(conn.sent[0], DATA, SERVER)
+    assert isinstance(decoded, data_pb2.DataServerMessage)
+    assert decoded.request_id == "req-2"
+    assert decoded.WhichOneof("payload") == "error"
+    assert decoded.error.code == "invalid_command"
+    assert decoded.error.message == "value out of range"
+
+
+def test_command_ack_is_withheld_from_a_legacy_connection() -> None:
+    runner = _runner()
+    conn = FakeConnection(1)  # v0 by default: fire-and-forget commands, no acks
+    runner.connection_opened(conn)
+
+    runner._ack_command(ConnId(1), "req-1", None)
+
+    assert conn.sent == []
 
 
 # --- the session-control face --------------------------------------------
@@ -705,6 +753,26 @@ async def test_rejected_command_is_journalled_as_an_error(started_runner: Runner
     assert len(errors) == 1
     assert "set_mode" in errors[0].detail["message"]
     assert not _moves(started_runner, SessionEvent.COMMAND)
+
+
+async def test_rejected_command_error_acks_the_v1_sender(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    conn = FakeConnection(1)
+    conn.protocol_version = V1
+    started_runner.connection_opened(conn)
+    command = InboundCommand(
+        name="set_mode", args={"mode": ""}, uploads={}, conn_id=ConnId(1), request_id="r1"
+    )
+    await started_runner._submit_command(command)
+    frames = [protocol.select(V1).decode(frame, DATA, SERVER) for frame in conn.sent]
+    errors = [
+        frame
+        for frame in frames
+        if isinstance(frame, data_pb2.DataServerMessage) and frame.WhichOneof("payload") == "error"
+    ]
+    assert len(errors) == 1
+    assert errors[0].request_id == "r1"
+    assert errors[0].error.code == "invalid_command"
 
 
 async def test_init_failure_requests_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:

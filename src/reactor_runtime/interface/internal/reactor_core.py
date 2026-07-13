@@ -42,6 +42,17 @@ _Holder = TypeVar("_Holder")
 BroadcastSink = Callable[[ModelMessage], None]
 AddressedSink = Callable[[ConnId, ModelMessage, RequestId | None], None]
 
+AckError = tuple[str, str]
+"""A command failure as ``(code, detail)``, carried back to correlate a reply."""
+
+AckSink = Callable[[ConnId, RequestId, "AckError | None"], None]
+"""Acknowledges a processed command to its sender.
+
+Called with no error once a handler completes without returning a message, or
+with an ``(code, detail)`` when the handler raised, so the client's awaited
+command settles either way.
+"""
+
 FailureSink = Callable[[BaseException], None]
 """Receives the exception that ended :meth:`ReactorCore.run`, on the model thread."""
 
@@ -83,6 +94,7 @@ class ReactorCore:
 
         self._out_broadcast: BroadcastSink | None = None
         self._out_addressed: AddressedSink | None = None
+        self._out_ack: AckSink | None = None
         self._on_failure: FailureSink | None = None
 
         self.output_buffer = OutputBuffer(all_output_tracks(), queue_depth=self.buffer_size)
@@ -134,10 +146,17 @@ class ReactorCore:
 
     # -- outbound binding (called once by the bridge) -------------------------
 
-    def bind_output(self, *, broadcast: BroadcastSink, addressed: AddressedSink) -> None:
+    def bind_output(
+        self,
+        *,
+        broadcast: BroadcastSink,
+        addressed: AddressedSink,
+        ack: AckSink | None = None,
+    ) -> None:
         """Bind the outbound message sinks. Called once before the loop starts."""
         self._out_broadcast = broadcast
         self._out_addressed = addressed
+        self._out_ack = ack
 
     def bind_failure(self, callback: FailureSink) -> None:
         """Bind the sink that receives an unrecoverable crash of :meth:`run`.

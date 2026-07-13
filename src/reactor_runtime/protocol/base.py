@@ -124,6 +124,35 @@ class Codec(ABC):
         )
         return self.encode(message)
 
+    def encode_command_ack(self, request_id: str) -> tuple[Channel, bytes | str]:
+        """Encode a bodyless acknowledgement that a command was processed.
+
+        Correlated by *request_id* so a client's awaited command resolves once
+        its handler has run and returned no message, rather than waiting for a
+        reply that never comes.
+        """
+        message = data_pb2.DataServerMessage(
+            request_id=request_id,
+            kind=common_pb2.MessageKind.MESSAGE_KIND_RESPONSE,
+        )
+        return self.encode(message)
+
+    def encode_command_error(
+        self, request_id: str, code: str, detail: str
+    ) -> tuple[Channel, bytes | str]:
+        """Encode a command's failure, correlated by *request_id*.
+
+        Carries a short *code* and human-readable *detail* so a client's awaited
+        command rejects with a reason instead of timing out — whether the command
+        failed contract validation or its handler raised.
+        """
+        message = data_pb2.DataServerMessage(
+            request_id=request_id,
+            kind=common_pb2.MessageKind.MESSAGE_KIND_RESPONSE,
+            error=common_pb2.Error(code=code, message=detail),
+        )
+        return self.encode(message)
+
     def encode_publish_response(
         self, request_id: str, *, granted: bool, reason: str = ""
     ) -> tuple[Channel, bytes | str]:

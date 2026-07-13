@@ -36,6 +36,7 @@ from reactor_runtime.interface.client import ClientInfo
 from reactor_runtime.interface.events.decorators import RESERVED_PARAMS
 from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.reactor_core import (
+    AckError,
     CommandEnvelope,
     ReactorCore,
     RequestId,
@@ -121,11 +122,18 @@ class ReactorModel(ReactorCore):
                 result = await spec.handler(self, **kwargs)
             else:
                 result = spec.handler(self, **kwargs)
-        except Exception:
+        except Exception as error:
             logger.exception("error in command handler", command=spec.name)
+            self._ack(
+                envelope.conn_id,
+                envelope.request_id,
+                ("handler_error", str(error) or "command handler failed"),
+            )
             return
         if isinstance(result, ModelMessage) and envelope.conn_id is not None:
             self._reply(envelope.conn_id, result, envelope.request_id)
+        else:
+            self._ack(envelope.conn_id, envelope.request_id, None)
 
     # -- reactor-event dispatch -----------------------------------------------
 
@@ -228,6 +236,18 @@ class ReactorModel(ReactorCore):
         """Send a message to one connection through the addressed sink, if bound."""
         if self._out_addressed is not None:
             self._out_addressed(conn_id, message, request_id)
+
+    def _ack(
+        self, conn_id: ConnId | None, request_id: RequestId | None, error: AckError | None
+    ) -> None:
+        """Acknowledge a processed command to its sender through the ack sink.
+
+        A client command always carries both a connection and a request id; the
+        guard skips model-internal dispatches that carry neither and so have
+        nothing to correlate.
+        """
+        if self._out_ack is not None and conn_id is not None and request_id is not None:
+            self._out_ack(conn_id, request_id, error)
 
 
 def _hook_reserved(hook: Callable[..., Any]) -> tuple[str, ...]:

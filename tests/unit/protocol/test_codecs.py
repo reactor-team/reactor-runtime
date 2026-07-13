@@ -500,3 +500,34 @@ def test_v1_clip_failed_carries_its_reason_and_id() -> None:
     assert isinstance(decoded, control_pb2.ControlServerMessage)
     assert decoded.request_id == "ctrl_2"
     assert decoded.clip_failed.reason == "recorder disabled"
+
+
+def test_v1_command_ack_is_a_bodyless_response() -> None:
+    codec = protocol.select(protocol.ProtocolVersion.V1)
+    channel, frame = codec.encode_command_ack("req-1")
+    assert channel is DATA
+    decoded = codec.decode(frame, DATA, SERVER)
+    assert isinstance(decoded, data_pb2.DataServerMessage)
+    assert decoded.request_id == "req-1"
+    assert decoded.kind == K.MESSAGE_KIND_RESPONSE
+    assert decoded.WhichOneof("payload") is None
+
+
+def test_v1_command_error_carries_its_code_and_detail() -> None:
+    codec = protocol.select(protocol.ProtocolVersion.V1)
+    channel, frame = codec.encode_command_error("req-2", "invalid_command", "value out of range")
+    assert channel is DATA
+    decoded = codec.decode(frame, DATA, SERVER)
+    assert isinstance(decoded, data_pb2.DataServerMessage)
+    assert decoded.request_id == "req-2"
+    assert decoded.kind == K.MESSAGE_KIND_RESPONSE
+    assert decoded.error.code == "invalid_command"
+    assert decoded.error.message == "value out of range"
+
+
+def test_v0_rejects_command_ack_and_error() -> None:
+    codec = protocol.select(protocol.ProtocolVersion.V0)
+    with pytest.raises(protocol.UnsupportedMessageError):
+        codec.encode_command_ack("req-1")
+    with pytest.raises(protocol.UnsupportedMessageError):
+        codec.encode_command_error("req-2", "invalid_command", "value out of range")
