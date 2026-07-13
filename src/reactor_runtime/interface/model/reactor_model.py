@@ -36,7 +36,6 @@ from reactor_runtime.interface.client import ClientInfo
 from reactor_runtime.interface.events.decorators import RESERVED_PARAMS
 from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.reactor_core import (
-    AckError,
     CommandEnvelope,
     ReactorCore,
     RequestId,
@@ -105,8 +104,11 @@ class ReactorModel(ReactorCore):
         directly; any reserved parameter the handler declares is injected. When
         the handler returns a :class:`ModelMessage`, it is sent addressed to the
         connection that issued the command — never broadcast — correlated with
-        the command's request id. A handler that raises is logged and swallowed,
-        so one bad command cannot stop the loop.
+        the command's request id; a handler that returns nothing is answered
+        with a bodyless acknowledgement so an awaiting client still resolves. A
+        handler that raises is logged and swallowed — no reply is sent, and
+        surfacing the failure to the client is the model author's choice — so
+        one bad command cannot stop the loop.
         """
         command = envelope.command
         spec = self.__reactor_contract__.commands.get(type(command).name)
@@ -122,18 +124,15 @@ class ReactorModel(ReactorCore):
                 result = await spec.handler(self, **kwargs)
             else:
                 result = spec.handler(self, **kwargs)
-        except Exception as error:
+        except Exception:
             logger.exception("error in command handler", command=spec.name)
-            self._ack(
-                envelope.conn_id,
-                envelope.request_id,
-                ("handler_error", str(error) or "command handler failed"),
-            )
             return
-        if isinstance(result, ModelMessage) and envelope.conn_id is not None:
+        if envelope.conn_id is None:
+            return
+        if isinstance(result, ModelMessage):
             self._reply(envelope.conn_id, result, envelope.request_id)
-        else:
-            self._ack(envelope.conn_id, envelope.request_id, None)
+        elif envelope.request_id is not None:
+            self._reply(envelope.conn_id, None, envelope.request_id)
 
     # -- reactor-event dispatch -----------------------------------------------
 
@@ -232,22 +231,16 @@ class ReactorModel(ReactorCore):
             _send=lambda message: self._reply(conn_id, message, None),
         )
 
-    def _reply(self, conn_id: ConnId, message: ModelMessage, request_id: RequestId | None) -> None:
-        """Send a message to one connection through the addressed sink, if bound."""
+    def _reply(
+        self, conn_id: ConnId, message: ModelMessage | None, request_id: RequestId | None
+    ) -> None:
+        """Send a reply to one connection through the addressed sink, if bound.
+
+        A ``None`` message is the bodyless acknowledgement of a command whose
+        handler returned nothing, correlated by *request_id*.
+        """
         if self._out_addressed is not None:
             self._out_addressed(conn_id, message, request_id)
-
-    def _ack(
-        self, conn_id: ConnId | None, request_id: RequestId | None, error: AckError | None
-    ) -> None:
-        """Acknowledge a processed command to its sender through the ack sink.
-
-        A client command always carries both a connection and a request id; the
-        guard skips model-internal dispatches that carry neither and so have
-        nothing to correlate.
-        """
-        if self._out_ack is not None and conn_id is not None and request_id is not None:
-            self._out_ack(conn_id, request_id, error)
 
 
 def _hook_reserved(hook: Callable[..., Any]) -> tuple[str, ...]:

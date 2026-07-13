@@ -65,7 +65,7 @@ class EchoModel(ReactorModel):
 class Sinks:
     def __init__(self) -> None:
         self.broadcast: list[ModelMessage] = []
-        self.addressed: list[tuple[ConnId, ModelMessage, RequestId | None]] = []
+        self.addressed: list[tuple[ConnId, ModelMessage | None, RequestId | None]] = []
         self.media: list[tuple[MediaBundle, bool]] = []
 
     def bind(self, bridge: ModelBridge) -> None:
@@ -73,7 +73,9 @@ class Sinks:
             broadcast=self.broadcast.append, addressed=self._addr, media=self._media
         )
 
-    def _addr(self, conn: ConnId, message: ModelMessage, request_id: RequestId | None) -> None:
+    def _addr(
+        self, conn: ConnId, message: ModelMessage | None, request_id: RequestId | None
+    ) -> None:
         self.addressed.append((conn, message, request_id))
 
     def _media(self, bundle: MediaBundle, is_fresh_black: bool) -> None:

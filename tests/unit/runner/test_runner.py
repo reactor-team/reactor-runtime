@@ -37,7 +37,7 @@ from reactor_runtime.core import (
     TransitionEvent,
 )
 from reactor_runtime.interface.internal.bridge import CommandOutcome
-from reactor_runtime.interface.internal.reactor_core import AckSink, AddressedSink, BroadcastSink
+from reactor_runtime.interface.internal.reactor_core import AddressedSink, BroadcastSink
 from reactor_runtime.message_gateway import InboundCommand
 from reactor_runtime.protocol.common import struct_to_dict
 from reactor_runtime.recording import ClipResult
@@ -90,15 +90,9 @@ class FakeModel(ReactorModel):
         self.events.append("load")
         self.loaded = config_path
 
-    def bind_output(
-        self,
-        *,
-        broadcast: BroadcastSink,
-        addressed: AddressedSink,
-        ack: AckSink | None = None,
-    ) -> None:
+    def bind_output(self, *, broadcast: BroadcastSink, addressed: AddressedSink) -> None:
         self.events.append("bind")
-        super().bind_output(broadcast=broadcast, addressed=addressed, ack=ack)
+        super().bind_output(broadcast=broadcast, addressed=addressed)
 
     def start_thread(self) -> None:
         self.events.append("start")
@@ -307,13 +301,13 @@ async def test_schema_request_v1_replies_on_control_correlated_by_id(
         await runner.stop()
 
 
-def test_command_ack_reaches_a_v1_connection() -> None:
+def test_bodyless_reply_acks_a_v1_connection() -> None:
     runner = _runner()
     conn = FakeConnection(1)
     conn.protocol_version = V1
     runner.connection_opened(conn)
 
-    runner._ack_command(ConnId(1), "req-1", None)
+    runner._send_addressed(ConnId(1), None, "req-1")
 
     assert len(conn.sent) == 1
     decoded = protocol.select(V1).decode(conn.sent[0], DATA, SERVER)
@@ -323,13 +317,13 @@ def test_command_ack_reaches_a_v1_connection() -> None:
     assert decoded.WhichOneof("payload") is None
 
 
-def test_command_error_ack_carries_its_reason_on_v1() -> None:
+def test_command_rejection_carries_its_reason_on_v1() -> None:
     runner = _runner()
     conn = FakeConnection(1)
     conn.protocol_version = V1
     runner.connection_opened(conn)
 
-    runner._ack_command(ConnId(1), "req-2", ("invalid_command", "value out of range"))
+    runner._reject_command(ConnId(1), "req-2", "invalid_command", "value out of range")
 
     decoded = protocol.select(V1).decode(conn.sent[0], DATA, SERVER)
     assert isinstance(decoded, data_pb2.DataServerMessage)
@@ -339,12 +333,23 @@ def test_command_error_ack_carries_its_reason_on_v1() -> None:
     assert decoded.error.message == "value out of range"
 
 
-def test_command_ack_is_withheld_from_a_legacy_connection() -> None:
+def test_bodyless_reply_is_withheld_from_a_legacy_connection() -> None:
     runner = _runner()
     conn = FakeConnection(1)  # v0 by default: fire-and-forget commands, no acks
     runner.connection_opened(conn)
 
-    runner._ack_command(ConnId(1), "req-1", None)
+    runner._send_addressed(ConnId(1), None, "req-1")
+
+    assert conn.sent == []
+
+
+def test_bodyless_reply_without_a_request_id_sends_nothing() -> None:
+    runner = _runner()
+    conn = FakeConnection(1)
+    conn.protocol_version = V1
+    runner.connection_opened(conn)
+
+    runner._send_addressed(ConnId(1), None, None)
 
     assert conn.sent == []
 
