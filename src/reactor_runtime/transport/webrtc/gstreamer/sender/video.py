@@ -26,6 +26,30 @@ from .base import _SenderStreamBase
 _DEFAULT_STREAM_ID = "default"
 
 
+def _rgb_bytes_padded_to_stride(frame: np.ndarray) -> bytes:
+    """Serialize an RGB frame with each row padded to a 4-byte stride.
+
+    Downstream reads raw RGB rows padded up to a 4-byte boundary, so a width
+    whose byte length (``width * 3``) is not a multiple of 4 needs the padding
+    added here; a tightly packed buffer is undersized for that stride and the
+    frame is rejected.
+
+    Args:
+        frame: An ``(H, W, 3)`` uint8 RGB array.
+
+    Returns:
+        The frame's bytes with each row padded out to its 4-byte stride.
+    """
+    height, width = frame.shape[:2]
+    row_bytes = width * 3
+    stride = (row_bytes + 3) & ~3
+    if stride == row_bytes:
+        return frame.tobytes()
+    padded = np.zeros((height, stride), dtype=np.uint8)
+    padded[:, :row_bytes] = np.ascontiguousarray(frame).reshape(height, row_bytes)
+    return padded.tobytes()
+
+
 class RtpRtxSenderIds(NamedTuple):
     """Primary and RTX RTP identifiers for ``rtprtxsend`` map structures."""
 
@@ -229,7 +253,7 @@ class VideoSender(_SenderStreamBase):
         """
         try:
             height, width = frame.shape[:2]
-            data = frame.tobytes()
+            data = _rgb_bytes_padded_to_stride(frame)
         except Exception:
             return False
 

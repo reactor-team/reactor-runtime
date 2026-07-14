@@ -38,7 +38,7 @@ from reactor_runtime.transport.webrtc.gstreamer.errors import (
     WebRTCNoMediaError,
     WebRTCSupersededError,
 )
-from reactor_runtime.transport.webrtc.gstreamer.gst import GLib, Gst, GstSdp, GstWebRTC
+from reactor_runtime.transport.webrtc.gstreamer.gst import GLib, Gst, GstSdp, GstVideo, GstWebRTC
 from reactor_runtime.transport.webrtc.gstreamer.gst_helpers import (
     add_many,
     link_pads,
@@ -129,6 +129,32 @@ def _gst_buffer_pts_seconds(buf: object) -> Optional[float]:
         return float(pts) / float(Gst.SECOND)
     except (TypeError, ValueError, ZeroDivisionError):
         return None
+
+
+def _rgb_frame_from_mapped_buffer(
+    data: bytes | bytearray | memoryview, width: int, height: int, stride: int
+) -> np.ndarray:
+    """Copy a mapped RGB buffer into a tightly packed ``(H, W, 3)`` array.
+
+    GStreamer pads each row up to a 4-byte boundary, so ``stride`` (the bytes
+    the negotiated caps reserve per row) can exceed ``width * 3``. Reading at
+    the true stride and dropping the trailing padding keeps the rows from
+    shearing and the channels from rotating into grayscale.
+
+    Args:
+        data: The mapped buffer memory (anything exposing the buffer protocol).
+        width: Frame width in pixels.
+        height: Frame height in pixels.
+        stride: Bytes per row including padding, from the negotiated caps.
+
+    Returns:
+        An owned ``(height, width, 3)`` uint8 array with padding removed.
+    """
+    row_bytes = width * 3
+    if stride == row_bytes:
+        return np.ndarray((height, width, 3), dtype=np.uint8, buffer=data).copy()
+    padded = np.ndarray((height, stride), dtype=np.uint8, buffer=data)
+    return np.ascontiguousarray(padded[:, :row_bytes]).reshape(height, width, 3)
 
 
 # =============================================================================
@@ -1165,10 +1191,11 @@ class GStreamerPeer:
             return Gst.FlowReturn.OK
 
         try:
-            # Create numpy array from buffer (RGB format)
-            frame: np.ndarray = np.ndarray(
-                shape=(height, width, 3), dtype=np.uint8, buffer=map_info.data
-            ).copy()  # Copy to own the data
+            # Read at the true row stride from the negotiated caps so padded
+            # rows (width * 3 not 4-aligned) don't shear into grayscale.
+            video_info = GstVideo.VideoInfo.new_from_caps(caps)
+            stride = video_info.stride[0] if video_info is not None else width * 3
+            frame = _rgb_frame_from_mapped_buffer(map_info.data, width, height, stride)
 
             self._fire(
                 self._cb_media,
