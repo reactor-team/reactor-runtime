@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import uuid
 from collections.abc import Callable
@@ -478,16 +479,17 @@ async def test_stop_session_rejects_when_no_session_is_running(started_runner: R
     assert rejected.value.state is SessionState.READY
 
 
-async def test_enforce_blocks_a_running_session(started_runner: Runner) -> None:
+async def test_moderated_stop_closes_a_running_session(started_runner: Runner) -> None:
     started_runner.start_session({})
-    started_runner.enforce(block=True)
+    started_runner.stop_session(moderated=True)
     assert started_runner._sm.current_state is SessionState.CLOSING
 
 
-async def test_enforce_without_block_is_a_noop(started_runner: Runner) -> None:
-    started_runner.start_session({})
-    started_runner.enforce(block=False)
-    assert started_runner._sm.current_state is SessionState.WAITING
+async def test_moderated_stop_rejects_when_no_session_is_running(started_runner: Runner) -> None:
+    with pytest.raises(SessionTransitionError) as rejected:
+        started_runner.stop_session(moderated=True)
+    assert rejected.value.action == "stop"
+    assert rejected.value.state is SessionState.READY
 
 
 async def test_track_map_reports_declared_tracks(started_runner: Runner) -> None:
@@ -566,16 +568,53 @@ async def test_session_end_crosses_into_the_model_after_cleanup(
     assert ended[0].reason is EndReason.STOPPED
 
 
-async def test_enforce_ends_the_session_as_moderated(
+async def test_moderated_stop_ends_the_session_as_moderated(
     started_runner: Runner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     events = _record_reactor_events(started_runner, monkeypatch)
     started_runner.start_session({})
-    started_runner.enforce(block=True)
+    started_runner.stop_session(moderated=True)
     await asyncio.sleep(0.01)
     ended = [e for e in events if isinstance(e, SessionEnded)]
     assert len(ended) == 1
     assert ended[0].reason is EndReason.MODERATED
+
+
+async def test_moderated_stop_notifies_every_client_before_teardown(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    v0_conn = FakeConnection(1)
+    v1_conn = FakeConnection(2)
+    v1_conn.protocol_version = V1
+    started_runner.connection_opened(v0_conn)
+    started_runner.connection_opened(v1_conn)
+
+    started_runner.stop_session(moderated=True)
+
+    # The v0 client sees the legacy runtime-scope JSON on the data channel.
+    v0_frame = next(f for f in v0_conn.sent if isinstance(f, str) and "moderation" in f)
+    body = json.loads(v0_frame)
+    assert body["scope"] == "runtime"
+    assert body["data"]["type"] == "moderation"
+    assert body["data"]["data"]["action"] == "terminate"
+    # The v1 client sees the binary notification on the control channel.
+    raw = v1_conn.control[-1]
+    assert isinstance(raw, bytes)
+    decoded = protocol.select(V1).decode(raw, CONTROL, SERVER)
+    assert isinstance(decoded, control_pb2.ControlServerMessage)
+    assert decoded.WhichOneof("payload") == "moderation"
+    assert decoded.moderation.action == "terminate"
+
+
+async def test_plain_stop_sends_no_moderation_notice(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    conn = FakeConnection(1)
+    started_runner.connection_opened(conn)
+
+    started_runner.stop_session()
+
+    assert not any(isinstance(f, str) and "moderation" in f for f in conn.sent)
 
 
 async def test_drain_ends_an_active_session_within_grace(started_runner: Runner) -> None:

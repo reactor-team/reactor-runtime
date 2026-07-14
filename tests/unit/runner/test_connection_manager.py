@@ -230,6 +230,25 @@ def test_send_response_routes_by_the_codec_channel() -> None:
     assert conn.control == ["on-control"]
 
 
+def test_broadcast_response_routes_each_connection_by_its_codec_channel() -> None:
+    cm, _ = waiting_manager()
+    v0 = FakeConnection(1, protocol_version=ProtocolVersion.V0)
+    v1 = FakeConnection(2, protocol_version=ProtocolVersion.V1)
+    cm.register(v0)
+    cm.register(v1)
+    cm.broadcast_response(
+        lambda version: (
+            (Channel.DATA, "legacy")
+            if version is ProtocolVersion.V0
+            else (Channel.CONTROL, "binary")
+        )
+    )
+    assert v0.messages == ["legacy"]
+    assert v0.control == []
+    assert v1.control == ["binary"]
+    assert v1.messages == []
+
+
 def test_resume_and_pause_forward_to_the_connection() -> None:
     cm, _ = waiting_manager()
     conn = FakeConnection(1)

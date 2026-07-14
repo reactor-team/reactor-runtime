@@ -269,6 +269,34 @@ CASES = [
     ),
     pytest.param(
         control_pb2.ControlServerMessage(
+            kind=K.MESSAGE_KIND_NOTIFICATION,
+            moderation=platform_pb2.Moderation(
+                action="terminate",
+                input_kind="text",
+                command="set_prompt",
+                categories=["sexual"],
+                message="Session terminated due to policy violation.",
+            ),
+        ),
+        SERVER,
+        DATA,
+        {
+            "scope": "runtime",
+            "data": {
+                "type": "moderation",
+                "data": {
+                    "action": "terminate",
+                    "input_kind": "text",
+                    "command": "set_prompt",
+                    "categories": ["sexual"],
+                    "message": "Session terminated due to policy violation.",
+                },
+            },
+        },
+        id="moderation",
+    ),
+    pytest.param(
+        control_pb2.ControlServerMessage(
             request_id="ctrl_1",
             kind=K.MESSAGE_KIND_RESPONSE,
             publish_track=track_pb2.PublishTrackResponse(),
@@ -531,3 +559,28 @@ def test_v0_rejects_command_ack_and_error() -> None:
         codec.encode_command_ack("req-1")
     with pytest.raises(protocol.UnsupportedMessageError):
         codec.encode_command_error("req-2", "invalid_command", "value out of range")
+
+
+def test_v0_moderation_rides_the_data_channel_in_the_runtime_scope() -> None:
+    codec = protocol.select(protocol.ProtocolVersion.V0)
+    channel, frame = codec.encode_moderation(action="terminate", message="policy violation")
+    assert channel is DATA
+    assert isinstance(frame, str)
+    body = json.loads(frame)
+    assert body["scope"] == "runtime"
+    assert body["data"]["type"] == "moderation"
+    assert body["data"]["data"]["action"] == "terminate"
+    assert body["data"]["data"]["message"] == "policy violation"
+
+
+def test_v1_moderation_rides_control_as_an_uncorrelated_notification() -> None:
+    codec = protocol.select(protocol.ProtocolVersion.V1)
+    channel, frame = codec.encode_moderation(action="terminate", message="policy violation")
+    assert channel is CONTROL
+    decoded = codec.decode(frame, CONTROL, SERVER)
+    assert isinstance(decoded, control_pb2.ControlServerMessage)
+    assert decoded.kind == K.MESSAGE_KIND_NOTIFICATION
+    assert decoded.request_id == ""
+    assert decoded.WhichOneof("payload") == "moderation"
+    assert decoded.moderation.action == "terminate"
+    assert decoded.moderation.message == "policy violation"

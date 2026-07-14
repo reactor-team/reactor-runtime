@@ -32,6 +32,7 @@ message ControlServerMessage {
     ModelSchema model_schema = 10;
     ClipReady clip_ready = 11;
     ClipFailed clip_failed = 12;
+    Moderation moderation = 13;
     PublishTrackResponse publish_track = 14;
     Error error = 40;
   }

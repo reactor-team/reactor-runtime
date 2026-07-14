@@ -60,18 +60,6 @@
         "title": "CreateUploadResponse",
         "type": "object"
       },
-      "EnforceRequest": {
-        "description": "A moderation verdict posted against the active session.",
-        "properties": {
-          "block": {
-            "default": true,
-            "title": "Block",
-            "type": "boolean"
-          }
-        },
-        "title": "EnforceRequest",
-        "type": "object"
-      },
       "ErrorDetail": {
         "description": "The body every rejected request carries: a human-readable motive.\n\nThe one error shape of the HTTP surface \u2014 the fixed route groups and the\ntransport route groups alike declare their non-2xx responses with it, so a\nclient generating types from the published contract sees the same\n``{\"detail\": ...}`` body everywhere.",
         "properties": {
@@ -267,6 +255,18 @@
           "sdp_offer"
         ],
         "title": "SdpParamsRequest",
+        "type": "object"
+      },
+      "StopSessionRequest": {
+        "description": "Optional qualifiers on a session stop.\n\n``moderate`` marks the stop as a content-moderation verdict: the session\nends as moderated and clients are notified before their connections close.\nThe body itself is optional \u2014 a bare ``POST /stop_session`` is a plain stop.",
+        "properties": {
+          "moderate": {
+            "default": false,
+            "title": "Moderate",
+            "type": "boolean"
+          }
+        },
+        "title": "StopSessionRequest",
         "type": "object"
       },
       "TrackMappingEntry": {
@@ -639,73 +639,6 @@
           }
         },
         "summary": "Get Session"
-      }
-    },
-    "/sessions/{sid}/enforce": {
-      "post": {
-        "operationId": "enforce_sessions__sid__enforce_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "sid",
-            "required": true,
-            "schema": {
-              "title": "Sid",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/EnforceRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
-                }
-              }
-            },
-            "description": "Bad Request"
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
-                }
-              }
-            },
-            "description": "Not Found"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Enforce"
       }
     },
     "/sessions/{sid}/transport/webrtc/connections": {
@@ -1309,6 +1242,23 @@
     "/stop_session": {
       "post": {
         "operationId": "stop_session_stop_session_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/StopSessionRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Req"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {
@@ -1327,6 +1277,16 @@
               }
             },
             "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           },
           "503": {
             "content": {

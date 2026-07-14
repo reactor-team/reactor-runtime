@@ -237,6 +237,26 @@ class ConnectionManager:
         conn = self._by_id.get(cid)
         if conn is None:
             return
+        self._send_on_channel(conn, encode)
+
+    def broadcast_response(
+        self, encode: Callable[[ProtocolVersion], tuple[Channel, bytes | str]]
+    ) -> None:
+        """Encode and send an unsolicited server frame to every connection.
+
+        The all-connections analogue of :meth:`send_response`: each connection
+        receives the frame encoded for its negotiated codec, on the physical
+        channel that codec picks for it. A runtime-authored notice with no single
+        addressee — a moderation verdict — rides this.
+        """
+        for conn in self._by_id.values():
+            self._send_on_channel(conn, encode)
+
+    @staticmethod
+    def _send_on_channel(
+        conn: Connection, encode: Callable[[ProtocolVersion], tuple[Channel, bytes | str]]
+    ) -> None:
+        """Encode a frame for one connection and route it to the channel picked."""
         channel, frame = encode(conn.protocol_version)
         if channel is Channel.CONTROL:
             conn.send_control(frame)

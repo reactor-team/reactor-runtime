@@ -46,3 +46,14 @@ message ClipReady {
 message ClipFailed {
   string reason = 1;
 }
+
+// A content-moderation verdict delivered to the client. A "terminate" action
+// means the session is about to end; "warn" is informational and the session
+// continues. Fields the sender cannot attribute are left empty.
+message Moderation {
+  string action = 1;
+  string input_kind = 2;
+  string command = 3;
+  repeated string categories = 4;
+  string message = 5;
+}

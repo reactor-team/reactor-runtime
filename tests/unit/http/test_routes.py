@@ -166,32 +166,51 @@ async def test_start_session_is_unavailable_while_the_model_loads(
     assert response.headers["Retry-After"] == "1"
 
 
-async def test_enforce_returns_ok(client: tuple[httpx.AsyncClient, Runner]) -> None:
+async def test_moderated_stop_returns_ok(client: tuple[httpx.AsyncClient, Runner]) -> None:
     http_client, _ = client
     await http_client.post("/start_session", json={})
 
-    response = await http_client.post(f"/sessions/{SESSION_ID}/enforce", json={"block": True})
+    response = await http_client.post("/stop_session", json={"moderate": True})
 
     assert response.status_code == 200
 
 
-async def test_enforce_rejects_an_unknown_sid(client: tuple[httpx.AsyncClient, Runner]) -> None:
-    http_client, _ = client
+async def test_moderated_stop_ends_the_session_as_moderated(
+    client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, runner = client
     await http_client.post("/start_session", json={})
 
-    response = await http_client.post("/sessions/not-the-session/enforce", json={"block": True})
+    await http_client.post("/stop_session", json={"moderate": True})
 
-    assert response.status_code == 404
+    transitions = [event.transition for _seq, event in runner.events._history]
+    stops = [t for t in transitions if t.event.name.lower() == "stop_session"]
+    assert stops
+    assert stops[-1].detail["reason"] == "moderated"
 
 
-async def test_enforce_rejects_when_no_session_is_running(
+async def test_stop_session_with_an_explicit_plain_body_stays_stopped(
+    client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, runner = client
+    await http_client.post("/start_session", json={})
+
+    response = await http_client.post("/stop_session", json={"moderate": False})
+
+    assert response.status_code == 200
+    transitions = [event.transition for _seq, event in runner.events._history]
+    stops = [t for t in transitions if t.event.name.lower() == "stop_session"]
+    assert stops[-1].detail["reason"] == "stopped"
+
+
+async def test_moderated_stop_conflicts_when_nothing_is_running(
     client: tuple[httpx.AsyncClient, Runner],
 ) -> None:
     http_client, _ = client
 
-    response = await http_client.post(f"/sessions/{SESSION_ID}/enforce", json={"block": True})
+    response = await http_client.post("/stop_session", json={"moderate": True})
 
-    assert response.status_code == 400
+    assert response.status_code == 409
 
 
 async def test_health_is_ok_once_the_model_is_up(

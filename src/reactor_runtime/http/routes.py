@@ -33,10 +33,15 @@ from reactor_runtime.upload_store import (
 )
 
 
-class EnforceRequest(BaseModel):
-    """A moderation verdict posted against the active session."""
+class StopSessionRequest(BaseModel):
+    """Optional qualifiers on a session stop.
 
-    block: bool = True
+    ``moderate`` marks the stop as a content-moderation verdict: the session
+    ends as moderated and clients are notified before their connections close.
+    The body itself is optional — a bare ``POST /stop_session`` is a plain stop.
+    """
+
+    moderate: bool = False
 
 
 # The non-2xx statuses a route can answer, declared so the published contract
@@ -115,17 +120,13 @@ class SessionRoutes:
             return runner.schema()
 
         @app.post("/stop_session", responses=_TRANSITION_RESPONSES)
-        async def stop_session() -> Response:
+        async def stop_session(
+            req: Annotated[StopSessionRequest | None, Body()] = None,
+        ) -> Response:
             try:
-                runner.stop_session()
+                runner.stop_session(moderated=req.moderate if req else False)
             except SessionTransitionError as rejected:
                 raise _transition_rejection(rejected) from None
-            return Response(status_code=200)
-
-        @app.post("/sessions/{sid}/enforce", responses=_GUARD_RESPONSES)
-        async def enforce(sid: str, req: EnforceRequest) -> Response:
-            _require_session(runner, sid)
-            runner.enforce(req.block)
             return Response(status_code=200)
 
 

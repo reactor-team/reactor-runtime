@@ -235,6 +235,35 @@ class Codec(ABC):
         )
         return self.encode(message)
 
+    def encode_moderation(
+        self,
+        *,
+        action: str,
+        message: str,
+        input_kind: str = "",
+        command: str = "",
+        categories: list[str] | None = None,
+    ) -> tuple[Channel, bytes | str]:
+        """Encode a content-moderation verdict for the client.
+
+        A moderation notice is runtime-authored and unsolicited, so it rides a
+        ``ControlServerMessage`` notification with no ``request_id``. Fields the
+        sender cannot attribute — the flagged input's modality, the originating
+        command, the category labels — are left empty. The physical channel is
+        version-dependent and returned alongside the frame.
+        """
+        wire = control_pb2.ControlServerMessage(
+            kind=common_pb2.MessageKind.MESSAGE_KIND_NOTIFICATION,
+            moderation=platform_pb2.Moderation(
+                action=action,
+                input_kind=input_kind,
+                command=command,
+                categories=categories or [],
+                message=message,
+            ),
+        )
+        return self.encode(wire)
+
 
 def select(version: ProtocolVersion) -> Codec:
     """Return the codec for a negotiated wire version."""
