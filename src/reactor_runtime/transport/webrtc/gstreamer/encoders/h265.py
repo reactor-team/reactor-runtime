@@ -13,11 +13,19 @@ def h265_fmtp_to_x265_option_string(fmtp: Dict[str, Optional[str]]) -> str:
     """
     Map HEVC SDP fmtp (RFC 7798) keys to ``x265enc`` ``option-string`` tokens.
 
-    SDP ``tier-flag`` and ``level-id`` are mapped to ``high-tier`` and
-    ``level-idc`` respectively.  ``profile-id`` is intentionally omitted:
-    GStreamer's x265enc enforces profile through caps negotiation (calling
-    x265_param_apply_profile internally), not via x265_param_parse — passing
-    ``profile=...`` in option-string causes an encoder init failure.
+    SDP ``tier-flag`` is mapped to ``high-tier``.  ``profile-id`` is
+    intentionally omitted: GStreamer's x265enc enforces profile through caps
+    negotiation (calling x265_param_apply_profile internally), not via
+    x265_param_parse — passing ``profile=...`` in option-string causes an
+    encoder init failure.
+
+    ``level-id`` is intentionally NOT mapped to ``level-idc``. The offered
+    level-id advertises the receiver's decode ceiling, and forcing it onto
+    the encoder makes x265 refuse to initialize for any frame above that
+    level's budget (Safari offers level-id=93 = level 3.1, ~720p), silently
+    stalling the sender branch. x265 derives a resolution-valid level and
+    writes it into the bitstream; receivers decode based on that, and in
+    practice tolerate streams above their advertised ceiling.
 
     Unrecognized or missing values are omitted so the encoder can use defaults.
     """
@@ -35,19 +43,6 @@ def h265_fmtp_to_x265_option_string(fmtp: Dict[str, Optional[str]]) -> str:
         parts.append("high-tier=1")
     elif tier == "0":
         parts.append("high-tier=0")
-
-    level = _get("level-id")
-    if level is not None:
-        try:
-            lid = int(level)
-        except ValueError:
-            lid = -1
-        if 0 <= lid <= 255:
-            level_idc = lid / 30
-            if level_idc == int(level_idc):
-                parts.append(f"level-idc={int(level_idc)}")
-            else:
-                parts.append(f"level-idc={level_idc:.1f}")
 
     return ":".join(parts)
 

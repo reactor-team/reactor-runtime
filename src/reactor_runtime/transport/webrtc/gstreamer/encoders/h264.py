@@ -166,13 +166,21 @@ class H264EncoderBin(BaseEncoderBin):
             try_set_property(self._pay, "ssrc", ssrc)
 
         # ---------------------------------------------------------
-        # Enforce negotiated profile/level
+        # Enforce negotiated profile only — NOT level.
         # ---------------------------------------------------------
-        profile, level = h264_plid_to_gst_profile_level(profile_level_id)
+        # The SDP profile-level-id encodes a level (e.g. 42e01f -> 3.1) that is
+        # only valid up to ~720p. Pinning that level in the capsfilter caps the
+        # encoder below the actual resolution: at 2K the encoded stream is
+        # ~level 5.x, the level-3.1 capsfilter fails to negotiate, and the whole
+        # send branch stalls with `not-negotiated` — zero RTP ever leaves. VP8
+        # (no level) is unaffected, which is why it works over the same path.
+        #
+        # Pin the profile only. x264/NVENC pick a level valid for the resolution,
+        # and receivers (incl. Safari) match on the profile, not the exact level.
+        # (`h264_plid_to_gst_profile_level` still validates the negotiated id.)
+        profile, _level = h264_plid_to_gst_profile_level(profile_level_id)
 
-        caps = Gst.Caps.from_string(
-            f"video/x-h264,profile=(string){profile},level=(string){level}"
-        )
+        caps = Gst.Caps.from_string(f"video/x-h264,profile=(string){profile}")
 
         try_set_property(self._capsfilter, "caps", caps)
 
