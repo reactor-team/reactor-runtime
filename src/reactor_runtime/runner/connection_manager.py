@@ -199,6 +199,20 @@ class ConnectionManager:
         if conn is not None:
             conn.send_message(encode(conn.protocol_version))
 
+    def send_command_ack(
+        self, cid: ConnId, encode: Callable[[ProtocolVersion], bytes | str]
+    ) -> None:
+        """Send a command acknowledgement to one connection, if its codec carries one.
+
+        The ack correlates a client's awaited command to its completion on the
+        data channel. A legacy (v0) client issues fire-and-forget commands and
+        expects no reply, so it is sent none.
+        """
+        conn = self._by_id.get(cid)
+        if conn is None or conn.protocol_version is ProtocolVersion.V0:
+            return
+        conn.send_message(encode(conn.protocol_version))
+
     def send_control(self, cid: ConnId, encode: Callable[[ProtocolVersion], bytes | str]) -> None:
         """Encode and send a control frame to one connection in its codec, if registered.
 

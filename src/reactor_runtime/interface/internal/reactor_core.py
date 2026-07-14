@@ -40,7 +40,13 @@ RequestId = str
 _Holder = TypeVar("_Holder")
 
 BroadcastSink = Callable[[ModelMessage], None]
-AddressedSink = Callable[[ConnId, ModelMessage, RequestId | None], None]
+
+AddressedSink = Callable[[ConnId, "ModelMessage | None", RequestId | None], None]
+"""Delivers a reply to one connection, correlated by its request id.
+
+A ``None`` message is the bodyless acknowledgement of a command whose handler
+completed without returning one, so the client's awaited command resolves.
+"""
 
 FailureSink = Callable[[BaseException], None]
 """Receives the exception that ended :meth:`ReactorCore.run`, on the model thread."""

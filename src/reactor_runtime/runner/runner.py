@@ -664,6 +664,13 @@ class Runner(ServiceComponent, ConnectionSink):
                 SessionEvent.ERROR,
                 message=f"command {command.name!r} references an unresolved upload",
             )
+            if command.conn_id is not None:
+                self._reject_command(
+                    command.conn_id,
+                    command.request_id,
+                    "unresolved_upload",
+                    f"command {command.name!r} references an unresolved upload",
+                )
             return
         outcome = await self._bridge.submit_command(
             command.name,
@@ -683,6 +690,13 @@ class Runner(ServiceComponent, ConnectionSink):
                 SessionEvent.ERROR,
                 message=f"command {command.name!r} rejected ({outcome.field}: {outcome.reason})",
             )
+            if command.conn_id is not None:
+                self._reject_command(
+                    command.conn_id,
+                    command.request_id,
+                    "invalid_command",
+                    outcome.reason or "command rejected",
+                )
 
     async def _dispatch_file_uploaded(self, conn_id: ConnId, upload_id: str) -> None:
         """Fetch an out-of-band upload and hand it to the model as a reactor event.
@@ -719,15 +733,46 @@ class Runner(ServiceComponent, ConnectionSink):
         )
 
     def _send_addressed(
-        self, conn_id: ConnId, message: ModelMessage, request_id: str | None
+        self, conn_id: ConnId, message: ModelMessage | None, request_id: str | None
     ) -> None:
-        """Send a model message to one connection, in its codec, correlating a reply."""
+        """Send a model's reply to one connection, in its codec, correlated.
+
+        A ``None`` message is the bodyless acknowledgement of a command whose
+        handler returned nothing; it is sent only when there is a request id to
+        correlate, and withheld from legacy clients whose commands are
+        fire-and-forget.
+        """
+        if message is None:
+            if request_id is None:
+                return
+            self._connections.send_command_ack(
+                conn_id,
+                lambda version: self._codec_for(version).encode_command_ack(request_id)[1],
+            )
+            return
         data = message.to_wire_format()["data"]
         self._connections.send(
             conn_id,
             lambda version: self._codec_for(version).encode_model_message(
                 message.name, data, request_id=request_id
             )[1],
+        )
+
+    def _reject_command(self, conn_id: ConnId, request_id: str, code: str, detail: str) -> None:
+        """Reject a command the model never saw, correlated by *request_id*.
+
+        Covers failures upstream of the model — a payload the contract rejects
+        or an upload that cannot be resolved — where no handler runs and only
+        the runtime can tell the client why. A handler that raises sends
+        nothing: surfacing failures from model code is the model author's
+        choice. The reply is withheld from legacy clients, whose commands are
+        fire-and-forget.
+        """
+        self._connections.send_command_ack(
+            conn_id,
+            lambda version: self._codec_for(version).encode_command_error(request_id, code, detail)[
+                1
+            ],
         )
 
     def _dispatch_transition(self, transition: Transition) -> None:

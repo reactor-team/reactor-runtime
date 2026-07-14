@@ -31,7 +31,7 @@ from reactor_runtime.core import (
     TrackInfo,
     TrackKind,
 )
-from reactor_runtime.protocol import Channel, ProtocolVersion
+from reactor_runtime.protocol import Channel, ProtocolVersion, sniff
 from reactor_runtime.transport.webrtc.config import IceServer, IceTransportPolicy, WebRtcConfig
 from reactor_runtime.transport.webrtc.gstreamer._log import get_logger
 from reactor_runtime.transport.webrtc.gstreamer.errors import (
@@ -183,9 +183,12 @@ class GStreamerPeer:
         self._cb_connected: Optional[Callable[[], None]] = None
         self._cb_disconnect: Optional[Callable[[], None]] = None
 
-        # The wire codec negotiated for this connection, set by the factory and
-        # held for the peer's life. Defaults to the baseline until negotiated.
+        # The wire codec for this connection's data channels. The transport
+        # version negotiates the HTTP surface; the codec is detected from the
+        # first inbound data-channel frame's content and then held for the
+        # peer's life, so inbound decode and outbound encode agree on one codec.
         self.protocol_version: ProtocolVersion = ProtocolVersion.V0
+        self._protocol_sniffed = False
 
         # Configuration threaded in by the factory.
         self._config = WebRtcConfig()
@@ -1277,22 +1280,37 @@ class GStreamerPeer:
         if self._stopping is False:
             self._run_on_gst_thread(self._gst_request_stop)
 
+    def _sniff_protocol(self, frame: bytes | str) -> None:
+        """Fix the connection's wire codec from an observed inbound frame.
+
+        The transport-version header negotiates the HTTP surface; the data-channel
+        codec is a property of the bytes on the wire. The first frame observed
+        latches the codec for the peer's life, so inbound decode and outbound
+        encode agree without a second negotiated knob.
+        """
+        if self._protocol_sniffed:
+            return
+        self.protocol_version = sniff(frame)
+        self._protocol_sniffed = True
+
     def _gst_on_data_channel_message(self, channel, message: str) -> None:
         """Surface an inbound text data-channel frame and note client liveness."""
         if self._stopping or self._stop_event.is_set():
             return
+        self._sniff_protocol(message)
         self._fire(self._cb_message, message, self.protocol_version, Channel.DATA)
         self._fire(self._cb_ping)
 
     def _gst_on_data_channel_data(self, channel, data: Any) -> None:
         """Surface an inbound binary data-channel frame and note client liveness.
 
-        A binary frame carries a non-v0 codec (v0 is JSON text); it is relayed
-        with the connection's negotiated version so it decodes as that codec.
+        A binary frame is the v1 codec (v0 is JSON text); the first frame
+        observed latches the connection's codec so it decodes as that codec.
         """
         if self._stopping or self._stop_event.is_set():
             return
         payload = bytes(data.get_data() or b"")
+        self._sniff_protocol(payload)
         self._fire(self._cb_message, payload, self.protocol_version, Channel.DATA)
         self._fire(self._cb_ping)
 
@@ -1306,6 +1324,7 @@ class GStreamerPeer:
         """
         if self._stopping or self._stop_event.is_set():
             return
+        self._sniff_protocol(message)
         self._fire(self._cb_message, message, self.protocol_version, Channel.CONTROL)
         self._fire(self._cb_ping)
 
@@ -1314,6 +1333,7 @@ class GStreamerPeer:
         if self._stopping or self._stop_event.is_set():
             return
         payload = bytes(data.get_data() or b"")
+        self._sniff_protocol(payload)
         self._fire(self._cb_message, payload, self.protocol_version, Channel.CONTROL)
         self._fire(self._cb_ping)
 
@@ -1945,8 +1965,9 @@ async def gstreamer_peer_factory(
     Conforms to :data:`~reactor_runtime.transport.webrtc.peer.WebRtcPeerFactory`.
     Threads the connection's config into the pipeline and builds, from the
     client's declared track map, the mid/name lookups the media setup needs.
-    *version* is the wire codec negotiated for the connection, which the peer
-    holds for its life and applies to every frame it relays.
+    *version* seeds the wire codec as the pre-first-frame default; the first
+    inbound data-channel frame is sniffed and latches the codec the peer then
+    holds for its life.
     """
     logger.debug("negotiating GStreamer peer", conn_id=conn_id)
     peer = GStreamerPeer(ping_timeout_seconds=config.ping_timeout)

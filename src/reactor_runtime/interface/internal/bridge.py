@@ -160,15 +160,17 @@ class ModelBridge:
         """Wire the model's outbound paths down into the runner. Call once.
 
         ``broadcast`` delivers a message to every client; ``addressed`` delivers
-        one to a single connection, correlated to a request id when it is a reply;
-        ``media`` receives each emitted frame. The media sink is registered as a
-        per-tick observer on the emission buffer. ``failure`` receives the
-        exception that ends the model's run loop, at most once, on the model
-        thread — it is how the owner learns the model died rather than idled.
+        one to a single connection, correlated to a request id when it is a reply
+        (a ``None`` message is the bodyless acknowledgement of a command that
+        returned nothing); ``media`` receives each emitted frame. The media sink
+        is registered as a per-tick observer on the emission buffer. ``failure``
+        receives the exception that ends the model's run loop, at most once, on
+        the model thread — it is how the owner learns the model died rather than
+        idled.
 
         Args:
             broadcast: Sink for a message sent to all clients.
-            addressed: Sink for a message sent to one connection.
+            addressed: Sink for a reply sent to one connection.
             media: Sink for each emitted frame.
             failure: Sink for an unrecoverable crash of the model's run loop.
 

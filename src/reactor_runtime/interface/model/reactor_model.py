@@ -104,8 +104,11 @@ class ReactorModel(ReactorCore):
         directly; any reserved parameter the handler declares is injected. When
         the handler returns a :class:`ModelMessage`, it is sent addressed to the
         connection that issued the command — never broadcast — correlated with
-        the command's request id. A handler that raises is logged and swallowed,
-        so one bad command cannot stop the loop.
+        the command's request id; a handler that returns nothing is answered
+        with a bodyless acknowledgement so an awaiting client still resolves. A
+        handler that raises is logged and swallowed — no reply is sent, and
+        surfacing the failure to the client is the model author's choice — so
+        one bad command cannot stop the loop.
         """
         command = envelope.command
         spec = self.__reactor_contract__.commands.get(type(command).name)
@@ -124,8 +127,12 @@ class ReactorModel(ReactorCore):
         except Exception:
             logger.exception("error in command handler", command=spec.name)
             return
-        if isinstance(result, ModelMessage) and envelope.conn_id is not None:
+        if envelope.conn_id is None:
+            return
+        if isinstance(result, ModelMessage):
             self._reply(envelope.conn_id, result, envelope.request_id)
+        elif envelope.request_id is not None:
+            self._reply(envelope.conn_id, None, envelope.request_id)
 
     # -- reactor-event dispatch -----------------------------------------------
 
@@ -224,8 +231,14 @@ class ReactorModel(ReactorCore):
             _send=lambda message: self._reply(conn_id, message, None),
         )
 
-    def _reply(self, conn_id: ConnId, message: ModelMessage, request_id: RequestId | None) -> None:
-        """Send a message to one connection through the addressed sink, if bound."""
+    def _reply(
+        self, conn_id: ConnId, message: ModelMessage | None, request_id: RequestId | None
+    ) -> None:
+        """Send a reply to one connection through the addressed sink, if bound.
+
+        A ``None`` message is the bodyless acknowledgement of a command whose
+        handler returned nothing, correlated by *request_id*.
+        """
         if self._out_addressed is not None:
             self._out_addressed(conn_id, message, request_id)
 

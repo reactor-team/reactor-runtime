@@ -25,7 +25,7 @@ from reactor_runtime.core.model import (
 from reactor_runtime.core.values import ConnId
 from reactor_runtime.interface.internal.reactor_core import CommandEnvelope, RequestId
 
-Addressed = list[tuple[ConnId, ModelMessage, RequestId | None]]
+Addressed = list[tuple[ConnId, ModelMessage | None, RequestId | None]]
 
 
 class Out(Output):
@@ -104,10 +104,18 @@ async def test_command_invokes_handler_and_replies_to_sender() -> None:
     assert addressed == [(ConnId(1001), BrightnessSet(value=7), "req-1")]
 
 
-async def test_command_returning_none_sends_nothing() -> None:
+async def test_command_returning_none_acks_with_a_bodyless_reply() -> None:
     model = Model()
     addressed = _ready(model)
     await model._dispatch_command(CommandEnvelope(_cmd("touch"), ConnId(1001), "req-2"))
+    assert model.calls == [("touch", ConnId(1001))]
+    assert addressed == [(ConnId(1001), None, "req-2")]
+
+
+async def test_command_returning_none_without_a_request_id_sends_nothing() -> None:
+    model = Model()
+    addressed = _ready(model)
+    await model._dispatch_command(CommandEnvelope(_cmd("touch"), ConnId(1001), None))
     assert model.calls == [("touch", ConnId(1001))]
     assert addressed == []
 
