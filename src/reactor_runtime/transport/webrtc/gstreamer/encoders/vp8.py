@@ -4,6 +4,7 @@ from reactor_runtime.transport.webrtc.gstreamer.gst_helpers import (
     make_element,
     try_set_property,
 )
+from reactor_runtime.transport.webrtc.gstreamer.settings import RTP_PAYLOAD_MTU
 from .base import BaseEncoderBin
 
 
@@ -86,6 +87,7 @@ class VP8EncoderBin(BaseEncoderBin):
 
         # RTP payload type must match SDP negotiation
         self._pay.set_property("pt", self._pt)
+        try_set_property(self._pay, "mtu", RTP_PAYLOAD_MTU)
         if ssrc is not None:
             try_set_property(self._pay, "ssrc", ssrc)
 

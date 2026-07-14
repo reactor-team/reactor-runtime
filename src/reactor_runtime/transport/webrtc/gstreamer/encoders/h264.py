@@ -1,7 +1,10 @@
 from typing import Optional
 
 from reactor_runtime.transport.webrtc.gstreamer.gst import Gst
-from reactor_runtime.transport.webrtc.gstreamer.settings import HW_CODECS_ENABLED
+from reactor_runtime.transport.webrtc.gstreamer.settings import (
+    HW_CODECS_ENABLED,
+    RTP_PAYLOAD_MTU,
+)
 from reactor_runtime.transport.webrtc.gstreamer.gst_helpers import (
     link_many,
     make_element,
@@ -156,6 +159,7 @@ class H264EncoderBin(BaseEncoderBin):
 
         # Set RTP payload type
         self._pay.set_property("pt", self._pt)
+        try_set_property(self._pay, "mtu", RTP_PAYLOAD_MTU)
 
         # config-interval=1 forces SPS/PPS to be sent periodically.
         # Important for WebRTC because:

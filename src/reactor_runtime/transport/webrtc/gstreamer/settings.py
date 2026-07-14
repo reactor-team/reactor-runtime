@@ -28,6 +28,10 @@ VIDEO_BWE_TARGET_UPDATE_RELATIVE_THRESHOLD = _DEFAULTS.bwe_target_update_thresho
 VIDEO_RTX_MAX_SIZE_PACKETS = _DEFAULTS.rtx_max_size_packets
 VIDEO_RTX_MAX_SIZE_TIME_MS = _DEFAULTS.rtx_max_size_time_ms
 
+# The mtu (bytes) every encoder bin pins on its RTP payloader so full-size
+# media packets survive low-MTU network paths (see WebRtcConfig).
+RTP_PAYLOAD_MTU: int = _DEFAULTS.rtp_payload_mtu
+
 # Supported codecs in preference order; the first that appears in the offer wins.
 SUPPORTED_VIDEO_CODECS: list[CodecEntry] = list(_DEFAULTS.supported_video_codecs)
 SUPPORTED_AUDIO_CODECS: list[CodecEntry] = list(_DEFAULTS.supported_audio_codecs)

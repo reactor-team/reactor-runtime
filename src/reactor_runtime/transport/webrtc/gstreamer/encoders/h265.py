@@ -1,7 +1,10 @@
 from typing import Dict, Optional
 
 from reactor_runtime.transport.webrtc.gstreamer.gst import Gst
-from reactor_runtime.transport.webrtc.gstreamer.settings import HW_CODECS_ENABLED
+from reactor_runtime.transport.webrtc.gstreamer.settings import (
+    HW_CODECS_ENABLED,
+    RTP_PAYLOAD_MTU,
+)
 from reactor_runtime.transport.webrtc.gstreamer.gst_helpers import (
     make_element,
     try_set_property,
@@ -117,6 +120,7 @@ class H265EncoderBin(BaseEncoderBin):
 
         # Set RTP payload type to match SDP negotiation
         self._pay.set_property("pt", self._pt)
+        try_set_property(self._pay, "mtu", RTP_PAYLOAD_MTU)
 
         # config-interval=1 ensures VPS/SPS/PPS are periodically sent.
         # Important for:
