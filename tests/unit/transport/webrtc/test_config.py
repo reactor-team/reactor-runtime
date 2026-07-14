@@ -18,6 +18,7 @@ def test_defaults_match_the_old_transport_settings() -> None:
     assert cfg.bwe_target_update_threshold == 0.05
     assert cfg.rtx_max_size_packets == 512
     assert cfg.rtx_max_size_time_ms == 200
+    assert cfg.rtp_payload_mtu == 1200
     assert cfg.webrtcbin_latency_ms == 30
     assert cfg.ice_tcp is False
     assert cfg.upnp is False
