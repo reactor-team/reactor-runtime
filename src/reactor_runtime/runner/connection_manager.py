@@ -20,7 +20,7 @@ from collections.abc import Callable
 from reactor_runtime.core import (
     Connection,
     ConnId,
-    MediaBundle,
+    MediaChunk,
     SessionEvent,
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion
@@ -243,19 +243,17 @@ class ConnectionManager:
         else:
             conn.send_message(frame)
 
-    def broadcast_media(self, bundle: MediaBundle, is_fresh_black: bool) -> None:
-        """Send a media bundle to every connection whose wire carries media.
+    def broadcast_media(self, chunk: MediaChunk) -> None:
+        """Send a media chunk to every connection whose wire carries media.
 
         Data-only connections are skipped rather than relying on a silent no-op, so
-        a media bundle only reaches a wire that can deliver it. ``is_fresh_black``
-        is the flag the model bridge's media sink forwards — the synthesised black
-        frame emitted at a session boundary; the multiplexer sends every bundle to
-        all media-capable connections and does not branch on it.
+        a chunk only reaches a wire that can deliver it. Each connection paces the
+        chunk itself, so this fans the same unpaced chunk out and does no timing.
         """
         for conn in self._by_id.values():
             caps = conn.capabilities
             if caps.carries_video or caps.carries_audio:
-                conn.send_media(bundle)
+                conn.send_media(chunk)
 
     def note_keepalive(self, cid: ConnId) -> None:
         """Record a per-connection liveness ping.

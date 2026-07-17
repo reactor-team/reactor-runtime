@@ -24,12 +24,14 @@ from reactor_runtime.core import (
     ConnectionCapabilities,
     ConnId,
     InputFrame,
-    MediaBundle,
+    MediaChunk,
     TrackDirection,
+    TrackInfo,
     TrackKind,
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.transport.webrtc.config import WebRtcConfig
+from reactor_runtime.transport.webrtc.pacer import MediaPacer
 from reactor_runtime.transport.webrtc.peer import PeerStats, WebRtcPeer, WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpAnswer, SdpOffer, TrackMap
 
@@ -43,6 +45,11 @@ def _capabilities_for(tracks: TrackMap) -> ConnectionCapabilities:
         carries_video=any(t.kind is TrackKind.VIDEO for t in outbound),
         carries_audio=any(t.kind is TrackKind.AUDIO for t in outbound),
     )
+
+
+def _outbound_video_tracks(tracks: TrackMap) -> dict[str, TrackInfo]:
+    """Return the outbound video tracks the pacer synthesises black frames for."""
+    return {t.name: t for t in tracks.by_direction(TrackDirection.OUT) if t.kind is TrackKind.VIDEO}
 
 
 class WebRTCConnection:
@@ -64,6 +71,7 @@ class WebRTCConnection:
         capabilities: ConnectionCapabilities,
         *,
         ping_timeout: float,
+        video_tracks: dict[str, TrackInfo] | None = None,
     ) -> None:
         """Bind the connection to its peer and outbound capabilities.
 
@@ -73,11 +81,16 @@ class WebRTCConnection:
             capabilities: What media this connection's wire can carry outbound.
             ping_timeout: Seconds without a client ping before the watchdog
                 declares the connection lost; ``0`` or less disables it.
+            video_tracks: The connection's outbound video tracks, so its pacer can
+                synthesise black frames before the first real one arrives.
         """
         self.id = conn_id
         self.capabilities = capabilities
         self._peer = peer
         self._ping_timeout = ping_timeout
+        video_tracks = video_tracks or {}
+        initial_fps = max((t.rate for t in video_tracks.values() if t.rate > 0), default=30.0)
+        self._pacer = MediaPacer(video_tracks, self._peer.send_media, fps=initial_fps)
 
         self._on_message: Callable[[bytes | str, ProtocolVersion, Channel], None] | None = None
         self._on_media: Callable[[str, InputFrame], None] | None = None
@@ -113,7 +126,13 @@ class WebRTCConnection:
         moment the acceptor has registered its callbacks.
         """
         peer, answer = await peer_factory(conn_id, offer, tracks, config, version)
-        conn = cls(conn_id, peer, _capabilities_for(tracks), ping_timeout=config.ping_timeout)
+        conn = cls(
+            conn_id,
+            peer,
+            _capabilities_for(tracks),
+            ping_timeout=config.ping_timeout,
+            video_tracks=_outbound_video_tracks(tracks),
+        )
         conn._subscribe()
         return conn, answer
 
@@ -182,9 +201,15 @@ class WebRTCConnection:
         """Send an already-encoded control frame (text or binary) to this client."""
         self._peer.send_control(payload)
 
-    def send_media(self, bundle: MediaBundle) -> None:
-        """Send a media bundle to this client."""
-        self._peer.send_media(bundle)
+    def send_media(self, chunk: MediaChunk) -> None:
+        """Submit a media chunk to this connection's pacer.
+
+        The pacer splits the chunk into single frames and drains them to the peer
+        at the chunk's declared rate, so the model's bursty, unpaced emission
+        reaches the wire as a steady stream. Non-blocking: a chunk that does not
+        fit the pacer's queue is dropped rather than stalling the model thread.
+        """
+        self._pacer.submit(chunk)
 
     def resume_track(self, name: str) -> None:
         """Resume the named outbound track (publisher arbitration)."""
@@ -233,6 +258,7 @@ class WebRTCConnection:
     def _handle_connected(self) -> None:
         if not self._alive:
             return
+        self._pacer.start()
         self._start_watchdog()
         self._stats_task = asyncio.create_task(self._stats_loop())
         if self._on_connected is not None:
@@ -307,6 +333,7 @@ class WebRTCConnection:
             logger.exception("error closing WebRTC peer")
 
     def _cancel_tasks(self) -> None:
+        self._pacer.stop()
         for task in (self._watchdog_task, self._stats_task):
             if task is not None:
                 task.cancel()

@@ -55,11 +55,10 @@ class ReactorModel(ReactorCore):
     :meth:`ModelContract.of`.
 
     Class attributes:
-        fps: Target output frame rate of the emission buffer (default 30).
-        buffer_size: Output buffer queue depth (default 10) — how many emitted
-            frames may sit queued before :meth:`emit` blocks to pace the
-            producer. A smaller value keeps latency low; a larger one absorbs
-            more jitter.
+        fps: The nominal rate, in frames per second, an emitted chunk plays out
+            at when the model does not measure its own compute time (default 30).
+            A model that passes ``compute_time`` to :meth:`emit` paces itself and
+            this is only the fallback.
 
     Lifecycle:
         connected: An :class:`asyncio.Event` set while at least one client is

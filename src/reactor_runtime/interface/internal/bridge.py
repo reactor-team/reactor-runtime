@@ -15,29 +15,20 @@ so nothing here reaches into model internals beyond the handful of entrypoints
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from reactor_runtime.core.model import ReactorEvent
-from reactor_runtime.core.values import ConnId, InputFrame, MediaBundle
-from reactor_runtime.interface.internal.output_buffer import OutputBuffer
+from reactor_runtime.core.values import ConnId, InputFrame
 from reactor_runtime.interface.internal.reactor_core import (
     AddressedSink,
     BroadcastSink,
     FailureSink,
+    MediaSink,
     ReactorCore,
     RequestId,
 )
 from reactor_runtime.interface.model.contract import ContractError, ModelContract
-
-MediaSink = Callable[[MediaBundle, bool], None]
-"""An outbound media sink ``(bundle, is_fresh_black)``.
-
-``is_fresh_black`` marks the synthesised frame emitted at a session boundary: a
-transport forwards it so the client unfreezes from the previous frame, where a
-recorder tapping the same buffer ignores it.
-"""
 
 
 @dataclass(frozen=True)
@@ -84,18 +75,12 @@ class ModelBridge:
     def __init__(self, model: ReactorCore, contract: ModelContract) -> None:
         self._model = model
         self._contract = contract
-        self._media: MediaSink | None = None
         self._outbound_bound = False
 
     @property
     def contract(self) -> ModelContract:
         """The model's contract."""
         return self._contract
-
-    @property
-    def output_buffer(self) -> OutputBuffer:
-        """The model's emission buffer, exposed so a recorder can tap it."""
-        return self._model.output_buffer
 
     # -- inbound: user-authored, validated --------------------------------
 
@@ -162,16 +147,15 @@ class ModelBridge:
         ``broadcast`` delivers a message to every client; ``addressed`` delivers
         one to a single connection, correlated to a request id when it is a reply
         (a ``None`` message is the bodyless acknowledgement of a command that
-        returned nothing); ``media`` receives each emitted frame. The media sink
-        is registered as a per-tick observer on the emission buffer. ``failure``
-        receives the exception that ends the model's run loop, at most once, on
-        the model thread — it is how the owner learns the model died rather than
-        idled.
+        returned nothing); ``media`` receives each emitted :class:`MediaChunk`,
+        unpaced, on the model thread. ``failure`` receives the exception that
+        ends the model's run loop, at most once, on the model thread — it is how
+        the owner learns the model died rather than idled.
 
         Args:
             broadcast: Sink for a message sent to all clients.
             addressed: Sink for a reply sent to one connection.
-            media: Sink for each emitted frame.
+            media: Sink for each emitted media chunk.
             failure: Sink for an unrecoverable crash of the model's run loop.
 
         Raises:
@@ -179,27 +163,15 @@ class ModelBridge:
         """
         if self._outbound_bound:
             raise RuntimeError("bind_outbound must be called once")
-        self._model.bind_output(broadcast=broadcast, addressed=addressed)
+        self._model.bind_output(broadcast=broadcast, addressed=addressed, media=media)
         if failure is not None:
             self._model.bind_failure(failure)
-        self._media = media
-        self._model.output_buffer.add_callback(self._on_emission)
         self._outbound_bound = True
-
-    def _on_emission(self, bundle: MediaBundle, duplicate: bool, is_fresh_black: bool) -> None:
-        """Adapt the emission buffer's per-tick callback to the media sink.
-
-        Every tick is forwarded to keep the stream at cadence; the pacing-internal
-        ``duplicate`` flag is dropped, while ``is_fresh_black`` is passed through
-        so the transport can handle the session-boundary frame.
-        """
-        if self._media is not None:
-            self._media(bundle, is_fresh_black)
 
     # -- lifecycle --------------------------------------------------------
 
     def start(self) -> None:
-        """Spawn the model thread and start emission.
+        """Spawn the model thread.
 
         Raises:
             RuntimeError: If :meth:`bind_outbound` has not been called.
@@ -207,9 +179,7 @@ class ModelBridge:
         if not self._outbound_bound:
             raise RuntimeError("bind_outbound must be called before start")
         self._model.start_thread()
-        self._model.output_buffer.start_emission()
 
     async def stop(self) -> None:
-        """Stop emission and cancel the model loop."""
-        self._model.output_buffer.stop_emission()
+        """Cancel the model loop."""
         self._model.stop()

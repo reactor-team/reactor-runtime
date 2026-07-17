@@ -35,6 +35,7 @@ from reactor_runtime.core import (
     Health,
     HealthStatus,
     InputFrame,
+    MediaChunk,
     RuntimeConfig,
     ServiceComponent,
     SessionEnded,
@@ -213,7 +214,7 @@ class Runner(ServiceComponent, ConnectionSink):
             bridge.bind_outbound(
                 broadcast=self._broadcast_message,
                 addressed=self._send_addressed,
-                media=self._connections.broadcast_media,
+                media=self._emit_media,
                 failure=self._on_model_failure,
             )
             bridge.start()
@@ -725,6 +726,18 @@ class Runner(ServiceComponent, ConnectionSink):
             self._codecs[version] = codec
         return codec
 
+    def _emit_media(self, chunk: MediaChunk) -> None:
+        """Fan one emitted media chunk out to the connections and the recorder.
+
+        Called on the model thread. Both consumers are non-blocking — the
+        connections pace the chunk on their own threads, and the recorder queues
+        it — so a slow wire or a slow encoder never stalls the model. The
+        recorder tap is where recording reads the model's output now that it no
+        longer shares an emission buffer with the transport.
+        """
+        self._connections.broadcast_media(chunk)
+        self._recorder.on_chunk(chunk)
+
     def _broadcast_message(self, message: ModelMessage) -> None:
         """Broadcast a model message, encoded for each connection's codec."""
         data = message.to_wire_format()["data"]
@@ -809,7 +822,7 @@ class Runner(ServiceComponent, ConnectionSink):
         if self._bridge is not None:
             self._dispatch_reactor_events(transition, self._bridge)
         if transition.is_session_start and self._bridge is not None:
-            self._start_recorder(self._bridge)
+            self._start_recorder()
         entered = transition.from_state is not transition.to_state
         if entered:
             self._reset_orphan_timeout(transition.to_state)
@@ -825,14 +838,17 @@ class Runner(ServiceComponent, ConnectionSink):
                 self._spawn_teardown(self._connections.close_all())
             self.request_shutdown()
 
-    def _start_recorder(self, bridge: ModelBridge) -> None:
-        """Tap the model's output buffer for recording, best-effort.
+    def _start_recorder(self) -> None:
+        """Arm the recorder for the session, best-effort.
 
-        Recording must never break the session: a recorder that fails to start
-        logs and is left disabled rather than raising into the transition path.
+        Recording reads the model's output through the media fan-out
+        (:meth:`_emit_media`), so starting it only opens its directory and
+        workers. Recording must never break the session: a recorder that fails to
+        start logs and is left disabled rather than raising into the transition
+        path.
         """
         try:
-            self._recorder.start(self._recording_id, bridge.output_buffer)
+            self._recorder.start(self._recording_id)
         except Exception:
             logger.exception("failed to start the recorder; continuing without recording")
 

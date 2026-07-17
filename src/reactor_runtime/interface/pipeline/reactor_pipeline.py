@@ -229,7 +229,6 @@ class ReactorPipeline(ReactorModel):
                 self.state = None
                 for buffer in self._input_buffers.values():
                     buffer.reset()
-                self.output_buffer.flush()
 
     async def _advance(self, gen: Any, is_async: bool) -> tuple[Output | None, float]:
         """Advance the generator by one yield, timing the work it took.

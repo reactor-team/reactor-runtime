@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from reactor_runtime import Input, ModelMessage, Output, Video
-from reactor_runtime.core import Command, SessionStarted
+from reactor_runtime.core import Command, MediaChunk, SessionStarted
 from reactor_runtime.core.values import ConnId, InputFrame, TrackDirection
 from reactor_runtime.interface.internal.reactor_core import ReactorCore
 
@@ -51,29 +51,21 @@ def frame(value: int = 0) -> InputFrame:
     return InputFrame(data=np.full((2, 2, 3), value, dtype=np.uint8), pts=float(value))
 
 
+def _capture_media(core: ReactorCore) -> list[MediaChunk]:
+    """Bind a media sink that records every emitted chunk."""
+    chunks: list[MediaChunk] = []
+    core.bind_output(
+        broadcast=lambda msg: None,
+        addressed=lambda conn, msg, req: None,
+        media=chunks.append,
+    )
+    return chunks
+
+
 def test_input_buffers_are_wired_from_annotations() -> None:
     core = IdleCore()
     assert set(core._input_buffers) == {"camera"}
     assert vars(core.input)["camera"] is core._input_buffers["camera"]
-
-
-def test_output_topology_is_read_from_annotations() -> None:
-    core = IdleCore()
-    assert set(core.output_buffer._video_tracks) == {"main"}
-    assert core.output_buffer.fps == 30
-
-
-def test_default_buffer_size_sets_the_output_queue_depth() -> None:
-    core = OutputOnlyCore()
-    assert ReactorCore.buffer_size == 10
-    assert core.output_buffer._queue.maxsize == 10
-
-
-def test_buffer_size_class_attr_sets_the_output_queue_depth() -> None:
-    class DeepCore(OutputOnlyCore):
-        buffer_size = 24
-
-    assert DeepCore().output_buffer._queue.maxsize == 24
 
 
 def test_a_model_without_input_has_no_buffers() -> None:
@@ -90,26 +82,31 @@ def test_to_bundle_converts_a_typed_output() -> None:
     assert bundle.tracks["main"].info.direction is TrackDirection.OUT
 
 
-def test_emit_adapts_fps_to_measured_throughput() -> None:
+def test_emit_tags_the_chunk_with_measured_throughput() -> None:
     core = OutputOnlyCore()
+    chunks = _capture_media(core)
     data = np.zeros((4, 4, 3), dtype=np.uint8)
-    # drop=True enqueues without the running emission thread; one frame in 0.1s
-    # is an effective 10 fps.
-    asyncio.run(core.emit(Out(main=data), compute_time=0.1, drop=True))
-    assert core.output_buffer.fps == 10
+    # One frame in 0.1s is an effective 10 fps.
+    asyncio.run(core.emit(Out(main=data), compute_time=0.1))
+    assert len(chunks) == 1
+    assert chunks[0].fps == 10
+    assert chunks[0].n_frames == 1
 
 
-def test_emit_without_compute_time_leaves_fps_unchanged() -> None:
+def test_emit_without_compute_time_uses_the_declared_fps() -> None:
     core = OutputOnlyCore()
-    asyncio.run(core.emit(Out(main=np.zeros((4, 4, 3), dtype=np.uint8)), drop=True))
-    assert core.output_buffer.fps == 30
+    chunks = _capture_media(core)
+    asyncio.run(core.emit(Out(main=np.zeros((4, 4, 3), dtype=np.uint8))))
+    assert chunks[0].fps == 30
 
 
-def test_emit_leaves_fps_unchanged_when_nothing_is_enqueued() -> None:
+def test_emit_tags_a_batch_with_its_frame_count() -> None:
     core = OutputOnlyCore()
-    # drop=False with emission stopped enqueues nothing, so no rate to adapt to.
-    asyncio.run(core.emit(Out(main=np.zeros((4, 4, 3), dtype=np.uint8)), compute_time=0.1))
-    assert core.output_buffer.fps == 30
+    chunks = _capture_media(core)
+    asyncio.run(core.emit(Out(main=np.zeros((4, 8, 8, 3), dtype=np.uint8)), compute_time=0.2))
+    # Four frames in 0.2s is 20 fps.
+    assert chunks[0].n_frames == 4
+    assert chunks[0].fps == 20
 
 
 def test_push_media_routes_to_the_track_buffer() -> None:
@@ -174,7 +171,9 @@ def test_run_crash_without_a_bound_sink_still_ends_the_thread() -> None:
 def test_send_routes_to_the_bound_broadcast_sink() -> None:
     core = OutputOnlyCore()
     sent: list[ModelMessage] = []
-    core.bind_output(broadcast=sent.append, addressed=lambda conn, msg, req: None)
+    core.bind_output(
+        broadcast=sent.append, addressed=lambda conn, msg, req: None, media=lambda chunk: None
+    )
     asyncio.run(core.send(Ping(note="hi")))
     assert sent == [Ping(note="hi")]
 

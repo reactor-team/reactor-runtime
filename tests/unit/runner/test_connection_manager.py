@@ -5,6 +5,7 @@ from reactor_runtime.core import (
     ConnectionCapabilities,
     ConnId,
     MediaBundle,
+    MediaChunk,
     SessionEvent,
     SessionState,
     Transition,
@@ -30,7 +31,7 @@ class FakeConnection:
         self.protocol_version = protocol_version
         self.messages: list[bytes | str] = []
         self.control: list[bytes | str] = []
-        self.media: list[MediaBundle] = []
+        self.media: list[MediaChunk] = []
         self.resumed: list[str] = []
         self.paused: list[str] = []
         self.closed = False
@@ -41,8 +42,8 @@ class FakeConnection:
     def send_control(self, payload: bytes | str) -> None:
         self.control.append(payload)
 
-    def send_media(self, bundle: MediaBundle) -> None:
-        self.media.append(bundle)
+    def send_media(self, chunk: MediaChunk) -> None:
+        self.media.append(chunk)
 
     def resume_track(self, name: str) -> None:
         self.resumed.append(name)
@@ -248,9 +249,9 @@ def test_media_skips_data_only_connections() -> None:
     )
     cm.register(media)
     cm.register(data_only)
-    bundle = MediaBundle()
-    cm.broadcast_media(bundle, is_fresh_black=False)
-    assert media.media == [bundle]
+    chunk = MediaChunk(bundle=MediaBundle(), fps=30.0, n_frames=1)
+    cm.broadcast_media(chunk)
+    assert media.media == [chunk]
     assert data_only.media == []
 
 

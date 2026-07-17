@@ -2,9 +2,9 @@
 
 A standalone runtime records the model's output to local disk and serves the
 clips straight back over HTTP, with no object store in the loop. The recorder
-taps the model's :class:`~reactor_runtime.interface.internal.output_buffer.OutputBuffer`,
-encodes the frames into fMP4 HLS segments under a per-recording directory, and
-answers the clip-manifest math behind ``GET /clips``.
+taps the runtime's media fan-out through :meth:`Recorder.on_chunk`, encodes the
+frames into fMP4 HLS segments under a per-recording directory, and answers the
+clip-manifest math behind ``GET /clips``.
 
 A clip request resolves immediately to a marker range and a path-only playlist
 URL the client polls; the bytes for the boundary segment may still be in flight.
@@ -31,13 +31,18 @@ from urllib.parse import urlencode
 import numpy as np
 import numpy.typing as npt
 
-from reactor_runtime.core import MediaBundle, RecordingConfig, TrackKind
-from reactor_runtime.interface.internal.output_buffer import OutputBuffer
+from reactor_runtime.core import MediaBundle, MediaChunk, RecordingConfig, TrackKind
 from reactor_runtime.log import get_logger
 from reactor_runtime.recording.chunk_encoder import ChunkEncoder
 from reactor_runtime.recording.markers import MarkerBookkeeper
 
 logger = get_logger(__name__)
+
+# The fixed frame rate the recorded media is encoded at. A chunk's frames are
+# resampled onto this grid from the chunk's own rate, so the recorded PTS derives
+# from the model's declared cadence rather than the wall-clock arrival time — a
+# model that runs slower or faster than real time still records at true duration.
+RECORDING_FPS = 30
 
 _INIT_FILENAME = "init.mp4"
 # Written into a recording's directory once it is finished, so its final segment
@@ -159,7 +164,6 @@ class Recorder:
         *,
         on_clip_ready: ClipReadyCallback | None = None,
         on_chunk_ready: ChunkReadyCallback | None = None,
-        keepalive_interval: float = 1.0,
     ) -> None:
         """Bind the recorder to its config and the readiness notifications.
 
@@ -171,20 +175,16 @@ class Recorder:
             on_chunk_ready: Called with ``(recording_id, idx)`` when a recording
                 segment has closed, on a recorder-owned thread, so the recording
                 can be mirrored as it is produced.
-            keepalive_interval: Seconds between idle gap-fill frames fed to the
-                encoder so a paused model still advances the recording timeline.
         """
         self._config = config
         self._on_clip_ready = on_clip_ready
         self._on_chunk_ready = on_chunk_ready
-        self._keepalive_interval = max(0.0, keepalive_interval)
         # The recordings root is materialised on the first start, so a disabled
         # recorder (the common case) never creates a directory.
         self._root: Path | None = None
 
         self._session_id: str | None = None
         self._session_dir: Path | None = None
-        self._output_buffer: OutputBuffer | None = None
         self._markers: MarkerBookkeeper | None = None
         self._encoder: ChunkEncoder | None = None
         self._video_track: str | None = None
@@ -211,8 +211,9 @@ class Recorder:
         self._chunk_lock = threading.Lock()
 
         self._dropped_frames = 0
-        self._last_fed_t = 0.0
-        self._last_video_wall_t = 0.0
+        # Fractional grid frames carried between chunks so resampling a chunk's
+        # own rate onto the fixed recording grid accumulates no rounding drift.
+        self._grid_debt = 0.0
         self._audio_jitter_buf: list[_AudioArray] = []
         self._audio_buffered_samples = 0
 
@@ -232,19 +233,19 @@ class Recorder:
 
     # -- lifecycle ------------------------------------------------------------
 
-    def start(self, session_id: str, output_buffer: OutputBuffer) -> None:
+    def start(self, session_id: str) -> None:
         """Begin recording the session's output under *session_id*.
 
         The recording is stored and addressed under *session_id*: a director
         passes the platform's session id so a clip is fetched by the same id the
         platform stores it under, and a session started without one is given a
         freshly minted id so sequential recordings never share a directory.
-        Opens the recording directory, taps *output_buffer*, and starts the feed
-        and watch workers. A no-op when recording is disabled or already running.
+        Opens the recording directory and starts the feed and watch workers;
+        frames arrive through :meth:`on_chunk`, fed by the runner's media
+        fan-out. A no-op when recording is disabled or already running.
 
         Args:
             session_id: The id this recording is stored and addressed under.
-            output_buffer: The model's emission buffer to tap for frames.
         """
         if not self._config.enabled or self._started:
             return
@@ -259,8 +260,7 @@ class Recorder:
         self._session_id = session_id
         self._session_dir = self._root / self._session_id
         self._session_dir.mkdir(parents=True, exist_ok=True)
-        self._markers = MarkerBookkeeper(anchor_at_first_frame=self._config.skip_leading_black)
-        self._output_buffer = output_buffer
+        self._markers = MarkerBookkeeper()
         self._feed_stop.clear()
         self._watch_stop.clear()
         self._feed_thread = threading.Thread(
@@ -272,7 +272,6 @@ class Recorder:
         self._feed_thread.start()
         self._watch_thread.start()
         self._started = True
-        output_buffer.add_callback(self._on_bundle)
         logger.info(
             "recorder started",
             recording_id=self._session_id,
@@ -290,8 +289,6 @@ class Recorder:
         if not self._started:
             return
         self._disabled = True
-        if self._output_buffer is not None:
-            self._output_buffer.remove_callback(self._on_bundle)
         self._feed_stop.set()
         with contextlib.suppress(queue.Full):
             self._feed_queue.put_nowait(None)
@@ -331,8 +328,7 @@ class Recorder:
         self._audio_sample_rate = 48_000
         self._has_audio = False
         self._dropped_frames = 0
-        self._last_fed_t = 0.0
-        self._last_video_wall_t = 0.0
+        self._grid_debt = 0.0
         self._audio_jitter_buf = []
         self._audio_buffered_samples = 0
         with self._pending_lock:
@@ -342,73 +338,76 @@ class Recorder:
             self._announced_chunk_idx = -1
         self._drain_feed_queue()
 
-    # -- output-buffer tap ----------------------------------------------------
+    # -- media fan-out tap ----------------------------------------------------
 
-    def _on_bundle(
-        self, bundle: MediaBundle, duplicate: bool, is_fresh_black: bool = False
-    ) -> None:
-        """Enqueue a bundle for the feed worker; non-blocking.
+    def on_chunk(self, chunk: MediaChunk) -> None:
+        """Feed one emitted media chunk to the recording; non-blocking.
 
-        The synthesised black frame at a session boundary (*is_fresh_black*) is
-        not model output and is skipped. Gap-fill duplicates before the first
-        real frame are dropped, and idle duplicates afterwards are throttled to
-        the keepalive interval so a paused model does not flood the encoder.
+        Called on the model thread by the runner's media fan-out. The chunk's
+        frames are resampled from the chunk's own rate onto the fixed recording
+        grid (:data:`RECORDING_FPS`): the chunk represents ``n_frames / fps``
+        seconds of media, which is ``that * RECORDING_FPS`` grid frames, so a
+        model producing at a rate other than the grid still records at true
+        duration. Fractional grid frames carry across chunks so the resampling
+        accumulates no drift. The timeline advances by the media actually fed,
+        not by wall-clock, so a pause simply stops advancing rather than
+        recording dead air. A frame that does not fit the feed queue is dropped
+        to keep the model thread unblocked.
         """
         if self.disabled:
-            return
-        if is_fresh_black:
             return
         markers = self._markers
         if markers is None:
             return
-        now = time.monotonic()
-        if duplicate:
-            # The encoder is only ever spawned from a real frame (which carries
-            # audio); a gap-fill is video-only, so a leading duplicate is dropped
-            # rather than locking the recording to a silent track.
-            if self._encoder is None:
-                return
-            if self._config.skip_leading_black and not markers.recording_started:
-                return
-            if (
-                self._keepalive_interval <= 0.0
-                or (now - self._last_fed_t) < self._keepalive_interval
-            ):
-                return
-        elif self._encoder is None:
+        bundle = chunk.bundle
+        if self._encoder is None:
             self._build_encoder(bundle)
             if self._encoder is None:
                 return
-        video_data = self._video_frame(bundle)
-        if video_data is None:
+        frames = self._video_frames(bundle)
+        if not frames:
             return
-        audio_data: _AudioArray | None = None
-        if self._has_audio and self._audio_track is not None:
-            audio_td = bundle.get_track(self._audio_track)
-            if audio_td is not None:
-                audio_data = audio_td.data
-        try:
-            self._feed_queue.put_nowait((video_data, audio_data))
-        except queue.Full:
-            self._dropped_frames += 1
-            if self._dropped_frames == 1 or self._dropped_frames % 300 == 0:
-                logger.warning(
-                    "recorder feed queue full; dropping a frame to keep the wire unblocked",
-                    dropped_total=self._dropped_frames,
-                )
-            return
-        if not duplicate:
-            markers.mark_first_real_frame()
-        self._last_fed_t = now
+        fps = chunk.fps if chunk.fps > 0 else float(RECORDING_FPS)
+        if self._has_audio:
+            self._buffer_audio(bundle)
+        self._grid_debt += (len(frames) / fps) * RECORDING_FPS
+        grid_frames = int(self._grid_debt)
+        self._grid_debt -= grid_frames
+        audio_target = round(self._audio_sample_rate / RECORDING_FPS) if self._has_audio else 0
+        fed = 0
+        for i in range(grid_frames):
+            video_data = frames[i * len(frames) // grid_frames]
+            audio_data = self._take_audio(audio_target) if self._has_audio else None
+            try:
+                self._feed_queue.put_nowait((video_data, audio_data))
+            except queue.Full:
+                self._dropped_frames += 1
+                if self._dropped_frames == 1 or self._dropped_frames % 300 == 0:
+                    logger.warning(
+                        "recorder feed queue full; dropping a frame to keep the model unblocked",
+                        dropped_total=self._dropped_frames,
+                    )
+                break
+            fed += 1
+        if fed:
+            markers.advance(fed / RECORDING_FPS)
 
-    def _video_frame(self, bundle: MediaBundle) -> npt.NDArray[Any] | None:
-        """Return the configured video track's frame, or the first video track."""
-        if self._video_track is not None:
-            track = bundle.get_track(self._video_track)
-            if track is not None:
-                return track.data
-        videos = bundle.get_tracks_by_kind(TrackKind.VIDEO)
-        return videos[0].data if videos else None
+    def _video_frames(self, bundle: MediaBundle) -> list[npt.NDArray[Any]]:
+        """Split the recorded video track into single ``(H, W, 3)`` frames.
+
+        A batched track ``(N, H, W, 3)`` becomes ``N`` frames; an unbatched one
+        is a single frame. Empty when the bundle carries no video.
+        """
+        track = bundle.get_track(self._video_track) if self._video_track is not None else None
+        if track is None:
+            videos = bundle.get_tracks_by_kind(TrackKind.VIDEO)
+            track = videos[0] if videos else None
+        if track is None:
+            return []
+        data = track.data
+        if data.ndim == 4:
+            return [data[i] for i in range(data.shape[0])]
+        return [data]
 
     def _build_encoder(self, bundle: MediaBundle) -> None:
         """Resolve the tracks to record and spawn the encoder from a real frame."""
@@ -439,10 +438,16 @@ class Recorder:
             config=self._config,
             has_audio=self._has_audio,
             audio_sample_rate=self._audio_sample_rate,
+            frame_rate=RECORDING_FPS,
         )
 
     def _feed_loop(self) -> None:
-        """Drain the feed queue into the encoder, disabling on encoder failure."""
+        """Drain the feed queue into the encoder, disabling on encoder failure.
+
+        Each item is a video frame and the audio samples for its grid slot, both
+        already sized to the recording grid, so the worker only writes bytes and
+        the encoder's PTS derives from the fixed input frame rate.
+        """
         while True:
             if self._feed_stop.is_set() and self._feed_queue.empty():
                 return
@@ -456,35 +461,31 @@ class Recorder:
             if encoder is None:
                 continue
             video, audio = item
-            now = time.monotonic()
-            dt = now - self._last_video_wall_t if self._last_video_wall_t > 0.0 else 1.0 / 30.0
-            self._last_video_wall_t = now
             try:
                 encoder.feed_video(video)
-                if self._has_audio:
-                    target = max(0, round(self._audio_sample_rate * dt))
-                    chunk = self._next_audio_chunk(audio, target)
-                    if chunk is not None:
-                        encoder.feed_audio(chunk)
+                if self._has_audio and audio is not None:
+                    encoder.feed_audio(audio)
             except Exception:
                 logger.exception("recorder encoder feed failed; disabling recording")
                 self._disabled = True
                 self._drain_feed_queue()
                 return
 
-    def _next_audio_chunk(self, model_audio: _AudioArray | None, target: int) -> _AudioArray | None:
-        """Produce exactly *target* samples, echoing model audio and padding silence.
+    def _buffer_audio(self, bundle: MediaBundle) -> None:
+        """Append a chunk's audio to the jitter buffer, capped at one second.
 
-        *target* is ``sample_rate * dt`` for the accompanying video frame, so each
-        batch covers the same wall-clock interval as the frame and the audio DTS
-        tracks the video PTS. Surplus is buffered up to a one-second cap.
+        The whole chunk's audio is buffered once; :meth:`_take_audio` then pulls a
+        grid slot's worth per recorded frame, so the audio DTS tracks the video
+        PTS regardless of how the chunk's frames map onto the grid.
         """
-        if target <= 0:
-            return None
-        if model_audio is not None and model_audio.size > 0:
-            flat = np.ascontiguousarray(model_audio, dtype=np.int16).reshape(-1)
-            self._audio_jitter_buf.append(flat)
-            self._audio_buffered_samples += int(flat.size)
+        if self._audio_track is None:
+            return
+        track = bundle.get_track(self._audio_track)
+        if track is None or track.data.size == 0:
+            return
+        flat = np.ascontiguousarray(track.data, dtype=np.int16).reshape(-1)
+        self._audio_jitter_buf.append(flat)
+        self._audio_buffered_samples += int(flat.size)
         cap = self._audio_sample_rate
         while self._audio_buffered_samples > cap:
             head = self._audio_jitter_buf[0]
@@ -495,6 +496,11 @@ class Recorder:
             else:
                 self._audio_jitter_buf[0] = head[drop:]
                 self._audio_buffered_samples -= drop
+
+    def _take_audio(self, target: int) -> _AudioArray | None:
+        """Pull exactly *target* samples from the jitter buffer, padding silence."""
+        if target <= 0:
+            return None
         out = np.zeros(target, dtype=np.int16)
         filled = 0
         while filled < target and self._audio_jitter_buf:

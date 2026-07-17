@@ -33,6 +33,7 @@ from reactor_runtime.core import (
     ConnId,
     InputFrame,
     MediaBundle,
+    MediaChunk,
     RuntimeConfig,
     TransitionEvent,
 )
@@ -331,7 +332,7 @@ class FakeConnection:
 
     def send_message(self, payload: bytes | str) -> None: ...
 
-    def send_media(self, bundle: MediaBundle) -> None: ...
+    def send_media(self, chunk: MediaChunk) -> None: ...
 
     def resume_track(self, name: str) -> None: ...
 

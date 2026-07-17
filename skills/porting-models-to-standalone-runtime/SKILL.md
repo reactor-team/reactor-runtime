@@ -102,18 +102,17 @@ There is no upload store, and an `@event` cannot take an uploaded-file argument.
 A command that consumed an upload must be reworked to take the data over an
 input track instead.
 
-## `buffer_size` default changed (4 -> 10)
+## Pacing moved out of the model — `buffer_size` and `output_buffer` are gone
 
-It is still a class attribute controlling the output queue depth, but the
-default is now 10 (it was 4). If the model relied on the old shallow default for
-latency, set `buffer_size` explicitly.
-
-## Private `output_buffer` internals renamed
-
-The output buffer's internal queue is `_queue`, not `_q`. Code that poked
-`self.output_buffer._q` (e.g. a latency probe reading `qsize()`) breaks. There is
-no public queue-depth getter — drop the probe or guard it; do not depend on
-private attributes.
+The model no longer paces its own output. `emit()` hands the whole batch of
+frames straight downstream, tagged with the rate they should play out at
+(measured from `compute_time` when given, else the class `fps`); the transport
+paces each connection itself. There is no `buffer_size` class attribute and no
+`self.output_buffer` — drop any reference to either. A model that set
+`buffer_size` for latency simply removes it; a probe that read
+`self.output_buffer._q` / `_queue` has nothing to read and should be dropped. The
+model's only output concern is emitting media chunks at whatever rate it
+produces them.
 
 ## What did not change
 

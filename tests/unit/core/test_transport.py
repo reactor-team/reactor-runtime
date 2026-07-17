@@ -8,7 +8,7 @@ from reactor_runtime.core import (
     ConnectionSink,
     ConnId,
     InputFrame,
-    MediaBundle,
+    MediaChunk,
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion
 
@@ -26,7 +26,7 @@ class FakeConnection:
     def send_message(self, payload: bytes | str) -> None:
         self.sent.append(payload)
 
-    def send_media(self, bundle: MediaBundle) -> None:
+    def send_media(self, chunk: MediaChunk) -> None:
         pass
 
     def resume_track(self, name: str) -> None:

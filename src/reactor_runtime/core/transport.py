@@ -16,7 +16,7 @@ from reactor_runtime.core.values import (
     ConnectionCapabilities,
     ConnId,
     InputFrame,
-    MediaBundle,
+    MediaChunk,
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion
 
@@ -57,8 +57,13 @@ class Connection(Protocol):
         binary frame) — so the connection carries both.
         """
 
-    def send_media(self, bundle: MediaBundle) -> None:
-        """Send a media bundle, or do nothing when the wire carries no media."""
+    def send_media(self, chunk: MediaChunk) -> None:
+        """Hand a media chunk to the connection, or do nothing when it carries no media.
+
+        The chunk is unpaced — a batch of frames tagged with the rate they should
+        play out at. The connection owns pacing it to a steady wire cadence; the
+        runner never sees a single frame.
+        """
 
     def resume_track(self, name: str) -> None:
         """Resume the named outbound track (publisher arbitration)."""

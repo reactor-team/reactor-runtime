@@ -62,7 +62,9 @@ def _frame() -> Frame:
 def _ready(pipe: ReactorPipeline) -> None:
     """Bring the loop-bound state (including the generator lock) up."""
     pipe._on_loop_ready()
-    pipe.bind_output(broadcast=lambda message: None, addressed=lambda *args: None)
+    pipe.bind_output(
+        broadcast=lambda message: None, addressed=lambda *args: None, media=lambda chunk: None
+    )
 
 
 # -- contract wiring ----------------------------------------------------------

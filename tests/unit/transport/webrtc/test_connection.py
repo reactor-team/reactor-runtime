@@ -4,7 +4,8 @@ from collections.abc import Callable
 import numpy as np
 from conftest import FakePeer
 
-from reactor_runtime.core import Connection, ConnId, InputFrame, MediaBundle
+from reactor_runtime.core import Connection, ConnId, InputFrame, MediaBundle, MediaChunk
+from reactor_runtime.core.values import TrackData, TrackInfo, TrackKind
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.transport.webrtc import (
     PeerStats,
@@ -82,18 +83,57 @@ async def test_outbound_commands_delegate_to_peer(
     out_av_tracks: TrackMap,
 ) -> None:
     conn = await _connect(fake_peer, factory_for(fake_peer), out_av_tracks)
-    bundle = MediaBundle()
     conn.send_message(b"payload")
     conn.send_message('{"type":"current_mode"}')
-    conn.send_media(bundle)
     conn.resume_track("main_video")
     conn.pause_track("main_video")
     await conn.add_ice(IceCandidate("cand", "0", 0))
     assert fake_peer.messages == [b"payload", '{"type":"current_mode"}']
-    assert fake_peer.sent_media == [bundle]
     assert fake_peer.resumed == ["main_video"]
     assert fake_peer.paused == ["main_video"]
     assert fake_peer.ice == [IceCandidate("cand", "0", 0)]
+
+
+def _video_chunk(fps: float = 200.0) -> MediaChunk:
+    info = TrackInfo(name="main_video", kind=TrackKind.VIDEO)
+    data = np.zeros((4, 4, 3), dtype=np.uint8)
+    bundle = MediaBundle(tracks={"main_video": TrackData(info=info, data=data)})
+    return MediaChunk(bundle=bundle, fps=fps, n_frames=1)
+
+
+async def test_send_media_paces_a_chunk_to_the_peer(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    conn = await _connect(fake_peer, factory_for(fake_peer), out_av_tracks)
+    # The pacer runs only once the wire is connected; before then a submitted
+    # chunk waits without reaching the peer.
+    conn.send_media(_video_chunk())
+    assert fake_peer.sent_media == []
+
+    fake_peer.fire_connected()
+    conn.send_media(_video_chunk())
+    await asyncio.sleep(0.1)
+    await conn.close()
+
+    assert len(fake_peer.sent_media) >= 1
+    delivered = fake_peer.sent_media[0]
+    assert delivered.tracks["main_video"].data.shape == (4, 4, 3)
+
+
+async def test_send_media_stops_pacing_after_close(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    conn = await _connect(fake_peer, factory_for(fake_peer), out_av_tracks)
+    fake_peer.fire_connected()
+    await conn.close()
+    fake_peer.sent_media.clear()
+    conn.send_media(_video_chunk())
+    await asyncio.sleep(0.05)
+    assert fake_peer.sent_media == []
 
 
 async def test_inbound_message_and_media_forwarded(

@@ -72,21 +72,21 @@ def _build_argv(
     height: int,
     has_audio: bool,
     audio_sample_rate: int,
+    frame_rate: int,
     config: RecordingConfig,
     video_read_fd: int,
     audio_read_fd: int | None,
 ) -> list[str]:
     """Construct the ffmpeg argv.
 
-    Video input uses ``-use_wallclock_as_timestamps 1``: ffmpeg stamps each frame
-    at the moment it reads it off the pipe, so the recorded PTS reflects the
-    model's actual emission cadence (dynamic on most models). The feed worker
-    therefore does not pace itself; it writes frames straight through and ffmpeg
-    owns the timeline. Audio derives its DTS from byte count and sample rate (no
-    wallclock flag) because wallclock-stamping a sample-rate-paced batch produces
-    non-monotonic per-sample DTS in AAC and stalls the encoder; audio is fed at
-    ``sample_rate * dt`` samples per video frame so its DTS still tracks
-    wall-clock one-to-one with the video PTS.
+    Video input declares a fixed ``-framerate`` (*frame_rate*): ffmpeg assigns
+    each frame a PTS of ``index / frame_rate``, so the recorded timeline is
+    media time derived from the model's declared cadence, not the wall-clock
+    moment a frame was read. The recorder resamples each chunk's frames onto that
+    grid before feeding, so a model running faster or slower than real time still
+    records at true duration. Audio derives its DTS from byte count and sample
+    rate; it is fed ``sample_rate / frame_rate`` samples per recorded frame, so
+    its DTS tracks the video PTS one-to-one.
 
     Compatibility choices:
 
@@ -94,13 +94,10 @@ def _build_argv(
       input and no output pixel format, libx264 selects yuv444p (Hi444PP), which
       many decoders and uploaders reject; yuv420p with the Main profile is the
       universally-compatible sub-profile.
-    * ``-vf setpts=PTS-STARTPTS`` re-anchors the wallclock-stamped video PTS to
-      session-relative, so segment timestamps start near zero rather than at a
-      Unix-epoch value some players treat as the playback start time.
     * A synthetic silent AAC track for video-only models via
-      ``-f lavfi -i anullsrc``, paced with ``-re`` and terminated with
-      ``-shortest`` on the video pipe's EOF, so every output carries an audio
-      track without a second subprocess or audio pipe.
+      ``-f lavfi -i anullsrc``, terminated with ``-shortest`` on the video pipe's
+      EOF, so every output carries an audio track without a second subprocess or
+      audio pipe.
     """
     # ``-probesize 32 -analyzeduration 0`` on every input: rawvideo and s16le are
     # fully described by their format flags, so the default multi-megabyte probe
@@ -121,8 +118,8 @@ def _build_argv(
         "rgb24",
         "-s",
         f"{width}x{height}",
-        "-use_wallclock_as_timestamps",
-        "1",
+        "-framerate",
+        str(frame_rate),
         # A large packet queue keeps the demuxer from parking when audio writes
         # outpace video at higher resolutions, which would otherwise wedge the
         # worker's blocking write to the pipe.
@@ -151,11 +148,10 @@ def _build_argv(
         ]
     else:
         # ``lavfi anullsrc`` is a virtual generator inside libavfilter — no extra
-        # subprocess, no audio pipe. ``-re`` paces it at native rate so the silent
-        # stream tracks wall-clock the way the real pipe-fed path does; ``-shortest``
-        # below terminates the otherwise-infinite stream on the video EOF.
+        # subprocess, no audio pipe. ``-shortest`` below terminates the otherwise
+        # infinite stream on the video EOF; the fixed-framerate video owns the
+        # timeline, so the silent track needs no real-time pacing.
         argv += [
-            "-re",
             "-f",
             "lavfi",
             "-i",
@@ -170,8 +166,6 @@ def _build_argv(
         "yuv420p",
         "-profile:v",
         "main",
-        "-vf",
-        "setpts=PTS-STARTPTS",
         "-preset",
         config.video_preset,
         "-crf",
@@ -228,6 +222,7 @@ class ChunkEncoder:
         config: RecordingConfig,
         has_audio: bool,
         audio_sample_rate: int,
+        frame_rate: int = 30,
     ) -> None:
         """Record the output directory and encode settings; spawn ffmpeg lazily."""
         self._output_dir = Path(output_dir)
@@ -235,6 +230,7 @@ class ChunkEncoder:
         self._config = config
         self._has_audio = has_audio
         self._audio_sample_rate = audio_sample_rate
+        self._frame_rate = frame_rate
 
         self._proc: subprocess.Popen[bytes] | None = None
         self._video_w: int | None = None
@@ -339,6 +335,7 @@ class ChunkEncoder:
             height=height,
             has_audio=self._has_audio,
             audio_sample_rate=self._audio_sample_rate,
+            frame_rate=self._frame_rate,
             config=self._config,
             video_read_fd=video_r,
             audio_read_fd=audio_r,

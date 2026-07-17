@@ -1,66 +1,59 @@
-"""Wall-clock marker bookkeeping for the recorder.
+# Copyright (c) 2026 Reactor Technologies, Inc. All rights reserved.
+"""Media-time marker bookkeeping for the recorder.
 
-Markers are wall-clock seconds aligned with the encoder's
-``-use_wallclock_as_timestamps`` input. When ``anchor_at_first_frame`` is set
-(the config's ``skip_leading_black``), ``t=0`` is the first real frame fed to the
-encoder rather than recorder-arm time, so a clip's marker range and the recorded
-media share one origin.
+Markers are seconds on the recorded media timeline, not wall-clock: the timeline
+advances by the play-out duration of the frames actually fed to the encoder
+(``n_frames / fps`` per chunk), so a clip's marker range and the recorded media
+share one origin regardless of how fast or slow the model produced the frames.
+The timeline starts at zero and only moves once the first real frame is fed.
 """
 
 from __future__ import annotations
 
 import threading
-import time
 
 
 class MarkerBookkeeper:
-    """Tracks the recording timeline origin and the first real frame.
+    """Tracks how much media time has been recorded.
 
-    Thread-safe: the clip-range math runs on the event loop while the
-    first-frame latch runs on the emission thread.
+    Thread-safe: the clip-range math runs on the event loop while the timeline
+    advances on the model thread as chunks are fed.
     """
 
-    def __init__(self, *, anchor_at_first_frame: bool = False) -> None:
-        """Start the timeline at construction, to be re-anchored on the first frame."""
-        self._anchor_at_first_frame = anchor_at_first_frame
-        self._session_start = time.monotonic()
-        self._recording_start: float | None = None
-        self._first_real_frame_marker: float | None = None
+    def __init__(self) -> None:
+        """Start the timeline at zero, before any frame is fed."""
+        self._media_time = 0.0
+        self._started = False
         self._lock = threading.Lock()
 
     def now_marker(self) -> float:
-        """Return seconds since the active timeline origin."""
+        """Return the recorded media time in seconds."""
         with self._lock:
-            origin = (
-                self._recording_start if self._recording_start is not None else self._session_start
-            )
-        return time.monotonic() - origin
+            return self._media_time
+
+    def advance(self, seconds: float) -> None:
+        """Add *seconds* of recorded media to the timeline and latch the start."""
+        if seconds <= 0:
+            return
+        with self._lock:
+            self._media_time += seconds
+            self._started = True
 
     @property
     def first_real_frame_marker(self) -> float | None:
-        """Return the session-relative time of the first real frame, or ``None``."""
+        """Return ``0.0`` once a frame has been fed, else ``None``.
+
+        The media timeline is anchored at the first real frame, so the first
+        frame is the origin.
+        """
         with self._lock:
-            return self._first_real_frame_marker
+            return 0.0 if self._started else None
 
     @property
     def recording_started(self) -> bool:
-        """Return whether a real frame has been seen.
-
-        Always ``True`` when not anchoring at the first frame, since the timeline
-        then runs from recorder-arm time.
-        """
-        if not self._anchor_at_first_frame:
-            return True
+        """Return whether any real frame has been fed."""
         with self._lock:
-            return self._recording_start is not None
-
-    def mark_first_real_frame(self) -> None:
-        """Latch the first real frame, re-anchoring the timeline when configured."""
-        with self._lock:
-            if self._first_real_frame_marker is None:
-                self._first_real_frame_marker = time.monotonic() - self._session_start
-            if self._anchor_at_first_frame and self._recording_start is None:
-                self._recording_start = time.monotonic()
+            return self._started
 
     def compute_clip_range(self, duration_seconds: float) -> tuple[float, float]:
         """Return ``(start, end)`` for a snap clip of *duration_seconds* ending now."""

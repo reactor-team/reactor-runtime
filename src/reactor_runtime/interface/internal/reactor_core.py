@@ -24,13 +24,12 @@ from reactor_runtime.core.values import (
     ConnId,
     InputFrame,
     MediaBundle,
+    MediaChunk,
     TrackData,
 )
 from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.input_buffer import InputBuffer
-from reactor_runtime.interface.internal.output_buffer import OutputBuffer
 from reactor_runtime.interface.tracks import Input, Output
-from reactor_runtime.interface.tracks.output import all_output_tracks
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +46,9 @@ AddressedSink = Callable[[ConnId, "ModelMessage | None", RequestId | None], None
 A ``None`` message is the bodyless acknowledgement of a command whose handler
 completed without returning one, so the client's awaited command resolves.
 """
+
+MediaSink = Callable[[MediaChunk], None]
+"""Receives each finished media chunk the model emits, unpaced, on the model thread."""
 
 FailureSink = Callable[[BaseException], None]
 """Receives the exception that ended :meth:`ReactorCore.run`, on the model thread."""
@@ -77,7 +79,6 @@ class ReactorCore:
     """
 
     fps: ClassVar[int] = 30
-    buffer_size: ClassVar[int] = 10
 
     def __init__(self) -> None:
         self._loop = asyncio.new_event_loop()
@@ -89,10 +90,8 @@ class ReactorCore:
 
         self._out_broadcast: BroadcastSink | None = None
         self._out_addressed: AddressedSink | None = None
+        self._out_media: MediaSink | None = None
         self._on_failure: FailureSink | None = None
-
-        self.output_buffer = OutputBuffer(all_output_tracks(), queue_depth=self.buffer_size)
-        self.output_buffer.set_fps(self.fps)
 
         self._input_buffers: dict[str, InputBuffer] = {}
         self._wire_input_buffers()
@@ -116,21 +115,29 @@ class ReactorCore:
     async def emit(
         self, output: Output, *, compute_time: float | None = None, drop: bool = False
     ) -> None:
-        """Hand a finished output to the emission buffer.
+        """Hand a finished output downstream as a media chunk.
 
-        Converts the typed *output* into a neutral bundle and submits it. When
-        *compute_time* is given, the emission rate adapts to the model's measured
-        throughput.
+        Converts the typed *output* into a neutral bundle and hands it to the
+        bound media sink as a :class:`MediaChunk`, tagged with the rate its
+        frames should play out at: the measured throughput when *compute_time* is
+        given, else the model's declared :attr:`fps`. Emission does not pace or
+        block — a consumer (a transport connection, a recorder) owns pacing and
+        any overflow handling downstream.
 
         Args:
             output: The produced output, one payload per declared track.
             compute_time: Wall-clock seconds spent producing it, if measured.
-            drop: Discard the frame when the buffer is full instead of blocking.
+            drop: Retained for source compatibility; overflow is now handled by
+                each downstream consumer, so this has no effect here.
         """
         bundle = self._to_bundle(output)
-        enqueued = await asyncio.to_thread(self.output_buffer.submit, bundle, drop=drop)
-        if enqueued and compute_time is not None and compute_time > 0:
-            self.output_buffer.set_fps(enqueued / compute_time)
+        n_frames = bundle.frame_count
+        if compute_time is not None and compute_time > 0:
+            fps = n_frames / compute_time
+        else:
+            fps = float(self.fps)
+        if self._out_media is not None:
+            self._out_media(MediaChunk(bundle=bundle, fps=fps, n_frames=n_frames))
         await asyncio.sleep(0)
 
     async def send(self, message: ModelMessage) -> None:
@@ -140,10 +147,13 @@ class ReactorCore:
 
     # -- outbound binding (called once by the bridge) -------------------------
 
-    def bind_output(self, *, broadcast: BroadcastSink, addressed: AddressedSink) -> None:
-        """Bind the outbound message sinks. Called once before the loop starts."""
+    def bind_output(
+        self, *, broadcast: BroadcastSink, addressed: AddressedSink, media: MediaSink
+    ) -> None:
+        """Bind the outbound sinks. Called once before the loop starts."""
         self._out_broadcast = broadcast
         self._out_addressed = addressed
+        self._out_media = media
 
     def bind_failure(self, callback: FailureSink) -> None:
         """Bind the sink that receives an unrecoverable crash of :meth:`run`.

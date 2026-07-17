@@ -111,7 +111,6 @@ class Brightness(ReactorPipeline):
     state: BrightnessState
     output: BrightnessOutput
     fps = FPS
-    buffer_size = 2
     _reference: UploadedFile | None = None
 
     def load(self, config_path: Path | None) -> None:
