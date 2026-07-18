@@ -1,0 +1,3 @@
+# OpenCV powers the video effects. Must be >=4.10: the runtime ships numpy 2.x,
+# and only opencv-python(-headless) 4.10+ is built against the numpy 2 ABI.
+opencv-python-headless>=4.10

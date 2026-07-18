@@ -1,13 +1,10 @@
 import logging
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
-from examples.passthrough import Passthrough
 from reactor_runtime.core import RuntimeConfig
 from reactor_runtime.http import HttpServer
-from reactor_runtime.interface.model import ModelContract
 from reactor_runtime.runner import Runner
 from reactor_runtime.serve import (
     _apply_env,
@@ -43,13 +40,6 @@ def _clear_adapter_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Run every test against a clean environment for the serve adapter."""
     for name in (*_WEBRTC_ENV, *_RUNTIME_ENV):
         monkeypatch.delenv(name, raising=False)
-
-
-@pytest.fixture(autouse=True)
-def _seed_registries(
-    isolate_interface_registries: None, register_model: Callable[[type], None]
-) -> None:
-    register_model(Passthrough)
 
 
 _MANIFEST = """\
@@ -136,30 +126,6 @@ def test_main_refuses_when_no_manifest_in_the_working_directory(
 
     with pytest.raises(SystemExit):
         main()
-
-
-def test_example_model_has_a_valid_contract() -> None:
-    contract = ModelContract.of(Passthrough)
-
-    assert "video" in contract.tracks
-    assert contract.tracks["video"].direction.value == "out"
-    assert "set_brightness" in contract.commands
-
-
-def test_example_model_reads_brightness_from_the_config_path(tmp_path: Path) -> None:
-    config = tmp_path / "config.yml"
-    config.write_text("brightness: 200\n")
-    model = Passthrough()
-    model.load(config)
-
-    assert model._brightness == 200
-
-
-def test_example_model_defaults_when_no_config_path() -> None:
-    model = Passthrough()
-    model.load(None)
-
-    assert model._brightness == 128
 
 
 def test_webrtc_config_falls_back_to_a_public_stun_when_unconfigured() -> None:

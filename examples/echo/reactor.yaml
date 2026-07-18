@@ -1,0 +1,16 @@
+runtime:
+  import: echo:Echo
+
+recording:
+  enabled: true
+  chunk_seconds: 4
+  clip_max_seconds: 300
+  video_track: main_video
+  audio_track: main_audio
+  video:
+    codec: h264
+    preset: veryfast
+    crf: 23
+  audio:
+    codec: aac
+    bitrate_kbps: 128
