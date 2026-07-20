@@ -1,0 +1,4 @@
+# Pillow draws the client-set caption over each frame. Must be >=10.1: the
+# scalable default font (ImageFont.load_default(size=...)) that keeps the caption
+# legible from 480p up to 2160p was added in 10.1.
+pillow>=10.1

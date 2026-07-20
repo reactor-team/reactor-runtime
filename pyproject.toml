@@ -48,6 +48,8 @@ Source = "https://github.com/reactor-team/reactor-runtime"
 [dependency-groups]
 dev = [
     "httpx>=0.28.1",
+    "opencv-python-headless>=4.10",
+    "pillow>=10.1",
     "pytest",
     "pytest-asyncio",
     "types-protobuf",

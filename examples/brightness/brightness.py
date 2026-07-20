@@ -1,11 +1,12 @@
 """Brightness — a generated, client-controllable gradient, built on ReactorPipeline.
 
-The smallest complete :class:`ReactorPipeline`: no model weights, no client
-media. It generates an animated gradient on ``main_video`` and a matching sine
-tone on ``main_audio``, driven entirely by a typed :class:`InputState`. The
-public state fields become ``set_paused`` / ``set_resolution`` commands
+A compact :class:`ReactorPipeline`: no model weights, no client media. It
+generates an animated gradient on ``main_video`` and a matching sine tone on
+``main_audio``, driven entirely by a typed :class:`InputState`. The public state
+fields become ``set_paused`` / ``set_resolution`` / ``set_text`` commands
 automatically — no handler boilerplate — and pausing yields :data:`Idle` so the
-stream holds without producing frames.
+stream holds without producing frames. The resolution goes up to ``2160p``
+(3840x2160), and a client-set caption is drawn over every frame.
 
 It also shows commands that reply with a typed message, so the schema links a
 command to its response: ``set_brightness`` overrides the auto-generated setter
@@ -18,7 +19,8 @@ command's ``responses.200``.
 
 It exercises the pipeline spine end to end: the ``inference()`` generator, typed
 state with auto-generated setters, ``Idle`` skips, adaptive-free fixed FPS, and
-multi-track (video + audio) output — all in pure NumPy, so it runs anywhere.
+multi-track (video + audio) output. The frame synthesis is NumPy; the caption is
+drawn with Pillow (``pillow``; see ``requirements.txt``).
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 
 from reactor_runtime import (
     Audio,
@@ -57,7 +60,12 @@ _RESOLUTIONS = {
     "480p": (480, 640),
     "720p": (720, 1280),
     "1080p": (1080, 1920),
+    "2160p": (2160, 3840),
 }
+
+# The caption height as a fraction of the frame height, so the text stays
+# legible from 480p up to 2160p rather than shrinking to a few pixels at 4K.
+_TEXT_HEIGHT_FRACTION = 0.05
 
 
 class BrightnessOutput(Output):
@@ -73,6 +81,7 @@ class BrightnessSnapshot(ModelMessage):
     brightness: float = MessageField(description="Active brightness multiplier.")
     paused: bool = MessageField(description="Whether frame generation is paused.")
     resolution: str = MessageField(description="Active output resolution.")
+    text: str = MessageField(description="Caption currently drawn over each frame.")
 
 
 class BrightnessSet(ModelMessage):
@@ -100,8 +109,13 @@ class BrightnessState(InputState):
     paused: bool = InputField(default=False, description="Pause frame generation.")
     resolution: str = InputField(
         default="480p",
-        choices=["480p", "720p", "1080p"],
-        description="Output resolution.",
+        choices=["480p", "720p", "1080p", "2160p"],
+        description="Output resolution (2160p is 4K UHD).",
+    )
+    text: str = InputField(
+        default="",
+        max_length=200,
+        description="Caption drawn over every frame; empty draws nothing.",
     )
 
 
@@ -129,6 +143,7 @@ class Brightness(ReactorPipeline):
             brightness=self.state.brightness,
             paused=self.state.paused,
             resolution=self.state.resolution,
+            text=self.state.text,
         )
 
     @event(name="set_brightness", description="Set the brightness and confirm the value in effect.")
@@ -173,6 +188,8 @@ class Brightness(ReactorPipeline):
             height, width = _RESOLUTIONS.get(self.state.resolution, (480, 640))
             brightness = self.state.brightness
             frame = _generate_frame(width, height, frame_count, brightness)
+            if self.state.text:
+                frame = _draw_text(frame, self.state.text)
             audio, tone_phase = _generate_tone(brightness, tone_phase)
             frame_count += 1
             yield BrightnessOutput(main_video=frame, main_audio=audio)
@@ -194,6 +211,28 @@ def _generate_frame(width: int, height: int, frame_count: int, brightness: float
 
     frame: np.ndarray = np.clip(img * brightness, 0, 255).astype(np.uint8)
     return frame
+
+
+def _draw_text(frame: np.ndarray, text: str) -> np.ndarray:
+    """Draw *text* near the bottom of the frame, outlined for legibility.
+
+    The font scales with the frame height (:data:`_TEXT_HEIGHT_FRACTION`) so the
+    caption reads the same at 480p and at 2160p.
+    """
+    height = frame.shape[0]
+    font = ImageFont.load_default(size=max(12, int(height * _TEXT_HEIGHT_FRACTION)))
+    image = Image.fromarray(frame)
+    draw = ImageDraw.Draw(image)
+    origin = (int(height * 0.02), height - int(height * 0.10))
+    draw.text(
+        origin,
+        text,
+        font=font,
+        fill=(255, 255, 255),
+        stroke_width=max(1, height // 240),
+        stroke_fill=(0, 0, 0),
+    )
+    return np.asarray(image)
 
 
 def _generate_tone(brightness: float, phase: float) -> tuple[np.ndarray, float]:
