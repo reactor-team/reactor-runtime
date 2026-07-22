@@ -102,21 +102,15 @@ async def test_health_is_503_once_terminated() -> None:
     assert set(response.json()) == {"status", "detail"}
 
 
-async def test_enforce_addresses_the_fixed_session_id(harness: Harness) -> None:
+async def test_moderated_stop_returns_200(harness: Harness) -> None:
     await harness.client.post("/start_session", json={})
 
-    accepted = await harness.client.post(
-        f"/sessions/{FIXED_SESSION_ID}/enforce", json={"block": False}
-    )
-    unknown = await harness.client.post("/sessions/some-other-id/enforce", json={"block": False})
+    response = await harness.client.post("/stop_session", json={"moderate": True})
 
-    assert accepted.status_code == 200
-    assert unknown.status_code == 404
+    assert response.status_code == 200
 
 
-async def test_enforce_without_a_session_is_400(harness: Harness) -> None:
-    response = await harness.client.post(
-        f"/sessions/{FIXED_SESSION_ID}/enforce", json={"block": True}
-    )
+async def test_moderated_stop_with_nothing_running_conflicts(harness: Harness) -> None:
+    response = await harness.client.post("/stop_session", json={"moderate": True})
 
-    assert response.status_code == 400
+    assert response.status_code == 409

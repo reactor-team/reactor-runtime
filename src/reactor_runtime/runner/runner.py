@@ -498,7 +498,7 @@ class Runner(ServiceComponent, ConnectionSink):
         if not self._sm.send(SessionEvent.START_SESSION, params=dict(params)):
             raise SessionTransitionError("start", self._sm.current_state)
 
-    def stop_session(self) -> None:
+    def stop_session(self, *, moderated: bool = False) -> None:
         """Close the active session, leaving the model loaded and ready again.
 
         Not idempotent, like :meth:`start_session`: a stop is legal only from a
@@ -506,24 +506,19 @@ class Runner(ServiceComponent, ConnectionSink):
         a session already ``CLOSING``, or a ``TERMINATED`` process is rejected
         and surfaces the current state.
 
+        A moderated stop is a content-moderation verdict against the session:
+        it ends with :attr:`~reactor_runtime.core.model.EndReason.MODERATED`
+        and the clients are told why before their connections close.
+
+        Args:
+            moderated: Whether the stop enforces a moderation verdict.
+
         Raises:
             SessionTransitionError: If there is no running session to stop.
         """
-        if not self._sm.send(SessionEvent.STOP_SESSION, reason=EndReason.STOPPED):
+        reason = EndReason.MODERATED if moderated else EndReason.STOPPED
+        if not self._sm.send(SessionEvent.STOP_SESSION, reason=reason):
             raise SessionTransitionError("stop", self._sm.current_state)
-
-    def enforce(self, block: bool) -> None:
-        """Apply a moderation verdict to the active session.
-
-        A blocking verdict ends the running session as moderated; a non-blocking
-        verdict is a no-op. This is the minimal enforcement surface — the
-        moderation tap that feeds richer verdicts layers on later.
-
-        Args:
-            block: Whether the verdict blocks the session.
-        """
-        if block and self._sm.current_state in _RUNNING_STATES:
-            self._sm.send(SessionEvent.STOP_SESSION, reason=EndReason.MODERATED)
 
     def new_conn_id(self) -> ConnId:
         """Mint a fresh connection id, delegating to the manager that owns the namespace.
@@ -788,6 +783,21 @@ class Runner(ServiceComponent, ConnectionSink):
             ],
         )
 
+    def _broadcast_moderation_notice(self) -> None:
+        """Tell every client the session is ending on a moderation verdict.
+
+        Broadcast synchronously as the session enters ``CLOSING``, before the
+        connection teardown is spawned, so the frame is queued on each ordered
+        channel ahead of its close and the client sees the verdict rather than a
+        bare disconnect.
+        """
+        self._connections.broadcast_response(
+            lambda version: self._codec_for(version).encode_moderation(
+                action="terminate",
+                message="Session terminated due to policy violation.",
+            )
+        )
+
     def _dispatch_transition(self, transition: Transition) -> None:
         """Run every side effect a session transition drives, in one place.
 
@@ -828,6 +838,8 @@ class Runner(ServiceComponent, ConnectionSink):
             self._reset_orphan_timeout(transition.to_state)
         if entered and transition.to_state is SessionState.CLOSING and self._loop is not None:
             reason = transition.detail.get("reason", EndReason.STOPPED)
+            if reason is EndReason.MODERATED:
+                self._broadcast_moderation_notice()
             self._uploads.clear()
             self._spawn_teardown(asyncio.to_thread(self._recorder.stop))
             self._spawn_teardown(self._close_session(reason))

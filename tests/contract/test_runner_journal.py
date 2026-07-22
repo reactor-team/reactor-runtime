@@ -129,13 +129,11 @@ async def test_a_clientless_session_times_out_and_unwinds() -> None:
             await journal.aclose()
 
 
-async def test_a_blocking_enforcement_stops_the_session_as_moderated(harness: Harness) -> None:
+async def test_a_moderated_stop_journals_the_session_as_moderated(harness: Harness) -> None:
     journal = JournalReader(harness.runner)
     try:
         await harness.client.post("/start_session", json={})
-        response = await harness.client.post(
-            "/sessions/00000000-0000-0000-0000-000000000000/enforce", json={"block": True}
-        )
+        response = await harness.client.post("/stop_session", json={"moderate": True})
         assert response.status_code == 200
 
         stopped = await journal.expect("stop_session")

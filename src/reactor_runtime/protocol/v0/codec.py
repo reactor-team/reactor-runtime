@@ -150,6 +150,8 @@ class V0Codec(Codec):
             return Channel.DATA, _runtime("clipReady", _clip_ready_to_dict(message.clip_ready))
         if which == "clip_failed":
             return Channel.DATA, _runtime("clipFailed", {"reason": message.clip_failed.reason})
+        if which == "moderation":
+            return Channel.DATA, _runtime("moderation", _moderation_to_dict(message.moderation))
         if which == "publish_track":
             return Channel.CONTROL, _dump(
                 {
@@ -307,6 +309,11 @@ class V0Codec(Codec):
                 kind=_KIND.MESSAGE_KIND_RESPONSE,
                 clip_failed=platform_pb2.ClipFailed(reason=str(data.get("reason", ""))),
             )
+        if kind == "moderation":
+            return control_pb2.ControlServerMessage(
+                kind=_KIND.MESSAGE_KIND_NOTIFICATION,
+                moderation=_dict_to_moderation(data),
+            )
         raise UnsupportedMessageError(f"unrecognized v0 runtime server message: {kind!r}")
 
 
@@ -328,6 +335,26 @@ def _clip_ready_to_dict(clip: platform_pb2.ClipReady) -> dict[str, Any]:
         "predicted_ready_at_ms": clip.predicted_ready_at_ms,
         "playlist_url": clip.playlist_url,
     }
+
+
+def _moderation_to_dict(moderation: platform_pb2.Moderation) -> dict[str, Any]:
+    return {
+        "action": moderation.action,
+        "input_kind": moderation.input_kind,
+        "command": moderation.command,
+        "categories": list(moderation.categories),
+        "message": moderation.message,
+    }
+
+
+def _dict_to_moderation(data: dict[str, Any]) -> platform_pb2.Moderation:
+    return platform_pb2.Moderation(
+        action=str(data.get("action", "")),
+        input_kind=str(data.get("input_kind", "")),
+        command=str(data.get("command", "")),
+        categories=[str(c) for c in data.get("categories") or []],
+        message=str(data.get("message", "")),
+    )
 
 
 def _dict_to_clip_ready(data: dict[str, Any]) -> platform_pb2.ClipReady:
