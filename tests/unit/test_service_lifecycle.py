@@ -10,6 +10,7 @@ from reactor_runtime.core import (
     Health,
     HealthStatus,
     RuntimeConfig,
+    RuntimeState,
     SessionEvent,
     SessionState,
     TransitionEvent,
@@ -180,9 +181,11 @@ async def test_shutdown_winds_down_the_rest_when_a_component_fails(
 def test_health_aggregates_to_the_worst_status() -> None:
     service = Service()
     service.add(FakeComponent("runner", health=Health.healthy()))
-    service.add(FakeComponent("http", health=Health(HealthStatus.DEGRADED, "warming up")))
+    service.add(FakeComponent("http", health=Health(HealthStatus.UNHEALTHY, "not started")))
 
-    assert service.health().status is HealthStatus.DEGRADED
+    rolled = service.health()
+    assert rolled.status is HealthStatus.UNHEALTHY
+    assert rolled.detail == "not started"
 
 
 # --- the HTTP edge is up before the model finishes loading (REA-3604) ---------
@@ -219,9 +222,9 @@ async def test_http_surface_is_up_before_the_model_finishes_loading(
     _LOAD_GATE.clear()
     monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: _GatedModel)
     cfg = RuntimeConfig(model_ref="x:_GatedModel", host="127.0.0.1", port=0)
-    runner = Runner(cfg)
-    http = HttpServer(cfg, runner, [])
     service = Service()
+    runner = Runner(cfg)
+    http = HttpServer(cfg, runner, [], process_health=service.health)
     service.add(runner)
     service.add(http)
 
@@ -235,7 +238,11 @@ async def test_http_surface_is_up_before_the_model_finishes_loading(
         assert http._server is not None
         assert http._server.started
         assert _state(runner) is SessionState.CREATED
-        assert runner.health().status is HealthStatus.DEGRADED
+        # A loading model is healthy — the lifecycle word, not the verdict,
+        # says it cannot serve yet — so the process aggregate is healthy too.
+        assert runner.health().status is HealthStatus.HEALTHY
+        assert runner.state() is RuntimeState.LOADING
+        assert service.health().status is HealthStatus.HEALTHY
 
         # Releasing the load lets the runner reach READY and journal the init fact,
         # which is emitted while the HTTP surface is already live.
@@ -245,6 +252,7 @@ async def test_http_surface_is_up_before_the_model_finishes_loading(
                 break
             await asyncio.sleep(0.01)
         assert _state(runner) is SessionState.READY
+        assert runner.state() is RuntimeState.AVAILABLE
         journalled = [event for _seq, event in runner._events._history]
         assert any(
             isinstance(event, TransitionEvent)

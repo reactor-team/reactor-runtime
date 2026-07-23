@@ -3,7 +3,7 @@ import asyncio
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from reactor_runtime.core import HealthStatus, RuntimeConfig
+from reactor_runtime.core import Health, HealthStatus, RuntimeConfig
 from reactor_runtime.http import HttpServer
 from reactor_runtime.runner.runner import Runner
 from reactor_runtime.transport.router import SessionControl, TransportRouter
@@ -31,7 +31,7 @@ def test_mounts_route_groups_and_each_transport() -> None:
     runner = _runner()
     fake = FakeRouter()
 
-    server = HttpServer(RuntimeConfig(model_ref="fake:Model"), runner, [fake])
+    server = HttpServer(RuntimeConfig(model_ref="fake:Model"), runner, [fake], Health.healthy)
 
     assert fake.mounted_with is runner
     paths = {getattr(route, "path", "") for route in server._app.routes}
@@ -40,7 +40,7 @@ def test_mounts_route_groups_and_each_transport() -> None:
 
 
 def test_cors_preflight_is_answered() -> None:
-    server = HttpServer(RuntimeConfig(model_ref="fake:Model"), _runner(), [])
+    server = HttpServer(RuntimeConfig(model_ref="fake:Model"), _runner(), [], Health.healthy)
     client = TestClient(server._app)
 
     response = client.options(
@@ -57,7 +57,10 @@ def test_cors_preflight_is_answered() -> None:
 
 async def test_start_drain_stop_lifecycle() -> None:
     server = HttpServer(
-        RuntimeConfig(model_ref="fake:Model", host="127.0.0.1", port=0), _runner(), []
+        RuntimeConfig(model_ref="fake:Model", host="127.0.0.1", port=0),
+        _runner(),
+        [],
+        Health.healthy,
     )
 
     await server.start()
@@ -78,7 +81,10 @@ async def test_start_drain_stop_lifecycle() -> None:
 
 async def test_stop_swallows_a_failed_serve_task() -> None:
     server = HttpServer(
-        RuntimeConfig(model_ref="fake:Model", host="127.0.0.1", port=0), _runner(), []
+        RuntimeConfig(model_ref="fake:Model", host="127.0.0.1", port=0),
+        _runner(),
+        [],
+        Health.healthy,
     )
 
     async def boom() -> None:
@@ -95,6 +101,7 @@ async def test_graceful_shutdown_is_bounded_by_the_grace_period() -> None:
         RuntimeConfig(model_ref="fake:Model", host="127.0.0.1", port=0, grace_period=7.0),
         _runner(),
         [],
+        Health.healthy,
     )
 
     await server.start()

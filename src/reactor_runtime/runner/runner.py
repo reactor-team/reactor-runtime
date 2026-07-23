@@ -37,6 +37,7 @@ from reactor_runtime.core import (
     InputFrame,
     MediaChunk,
     RuntimeConfig,
+    RuntimeState,
     ServiceComponent,
     SessionEnded,
     SessionEvent,
@@ -64,6 +65,19 @@ from reactor_runtime.transport.router import (
 from reactor_runtime.upload_store import UnknownUploadError, UploadStore
 
 _RUNNING_STATES = frozenset({SessionState.WAITING, SessionState.STREAMING, SessionState.ORPHANED})
+
+# The lifecycle word reported for each session state. Coarser than the session
+# machine on purpose: an outside observer cares whether the process is loading,
+# free, occupied, or finished — not which serving sub-state the session is in.
+_RUNTIME_STATES: dict[SessionState, RuntimeState] = {
+    SessionState.CREATED: RuntimeState.LOADING,
+    SessionState.READY: RuntimeState.AVAILABLE,
+    SessionState.WAITING: RuntimeState.SERVING,
+    SessionState.STREAMING: RuntimeState.SERVING,
+    SessionState.ORPHANED: RuntimeState.SERVING,
+    SessionState.CLOSING: RuntimeState.SERVING,
+    SessionState.TERMINATED: RuntimeState.TERMINATED,
+}
 
 # How long to wait for an upload's bytes to arrive when a command or notification
 # references it before they are written. A client references an upload over the
@@ -270,12 +284,18 @@ class Runner(ServiceComponent, ConnectionSink):
             await asyncio.sleep(0.01)
 
     def health(self) -> Health:
-        """Report readiness from the session state and whether the model is up."""
+        """Report unhealthy only for a terminated session.
+
+        Every other state is healthy: a model still loading is working as
+        intended, just not yet available — :meth:`state` carries that word.
+        """
         if self._sm.current_state is SessionState.TERMINATED:
             return Health(HealthStatus.UNHEALTHY, "session terminated")
-        if self._bridge is None:
-            return Health(HealthStatus.DEGRADED, "model not started")
         return Health.healthy()
+
+    def state(self) -> RuntimeState:
+        """Report the lifecycle word for the session's current state."""
+        return _RUNTIME_STATES[self._sm.current_state]
 
     # -- inbound (ConnectionSink) ---------------------------------------------
 

@@ -7,6 +7,7 @@ from reactor_runtime.core import (
     HealthStatus,
     InputFrame,
     MediaBundle,
+    RuntimeState,
     TrackData,
     TrackDirection,
     TrackInfo,
@@ -60,18 +61,31 @@ def test_connection_capabilities_default_to_no_media() -> None:
     assert caps.carries_audio is False
 
 
+def test_health_status_is_two_valued() -> None:
+    assert {status.value for status in HealthStatus} == {"healthy", "unhealthy"}
+
+
+def test_runtime_state_names_the_four_lifecycle_words() -> None:
+    assert [state.value for state in RuntimeState] == [
+        "loading",
+        "available",
+        "serving",
+        "terminated",
+    ]
+
+
 def test_health_aggregate_keeps_the_worst_status() -> None:
     rolled = Health.aggregate(
         [
             Health.healthy(),
-            Health(HealthStatus.DEGRADED, "cache cold"),
             Health(HealthStatus.UNHEALTHY, "model thread down"),
+            Health(HealthStatus.UNHEALTHY, "http server not started"),
         ]
     )
     assert rolled.status is HealthStatus.UNHEALTHY
     assert rolled.detail is not None
     assert "model thread down" in rolled.detail
-    assert "cache cold" in rolled.detail
+    assert "http server not started" in rolled.detail
 
 
 def test_health_aggregate_of_nothing_is_healthy() -> None:
@@ -84,8 +98,8 @@ def test_health_aggregate_omits_healthy_part_details() -> None:
     rolled = Health.aggregate(
         [
             Health.healthy("warming complete"),
-            Health(HealthStatus.DEGRADED, "cache cold"),
+            Health(HealthStatus.UNHEALTHY, "model thread down"),
         ]
     )
-    assert rolled.status is HealthStatus.DEGRADED
-    assert rolled.detail == "cache cold"
+    assert rolled.status is HealthStatus.UNHEALTHY
+    assert rolled.detail == "model thread down"

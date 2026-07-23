@@ -248,7 +248,9 @@ def _assemble(
     drive and the transport reports into. The WebRTC transport is mounted with
     the selected media engine, so a client can negotiate a peer connection and
     stream to and from the model. The runner's shutdown hook is wired to the
-    service so a failed model load brings the whole process down.
+    service so a failed model load brings the whole process down, and the
+    service's aggregate health is wired into the HTTP server so ``/health``
+    answers for every component of the process.
 
     Args:
         cfg: The configuration for this runtime process.
@@ -267,7 +269,7 @@ def _assemble(
     runner.request_shutdown = service.request_shutdown
     service.add(runner)
     transport = WebRtcRouter(webrtc or WebRtcConfig(), peer_factory)
-    service.add(HttpServer(cfg, runner, transports=[transport]))
+    service.add(HttpServer(cfg, runner, transports=[transport], process_health=service.health))
     return service
 
 

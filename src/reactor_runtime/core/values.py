@@ -266,18 +266,34 @@ class ConnectionCapabilities:
 
 
 class HealthStatus(Enum):
-    """A component's readiness, used to aggregate process readiness."""
+    """A component's verdict on itself: working or broken.
+
+    Deliberately two-valued so the verdict is machine-checkable — a probe
+    branches on it without interpretation. The lifecycle word a human reads
+    alongside it is :class:`RuntimeState`.
+    """
 
     UNHEALTHY = "unhealthy"
-    DEGRADED = "degraded"
     HEALTHY = "healthy"
 
 
-_SEVERITY: dict[HealthStatus, int] = {
-    HealthStatus.UNHEALTHY: 0,
-    HealthStatus.DEGRADED: 1,
-    HealthStatus.HEALTHY: 2,
-}
+class RuntimeState(Enum):
+    """The lifecycle word describing what the process is doing right now.
+
+    Orthogonal to :class:`HealthStatus`: where the status says whether the
+    process is working, the state says what it is up to.
+
+    States:
+        LOADING: The model is still loading; a session cannot be opened yet.
+        AVAILABLE: The model is loaded and idle, ready to open a session.
+        SERVING: A session is open, from its start through its teardown.
+        TERMINATED: The process is finished and will not serve again.
+    """
+
+    LOADING = "loading"
+    AVAILABLE = "available"
+    SERVING = "serving"
+    TERMINATED = "terminated"
 
 
 @dataclass(frozen=True)
@@ -302,14 +318,14 @@ class Health:
         """Combine component reports into one, keeping the worst status.
 
         An empty input is healthy: a process with nothing to report is ready.
-        The details of every non-healthy part are joined so the reason for a
-        degraded or unhealthy roll-up is preserved.
+        The details of every unhealthy part are joined so the reason for an
+        unhealthy roll-up is preserved.
         """
         worst = HealthStatus.HEALTHY
         details: list[str] = []
         for part in parts:
-            if _SEVERITY[part.status] < _SEVERITY[worst]:
-                worst = part.status
-            if part.status is not HealthStatus.HEALTHY and part.detail:
-                details.append(part.detail)
+            if part.status is HealthStatus.UNHEALTHY:
+                worst = HealthStatus.UNHEALTHY
+                if part.detail:
+                    details.append(part.detail)
         return cls(worst, "; ".join(details) or None)
