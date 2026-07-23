@@ -40,6 +40,7 @@ dependencies = [
     "protobuf>=7.35.1",
     "pygobject>=3.56.3",
     "pyyaml>=6.0.3",
+    "reactor-webrtc>=0.1.0",
     "uvicorn>=0.49.0",
 ]
 
