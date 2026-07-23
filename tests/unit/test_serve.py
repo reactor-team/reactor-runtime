@@ -3,20 +3,38 @@ from pathlib import Path
 
 import pytest
 
-from reactor_runtime.core import RuntimeConfig
+from reactor_runtime import serve
+from reactor_runtime.core import ConnId, RuntimeConfig
 from reactor_runtime.http import HttpServer
+from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.runner import Runner
 from reactor_runtime.serve import (
     _apply_env,
     _assemble,
     _load_config,
     _log_level_from_env,
+    _parse_args,
     _port_range_from_env,
+    _select_peer_factory,
     _version,
     _webrtc_config_from_env,
     main,
 )
-from reactor_runtime.transport.webrtc.config import IceTransportPolicy
+from reactor_runtime.transport.webrtc.config import IceTransportPolicy, WebRtcConfig
+from reactor_runtime.transport.webrtc.peer import WebRtcPeer
+from reactor_runtime.transport.webrtc.signaling import SdpAnswer, SdpOffer, TrackMap
+
+
+async def _unused_factory(
+    conn_id: ConnId,
+    offer: SdpOffer,
+    tracks: TrackMap,
+    config: WebRtcConfig,
+    version: ProtocolVersion,
+) -> tuple[WebRtcPeer, SdpAnswer]:
+    """A peer factory that must never be invoked during assembly."""
+    raise AssertionError("peer factory must not be invoked during assembly")
+
 
 _WEBRTC_ENV = (
     "STUN_SERVERS",
@@ -53,7 +71,7 @@ runtime:
 
 
 def test_assemble_hooks_on_runner_then_http() -> None:
-    service = _assemble(RuntimeConfig(model_ref="fake:Model"))
+    service = _assemble(RuntimeConfig(model_ref="fake:Model"), peer_factory=_unused_factory)
 
     components = service._components
     assert set(components) == {"runner", "http"}
@@ -63,11 +81,61 @@ def test_assemble_hooks_on_runner_then_http() -> None:
 
 
 def test_assemble_wires_the_runner_shutdown_to_the_service() -> None:
-    service = _assemble(RuntimeConfig(model_ref="fake:Model"))
+    service = _assemble(RuntimeConfig(model_ref="fake:Model"), peer_factory=_unused_factory)
 
     runner = service._components["runner"]
     assert isinstance(runner, Runner)
     assert runner.request_shutdown == service.request_shutdown
+
+
+def test_assemble_selects_the_default_transport_when_none_is_injected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str] = []
+
+    def _record(transport: str) -> object:
+        seen.append(transport)
+        return _unused_factory
+
+    monkeypatch.setattr(serve, "_select_peer_factory", _record)
+    _assemble(RuntimeConfig(model_ref="fake:Model"))
+    assert seen == ["gstreamer"]
+
+
+def test_assemble_uses_an_injected_peer_factory_without_selecting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(_transport: str) -> object:
+        raise AssertionError("must not select a default when a factory is injected")
+
+    monkeypatch.setattr(serve, "_select_peer_factory", _boom)
+    service = _assemble(RuntimeConfig(model_ref="fake:Model"), peer_factory=_unused_factory)
+    assert set(service._components) == {"runner", "http"}
+
+
+def test_parse_args_defaults_to_gstreamer() -> None:
+    assert _parse_args([]).transport == "gstreamer"
+
+
+def test_parse_args_accepts_gstreamer() -> None:
+    assert _parse_args(["--transport", "gstreamer"]).transport == "gstreamer"
+
+
+def test_parse_args_rejects_an_unknown_transport() -> None:
+    with pytest.raises(SystemExit):
+        _parse_args(["--transport", "bogus"])
+
+
+def test_select_peer_factory_rejects_an_unknown_transport() -> None:
+    with pytest.raises(SystemExit, match="unknown transport"):
+        _select_peer_factory("bogus")
+
+
+def test_select_peer_factory_returns_the_libwebrtc_engine() -> None:
+    pytest.importorskip("reactor_webrtc")
+    from reactor_runtime.transport.webrtc.libwebrtc.peer import libwebrtc_peer_factory
+
+    assert _select_peer_factory("libwebrtc") is libwebrtc_peer_factory
 
 
 def test_version_is_a_non_empty_string() -> None:
@@ -125,7 +193,7 @@ def test_main_refuses_when_no_manifest_in_the_working_directory(
     monkeypatch.chdir(tmp_path)
 
     with pytest.raises(SystemExit):
-        main()
+        main([])
 
 
 def test_webrtc_config_falls_back_to_a_public_stun_when_unconfigured() -> None:
