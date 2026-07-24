@@ -37,10 +37,24 @@ from reactor_runtime.transport.webrtc.config import (
     IceTransportPolicy,
     WebRtcConfig,
 )
-from reactor_runtime.transport.webrtc.gstreamer.peer import gstreamer_peer_factory
+from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.router import WebRtcRouter
 
 _MANIFEST = "reactor.yaml"
+
+# The WebRTC media engines a client can negotiate against, selected via the
+# PREFERRED_TRANSPORT environment variable. Each is imported only when chosen:
+# the GStreamer engine needs the native GStreamer stack, the libwebrtc engine the
+# ``reactor_webrtc`` wheel, and a deployment carrying one must not be forced to
+# install the other.
+_TRANSPORT_ENV = "PREFERRED_TRANSPORT"
+_DEFAULT_TRANSPORT = "gstreamer"
+_TRANSPORTS = ("libwebrtc", "gstreamer")
+# Maps the namespaced env-var values to the internal engine names.
+_ENV_TO_TRANSPORT: dict[str, str] = {
+    "webrtc.gstreamer": "gstreamer",
+    "webrtc.libwebrtc": "libwebrtc",
+}
 
 # Public STUN server used when no STUN/TURN is configured, so the SDP answer
 # carries a server-reflexive candidate. A same-host client still connects on
@@ -186,12 +200,53 @@ def _log_level_from_env() -> int:
     return logging.getLevelNamesMapping().get(name, logging.INFO)
 
 
-def _assemble(cfg: RuntimeConfig, webrtc: WebRtcConfig | None = None) -> Service:
+def _select_peer_factory(transport: str) -> WebRtcPeerFactory:
+    """Return the peer factory for a named media engine, imported on demand.
+
+    Each engine is imported here rather than at module load so that a process
+    only pulls in the native dependencies of the engine it actually runs — the
+    GStreamer stack for ``gstreamer``, the ``reactor_webrtc`` wheel for
+    ``libwebrtc``.
+
+    Args:
+        transport: The engine name, one of :data:`_TRANSPORTS`.
+
+    Returns:
+        The :data:`~reactor_runtime.transport.webrtc.peer.WebRtcPeerFactory` for
+        the engine.
+
+    Raises:
+        SystemExit: If the name is unknown, or the engine's native dependency
+            fails to load (its bindings surface a missing native stack as more
+            than a plain ``ImportError``, so any import failure is treated as the
+            engine being unavailable).
+    """
+    try:
+        if transport == "gstreamer":
+            from reactor_runtime.transport.webrtc.gstreamer.peer import gstreamer_peer_factory
+
+            return gstreamer_peer_factory
+        if transport == "libwebrtc":
+            from reactor_runtime.transport.webrtc.libwebrtc.peer import libwebrtc_peer_factory
+
+            return libwebrtc_peer_factory
+    except Exception as exc:
+        detail = str(exc) or type(exc).__name__
+        raise SystemExit(f"transport {transport!r} is unavailable: {detail}") from exc
+    raise SystemExit(f"unknown transport {transport!r}; choose one of {', '.join(_TRANSPORTS)}")
+
+
+def _assemble(
+    cfg: RuntimeConfig,
+    webrtc: WebRtcConfig | None = None,
+    *,
+    peer_factory: WebRtcPeerFactory | None = None,
+) -> Service:
     """Assemble the service from the runtime's components.
 
     The runner is built once and shared with the HTTP server, which the routes
     drive and the transport reports into. The WebRTC transport is mounted with
-    the GStreamer media engine, so a client can negotiate a peer connection and
+    the selected media engine, so a client can negotiate a peer connection and
     stream to and from the model. The runner's shutdown hook is wired to the
     service so a failed model load brings the whole process down.
 
@@ -199,28 +254,39 @@ def _assemble(cfg: RuntimeConfig, webrtc: WebRtcConfig | None = None) -> Service
         cfg: The configuration for this runtime process.
         webrtc: The WebRTC transport configuration; defaults to the plain
             ``WebRtcConfig`` when omitted (as in tests that don't exercise it).
+        peer_factory: The media engine to mount; defaults to the
+            :data:`_DEFAULT_TRANSPORT` engine when omitted.
 
     Returns:
         A service with the runner and the HTTP server hooked on.
     """
+    if peer_factory is None:
+        peer_factory = _select_peer_factory(_DEFAULT_TRANSPORT)
     service = Service()
     runner = Runner(cfg)
     runner.request_shutdown = service.request_shutdown
     service.add(runner)
-    transport = WebRtcRouter(webrtc or WebRtcConfig(), gstreamer_peer_factory)
+    transport = WebRtcRouter(webrtc or WebRtcConfig(), peer_factory)
     service.add(HttpServer(cfg, runner, transports=[transport]))
     return service
 
 
-async def serve(cfg: RuntimeConfig, webrtc: WebRtcConfig | None = None) -> None:
+async def serve(
+    cfg: RuntimeConfig,
+    webrtc: WebRtcConfig | None = None,
+    *,
+    peer_factory: WebRtcPeerFactory | None = None,
+) -> None:
     """Run the runtime to completion: assemble the service and supervise it.
 
     Args:
         cfg: The configuration for this runtime process.
         webrtc: The WebRTC transport configuration; defaults to the plain
             ``WebRtcConfig`` when omitted.
+        peer_factory: The media engine to mount; defaults to the
+            :data:`_DEFAULT_TRANSPORT` engine when omitted.
     """
-    await _assemble(cfg, webrtc).run()
+    await _assemble(cfg, webrtc, peer_factory=peer_factory).run()
 
 
 def _load_config(manifest: Path) -> RuntimeConfig:
@@ -326,37 +392,65 @@ def _resolve_config_path(runtime: dict[str, Any], manifest: Path) -> Path | None
     return candidate if candidate.is_absolute() else manifest.parent / candidate
 
 
+def _transport_from_env() -> str:
+    """Read the media engine selection from :data:`_TRANSPORT_ENV`.
+
+    The variable accepts namespaced values — ``webrtc.gstreamer`` or
+    ``webrtc.libwebrtc`` — so the naming stays unambiguous if non-WebRTC
+    transports are added later. When the variable is unset the GStreamer engine
+    is used.
+
+    Returns:
+        The internal transport name, one of :data:`_TRANSPORTS`.
+
+    Raises:
+        SystemExit: If the variable is set to an unrecognised value.
+    """
+    value = os.environ.get(_TRANSPORT_ENV, "")
+    if not value:
+        return _DEFAULT_TRANSPORT
+    transport = _ENV_TO_TRANSPORT.get(value)
+    if transport is None:
+        valid = ", ".join(sorted(_ENV_TO_TRANSPORT))
+        raise SystemExit(f"{_TRANSPORT_ENV}={value!r} is not recognised; choose one of {valid}")
+    return transport
+
+
 def main() -> None:
     """Boot the runtime from the ``reactor.yaml`` in the working directory.
 
     Refuses to start when no manifest is present. The manifest's directory is
     put first on the import path so a model referenced as ``"pipeline:Model"``
     resolves to the code sitting beside it. The manifest names the model; the
-    bind address, ICE/transport configuration, lifecycle timeouts, and log level
-    are read from the environment around it.
+    media engine is chosen with ``PREFERRED_TRANSPORT``, and the bind address,
+    ICE/transport configuration, lifecycle timeouts, and log level are read from
+    the environment around it.
 
     Raises:
-        SystemExit: If no ``reactor.yaml`` is found, or an environment variable
-            is set to a malformed value.
+        SystemExit: If no ``reactor.yaml`` is found, the chosen transport is
+            unavailable, or an environment variable is set to a malformed value.
     """
+    transport = _transport_from_env()
     log.configure(level=_log_level_from_env())
     manifest = Path.cwd() / _MANIFEST
     if not manifest.is_file():
         raise SystemExit(f"no {_MANIFEST} found in {Path.cwd()}")
     sys.path.insert(0, str(manifest.parent))
+    peer_factory = _select_peer_factory(transport)
     cfg = _apply_env(_load_config(manifest))
     webrtc = _webrtc_config_from_env()
     logger.info(
         "starting reactor runtime",
         version=_version(),
         model=cfg.model_ref,
+        transport=transport,
         host=cfg.host,
         port=cfg.port,
         ice_servers=[server.urls[0] for server in webrtc.ice_servers],
         port_range=webrtc.port_range,
         ice_policy=str(webrtc.transport_policy),
     )
-    asyncio.run(serve(cfg, webrtc))
+    asyncio.run(serve(cfg, webrtc, peer_factory=peer_factory))
 
 
 if __name__ == "__main__":
