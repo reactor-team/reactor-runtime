@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+#MISE description="[Testing] Run the integration tests on the floor Python"
+set -euo pipefail
+nox -s "integration-$PYTHON_FLOOR"

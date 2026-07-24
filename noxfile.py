@@ -52,12 +52,13 @@ def _gstreamer_env() -> dict[str, str]:
     }
 
 
-@nox.session(python=PYTHON_VERSIONS)
-def tests(session: nox.Session) -> None:
-    """Install the locked environment and run the unit suite under pytest."""
-    # The wire bindings must exist before the editable install maps them in.
-    # Generate them from the in-repo proto (no released wheel or token needed);
-    # the packaged build vendors the pinned release instead.
+def _install_locked(session: nox.Session) -> None:
+    """Generate the wire bindings and install the locked environment.
+
+    The wire bindings must exist before the editable install maps them in;
+    generate them from the in-repo proto (no released wheel or token needed),
+    the packaged build vendors the pinned release instead.
+    """
     session.run("mise", "run", "//proto:gen", external=True)
     session.run_install(
         "uv",
@@ -65,4 +66,29 @@ def tests(session: nox.Session) -> None:
         "--locked",
         env={"UV_PROJECT_ENVIRONMENT": session.virtualenv.location},
     )
-    session.run("pytest", "-q", *session.posargs, env=_gstreamer_env())
+
+
+@nox.session(python=PYTHON_VERSIONS)
+def tests(session: nox.Session) -> None:
+    """Install the locked environment and run the unit suite under pytest.
+
+    Integration tests live in their own ``integration`` session; this one is the
+    fast, hermetic suite (unit and contract), so a push gate need not stand up a
+    live peer connection.
+    """
+    _install_locked(session)
+    session.run(
+        "pytest", "-q", "--ignore=tests/integration", *session.posargs, env=_gstreamer_env()
+    )
+
+
+@nox.session(python=PYTHON_VERSIONS)
+def integration(session: nox.Session) -> None:
+    """Install the locked environment and run the integration suite under pytest.
+
+    The integration tests negotiate real peer connections (e.g. the libwebrtc
+    loopback), so they need the media backends the locked environment installs —
+    notably the ``reactor_webrtc`` wheel — present rather than skipped.
+    """
+    _install_locked(session)
+    session.run("pytest", "-q", "tests/integration", *session.posargs, env=_gstreamer_env())
