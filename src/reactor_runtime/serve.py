@@ -16,7 +16,6 @@ world into them.
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import dataclasses
 import importlib.metadata
@@ -43,12 +42,19 @@ from reactor_runtime.transport.webrtc.router import WebRtcRouter
 
 _MANIFEST = "reactor.yaml"
 
-# The WebRTC media engines a client can negotiate against, selected with
-# ``--transport``. Each is imported only when chosen: the GStreamer engine needs
-# the native GStreamer stack, the libwebrtc engine the ``reactor_webrtc`` wheel,
-# and a deployment carrying one must not be forced to install the other.
+# The WebRTC media engines a client can negotiate against, selected via the
+# PREFERRED_TRANSPORT environment variable. Each is imported only when chosen:
+# the GStreamer engine needs the native GStreamer stack, the libwebrtc engine the
+# ``reactor_webrtc`` wheel, and a deployment carrying one must not be forced to
+# install the other.
+_TRANSPORT_ENV = "PREFERRED_TRANSPORT"
 _DEFAULT_TRANSPORT = "gstreamer"
 _TRANSPORTS = ("libwebrtc", "gstreamer")
+# Maps the namespaced env-var values to the internal engine names.
+_ENV_TO_TRANSPORT: dict[str, str] = {
+    "webrtc.gstreamer": "gstreamer",
+    "webrtc.libwebrtc": "libwebrtc",
+}
 
 # Public STUN server used when no STUN/TURN is configured, so the SDP answer
 # carries a server-reflexive candidate. A same-host client still connects on
@@ -386,59 +392,58 @@ def _resolve_config_path(runtime: dict[str, Any], manifest: Path) -> Path | None
     return candidate if candidate.is_absolute() else manifest.parent / candidate
 
 
-def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse the command-line arguments the runtime accepts.
+def _transport_from_env() -> str:
+    """Read the media engine selection from :data:`_TRANSPORT_ENV`.
 
-    Args:
-        argv: The argument vector to parse, or ``None`` to read ``sys.argv``.
+    The variable accepts namespaced values — ``webrtc.gstreamer`` or
+    ``webrtc.libwebrtc`` — so the naming stays unambiguous if non-WebRTC
+    transports are added later. When the variable is unset the GStreamer engine
+    is used.
 
     Returns:
-        The parsed arguments, carrying the chosen ``transport``.
+        The internal transport name, one of :data:`_TRANSPORTS`.
+
+    Raises:
+        SystemExit: If the variable is set to an unrecognised value.
     """
-    parser = argparse.ArgumentParser(
-        prog="reactor-runtime",
-        description="Boot the model named by the reactor.yaml in the working directory.",
-    )
-    parser.add_argument(
-        "--transport",
-        choices=_TRANSPORTS,
-        default=_DEFAULT_TRANSPORT,
-        help="WebRTC media engine to serve with (default: %(default)s).",
-    )
-    return parser.parse_args(argv)
+    value = os.environ.get(_TRANSPORT_ENV, "")
+    if not value:
+        return _DEFAULT_TRANSPORT
+    transport = _ENV_TO_TRANSPORT.get(value)
+    if transport is None:
+        valid = ", ".join(sorted(_ENV_TO_TRANSPORT))
+        raise SystemExit(f"{_TRANSPORT_ENV}={value!r} is not recognised; choose one of {valid}")
+    return transport
 
 
-def main(argv: list[str] | None = None) -> None:
+def main() -> None:
     """Boot the runtime from the ``reactor.yaml`` in the working directory.
 
     Refuses to start when no manifest is present. The manifest's directory is
     put first on the import path so a model referenced as ``"pipeline:Model"``
     resolves to the code sitting beside it. The manifest names the model; the
-    media engine is chosen with ``--transport``, and the bind address,
+    media engine is chosen with ``PREFERRED_TRANSPORT``, and the bind address,
     ICE/transport configuration, lifecycle timeouts, and log level are read from
     the environment around it.
-
-    Args:
-        argv: The argument vector to parse, or ``None`` to read ``sys.argv``.
 
     Raises:
         SystemExit: If no ``reactor.yaml`` is found, the chosen transport is
             unavailable, or an environment variable is set to a malformed value.
     """
-    args = _parse_args(argv)
+    transport = _transport_from_env()
     log.configure(level=_log_level_from_env())
     manifest = Path.cwd() / _MANIFEST
     if not manifest.is_file():
         raise SystemExit(f"no {_MANIFEST} found in {Path.cwd()}")
     sys.path.insert(0, str(manifest.parent))
-    peer_factory = _select_peer_factory(args.transport)
+    peer_factory = _select_peer_factory(transport)
     cfg = _apply_env(_load_config(manifest))
     webrtc = _webrtc_config_from_env()
     logger.info(
         "starting reactor runtime",
         version=_version(),
         model=cfg.model_ref,
-        transport=args.transport,
+        transport=transport,
         host=cfg.host,
         port=cfg.port,
         ice_servers=[server.urls[0] for server in webrtc.ice_servers],
