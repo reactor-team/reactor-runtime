@@ -30,8 +30,10 @@ mise run install      # deps + wire bindings + git hooks (first-time setup)
 mise run lint         # ruff check, ruff format --check, and mise.lock drift
 mise run format       # apply ruff formatting
 mise run typecheck    # ty (strict)
-mise run test         # unit tests on the floor Python
-mise run test-matrix  # unit tests on every supported Python
+mise run test         # unit + contract tests on the floor Python
+mise run test-matrix  # unit + contract tests on every supported Python
+mise run test-integration         # integration tests on the floor Python
+mise run test-integration-matrix  # integration tests on every supported Python
 ```
 
 - Python is owned by uv, not mise: `requires-python` in `pyproject.toml`

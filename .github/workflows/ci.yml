@@ -1,8 +1,10 @@
-# Per-push CI: proto checks, lint, type check, and unit tests. Every step runs a
-# mise task, so the same commands work locally. Lint and type checks run once on
-# the floor Python; the unit tests fan out across the supported versions with a
-# GitHub Actions matrix, each leg running a single nox session pinned to that
-# version. mise pins the toolchain and jdx/mise-action installs it.
+# Per-push CI: proto checks, lint, type check, unit tests, and integration
+# tests. Every step runs a mise task, so the same commands work locally. Lint
+# and type checks run once on the floor Python; the unit tests fan out across
+# the supported versions with a GitHub Actions matrix, each leg running a single
+# nox session pinned to that version; the integration tests run once on the
+# floor Python, since they exercise the media backends rather than per-version
+# language behaviour. mise pins the toolchain and jdx/mise-action installs it.
 
 name: CI
 
@@ -151,3 +153,29 @@ jobs:
       - run: mise exec -- nox -s "tests-$PYTHON_VERSION"
         env:
           PYTHON_VERSION: ${{ matrix.python-version }}
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The locked sync builds pygobject against the GObject-introspection and
+      # Cairo dev libraries; the reactor_webrtc media backend the integration
+      # tests exercise installs as a prebuilt wheel, so no GStreamer stack is
+      # needed here.
+      - run: |
+          # Azure-hosted runners intermittently serve a broken
+          # packages.microsoft.com repo that fails apt-get update for unrelated
+          # reasons; nothing here needs it, so drop any source referencing it.
+          sudo find /etc/apt/sources.list.d -type f \
+            -exec grep -q packages.microsoft.com {} \; -delete
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libcairo2-dev libgirepository-2.0-dev libglib2.0-dev pkg-config
+
+      - uses: jdx/mise-action@v2
+        with:
+          version: ${{ env.MISE_VERSION }}
+
+      - run: mise run test-integration
