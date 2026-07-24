@@ -10,7 +10,7 @@ The pin lives in ``pyproject.toml`` under ``[tool.reactor-wire] version`` as a
 CalVer string (e.g. ``1.20260618.42``). This script resolves it to the
 ``wire/v<version>`` GitHub release on ``reactor-team/reactor-runtime``,
 downloads ``reactor_wire-<version>-py3-none-any.whl``, and extracts the
-``reactor_wire`` package into ``src/`` (gitignored).
+``reactor_wire`` package into ``src/`` (gitignored) or into ``--into``.
 
 Authentication is optional for the public repository; if ``GH_TOKEN`` or
 ``GITHUB_TOKEN`` is set it is used to lift API rate limits and read private
@@ -19,6 +19,7 @@ releases.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
@@ -102,10 +103,9 @@ def download_wheel(release: dict, wheel_name: str, dest_dir: Path) -> Path:
     return wheel_path
 
 
-def vendor(wheel_path: Path) -> None:
-    """Extract the reactor_wire package from the wheel into src/."""
-    src_dir = REPO_ROOT / "src"
-    target = src_dir / "reactor_wire"
+def vendor(wheel_path: Path, into: Path) -> None:
+    """Extract the reactor_wire package from the wheel into *into*."""
+    target = into / "reactor_wire"
     if target.exists():
         shutil.rmtree(target)
 
@@ -117,14 +117,23 @@ def vendor(wheel_path: Path) -> None:
         for member in members:
             if member.endswith("/"):
                 continue
-            out = src_dir / member
+            out = into / member
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_bytes(zf.read(member))
-    print(f"  Vendored {len(members)} files into src/reactor_wire/")
+    print(f"  Vendored {len(members)} files into {target}/")
 
 
 def main() -> None:
     """Resolve the pin, download the released wheel, and vendor its bindings."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--into",
+        type=Path,
+        default=REPO_ROOT / "src",
+        help="directory to extract the reactor_wire package into (default: src/)",
+    )
+    args = parser.parse_args()
+
     version = read_pinned_version()
     tag = f"wire/v{version}"
     wheel_name = f"reactor_wire-{version}-py3-none-any.whl"
@@ -132,7 +141,7 @@ def main() -> None:
 
     release = fetch_release(tag)
     wheel_path = download_wheel(release, wheel_name, REPO_ROOT / "build" / "wire")
-    vendor(wheel_path)
+    vendor(wheel_path, args.into)
     print("Done.")
 
 
