@@ -11,11 +11,12 @@ module-name = ["reactor_runtime", "reactor_wire"]
 namespace = true
 
 # The released wire-protocol language package this runtime vendors. CalVer,
-# matching a wire/v<version> GitHub release tag (e.g. 1.20260618.42). The 0.0.0
-# placeholder is unset: it resolves to no release until the first wire/v* is
-# cut. Bump it to adopt a release; buf breaking keeps the line compatible.
+# matching a wire/v<version> GitHub release tag (e.g. 1.20260618.42). Bump it to
+# adopt a release; buf breaking keeps the line compatible. The `wire-check` task
+# gates the pin against proto/, so a release cannot ship a schema older than the
+# sources it was built from.
 [tool.reactor-wire]
-version = "1.20260619.2"
+version = "1.20260722.6"
 
 [project]
 name = "reactor-runtime"

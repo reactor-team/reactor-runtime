@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+#MISE description="[Protobuf] Guard the release: fail if the pinned wire release has drifted from proto/"
+set -euo pipefail
+# Same comparison the per-PR report runs, failing closed: the bindings this
+# release is about to vendor must be the ones proto/ describes.
+mise run //proto:gen
+pinned="$(mktemp -d)"
+uv run --no-project --python "$PYTHON_FLOOR" python scripts/fetch-wire.py --into "$pinned"
+uv run --no-project --python "$PYTHON_FLOOR" --with "protobuf>=7.35.1" \
+  python scripts/check-wire-pin.py enforce \
+  --pinned "$pinned/reactor_wire" --generated src/reactor_wire

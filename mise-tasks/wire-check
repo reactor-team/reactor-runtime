@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+#MISE description="[Protobuf] Report whether the pinned wire release still matches proto/"
+set -euo pipefail
+# The two binding trees have to sit side by side to be compared, so the release
+# lands in a scratch directory and the generated bindings stay in src/ where the
+# rest of the toolchain expects them. check-wire-pin.py reads descriptors, not
+# the project, so skip the sync: the gate needs no native GObject/Cairo build in
+# its CI job.
+mise run //proto:gen
+pinned="$(mktemp -d)"
+uv run --no-project --python "$PYTHON_FLOOR" python scripts/fetch-wire.py --into "$pinned"
+uv run --no-project --python "$PYTHON_FLOOR" --with "protobuf>=7.35.1" \
+  python scripts/check-wire-pin.py report \
+  --pinned "$pinned/reactor_wire" --generated src/reactor_wire

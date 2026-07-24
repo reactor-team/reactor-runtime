@@ -37,6 +37,13 @@ jobs:
       - run: mise run //proto:lint
       - run: mise run //proto:breaking
 
+      # Informational, like the HTTP breaking-diff report: a proto change is
+      # meant to drift from the pin until it merges, cuts its wire/v* release,
+      # and the pin follows. The release gate is where the drift fails closed.
+      - run: mise run wire-check
+        env:
+          GH_TOKEN: ${{ github.token }}
+
   # Two checks guard the committed api/openapi.json. The drift gate is blocking:
   # a fresh render of the HTTP surface must equal the committed file byte for
   # byte, so the contract the release gate diffs is always the surface the code

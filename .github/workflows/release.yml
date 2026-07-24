@@ -25,7 +25,13 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
+      # A job-level block replaces the workflow's, so contents is restated here:
+      # both the wire gate and the build resolve the pinned wire/v* release
+      # through the GitHub API.
+      contents: read
       id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -52,6 +58,12 @@ jobs:
       # bump, any other contract diff a patch bump — never a major.
       - name: Enforce the contract-mandated version bump
         run: mise run http-breaking-release
+
+      # The build vendors the pinned wire/v* release rather than regenerating
+      # it, so the pin is what decides the schema the wheel ships. Fail before
+      # the build when that schema is not the one proto/ describes.
+      - name: Enforce the pinned wire release matches the proto sources
+        run: mise run wire-check-release
 
       - run: mise run build
       - run: mise run publish
