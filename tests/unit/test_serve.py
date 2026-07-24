@@ -99,7 +99,7 @@ def test_assemble_selects_the_default_transport_when_none_is_injected(
 
     monkeypatch.setattr(serve, "_select_peer_factory", _record)
     _assemble(RuntimeConfig(model_ref="fake:Model"))
-    assert seen == ["gstreamer"]
+    assert seen == ["libwebrtc"]
 
 
 def test_assemble_uses_an_injected_peer_factory_without_selecting(
@@ -113,8 +113,8 @@ def test_assemble_uses_an_injected_peer_factory_without_selecting(
     assert set(service._components) == {"runner", "http"}
 
 
-def test_transport_from_env_defaults_to_gstreamer() -> None:
-    assert _transport_from_env() == "gstreamer"
+def test_transport_from_env_defaults_to_libwebrtc() -> None:
+    assert _transport_from_env() == "libwebrtc"
 
 
 def test_transport_from_env_accepts_webrtc_gstreamer(monkeypatch: pytest.MonkeyPatch) -> None:

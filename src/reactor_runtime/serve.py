@@ -48,7 +48,7 @@ _MANIFEST = "reactor.yaml"
 # ``reactor_webrtc`` wheel, and a deployment carrying one must not be forced to
 # install the other.
 _TRANSPORT_ENV = "PREFERRED_TRANSPORT"
-_DEFAULT_TRANSPORT = "gstreamer"
+_DEFAULT_TRANSPORT = "libwebrtc"
 _TRANSPORTS = ("libwebrtc", "gstreamer")
 # Maps the namespaced env-var values to the internal engine names.
 _ENV_TO_TRANSPORT: dict[str, str] = {
