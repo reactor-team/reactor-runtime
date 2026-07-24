@@ -534,6 +534,7 @@ dependencies = [
     { name = "protobuf" },
     { name = "pygobject" },
     { name = "pyyaml" },
+    { name = "reactor-webrtc" },
     { name = "uvicorn" },
 ]
 
@@ -555,6 +556,7 @@ requires-dist = [
     { name = "protobuf", specifier = ">=7.35.1" },
     { name = "pygobject", specifier = ">=3.56.3" },
     { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "reactor-webrtc", specifier = ">=0.1.0" },
     { name = "uvicorn", specifier = ">=0.49.0" },
 ]
 
@@ -567,6 +569,17 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "types-protobuf" },
     { name = "types-pyyaml", specifier = ">=6.0.12.20260518" },
+]
+
+[[package]]
+name = "reactor-webrtc"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/55/46/57834de363ec152b52c6e98f039155a9f98125b2fbd576b104d3c0f1cfd2/reactor_webrtc-0.1.0-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:798615d71de3909b6831a935dc5cd76fcab3b7adfa31ecac96938450f2353ae2", size = 6947467, upload-time = "2026-07-24T02:16:27.415Z" },
+    { url = "https://files.pythonhosted.org/packages/37/af/c0536977261e9006720313099ec0a1309d733f0cb20dd82197ad1f72ad66/reactor_webrtc-0.1.0-cp310-abi3-manylinux_2_34_aarch64.whl", hash = "sha256:123ea0451e0840f4c9fa76640fb11d24618c45d6bff334a0a0df05021454c0cf", size = 8069629, upload-time = "2026-07-24T02:16:29.183Z" },
+    { url = "https://files.pythonhosted.org/packages/08/20/ac496fe6e5cff03d86b56e067c4e7848ff644b4c0cb3049e19340515cdd2/reactor_webrtc-0.1.0-cp310-abi3-manylinux_2_34_x86_64.whl", hash = "sha256:4bb93a2e76473fd4621df08d863ac8ec31f42bc8b486bd007adc1c124fe7d57e", size = 8732697, upload-time = "2026-07-24T02:16:30.853Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/f8/4d5ffa11a012980b3a790e37063ceea70867f0a9512df9d50f91872cea8a/reactor_webrtc-0.1.0-cp310-abi3-win_amd64.whl", hash = "sha256:27b00e93f8eaaf28ce253df91143ac9cf8886237ef34d07303bd8a5230ca305d", size = 7706368, upload-time = "2026-07-24T02:16:33.32Z" },
 ]
 
 [[package]]
