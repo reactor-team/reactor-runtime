@@ -6,6 +6,10 @@ call so the frame's shape derives the ``-s WxH`` argument. Output is HLS-fMP4
 :func:`_build_argv` documents the full flag rationale. The audio pipe, second
 input, and ``-map 1:a`` are omitted when ``has_audio`` is ``False`` — a silent
 synthetic track stands in so every segment still carries audio.
+
+Each pipe is drained by its own :class:`_PipeWriter` thread, so the video and
+audio for a recorded frame reach ffmpeg concurrently whatever the pipe buffers
+hold.
 """
 
 from __future__ import annotations
@@ -13,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import os
+import queue
 import signal
 import subprocess
 import sys
@@ -28,31 +33,158 @@ from reactor_runtime.log import get_logger
 
 logger = get_logger(__name__)
 
-# Linux fcntl command to resize a pipe's kernel buffer (absent from the fcntl
-# module). The floor a resized pipe is grown to, so even a small-frame recording
-# gets comfortable headroom.
+# Linux fcntl commands to read and resize a pipe's kernel buffer (absent from the
+# fcntl module), the floor a resized pipe is grown to, and the node-wide ceiling
+# the kernel refuses to exceed without ``CAP_SYS_RESOURCE``.
 _F_SETPIPE_SZ = 1031
+_F_GETPIPE_SZ = 1032
 _MIN_PIPE_BYTES = 1 << 20
+_PIPE_MAX_SIZE_PATH = Path("/proc/sys/fs/pipe-max-size")
+
+# How many payloads each writer queues before a feed call blocks. A video frame
+# is megabytes, so its queue stays shallow; one audio slot is a few kilobytes.
+_VIDEO_QUEUE_DEPTH = 4
+_AUDIO_QUEUE_DEPTH = 64
+# How long a feed waits for queue room before it reports the pipe unusable, how
+# long a writer is given to flush and release its pipe, and how often a writer
+# wakes to notice a close request.
+_FEED_TIMEOUT_SECONDS = 10.0
+_CLOSE_TIMEOUT_SECONDS = 1.0
+_WRITER_POLL_SECONDS = 0.05
 
 
-def _enlarge_pipe(write_fd: int, frame_bytes: int) -> None:
-    """Grow a feed pipe's buffer to hold at least one whole video frame.
+class _PipeWriter:
+    """Drains one of ffmpeg's input pipes from a dedicated thread.
 
-    ffmpeg interleaves its two piped inputs, so if a single rawvideo frame is
-    larger than the default pipe buffer (64 KiB) the feed write blocks mid-frame
-    while ffmpeg is parked reading the *other* input — a deadlock that stalls the
-    encoder before it writes a single segment. Sizing the buffer to a whole frame
-    lets the feed thread hand over a frame and its audio without blocking.
+    ffmpeg interleaves its piped inputs by DTS: an encoded video packet is held
+    back until the audio stream has advanced past it. Writing both pipes from one
+    thread couples them, because a frame larger than the pipe buffer only streams
+    through as ffmpeg reads it and the audio ffmpeg is waiting for cannot be
+    written until that write returns. A writer per pipe removes the coupling —
+    every stream keeps moving as soon as ffmpeg reads it, at any frame size and
+    any pipe buffer size.
 
-    Best-effort and Linux-only: the kernel caps the request at ``fs.pipe-max-size``
-    and any failure is ignored (the pre-existing 64 KiB buffer still works for
-    small frames).
+    The writer owns *write_fd* for its whole life and closes it on exit, which is
+    the EOF ffmpeg needs to write its trailer.
+    """
+
+    def __init__(self, name: str, write_fd: int, depth: int) -> None:
+        """Take ownership of *write_fd* and start the writer thread."""
+        self._name = name
+        self._fd = write_fd
+        self._queue: queue.Queue[bytes] = queue.Queue(maxsize=depth)
+        self._closing = threading.Event()
+        self._failed = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run, name=f"recording-{name}-writer", daemon=True
+        )
+        self._thread.start()
+
+    @property
+    def failed(self) -> bool:
+        """Whether a write to the pipe failed, which is terminal for the pipe."""
+        return self._failed.is_set()
+
+    def write(self, payload: bytes) -> bool:
+        """Hand *payload* to the writer thread.
+
+        Blocks while the queue is full, which is how encoder back-pressure
+        reaches the caller.
+
+        Args:
+            payload: The bytes to write to the pipe, in order.
+
+        Returns:
+            Whether the payload was accepted. ``False`` once the pipe is closing,
+            its writes have failed, or the queue stayed full for the whole feed
+            timeout.
+        """
+        if self._closing.is_set() or self._failed.is_set():
+            return False
+        try:
+            self._queue.put(payload, timeout=_FEED_TIMEOUT_SECONDS)
+        except queue.Full:
+            return False
+        return not self._failed.is_set()
+
+    def close(self, timeout: float) -> None:
+        """Flush what is queued, close the pipe, and join the writer thread.
+
+        Returns once the thread has exited or *timeout* elapses. A writer parked
+        in a write to a pipe ffmpeg stopped reading only leaves that write when it
+        fails, which the caller forces by killing ffmpeg; calling ``close`` again
+        afterwards collects it. Safe to call repeatedly.
+        """
+        self._closing.set()
+        self._thread.join(timeout=timeout)
+
+    def _run(self) -> None:
+        """Write queued payloads to the pipe until closed, then release the fd."""
+        try:
+            while True:
+                try:
+                    payload = self._queue.get(timeout=_WRITER_POLL_SECONDS)
+                except queue.Empty:
+                    if self._closing.is_set():
+                        return
+                    continue
+                # A failed pipe keeps draining its queue, so a feed call never
+                # blocks against a writer with nowhere left to write.
+                if self._failed.is_set():
+                    continue
+                try:
+                    self._write_all(payload)
+                except OSError as exc:
+                    self._failed.set()
+                    logger.warning("recorder pipe write failed", pipe=self._name, error=str(exc))
+        finally:
+            with contextlib.suppress(OSError):
+                os.close(self._fd)
+
+    def _write_all(self, payload: bytes) -> None:
+        """Write every byte of *payload*, however many writes the pipe takes."""
+        view = memoryview(payload)
+        while view:
+            view = view[os.write(self._fd, view) :]
+
+
+def _pipe_size_ceiling() -> int | None:
+    """Return the node's ``fs.pipe-max-size``, or ``None`` when unreadable."""
+    try:
+        return int(_PIPE_MAX_SIZE_PATH.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _enlarge_pipe(write_fd: int, want_bytes: int) -> int:
+    """Grow a feed pipe's buffer towards *want_bytes* and report its capacity.
+
+    A roomier buffer lets ffmpeg absorb a burst without the writer thread having
+    to stream the bytes through in step with ffmpeg's reads. The request is
+    clamped to ``fs.pipe-max-size``, because the kernel answers ``EPERM`` rather
+    than clamping for a process without ``CAP_SYS_RESOURCE`` — asking for more
+    than the node allows would leave the pipe at its default size.
+
+    Args:
+        write_fd: The pipe's write end.
+        want_bytes: The buffer size the caller would like.
+
+    Returns:
+        The pipe's capacity in bytes, or ``0`` where the platform does not expose
+        pipe sizing.
     """
     if sys.platform != "linux":
-        return
-    desired = max(_MIN_PIPE_BYTES, frame_bytes * 2)
+        return 0
+    desired = max(_MIN_PIPE_BYTES, want_bytes)
+    ceiling = _pipe_size_ceiling()
+    if ceiling is not None:
+        desired = min(desired, ceiling)
     with contextlib.suppress(OSError):
         fcntl.fcntl(write_fd, _F_SETPIPE_SZ, desired)
+    try:
+        return int(fcntl.fcntl(write_fd, _F_GETPIPE_SZ))
+    except OSError:
+        return 0
 
 
 def _resize_nearest(frame: npt.NDArray[Any], target_w: int, target_h: int) -> npt.NDArray[Any]:
@@ -120,9 +252,8 @@ def _build_argv(
         f"{width}x{height}",
         "-framerate",
         str(frame_rate),
-        # A large packet queue keeps the demuxer from parking when audio writes
-        # outpace video at higher resolutions, which would otherwise wedge the
-        # worker's blocking write to the pipe.
+        # A deep packet queue lets a demuxer keep reading its pipe across the
+        # jitter of encoder startup and of a busy host, so the pipe rarely fills.
         "-thread_queue_size",
         "1024",
         "-i",
@@ -210,10 +341,10 @@ class ChunkEncoder:
     """Drives a long-lived ``ffmpeg`` subprocess for one recording.
 
     Lifecycle: construction records the output directory; the first
-    :meth:`feed_video` spawns ffmpeg from the frame's shape; subsequent
-    ``feed_video`` / ``feed_audio`` calls write raw bytes into the pipes; and
-    :meth:`stop` closes the write ends, sends ``SIGTERM``, and escalates to
-    ``SIGKILL`` if ffmpeg refuses to exit.
+    :meth:`feed_video` spawns ffmpeg from the frame's shape and starts a writer
+    per pipe; subsequent ``feed_video`` / ``feed_audio`` calls queue raw bytes for
+    those writers; and :meth:`stop` flushes and closes the pipes, sends
+    ``SIGTERM``, and escalates to ``SIGKILL`` if ffmpeg refuses to exit.
     """
 
     def __init__(
@@ -233,8 +364,8 @@ class ChunkEncoder:
         self._frame_rate = frame_rate
 
         self._proc: subprocess.Popen[bytes] | None = None
-        self._video_w: int | None = None
-        self._audio_w: int | None = None
+        self._video: _PipeWriter | None = None
+        self._audio: _PipeWriter | None = None
         self._width: int | None = None
         self._height: int | None = None
         self._lock = threading.Lock()
@@ -251,7 +382,11 @@ class ChunkEncoder:
     @property
     def failed(self) -> bool:
         """Return whether the encoder is dead and unrecoverable for this session."""
-        return self._failed or (self._proc is not None and self._proc.poll() is not None)
+        if self._failed:
+            return True
+        if any(writer is not None and writer.failed for writer in (self._video, self._audio)):
+            return True
+        return self._proc is not None and self._proc.poll() is not None
 
     def feed_video(self, frame: npt.NDArray[Any]) -> None:
         """Push a single ``(H, W, 3)`` ``uint8`` frame into the encoder.
@@ -285,12 +420,10 @@ class ChunkEncoder:
             and (frame.shape[1] != self._width or frame.shape[0] != self._height)
         ):
             frame = _resize_nearest(frame, self._width, self._height)
-        assert self._video_w is not None
-        try:
-            os.write(self._video_w, np.ascontiguousarray(frame).tobytes())
-        except BrokenPipeError as exc:
+        writer = self._video
+        if writer is None or not writer.write(np.ascontiguousarray(frame).tobytes()):
             self._failed = True
-            raise RuntimeError("ffmpeg video pipe broke") from exc
+            raise RuntimeError("ffmpeg stopped accepting video")
 
     def feed_audio(self, samples: npt.NDArray[Any]) -> None:
         """Push ``int16`` PCM samples into the audio pipe.
@@ -300,17 +433,16 @@ class ChunkEncoder:
         Raises:
             RuntimeError: If the encoder is in a failed state.
         """
-        if not self._has_audio or self._audio_w is None:
+        writer = self._audio
+        if not self._has_audio or writer is None:
             return
         if self._failed:
             raise RuntimeError("ChunkEncoder is in a failed state")
         if samples.dtype != np.int16:
             samples = samples.astype(np.int16)
-        try:
-            os.write(self._audio_w, np.ascontiguousarray(samples).tobytes())
-        except BrokenPipeError as exc:
+        if not writer.write(np.ascontiguousarray(samples).tobytes()):
             self._failed = True
-            raise RuntimeError("ffmpeg audio pipe broke") from exc
+            raise RuntimeError("ffmpeg stopped accepting audio")
 
     def _spawn(self, width: int, height: int) -> None:
         """Open the pipes and launch ffmpeg for the given frame dimensions."""
@@ -322,12 +454,10 @@ class ChunkEncoder:
         else:
             audio_r, audio_w = None, None
 
-        # Size both pipes to hold a whole frame so a feed write never blocks
-        # mid-frame and deadlocks against ffmpeg reading the other input.
         frame_bytes = width * height * 3
-        _enlarge_pipe(video_w, frame_bytes)
+        video_pipe_bytes = _enlarge_pipe(video_w, frame_bytes)
         if audio_w is not None:
-            _enlarge_pipe(audio_w, frame_bytes)
+            _enlarge_pipe(audio_w, _MIN_PIPE_BYTES)
 
         argv = _build_argv(
             output_dir=self._output_dir,
@@ -362,8 +492,9 @@ class ChunkEncoder:
         if audio_r is not None:
             os.close(audio_r)
 
-        self._video_w = video_w
-        self._audio_w = audio_w
+        self._video = _PipeWriter("video", video_w, _VIDEO_QUEUE_DEPTH)
+        if audio_w is not None:
+            self._audio = _PipeWriter("audio", audio_w, _AUDIO_QUEUE_DEPTH)
         self._width = width
         self._height = height
         logger.info(
@@ -372,6 +503,8 @@ class ChunkEncoder:
             width=width,
             height=height,
             audio=self._has_audio,
+            video_pipe_bytes=video_pipe_bytes,
+            frame_bytes=frame_bytes,
         )
 
     def stop(self, timeout: float = 5.0) -> None:
@@ -381,18 +514,27 @@ class ChunkEncoder:
         """
         with self._lock:
             # Latch first so a concurrent ``feed_video`` bails out instead of
-            # spawning over the fds about to be closed.
+            # spawning over the pipes about to be closed.
             self._stopped = True
-            for fd in (self._video_w, self._audio_w):
-                if fd is not None:
-                    with contextlib.suppress(OSError):
-                        os.close(fd)
-            self._video_w = None
-            self._audio_w = None
+            writers = [writer for writer in (self._video, self._audio) if writer is not None]
+            self._video = None
+            self._audio = None
             proc = self._proc
             self._proc = None
-        if proc is None:
-            return
+        # Flushing the queues and closing the pipes is the EOF ffmpeg needs to
+        # write its trailer, so it comes before the signal.
+        for writer in writers:
+            writer.close(timeout=_CLOSE_TIMEOUT_SECONDS)
+        if proc is not None:
+            self._shutdown(proc, timeout)
+        # ffmpeg is gone, so a writer still parked in a write to its pipe now
+        # fails and releases the fd.
+        for writer in writers:
+            writer.close(timeout=_CLOSE_TIMEOUT_SECONDS)
+
+    @staticmethod
+    def _shutdown(proc: subprocess.Popen[bytes], timeout: float) -> None:
+        """Signal ffmpeg to finish, escalating to a kill if it stays alive."""
         if proc.poll() is not None:
             # ffmpeg exited on its own before teardown — the feed worker would
             # have seen a broken pipe and disabled recording. A non-zero code is
