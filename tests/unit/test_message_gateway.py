@@ -1,4 +1,7 @@
+import logging
 from collections.abc import Mapping
+
+import pytest
 
 from reactor_runtime.core import Connection, ConnId, InputFrame
 from reactor_runtime.message_gateway import InboundCommand, MessageGateway
@@ -192,11 +195,22 @@ async def test_v0_request_schema_routes_off_the_data_channel() -> None:
     assert sink.schema_requests == [(ConnId(9), "")]
 
 
-async def test_v0_request_capabilities_is_no_longer_answered() -> None:
+async def test_v0_request_capabilities_is_dropped_without_a_traceback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     gateway, sink, _ = _gateway()
     frame = '{"scope": "runtime", "data": {"type": "requestCapabilities", "data": {}}}'
-    await gateway.handle(ConnId(9), frame, Channel.DATA, ProtocolVersion.V0)
+    with caplog.at_level(logging.WARNING, logger="reactor_runtime.message_gateway"):
+        await gateway.handle(ConnId(9), frame, Channel.DATA, ProtocolVersion.V0)
+
     assert sink.schema_requests == []
+    assert len(caplog.records) == 1
+    record = caplog.records[0]
+    assert record.exc_info is None
+    assert record.getMessage() == (
+        "MessageGateway dropped an undecodable frame on Channel.DATA: "
+        "unrecognized v0 runtime client message: 'requestCapabilities'"
+    )
 
 
 async def test_undecodable_v1_frame_is_dropped() -> None:

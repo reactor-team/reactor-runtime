@@ -106,10 +106,8 @@ class MessageGateway:
         """
         try:
             message = self._codec_for(version).decode_inbound(payload, channel)
-        except (ValueError, DecodeError):
-            logger.warning(
-                "MessageGateway dropped an undecodable frame on %s", channel, exc_info=True
-            )
+        except (ValueError, DecodeError) as exc:
+            logger.warning("MessageGateway dropped an undecodable frame on %s: %s", channel, exc)
             return
 
         if isinstance(message, control_pb2.ControlClientMessage):
