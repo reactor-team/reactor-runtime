@@ -87,6 +87,44 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "HealthResponse": {
+        "description": "The process verdict, the lifecycle word behind it, and why.\n\n``status`` is the machine-checkable verdict a probe branches on; ``state``\nsays what the process is doing, which a probe reads to tell a runtime that\ncannot serve yet from one that is finished; ``detail`` explains an unhealthy\nverdict.",
+        "properties": {
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "state": {
+            "$ref": "#/components/schemas/RuntimeState"
+          },
+          "status": {
+            "$ref": "#/components/schemas/HealthStatus"
+          }
+        },
+        "required": [
+          "status",
+          "state",
+          "detail"
+        ],
+        "title": "HealthResponse",
+        "type": "object"
+      },
+      "HealthStatus": {
+        "description": "A component's verdict on itself: working or broken.\n\nDeliberately two-valued so the verdict is machine-checkable \u2014 a probe\nbranches on it without interpretation. The lifecycle word a human reads\nalongside it is :class:`RuntimeState`.",
+        "enum": [
+          "unhealthy",
+          "healthy"
+        ],
+        "title": "HealthStatus",
+        "type": "string"
+      },
       "IceCandidateEntry": {
         "description": "One trickle-ICE candidate from a client.",
         "properties": {
@@ -202,6 +240,17 @@
         ],
         "title": "RegisterConnectionResponse",
         "type": "object"
+      },
+      "RuntimeState": {
+        "description": "The lifecycle word describing what the process is doing right now.\n\nOrthogonal to :class:`HealthStatus`: where the status says whether the\nprocess is working, the state says what it is up to.\n\nStates:\n    LOADING: The model is still loading; a session cannot be opened yet.\n    AVAILABLE: The model is loaded and idle, ready to open a session.\n    SERVING: A session is open, from its start through its teardown.\n    TERMINATED: The process is finished and will not serve again.",
+        "enum": [
+          "loading",
+          "available",
+          "serving",
+          "terminated"
+        ],
+        "title": "RuntimeState",
+        "type": "string"
       },
       "SdpAnswerResponse": {
         "description": "The negotiated SDP answer for a connection.",
@@ -589,7 +638,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
               }
             },
             "description": "Successful Response"
