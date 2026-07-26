@@ -11,6 +11,7 @@ routers and acceptors it mounts.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 
 import uvicorn
 from fastapi import FastAPI
@@ -30,7 +31,11 @@ from reactor_runtime.transport.router import TransportRouter
 logger = get_logger(__name__)
 
 
-def build_app(runner: Runner, transports: list[TransportRouter]) -> FastAPI:
+def build_app(
+    runner: Runner,
+    transports: list[TransportRouter],
+    process_health: Callable[[], Health],
+) -> FastAPI:
     """Assemble the runtime's ASGI application from its route groups.
 
     The one place the HTTP surface is composed: the fixed route groups, the
@@ -41,6 +46,8 @@ def build_app(runner: Runner, transports: list[TransportRouter]) -> FastAPI:
     Args:
         runner: The runner the routes drive and the transports report into.
         transports: One router per connection type, each mounted onto the app.
+        process_health: The health report ``/health`` answers with — the
+            whole-process aggregate in the served assembly.
 
     Returns:
         The fully assembled FastAPI application.
@@ -58,7 +65,7 @@ def build_app(runner: Runner, transports: list[TransportRouter]) -> FastAPI:
         allow_headers=["*"],
     )
     SessionRoutes(runner).mount(app)
-    EgressRoutes(runner).mount(app)
+    EgressRoutes(runner, process_health).mount(app)
     UploadRoutes(runner).mount(app)
     RecordingRoutes(runner).mount(app)
     for transport in transports:
@@ -96,7 +103,11 @@ class HttpServer(ServiceComponent):
     depends_on: tuple[str, ...] = ("runner",)
 
     def __init__(
-        self, cfg: RuntimeConfig, runner: Runner, transports: list[TransportRouter]
+        self,
+        cfg: RuntimeConfig,
+        runner: Runner,
+        transports: list[TransportRouter],
+        process_health: Callable[[], Health],
     ) -> None:
         """Assemble the app from the route groups and each transport's routes.
 
@@ -104,9 +115,12 @@ class HttpServer(ServiceComponent):
             cfg: The configuration naming the address to bind.
             runner: The runner the routes drive and the transports report into.
             transports: One router per connection type, each mounted onto the app.
+            process_health: The health report ``/health`` answers with,
+                injected by the assembly so the endpoint speaks for the whole
+                process rather than any one component.
         """
         self._cfg = cfg
-        self._app = build_app(runner, transports)
+        self._app = build_app(runner, transports, process_health)
         self._server: uvicorn.Server | None = None
         self._serve_task: asyncio.Task[None] | None = None
 
@@ -169,7 +183,12 @@ class HttpServer(ServiceComponent):
                 logger.exception("http serve task failed during shutdown")
 
     def health(self) -> Health:
-        """Report ready once the server has finished starting."""
+        """Report healthy once the server has finished starting.
+
+        The not-started report is unobservable on the wire — no request reaches
+        ``/health`` before the socket is up — so it exists only for the process
+        aggregate, where a server that should be serving but is not is broken.
+        """
         if self._server is not None and self._server.started:
             return Health.healthy()
-        return Health(HealthStatus.DEGRADED, "http server not started")
+        return Health(HealthStatus.UNHEALTHY, "http server not started")

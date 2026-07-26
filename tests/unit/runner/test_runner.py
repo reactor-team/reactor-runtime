@@ -46,7 +46,7 @@ from reactor_runtime.interface.internal.reactor_core import (
 from reactor_runtime.message_gateway import InboundCommand
 from reactor_runtime.protocol.common import struct_to_dict
 from reactor_runtime.recording import ClipResult
-from reactor_runtime.runner.runner import SESSION_ID, Runner
+from reactor_runtime.runner.runner import _RUNTIME_STATES, SESSION_ID, Runner
 from reactor_runtime.transport.router import (
     SessionControl,
     SessionNotRunningError,
@@ -206,6 +206,12 @@ async def test_start_failure_terminates_the_session(monkeypatch: pytest.MonkeyPa
 
     assert runner._sm.current_state is SessionState.TERMINATED
     assert runner.health().status is HealthStatus.UNHEALTHY
+
+
+def test_every_session_state_has_a_lifecycle_word() -> None:
+    # A session state missing from the table makes state() raise on /health,
+    # the endpoint a probe reads to decide the process is alive.
+    assert set(_RUNTIME_STATES) == set(SessionState)
 
 
 def test_broadcast_encodes_a_model_message_and_fans_it_out() -> None:

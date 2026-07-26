@@ -85,13 +85,37 @@ async def test_stopping_with_nothing_running_conflicts(harness: Harness) -> None
     assert response.status_code == 409
 
 
-async def test_health_reports_status_and_detail(harness: Harness) -> None:
+async def test_health_reports_status_state_and_detail(harness: Harness) -> None:
     response = await harness.client.get("/health")
 
     assert response.status_code == 200
     body = response.json()
-    assert set(body) == {"status", "detail"}
+    assert set(body) == {"status", "state", "detail"}
     assert body["status"] == "healthy"
+    assert body["state"] == "available"
+
+
+async def test_health_is_200_and_loading_while_the_model_loads() -> None:
+    async with running_runtime(start=False) as harness:
+        response = await harness.client.get("/health")
+
+    # A loading model is not broken: the verdict stays healthy and the
+    # lifecycle word alone says the process cannot open a session yet.
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "healthy"
+    assert body["state"] == "loading"
+
+
+async def test_health_is_serving_while_a_session_is_open(harness: Harness) -> None:
+    await harness.client.post("/start_session", json={})
+
+    response = await harness.client.get("/health")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "healthy"
+    assert body["state"] == "serving"
 
 
 async def test_health_is_503_once_terminated() -> None:
@@ -99,7 +123,10 @@ async def test_health_is_503_once_terminated() -> None:
         response = await harness.client.get("/health")
 
     assert response.status_code == 503
-    assert set(response.json()) == {"status", "detail"}
+    body = response.json()
+    assert set(body) == {"status", "state", "detail"}
+    assert body["status"] == "unhealthy"
+    assert body["state"] == "terminated"
 
 
 async def test_moderated_stop_returns_200(harness: Harness) -> None:

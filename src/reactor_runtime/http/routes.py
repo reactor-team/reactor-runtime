@@ -8,14 +8,14 @@ and connections never surface here.
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from typing import Annotated, Any
 
 from fastapi import Body, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
-from reactor_runtime.core import HealthStatus, SessionState
+from reactor_runtime.core import Health, HealthStatus, RuntimeState, SessionState
 from reactor_runtime.http.events import format_sse
 from reactor_runtime.recording import ClipManifest, ClipSessionGoneError, Pending
 from reactor_runtime.runner import Runner
@@ -328,16 +328,39 @@ class RecordingRoutes:
             return FileResponse(path, media_type=media_type)
 
 
+class HealthResponse(BaseModel):
+    """The process verdict, the lifecycle word behind it, and why.
+
+    ``status`` is the machine-checkable verdict a probe branches on; ``state``
+    says what the process is doing, which a probe reads to tell a runtime that
+    cannot serve yet from one that is finished; ``detail`` explains an unhealthy
+    verdict.
+    """
+
+    status: HealthStatus
+    state: RuntimeState
+    detail: str | None
+
+
 class EgressRoutes:
     """The egress journal and liveness over HTTP."""
 
-    def __init__(self, runner: Runner) -> None:
-        """Bind the route group to the runner it reads."""
+    def __init__(self, runner: Runner, process_health: Callable[[], Health]) -> None:
+        """Bind the route group to the runner it reads and the health source.
+
+        Args:
+            runner: The runner whose journal and lifecycle state the routes read.
+            process_health: The health report ``/health`` answers with —
+                injected so the endpoint speaks for the whole process, not for
+                any one component.
+        """
         self._runner = runner
+        self._process_health = process_health
 
     def mount(self, app: FastAPI) -> None:
         """Register the egress and health routes against *app*."""
         runner = self._runner
+        process_health = self._process_health
 
         @app.get(
             "/events",
@@ -357,13 +380,10 @@ class EgressRoutes:
             return StreamingResponse(_stream_events(runner, resume), media_type="text/event-stream")
 
         @app.get("/health", responses={503: {"description": "The process is unhealthy."}})
-        async def health() -> JSONResponse:
-            report = runner.health()
-            code = 503 if report.status is HealthStatus.UNHEALTHY else 200
-            return JSONResponse(
-                status_code=code,
-                content={"status": report.status.value, "detail": report.detail},
-            )
+        async def health(response: Response) -> HealthResponse:
+            report = process_health()
+            response.status_code = 503 if report.status is HealthStatus.UNHEALTHY else 200
+            return HealthResponse(status=report.status, state=runner.state(), detail=report.detail)
 
 
 def _resume_from(last_event_id: str | None) -> int | None:

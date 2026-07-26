@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 from reactor_runtime import serve
 from reactor_runtime.core import ConnId, RuntimeConfig
@@ -78,6 +79,24 @@ def test_assemble_hooks_on_runner_then_http() -> None:
     assert isinstance(components["runner"], Runner)
     assert isinstance(components["http"], HttpServer)
     assert components["http"].depends_on == ("runner",)
+
+
+def test_assemble_answers_health_with_the_process_aggregate() -> None:
+    service = _assemble(RuntimeConfig(model_ref="fake:Model"), peer_factory=_unused_factory)
+    http = service._components["http"]
+    assert isinstance(http, HttpServer)
+
+    response = TestClient(http._app).get("/health")
+
+    # A freshly assembled process discriminates the two wirings: its runner is
+    # healthy and loading, so only the aggregate — which also sees the server
+    # that has not started — answers unhealthy.
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "unhealthy",
+        "state": "loading",
+        "detail": "http server not started",
+    }
 
 
 def test_assemble_wires_the_runner_shutdown_to_the_service() -> None:

@@ -40,7 +40,7 @@ def render_openapi() -> dict[str, Any]:
     """
     runner = Runner(RuntimeConfig(model_ref="spec:UnusedSpecModel"))
     transport = WebRtcRouter(WebRtcConfig(), _unbootable_peer_factory)
-    return build_app(runner, [transport]).openapi()
+    return build_app(runner, [transport], runner.health).openapi()
 
 
 def render_spec_json() -> str:

@@ -9,7 +9,7 @@ import pytest
 from fastapi import FastAPI, HTTPException, Request
 
 from reactor_runtime import InputField, Output, ReactorModel, Video, event
-from reactor_runtime.core import RuntimeConfig
+from reactor_runtime.core import Health, HealthStatus, RuntimeConfig
 from reactor_runtime.http import EgressRoutes, RecordingRoutes, SessionRoutes, UploadRoutes
 from reactor_runtime.http.routes import _read_capped, _resume_from, _stream_events
 from reactor_runtime.runner.runner import SESSION_ID, Runner
@@ -35,10 +35,10 @@ class FakeModel(ReactorModel):
         await asyncio.sleep(60)
 
 
-def _app(runner: Runner) -> FastAPI:
+def _app(runner: Runner, process_health: Callable[[], Health] | None = None) -> FastAPI:
     app = FastAPI()
     SessionRoutes(runner).mount(app)
-    EgressRoutes(runner).mount(app)
+    EgressRoutes(runner, process_health or runner.health).mount(app)
     UploadRoutes(runner).mount(app)
     RecordingRoutes(runner).mount(app)
     return app
@@ -213,14 +213,87 @@ async def test_moderated_stop_conflicts_when_nothing_is_running(
     assert response.status_code == 409
 
 
-async def test_health_is_ok_once_the_model_is_up(
+async def test_health_is_available_once_the_model_is_up(
     client: tuple[httpx.AsyncClient, Runner],
 ) -> None:
     http_client, _ = client
     response = await http_client.get("/health")
 
     assert response.status_code == 200
+    assert response.json() == {"status": "healthy", "state": "available", "detail": None}
+
+
+async def test_health_is_ok_and_loading_while_the_model_loads() -> None:
+    # Constructed but never started, so the session sits in CREATED: healthy —
+    # nothing is broken — with the lifecycle word saying it cannot serve yet.
+    runner = Runner(RuntimeConfig(model_ref="fake:Model"))
+    transport = httpx.ASGITransport(app=_app(runner))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+        response = await http_client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "healthy", "state": "loading", "detail": None}
+
+
+async def test_health_is_serving_while_a_session_is_open(
+    client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, _ = client
+    await http_client.post("/start_session", json={})
+
+    response = await http_client.get("/health")
+
+    assert response.status_code == 200
     assert response.json()["status"] == "healthy"
+    assert response.json()["state"] == "serving"
+
+
+async def test_health_is_503_and_terminated_after_a_failed_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnloadableModel(FakeModel):
+        def load(self, config_path: Path | None) -> None:
+            raise RuntimeError("weights missing")
+
+    monkeypatch.setattr(
+        "reactor_runtime.runner.runner.import_model_class", lambda ref: UnloadableModel
+    )
+    runner = Runner(RuntimeConfig(model_ref="fake:Model"))
+    await runner.start()
+    transport = httpx.ASGITransport(app=_app(runner))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+        response = await http_client.get("/health")
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "unhealthy"
+    assert body["state"] == "terminated"
+    assert body["detail"]
+
+
+async def test_health_status_comes_from_the_injected_process_health(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The verdict is the injected process aggregate, not the runner's own
+    # report: a broken sibling component turns /health unhealthy while the
+    # state keeps reading the runner's lifecycle word.
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
+    runner = Runner(RuntimeConfig(model_ref="fake:Model"))
+    await runner.start()
+    app = _app(runner, lambda: Health(HealthStatus.UNHEALTHY, "http server not started"))
+    transport = httpx.ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            response = await http_client.get("/health")
+    finally:
+        await runner.stop()
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "unhealthy",
+        "state": "available",
+        "detail": "http server not started",
+    }
 
 
 async def test_create_upload_allocates_a_slot(
