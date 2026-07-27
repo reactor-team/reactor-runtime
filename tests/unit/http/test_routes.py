@@ -12,6 +12,7 @@ from reactor_runtime import InputField, Output, ReactorModel, Video, event
 from reactor_runtime.core import Health, HealthStatus, RuntimeConfig
 from reactor_runtime.http import EgressRoutes, RecordingRoutes, SessionRoutes, UploadRoutes
 from reactor_runtime.http.routes import _read_capped, _resume_from, _stream_events
+from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.runner.runner import SESSION_ID, Runner
 
 _RECORDING_ID = "00000000-0000-0000-0000-000000000001"
@@ -35,10 +36,18 @@ class FakeModel(ReactorModel):
         await asyncio.sleep(60)
 
 
-def _app(runner: Runner, process_health: Callable[[], Health] | None = None) -> FastAPI:
+def _metrics() -> RuntimeMetrics:
+    return RuntimeMetrics(version="1.2.3", model="fake:Model")
+
+
+def _app(
+    runner: Runner,
+    process_health: Callable[[], Health] | None = None,
+    metrics: RuntimeMetrics | None = None,
+) -> FastAPI:
     app = FastAPI()
     SessionRoutes(runner).mount(app)
-    EgressRoutes(runner, process_health or runner.health).mount(app)
+    EgressRoutes(runner, process_health or runner.health, metrics or _metrics()).mount(app)
     UploadRoutes(runner).mount(app)
     RecordingRoutes(runner).mount(app)
     return app
@@ -294,6 +303,33 @@ async def test_health_status_comes_from_the_injected_process_health(
         "state": "available",
         "detail": "http server not started",
     }
+
+
+async def test_metrics_renders_the_injected_registry(
+    client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, _ = client
+    response = await http_client.get("/metrics")
+
+    assert response.status_code == 200
+    # A scraper selects the parser from the media type, so the endpoint must
+    # answer in the Prometheus text format rather than the JSON the rest of the
+    # surface speaks.
+    assert response.headers["content-type"].startswith("text/plain")
+    assert 'runtime_info{model="fake:Model",version="1.2.3"} 1.0' in response.text
+
+
+async def test_metrics_answers_before_the_model_loads() -> None:
+    # Constructed but never started, so the model has not loaded. The scrape
+    # still answers, which makes a slow or failing load observable instead of a
+    # gap in the series.
+    runner = Runner(RuntimeConfig(model_ref="fake:Model"))
+    transport = httpx.ASGITransport(app=_app(runner))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+        response = await http_client.get("/metrics")
+
+    assert response.status_code == 200
+    assert "runtime_info" in response.text
 
 
 async def test_create_upload_allocates_a_slot(

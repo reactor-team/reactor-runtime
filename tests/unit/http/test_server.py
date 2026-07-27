@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from reactor_runtime.core import Health, HealthStatus, RuntimeConfig
 from reactor_runtime.http import HttpServer
+from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.runner.runner import Runner
 from reactor_runtime.transport.router import SessionControl, TransportRouter
 
@@ -27,11 +28,17 @@ def _runner() -> Runner:
     return Runner(RuntimeConfig(model_ref="fake:Model"))
 
 
+def _metrics() -> RuntimeMetrics:
+    return RuntimeMetrics(version="0.0.0", model="fake:Model")
+
+
 def test_mounts_route_groups_and_each_transport() -> None:
     runner = _runner()
     fake = FakeRouter()
 
-    server = HttpServer(RuntimeConfig(model_ref="fake:Model"), runner, [fake], Health.healthy)
+    server = HttpServer(
+        RuntimeConfig(model_ref="fake:Model"), runner, [fake], Health.healthy, _metrics()
+    )
 
     assert fake.mounted_with is runner
     paths = {getattr(route, "path", "") for route in server._app.routes}
@@ -40,7 +47,9 @@ def test_mounts_route_groups_and_each_transport() -> None:
 
 
 def test_cors_preflight_is_answered() -> None:
-    server = HttpServer(RuntimeConfig(model_ref="fake:Model"), _runner(), [], Health.healthy)
+    server = HttpServer(
+        RuntimeConfig(model_ref="fake:Model"), _runner(), [], Health.healthy, _metrics()
+    )
     client = TestClient(server._app)
 
     response = client.options(
@@ -61,6 +70,7 @@ async def test_start_drain_stop_lifecycle() -> None:
         _runner(),
         [],
         Health.healthy,
+        _metrics(),
     )
 
     await server.start()
@@ -85,6 +95,7 @@ async def test_stop_swallows_a_failed_serve_task() -> None:
         _runner(),
         [],
         Health.healthy,
+        _metrics(),
     )
 
     async def boom() -> None:
@@ -102,6 +113,7 @@ async def test_graceful_shutdown_is_bounded_by_the_grace_period() -> None:
         _runner(),
         [],
         Health.healthy,
+        _metrics(),
     )
 
     await server.start()

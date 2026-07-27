@@ -16,9 +16,16 @@ from typing import Any
 
 from reactor_runtime.core import RuntimeConfig
 from reactor_runtime.http.server import build_app
+from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.runner import Runner
 from reactor_runtime.transport.webrtc.config import WebRtcConfig
 from reactor_runtime.transport.webrtc.router import WebRtcRouter
+
+# Building the application needs a metrics holder, and the holder needs an
+# identity. The document describes routes and models only, so this value reaches
+# nothing that is rendered. A real version here would send a reader looking for a
+# dependency the document does not have.
+_SPEC_VERSION = "0.0.0"
 
 
 def _unbootable_peer_factory(*args: Any, **kwargs: Any) -> Any:
@@ -38,9 +45,11 @@ def render_openapi() -> dict[str, Any]:
     Returns:
         The OpenAPI document as a dictionary.
     """
-    runner = Runner(RuntimeConfig(model_ref="spec:UnusedSpecModel"))
+    model_ref = "spec:UnusedSpecModel"
+    runner = Runner(RuntimeConfig(model_ref=model_ref))
     transport = WebRtcRouter(WebRtcConfig(), _unbootable_peer_factory)
-    return build_app(runner, [transport], runner.health).openapi()
+    metrics = RuntimeMetrics(version=_SPEC_VERSION, model=model_ref)
+    return build_app(runner, [transport], runner.health, metrics).openapi()
 
 
 def render_spec_json() -> str:

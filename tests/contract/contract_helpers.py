@@ -39,6 +39,7 @@ from reactor_runtime.core import (
 )
 from reactor_runtime.http.events import format_sse
 from reactor_runtime.http.server import build_app
+from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.runner.runner import Runner
 from reactor_runtime.transport.webrtc import (
@@ -377,7 +378,8 @@ async def running_runtime(
             await runner.start()
         peer = FakePeer()
         router = WebRtcRouter(WebRtcConfig(ping_timeout=0.0), peer_factory(peer))
-        app = build_app(runner, [router], runner.health)
+        metrics = RuntimeMetrics(version="0.0.0", model="contract:Model")
+        app = build_app(runner, [router], runner.health, metrics)
         transport = httpx.ASGITransport(app=app)
         try:
             async with httpx.AsyncClient(transport=transport, base_url="http://runtime") as client:

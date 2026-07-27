@@ -652,6 +652,24 @@
         "summary": "Health"
       }
     },
+    "/metrics": {
+      "get": {
+        "operationId": "scrape_metrics_metrics_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The process's instruments in the Prometheus text format."
+          }
+        },
+        "summary": "Scrape Metrics"
+      }
+    },
     "/schema": {
       "get": {
         "operationId": "get_schema_schema_get",
