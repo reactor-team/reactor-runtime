@@ -373,12 +373,12 @@ async def running_runtime(
     resolved = model_cls or ContractModel
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: resolved)
-        runner = Runner(cfg or RuntimeConfig(model_ref="contract:Model"))
+        metrics = RuntimeMetrics(version="0.0.0", model="contract:Model")
+        runner = Runner(cfg or RuntimeConfig(model_ref="contract:Model"), metrics)
         if start:
             await runner.start()
         peer = FakePeer()
         router = WebRtcRouter(WebRtcConfig(ping_timeout=0.0), peer_factory(peer))
-        metrics = RuntimeMetrics(version="0.0.0", model="contract:Model")
         app = build_app(runner, [router], runner.health, metrics)
         transport = httpx.ASGITransport(app=app)
         try:

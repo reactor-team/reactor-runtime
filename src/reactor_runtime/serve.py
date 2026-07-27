@@ -202,8 +202,9 @@ def _assemble(
     service so a failed model load brings the whole process down, and the
     service's aggregate health is wired into the HTTP server so ``/health``
     answers for every component of the process. The metrics registry is created
-    here too, the one place that knows the identity of the process, and handed to
-    the HTTP server that renders it.
+    here too, the one place that knows the identity of the process, and handed
+    both to the runner that observes on it and to the HTTP server that renders
+    it.
 
     Args:
         cfg: The configuration for this runtime process.
@@ -224,7 +225,7 @@ def _assemble(
         peer_factory = libwebrtc_peer_factory
     service = Service()
     metrics = RuntimeMetrics(version=_version(), model=cfg.model_ref)
-    runner = Runner(cfg)
+    runner = Runner(cfg, metrics)
     runner.request_shutdown = service.request_shutdown
     service.add(runner)
     transport = WebRtcRouter(webrtc or WebRtcConfig(), peer_factory)

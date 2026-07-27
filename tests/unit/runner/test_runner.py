@@ -44,6 +44,7 @@ from reactor_runtime.interface.internal.reactor_core import (
     MediaSink,
 )
 from reactor_runtime.message_gateway import InboundCommand
+from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.protocol.common import struct_to_dict
 from reactor_runtime.recording import ClipResult
 from reactor_runtime.runner.runner import _RUNTIME_STATES, SESSION_ID, Runner
@@ -467,6 +468,27 @@ async def test_stop_session_closes_the_session(started_runner: Runner) -> None:
     started_runner.start_session({})
     started_runner.stop_session()
     assert started_runner._sm.current_state is SessionState.CLOSING
+
+
+async def test_the_runner_records_its_session_on_the_registry_it_was_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
+    metrics = RuntimeMetrics(version="0.0.0", model="fake:Model")
+    runner = Runner(RuntimeConfig(model_ref="fake:Model"), metrics)
+
+    await runner.start()
+    try:
+        runner.start_session({})
+        runner.stop_session()
+        await asyncio.sleep(0.01)
+    finally:
+        await runner.stop()
+
+    # Pins the seam the rest of the metrics tests cannot see: they subscribe a
+    # recorder to a state machine of their own, so the runner could drop the
+    # listener, or be handed a different holder, and they would all stay green.
+    assert metrics.registry.get_sample_value("runtime_sessions_total", {"reason": "stopped"}) == 1.0
 
 
 async def test_start_session_rejects_a_double_start(started_runner: Runner) -> None:
