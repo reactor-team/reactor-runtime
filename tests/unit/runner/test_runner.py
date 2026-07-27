@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -45,7 +46,7 @@ from reactor_runtime.interface.internal.reactor_core import (
 )
 from reactor_runtime.message_gateway import InboundCommand
 from reactor_runtime.metrics import RuntimeMetrics
-from reactor_runtime.protocol.common import struct_to_dict
+from reactor_runtime.protocol.common import dict_to_struct, struct_to_dict
 from reactor_runtime.recording import ClipResult
 from reactor_runtime.runner.runner import _RUNTIME_STATES, SESSION_ID, Runner
 from reactor_runtime.transport.router import (
@@ -55,7 +56,7 @@ from reactor_runtime.transport.router import (
     UnknownSessionError,
 )
 from reactor_runtime.upload_store import UnknownUploadError
-from reactor_wire.v1 import common_pb2, control_pb2, data_pb2
+from reactor_wire.v1 import common_pb2, control_pb2, data_pb2, model_pb2
 
 DATA = protocol.Channel.DATA
 CONTROL = protocol.Channel.CONTROL
@@ -808,7 +809,12 @@ async def test_connection_open_and_close_are_journalled(started_runner: Runner) 
 async def test_accepted_command_is_journalled_as_a_self_loop(started_runner: Runner) -> None:
     started_runner.start_session({})
     command = InboundCommand(
-        name="set_mode", args={"mode": "fast"}, uploads={}, conn_id=ConnId(1), request_id="r1"
+        name="set_mode",
+        args={"mode": "fast"},
+        uploads={},
+        conn_id=ConnId(1),
+        request_id="r1",
+        received_at=time.monotonic(),
     )
     await started_runner._submit_command(command)
     journalled = _moves(started_runner, SessionEvent.COMMAND)
@@ -824,7 +830,12 @@ async def test_accepted_command_is_journalled_as_a_self_loop(started_runner: Run
 async def test_rejected_command_is_journalled_as_an_error(started_runner: Runner) -> None:
     started_runner.start_session({})
     command = InboundCommand(
-        name="set_mode", args={"mode": ""}, uploads={}, conn_id=ConnId(1), request_id="r1"
+        name="set_mode",
+        args={"mode": ""},
+        uploads={},
+        conn_id=ConnId(1),
+        request_id="r1",
+        received_at=time.monotonic(),
     )
     await started_runner._submit_command(command)
     errors = _moves(started_runner, SessionEvent.ERROR)
@@ -839,7 +850,12 @@ async def test_rejected_command_error_acks_the_v1_sender(started_runner: Runner)
     conn.protocol_version = V1
     started_runner.connection_opened(conn)
     command = InboundCommand(
-        name="set_mode", args={"mode": ""}, uploads={}, conn_id=ConnId(1), request_id="r1"
+        name="set_mode",
+        args={"mode": ""},
+        uploads={},
+        conn_id=ConnId(1),
+        request_id="r1",
+        received_at=time.monotonic(),
     )
     await started_runner._submit_command(command)
     frames = [protocol.select(V1).decode(frame, DATA, SERVER) for frame in conn.sent]
@@ -964,6 +980,7 @@ async def test_command_uploads_are_resolved_before_submit(
         uploads={"image": upload_id},
         conn_id=ConnId(1),
         request_id="r1",
+        received_at=time.monotonic(),
     )
     await started_runner._submit_command(command)
 
@@ -983,8 +1000,14 @@ async def test_command_with_an_unresolved_upload_is_dropped(
         submitted.append(name)
         return CommandOutcome.accept()
 
+    async def never_arrives(upload_id: str, **kwargs: Any) -> UploadedFile:
+        raise UnknownUploadError(upload_id)
+
     assert started_runner._bridge is not None
     monkeypatch.setattr(started_runner._bridge, "submit_command", fake_submit)
+    # The store gives up only after the upload timeout, which this outcome does
+    # not depend on, so it gives up at once here.
+    monkeypatch.setattr(started_runner._uploads, "fetch", never_arrives)
 
     command = InboundCommand(
         name="set_image",
@@ -992,6 +1015,7 @@ async def test_command_with_an_unresolved_upload_is_dropped(
         uploads={"image": "missing"},
         conn_id=ConnId(1),
         request_id="r1",
+        received_at=time.monotonic(),
     )
     await started_runner._submit_command(command)
 
@@ -999,6 +1023,153 @@ async def test_command_with_an_unresolved_upload_is_dropped(
     errors = _moves(started_runner, SessionEvent.ERROR)
     assert len(errors) == 1
     assert "set_image" in errors[0].detail["message"]
+
+
+def _metric(runner: Runner, name: str, **labels: str) -> float | None:
+    """Read one sample off the registry the runner observes on."""
+    return runner._metrics.registry.get_sample_value(name, labels or None)
+
+
+async def _submit(runner: Runner, name: str, args: dict[str, Any], **extra: Any) -> None:
+    """Submit one command through the runner's own choke point."""
+    await runner._submit_command(
+        InboundCommand(
+            name=name,
+            args=args,
+            uploads=extra.pop("uploads", {}),
+            conn_id=ConnId(1),
+            request_id="r1",
+            received_at=extra.pop("received_at", time.monotonic()),
+        )
+    )
+
+
+async def test_an_accepted_command_is_counted_and_timed(started_runner: Runner) -> None:
+    started_runner.start_session({})
+
+    await _submit(started_runner, "set_mode", {"mode": "fast"})
+
+    assert _metric(started_runner, "runtime_commands_total", command="set_mode", outcome="accepted")
+    assert _metric(started_runner, "runtime_command_ingress_seconds_count", command="set_mode") == 1
+
+
+async def test_a_rejected_command_is_counted_and_timed(started_runner: Runner) -> None:
+    started_runner.start_session({})
+
+    await _submit(started_runner, "set_mode", {"mode": ""})
+
+    # A rejection costs the same ingress work an acceptance does, so it is timed
+    # too and only the outcome tells them apart.
+    assert _metric(started_runner, "runtime_commands_total", command="set_mode", outcome="rejected")
+    assert _metric(started_runner, "runtime_command_ingress_seconds_count", command="set_mode") == 1
+
+
+async def test_the_ingress_starts_when_the_frame_arrived(started_runner: Runner) -> None:
+    started_runner.start_session({})
+
+    await _submit(started_runner, "set_mode", {"mode": "fast"}, received_at=time.monotonic() - 5.0)
+
+    # The measurement runs from the stamp the transport edge put on the frame, so
+    # a frame that waited five seconds for the loop reports five seconds.
+    total = _metric(started_runner, "runtime_command_ingress_seconds_sum", command="set_mode")
+    assert total is not None
+    assert total >= 5.0
+
+
+async def test_the_wait_for_uploaded_bytes_is_left_out_of_the_ingress(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started_runner.start_session({})
+
+    async def arrives_late(upload_id: str, **kwargs: Any) -> UploadedFile:
+        await asyncio.sleep(0.3)
+        return UploadedFile(name="cat.png", mime_type="image/png", data=b"\x89PNG")
+
+    monkeypatch.setattr(started_runner._uploads, "fetch", arrives_late)
+    await _submit(started_runner, "set_image", {}, uploads={"image": "late"})
+
+    # A client that takes its time sending a file is not a runtime that is slow to
+    # carry a command. Counting the wait would put a client's upload speed in the
+    # tail of the histogram and hide the starved loop it exists to expose.
+    total = _metric(started_runner, "runtime_command_ingress_seconds_sum", command="set_image")
+    assert total is not None
+    assert total < 0.3
+
+
+async def test_every_command_the_model_declares_starts_at_zero(started_runner: Runner) -> None:
+    # A command nobody sent has no series, which reads the same as a command the
+    # model does not have. The seed makes "nobody uses this one" answerable.
+    assert (
+        _metric(started_runner, "runtime_commands_total", command="set_mode", outcome="accepted")
+        == 0.0
+    )
+    assert (
+        _metric(started_runner, "runtime_commands_total", command="set_mode", outcome="rejected")
+        == 0.0
+    )
+
+
+async def test_an_unresolved_upload_is_counted_with_no_ingress(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started_runner.start_session({})
+
+    async def never_arrives(upload_id: str, **kwargs: Any) -> UploadedFile:
+        raise UnknownUploadError(upload_id)
+
+    # The store gives up only after the upload timeout, which the outcome under
+    # test does not depend on, so it gives up at once here.
+    monkeypatch.setattr(started_runner._uploads, "fetch", never_arrives)
+    await _submit(started_runner, "set_image", {}, uploads={"image": "missing"})
+
+    assert _metric(
+        started_runner, "runtime_commands_total", command="set_image", outcome="unresolved_upload"
+    )
+    # Ingress measures a command the runtime carried to the model, and this one
+    # never got there, so it contributes no measurement.
+    assert (
+        _metric(started_runner, "runtime_command_ingress_seconds_count", command="set_image")
+        is None
+    )
+
+
+async def test_a_frame_off_the_wire_is_timed_from_the_moment_it_arrived(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    _, frame = protocol.select(V1).encode(
+        data_pb2.DataClientMessage(
+            request_id="req-1",
+            command=model_pb2.Command(type="set_mode", data=dict_to_struct({"mode": "fast"})),
+        )
+    )
+
+    # The whole path, not just the choke point: the transport edge stamps the
+    # arrival, the gateway carries the stamp onto the command it decodes, and the
+    # submit path measures against it.
+    started_runner.message_received(ConnId(1), frame, V1, DATA)
+    await asyncio.sleep(0.05)
+
+    assert _metric(started_runner, "runtime_commands_total", command="set_mode", outcome="accepted")
+    assert _metric(started_runner, "runtime_command_ingress_seconds_count", command="set_mode") == 1
+
+
+async def test_a_command_the_model_does_not_declare_shares_one_series(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+
+    await _submit(started_runner, "definitely_not_a_command", {})
+    await _submit(started_runner, "also_not_a_command", {})
+
+    # A client names the command, so the name is not a bounded label value. Only
+    # the schema is bounded, and everything outside it shares one series.
+    assert (
+        _metric(started_runner, "runtime_commands_total", command="unknown", outcome="rejected")
+        == 2
+    )
+    rendered = started_runner._metrics.render().decode()
+    assert "definitely_not_a_command" not in rendered
 
 
 async def test_file_uploaded_dispatches_when_a_hook_exists(

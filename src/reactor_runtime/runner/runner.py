@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import importlib.metadata
+import time
 import uuid
 from collections.abc import Callable, Coroutine, Mapping
 from typing import Any
@@ -53,7 +54,12 @@ from reactor_runtime.interface.internal.reactor_core import ReactorCore
 from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.log import get_logger
 from reactor_runtime.message_gateway import InboundCommand, MessageGateway
-from reactor_runtime.metrics import MetricsRecorder, RuntimeMetrics
+from reactor_runtime.metrics import (
+    UNKNOWN_COMMAND,
+    CommandMetrics,
+    MetricsRecorder,
+    RuntimeMetrics,
+)
 from reactor_runtime.protocol import Channel, Codec, ProtocolVersion, select
 from reactor_runtime.recording import ClipResult, Recorder, RecorderError
 from reactor_runtime.runner.connection_manager import ConnectionManager
@@ -173,6 +179,7 @@ class Runner(ServiceComponent, ConnectionSink):
         # the journal carries, so no session code below calls an instrument.
         self._metrics_recorder = MetricsRecorder(self._metrics, state=self._sm.current_state)
         self._sm.on_transition(self._metrics_recorder.observe)
+        self._command_metrics = CommandMetrics(self._metrics)
         self._events = EventStream()
         self._uploads = UploadStore()
         self._recorder = Recorder(
@@ -247,6 +254,7 @@ class Runner(ServiceComponent, ConnectionSink):
             self._sm.send(SessionEvent.INITIALIZATION_FAIL)
             return
         self._bridge = bridge
+        self._command_metrics.declare(contract.commands)
         self._sm.send(SessionEvent.INITIALIZATION_SUCCESS)
         logger.info(
             "model loaded; session ready",
@@ -339,10 +347,18 @@ class Runner(ServiceComponent, ConnectionSink):
         runtime loop and tracked until it completes. The frame is decoded in the
         codec the connection negotiated (*version*) and as the family its
         physical *channel* carries.
+
+        The arrival is stamped here, the first place in the runtime that sees the
+        frame, and rides any command it carries. A frame that arrives while the
+        loop is busy waits before the gateway reads it, and the wait belongs to
+        the command's ingress rather than being invisible.
         """
         if self._loop is None:
             return
-        task = self._loop.create_task(self._gateway.handle(conn_id, payload, channel, version))
+        received_at = time.monotonic()
+        task = self._loop.create_task(
+            self._gateway.handle(conn_id, payload, channel, version, received_at=received_at)
+        )
         self._inbound.add(task)
         task.add_done_callback(self._inbound.discard)
 
@@ -676,16 +692,26 @@ class Runner(ServiceComponent, ConnectionSink):
         contract rejects is journalled as an error instead and never reaches the
         model. The journalled argument record carries the scalar arguments, never
         the resolved file bytes.
+
+        This is also where the command instruments are recorded, because the
+        branches below are the outcomes a command that reached the runtime can
+        have. The guard above is not one of them: a command arrives over a
+        connection, a connection needs a running session, and a session needs a
+        loaded model, so a client cannot reach this method before the bridge
+        exists.
         """
         if self._bridge is None:
             return
+        label = self._command_label(command.name)
         args = dict(command.args)
+        resolve_started = time.monotonic()
         try:
             for param, upload_id in command.uploads.items():
                 args[param] = await self._uploads.fetch(
                     upload_id, wait_seconds=_UPLOAD_RESOLVE_TIMEOUT_SECONDS
                 )
         except UnknownUploadError:
+            self._command_metrics.unresolved_upload(label)
             self._sm.send(
                 SessionEvent.ERROR,
                 message=f"command {command.name!r} references an unresolved upload",
@@ -698,6 +724,12 @@ class Runner(ServiceComponent, ConnectionSink):
                     f"command {command.name!r} references an unresolved upload",
                 )
             return
+        # The wait for a client's bytes is the client's latency, so ingress starts
+        # again where that wait ended. Counted whole, one command with a file
+        # parameter reports the upload and hides the runtime's own cost.
+        started_at = command.received_at
+        if command.uploads:
+            started_at += time.monotonic() - resolve_started
         outcome = await self._bridge.submit_command(
             command.name,
             args,
@@ -705,6 +737,7 @@ class Runner(ServiceComponent, ConnectionSink):
             request_id=command.request_id,
         )
         if outcome.accepted:
+            self._command_metrics.accepted(label, since=started_at)
             self._sm.send(
                 SessionEvent.COMMAND,
                 name=command.name,
@@ -712,6 +745,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 conn_id=command.conn_id,
             )
         else:
+            self._command_metrics.rejected(label, since=started_at)
             self._sm.send(
                 SessionEvent.ERROR,
                 message=f"command {command.name!r} rejected ({outcome.field}: {outcome.reason})",
@@ -723,6 +757,18 @@ class Runner(ServiceComponent, ConnectionSink):
                     "invalid_command",
                     outcome.reason or "command rejected",
                 )
+
+    def _command_label(self, name: str) -> str:
+        """Return a command name that is safe to label a metric with.
+
+        A client puts any string in a command frame, and a label value that a
+        client chooses is a label value without a bound. The names the model
+        declares are bounded, so a declared name labels itself and every other
+        name shares one series.
+        """
+        if self._bridge is not None and name in self._bridge.contract.commands:
+            return name
+        return UNKNOWN_COMMAND
 
     async def _dispatch_file_uploaded(self, conn_id: ConnId, upload_id: str) -> None:
         """Fetch an out-of-band upload and hand it to the model as a reactor event.
