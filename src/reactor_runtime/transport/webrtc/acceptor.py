@@ -21,8 +21,10 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import time
 
 from reactor_runtime.core import ConnectionSink, ConnId
+from reactor_runtime.metrics import WebRtcMetrics
 from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.transport.acceptor import ConnectionAcceptor
 from reactor_runtime.transport.webrtc.config import IceServer, WebRtcConfig
@@ -49,17 +51,20 @@ class WebRTCAcceptor(ConnectionAcceptor):
         sink: ConnectionSink,
         config: WebRtcConfig,
         peer_factory: WebRtcPeerFactory,
+        metrics: WebRtcMetrics,
     ) -> None:
-        """Bind the acceptor to its sink, config, and peer factory.
+        """Bind the acceptor to its sink, config, peer factory, and instruments.
 
         Args:
             sink: The upward channel connections are registered through.
             config: The configuration applied to every negotiated connection.
             peer_factory: Builds the media peer for each offer.
+            metrics: Where the handshake timings are recorded.
         """
         self._sink = sink
         self._config = config
         self._peer_factory = peer_factory
+        self._metrics = metrics
         self._conns: dict[ConnId, WebRTCConnection] = {}
         self._live: set[ConnId] = set()
         # Candidates that arrived before their connection's offer was negotiated,
@@ -70,6 +75,11 @@ class WebRTCAcceptor(ConnectionAcceptor):
         # the SDP answer never travels above the sink.
         self._negotiating: dict[ConnId, asyncio.Task[None]] = {}
         self._answers: dict[ConnId, SdpAnswer] = {}
+        # When each offer arrived, which is when its client started waiting. Both
+        # handshake measurements run from here, and the entry is dropped when the
+        # connection opens or is reaped so a client that never arrives leaves
+        # nothing behind.
+        self._offered_at: dict[ConnId, float] = {}
 
     def start_offer(
         self,
@@ -97,8 +107,10 @@ class WebRTCAcceptor(ConnectionAcceptor):
         if in_flight is not None:
             in_flight.cancel()
         self._answers.pop(conn_id, None)
+        offered_at = time.monotonic()
+        self._offered_at[conn_id] = offered_at
         self._negotiating[conn_id] = asyncio.create_task(
-            self._negotiate(conn_id, sdp_offer, tracks, version, ice_servers)
+            self._negotiate(conn_id, sdp_offer, tracks, version, ice_servers, offered_at=offered_at)
         )
 
     def take_answer(self, conn_id: ConnId) -> SdpAnswer | None:
@@ -112,6 +124,8 @@ class WebRTCAcceptor(ConnectionAcceptor):
         tracks: TrackMap,
         version: ProtocolVersion,
         ice_servers: tuple[IceServer, ...] | None = None,
+        *,
+        offered_at: float,
     ) -> None:
         """Negotiate one offer into a connection and stage its answer.
 
@@ -145,20 +159,26 @@ class WebRTCAcceptor(ConnectionAcceptor):
             conn.on_media(lambda track, frame: self._sink.media_received(conn_id, track, frame))
             conn.on_ping(lambda: self._sink.keepalive(conn_id))
             conn.on_connected(lambda: self._opened(conn_id, conn))
-            conn.on_disconnect(lambda: self._closed(conn_id))
-            conn.on_closed(lambda: self._forget(conn_id))
+            conn.on_disconnect(lambda: self._closed(conn_id, offered_at))
+            conn.on_closed(lambda: self._forget(conn_id, offered_at))
             self._conns[conn_id] = conn
 
             for candidate in self._pending_ice.pop(conn_id, []):
                 await conn.add_ice(candidate)
             self._answers[conn_id] = answer
+            self._metrics.answered(since=offered_at)
             # The answer is both stashed for the client's HTTP poll (take_answer)
             # and reported up as a transport-agnostic fact, so a consumer driving
             # the runtime without polling (a director) can relay it back instead.
             self._sink.connection_answered(conn_id, {"type": answer.type, "sdp": answer.sdp})
         except asyncio.CancelledError:
+            # A superseding offer cancelled this one. The client is no longer
+            # waiting on it, so it is neither an answer nor a failure.
             raise
         except Exception:
+            self._metrics.negotiation_failed(since=offered_at)
+            # No connection was built, so nothing else will ever reap this id.
+            self._drop_offer(conn_id, offered_at)
             logger.exception("WebRTC negotiation failed for connection %s", conn_id)
         finally:
             # Only clear our own entry: a superseding offer may have already
@@ -180,10 +200,13 @@ class WebRTCAcceptor(ConnectionAcceptor):
 
     def _opened(self, conn_id: ConnId, conn: WebRTCConnection) -> None:
         """Announce a connection upward once its wire is live."""
+        offered_at = self._offered_at.pop(conn_id, None)
+        if offered_at is not None:
+            self._metrics.connected(since=offered_at)
         self._live.add(conn_id)
         self._sink.connection_opened(conn)
 
-    def _closed(self, conn_id: ConnId) -> None:
+    def _closed(self, conn_id: ConnId, offered_at: float) -> None:
         """Drop a connection, reporting the loss only if it had opened.
 
         A connection lost before it ever connected is reaped here and never
@@ -193,11 +216,12 @@ class WebRTCAcceptor(ConnectionAcceptor):
         self._conns.pop(conn_id, None)
         self._pending_ice.pop(conn_id, None)
         self._answers.pop(conn_id, None)
+        self._drop_offer(conn_id, offered_at)
         if conn_id in self._live:
             self._live.discard(conn_id)
             self._sink.connection_closed(conn_id)
 
-    def _forget(self, conn_id: ConnId) -> None:
+    def _forget(self, conn_id: ConnId, offered_at: float) -> None:
         """Drop a connection torn down on command, without reporting it upward.
 
         The mirror of :meth:`_closed` for a commanded close (session teardown):
@@ -209,4 +233,16 @@ class WebRTCAcceptor(ConnectionAcceptor):
         self._conns.pop(conn_id, None)
         self._pending_ice.pop(conn_id, None)
         self._answers.pop(conn_id, None)
+        self._drop_offer(conn_id, offered_at)
         self._live.discard(conn_id)
+
+    def _drop_offer(self, conn_id: ConnId, offered_at: float) -> None:
+        """Forget when an offer arrived, unless a newer offer replaced it.
+
+        A reconnect installs its timestamp and then tears the old connection
+        down, so the old connection's own teardown runs while the new offer is
+        already waiting. Dropping by id alone would take the new offer's
+        timestamp with it and leave the reconnect unmeasured.
+        """
+        if self._offered_at.get(conn_id) == offered_at:
+            del self._offered_at[conn_id]

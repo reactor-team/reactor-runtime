@@ -228,7 +228,7 @@ def _assemble(
     runner = Runner(cfg, metrics)
     runner.request_shutdown = service.request_shutdown
     service.add(runner)
-    transport = WebRtcRouter(webrtc or WebRtcConfig(), peer_factory)
+    transport = WebRtcRouter(webrtc or WebRtcConfig(), peer_factory, metrics)
     service.add(
         HttpServer(
             cfg,

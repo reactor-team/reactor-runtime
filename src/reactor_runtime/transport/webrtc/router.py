@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from reactor_runtime.core import ConnId
+from reactor_runtime.metrics import RuntimeMetrics, WebRtcMetrics
 from reactor_runtime.transport.router import (
     ErrorDetail,
     SessionControl,
@@ -166,14 +167,29 @@ class WebRtcRouter(TransportRouter):
     builds connections with; bound to the runner when mounted.
     """
 
-    def __init__(self, config: WebRtcConfig, peer_factory: WebRtcPeerFactory) -> None:
-        """Hold the configuration and peer factory for the acceptor."""
+    def __init__(
+        self,
+        config: WebRtcConfig,
+        peer_factory: WebRtcPeerFactory,
+        metrics: RuntimeMetrics,
+    ) -> None:
+        """Hold the configuration, peer factory, and instruments for the acceptor.
+
+        The handshake instruments are declared here rather than at each mount, so
+        the router owns one set of them for the life of the process.
+        """
         self._config = config
         self._peer_factory = peer_factory
+        self._metrics = WebRtcMetrics(metrics)
 
     def mount(self, app: FastAPI, runner: SessionControl) -> None:
         """Register the WebRTC route group against *app*, bound to *runner*."""
-        acceptor = WebRTCAcceptor(sink=runner, config=self._config, peer_factory=self._peer_factory)
+        acceptor = WebRTCAcceptor(
+            sink=runner,
+            config=self._config,
+            peer_factory=self._peer_factory,
+            metrics=self._metrics,
+        )
 
         async def _session_not_running(request: Request, exc: Exception) -> Response:
             return JSONResponse(status_code=400, content={"detail": "No session running"})

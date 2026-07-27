@@ -378,7 +378,7 @@ async def running_runtime(
         if start:
             await runner.start()
         peer = FakePeer()
-        router = WebRtcRouter(WebRtcConfig(ping_timeout=0.0), peer_factory(peer))
+        router = WebRtcRouter(WebRtcConfig(ping_timeout=0.0), peer_factory(peer), metrics)
         app = build_app(runner, [router], runner.health, metrics)
         transport = httpx.ASGITransport(app=app)
         try:

@@ -48,7 +48,7 @@ def render_openapi() -> dict[str, Any]:
     model_ref = "spec:UnusedSpecModel"
     metrics = RuntimeMetrics(version=_SPEC_VERSION, model=model_ref)
     runner = Runner(RuntimeConfig(model_ref=model_ref), metrics)
-    transport = WebRtcRouter(WebRtcConfig(), _unbootable_peer_factory)
+    transport = WebRtcRouter(WebRtcConfig(), _unbootable_peer_factory, metrics)
     return build_app(runner, [transport], runner.health, metrics).openapi()
 
 
