@@ -197,6 +197,10 @@ class ModelContract:
 
         Raises:
             ValueError: If two distinct handlers claim the same command name.
+            TypeError: If a handler's return annotation is neither a
+                :class:`ModelMessage` subclass nor ``None``. Declaring the model
+                calls this, so a mismatch between the schema and the wire is a
+                failure to import the model rather than a run-time surprise.
         """
         commands: dict[str, CommandSpec] = {}
         claimed_by: dict[str, str] = {}
@@ -340,16 +344,54 @@ def _response_type(handler: Callable[..., Any]) -> type[ModelMessage] | None:
     """Resolve a handler's return annotation to a message type, or ``None``.
 
     A handler that returns a :class:`ModelMessage` subclass registers it as the
-    command's response; any other return (including none) means no response.
+    command's response. A handler that annotates ``None``, or annotates nothing,
+    has no response and is answered with a bodyless acknowledgement.
+
+    Any other return annotation is rejected, and that includes a union such as
+    ``Reply | None``. The schema publishes the type this function resolves, but
+    the dispatcher sends whatever the handler returns, so an annotation the
+    contract cannot read produces a schema that disagrees with the wire. A client
+    generated from that schema expects no body and receives one.
+
+    Args:
+        handler: The handler method to read the return annotation from.
+
+    Returns:
+        The command's response message type, or ``None`` when it has no response.
+
+    Raises:
+        TypeError: If the annotations do not resolve, or the return annotation is
+            neither a :class:`ModelMessage` subclass nor ``None``.
     """
+    if "return" not in getattr(handler, "__annotations__", {}):
+        return None
+    name = getattr(handler, "__qualname__", repr(handler))
     try:
         hints = get_type_hints(handler)
-    except Exception:
-        return None
+    except Exception as exc:
+        raise TypeError(
+            f"Cannot resolve the annotations of command handler {name!r}: {exc}. "
+            f"An @event handler must annotate types that exist at import time, so a "
+            f"type imported only under TYPE_CHECKING does not work here."
+        ) from exc
     returned = hints.get("return")
+    if returned is None or returned is type(None):
+        return None
     if isinstance(returned, type) and issubclass(returned, ModelMessage):
         return returned
-    return None
+    raise TypeError(
+        f"Command handler {name!r} returns {_annotation_name(returned)}, which a client "
+        f"cannot receive. Annotate one ModelMessage subclass for a typed reply, or None "
+        f"for a bodyless acknowledgement. A union has no single response shape to publish, "
+        f"and that includes 'Message | None'. To report a failure, raise CommandError."
+    )
+
+
+def _annotation_name(annotation: Any) -> str:
+    """Return a readable name for an annotation, for use in an error message."""
+    if isinstance(annotation, type):
+        return annotation.__name__
+    return str(annotation)
 
 
 def _response_name(spec: CommandSpec | None) -> str | None:

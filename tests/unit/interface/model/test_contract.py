@@ -1,5 +1,6 @@
 import enum
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -17,6 +18,9 @@ from reactor_runtime import (
 )
 from reactor_runtime.core import Command, InputField, UploadedFile
 from reactor_runtime.interface.model import ContractError, ModelContract
+
+if TYPE_CHECKING:
+    from reactor_runtime import ModelMessage as LateReply
 
 
 class Reply(ModelMessage):
@@ -227,6 +231,83 @@ def test_duplicate_command_name_is_rejected_at_build() -> None:
 
             @event(name="go")
             async def second(self) -> None: ...
+
+
+# -- return annotations -------------------------------------------------------
+
+
+def test_a_message_return_annotation_becomes_the_response() -> None:
+    class Typed(ReactorModel):
+        @event(name="go")
+        async def go(self) -> Reply:
+            return Reply(image_url="x")
+
+    assert ModelContract.of(Typed).commands["go"].response is Reply
+
+
+def test_a_none_return_annotation_has_no_response() -> None:
+    class Void(ReactorModel):
+        @event(name="go")
+        async def go(self) -> None: ...
+
+    assert ModelContract.of(Void).commands["go"].response is None
+
+
+def test_an_unannotated_handler_has_no_response() -> None:
+    # The auto-generated set_<field> handlers carry no return annotation, so an
+    # absent annotation stays legal rather than becoming an import failure.
+    class Void(ReactorModel):
+        @event(name="go")
+        async def go(self): ...
+
+    assert ModelContract.of(Void).commands["go"].response is None
+
+
+def test_a_plain_return_annotation_is_rejected_at_build() -> None:
+    # A dict would be dropped on the wire while the schema published a 202, so the
+    # model fails to import rather than serving a contract it does not honour.
+    with pytest.raises(TypeError, match="which a client cannot receive"):
+
+        class Bad(ReactorModel):
+            @event(name="go")
+            async def go(self) -> dict[str, int]:
+                return {"count": 1}
+
+
+def test_a_union_return_annotation_is_rejected_at_build() -> None:
+    class Other(ModelMessage):
+        """A second reply."""
+
+        detail: str
+
+    with pytest.raises(TypeError, match="no single response shape"):
+
+        class Bad(ReactorModel):
+            @event(name="go")
+            async def go(self) -> Reply | Other:
+                return Reply(image_url="x")
+
+
+def test_an_optional_return_annotation_is_rejected_at_build() -> None:
+    # 'Reply | None' resolved to "no response" before, so the schema published a
+    # 202 for a handler that replies. The author picks one shape instead.
+    with pytest.raises(TypeError, match="no single response shape"):
+
+        class Bad(ReactorModel):
+            @event(name="go")
+            async def go(self) -> Reply | None:
+                return None
+
+
+def test_a_return_annotation_that_does_not_resolve_is_rejected_at_build() -> None:
+    # LateReply exists only for the type checker, so the contract cannot read the
+    # response type at import time and must not fall back to "no response".
+    with pytest.raises(TypeError, match="Cannot resolve the annotations"):
+
+        class Bad(ReactorModel):
+            @event(name="go")
+            async def go(self) -> "LateReply":
+                raise NotImplementedError
 
 
 def test_a_track_declared_as_both_directions_is_rejected() -> None:
