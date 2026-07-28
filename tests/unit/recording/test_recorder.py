@@ -1,4 +1,3 @@
-import shutil
 import threading
 import time
 from pathlib import Path
@@ -279,7 +278,7 @@ def test_disabled_recorder_never_starts(tmp_path: Path) -> None:
     assert recorder._session_dir is None
 
 
-# -- the encode path (needs ffmpeg) ----------------------------------------
+# -- the encode path --------------------------------------------------------
 
 
 def _video_bundle() -> MediaBundle:
@@ -290,7 +289,6 @@ def _video_bundle() -> MediaBundle:
     return MediaBundle(tracks={"main_video": TrackData(info=info, data=frame)})
 
 
-@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is not installed")
 def test_encodes_segments_and_serves_a_manifest(tmp_path: Path) -> None:
     recorder = Recorder(RecordingConfig(enabled=True, chunk_seconds=1, recording_dir=str(tmp_path)))
     recorder.start("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
