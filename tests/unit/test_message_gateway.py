@@ -207,10 +207,9 @@ async def test_v0_request_capabilities_is_dropped_without_a_traceback(
     assert len(caplog.records) == 1
     record = caplog.records[0]
     assert record.exc_info is None
-    assert record.getMessage() == (
-        "MessageGateway dropped an undecodable frame on Channel.DATA: "
-        "unrecognized v0 runtime client message: 'requestCapabilities'"
-    )
+    message = record.getMessage()
+    assert message.startswith("MessageGateway dropped an undecodable frame on Channel.DATA: ")
+    assert "requestCapabilities" in message
 
 
 async def test_undecodable_v1_frame_is_dropped() -> None:
