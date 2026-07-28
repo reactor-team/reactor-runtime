@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --python 3.12
 # fmt: off
 #MISE description="[Quality] Verify mise.lock is complete against mise.toml"
 # fmt: on
