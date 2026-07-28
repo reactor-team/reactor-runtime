@@ -140,7 +140,11 @@ async def test_an_uncaught_handler_exception_answers_with_a_generic_failure() ->
     # The client learns the command failed, and the exception's own text — which
     # can name a path or a credential — stays in the log.
     assert addressed == [
-        (ConnId(1001), CommandFailure("internal_error", "command handler failed"), "req-4")
+        (
+            ConnId(1001),
+            CommandFailure("internal_error", "The handler raised an unexpected error."),
+            "req-4",
+        )
     ]
 
 
@@ -157,12 +161,12 @@ async def test_a_command_error_answers_with_the_author_s_code_and_message() -> N
     ]
 
 
-async def test_a_failure_is_answered_even_without_a_request_id() -> None:
+async def test_an_uncorrelated_failure_reaches_the_sink_for_the_journal() -> None:
     model = Model()
     addressed = _ready(model)
     await model._dispatch_command(CommandEnvelope(_cmd("refuse"), ConnId(1001), None))
-    # A bodyless ack without a request id says nothing, but a failure carries a
-    # code and a message the client can act on.
+    # The model reports every failure. Whether one without a request id can be put
+    # on the wire is the runner's call, which journals it and sends nothing.
     assert addressed == [
         (
             ConnId(1001),

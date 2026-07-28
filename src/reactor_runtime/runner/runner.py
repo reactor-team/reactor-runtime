@@ -23,6 +23,7 @@ import uuid
 from collections.abc import Callable, Coroutine, Mapping
 from typing import Any
 
+from reactor_runtime.codes import INVALID_COMMAND, UNRESOLVED_UPLOAD
 from reactor_runtime.core import (
     JOURNAL_EVENTS,
     ClientConnected,
@@ -47,7 +48,6 @@ from reactor_runtime.core import (
     TrackDirection,
     Transition,
     TransitionEvent,
-    codes,
 )
 from reactor_runtime.event_stream import EventStream
 from reactor_runtime.interface.events.messages import ModelMessage
@@ -720,7 +720,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 self._reject_command(
                     command.conn_id,
                     command.request_id,
-                    codes.UNRESOLVED_UPLOAD,
+                    UNRESOLVED_UPLOAD,
                     f"command {command.name!r} references an unresolved upload",
                 )
             return
@@ -754,7 +754,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 self._reject_command(
                     command.conn_id,
                     command.request_id,
-                    codes.INVALID_COMMAND,
+                    INVALID_COMMAND,
                     outcome.reason or "command rejected",
                 )
 
@@ -828,13 +828,16 @@ class Runner(ServiceComponent, ConnectionSink):
 
         A :class:`CommandFailure` is a handler's reported failure and travels as
         an error frame. A ``None`` message is the bodyless acknowledgement of a
-        command whose handler returned nothing; it is sent only when there is a
-        request id to correlate. Both are withheld from legacy clients, whose
-        commands are fire-and-forget.
+        command whose handler returned nothing. Both are sent only when there is
+        a request id to correlate, so every response the client receives can be
+        matched to the command that caused it, and both are withheld from legacy
+        clients, whose commands are fire-and-forget. A failure is journalled
+        either way, so a reply the client cannot be told about is still auditable.
         """
         if isinstance(message, CommandFailure):
-            self._on_handler_failure(message)
-            self._reject_command(conn_id, request_id or "", message.code, message.message)
+            self._on_handler_failure(message, conn_id, request_id)
+            if request_id is not None:
+                self._reject_command(conn_id, request_id, message.code, message.message)
             return
         if message is None:
             if request_id is None:
@@ -852,7 +855,9 @@ class Runner(ServiceComponent, ConnectionSink):
             )[1],
         )
 
-    def _on_handler_failure(self, failure: CommandFailure) -> None:
+    def _on_handler_failure(
+        self, failure: CommandFailure, conn_id: ConnId, request_id: str | None
+    ) -> None:
         """Journal a handler's failure, hopping onto the loop.
 
         The model reports the failure from its own thread, so the journal move is
@@ -861,13 +866,22 @@ class Runner(ServiceComponent, ConnectionSink):
         """
         loop = self._loop
         if loop is not None:
-            loop.call_soon_threadsafe(self._emit_handler_failure, failure)
+            loop.call_soon_threadsafe(self._emit_handler_failure, failure, conn_id, request_id)
 
-    def _emit_handler_failure(self, failure: CommandFailure) -> None:
-        """Journal a handler failure as a self-loop move on the session machine."""
+    def _emit_handler_failure(
+        self, failure: CommandFailure, conn_id: ConnId, request_id: str | None
+    ) -> None:
+        """Journal a handler failure as a self-loop move on the session machine.
+
+        Carries the connection and the request id so the entry lines up with the
+        :attr:`SessionEvent.COMMAND` move that admitted the command, rather than
+        leaving an operator to match the two by timestamp.
+        """
         self._sm.send(
             SessionEvent.ERROR,
             message=f"command handler failed ({failure.code}: {failure.message})",
+            conn_id=conn_id,
+            request_id=request_id,
         )
 
     def _reject_command(self, conn_id: ConnId, request_id: str, code: str, detail: str) -> None:

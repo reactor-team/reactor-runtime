@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from enum import Enum
 from typing import Any
 
-from reactor_runtime.core import codes
+from reactor_runtime.codes import PUBLISH_REFUSED
 from reactor_runtime.protocol.common import dict_to_struct
 from reactor_wire.v1 import common_pb2, control_pb2, data_pb2, model_pb2, platform_pb2, track_pb2
 
@@ -175,7 +175,7 @@ class Codec(ABC):
                 request_id=request_id,
                 kind=common_pb2.MessageKind.MESSAGE_KIND_RESPONSE,
                 error=common_pb2.Error(
-                    code=codes.PUBLISH_REFUSED, message=reason or "track already published"
+                    code=PUBLISH_REFUSED, message=reason or "track already published"
                 ),
             )
         return self.encode(message)

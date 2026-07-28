@@ -405,15 +405,37 @@ def test_a_handler_failure_is_withheld_from_a_legacy_connection() -> None:
     assert conn.sent == []
 
 
-async def test_a_handler_failure_is_journalled(started_runner: Runner) -> None:
+async def test_a_handler_failure_is_journalled_with_its_correlation(
+    started_runner: Runner,
+) -> None:
     started_runner.start_session({})
     # The model reports the failure from its own thread; this is the half the hop
     # schedules on the runtime loop, where the journal is single-writer.
-    started_runner._emit_handler_failure(CommandFailure("quota_exceeded", "No credits remain."))
+    started_runner._emit_handler_failure(
+        CommandFailure("quota_exceeded", "No credits remain."), ConnId(1), "req-3"
+    )
 
     errors = _moves(started_runner, SessionEvent.ERROR)
     assert len(errors) == 1
     assert "quota_exceeded" in errors[0].detail["message"]
+    # The entry carries what the COMMAND move carries, so an operator lines the
+    # two up without matching timestamps.
+    assert errors[0].detail["conn_id"] == ConnId(1)
+    assert errors[0].detail["request_id"] == "req-3"
+
+
+def test_an_uncorrelated_handler_failure_is_journalled_but_not_sent() -> None:
+    runner = _runner()
+    conn = FakeConnection(1)
+    conn.protocol_version = V1
+    runner.connection_opened(conn)
+
+    # Every command a client sends carries a request id, minted by the gateway when
+    # absent, so this is only reachable internally. A RESPONSE with no request id
+    # is the one shape a client keyed on request ids cannot place.
+    runner._send_addressed(ConnId(1), CommandFailure("quota_exceeded", "No credits."), None)
+
+    assert conn.sent == []
 
 
 # --- the session-control face --------------------------------------------

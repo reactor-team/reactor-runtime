@@ -23,7 +23,7 @@ import time
 from collections.abc import Callable, Coroutine
 from typing import Any, ClassVar
 
-from reactor_runtime.core import codes
+from reactor_runtime.codes import INTERNAL_ERROR
 from reactor_runtime.core.model import (
     ClientConnected,
     ClientDisconnected,
@@ -139,7 +139,10 @@ class ReactorModel(ReactorCore):
             return
         except Exception:
             logger.exception("error in command handler", command=spec.name)
-            self._fail(envelope, CommandFailure(codes.INTERNAL_ERROR, "command handler failed"))
+            self._fail(
+                envelope,
+                CommandFailure(INTERNAL_ERROR, "The handler raised an unexpected error."),
+            )
             return
         if envelope.conn_id is None:
             return
