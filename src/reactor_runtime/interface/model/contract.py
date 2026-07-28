@@ -23,7 +23,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, get_type_hints
+from typing import Any
 
 from reactor_runtime.core.fields import NO_DEFAULT, validate_field
 from reactor_runtime.core.model import Command
@@ -360,21 +360,21 @@ def _response_type(handler: Callable[..., Any]) -> type[ModelMessage] | None:
         The command's response message type, or ``None`` when it has no response.
 
     Raises:
-        TypeError: If the annotations do not resolve, or the return annotation is
-            neither a :class:`ModelMessage` subclass nor ``None``.
+        TypeError: If the return annotation does not resolve, or is neither a
+            :class:`ModelMessage` subclass nor ``None``.
     """
-    if "return" not in getattr(handler, "__annotations__", {}):
+    annotations = getattr(handler, "__annotations__", {})
+    if "return" not in annotations:
         return None
     name = getattr(handler, "__qualname__", repr(handler))
     try:
-        hints = get_type_hints(handler)
+        returned = _resolve(annotations["return"], handler)
     except Exception as exc:
         raise TypeError(
-            f"Cannot resolve the annotations of command handler {name!r}: {exc}. "
-            f"An @event handler must annotate types that exist at import time, so a "
+            f"Cannot resolve the return annotation of command handler {name!r}: {exc}. "
+            f"An @event handler must return a type that exists at import time, so a "
             f"type imported only under TYPE_CHECKING does not work here."
         ) from exc
-    returned = hints.get("return")
     if returned is None or returned is type(None):
         return None
     if isinstance(returned, type) and issubclass(returned, ModelMessage):
@@ -385,6 +385,23 @@ def _response_type(handler: Callable[..., Any]) -> type[ModelMessage] | None:
         f"for a bodyless acknowledgement. A union has no single response shape to publish, "
         f"and that includes 'Message | None'. To report a failure, raise CommandError."
     )
+
+
+def _resolve(annotation: Any, handler: Callable[..., Any]) -> Any:
+    """Resolve one annotation against the module the handler was defined in.
+
+    Scoped to a single annotation on purpose. ``get_type_hints`` resolves the whole
+    dict, which would let a parameter the module cannot resolve decide the command's
+    response — and only for a handler that happens to carry a return annotation.
+    Parameter annotations are read where the command is built, which falls back to
+    ``Any`` rather than failing the model.
+
+    ``from __future__ import annotations`` leaves every annotation a string, so a
+    string is evaluated the way ``get_type_hints`` evaluates one.
+    """
+    if not isinstance(annotation, str):
+        return annotation
+    return eval(annotation, getattr(handler, "__globals__", {}))
 
 
 def _annotation_name(annotation: Any) -> str:
