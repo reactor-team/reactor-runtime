@@ -16,6 +16,7 @@ from reactor_runtime import (
 )
 from reactor_runtime.core import SessionStarted
 from reactor_runtime.core.values import (
+    CommandFailure,
     ConnId,
     InputFrame,
     MediaChunk,
@@ -61,7 +62,9 @@ class EchoModel(ReactorModel):
 class Sinks:
     def __init__(self) -> None:
         self.broadcast: list[ModelMessage] = []
-        self.addressed: list[tuple[ConnId, ModelMessage | None, RequestId | None]] = []
+        self.addressed: list[
+            tuple[ConnId, ModelMessage | CommandFailure | None, RequestId | None]
+        ] = []
         self.media: list[MediaChunk] = []
 
     def bind(self, bridge: ModelBridge) -> None:
@@ -70,7 +73,10 @@ class Sinks:
         )
 
     def _addr(
-        self, conn: ConnId, message: ModelMessage | None, request_id: RequestId | None
+        self,
+        conn: ConnId,
+        message: ModelMessage | CommandFailure | None,
+        request_id: RequestId | None,
     ) -> None:
         self.addressed.append((conn, message, request_id))
 

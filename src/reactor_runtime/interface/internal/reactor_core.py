@@ -21,6 +21,7 @@ from typing import Any, ClassVar, TypeVar, get_type_hints
 
 from reactor_runtime.core.model import Command, ReactorEvent
 from reactor_runtime.core.values import (
+    CommandFailure,
     ConnId,
     InputFrame,
     MediaBundle,
@@ -40,11 +41,14 @@ _Holder = TypeVar("_Holder")
 
 BroadcastSink = Callable[[ModelMessage], None]
 
-AddressedSink = Callable[[ConnId, "ModelMessage | None", RequestId | None], None]
+AddressedSink = Callable[[ConnId, "ModelMessage | CommandFailure | None", RequestId | None], None]
 """Delivers a reply to one connection, correlated by its request id.
 
-A ``None`` message is the bodyless acknowledgement of a command whose handler
-completed without returning one, so the client's awaited command resolves.
+A :class:`ModelMessage` is the handler's typed answer. A :class:`CommandFailure`
+is the reason it could not produce one. A ``None`` message is the bodyless
+acknowledgement of a command whose handler completed without returning one. All
+three resolve the client's awaited command, so it never waits on a reply that
+does not come.
 """
 
 MediaSink = Callable[[MediaChunk], None]

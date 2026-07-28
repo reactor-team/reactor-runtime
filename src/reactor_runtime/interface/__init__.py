@@ -21,6 +21,7 @@ from reactor_runtime.interface.client import ClientInfo
 from reactor_runtime.interface.events import (
     EVENT_REGISTRY,
     MESSAGE_REGISTRY,
+    CommandError,
     MessageField,
     ModelMessage,
     connected,
@@ -58,6 +59,7 @@ __all__ = [
     "BufferClosed",
     "ClientInfo",
     "Command",
+    "CommandError",
     "FieldInfo",
     "Idle",
     "Input",

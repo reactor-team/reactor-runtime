@@ -4,6 +4,7 @@ from typing import Any
 
 from reactor_runtime import (
     ClientInfo,
+    CommandError,
     ModelMessage,
     Output,
     ReactorModel,
@@ -22,10 +23,10 @@ from reactor_runtime.core.model import (
     SessionEnded,
     SessionStarted,
 )
-from reactor_runtime.core.values import ConnId
+from reactor_runtime.core.values import CommandFailure, ConnId
 from reactor_runtime.interface.internal.reactor_core import CommandEnvelope, RequestId
 
-Addressed = list[tuple[ConnId, ModelMessage | None, RequestId | None]]
+Addressed = list[tuple[ConnId, ModelMessage | CommandFailure | None, RequestId | None]]
 
 
 class Out(Output):
@@ -55,7 +56,11 @@ class Model(ReactorModel):
 
     @event(name="boom")
     async def boom(self) -> None:
-        raise RuntimeError("kaboom")
+        raise RuntimeError("kaboom /srv/secret.db")
+
+    @event(name="refuse")
+    async def refuse(self) -> None:
+        raise CommandError("quota_exceeded", "No credits remain for this session.")
 
     @connected
     async def on_connect(self, client: ClientInfo) -> None:
@@ -128,17 +133,56 @@ async def test_reserved_client_is_the_sending_connection() -> None:
     assert model.calls == [("touch", ConnId(1234))]
 
 
-async def test_handler_exception_is_swallowed() -> None:
+async def test_an_uncaught_handler_exception_answers_with_a_generic_failure() -> None:
     model = Model()
     addressed = _ready(model)
     await model._dispatch_command(CommandEnvelope(_cmd("boom"), ConnId(1001), "req-4"))
+    # The client learns the command failed, and the exception's own text — which
+    # can name a path or a credential — stays in the log.
+    assert addressed == [
+        (ConnId(1001), CommandFailure("internal_error", "command handler failed"), "req-4")
+    ]
+
+
+async def test_a_command_error_answers_with_the_author_s_code_and_message() -> None:
+    model = Model()
+    addressed = _ready(model)
+    await model._dispatch_command(CommandEnvelope(_cmd("refuse"), ConnId(1001), "req-5"))
+    assert addressed == [
+        (
+            ConnId(1001),
+            CommandFailure("quota_exceeded", "No credits remain for this session."),
+            "req-5",
+        )
+    ]
+
+
+async def test_a_failure_is_answered_even_without_a_request_id() -> None:
+    model = Model()
+    addressed = _ready(model)
+    await model._dispatch_command(CommandEnvelope(_cmd("refuse"), ConnId(1001), None))
+    # A bodyless ack without a request id says nothing, but a failure carries a
+    # code and a message the client can act on.
+    assert addressed == [
+        (
+            ConnId(1001),
+            CommandFailure("quota_exceeded", "No credits remain for this session."),
+            None,
+        )
+    ]
+
+
+async def test_a_failure_is_dropped_without_an_originating_connection() -> None:
+    model = Model()
+    addressed = _ready(model)
+    await model._dispatch_command(CommandEnvelope(_cmd("refuse"), None, "req-6"))
     assert addressed == []
 
 
 async def test_return_value_is_dropped_without_an_originating_connection() -> None:
     model = Model()
     addressed = _ready(model)
-    await model._dispatch_command(CommandEnvelope(_cmd("set_value", value=3), None, "req-5"))
+    await model._dispatch_command(CommandEnvelope(_cmd("set_value", value=3), None, "req-7"))
     assert model.value == 3
     assert addressed == []
 
