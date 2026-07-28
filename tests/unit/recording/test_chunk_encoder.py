@@ -11,10 +11,12 @@ import numpy as np
 import pytest
 
 from reactor_runtime.core import RecordingConfig
+from reactor_runtime.recording import chunk_encoder
 from reactor_runtime.recording.chunk_encoder import (
     _F_GETPIPE_SZ,
     _VIDEO_QUEUE_DEPTH,
     ChunkEncoder,
+    EncoderBusyError,
     _build_argv,
     _enlarge_pipe,
     _pipe_size_ceiling,
@@ -161,7 +163,33 @@ def test_a_stalled_video_pipe_still_lets_audio_through(
         expected = samples.tobytes() * _VIDEO_QUEUE_DEPTH
         assert _read_exactly(audio_fd, len(expected), timeout=5.0) == expected
     finally:
-        encoder.stop()
+        # The video pipe never drains here, so the graceful flush can only run
+        # out its budget; a short one keeps teardown from padding the suite.
+        encoder.stop(timeout=0.5)
+
+
+def test_a_saturated_queue_drops_a_frame_without_failing_the_encoder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A queue that stays full means the encoder is behind, which a busy host can
+    # cause on its own. Recording has to survive it, so the feed reports the lost
+    # frame and leaves the encoder usable rather than ending the recording.
+    _park_ffmpeg(monkeypatch)
+    monkeypatch.setattr(chunk_encoder, "_FEED_TIMEOUT_SECONDS", 0.1)
+    encoder = _encoder(tmp_path, has_audio=True)
+    try:
+        busy = False
+        for _ in range(_VIDEO_QUEUE_DEPTH + 4):
+            try:
+                encoder.feed_video(_oversized_frame())
+            except EncoderBusyError:
+                busy = True
+                break
+
+        assert busy
+        assert not encoder.failed
+    finally:
+        encoder.stop(timeout=0.5)
 
 
 def test_stop_returns_while_a_video_write_is_parked(
@@ -249,11 +277,19 @@ def test_enlarge_pipe_grows_to_the_node_ceiling() -> None:
         os.close(write_fd)
 
 
-def test_enlarge_pipe_is_inert_off_linux() -> None:
+def test_enlarge_pipe_is_inert_off_linux(monkeypatch: pytest.MonkeyPatch) -> None:
+    # `_enlarge_pipe` reads sys.platform when it is called, so patching it covers
+    # the branch a Linux runner never takes, and pins the 0 return `_spawn` logs.
+    on_linux = sys.platform == "linux"
     read_fd, write_fd = os.pipe()
     try:
-        capacity = _enlarge_pipe(write_fd, 1 << 24)
-        assert capacity >= 0
+        before = int(fcntl.fcntl(write_fd, _F_GETPIPE_SZ)) if on_linux else 0
+        monkeypatch.setattr(sys, "platform", "darwin")
+
+        assert _enlarge_pipe(write_fd, 1 << 24) == 0
+
+        if on_linux:
+            assert int(fcntl.fcntl(write_fd, _F_GETPIPE_SZ)) == before
     finally:
         os.close(read_fd)
         os.close(write_fd)

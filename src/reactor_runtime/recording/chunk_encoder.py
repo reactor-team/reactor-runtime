@@ -15,6 +15,7 @@ hold.
 from __future__ import annotations
 
 import contextlib
+import enum
 import fcntl
 import os
 import queue
@@ -22,6 +23,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -45,12 +47,28 @@ _PIPE_MAX_SIZE_PATH = Path("/proc/sys/fs/pipe-max-size")
 # is megabytes, so its queue stays shallow; one audio slot is a few kilobytes.
 _VIDEO_QUEUE_DEPTH = 4
 _AUDIO_QUEUE_DEPTH = 64
-# How long a feed waits for queue room before it reports the pipe unusable, how
-# long a writer is given to flush and release its pipe, and how often a writer
-# wakes to notice a close request.
+# How long a feed waits for queue room before it gives up on the payload, how
+# long a writer is given to release its pipe once ffmpeg is gone, and how often a
+# writer wakes to notice a close request.
 _FEED_TIMEOUT_SECONDS = 10.0
 _CLOSE_TIMEOUT_SECONDS = 1.0
 _WRITER_POLL_SECONDS = 0.05
+
+
+class EncoderBusyError(Exception):
+    """A feed found the encoder's queue full, so the payload was not recorded.
+
+    Back-pressure, not a broken encoder: the payload is lost and the encoder
+    stays usable. A caller counts the loss and continues with the next one.
+    """
+
+
+class _WriteOutcome(enum.Enum):
+    """What a writer did with a payload."""
+
+    ACCEPTED = "accepted"
+    BUSY = "busy"
+    DEAD = "dead"
 
 
 class _PipeWriter:
@@ -85,7 +103,7 @@ class _PipeWriter:
         """Whether a write to the pipe failed, which is terminal for the pipe."""
         return self._failed.is_set()
 
-    def write(self, payload: bytes) -> bool:
+    def write(self, payload: bytes) -> _WriteOutcome:
         """Hand *payload* to the writer thread.
 
         Blocks while the queue is full, which is how encoder back-pressure
@@ -95,27 +113,31 @@ class _PipeWriter:
             payload: The bytes to write to the pipe, in order.
 
         Returns:
-            Whether the payload was accepted. ``False`` once the pipe is closing,
-            its writes have failed, or the queue stayed full for the whole feed
-            timeout.
+            ``ACCEPTED`` once the payload is queued, ``BUSY`` when the queue
+            stayed full for the whole feed timeout, and ``DEAD`` when the pipe is
+            closing or its writes have failed.
         """
         if self._closing.is_set() or self._failed.is_set():
-            return False
+            return _WriteOutcome.DEAD
         try:
             self._queue.put(payload, timeout=_FEED_TIMEOUT_SECONDS)
         except queue.Full:
-            return False
-        return not self._failed.is_set()
+            return _WriteOutcome.BUSY
+        return _WriteOutcome.DEAD if self._failed.is_set() else _WriteOutcome.ACCEPTED
+
+    def request_close(self) -> None:
+        """Ask the writer to flush what is queued and then release the pipe."""
+        self._closing.set()
 
     def close(self, timeout: float) -> None:
         """Flush what is queued, close the pipe, and join the writer thread.
 
-        Returns once the thread has exited or *timeout* elapses. A writer parked
+        Returns once the thread has exited or *timeout* elapses. A writer blocked
         in a write to a pipe ffmpeg stopped reading only leaves that write when it
         fails, which the caller forces by killing ffmpeg; calling ``close`` again
         afterwards collects it. Safe to call repeatedly.
         """
-        self._closing.set()
+        self.request_close()
         self._thread.join(timeout=timeout)
 
     def _run(self) -> None:
@@ -396,6 +418,8 @@ class ChunkEncoder:
 
         Raises:
             ValueError: If *frame* is not a three-channel image.
+            EncoderBusyError: If the video queue stayed full, so the frame was
+                not recorded.
             RuntimeError: If the encoder is stopped or in a failed state.
         """
         if frame.ndim != 3 or frame.shape[2] != 3:
@@ -421,7 +445,14 @@ class ChunkEncoder:
         ):
             frame = _resize_nearest(frame, self._width, self._height)
         writer = self._video
-        if writer is None or not writer.write(np.ascontiguousarray(frame).tobytes()):
+        outcome = (
+            _WriteOutcome.DEAD
+            if writer is None
+            else writer.write(np.ascontiguousarray(frame).tobytes())
+        )
+        if outcome is _WriteOutcome.BUSY:
+            raise EncoderBusyError("the encoder's video queue stayed full")
+        if outcome is _WriteOutcome.DEAD:
             self._failed = True
             raise RuntimeError("ffmpeg stopped accepting video")
 
@@ -431,6 +462,8 @@ class ChunkEncoder:
         A no-op when the encoder has no audio pipe.
 
         Raises:
+            EncoderBusyError: If the audio queue stayed full, so the samples were
+                not recorded.
             RuntimeError: If the encoder is in a failed state.
         """
         writer = self._audio
@@ -440,7 +473,10 @@ class ChunkEncoder:
             raise RuntimeError("ChunkEncoder is in a failed state")
         if samples.dtype != np.int16:
             samples = samples.astype(np.int16)
-        if not writer.write(np.ascontiguousarray(samples).tobytes()):
+        outcome = writer.write(np.ascontiguousarray(samples).tobytes())
+        if outcome is _WriteOutcome.BUSY:
+            raise EncoderBusyError("the encoder's audio queue stayed full")
+        if outcome is _WriteOutcome.DEAD:
             self._failed = True
             raise RuntimeError("ffmpeg stopped accepting audio")
 
@@ -522,9 +558,15 @@ class ChunkEncoder:
             proc = self._proc
             self._proc = None
         # Flushing the queues and closing the pipes is the EOF ffmpeg needs to
-        # write its trailer, so it comes before the signal.
+        # write its trailer, so it comes before the signal, and it gets the
+        # caller's whole budget. Every writer starts its flush before any of them
+        # is waited on, so one pipe never reaches EOF a whole timeout ahead of the
+        # other and ffmpeg sees the two inputs end together.
         for writer in writers:
-            writer.close(timeout=_CLOSE_TIMEOUT_SECONDS)
+            writer.request_close()
+        deadline = time.monotonic() + timeout
+        for writer in writers:
+            writer.close(timeout=max(0.0, deadline - time.monotonic()))
         if proc is not None:
             self._shutdown(proc, timeout)
         # ffmpeg is gone, so a writer still parked in a write to its pipe now

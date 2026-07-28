@@ -2,8 +2,10 @@ import shutil
 import threading
 import time
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
+import numpy.typing as npt
 import pytest
 
 from reactor_runtime.core import (
@@ -25,6 +27,7 @@ from reactor_runtime.recording import (
     Recorder,
     RecorderDisabledError,
 )
+from reactor_runtime.recording.chunk_encoder import ChunkEncoder, EncoderBusyError
 
 _SID = "00000000-0000-0000-0000-000000000001"
 
@@ -271,6 +274,33 @@ def test_the_final_chunk_is_announced_on_completion(tmp_path: Path) -> None:
     (session_dir / ".complete").write_bytes(b"")
     recorder._fire_ready_chunks()
     assert fired == [(_SID, -1), (_SID, 0)]
+
+
+class _BusyEncoder:
+    """A stand-in encoder that is always behind on its input queue."""
+
+    failed = False
+
+    def feed_video(self, _frame: npt.NDArray[Any]) -> None:
+        raise EncoderBusyError("the encoder's video queue stayed full")
+
+    def feed_audio(self, _samples: npt.NDArray[Any]) -> None:
+        raise AssertionError("audio must not be fed for a frame that was dropped")
+
+
+def test_a_saturated_encoder_drops_a_frame_and_keeps_recording(tmp_path: Path) -> None:
+    # Back-pressure from the encoder used to disable recording for the rest of the
+    # session, which is the outcome this recorder exists to avoid.
+    recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
+    recorder._encoder = cast("ChunkEncoder", _BusyEncoder())
+    recorder._has_audio = True
+    recorder._feed_queue.put_nowait((np.zeros((4, 4, 3), dtype=np.uint8), np.zeros(4, np.int16)))
+    recorder._feed_stop.set()
+
+    recorder._feed_loop()
+
+    assert recorder._dropped_frames == 1
+    assert not recorder._disabled
 
 
 def test_disabled_recorder_never_starts(tmp_path: Path) -> None:

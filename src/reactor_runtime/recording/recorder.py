@@ -33,7 +33,7 @@ import numpy.typing as npt
 
 from reactor_runtime.core import MediaBundle, MediaChunk, RecordingConfig, TrackKind
 from reactor_runtime.log import get_logger
-from reactor_runtime.recording.chunk_encoder import ChunkEncoder
+from reactor_runtime.recording.chunk_encoder import ChunkEncoder, EncoderBusyError
 from reactor_runtime.recording.markers import MarkerBookkeeper
 
 logger = get_logger(__name__)
@@ -381,16 +381,21 @@ class Recorder:
             try:
                 self._feed_queue.put_nowait((video_data, audio_data))
             except queue.Full:
-                self._dropped_frames += 1
-                if self._dropped_frames == 1 or self._dropped_frames % 300 == 0:
-                    logger.warning(
-                        "recorder feed queue full; dropping a frame to keep the model unblocked",
-                        dropped_total=self._dropped_frames,
-                    )
+                self._note_dropped_frame("the feed queue is full")
                 break
             fed += 1
         if fed:
             markers.advance(fed / RECORDING_FPS)
+
+    def _note_dropped_frame(self, reason: str) -> None:
+        """Count a frame the recording lost, logging the first and every 300th."""
+        self._dropped_frames += 1
+        if self._dropped_frames == 1 or self._dropped_frames % 300 == 0:
+            logger.warning(
+                "recorder dropped a frame to keep the model unblocked",
+                reason=reason,
+                dropped_total=self._dropped_frames,
+            )
 
     def _video_frames(self, bundle: MediaBundle) -> list[npt.NDArray[Any]]:
         """Split the recorded video track into single ``(H, W, 3)`` frames.
@@ -465,6 +470,11 @@ class Recorder:
                 encoder.feed_video(video)
                 if self._has_audio and audio is not None:
                     encoder.feed_audio(audio)
+            except EncoderBusyError:
+                # The encoder is behind, not broken. Losing the frame and its
+                # audio together keeps the two streams paired, and recording
+                # resumes as soon as the encoder catches up.
+                self._note_dropped_frame("the encoder is saturated")
             except Exception:
                 logger.exception("recorder encoder feed failed; disabling recording")
                 self._disabled = True
