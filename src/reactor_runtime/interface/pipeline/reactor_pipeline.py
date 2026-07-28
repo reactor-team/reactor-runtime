@@ -307,9 +307,10 @@ class ReactorPipeline(ReactorModel):
         client connects and is restarted if it finishes while the client stays.
 
         A ``finally:`` block in the generator runs when the session ends, so it
-        is the place to release what the session held. Raising from it terminates
-        the whole model process, so raise only for a fault that the next session
-        cannot survive, and handle anything recoverable in place.
+        is the place to release what the session held. Raising from it ends the
+        model loop permanently — not just the current session — so raise only for
+        a fault that the next session cannot survive, and handle anything
+        recoverable in place.
 
         Example::
 
