@@ -37,8 +37,8 @@ from reactor_runtime.transport.webrtc.config import (
     IceTransportPolicy,
     WebRtcConfig,
 )
-from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.router import WebRtcRouter
+from reactor_runtime.transport.webrtc.stats import WebRtcPeerFactory
 
 _MANIFEST = "reactor.yaml"
 
@@ -213,7 +213,7 @@ def _assemble(
         A service with the runner and the HTTP server hooked on.
     """
     if peer_factory is None:
-        from reactor_runtime.transport.webrtc.libwebrtc.peer import libwebrtc_peer_factory
+        from reactor_runtime.transport.webrtc.peer import libwebrtc_peer_factory
 
         peer_factory = libwebrtc_peer_factory
     service = Service()
@@ -359,7 +359,7 @@ def main() -> None:
         SystemExit: If no ``reactor.yaml`` is found or an environment variable
             is set to a malformed value.
     """
-    from reactor_runtime.transport.webrtc.libwebrtc.peer import libwebrtc_peer_factory
+    from reactor_runtime.transport.webrtc.peer import libwebrtc_peer_factory
 
     log.configure(level=_log_level_from_env())
     manifest = Path.cwd() / _MANIFEST

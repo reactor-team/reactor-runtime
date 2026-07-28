@@ -19,7 +19,6 @@ from reactor_runtime.serve import (
     main,
 )
 from reactor_runtime.transport.webrtc.config import IceTransportPolicy, WebRtcConfig
-from reactor_runtime.transport.webrtc.peer import WebRtcPeer
 from reactor_runtime.transport.webrtc.signaling import SdpAnswer, SdpOffer, TrackMap
 
 
@@ -29,7 +28,7 @@ async def _unused_factory(
     tracks: TrackMap,
     config: WebRtcConfig,
     version: ProtocolVersion,
-) -> tuple[WebRtcPeer, SdpAnswer]:
+) -> tuple[object, SdpAnswer]:
     """A peer factory that must never be invoked during assembly."""
     raise AssertionError("peer factory must not be invoked during assembly")
 

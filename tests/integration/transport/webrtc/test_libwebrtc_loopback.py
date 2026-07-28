@@ -29,9 +29,9 @@ from reactor_runtime.core.values import (  # noqa: E402
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion  # noqa: E402
 from reactor_runtime.transport.webrtc.config import WebRtcConfig  # noqa: E402
-from reactor_runtime.transport.webrtc.libwebrtc.frames import rgb_to_bgra  # noqa: E402
-from reactor_runtime.transport.webrtc.libwebrtc.peer import (  # noqa: E402
-    LibWebRtcPeer,
+from reactor_runtime.transport.webrtc.frames import rgb_to_bgra  # noqa: E402
+from reactor_runtime.transport.webrtc.peer import (  # noqa: E402
+    WebRTCPeer,
     _get_factory,
     libwebrtc_peer_factory,
 )
@@ -166,7 +166,7 @@ class _Client:
             self.pc.add_ice_candidate(candidate)
 
 
-async def _trickle_until(client: _Client, peer: LibWebRtcPeer, stop: asyncio.Event) -> None:
+async def _trickle_until(client: _Client, peer: WebRTCPeer, stop: asyncio.Event) -> None:
     """Forward the client's ICE candidates to the peer as they are gathered.
 
     Candidates arrive on a libwebrtc thread after the offer is created, so a

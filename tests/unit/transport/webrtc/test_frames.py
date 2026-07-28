@@ -7,7 +7,7 @@ directly, without the ``reactor_webrtc`` wheel.
 import numpy as np
 import pytest
 
-from reactor_runtime.transport.webrtc.libwebrtc.frames import (
+from reactor_runtime.transport.webrtc.frames import (
     bgra_to_rgb,
     inbound_audio_to_mono,
     rgb_to_bgra,

@@ -29,8 +29,8 @@ from reactor_runtime.transport.router import (
 )
 from reactor_runtime.transport.webrtc.acceptor import WebRTCAcceptor
 from reactor_runtime.transport.webrtc.config import IceServer, WebRtcConfig
-from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpOffer, TrackMap
+from reactor_runtime.transport.webrtc.stats import WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.version import protocol_for_transport
 
 _PREFIX = "/sessions/{sid}/transport/webrtc"
