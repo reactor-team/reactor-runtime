@@ -19,9 +19,13 @@ pre-commit:
       run: MISE_LOCK_CHECK_FROM=index mise run lint:mise-lock
     http-spec:
       # The committed OpenAPI contract tracks the code: regenerate and stage it
-      # whenever a commit touches the HTTP surface, so it never drifts and the
-      # spec change rides the same commit reviewers see.
-      glob: "src/reactor_runtime/{http,transport,runner}/**/*.py"
+      # whenever a commit touches the runtime source, so it never drifts and the
+      # spec change rides the same commit reviewers see. The glob spans the whole
+      # package because the rendered document reaches past the route modules —
+      # the published enums come from `core` — and it is anchored at `src/`
+      # because a `**/` segment needs a directory level beneath it: a pattern
+      # like `src/reactor_runtime/http/**/*.py` skips `http/routes.py` itself.
+      glob: "src/**/*.py"
       run: mise run http-spec && git add api/openapi.json
 
 post-checkout:
