@@ -188,8 +188,13 @@ class ReactorPipeline(ReactorModel):
         An uncaught exception in ``inference()`` — including a yield that is not
         an :class:`Output`, :data:`Idle`, or ``None`` — is fatal: it propagates
         out of this driver and permanently ends the model loop, not just the
-        current session. The generator is still closed on the way out, so the
-        teardown stays clean.
+        current session. The generator is still closed on the way out, and a
+        failure in that cleanup is logged and dropped, so the exception the
+        runtime reports is the one the model raised first.
+
+        A cleanup that fails after a clean session end has no earlier exception
+        to defer to, so it propagates and ends the model loop too. The state and
+        the input buffers reset on every path out, including that one.
         """
         lock = self._gen_lock
         if lock is None:
@@ -204,6 +209,7 @@ class ReactorPipeline(ReactorModel):
             await self._runnable.wait()
 
             gen = inference_fn()
+            ended_cleanly = False
             try:
                 while self._runnable.is_set():
                     try:
@@ -224,11 +230,14 @@ class ReactorPipeline(ReactorModel):
                         await self.emit(output, compute_time=compute_time)
                     else:
                         await self.emit(output)
+                ended_cleanly = True
             finally:
-                await self._close_generator(gen, is_async)
-                self.state = None
-                for buffer in self._input_buffers.values():
-                    buffer.reset()
+                try:
+                    await self._close_generator(gen, is_async, ended_cleanly=ended_cleanly)
+                finally:
+                    self.state = None
+                    for buffer in self._input_buffers.values():
+                        buffer.reset()
 
     async def _advance(self, gen: Any, is_async: bool) -> tuple[Output | None, float]:
         """Advance the generator by one yield, timing the work it took.
@@ -258,14 +267,32 @@ class ReactorPipeline(ReactorModel):
             )
         return result, compute_time
 
-    async def _close_generator(self, gen: Any, is_async: bool) -> None:
-        """Close the generator on teardown, isolating an error in its cleanup."""
+    async def _close_generator(self, gen: Any, is_async: bool, *, ended_cleanly: bool) -> None:
+        """Close the generator on teardown, reporting a fatal cleanup failure.
+
+        Closing the generator runs the model's own cleanup block. When the loop
+        already carries an exception of its own, a failure here is logged and
+        dropped, so the original exception stays the one the runtime reports.
+        When the loop ended cleanly, that failure is the only one there is, so
+        it propagates and ends the model loop.
+
+        Args:
+            gen: The inference generator to close.
+            is_async: Whether *gen* is an async generator.
+            ended_cleanly: Whether the session loop finished without raising.
+
+        Raises:
+            Exception: Whatever the model's cleanup raised, when *ended_cleanly*
+                is true.
+        """
         try:
             if is_async:
                 await gen.aclose()
             else:
                 gen.close()
         except Exception:
+            if ended_cleanly:
+                raise
             logger.exception("inference generator raised while closing")
 
     # -- author hook ----------------------------------------------------------
@@ -278,6 +305,11 @@ class ReactorPipeline(ReactorModel):
         tracks, runs a forward pass, and yields an :class:`Output`. Yield
         :data:`Idle` or ``None`` to skip a turn. The generator starts when a
         client connects and is restarted if it finishes while the client stays.
+
+        A ``finally:`` block in the generator runs when the session ends, so it
+        is the place to release what the session held. Raising from it terminates
+        the whole model process, so raise only for a fault that the next session
+        cannot survive, and handle anything recoverable in place.
 
         Example::
 
