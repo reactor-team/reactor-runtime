@@ -9,9 +9,8 @@ single frames, and a dedicated thread drains them to the wire at the chunk's
 declared rate, repeating the last frame to fill a gap so the stream never stalls.
 
 One pacer lives per connection and dies with it, so there is no cross-session
-state to reset — a fresh connection starts with a fresh pacer. This is the seam
-a native GStreamer jitter buffer replaces: everything above it hands the pacer a
-chunk and never sees a frame.
+state to reset — a fresh connection starts with a fresh pacer. Everything above it hands the
+pacer a chunk and never sees a frame.
 
 Three stages::
 

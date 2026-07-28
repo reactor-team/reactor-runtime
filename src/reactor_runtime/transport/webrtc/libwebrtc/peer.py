@@ -1,9 +1,9 @@
 """libwebrtc WebRTC peer.
 
 The concrete :class:`~reactor_runtime.transport.webrtc.peer.WebRtcPeer` backed by
-the ``reactor_webrtc`` PyO3 module, which wraps libwebrtc. Where the GStreamer
-peer drives an explicit pipeline, this peer delegates encoding, decoding,
-RTP/RTCP, ICE, and DTLS-SRTP to libwebrtc and works only at the media boundary:
+the ``reactor_webrtc`` PyO3 module, which wraps libwebrtc. The peer delegates
+encoding, decoding, RTP/RTCP, ICE, and DTLS-SRTP to libwebrtc and works only at
+the media boundary:
 it feeds outbound video to a track as BGRA and outbound audio to the shared
 device as int16 PCM, and surfaces inbound media and data-channel frames back
 through the callbacks the connection registers on it.
