@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+from typing import cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,6 +20,7 @@ from reactor_runtime.serve import (
     main,
 )
 from reactor_runtime.transport.webrtc.config import IceTransportPolicy, WebRtcConfig
+from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.signaling import SdpAnswer, SdpOffer, TrackMap
 
 
@@ -31,6 +33,9 @@ async def _unused_factory(
 ) -> tuple[object, SdpAnswer]:
     """A peer factory that must never be invoked during assembly."""
     raise AssertionError("peer factory must not be invoked during assembly")
+
+
+_UNUSED: WebRtcPeerFactory = cast(WebRtcPeerFactory, _unused_factory)
 
 
 _WEBRTC_ENV = (
@@ -67,8 +72,15 @@ runtime:
 """
 
 
+def test_assemble_uses_libwebrtc_peer_factory_by_default() -> None:
+    pytest.importorskip("reactor_webrtc")
+    # The peer_factory=None branch does a deferred import; verify it succeeds.
+    service = _assemble(RuntimeConfig(model_ref="fake:Model"))
+    assert "runner" in service._components
+
+
 def test_assemble_hooks_on_runner_then_http() -> None:
-    service = _assemble(RuntimeConfig(model_ref="fake:Model"), peer_factory=_unused_factory)
+    service = _assemble(RuntimeConfig(model_ref="fake:Model"), peer_factory=_UNUSED)
 
     components = service._components
     assert set(components) == {"runner", "http"}
@@ -78,7 +90,7 @@ def test_assemble_hooks_on_runner_then_http() -> None:
 
 
 def test_assemble_answers_health_with_the_process_aggregate() -> None:
-    service = _assemble(RuntimeConfig(model_ref="fake:Model"), peer_factory=_unused_factory)
+    service = _assemble(RuntimeConfig(model_ref="fake:Model"), peer_factory=_UNUSED)
     http = service._components["http"]
     assert isinstance(http, HttpServer)
 
@@ -96,7 +108,7 @@ def test_assemble_answers_health_with_the_process_aggregate() -> None:
 
 
 def test_assemble_wires_the_runner_shutdown_to_the_service() -> None:
-    service = _assemble(RuntimeConfig(model_ref="fake:Model"), peer_factory=_unused_factory)
+    service = _assemble(RuntimeConfig(model_ref="fake:Model"), peer_factory=_UNUSED)
 
     runner = service._components["runner"]
     assert isinstance(runner, Runner)

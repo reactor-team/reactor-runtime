@@ -27,8 +27,8 @@ from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.transport.acceptor import ConnectionAcceptor
 from reactor_runtime.transport.webrtc.config import IceServer, WebRtcConfig
 from reactor_runtime.transport.webrtc.connection import WebRTCConnection
+from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpAnswer, SdpOffer, TrackMap
-from reactor_runtime.transport.webrtc.stats import WebRtcPeerFactory
 
 logger = logging.getLogger(__name__)
 

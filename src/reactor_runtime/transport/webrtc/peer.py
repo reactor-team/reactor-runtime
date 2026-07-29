@@ -45,7 +45,7 @@ import logging
 import queue
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import numpy as np
@@ -663,3 +663,14 @@ async def libwebrtc_peer_factory(
     peer._track_by_mid = {mapped.mid: mapped.info for mapped in tracks.tracks}
     answer_sdp = await peer._negotiate(offer.sdp)
     return peer, SdpAnswer(sdp=answer_sdp)
+
+
+WebRtcPeerFactory = Callable[
+    [ConnId, SdpOffer, TrackMap, WebRtcConfig, ProtocolVersion],
+    Awaitable[tuple[WebRTCPeer, SdpAnswer]],
+]
+"""Build a negotiated :class:`WebRTCPeer` for *(conn id, offer, tracks, config, version)*.
+
+Returns the peer and the SDP answer produced during the exchange. *version* is
+the wire codec negotiated for the connection, which the peer holds for its life.
+"""

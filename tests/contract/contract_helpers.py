@@ -250,7 +250,7 @@ async def wait_for_state(runner: Runner, state_name: str) -> None:
 
 
 class FakePeer:
-    """A WebRtcPeer double that lets tests fire the wire-level events."""
+    """A test peer double that lets tests fire the wire-level events."""
 
     def __init__(self) -> None:
         self.ice: list[IceCandidate] = []
@@ -316,7 +316,7 @@ def peer_factory(peer: FakePeer, answer: str = "answer-sdp") -> WebRtcPeerFactor
         peer.protocol_version = version
         return peer, SdpAnswer(answer)
 
-    return factory
+    return cast(WebRtcPeerFactory, factory)
 
 
 class FakeConnection:

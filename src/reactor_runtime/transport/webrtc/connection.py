@@ -14,7 +14,6 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
-from typing import TYPE_CHECKING
 
 from reactor_runtime.core import (
     ConnectionCapabilities,
@@ -28,11 +27,9 @@ from reactor_runtime.core import (
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.transport.webrtc.config import WebRtcConfig
 from reactor_runtime.transport.webrtc.pacer import MediaPacer
+from reactor_runtime.transport.webrtc.peer import WebRTCPeer, WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpAnswer, SdpOffer, TrackMap
-from reactor_runtime.transport.webrtc.stats import PeerStats, WebRtcPeerFactory
-
-if TYPE_CHECKING:
-    from reactor_runtime.transport.webrtc.peer import WebRTCPeer
+from reactor_runtime.transport.webrtc.stats import PeerStats
 
 logger = logging.getLogger(__name__)
 

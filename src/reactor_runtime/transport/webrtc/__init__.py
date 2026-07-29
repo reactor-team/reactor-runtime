@@ -10,6 +10,7 @@ during offer negotiation by a :data:`WebRtcPeerFactory`.
 from reactor_runtime.transport.webrtc.acceptor import WebRTCAcceptor
 from reactor_runtime.transport.webrtc.config import IceServer, IceTransportPolicy, WebRtcConfig
 from reactor_runtime.transport.webrtc.connection import WebRTCConnection
+from reactor_runtime.transport.webrtc.peer import WebRTCPeer, WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.router import WebRtcRouter
 from reactor_runtime.transport.webrtc.signaling import (
     IceCandidate,
@@ -18,11 +19,7 @@ from reactor_runtime.transport.webrtc.signaling import (
     SdpOffer,
     TrackMap,
 )
-from reactor_runtime.transport.webrtc.stats import (
-    PeerStats,
-    TrackStat,
-    WebRtcPeerFactory,
-)
+from reactor_runtime.transport.webrtc.stats import PeerStats, TrackStat
 
 __all__ = [
     "IceCandidate",
@@ -36,6 +33,7 @@ __all__ = [
     "TrackStat",
     "WebRTCAcceptor",
     "WebRTCConnection",
+    "WebRTCPeer",
     "WebRtcConfig",
     "WebRtcPeerFactory",
     "WebRtcRouter",

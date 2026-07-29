@@ -37,8 +37,8 @@ from reactor_runtime.transport.webrtc.config import (
     IceTransportPolicy,
     WebRtcConfig,
 )
+from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.router import WebRtcRouter
-from reactor_runtime.transport.webrtc.stats import WebRtcPeerFactory
 
 _MANIFEST = "reactor.yaml"
 
@@ -213,8 +213,11 @@ def _assemble(
         A service with the runner and the HTTP server hooked on.
     """
     if peer_factory is None:
-        from reactor_runtime.transport.webrtc.peer import libwebrtc_peer_factory
-
+        try:
+            from reactor_runtime.transport.webrtc.peer import libwebrtc_peer_factory
+        except Exception as exc:
+            detail = str(exc) or type(exc).__name__
+            raise SystemExit(f"the libwebrtc media engine is unavailable: {detail}") from exc
         peer_factory = libwebrtc_peer_factory
     service = Service()
     runner = Runner(cfg)

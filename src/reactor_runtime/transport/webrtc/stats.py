@@ -1,22 +1,14 @@
 """WebRTC peer statistics types.
 
-Shared data types used by the WebRTC peer and connection layers.
+Shared data types sampled by :class:`~reactor_runtime.transport.webrtc.peer.WebRTCPeer`
+and surfaced through :class:`~reactor_runtime.transport.webrtc.connection.WebRTCConnection`.
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
 
-from reactor_runtime.core import ConnId, TrackDirection
-from reactor_runtime.protocol import ProtocolVersion
-from reactor_runtime.transport.webrtc.config import WebRtcConfig
-from reactor_runtime.transport.webrtc.signaling import (
-    SdpAnswer,
-    SdpOffer,
-    TrackMap,
-)
+from reactor_runtime.core import TrackDirection
 
 
 @dataclass(frozen=True)
@@ -51,14 +43,3 @@ class PeerStats:
 
     rtt_seconds: float | None = None
     tracks: tuple[TrackStat, ...] = ()
-
-
-WebRtcPeerFactory = Callable[
-    [ConnId, SdpOffer, TrackMap, WebRtcConfig, ProtocolVersion],
-    Awaitable[tuple[Any, SdpAnswer]],
-]
-"""Build a negotiated peer for *(conn id, offer, tracks, config, version)*.
-
-Returns the peer and the SDP answer produced during the exchange. *version* is
-the wire codec negotiated for the connection, which the peer holds for its life.
-"""
