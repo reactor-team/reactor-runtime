@@ -1,10 +1,10 @@
 import logging
 from pathlib import Path
+from typing import cast
 
 import pytest
 from fastapi.testclient import TestClient
 
-from reactor_runtime import serve
 from reactor_runtime.core import ConnId, RuntimeConfig
 from reactor_runtime.http import HttpServer
 from reactor_runtime.protocol import ProtocolVersion
@@ -15,14 +15,12 @@ from reactor_runtime.serve import (
     _load_config,
     _log_level_from_env,
     _port_range_from_env,
-    _select_peer_factory,
-    _transport_from_env,
     _version,
     _webrtc_config_from_env,
     main,
 )
 from reactor_runtime.transport.webrtc.config import IceTransportPolicy, WebRtcConfig
-from reactor_runtime.transport.webrtc.peer import WebRtcPeer
+from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.signaling import SdpAnswer, SdpOffer, TrackMap
 
 
@@ -32,9 +30,12 @@ async def _unused_factory(
     tracks: TrackMap,
     config: WebRtcConfig,
     version: ProtocolVersion,
-) -> tuple[WebRtcPeer, SdpAnswer]:
+) -> tuple[object, SdpAnswer]:
     """A peer factory that must never be invoked during assembly."""
     raise AssertionError("peer factory must not be invoked during assembly")
+
+
+_UNUSED: WebRtcPeerFactory = cast(WebRtcPeerFactory, _unused_factory)
 
 
 _WEBRTC_ENV = (
@@ -57,7 +58,7 @@ _RUNTIME_ENV = (
 @pytest.fixture(autouse=True)
 def _clear_adapter_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Run every test against a clean environment for the serve adapter."""
-    for name in (*_WEBRTC_ENV, *_RUNTIME_ENV, "PREFERRED_TRANSPORT"):
+    for name in (*_WEBRTC_ENV, *_RUNTIME_ENV):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -71,8 +72,15 @@ runtime:
 """
 
 
+def test_assemble_uses_libwebrtc_peer_factory_by_default() -> None:
+    pytest.importorskip("reactor_webrtc")
+    # The peer_factory=None branch does a deferred import; verify it succeeds.
+    service = _assemble(RuntimeConfig(model_ref="fake:Model"))
+    assert "runner" in service._components
+
+
 def test_assemble_hooks_on_runner_then_http() -> None:
-    service = _assemble(RuntimeConfig(model_ref="fake:Model"), peer_factory=_unused_factory)
+    service = _assemble(RuntimeConfig(model_ref="fake:Model"), peer_factory=_UNUSED)
 
     components = service._components
     assert set(components) == {"runner", "http"}
@@ -82,7 +90,7 @@ def test_assemble_hooks_on_runner_then_http() -> None:
 
 
 def test_assemble_answers_health_with_the_process_aggregate() -> None:
-    service = _assemble(RuntimeConfig(model_ref="fake:Model"), peer_factory=_unused_factory)
+    service = _assemble(RuntimeConfig(model_ref="fake:Model"), peer_factory=_UNUSED)
     http = service._components["http"]
     assert isinstance(http, HttpServer)
 
@@ -100,68 +108,11 @@ def test_assemble_answers_health_with_the_process_aggregate() -> None:
 
 
 def test_assemble_wires_the_runner_shutdown_to_the_service() -> None:
-    service = _assemble(RuntimeConfig(model_ref="fake:Model"), peer_factory=_unused_factory)
+    service = _assemble(RuntimeConfig(model_ref="fake:Model"), peer_factory=_UNUSED)
 
     runner = service._components["runner"]
     assert isinstance(runner, Runner)
     assert runner.request_shutdown == service.request_shutdown
-
-
-def test_assemble_selects_the_default_transport_when_none_is_injected(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    seen: list[str] = []
-
-    def _record(transport: str) -> object:
-        seen.append(transport)
-        return _unused_factory
-
-    monkeypatch.setattr(serve, "_select_peer_factory", _record)
-    _assemble(RuntimeConfig(model_ref="fake:Model"))
-    assert seen == ["libwebrtc"]
-
-
-def test_assemble_uses_an_injected_peer_factory_without_selecting(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def _boom(_transport: str) -> object:
-        raise AssertionError("must not select a default when a factory is injected")
-
-    monkeypatch.setattr(serve, "_select_peer_factory", _boom)
-    service = _assemble(RuntimeConfig(model_ref="fake:Model"), peer_factory=_unused_factory)
-    assert set(service._components) == {"runner", "http"}
-
-
-def test_transport_from_env_defaults_to_libwebrtc() -> None:
-    assert _transport_from_env() == "libwebrtc"
-
-
-def test_transport_from_env_accepts_webrtc_gstreamer(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PREFERRED_TRANSPORT", "webrtc.gstreamer")
-    assert _transport_from_env() == "gstreamer"
-
-
-def test_transport_from_env_accepts_webrtc_libwebrtc(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PREFERRED_TRANSPORT", "webrtc.libwebrtc")
-    assert _transport_from_env() == "libwebrtc"
-
-
-def test_transport_from_env_rejects_an_unknown_value(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PREFERRED_TRANSPORT", "bogus")
-    with pytest.raises(SystemExit, match="PREFERRED_TRANSPORT"):
-        _transport_from_env()
-
-
-def test_select_peer_factory_rejects_an_unknown_transport() -> None:
-    with pytest.raises(SystemExit, match="unknown transport"):
-        _select_peer_factory("bogus")
-
-
-def test_select_peer_factory_returns_the_libwebrtc_engine() -> None:
-    pytest.importorskip("reactor_webrtc")
-    from reactor_runtime.transport.webrtc.libwebrtc.peer import libwebrtc_peer_factory
-
-    assert _select_peer_factory("libwebrtc") is libwebrtc_peer_factory
 
 
 def test_version_is_a_non_empty_string() -> None:

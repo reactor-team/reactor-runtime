@@ -10,11 +10,6 @@ runs by selecting them all.
 
 from __future__ import annotations
 
-import os
-import shutil
-import subprocess
-import sys
-
 import nox
 
 # The interpreters the suite supports. Each becomes its own session
@@ -29,27 +24,6 @@ nox.options.default_venv_backend = "uv"
 # failing when uv declines to recreate an environment that already exists. CI
 # runners start clean, so they always build fresh.
 nox.options.reuse_existing_virtualenvs = True
-
-
-def _gstreamer_env() -> dict[str, str]:
-    """Return environment additions that let PyGObject find GStreamer.
-
-    macOS strips ``DYLD_*`` from some subprocess chains, so PyGObject cannot load
-    the Homebrew GStreamer libraries the transport tests import. Re-add
-    Homebrew's library and typelib paths. Empty on Linux, where the loader finds
-    them through the standard search paths.
-    """
-    if sys.platform != "darwin" or not shutil.which("brew"):
-        return {}
-    prefix = subprocess.run(
-        ["brew", "--prefix"], capture_output=True, text=True, check=True
-    ).stdout.strip()
-    return {
-        "DYLD_LIBRARY_PATH": f"{prefix}/lib:{os.environ.get('DYLD_LIBRARY_PATH', '')}",
-        "GI_TYPELIB_PATH": (
-            f"{prefix}/lib/girepository-1.0:{os.environ.get('GI_TYPELIB_PATH', '')}"
-        ),
-    }
 
 
 def _install_locked(session: nox.Session) -> None:
@@ -77,9 +51,7 @@ def tests(session: nox.Session) -> None:
     live peer connection.
     """
     _install_locked(session)
-    session.run(
-        "pytest", "-q", "--ignore=tests/integration", *session.posargs, env=_gstreamer_env()
-    )
+    session.run("pytest", "-q", "--ignore=tests/integration", *session.posargs)
 
 
 @nox.session(python=PYTHON_VERSIONS)
@@ -91,4 +63,4 @@ def integration(session: nox.Session) -> None:
     notably the ``reactor_webrtc`` wheel — present rather than skipped.
     """
     _install_locked(session)
-    session.run("pytest", "-q", "tests/integration", *session.posargs, env=_gstreamer_env())
+    session.run("pytest", "-q", "tests/integration", *session.posargs)

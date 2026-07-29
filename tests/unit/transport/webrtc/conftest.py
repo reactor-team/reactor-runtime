@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from typing import cast
 
 import pytest
 
@@ -16,7 +17,7 @@ from reactor_runtime.transport.webrtc.signaling import IceCandidate
 
 
 class FakePeer:
-    """A WebRtcPeer that records commands and lets tests fire inbound events."""
+    """A test peer double that records commands and lets tests fire inbound events."""
 
     def __init__(self, stats: PeerStats | None = None) -> None:
         self.ice: list[IceCandidate] = []
@@ -120,7 +121,7 @@ def factory_for() -> Callable[..., WebRtcPeerFactory]:
             peer.last_config = config
             return peer, SdpAnswer(answer)
 
-        return factory
+        return cast(WebRtcPeerFactory, factory)
 
     return make
 

@@ -6,11 +6,6 @@ encoded messages and media through its peer, arbitrates publisher tracks, owns
 its own liveness through a ping watchdog, and samples connection stats — all the
 per-connection behaviour, with none of the signalling, which lives in the
 acceptor.
-
-The connection holds its media engine as a :class:`WebRtcPeer` and adapts it: it
-forwards the peer's inbound facts to the callbacks the acceptor registers, resets
-its watchdog on every client ping, and reports the connection lost — to the same
-callback — when a ping never arrives in time.
 """
 
 from __future__ import annotations
@@ -32,8 +27,9 @@ from reactor_runtime.core import (
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.transport.webrtc.config import WebRtcConfig
 from reactor_runtime.transport.webrtc.pacer import MediaPacer
-from reactor_runtime.transport.webrtc.peer import PeerStats, WebRtcPeer, WebRtcPeerFactory
+from reactor_runtime.transport.webrtc.peer import WebRTCPeer, WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpAnswer, SdpOffer, TrackMap
+from reactor_runtime.transport.webrtc.stats import PeerStats
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +63,7 @@ class WebRTCConnection:
     def __init__(
         self,
         conn_id: ConnId,
-        peer: WebRtcPeer,
+        peer: WebRTCPeer,
         capabilities: ConnectionCapabilities,
         *,
         ping_timeout: float,

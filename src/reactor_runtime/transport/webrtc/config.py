@@ -100,13 +100,11 @@ class WebRtcConfig:
         rtx_max_size_time_ms: Retransmission history depth, in milliseconds;
             ``0`` means no time limit.
         rtp_payload_mtu: The ``mtu`` (bytes) applied to every RTP payloader.
-            GStreamer payloaders default to 1400, which exceeds the effective
-            MTU of common tunneled paths (WireGuard and Tailscale links are
-            1280) once SRTP/UDP/IP overhead is added; oversized packets are
-            silently dropped there while ICE checks and data-channel traffic
-            fit and succeed. The default matches the ~1200-byte ceiling
-            libwebrtc uses for its own media packets.
-        webrtcbin_latency_ms: Jitter-buffer latency applied to ``webrtcbin``.
+            1400 bytes exceeds the effective MTU of common tunneled paths
+            (WireGuard and Tailscale links are 1280) once SRTP/UDP/IP overhead
+            is added; oversized packets are silently dropped there while ICE
+            checks and data-channel traffic fit and succeed. The default matches
+            the ~1200-byte ceiling libwebrtc uses for its own media packets.
         ice_tcp: Whether the ICE agent gathers TCP candidates.
         upnp: Whether the ICE agent attempts UPnP port mapping.
         ice_gathering_timeout_ms: How long to wait for ICE gathering before
@@ -128,7 +126,6 @@ class WebRtcConfig:
     rtx_max_size_packets: int = 512
     rtx_max_size_time_ms: int = 200
     rtp_payload_mtu: int = 1200
-    webrtcbin_latency_ms: int = 30
     ice_tcp: bool = False
     upnp: bool = False
     ice_gathering_timeout_ms: int = 3000

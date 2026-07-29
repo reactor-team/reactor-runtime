@@ -88,19 +88,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # PyGObject builds from source against the GObject-introspection and Cairo
-      # development libraries; without them the locked sync cannot compile its
-      # pycairo/pygobject wheels.
-      - run: |
-          # Azure-hosted runners intermittently serve a broken
-          # packages.microsoft.com repo that fails apt-get update for unrelated
-          # reasons; nothing here needs it, so drop any source referencing it.
-          sudo find /etc/apt/sources.list.d -type f \
-            -exec grep -q packages.microsoft.com {} \; -delete
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libcairo2-dev libgirepository-2.0-dev libglib2.0-dev pkg-config
-
       - uses: jdx/mise-action@v2
         with:
           version: ${{ env.MISE_VERSION }}
@@ -121,26 +108,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # PyGObject builds against the GObject-introspection and Cairo dev
-      # libraries, and the WebRTC media engine binds to a native GStreamer
-      # install. The media-engine tests import its typelibs at module load
-      # (Gst, GstWebRTC, GstSdp, GstVideo, GstRtp), so the running suite needs
-      # the GStreamer plugin sets and the gir typelibs present.
-      - run: |
-          # Azure-hosted runners intermittently serve a broken
-          # packages.microsoft.com repo that fails apt-get update for unrelated
-          # reasons; nothing here needs it, so drop any source referencing it.
-          sudo find /etc/apt/sources.list.d -type f \
-            -exec grep -q packages.microsoft.com {} \; -delete
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libcairo2-dev libgirepository-2.0-dev libglib2.0-dev pkg-config \
-            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
-            gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
-            gstreamer1.0-nice gstreamer1.0-libav \
-            gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
-            gir1.2-gst-plugins-bad-1.0
-
       - uses: jdx/mise-action@v2
         with:
           version: ${{ env.MISE_VERSION }}
@@ -159,20 +126,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-
-      # The locked sync builds pygobject against the GObject-introspection and
-      # Cairo dev libraries; the reactor_webrtc media backend the integration
-      # tests exercise installs as a prebuilt wheel, so no GStreamer stack is
-      # needed here.
-      - run: |
-          # Azure-hosted runners intermittently serve a broken
-          # packages.microsoft.com repo that fails apt-get update for unrelated
-          # reasons; nothing here needs it, so drop any source referencing it.
-          sudo find /etc/apt/sources.list.d -type f \
-            -exec grep -q packages.microsoft.com {} \; -delete
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libcairo2-dev libgirepository-2.0-dev libglib2.0-dev pkg-config
 
       - uses: jdx/mise-action@v2
         with:

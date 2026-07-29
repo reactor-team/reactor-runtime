@@ -28,8 +28,8 @@ from reactor_runtime.transport.webrtc.config import (  # noqa: E402
     IceTransportPolicy,
     WebRtcConfig,
 )
-from reactor_runtime.transport.webrtc.libwebrtc.peer import (  # noqa: E402
-    LibWebRtcPeer,
+from reactor_runtime.transport.webrtc.peer import (  # noqa: E402
+    WebRTCPeer,
     _build_rtc_config,
     _is_terminal_state,
     libwebrtc_peer_factory,
@@ -64,7 +64,7 @@ def _video_bundle(name: str, value: int = 1) -> MediaBundle:
 
 
 async def test_message_sink_sniffs_once_and_reports_ping() -> None:
-    peer = LibWebRtcPeer()
+    peer = WebRTCPeer()
     peer._loop = asyncio.get_running_loop()
     messages: list[tuple[bytes | str, ProtocolVersion, Channel]] = []
     pings: list[int] = []
@@ -82,7 +82,7 @@ async def test_message_sink_sniffs_once_and_reports_ping() -> None:
 
 
 async def test_control_channel_sink_tags_control() -> None:
-    peer = LibWebRtcPeer()
+    peer = WebRTCPeer()
     peer._loop = asyncio.get_running_loop()
     seen: list[Channel] = []
     peer.on_message(lambda _p, _v, channel: seen.append(channel))
@@ -98,7 +98,7 @@ async def test_control_channel_sink_tags_control() -> None:
 
 
 def test_send_message_and_control_route_by_channel() -> None:
-    peer = LibWebRtcPeer()
+    peer = WebRTCPeer()
     data: Any = _FakeChannel()
     control: Any = _FakeChannel()
     peer._data_channel = data
@@ -112,13 +112,13 @@ def test_send_message_and_control_route_by_channel() -> None:
 
 
 def test_send_media_drops_without_out_tracks() -> None:
-    peer = LibWebRtcPeer()
+    peer = WebRTCPeer()
     peer.send_media(_video_bundle("v"))
     assert peer._frame_queue.empty()
 
 
 def test_send_media_enqueues_and_drops_when_full() -> None:
-    peer = LibWebRtcPeer()
+    peer = WebRTCPeer()
     track: Any = _FakeTrack()
     peer._out_tracks["v"] = track
     for _ in range(peer._frame_queue.maxsize + 5):
@@ -131,7 +131,7 @@ def test_send_media_enqueues_and_drops_when_full() -> None:
 
 
 def test_push_bundle_routes_video_to_its_track() -> None:
-    peer = LibWebRtcPeer()
+    peer = WebRTCPeer()
     track: Any = _FakeTrack()
     peer._out_tracks["v"] = track
     peer._push_bundle(_video_bundle("v", value=9))
@@ -142,7 +142,7 @@ def test_push_bundle_routes_video_to_its_track() -> None:
 
 
 def test_push_bundle_skips_paused_track() -> None:
-    peer = LibWebRtcPeer()
+    peer = WebRTCPeer()
     track: Any = _FakeTrack()
     peer._out_tracks["v"] = track
     peer.pause_track("v")
@@ -154,7 +154,7 @@ def test_push_bundle_skips_paused_track() -> None:
 
 
 def test_push_bundle_buffers_audio_for_the_feeder() -> None:
-    peer = LibWebRtcPeer()
+    peer = WebRTCPeer()
     info = TrackInfo(name="a", kind=TrackKind.AUDIO, direction=TrackDirection.OUT)
     bundle = MediaBundle(tracks={"a": TrackData(info=info, data=np.zeros((1, 240), np.int16))})
     peer._push_bundle(bundle)
@@ -162,7 +162,7 @@ def test_push_bundle_buffers_audio_for_the_feeder() -> None:
 
 
 def test_push_bundle_gap_fill_buffers_no_audio() -> None:
-    peer = LibWebRtcPeer()
+    peer = WebRTCPeer()
     track: Any = _FakeTrack()
     peer._out_tracks["v"] = track
     peer._push_bundle(_video_bundle("v"))
@@ -171,10 +171,10 @@ def test_push_bundle_gap_fill_buffers_no_audio() -> None:
 
 
 def test_enqueue_audio_caps_the_buffer_depth() -> None:
-    peer = LibWebRtcPeer()
+    peer = WebRTCPeer()
     for _ in range(50):
         peer._enqueue_audio(np.zeros(1_000, dtype=np.int16))
-    from reactor_runtime.transport.webrtc.libwebrtc.peer import _AUDIO_BUFFER_MAX_SAMPLES
+    from reactor_runtime.transport.webrtc.peer import _AUDIO_BUFFER_MAX_SAMPLES
 
     assert peer._audio_buf.size == _AUDIO_BUFFER_MAX_SAMPLES
 
@@ -222,19 +222,19 @@ def test_inbound_name_matches_metadata_by_kind_order() -> None:
         TrackInfo(name="cam", kind=TrackKind.VIDEO, direction=TrackDirection.IN),
         TrackInfo(name="mic", kind=TrackKind.AUDIO, direction=TrackDirection.IN),
     ]
-    assert LibWebRtcPeer._inbound_name(in_tracks, TrackKind.VIDEO, 0) == "cam"
-    assert LibWebRtcPeer._inbound_name(in_tracks, TrackKind.AUDIO, 0) == "mic"
+    assert WebRTCPeer._inbound_name(in_tracks, TrackKind.VIDEO, 0) == "cam"
+    assert WebRTCPeer._inbound_name(in_tracks, TrackKind.AUDIO, 0) == "mic"
 
 
 def test_inbound_name_falls_back_when_unmapped() -> None:
-    assert LibWebRtcPeer._inbound_name([], TrackKind.VIDEO, 2) == "video-3"
+    assert WebRTCPeer._inbound_name([], TrackKind.VIDEO, 2) == "video-3"
 
 
 # ── Stats mapping ─────────────────────────────────────────────────────────────
 
 
 def test_stats_from_report_maps_tracks_and_rtt() -> None:
-    peer = LibWebRtcPeer()
+    peer = WebRTCPeer()
     peer._track_map = TrackMap(
         tracks=(
             MappedTrack(
@@ -269,7 +269,7 @@ def test_stats_from_report_maps_tracks_and_rtt() -> None:
 
 
 def test_stats_from_report_ignores_negative_packet_loss() -> None:
-    peer = LibWebRtcPeer()
+    peer = WebRTCPeer()
     peer._track_map = TrackMap(
         tracks=(
             MappedTrack(
@@ -292,7 +292,7 @@ def test_stats_from_report_ignores_negative_packet_loss() -> None:
 
 
 async def test_report_loss_fires_disconnect_once() -> None:
-    peer = LibWebRtcPeer()
+    peer = WebRTCPeer()
     peer._loop = asyncio.get_running_loop()
     fired: list[int] = []
     peer.on_disconnect(lambda: fired.append(1))
@@ -306,7 +306,7 @@ async def test_report_loss_fires_disconnect_once() -> None:
 
 
 async def test_close_is_idempotent() -> None:
-    peer = LibWebRtcPeer()
+    peer = WebRTCPeer()
     await peer.close()
     await peer.close()
     assert peer._stop_event.is_set()

@@ -2,21 +2,15 @@
 
 WebRTC reshaped as a connection: :class:`WebRTCConnection` is the wire,
 :class:`WebRTCAcceptor` concentrates its SDP/ICE signalling, and
-:class:`WebRtcRouter` mounts its routes. Its media engine sits behind the
-:class:`WebRtcPeer` seam, supplied by a
-:data:`~reactor_runtime.transport.webrtc.peer.WebRtcPeerFactory`, so the wire can
-be built and tested without the media stack present.
+:class:`WebRtcRouter` mounts its routes. The media engine is
+:class:`~reactor_runtime.transport.webrtc.peer.WebRTCPeer`, built
+during offer negotiation by a :data:`WebRtcPeerFactory`.
 """
 
 from reactor_runtime.transport.webrtc.acceptor import WebRTCAcceptor
 from reactor_runtime.transport.webrtc.config import IceServer, IceTransportPolicy, WebRtcConfig
 from reactor_runtime.transport.webrtc.connection import WebRTCConnection
-from reactor_runtime.transport.webrtc.peer import (
-    PeerStats,
-    TrackStat,
-    WebRtcPeer,
-    WebRtcPeerFactory,
-)
+from reactor_runtime.transport.webrtc.peer import WebRTCPeer, WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.router import WebRtcRouter
 from reactor_runtime.transport.webrtc.signaling import (
     IceCandidate,
@@ -25,6 +19,7 @@ from reactor_runtime.transport.webrtc.signaling import (
     SdpOffer,
     TrackMap,
 )
+from reactor_runtime.transport.webrtc.stats import PeerStats, TrackStat
 
 __all__ = [
     "IceCandidate",
@@ -38,8 +33,8 @@ __all__ = [
     "TrackStat",
     "WebRTCAcceptor",
     "WebRTCConnection",
+    "WebRTCPeer",
     "WebRtcConfig",
-    "WebRtcPeer",
     "WebRtcPeerFactory",
     "WebRtcRouter",
 ]

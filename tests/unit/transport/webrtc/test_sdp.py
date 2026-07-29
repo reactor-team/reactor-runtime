@@ -4,7 +4,7 @@ Pure string transforms with no native dependency: they exercise the module
 directly, without the ``reactor_webrtc`` wheel.
 """
 
-from reactor_runtime.transport.webrtc.libwebrtc.sdp import (
+from reactor_runtime.transport.webrtc.sdp import (
     deduplicate_bundle_pts,
     embed_ice_candidates,
 )
