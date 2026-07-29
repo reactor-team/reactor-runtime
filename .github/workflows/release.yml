@@ -1,18 +1,28 @@
-# Release on tag push. A release is a version-bump commit (`uv version X.Y.Z`)
-# plus a matching `vX.Y.Z` tag: the workflow fails fast if the tag and
-# pyproject.toml disagree, then builds and publishes to PyPI via trusted
-# publishing (OIDC). Requires a trusted publisher configured on PyPI for this
-# repository and workflow file.
+# Release on merge to main. The package version in pyproject.toml is the switch:
+# when a `vX.Y.Z` tag already exists for it, the merge is an ordinary change and
+# the workflow ships a `X.Y.Z.dev<run>` pre-release to GitHub Releases only.
+# When no such tag exists, the merge carries a version bump: the workflow runs
+# the release gates, tags the commit, publishes the GitHub release, and uploads
+# to PyPI through trusted publishing (OIDC). Requires a trusted publisher
+# configured on PyPI for this repository and workflow file.
+#
+# A tag created with GITHUB_TOKEN starts no further workflow, so the tag this
+# workflow writes cannot start a second release.
 
 name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches: [main]
 
 permissions:
   contents: read
+
+# One release at a time: the pre-release version carries the run number and the
+# release path writes a tag, so overlapping runs would race.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   # Keep this in step with the other workflows; the toolchain pin lives here so
@@ -20,18 +30,100 @@ env:
   MISE_VERSION: "2026.6.14"
 
 jobs:
-  publish:
-    name: Build and publish to PyPI
+  decide:
+    name: Decide the release kind
+    runs-on: ubuntu-latest
+    outputs:
+      kind: ${{ steps.kind.outputs.kind }}
+      version: ${{ steps.kind.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The decision reads the tag set, so the full history must be present.
+          fetch-depth: 0
+
+      - uses: jdx/mise-action@v2
+        with:
+          version: ${{ env.MISE_VERSION }}
+
+      - name: Read the version and pick the release kind
+        id: kind
+        run: |
+          set -euo pipefail
+          version="$(mise run version)"
+          if git rev-parse -q --verify "refs/tags/v${version}" >/dev/null; then
+            kind=prerelease
+          else
+            kind=release
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "kind=${kind}" >> "$GITHUB_OUTPUT"
+          echo "Version ${version} is a ${kind}."
+
+  prerelease:
+    name: Build and publish a pre-release
+    needs: decide
+    if: needs.decide.outputs.kind == 'prerelease'
+    runs-on: ubuntu-latest
+    permissions:
+      # gh release create writes a tag and a release, and the build resolves the
+      # pinned wire/v* release through the GitHub API.
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BASE_VERSION: ${{ needs.decide.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: jdx/mise-action@v2
+        with:
+          version: ${{ env.MISE_VERSION }}
+
+      # PEP 440 orders `X.Y.Z.devN` below `X.Y.Z`, so every pre-release of a
+      # version sorts under the release that later closes it. The stamp lives in
+      # the runner's checkout and is never committed.
+      - name: Stamp the development version
+        id: stamp
+        run: |
+          set -euo pipefail
+          version="${BASE_VERSION}.dev${GITHUB_RUN_NUMBER}"
+          uv version --frozen "$version"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      # The release gates stay out of this path. A proto change is meant to
+      # drift from the wire pin until it merges, cuts its wire/v* release, and
+      # the pin follows, so a pre-release ships the pinned schema and names it.
+      - run: mise run build
+
+      - name: Publish the pre-release
+        env:
+          VERSION: ${{ steps.stamp.outputs.version }}
+        run: |
+          set -euo pipefail
+          mise run release-notes -- --kind prerelease --commit "$GITHUB_SHA" > notes.md
+          # pre/v* keeps development tags out of the v* namespace that selects
+          # the contract baseline and guards the PyPI environment.
+          gh release create "pre/v${VERSION}" dist/* \
+            --title "reactor-runtime ${VERSION}" \
+            --notes-file notes.md \
+            --prerelease \
+            --target "$GITHUB_SHA"
+
+  release:
+    name: Build and publish a release
+    needs: decide
+    if: needs.decide.outputs.kind == 'release'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       # A job-level block replaces the workflow's, so contents is restated here:
-      # both the wire gate and the build resolve the pinned wire/v* release
-      # through the GitHub API.
-      contents: read
+      # the gates and the build resolve the pinned wire/v* release through the
+      # GitHub API, and gh release create writes the tag and the release.
+      contents: write
       id-token: write
     env:
       GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.decide.outputs.version }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -42,16 +134,6 @@ jobs:
       - uses: jdx/mise-action@v2
         with:
           version: ${{ env.MISE_VERSION }}
-
-      - name: Verify tag matches pyproject version
-        run: |
-          set -euo pipefail
-          tag_version="${GITHUB_REF_NAME#v}"
-          project_version="$(mise run version)"
-          if [[ "$tag_version" != "$project_version" ]]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match pyproject version $project_version."
-            exit 1
-          fi
 
       # The HTTP contract dictates the floor for this release's version bump:
       # a breaking contract diff since the previous release mandates a minor
@@ -66,4 +148,22 @@ jobs:
         run: mise run wire-check-release
 
       - run: mise run build
+
+      # The tag and the release come before PyPI, and both steps tolerate a
+      # re-run: the release is created once and its assets are replaced, and
+      # uv publish skips the files the index already holds.
+      - name: Tag the commit and publish the GitHub release
+        run: |
+          set -euo pipefail
+          mise run release-notes -- --kind release --commit "$GITHUB_SHA" > notes.md
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            gh release upload "v${VERSION}" dist/* --clobber
+          else
+            gh release create "v${VERSION}" dist/* \
+              --title "reactor-runtime ${VERSION}" \
+              --notes-file notes.md \
+              --latest \
+              --target "$GITHUB_SHA"
+          fi
+
       - run: mise run publish

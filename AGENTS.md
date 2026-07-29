@@ -44,8 +44,10 @@ mise run test-integration-matrix  # integration tests on every supported Python
   in its workflow matrix.
 - ty type-checks strictly. Do not weaken it with blanket ignores; a targeted
   `# type: ignore[ty:code]` needs a reason the reader can verify.
-- Releases are tag-driven: `uv version X.Y.Z` commit + matching `vX.Y.Z` tag.
-  Never edit the version field by hand in an unrelated change.
+- Releases are version-driven. Merging a `uv version X.Y.Z` bump to main tags
+  `vX.Y.Z`, publishes the GitHub release, and uploads to PyPI. Every other merge
+  publishes an `X.Y.Z.dev<run>` pre-release on GitHub alone. CI writes the tag,
+  so never tag by hand, and never edit the version field in an unrelated change.
 
 ## Tests
 
