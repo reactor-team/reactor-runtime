@@ -289,6 +289,47 @@ def _video_bundle() -> MediaBundle:
     return MediaBundle(tracks={"main_video": TrackData(info=info, data=frame)})
 
 
+def _av_bundle(width: int, height: int) -> MediaBundle:
+    """A bundle at a real output size, with the audio slot that pairs with it."""
+    frame = np.zeros((height, width, 3), dtype=np.uint8)
+    video = TrackInfo(
+        name="main_video", kind=TrackKind.VIDEO, rate=30.0, direction=TrackDirection.OUT
+    )
+    audio = TrackInfo(
+        name="main_audio", kind=TrackKind.AUDIO, rate=48_000.0, direction=TrackDirection.OUT
+    )
+    samples = np.zeros((1, 1600), dtype=np.int16)
+    return MediaBundle(
+        tracks={
+            "main_video": TrackData(info=video, data=frame),
+            "main_audio": TrackData(info=audio, data=samples),
+        }
+    )
+
+
+def test_a_saturated_feed_queue_drops_a_frame_and_keeps_recording(tmp_path: Path) -> None:
+    # An encoder that falls behind costs frames, never the session. The queue is
+    # the only thing between the model thread and the encoder, so a full one makes
+    # `on_chunk` count the loss and return rather than wait to hand the frame over.
+    recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
+    recorder.start(_SID)
+    try:
+        # Park the feed worker, so nothing drains what `on_chunk` queues.
+        recorder._feed_stop.set()
+        feed_thread = recorder._feed_thread
+        assert feed_thread is not None
+        feed_thread.join(timeout=2.0)
+        while not recorder._feed_queue.full():
+            recorder._feed_queue.put_nowait((np.zeros((4, 4, 3), dtype=np.uint8), None))
+
+        recorder.on_chunk(MediaChunk(bundle=_video_bundle(), fps=30.0, n_frames=1))
+
+        assert recorder._dropped_frames == 1
+        assert not recorder._disabled
+    finally:
+        recorder.stop()
+
+
 def test_encodes_segments_and_serves_a_manifest(tmp_path: Path) -> None:
     recorder = Recorder(RecordingConfig(enabled=True, chunk_seconds=1, recording_dir=str(tmp_path)))
     recorder.start("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
@@ -307,5 +348,34 @@ def test_encodes_segments_and_serves_a_manifest(tmp_path: Path) -> None:
                     break
         assert isinstance(manifest, ClipManifest)
         assert (tmp_path / recording_id / "init.mp4").is_file()
+    finally:
+        recorder.stop()
+
+
+@pytest.mark.parametrize("attempt", range(3))
+def test_records_a_real_frame_size_with_audio(tmp_path: Path, attempt: int) -> None:
+    # A recording at a size a model actually emits, with audio alongside it, has to
+    # close segments and lose almost nothing. An encoder that stalls takes nothing
+    # at all and drops every frame, so the bound below separates a stalled encoder
+    # from a merely busy host. Repeated, because a stall is timing-dependent.
+    root = tmp_path / str(attempt)
+    recorder = Recorder(RecordingConfig(enabled=True, chunk_seconds=1, recording_dir=str(root)))
+    recorder.start(_SID)
+    try:
+        bundle = _av_bundle(800, 600)
+        recording_id = recorder._session_id
+        assert recording_id is not None
+        deadline = time.monotonic() + 20.0
+        manifest: object = Pending()
+        offered = 0
+        while time.monotonic() < deadline:
+            recorder.on_chunk(MediaChunk(bundle=bundle, fps=30.0, n_frames=1))
+            offered += 1
+            time.sleep(1.0 / 30.0)
+            manifest = recorder.manifest(recording_id, 0.0, 1.0)
+            if isinstance(manifest, ClipManifest):
+                break
+        assert isinstance(manifest, ClipManifest)
+        assert recorder._dropped_frames < offered // 4
     finally:
         recorder.stop()
