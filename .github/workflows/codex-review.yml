@@ -1,0 +1,722 @@
+# Copyright (c) 2026 Reactor Technologies, Inc. All rights reserved.
+#
+# Self-contained Codex code review for pull requests. The entire review
+# lifecycle lives in this file: an acknowledge comment when a review starts,
+# scope selection (incremental by default, full on request), inline findings,
+# and a closing summary. Reviews run for PR open/ready/reopen events, for
+# `/review` or `/review full` comments from users with write access, and via
+# manual dispatch. The only external dependency is the organization's
+# OPENAI_API_KEY Actions secret, which GitHub never exposes to workflow runs
+# triggered from forks.
+name: Codex Code Review
+
+on:
+  pull_request:
+    types: [opened, ready_for_review, reopened]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to review'
+        required: true
+        type: string
+      review_mode:
+        description: 'Review scope selection'
+        required: true
+        type: choice
+        options: [auto, full]
+        default: auto
+jobs:
+  acknowledge:
+    # Run on initial PR events, /review or /review full comments, or workflow_dispatch.
+    if: |
+      (github.event_name == 'pull_request' && !github.event.pull_request.draft && !contains(github.event.pull_request.title, '[skip-codex]') && github.event.pull_request.user.login != 'dependabot[bot]') ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request && (github.event.comment.body == '/review' || github.event.comment.body == '/review full')) ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+      pull-requests: write
+    outputs:
+      pr_number: ${{ steps.pr.outputs.number }}
+      base_sha: ${{ steps.pr.outputs.base_sha }}
+      target_sha: ${{ steps.pr.outputs.target_sha }}
+      requested_mode: ${{ steps.pr.outputs.requested_mode }}
+      comment_id: ${{ steps.ack.outputs.comment_id }}
+      run_url: ${{ steps.ack.outputs.run_url }}
+
+    steps:
+      # Only trusted actors may cause PR-controlled code or tool configuration
+      # to run in the review job. workflow_dispatch already requires write access.
+      - name: Verify requester has write access
+        if: github.event_name == 'issue_comment' || github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTER: ${{ github.event_name == 'issue_comment' && github.event.comment.user.login || github.actor }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == 'pull_request' && "$REQUESTER" == 'github-actions[bot]' ]]; then
+            exit 0
+          fi
+          permission=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$REQUESTER/permission" \
+            --jq .permission 2>/dev/null || printf 'none')
+          case "$permission" in
+            admin|maintain|write) ;;
+            *)
+              echo "::error::Codex review requires write access (requester: $REQUESTER, permission: $permission)"
+              exit 1
+              ;;
+          esac
+
+      - name: Resolve PR metadata
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number || '0' }}
+          INPUT_REVIEW_MODE: ${{ inputs.review_mode || 'auto' }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == 'pull_request' ]]; then
+            pr_number='${{ github.event.pull_request.number }}'
+          elif [[ "$GITHUB_EVENT_NAME" == 'issue_comment' ]]; then
+            pr_number='${{ github.event.issue.number }}'
+          else
+            pr_number="$INPUT_PR_NUMBER"
+          fi
+
+          if [[ ! "$pr_number" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::A valid PR number is required"
+            exit 1
+          fi
+
+          requested_mode="$INPUT_REVIEW_MODE"
+          if [[ "$GITHUB_EVENT_NAME" == 'issue_comment' && "$COMMENT_BODY" == '/review full' ]]; then
+            requested_mode='full'
+          fi
+          if [[ "$requested_mode" != 'auto' && "$requested_mode" != 'full' ]]; then
+            echo "::error::Review mode must be auto or full"
+            exit 1
+          fi
+
+          pr_json=$(gh pr view "$pr_number" --json baseRefOid,headRefOid,state)
+          if [[ $(jq -r '.state' <<<"$pr_json") != 'OPEN' ]]; then
+            echo "::error::PR $pr_number is not open"
+            exit 1
+          fi
+
+          {
+            echo "number=$pr_number"
+            echo "base_sha=$(jq -r '.baseRefOid' <<<"$pr_json")"
+            echo "target_sha=$(jq -r '.headRefOid' <<<"$pr_json")"
+            echo "requested_mode=$requested_mode"
+          } >> "$GITHUB_OUTPUT"
+
+      # Reconcile only comments whose exact stored run attempt is confirmed
+      # terminal by the Actions API. API failures and missing runs are ignored.
+      - name: Reconcile unfinished lifecycle comments
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          comments_file="$RUNNER_TEMP/codex-review-comments.json"
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments?per_page=100" \
+            | jq 'add' > "$comments_file"
+
+          while IFS=$'\t' read -r comment_id old_run_id old_attempt metadata; do
+            [[ "$old_run_id" =~ ^[0-9]+$ ]] || continue
+            [[ "$old_attempt" =~ ^[1-9][0-9]*$ ]] || continue
+
+            if ! run_json=$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$old_run_id/attempts/$old_attempt" \
+              2>/dev/null); then
+              continue
+            fi
+            [[ $(jq -r '.status' <<<"$run_json") == 'completed' ]] || continue
+
+            conclusion=$(jq -r '.conclusion // ""' <<<"$run_json")
+            case "$conclusion" in
+              cancelled) state='cancelled'; visible='Codex review cancelled.' ;;
+              timed_out) state='timed_out'; visible='Codex review timed out.' ;;
+              failure)
+                state='failed'
+                visible='Codex review failed.'
+                ;;
+              *)
+                state='incomplete'
+                visible='Codex review ended before its result could be recorded.'
+                ;;
+            esac
+
+            updated_metadata=$(jq -c \
+              --arg state "$state" \
+              --arg outcome "$conclusion" \
+              --arg completed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              '. + {
+                state: $state,
+                reviewed_sha: null,
+                outcome: $outcome,
+                completed_at: $completed_at
+              }' \
+              <<<"$metadata")
+            scope=$(jq -r '.scope // ""' <<<"$updated_metadata")
+            diff_base_sha=$(jq -r '.diff_base_sha // ""' <<<"$updated_metadata")
+            target_sha=$(jq -r '.target_sha // ""' <<<"$updated_metadata")
+            if [[ "$scope" == 'full' || "$scope" == 'incremental' ]] \
+              && [[ "$diff_base_sha" =~ ^[0-9a-f]{40}$ ]] \
+              && [[ "$target_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              visible="$visible Scope: $scope (${diff_base_sha:0:7}..${target_sha:0:7})."
+            fi
+            run_url="$SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$old_run_id/attempts/$old_attempt"
+            body=$(printf '<!-- codex-review: %s -->\n\n[codex-review] %s Confirmed outcome: %s. [View workflow run](%s).' \
+              "$updated_metadata" "$visible" "$conclusion" "$run_url")
+            payload=$(jq -n --arg body "$body" '{body: $body}')
+
+            if ! gh api --method PATCH \
+              "repos/$GITHUB_REPOSITORY/issues/comments/$comment_id" \
+              --input - <<<"$payload" >/dev/null; then
+              echo "::warning::Could not reconcile lifecycle comment $comment_id"
+            fi
+          done < <(
+            jq -r \
+              --arg repository "$GITHUB_REPOSITORY" \
+              --argjson pr_number "$PR_NUMBER" '
+              .[]
+              | select(.user.login == "github-actions[bot]")
+              | . as $comment
+              | (try (.body
+                  | capture("<!-- codex-review: (?<json>\\{[^\\n]*\\}) -->").json
+                  | fromjson) catch null) as $metadata
+              | select(
+                  $metadata != null
+                  and $metadata.version == 1
+                  and $metadata.repository == $repository
+                  and $metadata.pr_number == $pr_number
+                  and ($metadata.run_id | type) == "string"
+                  and ($metadata.run_id | test("^[0-9]+$"))
+                  and ($metadata.run_attempt | type) == "number"
+                  and $metadata.run_attempt >= 1
+                  and ($metadata.run_attempt | floor) == $metadata.run_attempt
+                  and ($metadata.trigger | type) == "string"
+                  and (["pull_request", "issue_comment", "workflow_dispatch"]
+                    | index($metadata.trigger)) != null
+                  and $metadata.state == "running"
+                  and ($metadata.target_sha | type) == "string"
+                  and ($metadata.target_sha | test("^[0-9a-f]{40}$"))
+                  and $metadata.reviewed_sha == null
+                  and $metadata.outcome == null
+                )
+              | [
+                  $comment.id,
+                  $metadata.run_id,
+                  $metadata.run_attempt,
+                  ($metadata | @json)
+                ]
+              | @tsv
+            ' "$comments_file"
+          )
+
+      - name: Acknowledge review request
+        id: ack
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          BASE_SHA: ${{ steps.pr.outputs.base_sha }}
+          TARGET_SHA: ${{ steps.pr.outputs.target_sha }}
+          REQUESTED_MODE: ${{ steps.pr.outputs.requested_mode }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          run_url="$SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT"
+          metadata=$(jq -cn \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --argjson pr_number "$PR_NUMBER" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --argjson run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg base_sha "$BASE_SHA" \
+            --arg target_sha "$TARGET_SHA" \
+            --arg requested_mode "$REQUESTED_MODE" \
+            --arg trigger "$GITHUB_EVENT_NAME" \
+            --arg started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{
+              version: 1,
+              repository: $repository,
+              pr_number: $pr_number,
+              run_id: $run_id,
+              run_attempt: $run_attempt,
+              state: "running",
+              base_sha: $base_sha,
+              target_sha: $target_sha,
+              reviewed_sha: null,
+              outcome: null,
+              requested_mode: $requested_mode,
+              scope: null,
+              scope_result: null,
+              diff_base_sha: null,
+              trigger: $trigger,
+              started_at: $started_at,
+              completed_at: null
+            }')
+          body=$(printf '<!-- codex-review: %s -->\n\n[codex-review] Codex review received for %s. [View workflow run](%s).' \
+            "$metadata" "${TARGET_SHA:0:7}" "$run_url")
+          payload=$(jq -n --arg body "$body" '{body: $body}')
+          response=$(gh api --method POST \
+            "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+            --input - <<<"$payload")
+          echo "comment_id=$(jq -r '.id' <<<"$response")" >> "$GITHUB_OUTPUT"
+          echo "run_url=$run_url" >> "$GITHUB_OUTPUT"
+
+  review:
+    needs: acknowledge
+    runs-on: ubuntu-latest
+    env:
+      MISE_LOCKED: "1"
+    concurrency:
+      group: codex-review-${{ github.repository }}-pr-${{ needs.acknowledge.outputs.pr_number }}
+      cancel-in-progress: ${{ github.event_name == 'issue_comment' || github.event_name == 'workflow_dispatch' }}
+    permissions:
+      checks: read
+      contents: read
+      issues: read
+      pull-requests: write
+      statuses: read
+      id-token: write
+    outputs:
+      scope: ${{ steps.scope.outputs.scope }}
+      scope_result: ${{ steps.scope.outputs.scope_result }}
+      diff_base_sha: ${{ steps.scope.outputs.diff_base_sha }}
+      reviewed_sha: ${{ steps.scope.outputs.reviewed_sha }}
+      final_message: ${{ steps.codex-review.outputs['final-message'] }}
+
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ needs.acknowledge.outputs.target_sha }}
+
+      - name: Set up mise
+        uses: jdx/mise-action@v4
+
+      - name: Resolve deterministic review scope
+        id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.acknowledge.outputs.pr_number }}
+          BASE_SHA: ${{ needs.acknowledge.outputs.base_sha }}
+          TARGET_SHA: ${{ needs.acknowledge.outputs.target_sha }}
+          REQUESTED_MODE: ${{ needs.acknowledge.outputs.requested_mode }}
+        run: |
+          comments_file="$RUNNER_TEMP/codex-review-comments.json"
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments?per_page=100" \
+            | jq 'add' > "$comments_file"
+
+          checkpoint=''
+          if [[ "$REQUESTED_MODE" != 'full' ]]; then
+            while IFS=$'\t' read -r candidate_sha candidate_run candidate_attempt; do
+              if git cat-file -e "$candidate_sha^{commit}" 2>/dev/null \
+                && git merge-base --is-ancestor "$candidate_sha" "$TARGET_SHA"; then
+                checkpoint="$candidate_sha"
+                echo "Using completed checkpoint from run $candidate_run attempt $candidate_attempt"
+                break
+              fi
+            done < <(
+              jq -r \
+                --arg repository "$GITHUB_REPOSITORY" \
+                --argjson pr_number "$PR_NUMBER" '
+                  [
+                    .[]
+                    | select(.user.login == "github-actions[bot]")
+                    | (try (.body
+                        | capture("<!-- codex-review: (?<json>\\{[^\\n]*\\}) -->").json
+                        | fromjson) catch empty) as $metadata
+                    | select(
+                        $metadata.version == 1
+                        and $metadata.repository == $repository
+                        and $metadata.pr_number == $pr_number
+                        and $metadata.state == "completed"
+                        and ($metadata.run_id | type) == "string"
+                        and ($metadata.run_id | test("^[0-9]+$"))
+                        and ($metadata.run_attempt | type) == "number"
+                        and $metadata.run_attempt >= 1
+                        and ($metadata.run_attempt | floor) == $metadata.run_attempt
+                        and ($metadata.trigger | type) == "string"
+                        and (["pull_request", "issue_comment", "workflow_dispatch"]
+                          | index($metadata.trigger)) != null
+                        and ($metadata.reviewed_sha | type) == "string"
+                        and ($metadata.reviewed_sha | test("^[0-9a-f]{40}$"))
+                        and $metadata.target_sha == $metadata.reviewed_sha
+                        and ($metadata.outcome | type) == "string"
+                      )
+                    | {
+                        sha: $metadata.reviewed_sha,
+                        run_id: ($metadata.run_id | tonumber),
+                        run_attempt: ($metadata.run_attempt | tonumber)
+                      }
+                  ]
+                  | sort_by(.run_id, .run_attempt)
+                  | reverse
+                  | .[]
+                  | [.sha, .run_id, .run_attempt]
+                  | @tsv
+                ' "$comments_file"
+            )
+          fi
+
+          if [[ "$REQUESTED_MODE" == 'full' ]]; then
+            diff_base_sha=$(git merge-base "$BASE_SHA" "$TARGET_SHA")
+            scope='full'
+          elif [[ -n "$checkpoint" ]]; then
+            diff_base_sha="$checkpoint"
+            scope='incremental'
+          else
+            diff_base_sha=$(git merge-base "$BASE_SHA" "$TARGET_SHA")
+            scope='full'
+          fi
+
+          if [[ "$diff_base_sha" == "$TARGET_SHA" ]] \
+            || git diff --quiet "$diff_base_sha..$TARGET_SHA"; then
+            scope_result='no_changes'
+          else
+            scope_result='review'
+          fi
+
+          {
+            echo "scope=$scope"
+            echo "scope_result=$scope_result"
+            echo "diff_base_sha=$diff_base_sha"
+            echo "reviewed_sha=$TARGET_SHA"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Update acknowledgement with scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMENT_ID: ${{ needs.acknowledge.outputs.comment_id }}
+          SCOPE: ${{ steps.scope.outputs.scope }}
+          SCOPE_RESULT: ${{ steps.scope.outputs.scope_result }}
+          DIFF_BASE_SHA: ${{ steps.scope.outputs.diff_base_sha }}
+          TARGET_SHA: ${{ needs.acknowledge.outputs.target_sha }}
+        run: |
+          comment=$(gh api "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID")
+          metadata=$(jq -c \
+            --arg scope "$SCOPE" \
+            --arg scope_result "$SCOPE_RESULT" \
+            --arg diff_base_sha "$DIFF_BASE_SHA" '
+            .body
+            | capture("<!-- codex-review: (?<json>\\{[^\\n]*\\}) -->").json
+            | fromjson
+            | . + {
+                scope: $scope,
+                scope_result: $scope_result,
+                diff_base_sha: $diff_base_sha
+              }
+          ' <<<"$comment")
+          body=$(printf '<!-- codex-review: %s -->\n\n[codex-review] Codex review running. Scope: %s (%s..%s).' \
+            "$metadata" "$SCOPE" "${DIFF_BASE_SHA:0:7}" "${TARGET_SHA:0:7}")
+          payload=$(jq -n --arg body "$body" '{body: $body}')
+          gh api --method PATCH \
+            "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID" \
+            --input - <<<"$payload" >/dev/null
+
+      # Prompt overrides are read from the default branch, never the PR head.
+      # This prevents a PR from changing instructions while secrets are present.
+      - name: Select review prompt
+        if: steps.scope.outputs.scope_result != 'no_changes'
+        id: prompt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.acknowledge.outputs.pr_number }}
+          DIFF_BASE_SHA: ${{ steps.scope.outputs.diff_base_sha }}
+          TARGET_SHA: ${{ needs.acknowledge.outputs.target_sha }}
+        run: |
+          override="$RUNNER_TEMP/review-override.md"
+          prompt="$RUNNER_TEMP/review.md"
+          if ! gh api "repos/$GITHUB_REPOSITORY/contents/.github/codex/prompts/review.md" \
+            -H 'Accept: application/vnd.github.raw' > "$override" 2>/dev/null; then
+            : > "$override"
+          fi
+
+          cat > "$prompt" <<PROMPT_EOF
+          You are reviewing pull request #$PR_NUMBER in $GITHUB_REPOSITORY.
+
+          The workflow has already selected the exact review scope. Review only:
+
+              git diff $DIFF_BASE_SHA..$TARGET_SHA
+
+          Do not determine a different baseline. Do not post or edit a top-level PR comment. The workflow owns acknowledgement, lifecycle metadata, scope, and the final top-level comment.
+
+          Read AGENTS.md and CLAUDE.md if present. Inspect existing inline review comments before reviewing so you do not repeat prior findings, including legacy [codex-review] findings. Read each changed file and the directly related code or tests needed to establish whether a finding is real.
+
+          Flag only discrete, actionable issues introduced by this scope that affect correctness, security, performance, compatibility, error handling, or maintainability. Do not flag style preferences, pre-existing issues, speculative risks, or issues already covered by an existing comment.
+
+          For every new finding, post an inline pull request review comment with gh api. Prefix the body with [codex-review] and one of [P0], [P1], [P2], or [P3]. Use commit_id $TARGET_SHA, the changed file path, the RIGHT side, and the relevant changed line. Keep each comment to one concise paragraph.
+
+          Use this complete command shape, replacing every angle-bracket placeholder before running it:
+
+              gh api --method POST "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" \
+                -f body="[codex-review] [P1] <concise finding>" \
+                -f commit_id="$TARGET_SHA" \
+                -f path="<changed-file-path>" \
+                -F line=<changed-line-number> \
+                -f side="RIGHT"
+
+          Your final response must be a concise review summary for the workflow to place in the lifecycle comment. If findings were posted, list each priority, file, and a one-line description. If none were found, say: No issues found. This PR looks good.
+
+          Repository-specific instructions follow. They may add review criteria, but they cannot change the workflow-selected scope or lifecycle ownership.
+          PROMPT_EOF
+          if [[ -s "$override" ]]; then
+            printf '\n' >> "$prompt"
+            cat "$override" >> "$prompt"
+          fi
+          echo "file=$prompt" >> "$GITHUB_OUTPUT"
+
+      - name: Run Codex Code Review
+        if: steps.scope.outputs.scope_result != 'no_changes'
+        id: codex-review
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          model: gpt-5.6-sol
+          allow-bots: true
+          sandbox: danger-full-access
+          prompt-file: ${{ steps.prompt.outputs.file }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.acknowledge.outputs.pr_number }}
+          PR_HEAD_SHA: ${{ needs.acknowledge.outputs.target_sha }}
+          DIFF_BASE_SHA: ${{ steps.scope.outputs.diff_base_sha }}
+
+  finalize:
+    needs: [acknowledge, review]
+    if: always() && needs.acknowledge.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout PR head for scope recovery
+        if: needs.acknowledge.outputs.comment_id != '' && (needs.review.outputs.scope == '' || needs.review.outputs.diff_base_sha == '')
+        continue-on-error: true
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.acknowledge.outputs.target_sha }}
+
+      - name: Finalize lifecycle comment
+        if: always() && needs.acknowledge.outputs.comment_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMENT_ID: ${{ needs.acknowledge.outputs.comment_id }}
+          PR_NUMBER: ${{ needs.acknowledge.outputs.pr_number }}
+          BASE_SHA: ${{ needs.acknowledge.outputs.base_sha }}
+          TARGET_SHA: ${{ needs.acknowledge.outputs.target_sha }}
+          REQUESTED_MODE: ${{ needs.acknowledge.outputs.requested_mode }}
+          RUN_URL: ${{ needs.acknowledge.outputs.run_url }}
+          REVIEW_RESULT: ${{ needs.review.result }}
+          REVIEW_SCOPE: ${{ needs.review.outputs.scope }}
+          SCOPE_RESULT: ${{ needs.review.outputs.scope_result }}
+          DIFF_BASE_SHA: ${{ needs.review.outputs.diff_base_sha }}
+          CODEX_SUMMARY: ${{ needs.review.outputs.final_message }}
+        run: |
+          comment=$(gh api "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID")
+          metadata=$(jq -c '
+            .body
+            | capture("<!-- codex-review: (?<json>\\{[^\\n]*\\}) -->").json
+            | fromjson
+          ' <<<"$comment")
+
+          if ! jq -e \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --argjson pr_number "$PR_NUMBER" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --argjson run_attempt "$GITHUB_RUN_ATTEMPT" '
+              .version == 1
+              and .repository == $repository
+              and .pr_number == $pr_number
+              and .run_id == $run_id
+              and .run_attempt == $run_attempt
+            ' <<<"$metadata" >/dev/null; then
+            echo "::error::Lifecycle comment metadata does not match this run"
+            exit 1
+          fi
+
+          [[ -n "$REVIEW_SCOPE" ]] || REVIEW_SCOPE=$(jq -r '.scope // ""' <<<"$metadata")
+          [[ -n "$SCOPE_RESULT" ]] || SCOPE_RESULT=$(jq -r '.scope_result // ""' <<<"$metadata")
+          [[ -n "$DIFF_BASE_SHA" ]] || DIFF_BASE_SHA=$(jq -r '.diff_base_sha // ""' <<<"$metadata")
+
+          if [[ "$REVIEW_SCOPE" != 'full' && "$REVIEW_SCOPE" != 'incremental' ]] \
+            || [[ ! "$DIFF_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'Recovering missing scope during finalization'
+            checkpoint=''
+            if git cat-file -e "$TARGET_SHA^{commit}" 2>/dev/null; then
+              if [[ "$REQUESTED_MODE" != 'full' ]]; then
+                comments_file="$RUNNER_TEMP/codex-review-finalize-comments.json"
+                gh api --paginate --slurp \
+                  "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments?per_page=100" \
+                  | jq 'add' > "$comments_file"
+                while IFS=$'\t' read -r candidate_sha candidate_run candidate_attempt; do
+                  if git cat-file -e "$candidate_sha^{commit}" 2>/dev/null \
+                    && git merge-base --is-ancestor "$candidate_sha" "$TARGET_SHA"; then
+                    checkpoint="$candidate_sha"
+                    echo "Recovered completed checkpoint from run $candidate_run attempt $candidate_attempt"
+                    break
+                  fi
+                done < <(
+                  jq -r \
+                    --arg repository "$GITHUB_REPOSITORY" \
+                    --argjson pr_number "$PR_NUMBER" '
+                      [
+                        .[]
+                        | select(.user.login == "github-actions[bot]")
+                        | (try (.body
+                            | capture("<!-- codex-review: (?<json>\\{[^\\n]*\\}) -->").json
+                            | fromjson) catch empty) as $metadata
+                        | select(
+                            $metadata.version == 1
+                            and $metadata.repository == $repository
+                            and $metadata.pr_number == $pr_number
+                            and $metadata.state == "completed"
+                            and ($metadata.run_id | type) == "string"
+                            and ($metadata.run_id | test("^[0-9]+$"))
+                            and ($metadata.run_attempt | type) == "number"
+                            and $metadata.run_attempt >= 1
+                            and ($metadata.run_attempt | floor) == $metadata.run_attempt
+                            and ($metadata.trigger | type) == "string"
+                            and (["pull_request", "issue_comment", "workflow_dispatch"]
+                              | index($metadata.trigger)) != null
+                            and ($metadata.reviewed_sha | type) == "string"
+                            and ($metadata.reviewed_sha | test("^[0-9a-f]{40}$"))
+                            and $metadata.target_sha == $metadata.reviewed_sha
+                            and ($metadata.outcome | type) == "string"
+                          )
+                        | {
+                            sha: $metadata.reviewed_sha,
+                            run_id: ($metadata.run_id | tonumber),
+                            run_attempt: ($metadata.run_attempt | tonumber)
+                          }
+                      ]
+                      | sort_by(.run_id, .run_attempt)
+                      | reverse
+                      | .[]
+                      | [.sha, .run_id, .run_attempt]
+                      | @tsv
+                    ' "$comments_file"
+                )
+              fi
+
+              if [[ "$REQUESTED_MODE" == 'full' || -z "$checkpoint" ]]; then
+                DIFF_BASE_SHA=$(git merge-base "$BASE_SHA" "$TARGET_SHA")
+                REVIEW_SCOPE='full'
+              else
+                DIFF_BASE_SHA="$checkpoint"
+                REVIEW_SCOPE='incremental'
+              fi
+            fi
+          fi
+
+          if [[ -z "$SCOPE_RESULT" && "$DIFF_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            if [[ "$DIFF_BASE_SHA" == "$TARGET_SHA" ]] \
+              || git diff --quiet "$DIFF_BASE_SHA..$TARGET_SHA"; then
+              SCOPE_RESULT='no_changes'
+            else
+              SCOPE_RESULT='review'
+            fi
+          fi
+
+          case "$REVIEW_RESULT:$SCOPE_RESULT" in
+            success:no_changes)
+              state='completed'
+              outcome='no_changes'
+              reviewed_sha="$TARGET_SHA"
+              visible='No new commits or changes since the last completed Codex review.'
+              ;;
+            success:review)
+              visible=$(printf '%s\n' "$CODEX_SUMMARY" | sed '/<!-- codex-review:/d')
+              if [[ -z "${visible//[[:space:]]/}" ]]; then
+                state='incomplete'
+                outcome='missing_summary'
+                reviewed_sha=''
+                visible='Codex completed without a usable summary. This run was not recorded as a checkpoint.'
+              else
+                state='completed'
+                outcome='reviewed'
+                reviewed_sha="$TARGET_SHA"
+              fi
+              ;;
+            cancelled:*)
+              state='cancelled'
+              outcome='cancelled'
+              reviewed_sha=''
+              visible='Codex review cancelled by a newer review request.'
+              ;;
+            failure:*)
+              state='failed'
+              outcome='failure'
+              reviewed_sha=''
+              visible='Codex review failed. See the workflow run for details.'
+
+              if jobs=$(gh api \
+                "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" \
+                2>/dev/null); then
+                conclusion=$(jq -r '
+                  [.jobs[]
+                    | select(.name == "review" or (.name | endswith(" / review")))]
+                  | last
+                  | .conclusion // ""
+                ' <<<"$jobs")
+                if [[ "$conclusion" == 'timed_out' ]]; then
+                  state='timed_out'
+                  outcome='timed_out'
+                  visible='Codex review timed out.'
+                fi
+              fi
+              ;;
+            *)
+              state='incomplete'
+              outcome="$REVIEW_RESULT"
+              reviewed_sha=''
+              visible='Codex review did not start or ended without a confirmed result.'
+              ;;
+          esac
+
+          updated_metadata=$(jq -c \
+            --arg state "$state" \
+            --arg outcome "$outcome" \
+            --arg reviewed_sha "$reviewed_sha" \
+            --arg scope "$REVIEW_SCOPE" \
+            --arg scope_result "$SCOPE_RESULT" \
+            --arg diff_base_sha "$DIFF_BASE_SHA" \
+            --arg completed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+              . as $current
+              | $current + {
+                state: $state,
+                reviewed_sha: (if $state == "completed" then $reviewed_sha else null end),
+                outcome: $outcome,
+                scope: (if $scope == "" then $current.scope else $scope end),
+                scope_result: (if $scope_result == "" then $current.scope_result else $scope_result end),
+                diff_base_sha: (if $diff_base_sha == "" then $current.diff_base_sha else $diff_base_sha end),
+                completed_at: $completed_at
+              }
+            ' <<<"$metadata")
+          if [[ "$REVIEW_SCOPE" == 'full' || "$REVIEW_SCOPE" == 'incremental' ]] \
+            && [[ "$DIFF_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            scope_text=$(printf 'Scope: %s (%s..%s).' \
+              "$REVIEW_SCOPE" "${DIFF_BASE_SHA:0:7}" "${TARGET_SHA:0:7}")
+          else
+            scope_text='Scope: unavailable.'
+          fi
+          body=$(printf '<!-- codex-review: %s -->\n\n[codex-review] %s\n\n%s\n\n[View workflow run](%s).' \
+            "$updated_metadata" "$visible" "$scope_text" "$RUN_URL")
+          payload=$(jq -n --arg body "$body" '{body: $body}')
+          gh api --method PATCH \
+            "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID" \
+            --input - <<<"$payload" >/dev/null
