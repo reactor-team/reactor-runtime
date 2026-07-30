@@ -1,25 +1,21 @@
-"""Continuous fMP4 chunk encoder backed by a single ``ffmpeg`` subprocess.
+"""Continuous fMP4 chunk encoder built on the libav bindings.
 
-The encoder is lazy: ffmpeg spawns on the first :meth:`ChunkEncoder.feed_video`
-call so the frame's shape derives the ``-s WxH`` argument. Output is HLS-fMP4
-(``init.mp4`` + ``chunk_NNNNN.m4s``) written straight into the served directory;
-:func:`_build_argv` documents the full flag rationale. The audio pipe, second
-input, and ``-map 1:a`` are omitted when ``has_audio`` is ``False`` — a silent
-synthetic track stands in so every segment still carries audio.
+The encoder is lazy: the first :meth:`ChunkEncoder.feed_video` opens the output
+from the frame's shape. Output is HLS-fMP4 (``init.mp4`` + ``chunk_NNNNN.m4s``)
+written straight into the served directory. Every recording carries an audio
+track — a video-only model gets a silent one, so each segment holds both streams
+whatever the model emits.
 """
 
 from __future__ import annotations
 
 import contextlib
-import fcntl
-import os
-import signal
-import subprocess
-import sys
 import threading
+from fractions import Fraction
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+import av
 import numpy as np
 import numpy.typing as npt
 
@@ -28,192 +24,64 @@ from reactor_runtime.log import get_logger
 
 logger = get_logger(__name__)
 
-# Linux fcntl command to resize a pipe's kernel buffer (absent from the fcntl
-# module). The floor a resized pipe is grown to, so even a small-frame recording
-# gets comfortable headroom.
-_F_SETPIPE_SZ = 1031
-_MIN_PIPE_BYTES = 1 << 20
+_INIT_FILENAME = "init.mp4"
+_SEGMENT_PATTERN = "chunk_%05d.m4s"
+_MANIFEST_FILENAME = "manifest.m3u8"
+
+# The output pixel format and profile. With rgb24 input and no explicit choice,
+# libx264 selects yuv444p (Hi444PP), which many decoders and uploaders reject;
+# yuv420p with the Main profile is the universally-compatible sub-profile.
+_PIXEL_FORMAT = "yuv420p"
+_PROFILE = "Main"
 
 
-def _enlarge_pipe(write_fd: int, frame_bytes: int) -> None:
-    """Grow a feed pipe's buffer to hold at least one whole video frame.
+def _video_options(config: RecordingConfig, keyframe_interval: int) -> dict[str, str]:
+    """Build the private encoder options for the configured video codec.
 
-    ffmpeg interleaves its two piped inputs, so if a single rawvideo frame is
-    larger than the default pipe buffer (64 KiB) the feed write blocks mid-frame
-    while ffmpeg is parked reading the *other* input — a deadlock that stalls the
-    encoder before it writes a single segment. Sizing the buffer to a whole frame
-    lets the feed thread hand over a frame and its audio without blocking.
+    A hard GOP — ``keyint`` equal to ``min-keyint``, scene cuts off — puts a
+    keyframe on every chunk boundary, which is what the muxer needs to close a
+    segment there and what ``independent_segments`` promises a player.
 
-    Best-effort and Linux-only: the kernel caps the request at ``fs.pipe-max-size``
-    and any failure is ignored (the pre-existing 64 KiB buffer still works for
-    small frames).
+    Args:
+        config: The recording settings the preset and quality target come from.
+        keyframe_interval: Frames per chunk, so the GOP matches a segment.
     """
-    if sys.platform != "linux":
-        return
-    desired = max(_MIN_PIPE_BYTES, frame_bytes * 2)
-    with contextlib.suppress(OSError):
-        fcntl.fcntl(write_fd, _F_SETPIPE_SZ, desired)
-
-
-def _resize_nearest(frame: npt.NDArray[Any], target_w: int, target_h: int) -> npt.NDArray[Any]:
-    """Nearest-neighbour resize using only numpy; a no-op when already sized."""
-    h, w = frame.shape[:2]
-    if h == target_h and w == target_w:
-        return frame
-    y_idx = (np.arange(target_h) * (h / target_h)).astype(np.int64)
-    x_idx = (np.arange(target_w) * (w / target_w)).astype(np.int64)
-    resized: npt.NDArray[Any] = frame[y_idx[:, None], x_idx[None, :]]
-    return resized
-
-
-def _build_argv(
-    output_dir: Path,
-    width: int,
-    height: int,
-    has_audio: bool,
-    audio_sample_rate: int,
-    frame_rate: int,
-    config: RecordingConfig,
-    video_read_fd: int,
-    audio_read_fd: int | None,
-) -> list[str]:
-    """Construct the ffmpeg argv.
-
-    Video input declares a fixed ``-framerate`` (*frame_rate*): ffmpeg assigns
-    each frame a PTS of ``index / frame_rate``, so the recorded timeline is
-    media time derived from the model's declared cadence, not the wall-clock
-    moment a frame was read. The recorder resamples each chunk's frames onto that
-    grid before feeding, so a model running faster or slower than real time still
-    records at true duration. Audio derives its DTS from byte count and sample
-    rate; it is fed ``sample_rate / frame_rate`` samples per recorded frame, so
-    its DTS tracks the video PTS one-to-one.
-
-    Compatibility choices:
-
-    * ``-pix_fmt yuv420p`` and ``-profile:v main`` on the output. With rgb24
-      input and no output pixel format, libx264 selects yuv444p (Hi444PP), which
-      many decoders and uploaders reject; yuv420p with the Main profile is the
-      universally-compatible sub-profile.
-    * A synthetic silent AAC track for video-only models via
-      ``-f lavfi -i anullsrc``, terminated with ``-shortest`` on the video pipe's
-      EOF, so every output carries an audio track without a second subprocess or
-      audio pipe.
-    """
-    # ``-probesize 32 -analyzeduration 0`` on every input: rawvideo and s16le are
-    # fully described by their format flags, so the default multi-megabyte probe
-    # is pure cost and can deadlock the encoder when one pipe fills before the
-    # other has enough bytes for the probe to complete.
-    argv: list[str] = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "warning",
-        "-probesize",
-        "32",
-        "-analyzeduration",
-        "0",
-        "-f",
-        "rawvideo",
-        "-pix_fmt",
-        "rgb24",
-        "-s",
-        f"{width}x{height}",
-        "-framerate",
-        str(frame_rate),
-        # A large packet queue keeps the demuxer from parking when audio writes
-        # outpace video at higher resolutions, which would otherwise wedge the
-        # worker's blocking write to the pipe.
-        "-thread_queue_size",
-        "1024",
-        "-i",
-        f"pipe:{video_read_fd}",
-    ]
-    if has_audio:
-        assert audio_read_fd is not None
-        argv += [
-            "-probesize",
-            "32",
-            "-analyzeduration",
-            "0",
-            "-f",
-            "s16le",
-            "-ar",
-            str(audio_sample_rate),
-            "-ac",
-            "1",
-            "-thread_queue_size",
-            "1024",
-            "-i",
-            f"pipe:{audio_read_fd}",
-        ]
-    else:
-        # ``lavfi anullsrc`` is a virtual generator inside libavfilter — no extra
-        # subprocess, no audio pipe. ``-shortest`` below terminates the otherwise
-        # infinite stream on the video EOF; the fixed-framerate video owns the
-        # timeline, so the silent track needs no real-time pacing.
-        argv += [
-            "-f",
-            "lavfi",
-            "-i",
-            "anullsrc=cl=mono:r=48000",
-        ]
-    argv += ["-map", "0:v", "-map", "1:a"]
-    vcodec = "libx264" if config.video_codec == "h264" else "libx265"
-    argv += [
-        "-c:v",
-        vcodec,
-        "-pix_fmt",
-        "yuv420p",
-        "-profile:v",
-        "main",
-        "-preset",
-        config.video_preset,
-        "-crf",
-        str(config.video_crf),
-        "-tune",
-        "zerolatency",
-        # x264 sliced threads (auto-enabled by ``-tune zerolatency``) can deadlock
+    gop = f"keyint={keyframe_interval}:min-keyint={keyframe_interval}:scenecut=0"
+    options = {
+        "preset": config.video_preset,
+        "crf": str(config.video_crf),
+        "tune": "zerolatency",
+    }
+    if config.video_codec == "h264":
+        # x264 sliced threads (auto-enabled by the zerolatency tune) can deadlock
         # at higher resolutions; frame threads avoid it and the recorder does not
         # need per-frame latency.
-        "-x264-params",
-        "sliced-threads=0",
-        "-force_key_frames",
-        f"expr:gte(t,n_forced*{config.chunk_seconds})",
-    ]
-    argv += ["-c:a", config.audio_codec, "-b:a", f"{config.audio_bitrate_kbps}k"]
-    if not has_audio:
-        argv += ["-shortest"]
-    # The HLS fMP4 muxer numbers segments from zero, which the marker math and the
-    # manifest endpoint already assume. The generated ``.m3u8`` is ignored — the
-    # ``/clips`` endpoint composes its own manifest.
-    argv += [
-        "-f",
-        "hls",
-        "-hls_segment_type",
-        "fmp4",
-        "-hls_time",
-        str(config.chunk_seconds),
-        "-hls_list_size",
-        "0",
-        "-hls_flags",
-        "independent_segments",
-        "-hls_fmp4_init_filename",
-        "init.mp4",
-        "-hls_segment_filename",
-        str(output_dir / "chunk_%05d.m4s"),
-        str(output_dir / "manifest.m3u8"),
-    ]
-    return argv
+        options["x264-params"] = f"sliced-threads=0:{gop}"
+    else:
+        # x265 prints a configuration banner to stderr at its default verbosity,
+        # which libav's own log level does not reach.
+        options["x265-params"] = f"log-level=warning:{gop}"
+    return options
 
 
 class ChunkEncoder:
-    """Drives a long-lived ``ffmpeg`` subprocess for one recording.
+    """Encodes one recording into HLS fMP4 segments.
 
     Lifecycle: construction records the output directory; the first
-    :meth:`feed_video` spawns ffmpeg from the frame's shape; subsequent
-    ``feed_video`` / ``feed_audio`` calls write raw bytes into the pipes; and
-    :meth:`stop` closes the write ends, sends ``SIGTERM``, and escalates to
-    ``SIGKILL`` if ffmpeg refuses to exit.
+    :meth:`feed_video` opens the output from the frame's shape; each subsequent
+    feed encodes and muxes; :meth:`stop` drains the encoders and writes the
+    trailer, which is what closes the final segment.
+
+    The recorded timeline is media time, not wall-clock time: a frame is stamped
+    at the next position on a fixed *frame_rate* grid and an audio block at the
+    sample that follows the last one. The recorder resamples each chunk onto that
+    grid before feeding, so a model running faster or slower than real time still
+    records at true duration and a stall between feeds records no dead air.
+
+    Encoding happens on the calling thread. The recorder feeds from a worker of
+    its own and libav releases the GIL, so the model thread is never blocked by
+    it. Feeds and :meth:`stop` are serialised against each other, because an
+    output container cannot be used from two threads at once.
     """
 
     def __init__(
@@ -224,191 +92,197 @@ class ChunkEncoder:
         audio_sample_rate: int,
         frame_rate: int = 30,
     ) -> None:
-        """Record the output directory and encode settings; spawn ffmpeg lazily."""
+        """Record the output directory and encode settings; open the output lazily."""
         self._output_dir = Path(output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._config = config
         self._has_audio = has_audio
         self._audio_sample_rate = audio_sample_rate
         self._frame_rate = frame_rate
+        # One grid slot of audio: what the recorder pairs with each frame, and
+        # what a video-only recording gets as silence in its place.
+        self._samples_per_frame = round(audio_sample_rate / frame_rate)
 
-        self._proc: subprocess.Popen[bytes] | None = None
-        self._video_w: int | None = None
-        self._audio_w: int | None = None
-        self._width: int | None = None
-        self._height: int | None = None
+        self._container: av.container.OutputContainer | None = None
+        self._video: av.VideoStream | None = None
+        self._audio: av.AudioStream | None = None
+        # The next grid position for each stream. Video counts frames, audio
+        # counts samples, and both advance only by what was actually encoded, so
+        # the two timelines stay locked to each other.
+        self._video_pts = 0
+        self._audio_pts = 0
         self._lock = threading.Lock()
         self._failed = False
-        # A one-way latch flipped by ``stop()`` so the feed worker cannot
-        # lazy-respawn ffmpeg after teardown began.
         self._stopped = False
 
     @property
     def output_dir(self) -> Path:
-        """The directory ffmpeg writes init and chunk segments into."""
+        """The directory the init and chunk segments are written into."""
         return self._output_dir
 
     @property
     def failed(self) -> bool:
         """Return whether the encoder is dead and unrecoverable for this session."""
-        return self._failed or (self._proc is not None and self._proc.poll() is not None)
+        return self._failed
 
     def feed_video(self, frame: npt.NDArray[Any]) -> None:
-        """Push a single ``(H, W, 3)`` ``uint8`` frame into the encoder.
+        """Encode a single ``(H, W, 3)`` ``uint8`` frame at the next grid position.
 
-        Frames at a size other than the encoder is locked to are nearest-neighbour
-        resized, so a changing resolution never breaks the rawvideo pipe.
+        A frame sized differently from the one the encoder opened with is scaled
+        onto that size, so a changing resolution never breaks the recording. A
+        video-only recording gets its slot of silence here too, so the audio
+        timeline advances in step with the video whether or not the model emits
+        any sound.
 
         Raises:
             ValueError: If *frame* is not a three-channel image.
-            RuntimeError: If the encoder is stopped or in a failed state.
+            RuntimeError: If the encoder is stopped or in a failed state, or if
+                libav rejected the frame.
         """
         if frame.ndim != 3 or frame.shape[2] != 3:
             raise ValueError(f"feed_video expects (H, W, 3); got shape {frame.shape}")
-        if self._proc is None:
-            with self._lock:
-                if self._stopped:
-                    raise RuntimeError("ChunkEncoder is stopped")
-                if self._proc is None:
-                    tw = self._config.target_width
-                    th = self._config.target_height
-                    if tw and th:
-                        self._spawn(width=int(tw), height=int(th))
-                    else:
-                        h, w, _ = frame.shape
-                        self._spawn(width=int(w), height=int(h))
-        if self._failed:
-            raise RuntimeError("ChunkEncoder is in a failed state")
-        if (
-            self._width is not None
-            and self._height is not None
-            and (frame.shape[1] != self._width or frame.shape[0] != self._height)
-        ):
-            frame = _resize_nearest(frame, self._width, self._height)
-        assert self._video_w is not None
-        try:
-            os.write(self._video_w, np.ascontiguousarray(frame).tobytes())
-        except BrokenPipeError as exc:
-            self._failed = True
-            raise RuntimeError("ffmpeg video pipe broke") from exc
+        with self._lock:
+            if self._stopped:
+                raise RuntimeError("ChunkEncoder is stopped")
+            if self._failed:
+                raise RuntimeError("ChunkEncoder is in a failed state")
+            if self._container is None:
+                width, height = self._config.target_width, self._config.target_height
+                if width and height:
+                    self._open(int(width), int(height))
+                else:
+                    self._open(int(frame.shape[1]), int(frame.shape[0]))
+            try:
+                self._write_video(frame)
+                if not self._has_audio:
+                    self._write_audio(np.zeros(self._samples_per_frame, dtype=np.int16))
+            except av.FFmpegError as exc:
+                self._failed = True
+                raise RuntimeError("the encoder stopped accepting video") from exc
 
     def feed_audio(self, samples: npt.NDArray[Any]) -> None:
-        """Push ``int16`` PCM samples into the audio pipe.
+        """Encode ``int16`` PCM samples at the next audio position.
 
-        A no-op when the encoder has no audio pipe.
+        A no-op for a video-only recording, whose silent track is written
+        alongside the video in :meth:`feed_video`, and before the first frame has
+        opened the output.
 
         Raises:
-            RuntimeError: If the encoder is in a failed state.
+            RuntimeError: If the encoder is in a failed state, or if libav
+                rejected the samples.
         """
-        if not self._has_audio or self._audio_w is None:
+        with self._lock:
+            if not self._has_audio or self._container is None:
+                return
+            if self._failed:
+                raise RuntimeError("ChunkEncoder is in a failed state")
+            try:
+                self._write_audio(samples)
+            except av.FFmpegError as exc:
+                self._failed = True
+                raise RuntimeError("the encoder stopped accepting audio") from exc
+
+    def stop(self) -> None:
+        """Drain the encoders and write the trailer, closing the final segment.
+
+        Always safe to call, and a no-op when the output never opened or has
+        already been closed.
+        """
+        with self._lock:
+            # Latch first so a concurrent feed bails out instead of encoding into
+            # the container about to be closed.
+            self._stopped = True
+            container, video, audio = self._container, self._video, self._audio
+            self._container = None
+            self._video = None
+            self._audio = None
+        if container is None:
             return
-        if self._failed:
-            raise RuntimeError("ChunkEncoder is in a failed state")
-        if samples.dtype != np.int16:
-            samples = samples.astype(np.int16)
         try:
-            os.write(self._audio_w, np.ascontiguousarray(samples).tobytes())
-        except BrokenPipeError as exc:
-            self._failed = True
-            raise RuntimeError("ffmpeg audio pipe broke") from exc
+            # A failed encoder has no coherent state left to drain; closing the
+            # container still writes what already reached the muxer.
+            if not self._failed:
+                for stream in (video, audio):
+                    if stream is not None:
+                        container.mux(stream.encode(None))
+        except av.FFmpegError:
+            logger.exception("recorder failed to drain the encoder")
+        finally:
+            with contextlib.suppress(av.FFmpegError):
+                container.close()
 
-    def _spawn(self, width: int, height: int) -> None:
-        """Open the pipes and launch ffmpeg for the given frame dimensions."""
-        video_r, video_w = os.pipe()
-        audio_r: int | None
-        audio_w: int | None
-        if self._has_audio:
-            audio_r, audio_w = os.pipe()
-        else:
-            audio_r, audio_w = None, None
+    def _open(self, width: int, height: int) -> None:
+        """Open the HLS output and add the video and audio streams.
 
-        # Size both pipes to hold a whole frame so a feed write never blocks
-        # mid-frame and deadlocks against ffmpeg reading the other input.
-        frame_bytes = width * height * 3
-        _enlarge_pipe(video_w, frame_bytes)
-        if audio_w is not None:
-            _enlarge_pipe(audio_w, frame_bytes)
-
-        argv = _build_argv(
-            output_dir=self._output_dir,
-            width=width,
-            height=height,
-            has_audio=self._has_audio,
-            audio_sample_rate=self._audio_sample_rate,
-            frame_rate=self._frame_rate,
-            config=self._config,
-            video_read_fd=video_r,
-            audio_read_fd=audio_r,
+        The muxer numbers segments from zero, which the marker math and the
+        manifest endpoint already assume. The ``.m3u8`` it writes alongside them
+        is ignored — the ``/clips`` endpoint composes its own manifest.
+        """
+        config = self._config
+        container = av.open(
+            str(self._output_dir / _MANIFEST_FILENAME),
+            mode="w",
+            format="hls",
+            options={
+                "hls_segment_type": "fmp4",
+                "hls_time": str(config.chunk_seconds),
+                "hls_list_size": "0",
+                "hls_flags": "independent_segments",
+                "hls_fmp4_init_filename": _INIT_FILENAME,
+                "hls_segment_filename": str(self._output_dir / _SEGMENT_PATTERN),
+            },
         )
-        pass_fds: tuple[int, ...]
-        if self._has_audio:
-            assert audio_r is not None
-            pass_fds = (video_r, audio_r)
-        else:
-            pass_fds = (video_r,)
-        try:
-            self._proc = subprocess.Popen(argv, pass_fds=pass_fds, stdin=subprocess.DEVNULL)
-        except FileNotFoundError as exc:
-            for fd in (video_r, video_w, audio_r, audio_w):
-                if fd is not None:
-                    with contextlib.suppress(OSError):
-                        os.close(fd)
-            self._failed = True
-            raise RuntimeError(
-                "ffmpeg binary not found on PATH; install ffmpeg to enable recording"
-            ) from exc
-        # The parent never reads; the child owns the read ends.
-        os.close(video_r)
-        if audio_r is not None:
-            os.close(audio_r)
+        # ``add_stream`` is overloaded on a literal set of codec names, so the
+        # configured codec resolves to the catch-all return type.
+        video = cast(
+            "av.VideoStream",
+            container.add_stream(
+                "libx264" if config.video_codec == "h264" else "libx265",
+                rate=Fraction(self._frame_rate, 1),
+                options=_video_options(config, self._frame_rate * config.chunk_seconds),
+            ),
+        )
+        video.width = width
+        video.height = height
+        video.pix_fmt = _PIXEL_FORMAT
+        video.profile = _PROFILE
+        video.time_base = Fraction(1, self._frame_rate)
 
-        self._video_w = video_w
-        self._audio_w = audio_w
-        self._width = width
-        self._height = height
+        audio = cast(
+            "av.AudioStream",
+            container.add_stream(config.audio_codec, rate=self._audio_sample_rate, layout="mono"),
+        )
+        audio.bit_rate = config.audio_bitrate_kbps * 1000
+
+        self._container = container
+        self._video = video
+        self._audio = audio
         logger.info(
-            "recorder encoder spawned ffmpeg",
-            pid=self._proc.pid,
+            "recorder encoder opened",
             width=width,
             height=height,
+            frame_rate=self._frame_rate,
             audio=self._has_audio,
         )
 
-    def stop(self, timeout: float = 5.0) -> None:
-        """Close the input pipes and shut ffmpeg down, escalating to a kill.
+    def _write_video(self, frame: npt.NDArray[Any]) -> None:
+        """Encode one frame at the next grid position and mux what comes out."""
+        assert self._container is not None
+        assert self._video is not None
+        picture = av.VideoFrame.from_ndarray(np.ascontiguousarray(frame), format="rgb24")
+        picture.pts = self._video_pts
+        picture.time_base = Fraction(1, self._frame_rate)
+        self._video_pts += 1
+        self._container.mux(self._video.encode(picture))
 
-        Always safe to call; a no-op when ffmpeg never spawned.
-        """
-        with self._lock:
-            # Latch first so a concurrent ``feed_video`` bails out instead of
-            # spawning over the fds about to be closed.
-            self._stopped = True
-            for fd in (self._video_w, self._audio_w):
-                if fd is not None:
-                    with contextlib.suppress(OSError):
-                        os.close(fd)
-            self._video_w = None
-            self._audio_w = None
-            proc = self._proc
-            self._proc = None
-        if proc is None:
-            return
-        if proc.poll() is not None:
-            # ffmpeg exited on its own before teardown — the feed worker would
-            # have seen a broken pipe and disabled recording. A non-zero code is
-            # a silent encode failure, so surface it rather than let it vanish.
-            if proc.returncode:
-                logger.warning(
-                    "recorder ffmpeg exited before teardown with a non-zero code",
-                    returncode=proc.returncode,
-                )
-            return
-        try:
-            proc.send_signal(signal.SIGTERM)
-        except ProcessLookupError:
-            return
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=2.0)
+    def _write_audio(self, samples: npt.NDArray[Any]) -> None:
+        """Encode PCM samples at the next audio position and mux what comes out."""
+        assert self._container is not None
+        assert self._audio is not None
+        block = np.ascontiguousarray(samples, dtype=np.int16).reshape(1, -1)
+        chunk = av.AudioFrame.from_ndarray(block, format="s16", layout="mono")
+        chunk.rate = self._audio_sample_rate
+        chunk.pts = self._audio_pts
+        chunk.time_base = Fraction(1, self._audio_sample_rate)
+        self._audio_pts += block.shape[1]
+        self._container.mux(self._audio.encode(chunk))

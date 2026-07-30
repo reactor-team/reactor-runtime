@@ -15,10 +15,6 @@ Early development. The public API and wire protocol are not yet stable.
 - The **`reactor-webrtc`** wheel, declared as a dependency, which ships the
   prebuilt libwebrtc media engine. No system-level WebRTC or GStreamer install
   is required; the wheel carries everything the transport needs.
-- **`ffmpeg`** on `PATH`, when recording is enabled. The recorder shells out to
-  it to encode the model's output into the fMP4 segments `/clips` serves; a
-  runtime with recording turned off does not need it. Install it from Homebrew
-  (`ffmpeg`) or the `ffmpeg` package on Debian/Ubuntu.
 
 ## Development
 
