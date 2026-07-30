@@ -53,6 +53,7 @@ from reactor_runtime.interface.internal.reactor_core import ReactorCore
 from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.log import get_logger
 from reactor_runtime.message_gateway import InboundCommand, MessageGateway
+from reactor_runtime.metrics import MetricsRecorder, RuntimeMetrics
 from reactor_runtime.protocol import Channel, Codec, ProtocolVersion, select
 from reactor_runtime.recording import ClipResult, Recorder, RecorderError
 from reactor_runtime.runner.connection_manager import ConnectionManager
@@ -151,7 +152,7 @@ class Runner(ServiceComponent, ConnectionSink):
     name = "runner"
     depends_on: tuple[str, ...] = ()
 
-    def __init__(self, cfg: RuntimeConfig) -> None:
+    def __init__(self, cfg: RuntimeConfig, metrics: RuntimeMetrics | None = None) -> None:
         """Wire the session machinery and local components that need no model.
 
         The bridge is built later, in :meth:`start`, once the model class is
@@ -159,10 +160,19 @@ class Runner(ServiceComponent, ConnectionSink):
 
         Args:
             cfg: The configuration for this runtime process.
+            metrics: The registry the session instruments observe on. A runner
+                built without one records on a registry of its own, so the
+                instruments are always live and only the assembled process
+                serves them.
         """
         self._cfg = cfg
+        self._metrics = metrics or RuntimeMetrics(version=_server_version(), model=cfg.model_ref)
         self._sm = SessionStateMachine()
         self._sm.on_transition(self._dispatch_transition)
+        # The session surface of the metrics is one listener over the same moves
+        # the journal carries, so no session code below calls an instrument.
+        self._metrics_recorder = MetricsRecorder(self._metrics, state=self._sm.current_state)
+        self._sm.on_transition(self._metrics_recorder.observe)
         self._events = EventStream()
         self._uploads = UploadStore()
         self._recorder = Recorder(
