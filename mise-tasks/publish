@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
 #MISE description="[Build] Publish dist/ to PyPI (trusted publishing in CI)"
 set -euo pipefail
-uv publish
+# --check-url skips the files the index already holds, so re-running a release
+# job whose upload half-succeeded finishes it instead of failing on a duplicate.
+uv publish --check-url https://pypi.org/simple/reactor-runtime/

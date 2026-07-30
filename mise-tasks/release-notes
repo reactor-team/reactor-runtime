@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+#MISE description="[Build] Render the GitHub release body for the built distributions"
+#MISE quiet=true
+set -euo pipefail
+# release-notes.py is stdlib-only; skip the project sync so the task needs no
+# build deps in a release job.
+uv run --no-project --python "$PYTHON_FLOOR" python scripts/release-notes.py "$@"
