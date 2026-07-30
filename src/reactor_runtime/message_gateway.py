@@ -43,6 +43,9 @@ class InboundCommand:
         conn_id: The connection the command arrived on.
         request_id: The client's correlation id, guaranteed present — carried
             from the client when supplied, minted here only when absent.
+        received_at: When the frame carrying this command reached the runtime, on
+            a monotonic clock. Stamped by the caller at the transport edge, so it
+            precedes the decode and the wait for the event loop.
     """
 
     name: str
@@ -50,6 +53,7 @@ class InboundCommand:
     uploads: Mapping[str, str]
     conn_id: ConnId
     request_id: str
+    received_at: float
 
 
 CommandHandler = Callable[[InboundCommand], Awaitable[None]]
@@ -92,7 +96,13 @@ class MessageGateway:
         return codec
 
     async def handle(
-        self, conn_id: ConnId, payload: bytes | str, channel: Channel, version: ProtocolVersion
+        self,
+        conn_id: ConnId,
+        payload: bytes | str,
+        channel: Channel,
+        version: ProtocolVersion,
+        *,
+        received_at: float,
     ) -> None:
         """Decode one inbound frame and route it.
 
@@ -103,6 +113,11 @@ class MessageGateway:
         decoded message is left for a later layer to route. A frame that cannot
         be decoded is dropped with a warning rather than raised, so one malformed
         frame from any client cannot break the transport read loop.
+
+        *received_at* is when the frame reached the runtime, on a monotonic clock.
+        The caller stamps it at the transport edge and it rides the decoded
+        command, because the gateway runs as a task and cannot see how long the
+        frame waited for the event loop.
         """
         try:
             message = self._codec_for(version).decode_inbound(payload, channel)
@@ -126,6 +141,7 @@ class MessageGateway:
                     uploads={param: ref.upload_id for param, ref in command.uploads.items()},
                     conn_id=conn_id,
                     request_id=message.request_id or _new_request_id(),
+                    received_at=received_at,
                 )
             )
             return
