@@ -4,12 +4,17 @@ import pytest
 from fake_engine import FakeEngine, FakeInit, Move
 
 from reactor_runtime.interface.engine import EnginePipeline, application_for, is_engine
-from reactor_runtime.interface.engine.application import DEFAULT_VIDEO_TRACK
+from reactor_runtime.interface.engine.reflection import VIDEO_TRACK
 from reactor_runtime.interface.model.contract import ModelContract
 
 
 class NotAnEngine:
-    def generate(self) -> None:
+    """Has some of the calls, so presence of one method is not enough."""
+
+    def generate(self, autoregressive_index: int, cache: object, input: object = None) -> None:
+        return None
+
+    def finalize(self, autoregressive_index: int, cache: object) -> None:
         return None
 
 
@@ -23,6 +28,8 @@ def test_a_class_with_the_four_calls_is_an_engine() -> None:
 
 
 def test_a_class_missing_a_call_is_not_an_engine() -> None:
+    # It has generate and finalize, but no map_inputs: an engine that cannot
+    # fold a window is not servable.
     assert not is_engine(NotAnEngine)
 
 
@@ -55,7 +62,7 @@ def test_the_built_application_emits_on_the_default_video_track(
     app = application_for(FakeEngine)
     register_model(app)
 
-    assert ModelContract.of(app).tracks[DEFAULT_VIDEO_TRACK].direction == "out"
+    assert ModelContract.of(app).tracks[VIDEO_TRACK].direction == "out"
 
 
 def test_the_engines_name_carries_into_the_published_model(
@@ -72,10 +79,10 @@ async def test_the_built_application_runs_a_step() -> None:
     model.load(None)
     model._on_loop_ready()
 
-    frames = await model.step()
+    chunk = await model.step()
 
-    assert frames is not None
-    assert set(frames.tracks) == {DEFAULT_VIDEO_TRACK}
+    assert chunk is not None
+    assert chunk.shape[0] == 1
 
 
 def test_the_declarations_are_the_engines_own() -> None:

@@ -16,7 +16,7 @@ from fake_engine import (
     frame,
 )
 
-from reactor_runtime import EnginePipeline, Output, Video, event, override_input
+from reactor_runtime import EnginePipeline, event, override_input
 from reactor_runtime.core.model import (
     ClientConnected,
     ClientDisconnected,
@@ -25,21 +25,16 @@ from reactor_runtime.core.model import (
     SessionStarted,
 )
 from reactor_runtime.core.values import ConnId, MediaChunk
-from reactor_runtime.engine_contract import Frames, UserInput
+from reactor_runtime.engine_contract import UserInput
 from reactor_runtime.interface.engine.engine_pipeline import InitRequiredError
 from reactor_runtime.interface.internal.reactor_core import CommandEnvelope
 from reactor_runtime.interface.model.contract import ModelContract
-
-
-class Canvas(Output):
-    main_video: Video
 
 
 class Paint(EnginePipeline):
     """A model backed by the fake engine."""
 
     engine = FakeEngine
-    output: Canvas
 
     emitted: list[MediaChunk]
     produced: asyncio.Event
@@ -126,7 +121,6 @@ def test_the_step_command_does_not_shadow_the_step_method() -> None:
 def test_an_engine_declaring_no_media_declares_no_track() -> None:
     class Bare(EnginePipeline):
         engine = StrictEngine
-        output: Canvas
 
     assert Bare.__engine_tracks__ is None
 
@@ -183,7 +177,6 @@ async def test_the_step_index_advances_by_exactly_one(paint: Paint) -> None:
 async def test_a_mapping_that_returns_none_skips_the_step(paint: Paint) -> None:
     class Skipping(EnginePipeline):
         engine = MediaOnlyEngine
-        output: Canvas
 
     model = Skipping()
     model.load(None)
@@ -193,11 +186,10 @@ async def test_a_mapping_that_returns_none_skips_the_step(paint: Paint) -> None:
     assert _engine(model).generated == []
 
 
-async def test_a_step_returns_its_frames_rather_than_emitting_them(paint: Paint) -> None:
-    frames = await paint.step()
+async def test_a_step_returns_its_chunk_rather_than_emitting_it(paint: Paint) -> None:
+    chunk = await paint.step()
 
-    assert frames is not None
-    assert "main_video" in frames.tracks
+    assert chunk is not None
     assert paint.emitted == []
 
 
@@ -281,7 +273,6 @@ async def test_a_later_init_drops_what_was_scheduled_against_the_old_sequence(
 async def test_a_required_init_field_holds_the_rollout_back() -> None:
     class Strict(EnginePipeline):
         engine = StrictEngine
-        output: Canvas
 
     model = Strict()
     model.load(None)
@@ -294,7 +285,6 @@ async def test_a_required_init_field_holds_the_rollout_back() -> None:
 async def test_a_required_init_field_supplied_by_the_client_opens_the_rollout() -> None:
     class Strict(EnginePipeline):
         engine = StrictEngine
-        output: Canvas
 
     model = Strict()
     model.load(None)
@@ -327,7 +317,6 @@ async def test_an_input_can_be_scheduled_for_a_later_step(paint: Paint) -> None:
 async def test_an_override_replaces_the_wire_payload() -> None:
     class Mirrored(EnginePipeline):
         engine = FakeEngine
-        output: Canvas
 
         @override_input(Move)
         def move(self, direction: str) -> Move:
@@ -348,7 +337,6 @@ async def test_an_override_replaces_the_wire_payload() -> None:
 async def test_an_override_returning_none_drops_the_input() -> None:
     class Filtered(EnginePipeline):
         engine = FakeEngine
-        output: Canvas
 
         @override_input(Move)
         def move(self, direction: str) -> Move | None:
@@ -366,7 +354,6 @@ async def test_an_override_returning_none_drops_the_input() -> None:
 async def test_an_added_event_feeds_the_same_window() -> None:
     class Dashing(EnginePipeline):
         engine = FakeEngine
-        output: Canvas
 
         @event(name="dash")
         def dash(self, direction: str) -> None:
@@ -384,7 +371,6 @@ async def test_an_added_event_feeds_the_same_window() -> None:
 def test_a_hand_written_event_wins_over_the_generated_one() -> None:
     class Custom(EnginePipeline):
         engine = FakeEngine
-        output: Canvas
 
         @event(name="move", description="Move, this deployment's way.")
         def move(self, direction: str) -> None:
@@ -397,19 +383,18 @@ def test_a_hand_written_event_wins_over_the_generated_one() -> None:
 async def test_an_application_can_replace_the_mapping() -> None:
     class Reconditioned(EnginePipeline):
         engine = FakeEngine
-        output: Canvas
 
-        def map_inputs(self, inputs, cache):
+        def map_inputs(self, autoregressive_index, cache, inputs):
             return FakeStepInput(shade=255)
 
     model = Reconditioned()
     model.load(None)
     model._on_loop_ready()
 
-    frames = await model.step()
+    chunk = await model.step()
 
-    assert frames is not None
-    assert int(frames.tracks["main_video"][0][0][0]) == 255
+    assert chunk is not None
+    assert int(chunk.flat[0]) == 255
     assert _engine(model).windows == []
 
 
@@ -523,16 +508,29 @@ async def test_a_triggered_models_rollout_ends_with_its_session(paint: Paint) ->
 # -- emission ------------------------------------------------------------------
 
 
-async def test_frames_are_emitted_on_the_declared_output_track(paint: Paint) -> None:
-    await paint.emit_frames(Frames(main_video=np.zeros((2, 2, 3), dtype=np.uint8)))
+async def test_frames_are_emitted_on_the_track_the_runtime_declared(paint: Paint) -> None:
+    await paint.emit_chunk(np.zeros((3, 2, 2), dtype=np.uint8))
 
-    assert paint.emitted[0].bundle.get_track("main_video") is not None
+    track = paint.emitted[0].bundle.get_track("main_video")
+    assert track is not None
+    assert track.data.shape == (2, 2, 3)
+
+
+async def test_a_decoded_chunk_is_normalized_for_the_wire(paint: Paint) -> None:
+    # What the fake engine returns is [T, C, H, W] uint8; a real decoder returns
+    # floating point in its own range. Both leave as (N, H, W, 3) uint8.
+    chunk = await paint.step()
+    await paint.emit_chunk(chunk)
+
+    track = paint.emitted[0].bundle.get_track("main_video")
+    assert track is not None
+    assert track.data.dtype == np.uint8
+    assert track.data.shape[-1] == 3
 
 
 async def test_a_pinned_fps_overrides_the_measured_pace() -> None:
     class Pinned(EnginePipeline):
         engine = FakeEngine
-        output: Canvas
         fps = 12
 
     model = Pinned()
@@ -545,7 +543,7 @@ async def test_a_pinned_fps_overrides_the_measured_pace() -> None:
 
     frames = await model.step()
     assert frames is not None
-    await model.emit_frames(frames, compute_time=1.0)
+    await model.emit_chunk(frames, compute_time=1.0)
 
     assert chunks[0].fps == 12.0
 
@@ -553,17 +551,16 @@ async def test_a_pinned_fps_overrides_the_measured_pace() -> None:
 # -- declaration errors --------------------------------------------------------
 
 
-def test_a_model_that_declares_no_output_is_rejected() -> None:
-    class NoTracks(EnginePipeline):
+def test_binding_an_engine_is_the_whole_declaration() -> None:
+    class Bare(EnginePipeline):
         engine = FakeEngine
 
-    with pytest.raises(TypeError, match="must declare the tracks"):
-        NoTracks()
+    assert Bare().__engine_output__.__tracks__["main_video"].direction == "out"
 
 
 def test_a_model_that_binds_no_engine_is_rejected() -> None:
     class NoEngine(EnginePipeline):
-        output: Canvas
+        pass
 
     with pytest.raises(TypeError, match="must bind an engine"):
         NoEngine()

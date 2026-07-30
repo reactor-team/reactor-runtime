@@ -6,7 +6,6 @@ input tracks, and the initialization, and the base drives the rollout::
 
     class ArcadeLingBot(EnginePipeline):
         engine = LingBotPipeline
-        output: GameOutput
 
 Three layers sit above the engine's defaults, each reachable without touching
 the one below. ``@override_input`` replaces one generated event. Implementing
@@ -15,9 +14,9 @@ the one below. ``@override_input`` replaces one generated event. Implementing
 drives :meth:`step` directly.
 
 :meth:`step` is the unit and :meth:`run` is one composition of it: a step
-returns its frames rather than emitting them, so a caller that is not a loop —
-a single triggered advance, a benchmark, a replay — gets the same result the
-loop would have emitted.
+returns its chunk rather than emitting it, so a caller that is not a loop — a
+single triggered advance, a benchmark, a replay — gets the same result the loop
+would have emitted.
 """
 
 from __future__ import annotations
@@ -33,15 +32,18 @@ from typing import Any, ClassVar, Literal
 from reactor_runtime.core.model import ReactorEvent, SessionEnded, SessionStarted
 from reactor_runtime.core.values import InputFrame
 from reactor_runtime.engine_contract.inputs import Init, UserInput
-from reactor_runtime.engine_contract.pipeline import Cache, Frames, StreamingPipeline
+from reactor_runtime.engine_contract.pipeline import Cache, StreamingPipeline, VideoChunk
+from reactor_runtime.interface.engine.frames import DEFAULT_VALUE_RANGE, to_video_frames
 from reactor_runtime.interface.engine.overrides import OVERRIDE_ATTR
 from reactor_runtime.interface.engine.reflection import (
+    VIDEO_TRACK,
     EngineInputs,
     command_for,
     default_init,
     discover_inputs,
     init_values,
     missing_init_fields,
+    output_holder,
     track_holder,
     wire_name,
 )
@@ -93,8 +95,9 @@ class InitRequiredError(Exception):
 class EnginePipeline(ReactorModel):
     """Serves one engine, driving its rollout from the client's input window.
 
-    Subclass, bind an engine with the ``engine`` class attribute, and declare
-    the outbound tracks its frames fill with an ``Output`` annotation.
+    Binding an engine is the whole of it: subclass and set ``engine``. The
+    outbound track the engine's frames land on is declared for you, so an
+    engine that says nothing about where its video goes still serves.
     Everything :class:`ReactorModel` offers — ``@event``, the lifecycle hooks,
     ``send`` — still applies, and a hand-written ``@event`` of the same wire
     name as a generated one wins.
@@ -106,6 +109,10 @@ class EnginePipeline(ReactorModel):
             ``"triggered"`` parks it and advances one step per ``step`` command.
             A deployment overrides it through ``runtime.stepping`` in
             ``reactor.yaml``.
+        output_range: The value range a floating-point chunk from ``generate``
+            spans, defaulting to the ``[-1, 1]`` these decoders emit. An engine
+            that decodes to ``[0, 1]`` declares it; an engine that returns
+            ``uint8`` is unaffected.
         fps: Pins the playback rate of an emitted chunk. Left undeclared, the
             rate follows the measured time each step took.
 
@@ -118,9 +125,11 @@ class EnginePipeline(ReactorModel):
 
     engine: ClassVar[type]
     stepping: Stepping = "automatic"
+    output_range: ClassVar[tuple[float, float]] = DEFAULT_VALUE_RANGE
 
     __engine_inputs__: ClassVar[EngineInputs]
     __engine_tracks__: ClassVar[type[Input] | None] = None
+    __engine_output__: ClassVar[type[Output]]
     __engine_overrides__: ClassVar[dict[type[UserInput], Callable[..., Any]]] = {}
 
     inputs: InputStore
@@ -145,13 +154,6 @@ class EnginePipeline(ReactorModel):
                 f"{type(self).__name__} must bind an engine: 'engine = MyPipeline', where "
                 "MyPipeline satisfies the StreamingPipeline protocol."
             )
-        holder = type(self)._find_holder(Output)
-        if holder is None:
-            raise TypeError(
-                f"{type(self).__name__} must declare the tracks the engine's frames fill, "
-                "e.g. 'output: MyOutput' where MyOutput is an Output subclass."
-            )
-        self._output_cls = holder[1]
         self._dynamic_fps = not _fps_is_author_pinned(type(self))
         self.inputs = InputStore(type(self).__engine_inputs__.media)
         self._engine: StreamingPipeline | None = None
@@ -172,7 +174,7 @@ class EnginePipeline(ReactorModel):
         """
         self._engine = type(self).engine()
 
-    def map_inputs(self, inputs: list[UserInput], cache: Cache) -> Any:
+    def map_inputs(self, autoregressive_index: int, cache: Cache, inputs: list[UserInput]) -> Any:
         """Fold one window into the next step's conditioning.
 
         Delegates to the engine. Implement this on the application to condition
@@ -180,27 +182,31 @@ class EnginePipeline(ReactorModel):
         ``finalize`` are untouched either way.
 
         Args:
-            inputs: The window, in arrival order.
+            autoregressive_index: The step this conditioning is for.
             cache: The rollout's memory.
+            inputs: The window, in arrival order.
 
         Returns:
             The engine's ``ModelInput`` for this step, or ``None`` to skip it.
         """
         assert self._engine is not None
-        return self._engine.map_inputs(inputs, cache)
+        return self._engine.map_inputs(
+            autoregressive_index=autoregressive_index, cache=cache, inputs=inputs
+        )
 
     # -- the step -------------------------------------------------------------
 
-    async def step(self) -> Frames | None:
+    async def step(self) -> VideoChunk | None:
         """Advance the rollout by one step and return what it produced.
 
         Drains the window, folds it, and runs the engine's generate/finalize
         pair, opening the rollout first when there is none yet. Emission belongs
-        to the caller: nothing is sent on a track from here.
+        to the caller: nothing is sent on a track from here, and the chunk comes
+        back exactly as the engine decoded it.
 
         Returns:
-            The step's frames, or ``None`` when the step was skipped because the
-            mapping asked for it.
+            The step's decoded video, or ``None`` when the step was skipped
+            because the mapping asked for it.
 
         Raises:
             InitRequiredError: The engine declares an initialization field with no
@@ -209,7 +215,7 @@ class EnginePipeline(ReactorModel):
         async with self._step_lock:
             return self._advance()
 
-    def _advance(self) -> Frames | None:
+    def _advance(self) -> VideoChunk | None:
         """Run one step on the model loop. Serialised by :meth:`step`."""
         assert self._engine is not None
         window = self.inputs.drain(self._index)
@@ -222,13 +228,17 @@ class EnginePipeline(ReactorModel):
             # the old sequence's steps no longer address anything.
             self.inputs.clear_deferred()
             self._index = 0
-        model_input = self.map_inputs(window, self._cache)
+        model_input = self.map_inputs(
+            autoregressive_index=self._index, cache=self._cache, inputs=window
+        )
         if model_input is None:
             return None
-        frames = self._engine.generate(self._index, self._cache, model_input)
-        self._engine.finalize(self._index, self._cache)
+        chunk = self._engine.generate(
+            autoregressive_index=self._index, cache=self._cache, input=model_input
+        )
+        self._engine.finalize(autoregressive_index=self._index, cache=self._cache)
         self._index += 1
-        return frames
+        return chunk
 
     def _open_rollout(self, window: list[UserInput]) -> list[UserInput]:
         """Open the rollout this window's step runs against, and return the rest of it.
@@ -290,26 +300,31 @@ class EnginePipeline(ReactorModel):
         """Take one automatic turn: step, then emit whatever it produced."""
         started = time.perf_counter()
         try:
-            frames = await self.step()
+            chunk = await self.step()
         except InitRequiredError:
             # A required initialization field is the client's to send. Wait for
             # it rather than failing the session.
             await asyncio.sleep(_IDLE_SLEEP)
             return
-        if frames is None:
+        if chunk is None:
             await asyncio.sleep(_IDLE_SLEEP)
             return
-        await self.emit_frames(frames, time.perf_counter() - started)
+        await self.emit_chunk(chunk, time.perf_counter() - started)
 
-    async def emit_frames(self, frames: Frames, compute_time: float | None = None) -> None:
-        """Send one step's frames on the declared output tracks.
+    async def emit_chunk(self, chunk: VideoChunk, compute_time: float | None = None) -> None:
+        """Send one step's decoded video on the outbound track.
+
+        Normalizes whatever the engine returned — device tensor, channels
+        first, half precision, its own value range — into the frames a
+        transport carries.
 
         Args:
-            frames: What a step produced, keyed by output track name.
+            chunk: What a step produced.
             compute_time: Seconds the step took, used to pace playback when the
                 model does not pin ``fps``.
         """
-        output = self._output_cls(**frames.tracks)
+        frames = to_video_frames(chunk, type(self).output_range)
+        output = type(self).__engine_output__(**{VIDEO_TRACK: frames})
         if self._dynamic_fps and compute_time is not None:
             await self.emit(output, compute_time=compute_time)
         else:
@@ -322,12 +337,12 @@ class EnginePipeline(ReactorModel):
             return
         started = time.perf_counter()
         try:
-            frames = await self.step()
+            chunk = await self.step()
         except InitRequiredError as required:
             logger.warning("step before initialization", missing=required.fields)
             return
-        if frames is not None:
-            await self.emit_frames(frames, time.perf_counter() - started)
+        if chunk is not None:
+            await self.emit_chunk(chunk, time.perf_counter() - started)
 
     # -- engine hooks ---------------------------------------------------------
 
@@ -374,6 +389,7 @@ def _bind_engine(cls: type[EnginePipeline], engine_cls: type) -> None:
     inputs = discover_inputs(engine_cls)
     cls.__engine_inputs__ = inputs
     cls.__engine_tracks__ = track_holder(f"{engine_cls.__name__}Input", inputs.media)
+    cls.__engine_output__ = output_holder(f"{engine_cls.__name__}Output")
 
     overrides = _collect_overrides(cls)
     cls.__engine_overrides__ = overrides

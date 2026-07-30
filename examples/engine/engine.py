@@ -18,16 +18,19 @@ from typing import Any, Literal
 import numpy as np
 
 from reactor_runtime.engine_contract import (
-    Frames,
     Init,
     InputField,
     ModelInput,
     UserInput,
+    VideoChunk,
     VideoInput,
 )
 
 CHUNK_FRAMES = 4
 """How many source frames one :class:`Camera` instance carries."""
+
+STEP_FRAMES = 3
+"""How many frames one step paints, after the first."""
 
 Direction = Literal["up", "down", "left", "right"]
 """The directions the brush understands."""
@@ -91,6 +94,15 @@ class PaintCache:
 class PaintPipeline:
     """The engine. Satisfies the streaming-pipeline protocol structurally."""
 
+    def get_num_output_frames(self, autoregressive_index: int) -> int:
+        """Return this step's frame count.
+
+        The first step lays down a single frame and the rest paint a short run,
+        which is the shape a real engine has: a seeded first step is smaller
+        than the ones after it, and the mapping sizes its path to match.
+        """
+        return 1 if autoregressive_index == 0 else STEP_FRAMES
+
     def initialize_cache(self, **init: Any) -> PaintCache:
         """Open a rollout on a fresh canvas."""
         height = int(init.get("height", 256))
@@ -99,7 +111,9 @@ class PaintPipeline:
         canvas = np.full((height, width, 3), background, dtype=np.uint8)
         return PaintCache(canvas=canvas, row=height // 2, col=width // 2)
 
-    def map_inputs(self, inputs: list[UserInput], cache: PaintCache) -> PaintStepInput | None:
+    def map_inputs(
+        self, autoregressive_index: int, cache: PaintCache, inputs: list[UserInput]
+    ) -> PaintStepInput | None:
         """Fold one window into the next step's conditioning.
 
         The fold happens in one pass, in arrival order: a colour is last-value
@@ -108,6 +122,9 @@ class PaintPipeline:
         is the one this step conditions on. A colour or a cursor that has to
         survive into the next window lives on the cache, because the cache is
         the rollout.
+
+        The path is resampled to this step's frame count, so the conditioning
+        and the frames it produces always agree.
         """
         height, width = cache.canvas.shape[:2]
         positions: list[tuple[int, int]] = []
@@ -128,29 +145,45 @@ class PaintPipeline:
             elif isinstance(item, Camera):
                 source = item.data
         return PaintStepInput(
-            positions=positions or [(cache.row, cache.col)],
+            positions=_resample(
+                positions or [(cache.row, cache.col)],
+                self.get_num_output_frames(autoregressive_index),
+            ),
             colour=cache.colour,
             source=source,
         )
 
-    def generate(self, index: int, cache: PaintCache, input: PaintStepInput) -> Frames:
-        """Paint this step's path onto the canvas and hand back the frame."""
+    def generate(
+        self,
+        autoregressive_index: int,
+        cache: PaintCache,
+        input: PaintStepInput | None = None,
+    ) -> VideoChunk:
+        """Paint this step's path onto the canvas, one frame per position.
+
+        Returns the chunk in the layout a decoder emits — ``[T, C, H, W]``
+        floating point in ``[-1, 1]`` — which the runtime normalizes for the
+        wire.
+        """
+        assert input is not None
         canvas = cache.canvas.copy()
         if input.source is not None:
             canvas = _tint(canvas, input.source)
+        chunk = []
         for row, col in input.positions:
-            canvas[
-                max(row - 4, 0) : row + 4,
-                max(col - 4, 0) : col + 4,
-            ] = input.colour
+            canvas = canvas.copy()
+            canvas[max(row - 4, 0) : row + 4, max(col - 4, 0) : col + 4] = input.colour
+            chunk.append(canvas)
         cache.final_state = canvas
-        return Frames(main_video=canvas)
+        frames = np.stack(chunk).astype(np.float32) / 127.5 - 1.0
+        return frames.transpose(0, 3, 1, 2)
 
-    def finalize(self, index: int, cache: PaintCache) -> None:
+    def finalize(self, autoregressive_index: int, cache: PaintCache) -> dict[str, float] | None:
         """Commit the step into the rollout's memory."""
         if cache.final_state is not None:
             cache.canvas = cache.final_state
             cache.final_state = None
+        return None
 
     def _restart(self, cache: PaintCache, init: PaintInit) -> None:
         """Reset the rollout in place, the way an engine with pinned buffers must."""
@@ -158,6 +191,12 @@ class PaintPipeline:
         cache.row = init.height // 2
         cache.col = init.width // 2
         cache.final_state = None
+
+
+def _resample(positions: list[tuple[int, int]], count: int) -> list[tuple[int, int]]:
+    """Stretch or thin a path so it carries exactly *count* positions."""
+    last = len(positions) - 1
+    return [positions[min(round(i * last / max(count - 1, 1)), last)] for i in range(count)]
 
 
 def _tint(canvas: np.ndarray, source: np.ndarray) -> np.ndarray:

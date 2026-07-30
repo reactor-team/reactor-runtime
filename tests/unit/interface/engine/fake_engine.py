@@ -18,11 +18,11 @@ import numpy as np
 
 from reactor_runtime.core.values import InputFrame
 from reactor_runtime.engine_contract import (
-    Frames,
     Init,
     InputField,
     ModelInput,
     UserInput,
+    VideoChunk,
     VideoInput,
 )
 
@@ -66,10 +66,15 @@ class FakeEngine:
         self.generated: list[int] = []
         self.finalized: list[int] = []
 
+    def get_num_output_frames(self, autoregressive_index: int) -> int:
+        return 1 if autoregressive_index == 0 else 2
+
     def initialize_cache(self, **init: Any) -> FakeCache:
         return FakeCache(shade=int(init.get("shade", 8)), initialized_with=dict(init))
 
-    def map_inputs(self, inputs: list[UserInput], cache: FakeCache) -> FakeStepInput | None:
+    def map_inputs(
+        self, autoregressive_index: int, cache: FakeCache, inputs: list[UserInput]
+    ) -> FakeStepInput | None:
         self.windows.append(list(inputs))
         source = None
         moves = 0
@@ -84,13 +89,21 @@ class FakeEngine:
                 source = item.data
         return FakeStepInput(shade=cache.shade, moves=moves, source=source)
 
-    def generate(self, index: int, cache: FakeCache, input: FakeStepInput) -> Frames:
-        self.generated.append(index)
-        return Frames(main_video=np.full((2, 2, 3), input.shade, dtype=np.uint8))
+    def generate(
+        self,
+        autoregressive_index: int,
+        cache: FakeCache,
+        input: FakeStepInput | None = None,
+    ) -> VideoChunk:
+        self.generated.append(autoregressive_index)
+        assert input is not None
+        frames = self.get_num_output_frames(autoregressive_index)
+        return np.full((frames, 3, 2, 2), input.shade, dtype=np.uint8)
 
-    def finalize(self, index: int, cache: FakeCache) -> None:
-        self.finalized.append(index)
+    def finalize(self, autoregressive_index: int, cache: FakeCache) -> dict[str, float] | None:
+        self.finalized.append(autoregressive_index)
         cache.steps += 1
+        return {"step_seconds": 0.0}
 
 
 class MediaOnlyEngine(FakeEngine):
@@ -98,7 +111,9 @@ class MediaOnlyEngine(FakeEngine):
 
     declared_inputs = (Camera,)
 
-    def map_inputs(self, inputs: list[UserInput], cache: FakeCache) -> FakeStepInput | None:
+    def map_inputs(
+        self, autoregressive_index: int, cache: FakeCache, inputs: list[UserInput]
+    ) -> FakeStepInput | None:
         self.windows.append(list(inputs))
         chunks = [item for item in inputs if isinstance(item, Camera)]
         if not chunks:

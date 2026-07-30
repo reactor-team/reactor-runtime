@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-from reactor_runtime.engine_contract import Frames, ModelInput, UserInput, VideoInput
+from reactor_runtime.engine_contract import ModelInput, UserInput, VideoChunk, VideoInput
 
 
 class Jump(UserInput):
@@ -28,14 +28,21 @@ class ScopedStepInput(ModelInput):
 class ScopedEngine:
     """Declares no ``declared_inputs``; its package is the declaration."""
 
+    def get_num_output_frames(self, autoregressive_index: int) -> int:
+        return 1
+
     def initialize_cache(self, **init: Any) -> dict[str, Any]:
         return dict(init)
 
-    def map_inputs(self, inputs: list[UserInput], cache: Any) -> ScopedStepInput:
+    def map_inputs(
+        self, autoregressive_index: int, cache: Any, inputs: list[UserInput]
+    ) -> ScopedStepInput:
         return ScopedStepInput(jumps=sum(isinstance(item, Jump) for item in inputs))
 
-    def generate(self, index: int, cache: Any, input: ScopedStepInput) -> Frames:
-        return Frames(main_video=np.zeros((2, 2, 3), dtype=np.uint8))
+    def generate(
+        self, autoregressive_index: int, cache: Any, input: ScopedStepInput | None = None
+    ) -> VideoChunk:
+        return np.zeros((2, 2, 3), dtype=np.uint8)
 
-    def finalize(self, index: int, cache: Any) -> None:
+    def finalize(self, autoregressive_index: int, cache: Any) -> dict[str, float] | None:
         return None

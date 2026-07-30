@@ -7,7 +7,7 @@ Treat its packaging as swappable — it is a vocabulary, not a framework.
 
 An engine declares three things and nothing more::
 
-    from reactor_runtime.engine_contract import Frames, Init, InputField, ModelInput, UserInput
+    from reactor_runtime.engine_contract import Init, InputField, ModelInput, UserInput
 
     class Move(UserInput):
         direction: Literal["forward", "back", "left", "right"]
@@ -21,9 +21,10 @@ An engine declares three things and nothing more::
 
     class WalkPipeline:                      # satisfies StreamingPipeline
         def initialize_cache(self, **init): ...
-        def map_inputs(self, inputs, cache): ...
-        def generate(self, index, cache, input): ...
-        def finalize(self, index, cache): ...
+        def get_num_output_frames(self, autoregressive_index): ...
+        def map_inputs(self, autoregressive_index, cache, inputs): ...
+        def generate(self, autoregressive_index, cache, input=None): ...
+        def finalize(self, autoregressive_index, cache): ...
 
 Every input the client sends is queued and stamped on arrival, and each step's
 ``map_inputs`` receives every input since the previous step, ordered by
@@ -42,7 +43,7 @@ from reactor_runtime.engine_contract.inputs import (
     UserInput,
     VideoInput,
 )
-from reactor_runtime.engine_contract.pipeline import Cache, Frames, StreamingPipeline
+from reactor_runtime.engine_contract.pipeline import Cache, StreamingPipeline, VideoChunk
 
 __all__ = [
     "NO_DEFAULT",
@@ -50,12 +51,12 @@ __all__ = [
     "AudioInput",
     "Cache",
     "FieldSpec",
-    "Frames",
     "Init",
     "InputField",
     "MediaInput",
     "ModelInput",
     "StreamingPipeline",
     "UserInput",
+    "VideoChunk",
     "VideoInput",
 ]

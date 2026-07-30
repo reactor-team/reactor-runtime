@@ -60,11 +60,12 @@ def _register_model(model_cls: type) -> None:
     for hint in get_type_hints(model_cls).values():
         if isinstance(hint, type) and issubclass(hint, (Output, Input)):
             _register(hint)
-    # An engine-backed model's inbound tracks are declared from the engine's
-    # media rather than annotated on the class, so they are reached separately.
-    engine_tracks = getattr(model_cls, "__engine_tracks__", None)
-    if engine_tracks is not None:
-        _register(engine_tracks)
+    # An engine-backed model's tracks are declared from the engine rather than
+    # annotated on the class, so they are reached separately.
+    for attr in ("__engine_tracks__", "__engine_output__"):
+        holder = getattr(model_cls, attr, None)
+        if holder is not None:
+            _register(holder)
     for name, spec in ModelContract.of(model_cls).commands.items():
         EVENT_REGISTRY[name] = spec.command
         if spec.response is not None:

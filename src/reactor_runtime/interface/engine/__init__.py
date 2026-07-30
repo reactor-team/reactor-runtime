@@ -19,10 +19,12 @@ from reactor_runtime.interface.engine.engine_pipeline import (
     Stepping,
 )
 from reactor_runtime.interface.engine.overrides import override_input
+from reactor_runtime.interface.engine.reflection import VIDEO_TRACK
 from reactor_runtime.interface.engine.store import InputStore, MediaSpec
 
 __all__ = [
     "STEPPING_MODES",
+    "VIDEO_TRACK",
     "EnginePipeline",
     "InitRequiredError",
     "InputStore",

@@ -23,9 +23,16 @@ Four kinds of declaration, and no serving code:
 | `PaintInit` (`Init`) | the `init` command, and the rollout's starting state |
 | `PaintStepInput` (`ModelInput`) | the conditioning of one step, engine-facing only |
 
-`PaintPipeline` implements the four calls a runtime makes: `initialize_cache`,
-`map_inputs`, `generate`, `finalize`. It satisfies the protocol structurally, so
-it inherits from nothing.
+`PaintPipeline` implements the calls a runtime makes: `initialize_cache`,
+`get_num_output_frames`, `map_inputs`, `generate`, `finalize`. It satisfies the
+protocol structurally, so it inherits from nothing, and every call is made by
+keyword.
+
+`generate` returns decoded video the way a decoder produces it — `[T, C, H, W]`
+floating point in `[-1, 1]` — and the runtime normalizes it for the wire. The
+frame count is not constant: `get_num_output_frames` says the first step emits
+one frame and the rest emit three, and the mapping sizes its brush path to
+match.
 
 ## The window
 
@@ -49,6 +56,12 @@ sequence is what initializing again means.
 Give a `PaintInit` field no default and the model waits for the client instead of
 starting on its own.
 
+## The output track
+
+The engine says nothing about where its frames go, so the runtime declares the
+one outbound video track they land on. There is no `Output` to write. A model
+that needs audio or a second track is what a future `map_output` is for.
+
 ## The application
 
 `PaintApp` binds the engine and adds what the engine had no business knowing:
@@ -65,17 +78,16 @@ Neither touches the mapping or the loop. To replace the fold, implement
 
 ## Serving the engine alone
 
-An application that only binds an engine and declares one video track is
-boilerplate, so `runtime.import` may name the engine class directly:
+An application that only binds an engine is boilerplate, so `runtime.import` may
+name the engine class directly:
 
 ```yaml
 runtime:
   import: engine:PaintPipeline
 ```
 
-The runtime builds the application, and the engine emits on a single `main_video`
-track. Anything else — a second track, audio, an override — means writing the
-application.
+The runtime builds the application around it. An override or a new event is what
+writing the application buys you.
 
 ## Stepping
 

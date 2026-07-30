@@ -29,9 +29,13 @@ from reactor_runtime.interface.engine.store import MediaSpec
 from reactor_runtime.interface.events.decorators import make_command
 from reactor_runtime.interface.tracks.descriptors import Audio, Video
 from reactor_runtime.interface.tracks.input import Input
+from reactor_runtime.interface.tracks.output import Output
 
 INIT_COMMAND = "init"
 """The wire name every engine's :class:`Init` is served under, whatever it is called."""
+
+VIDEO_TRACK = "main_video"
+"""The outbound track an engine's frames are served on."""
 
 
 @dataclass(frozen=True)
@@ -154,6 +158,22 @@ def track_holder(name: str, media: dict[str, MediaSpec]) -> type[Input] | None:
         for track, spec in media.items()
     }
     return type(name, (Input,), {"__annotations__": annotations})
+
+
+def output_holder(name: str) -> type[Output]:
+    """Build the :class:`Output` carrying an engine's frames.
+
+    An engine returns decoded video and says nothing about where it goes, so the
+    runtime declares the one outbound track it lands on. Declaring the class
+    registers the track, so negotiation and the schema treat it as any other.
+
+    Args:
+        name: Class name for the holder, for readable diagnostics.
+
+    Returns:
+        The holder class, declaring a single video track.
+    """
+    return type(name, (Output,), {"__annotations__": {VIDEO_TRACK: Video}})
 
 
 def missing_init_fields(init_cls: type[Init] | None) -> list[str]:
