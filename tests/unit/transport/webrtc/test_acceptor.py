@@ -6,6 +6,7 @@ import pytest
 from conftest import FakePeer
 
 from reactor_runtime.core import Connection, ConnId, InputFrame
+from reactor_runtime.metrics import RuntimeMetrics, WebRtcMetrics
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.transport.webrtc import (
     SdpAnswer,
@@ -13,6 +14,7 @@ from reactor_runtime.transport.webrtc import (
     TrackMap,
     WebRTCAcceptor,
     WebRtcConfig,
+    WebRTCPeer,
     WebRtcPeerFactory,
 )
 from reactor_runtime.transport.webrtc.config import IceServer
@@ -75,15 +77,21 @@ class FakeSink:
         self.answered.append((conn_id, dict(answer)))
 
 
+def _metrics() -> RuntimeMetrics:
+    return RuntimeMetrics(version="0.0.0", model="fake:Model")
+
+
 def _acceptor(
     sink: FakeSink,
     peer: FakePeer,
     factory_for: Callable[..., WebRtcPeerFactory],
+    metrics: RuntimeMetrics | None = None,
 ) -> WebRTCAcceptor:
     return WebRTCAcceptor(
         sink=sink,
         config=WebRtcConfig(ping_timeout=0.0),
         peer_factory=factory_for(peer),
+        metrics=WebRtcMetrics(metrics or _metrics()),
     )
 
 
@@ -291,3 +299,129 @@ async def test_re_offer_supersedes_a_pending_negotiation(
     await second
     answer = acceptor.take_answer(ConnId(7))
     assert answer is not None
+
+
+def _sample(metrics: RuntimeMetrics, name: str, **labels: str) -> float | None:
+    return metrics.registry.get_sample_value(name, labels or None)
+
+
+async def test_an_answered_offer_is_measured(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    metrics = _metrics()
+    acceptor = _acceptor(FakeSink(), fake_peer, factory_for, metrics)
+
+    await _negotiate(acceptor, ConnId(7), SdpOffer("offer"), out_av_tracks)
+
+    assert _sample(metrics, "runtime_webrtc_negotiation_seconds_count", outcome="ok") == 1.0
+    # The answer is not a connection: the wire is still cold, so the client has
+    # not arrived and there is nothing to measure yet.
+    assert _sample(metrics, "runtime_webrtc_connect_seconds_count") == 0.0
+
+
+async def test_a_negotiation_that_raises_is_measured_as_a_failure(
+    fake_peer: FakePeer,
+    out_av_tracks: TrackMap,
+) -> None:
+    def refuses(*args: object, **kwargs: object) -> WebRtcPeerFactory:
+        async def factory(
+            conn_id: ConnId,
+            offer: SdpOffer,
+            tracks: TrackMap,
+            config: WebRtcConfig,
+            version: ProtocolVersion,
+            /,
+        ) -> tuple[WebRTCPeer, SdpAnswer]:
+            raise RuntimeError("no peer today")
+
+        return factory
+
+    metrics = _metrics()
+    acceptor = _acceptor(FakeSink(), fake_peer, refuses, metrics)
+
+    await _negotiate(acceptor, ConnId(7), SdpOffer("offer"), out_av_tracks)
+
+    assert _sample(metrics, "runtime_webrtc_negotiation_seconds_count", outcome="failed") == 1.0
+    assert _sample(metrics, "runtime_webrtc_negotiation_seconds_count", outcome="ok") is None
+    # An offer that produced no connection is reaped by nothing, so the acceptor
+    # drops its own bookkeeping rather than holding it for the life of the process.
+    assert acceptor._offered_at == {}
+
+
+async def test_a_live_wire_is_measured_from_the_offer(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    metrics = _metrics()
+    acceptor = _acceptor(FakeSink(), fake_peer, factory_for, metrics)
+    await _negotiate(acceptor, ConnId(7), SdpOffer("offer"), out_av_tracks)
+
+    fake_peer.fire_connected()
+
+    # Measured from the offer, not from the answer: the client waits through both
+    # legs, and only the total says how long it took to reach a usable wire.
+    assert _sample(metrics, "runtime_webrtc_connect_seconds_count") == 1.0
+    fake_peer.fire_disconnect()
+
+
+async def test_a_reconnect_on_a_live_connection_is_measured(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    metrics = _metrics()
+    acceptor = _acceptor(FakeSink(), fake_peer, factory_for, metrics)
+    await _negotiate(acceptor, ConnId(7), SdpOffer("first"), out_av_tracks)
+    fake_peer.fire_connected()
+
+    await _negotiate(acceptor, ConnId(7), SdpOffer("second"), out_av_tracks)
+    fake_peer.fire_connected()
+
+    # The second offer installs its timestamp, and negotiating it closes the
+    # connection the first one left behind. That teardown must not carry off the
+    # bookkeeping of the offer that is still waiting, or a reconnect would read
+    # as a client that answered and never arrived.
+    assert _sample(metrics, "runtime_webrtc_connect_seconds_count") == 2.0
+    fake_peer.fire_disconnect()
+
+
+async def test_an_offer_that_never_connects_measures_no_wire(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    metrics = _metrics()
+    acceptor = _acceptor(FakeSink(), fake_peer, factory_for, metrics)
+    await _negotiate(acceptor, ConnId(7), SdpOffer("offer"), out_av_tracks)
+
+    fake_peer.fire_disconnect()
+
+    # A client that gives up is an absent connection, not a slow one. Recording a
+    # duration for it would report the time it took to fail as a connect time.
+    assert _sample(metrics, "runtime_webrtc_connect_seconds_count") == 0.0
+    assert _sample(metrics, "runtime_webrtc_negotiation_seconds_count", outcome="ok") == 1.0
+
+
+async def test_a_superseded_offer_is_not_measured(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    metrics = _metrics()
+    acceptor = _acceptor(FakeSink(), fake_peer, factory_for, metrics)
+
+    acceptor.start_offer(ConnId(7), SdpOffer("first"), out_av_tracks, ProtocolVersion.V0)
+    first = acceptor._negotiating[ConnId(7)]
+    acceptor.start_offer(ConnId(7), SdpOffer("second"), out_av_tracks, ProtocolVersion.V0)
+    second = acceptor._negotiating[ConnId(7)]
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    await second
+
+    # The client abandoned the first offer by re-offering, so it is neither an
+    # answer nor a failure and counting it either way would be a lie.
+    assert _sample(metrics, "runtime_webrtc_negotiation_seconds_count", outcome="ok") == 1.0
+    assert _sample(metrics, "runtime_webrtc_negotiation_seconds_count", outcome="failed") is None

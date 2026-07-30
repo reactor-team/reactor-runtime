@@ -7,6 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 
 from reactor_runtime import (
@@ -28,6 +29,7 @@ from reactor_runtime.core import (
     EndReason,
     FileUploaded,
     HealthStatus,
+    MediaBundle,
     MediaChunk,
     RecordingConfig,
     RuntimeConfig,
@@ -35,6 +37,9 @@ from reactor_runtime.core import (
     SessionEvent,
     SessionStarted,
     SessionState,
+    TrackData,
+    TrackInfo,
+    TrackKind,
     Transition,
     TransitionEvent,
 )
@@ -1170,6 +1175,104 @@ async def test_a_command_the_model_does_not_declare_shares_one_series(
     )
     rendered = started_runner._metrics.render().decode()
     assert "definitely_not_a_command" not in rendered
+
+
+async def test_a_model_that_came_up_is_measured(started_runner: Runner) -> None:
+    assert _metric(started_runner, "runtime_model_load_seconds_count", outcome="ok") == 1.0
+
+
+async def test_a_model_that_failed_to_load_is_measured(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Unloadable(FakeModel):
+        def load(self, config_path: Path | None) -> None:
+            raise RuntimeError("weights missing")
+
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: Unloadable)
+    runner = _runner()
+
+    await runner.start()
+    try:
+        # A failed load is terminal, so this is the one observation the process
+        # ever makes, and it says how long it spent before it gave up.
+        assert _metric(runner, "runtime_model_load_seconds_count", outcome="failed") == 1.0
+        assert _metric(runner, "runtime_model_load_seconds_count", outcome="ok") is None
+    finally:
+        await runner.stop()
+
+
+async def test_emitted_media_is_counted_in_frames_per_track(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    bundle = MediaBundle(
+        tracks={
+            "main_video": TrackData(
+                info=TrackInfo(name="main_video", kind=TrackKind.VIDEO),
+                data=np.zeros((4, 2, 2, 3), dtype=np.uint8),
+            ),
+            "main_audio": TrackData(
+                info=TrackInfo(name="main_audio", kind=TrackKind.AUDIO),
+                data=np.zeros((4, 2), dtype=np.float32),
+            ),
+        }
+    )
+
+    started_runner._emit_media(MediaChunk(bundle=bundle, fps=30.0, n_frames=4))
+
+    # Counted in frames, not in emissions: the model batches four frames into one
+    # chunk here, and a counter of chunks would report a quarter of the real rate.
+    assert _metric(started_runner, "runtime_media_frames_total", track="main_video") == 4.0
+    assert _metric(started_runner, "runtime_media_frames_total", track="main_audio") == 4.0
+
+
+async def test_every_output_track_the_model_declares_starts_at_zero(
+    started_runner: Runner,
+) -> None:
+    # A track that has carried nothing reads zero, which is what tells a silent
+    # track apart from a track this model does not have.
+    assert _metric(started_runner, "runtime_media_frames_total", track="main") == 0.0
+
+
+async def test_the_gap_between_two_emissions_is_measured(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    chunk = MediaChunk(bundle=_video_bundle(), fps=30.0, n_frames=1)
+
+    started_runner._emit_media(chunk)
+    # The first emission has nothing to be measured against.
+    assert _interval_count(started_runner) is None
+
+    started_runner._emit_media(chunk)
+
+    assert _interval_count(started_runner) == 1.0
+
+
+async def test_no_gap_is_measured_across_a_session_boundary(started_runner: Runner) -> None:
+    chunk = MediaChunk(bundle=_video_bundle(), fps=30.0, n_frames=1)
+    started_runner.start_session({})
+    started_runner._emit_media(chunk)
+    started_runner.stop_session()
+    await asyncio.sleep(0.01)
+
+    started_runner.start_session({})
+    started_runner._emit_media(chunk)
+
+    # The wait between one client leaving and the next arriving is idle time, and
+    # counting it would report the pause as the model's worst stall.
+    assert _interval_count(started_runner) is None
+
+
+def _interval_count(runner: Runner) -> float | None:
+    """How many gaps between emissions were measured on FakeModel's one track."""
+    return _metric(runner, "runtime_media_emit_interval_seconds_count", track="main")
+
+
+def _video_bundle() -> MediaBundle:
+    """A one-frame bundle on the track FakeModel declares."""
+    return MediaBundle(
+        tracks={
+            "main": TrackData(
+                info=TrackInfo(name="main", kind=TrackKind.VIDEO),
+                data=np.zeros((2, 2, 3), dtype=np.uint8),
+            )
+        }
+    )
 
 
 async def test_file_uploaded_dispatches_when_a_hook_exists(

@@ -44,6 +44,7 @@ from reactor_runtime.core import (
     SessionEvent,
     SessionStarted,
     SessionState,
+    TrackDirection,
     Transition,
     TransitionEvent,
 )
@@ -58,6 +59,7 @@ from reactor_runtime.metrics import (
     UNKNOWN_COMMAND,
     CommandMetrics,
     MetricsRecorder,
+    ModelMetrics,
     RuntimeMetrics,
 )
 from reactor_runtime.protocol import Channel, Codec, ProtocolVersion, select
@@ -180,6 +182,7 @@ class Runner(ServiceComponent, ConnectionSink):
         self._metrics_recorder = MetricsRecorder(self._metrics, state=self._sm.current_state)
         self._sm.on_transition(self._metrics_recorder.observe)
         self._command_metrics = CommandMetrics(self._metrics)
+        self._model_metrics = ModelMetrics(self._metrics)
         self._events = EventStream()
         self._uploads = UploadStore()
         self._recorder = Recorder(
@@ -236,6 +239,7 @@ class Runner(ServiceComponent, ConnectionSink):
         """
         self._loop = asyncio.get_running_loop()
         logger.info("loading model", model=self._cfg.model_ref)
+        started_at = time.monotonic()
         try:
             model_cls = import_model_class(self._cfg.model_ref)
             contract = ModelContract.of(model_cls)
@@ -250,11 +254,16 @@ class Runner(ServiceComponent, ConnectionSink):
             )
             bridge.start()
         except Exception:
+            self._model_metrics.load_failed(since=started_at)
             logger.exception("model failed to load; terminating the session")
             self._sm.send(SessionEvent.INITIALIZATION_FAIL)
             return
+        self._model_metrics.loaded(since=started_at)
         self._bridge = bridge
         self._command_metrics.declare(contract.commands)
+        self._model_metrics.declare(
+            name for name, info in contract.tracks.items() if info.direction is TrackDirection.OUT
+        )
         self._sm.send(SessionEvent.INITIALIZATION_SUCCESS)
         logger.info(
             "model loaded; session ready",
@@ -543,6 +552,7 @@ class Runner(ServiceComponent, ConnectionSink):
         self._recording_id = str(params.get("session_id") or uuid.uuid4())
         if not self._sm.send(SessionEvent.START_SESSION, params=dict(params)):
             raise SessionTransitionError("start", self._sm.current_state)
+        self._model_metrics.session_started()
 
     def stop_session(self, *, moderated: bool = False) -> None:
         """Close the active session, leaving the model loaded and ready again.
@@ -806,6 +816,8 @@ class Runner(ServiceComponent, ConnectionSink):
         recorder tap is where recording reads the model's output now that it no
         longer shares an emission buffer with the transport.
         """
+        for track in chunk.bundle.tracks:
+            self._model_metrics.emitted(track, chunk.n_frames)
         self._connections.broadcast_media(chunk)
         self._recorder.on_chunk(chunk)
 

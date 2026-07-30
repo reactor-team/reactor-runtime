@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from reactor_runtime.core import Connection, ConnId, InputFrame
+from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.transport import SessionNotRunningError, UnknownSessionError
 from reactor_runtime.transport.webrtc import WebRtcConfig, WebRtcPeerFactory, WebRtcRouter
@@ -92,7 +93,10 @@ def _client(
     config: WebRtcConfig | None = None,
 ) -> TestClient:
     app = FastAPI()
-    WebRtcRouter(config or WebRtcConfig(ping_timeout=0.0), factory_for(peer)).mount(app, runner)
+    metrics = RuntimeMetrics(version="0.0.0", model="fake:Model")
+    WebRtcRouter(config or WebRtcConfig(ping_timeout=0.0), factory_for(peer), metrics).mount(
+        app, runner
+    )
     return TestClient(app)
 
 
