@@ -22,7 +22,7 @@ import importlib.metadata
 import time
 import uuid
 from collections.abc import Callable, Coroutine, Mapping
-from typing import Any
+from typing import Any, cast
 
 from reactor_runtime.core import (
     JOURNAL_EVENTS,
@@ -49,6 +49,12 @@ from reactor_runtime.core import (
     TransitionEvent,
 )
 from reactor_runtime.event_stream import EventStream
+from reactor_runtime.interface.engine import (
+    EnginePipeline,
+    Stepping,
+    application_for,
+    is_engine,
+)
 from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.bridge import ModelBridge
 from reactor_runtime.interface.internal.reactor_core import ReactorCore
@@ -129,23 +135,31 @@ def _no_shutdown() -> None:
 def import_model_class(model_ref: str) -> type[ReactorCore]:
     """Resolve a ``"module:Class"`` reference into the model class it names.
 
+    The reference names a model, or an inference engine. An engine — a class
+    satisfying the streaming-pipeline protocol rather than subclassing a model
+    base — is served through an application built around it, so a deployment
+    that needs no product surface of its own points straight at the engine.
+
     Args:
         model_ref: An import reference of the form ``"package.module:Class"``.
 
     Returns:
-        The referenced model class.
+        The referenced model class, or the application serving the referenced
+        engine.
 
     Raises:
         ValueError: If the reference is not of the form ``"module:Class"``.
-        TypeError: If the reference does not name a :class:`ReactorCore` subclass.
+        TypeError: If the reference names neither a model nor an engine.
     """
     module_name, separator, class_name = model_ref.partition(":")
     if not separator or not module_name or not class_name:
         raise ValueError(f"model_ref must be 'module:Class', got {model_ref!r}")
     model_cls = getattr(importlib.import_module(module_name), class_name)
-    if not isinstance(model_cls, type) or not issubclass(model_cls, ReactorCore):
-        raise TypeError(f"{model_ref} does not name a ReactorCore subclass")
-    return model_cls
+    if isinstance(model_cls, type) and issubclass(model_cls, ReactorCore):
+        return model_cls
+    if is_engine(model_cls):
+        return application_for(model_cls)
+    raise TypeError(f"{model_ref} names neither a ReactorCore subclass nor an inference engine")
 
 
 class Runner(ServiceComponent, ConnectionSink):
@@ -244,6 +258,10 @@ class Runner(ServiceComponent, ConnectionSink):
             model_cls = import_model_class(self._cfg.model_ref)
             contract = ModelContract.of(model_cls)
             model = model_cls()
+            if self._cfg.stepping is not None and isinstance(model, EnginePipeline):
+                # The deployment, not the class, decides whether this process
+                # streams its own loop or is stepped by its caller.
+                model.stepping = cast("Stepping", self._cfg.stepping)
             await asyncio.to_thread(model.load, self._cfg.config_path)
             bridge = ModelBridge(model, contract)
             bridge.bind_outbound(

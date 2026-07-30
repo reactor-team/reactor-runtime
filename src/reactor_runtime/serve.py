@@ -30,6 +30,7 @@ import yaml
 from reactor_runtime import log
 from reactor_runtime.core import RecordingConfig, RuntimeConfig
 from reactor_runtime.http import HttpServer
+from reactor_runtime.interface.engine import STEPPING_MODES
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.runner import Runner
 from reactor_runtime.service import Service
@@ -264,21 +265,22 @@ def _load_config(manifest: Path) -> RuntimeConfig:
 
     ``runtime.import`` — the ``"module:Class"`` model reference — and
     ``runtime.config`` — the path to the model's own config file — name the
-    model, and the top-level ``recording:`` block configures the recorder; the
-    rest of the manifest describes the model to the platform and is not the
-    runtime's concern. The config path is passed to the model verbatim (resolved
-    to an absolute path); the runtime never parses its contents.
+    model, ``runtime.stepping`` chooses how an engine-backed model advances, and
+    the top-level ``recording:`` block configures the recorder; the rest of the
+    manifest describes the model to the platform and is not the runtime's
+    concern. The config path is passed to the model verbatim (resolved to an
+    absolute path); the runtime never parses its contents.
 
     Args:
         manifest: Path to the ``reactor.yaml`` file.
 
     Returns:
         A configuration naming the model the manifest points at, the path to its
-        config file when present, and the recorder's settings.
+        config file when present, the stepping mode, and the recorder's settings.
 
     Raises:
-        SystemExit: If the manifest is not valid YAML, is not a mapping, or
-            carries no ``runtime.import``.
+        SystemExit: If the manifest is not valid YAML, is not a mapping, carries
+            no ``runtime.import``, or names an unknown stepping mode.
     """
     try:
         document = yaml.safe_load(manifest.read_text())
@@ -294,8 +296,25 @@ def _load_config(manifest: Path) -> RuntimeConfig:
     return RuntimeConfig(
         model_ref=model_ref,
         config_path=_resolve_config_path(runtime, manifest),
+        stepping=_stepping_from_manifest(runtime, manifest),
         recording=_recording_from_manifest(document.get("recording")),
     )
+
+
+def _stepping_from_manifest(runtime: dict[str, Any], manifest: Path) -> str | None:
+    """Read ``runtime.stepping``, leaving the model's own declaration when absent.
+
+    Raises:
+        SystemExit: If the value is not one of the known stepping modes.
+    """
+    stepping = runtime.get("stepping")
+    if stepping is None:
+        return None
+    if stepping not in STEPPING_MODES:
+        raise SystemExit(
+            f"{manifest}: runtime.stepping {stepping!r} must be one of {sorted(STEPPING_MODES)}"
+        )
+    return str(stepping)
 
 
 def _recording_from_manifest(block: Any) -> RecordingConfig:

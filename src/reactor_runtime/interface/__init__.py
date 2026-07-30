@@ -18,6 +18,7 @@ from reactor_runtime.core import (
     UploadedFile,
 )
 from reactor_runtime.interface.client import ClientInfo
+from reactor_runtime.interface.engine import EnginePipeline, override_input
 from reactor_runtime.interface.events import (
     EVENT_REGISTRY,
     MESSAGE_REGISTRY,
@@ -58,6 +59,7 @@ __all__ = [
     "BufferClosed",
     "ClientInfo",
     "Command",
+    "EnginePipeline",
     "FieldInfo",
     "Idle",
     "Input",
@@ -80,6 +82,7 @@ __all__ = [
     "disconnected",
     "event",
     "file_uploaded",
+    "override_input",
     "session_ended",
     "session_started",
 ]

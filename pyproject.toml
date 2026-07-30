@@ -112,9 +112,18 @@ python-version = "3.12"
 # Import roots ty would not otherwise search: the repo root, so the example
 # models (`examples`, first-party but outside the package) resolve the way
 # pytest's pythonpath makes them importable; the WebRTC test directory, so
-# its tests can import their sibling `conftest` for the shared peer fakes; and
-# the contract suite, so its tests can import their sibling `contract_helpers`.
-extra-paths = [".", "tests/unit/transport/webrtc", "tests/contract"]
+# its tests can import their sibling `conftest` for the shared peer fakes; the
+# contract suite, so its tests can import their sibling `contract_helpers`; the
+# engine test directory, for its sibling fake engines; and the engine example,
+# whose application imports the engine beside it the way `serve` makes it
+# importable.
+extra-paths = [
+    ".",
+    "tests/unit/transport/webrtc",
+    "tests/contract",
+    "tests/unit/interface/engine",
+    "examples/engine",
+]
 
 [tool.ty.src]
 # Check the package, its tests, and the example models; scripts/ ships developer

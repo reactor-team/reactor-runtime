@@ -160,6 +160,32 @@ def test_load_config_leaves_config_path_none_when_unset(tmp_path: Path) -> None:
     assert cfg.config_path is None
 
 
+def test_load_config_reads_the_stepping_mode(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text("runtime:\n  import: pipeline:Demo\n  stepping: triggered\n")
+
+    cfg = _load_config(manifest)
+
+    assert cfg.stepping == "triggered"
+
+
+def test_load_config_leaves_stepping_to_the_model_when_unset(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text("runtime:\n  import: pipeline:Demo\n")
+
+    cfg = _load_config(manifest)
+
+    assert cfg.stepping is None
+
+
+def test_load_config_rejects_an_unknown_stepping_mode(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text("runtime:\n  import: pipeline:Demo\n  stepping: whenever\n")
+
+    with pytest.raises(SystemExit, match=r"runtime\.stepping"):
+        _load_config(manifest)
+
+
 def test_load_config_refuses_a_manifest_without_runtime_import(tmp_path: Path) -> None:
     manifest = tmp_path / "reactor.yaml"
     manifest.write_text("model:\n  name: demo\n")

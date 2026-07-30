@@ -112,22 +112,39 @@ def event(
         )
 
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-        command = _command_from_signature(func, name)
-        EVENT_REGISTRY[name] = command
-        setattr(
-            func,
-            EVENT_ATTR,
-            EventHandler(
-                name=name,
-                description=description,
-                command=command,
-                is_async=inspect.iscoroutinefunction(func),
-                reserved=_reserved_params(func),
-            ),
-        )
+        handler = handler_from_signature(func, name, description)
+        EVENT_REGISTRY[name] = handler.command
+        setattr(func, EVENT_ATTR, handler)
         return func
 
     return decorator
+
+
+def handler_from_signature(
+    func: Callable[..., Any], name: str, description: str = ""
+) -> EventHandler:
+    """Read a handler's signature into the metadata an ``@event`` would stamp.
+
+    The command mirroring the parameters, whether the handler is a coroutine,
+    and which reserved parameters it opts into — resolved without touching the
+    function, so a caller that binds the handler somewhere else (a generated
+    wrapper, for instance) is not forced to declare it twice.
+
+    Args:
+        func: The handler method to read.
+        name: The wire name the command is served under.
+        description: Human-readable description, surfaced in the rendered schema.
+
+    Returns:
+        The resolved handler metadata.
+    """
+    return EventHandler(
+        name=name,
+        description=description,
+        command=_command_from_signature(func, name),
+        is_async=inspect.iscoroutinefunction(func),
+        reserved=_reserved_params(func),
+    )
 
 
 def session_started(func: Callable[..., Any]) -> Callable[..., Any]:

@@ -106,6 +106,11 @@ class RuntimeConfig:
             ``runtime.config`` in ``reactor.yaml``), or ``None`` when the
             manifest names none. Handed to the model's ``load`` to read however
             it wants; the runtime never parses it.
+        stepping: How an engine-backed model advances — ``"automatic"`` to run
+            its own loop, ``"triggered"`` to advance one step per ``step``
+            command. ``None`` leaves the model's own declaration in place. The
+            same application streams under one deployment and steps under
+            another, so this belongs to the deployment rather than the class.
         host: Address the HTTP ingress binds.
         port: Port the HTTP ingress binds.
         grace_period: Seconds a draining session is given to end before stop.
@@ -115,6 +120,7 @@ class RuntimeConfig:
 
     model_ref: str
     config_path: Path | None = None
+    stepping: str | None = None
     host: str = "0.0.0.0"
     port: int = 8080
     grace_period: float = 30.0

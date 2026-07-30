@@ -20,6 +20,7 @@ from reactor_runtime.interface import (
     BufferClosed,
     ClientInfo,
     Command,
+    EnginePipeline,
     FieldInfo,
     Idle,
     Input,
@@ -42,6 +43,7 @@ from reactor_runtime.interface import (
     disconnected,
     event,
     file_uploaded,
+    override_input,
     session_ended,
     session_started,
 )
@@ -58,6 +60,7 @@ __all__ = [
     "BufferClosed",
     "ClientInfo",
     "Command",
+    "EnginePipeline",
     "FieldInfo",
     "Idle",
     "Input",
@@ -82,6 +85,7 @@ __all__ = [
     "event",
     "file_uploaded",
     "get_weights_path",
+    "override_input",
     "session_ended",
     "session_started",
 ]

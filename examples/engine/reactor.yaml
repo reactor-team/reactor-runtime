@@ -1,0 +1,11 @@
+model:
+  name: paint
+  version: 0.1.0
+
+runtime:
+  # The application that binds the engine. Point this at `engine:PaintPipeline`
+  # instead to serve the engine with no application at all.
+  import: app:PaintApp
+  # `automatic` (the default) runs the loop; `triggered` parks it and advances
+  # one step per `step` command.
+  stepping: automatic
