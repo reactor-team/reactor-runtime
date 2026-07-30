@@ -25,6 +25,7 @@ from reactor_runtime.http.routes import (
     UploadRoutes,
 )
 from reactor_runtime.log import get_logger
+from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.runner import Runner
 from reactor_runtime.transport.router import TransportRouter
 
@@ -35,6 +36,7 @@ def build_app(
     runner: Runner,
     transports: list[TransportRouter],
     process_health: Callable[[], Health],
+    metrics: RuntimeMetrics,
 ) -> FastAPI:
     """Assemble the runtime's ASGI application from its route groups.
 
@@ -48,6 +50,8 @@ def build_app(
         transports: One router per connection type, each mounted onto the app.
         process_health: The health report ``/health`` answers with — the
             whole-process aggregate in the served assembly.
+        metrics: The registry ``/metrics`` renders, which the components of the
+            process observe on.
 
     Returns:
         The fully assembled FastAPI application.
@@ -65,7 +69,7 @@ def build_app(
         allow_headers=["*"],
     )
     SessionRoutes(runner).mount(app)
-    EgressRoutes(runner, process_health).mount(app)
+    EgressRoutes(runner, process_health, metrics).mount(app)
     UploadRoutes(runner).mount(app)
     RecordingRoutes(runner).mount(app)
     for transport in transports:
@@ -108,6 +112,7 @@ class HttpServer(ServiceComponent):
         runner: Runner,
         transports: list[TransportRouter],
         process_health: Callable[[], Health],
+        metrics: RuntimeMetrics,
     ) -> None:
         """Assemble the app from the route groups and each transport's routes.
 
@@ -118,9 +123,11 @@ class HttpServer(ServiceComponent):
             process_health: The health report ``/health`` answers with,
                 injected by the assembly so the endpoint speaks for the whole
                 process rather than any one component.
+            metrics: The registry ``/metrics`` renders, injected by the assembly
+                that also hands it to the components which observe on it.
         """
         self._cfg = cfg
-        self._app = build_app(runner, transports, process_health)
+        self._app = build_app(runner, transports, process_health, metrics)
         self._server: uvicorn.Server | None = None
         self._serve_task: asyncio.Task[None] | None = None
 

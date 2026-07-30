@@ -16,6 +16,7 @@ from reactor_runtime.core import (
     TransitionEvent,
 )
 from reactor_runtime.http import HttpServer
+from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.runner.runner import Runner
 from reactor_runtime.service import Service
 
@@ -224,7 +225,8 @@ async def test_http_surface_is_up_before_the_model_finishes_loading(
     cfg = RuntimeConfig(model_ref="x:_GatedModel", host="127.0.0.1", port=0)
     service = Service()
     runner = Runner(cfg)
-    http = HttpServer(cfg, runner, [], process_health=service.health)
+    metrics = RuntimeMetrics(version="0.0.0", model=cfg.model_ref)
+    http = HttpServer(cfg, runner, [], process_health=service.health, metrics=metrics)
     service.add(runner)
     service.add(http)
 

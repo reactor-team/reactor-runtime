@@ -17,6 +17,8 @@ from pydantic import BaseModel
 
 from reactor_runtime.core import Health, HealthStatus, RuntimeState, SessionState
 from reactor_runtime.http.events import format_sse
+from reactor_runtime.metrics import CONTENT_TYPE as METRICS_CONTENT_TYPE
+from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.recording import ClipManifest, ClipSessionGoneError, Pending
 from reactor_runtime.runner import Runner
 from reactor_runtime.transport.router import (
@@ -343,24 +345,34 @@ class HealthResponse(BaseModel):
 
 
 class EgressRoutes:
-    """The egress journal and liveness over HTTP."""
+    """The egress journal, liveness, and the metrics scrape over HTTP."""
 
-    def __init__(self, runner: Runner, process_health: Callable[[], Health]) -> None:
-        """Bind the route group to the runner it reads and the health source.
+    def __init__(
+        self,
+        runner: Runner,
+        process_health: Callable[[], Health],
+        metrics: RuntimeMetrics,
+    ) -> None:
+        """Bind the route group to the runner it reads, the health source, and the metrics.
 
         Args:
             runner: The runner whose journal and lifecycle state the routes read.
             process_health: The health report ``/health`` answers with —
                 injected so the endpoint speaks for the whole process, not for
                 any one component.
+            metrics: The registry ``/metrics`` renders, injected for the same
+                reason: the assembly owns it, and every component that observes
+                on it holds the one instance.
         """
         self._runner = runner
         self._process_health = process_health
+        self._metrics = metrics
 
     def mount(self, app: FastAPI) -> None:
-        """Register the egress and health routes against *app*."""
+        """Register the egress, health, and metrics routes against *app*."""
         runner = self._runner
         process_health = self._process_health
+        metrics = self._metrics
 
         @app.get(
             "/events",
@@ -384,6 +396,22 @@ class EgressRoutes:
             report = process_health()
             response.status_code = 503 if report.status is HealthStatus.UNHEALTHY else 200
             return HealthResponse(status=report.status, state=runner.state(), detail=report.detail)
+
+        # A scraper reads this endpoint on its own schedule, and it answers from
+        # the moment the socket binds — before the model loads — so a slow load
+        # is itself observable rather than a gap in the series.
+        @app.get(
+            "/metrics",
+            response_class=Response,
+            responses={
+                200: {
+                    "description": "The process's instruments in the Prometheus text format.",
+                    "content": {"text/plain": {"schema": {"type": "string"}}},
+                }
+            },
+        )
+        async def scrape_metrics() -> Response:
+            return Response(content=metrics.render(), media_type=METRICS_CONTENT_TYPE)
 
 
 def _resume_from(last_event_id: str | None) -> int | None:

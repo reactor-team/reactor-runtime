@@ -30,6 +30,7 @@ import yaml
 from reactor_runtime import log
 from reactor_runtime.core import RecordingConfig, RuntimeConfig
 from reactor_runtime.http import HttpServer
+from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.runner import Runner
 from reactor_runtime.service import Service
 from reactor_runtime.transport.webrtc.config import (
@@ -200,7 +201,9 @@ def _assemble(
     stream to and from the model. The runner's shutdown hook is wired to the
     service so a failed model load brings the whole process down, and the
     service's aggregate health is wired into the HTTP server so ``/health``
-    answers for every component of the process.
+    answers for every component of the process. The metrics registry is created
+    here too, the one place that knows the identity of the process, and handed to
+    the HTTP server that renders it.
 
     Args:
         cfg: The configuration for this runtime process.
@@ -220,11 +223,20 @@ def _assemble(
             raise SystemExit(f"the libwebrtc media engine is unavailable: {detail}") from exc
         peer_factory = libwebrtc_peer_factory
     service = Service()
+    metrics = RuntimeMetrics(version=_version(), model=cfg.model_ref)
     runner = Runner(cfg)
     runner.request_shutdown = service.request_shutdown
     service.add(runner)
     transport = WebRtcRouter(webrtc or WebRtcConfig(), peer_factory)
-    service.add(HttpServer(cfg, runner, transports=[transport], process_health=service.health))
+    service.add(
+        HttpServer(
+            cfg,
+            runner,
+            transports=[transport],
+            process_health=service.health,
+            metrics=metrics,
+        )
+    )
     return service
 
 

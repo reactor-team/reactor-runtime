@@ -107,6 +107,19 @@ def test_assemble_answers_health_with_the_process_aggregate() -> None:
     }
 
 
+def test_assemble_publishes_the_identity_of_the_process() -> None:
+    service = _assemble(RuntimeConfig(model_ref="fake:Model"), peer_factory=_UNUSED)
+    http = service._components["http"]
+    assert isinstance(http, HttpServer)
+
+    body = TestClient(http._app).get("/metrics").text
+
+    # The assembly is the one place the identity gets its real values. Every
+    # other test builds a holder by hand, so only this one catches a version or
+    # a model reference that was never read off the process.
+    assert f'runtime_info{{model="fake:Model",version="{_version()}"}} 1.0' in body
+
+
 def test_assemble_wires_the_runner_shutdown_to_the_service() -> None:
     service = _assemble(RuntimeConfig(model_ref="fake:Model"), peer_factory=_UNUSED)
 
