@@ -101,9 +101,21 @@ jobs:
             exit 1
           fi
 
-          pr_json=$(gh pr view "$pr_number" --json baseRefOid,headRefOid,state)
+          pr_json=$(gh pr view "$pr_number" \
+            --json baseRefOid,headRefOid,state,isCrossRepository)
           if [[ $(jq -r '.state' <<<"$pr_json") != 'OPEN' ]]; then
             echo "::error::PR $pr_number is not open"
+            exit 1
+          fi
+
+          # Never review a pull request whose head lives in a fork. The review
+          # job checks out the head commit and runs an agent over it with the
+          # API key in scope, so a fork head would put untrusted code in a
+          # privileged context — including when a maintainer runs /review on
+          # someone else's pull request. Checked here for every trigger,
+          # because the value comes from the API rather than the event payload.
+          if [[ $(jq -r '.isCrossRepository' <<<"$pr_json") == 'true' ]]; then
+            echo "::error::PR $pr_number comes from a fork; automated review is disabled for fork pull requests. Review it manually, or re-run the review from a branch in this repository."
             exit 1
           fi
 
