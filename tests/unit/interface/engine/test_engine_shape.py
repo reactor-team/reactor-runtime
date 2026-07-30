@@ -73,6 +73,7 @@ class WorldPipeline:
     def __init__(self) -> None:
         self.steps: list[int] = []
         self.conditioning: list[CamCtrlInput] = []
+        self.initialized_with: list[dict[str, Any]] = []
 
     def initialize_cache(
         self,
@@ -82,6 +83,7 @@ class WorldPipeline:
         width: int | None = None,
         release_oneshot_encoders: bool = True,
     ) -> PipelineCache:
+        self.initialized_with.append({"text": text, "height": height, "width": width})
         return PipelineCache(text=text)
 
     def get_num_output_frames(self, autoregressive_index: int) -> int:
@@ -93,8 +95,7 @@ class WorldPipeline:
         held = set(cache.held)
         for item in inputs:
             if isinstance(item, WorldInit):
-                cache.text = item.text
-                cache.autoregressive_index = None
+                self._reinitialize(cache, item)
                 return None
             if isinstance(item, KeyDown):
                 held.add(item.key)
@@ -120,6 +121,16 @@ class WorldPipeline:
     def finalize(self, autoregressive_index: int, cache: PipelineCache) -> dict[str, float] | None:
         cache.autoregressive_index = autoregressive_index
         return {"denoise_seconds": 0.01}
+
+    def _reinitialize(self, cache: PipelineCache, init: WorldInit) -> None:
+        """Start a new sequence on the cache the runtime already holds.
+
+        The runtime owns the reference, so a mapping cannot hand back a new
+        cache — it opens one the ordinary way and moves the fields across. An
+        engine whose buffers are pinned by a captured graph has no other option
+        either, which is why re-initialization belongs to the engine.
+        """
+        cache.__dict__.update(self.initialize_cache(text=init.text).__dict__)
 
 
 class World(EnginePipeline):
@@ -164,10 +175,15 @@ def test_binding_it_is_the_whole_application() -> None:
     assert set(commands) == {"key_down", "key_up", "init", "step"}
 
 
-def test_its_own_initializer_signature_is_called_as_written(world: World) -> None:
-    # `text` is a positional-or-keyword parameter with keyword-only extras after
-    # it; the runtime calls it by keyword from the Init's fields.
-    assert world._cache is None
+async def test_its_own_initializer_signature_is_called_as_written(world: World) -> None:
+    # `text` is positional-or-keyword with keyword-only extras after it. The
+    # runtime calls it by keyword from the Init's fields, so the extras keep
+    # their own defaults rather than being filled positionally.
+    await world.step()
+
+    assert _pipeline(world).initialized_with == [
+        {"text": "a walk through a misty forest", "height": None, "width": None}
+    ]
 
 
 async def test_the_index_advances_as_the_engine_asserts(world: World) -> None:
@@ -226,3 +242,52 @@ async def test_the_timings_finalize_returns_are_ignored(world: World) -> None:
     await world.step()
 
     assert world._cache.autoregressive_index == 0
+
+
+# -- re-initialization ---------------------------------------------------------
+
+
+async def test_an_init_mid_rollout_reaches_the_mapping(world: World) -> None:
+    await world.step()
+
+    await _send(world, "init", text="a city at night")
+    assert await world.step() is None
+
+    assert world._cache.text == "a city at night"
+
+
+async def test_re_initialization_keeps_the_cache_the_runtime_holds(world: World) -> None:
+    await world.step()
+    before = world._cache
+
+    await _send(world, "init", text="a city at night")
+    await world.step()
+
+    # The mapping cannot hand back a new cache, so a new sequence has to land
+    # on this object. Losing that would leave the runtime driving the old one.
+    assert world._cache is before
+
+
+async def test_a_new_sequence_restarts_the_index_the_engine_asserts(world: World) -> None:
+    await world.step()
+    await world.step()
+
+    await _send(world, "init", text="a city at night")
+    await world.step()
+    await world.step()
+
+    # The engine asserts index == cache.autoregressive_index + 1 on every
+    # generate, so the runtime's restart and the engine's own bookkeeping have
+    # to agree or the third step raises.
+    assert _pipeline(world).steps == [0, 1, 0]
+
+
+async def test_a_new_sequence_drops_the_held_controls(world: World) -> None:
+    await _send(world, "key_down", key="w")
+    await world.step()
+
+    await _send(world, "init", text="a city at night")
+    await world.step()
+    await world.step()
+
+    assert world._cache.held == frozenset()
