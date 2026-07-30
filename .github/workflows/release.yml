@@ -74,6 +74,10 @@ jobs:
       BASE_VERSION: ${{ needs.decide.outputs.version }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The release body lists the commits since the last published tag, so
+          # the history and the tag set must both be present.
+          fetch-depth: 0
 
       - uses: jdx/mise-action@v2
         with:
