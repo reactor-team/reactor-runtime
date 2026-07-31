@@ -9,11 +9,13 @@ data channel. This module renders that document from the model class alone::
 The model is imported, never loaded: the contract is assembled when the class is
 created, so nothing here reads weights. The manifest is read by the same code
 that boots the model, so the schema and the running process can never disagree
-on which model a directory holds.
+on which model a directory holds — and that reader lives in a module of its
+own, so rendering a schema never imports the server or the transport stack.
 
-Standard output carries the JSON document and nothing else, so a caller can
-redirect it straight into a file. Whatever the model prints as it imports goes to
-standard error instead.
+The command keeps standard output clean so a caller can redirect it straight
+into a file: whatever the model prints as it imports is rerouted to standard
+error. The reroute catches Python-level writes; a native extension writing to
+file descriptor 1 directly bypasses it, and ``--out`` sidesteps even that.
 """
 
 from __future__ import annotations
@@ -27,8 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from reactor_runtime.interface.model import ModelContract
-from reactor_runtime.runner import import_model_class
-from reactor_runtime.serve import _MANIFEST, _load_config
+from reactor_runtime.manifest import MANIFEST, import_model_class, load_config
 
 _DEFAULT_VERSION = "v0.0.0"
 
@@ -46,6 +47,9 @@ def render(path: Path, version: str = _DEFAULT_VERSION) -> dict[str, Any]:
     Call this once per process: a model registers its messages and its tracks as
     it is declared, and those registrations outlive the call.
 
+    Importing the model runs its module top to bottom, so whatever it prints or
+    raises reaches the caller unchanged; the streams are left alone.
+
     Args:
         path: Directory that holds the ``reactor.yaml`` manifest.
         version: Release tag to stamp into ``info.version``, with or without a
@@ -62,18 +66,14 @@ def render(path: Path, version: str = _DEFAULT_VERSION) -> dict[str, Any]:
             traceback, which is what names the line that failed.
     """
     tag = _tag(version)
-    manifest = path / _MANIFEST
+    manifest = path / MANIFEST
     if not manifest.is_file():
-        raise SystemExit(f"no {_MANIFEST} found in {path}")
-    model_ref = _load_config(manifest).model_ref
+        raise SystemExit(f"no {MANIFEST} found in {path}")
+    model_ref = load_config(manifest).model_ref
     previous_path = list(sys.path)
     sys.path.insert(0, str(manifest.parent))
     try:
-        # A model prints as it imports — a device banner, a deprecation notice,
-        # the chatter of a library it pulls in. On standard output that lands
-        # ahead of the document and leaves the JSON unparseable.
-        with contextlib.redirect_stdout(sys.stderr):
-            model_cls = import_model_class(model_ref)
+        model_cls = import_model_class(model_ref)
     finally:
         sys.path[:] = previous_path
     return ModelContract.of(model_cls).render_schema(tag).to_openapi()
@@ -121,7 +121,7 @@ def main() -> None:
         "-p",
         type=Path,
         default=None,
-        help=f"directory that holds the model's {_MANIFEST} (default: the working directory)",
+        help=f"directory that holds the model's {MANIFEST} (default: the working directory)",
     )
     parser.add_argument(
         "--version",
@@ -143,7 +143,14 @@ def main() -> None:
 
     version = _release_tag(args.version)
     path = args.path.expanduser().resolve() if args.path else Path.cwd()
-    document = json.dumps(render(path, version), indent=2)
+    # A model prints as it imports — a device banner, a deprecation notice, the
+    # chatter of a library it pulls in. On standard output that lands ahead of
+    # the document and leaves the JSON unparseable, so the import runs with
+    # stdout rerouted to stderr. The reroute is the command's concern, not the
+    # library's: a caller of render() keeps its own streams.
+    with contextlib.redirect_stdout(sys.stderr):
+        schema = render(path, version)
+    document = json.dumps(schema, indent=2)
     if args.out is None:
         print(document)
         return

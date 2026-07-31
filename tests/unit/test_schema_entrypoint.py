@@ -1,5 +1,6 @@
 import itertools
 import json
+import subprocess
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -97,6 +98,42 @@ def test_render_stamps_a_release_tag_the_way_the_command_does(
 def test_render_refuses_a_version_that_is_not_a_release_tag(model_dir: Path) -> None:
     with pytest.raises(ValueError, match="is not a release tag"):
         render(model_dir, "release-1.4.0")
+
+
+def test_render_leaves_the_callers_streams_alone(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The stdout-to-stderr reroute belongs to the command; a code generator
+    # calling render() while writing its own progress to stdout keeps it there.
+    module = f"loud_{next(_MODULE_NAMES)}"
+    (tmp_path / f"{module}.py").write_text(f'print("CUDA device 0 ready")\n{_MODEL_SOURCE}')
+    (tmp_path / "reactor.yaml").write_text(f"runtime:\n  import: {module}:Demo\n")
+
+    doc = render(tmp_path)
+
+    captured = capsys.readouterr()
+    assert doc["info"]["title"] == "demo"
+    assert "CUDA device 0 ready" in captured.out
+    assert captured.err == ""
+
+
+def test_importing_the_module_leaves_the_server_stack_out() -> None:
+    # Rendering a schema must not drag in the ASGI server, the native media
+    # engine, or the encoder — the module exists so a code generator can get
+    # the document without paying for a transport stack it never uses.
+    probe = (
+        "import sys\n"
+        "import reactor_runtime.schema\n"
+        "heavy = [name for name in ('fastapi', 'uvicorn', 'reactor_webrtc', 'av')\n"
+        "         if name in sys.modules]\n"
+        "raise SystemExit(f'transitively imported: {heavy}' if heavy else 0)\n"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_render_restores_the_import_path(model_dir: Path) -> None:
