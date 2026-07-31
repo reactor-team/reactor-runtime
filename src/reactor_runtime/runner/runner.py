@@ -17,7 +17,6 @@ declared ready.
 from __future__ import annotations
 
 import asyncio
-import importlib
 import importlib.metadata
 import time
 import uuid
@@ -51,9 +50,9 @@ from reactor_runtime.core import (
 from reactor_runtime.event_stream import EventStream
 from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.bridge import ModelBridge
-from reactor_runtime.interface.internal.reactor_core import ReactorCore
 from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.log import get_logger
+from reactor_runtime.manifest import import_model_class
 from reactor_runtime.message_gateway import InboundCommand, MessageGateway
 from reactor_runtime.metrics import (
     UNKNOWN_COMMAND,
@@ -124,28 +123,6 @@ def _server_version() -> str:
 
 def _no_shutdown() -> None:
     """Default process-shutdown hook — a no-op until the service wires one in."""
-
-
-def import_model_class(model_ref: str) -> type[ReactorCore]:
-    """Resolve a ``"module:Class"`` reference into the model class it names.
-
-    Args:
-        model_ref: An import reference of the form ``"package.module:Class"``.
-
-    Returns:
-        The referenced model class.
-
-    Raises:
-        ValueError: If the reference is not of the form ``"module:Class"``.
-        TypeError: If the reference does not name a :class:`ReactorCore` subclass.
-    """
-    module_name, separator, class_name = model_ref.partition(":")
-    if not separator or not module_name or not class_name:
-        raise ValueError(f"model_ref must be 'module:Class', got {model_ref!r}")
-    model_cls = getattr(importlib.import_module(module_name), class_name)
-    if not isinstance(model_cls, type) or not issubclass(model_cls, ReactorCore):
-        raise TypeError(f"{model_ref} does not name a ReactorCore subclass")
-    return model_cls
 
 
 class Runner(ServiceComponent, ConnectionSink):

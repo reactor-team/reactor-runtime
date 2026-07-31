@@ -15,9 +15,8 @@ from pathlib import Path
 import pytest
 
 from examples.echo.echo import Echo, EchoInput, EchoOutput, EffectChanged
-from reactor_runtime import serve
 from reactor_runtime.interface.model.contract import ModelContract
-from reactor_runtime.runner.runner import import_model_class
+from reactor_runtime.manifest import import_model_class, load_config
 
 _EFFECTS = ["none", "grayscale", "sepia", "edges", "invert", "blur", "pixelate"]
 _EXAMPLE_DIR = Path(__file__).parents[3] / "examples" / "echo"
@@ -96,7 +95,7 @@ def test_schema_renders_the_full_surface() -> None:
 
 
 def test_manifest_resolves_to_the_model_class(monkeypatch: pytest.MonkeyPatch) -> None:
-    cfg = serve._load_config(_EXAMPLE_DIR / "reactor.yaml")
+    cfg = load_config(_EXAMPLE_DIR / "reactor.yaml")
     assert cfg.model_ref == "echo:Echo"
     # The example runs from its own directory, so its module is a top-level
     # `echo`, imported under a second name here — compare by qualname, not identity.

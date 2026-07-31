@@ -25,9 +25,9 @@ from examples.brightness.brightness import (
     BrightnessState,
     ImageSet,
 )
-from reactor_runtime import Idle, serve
+from reactor_runtime import Idle
 from reactor_runtime.interface.model.contract import ModelContract
-from reactor_runtime.runner.runner import import_model_class
+from reactor_runtime.manifest import import_model_class, load_config
 
 _RESOLUTIONS = ["480p", "720p", "1080p", "2160p"]
 _EXAMPLE_DIR = Path(__file__).parents[3] / "examples" / "brightness"
@@ -105,7 +105,7 @@ def test_schema_renders_the_full_surface() -> None:
 
 
 def test_manifest_resolves_to_the_model_class(monkeypatch: pytest.MonkeyPatch) -> None:
-    cfg = serve._load_config(_EXAMPLE_DIR / "reactor.yaml")
+    cfg = load_config(_EXAMPLE_DIR / "reactor.yaml")
     assert cfg.model_ref == "brightness:Brightness"
     monkeypatch.syspath_prepend(str(_EXAMPLE_DIR))
     assert import_model_class(cfg.model_ref).__qualname__ == "Brightness"
