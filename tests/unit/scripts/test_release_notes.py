@@ -56,6 +56,40 @@ class TestVersions:
         assert wire.startswith("1.")
 
 
+class TestGit:
+    """The one path the fakes cannot cover: what real git does to the return value."""
+
+    def test_answers_with_the_output_of_a_command_that_succeeds(self, notes: ModuleType) -> None:
+        assert len(notes._git("rev-parse", "HEAD") or "") == 40
+
+    def test_a_command_git_rejects_reads_as_no_answer(
+        self, notes: ModuleType, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert notes._git("describe", "--tags", "--match=not-a-tag-*", "HEAD") is None
+        # The empty case and a checkout that cannot answer both return None, so
+        # the reason has to reach the log.
+        assert capsys.readouterr().err.strip()
+
+
+class TestSubject:
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            ("[REA-4549] Write down how this runtime is instrumented (#85)", "Write down how"),
+            ("[REA-4047] chore: remove GStreamer (#89)", "Remove GStreamer (#89)"),
+            ("fix(recording): drop the stale frame (#12)", "Drop the stale frame (#12)"),
+            ("Encode recordings in process with PyAV (#90)", "Encode recordings in process"),
+        ],
+    )
+    def test_sheds_what_an_outside_reader_cannot_use(
+        self, notes: ModuleType, line: str, expected: str
+    ) -> None:
+        assert notes.subject(line).startswith(expected)
+
+    def test_keeps_a_bracket_that_is_not_a_ticket(self, notes: ModuleType) -> None:
+        assert notes.subject("[not a ticket] do the thing") == "[not a ticket] do the thing"
+
+
 class TestStartTag:
     def test_a_release_measures_from_the_previous_release(
         self, notes: ModuleType, monkeypatch: pytest.MonkeyPatch
@@ -85,8 +119,10 @@ class TestStartTag:
 
 
 class TestChanges:
-    def test_lists_one_entry_per_commit(self, notes: ModuleType, monkeypatch) -> None:
-        log = "Encode recordings in process with PyAV (#90)\nServe the metrics (#81)"
+    def test_lists_one_entry_per_commit(
+        self, notes: ModuleType, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        log = "Encode recordings in process with PyAV (#90)\n[REA-3366] Serve the metrics (#81)"
         monkeypatch.setattr(notes, "_git", _fake_git([], "v3.0.0", log))
         assert notes.changes("v3.0.0", _COMMIT) == [
             "Encode recordings in process with PyAV (#90)",
