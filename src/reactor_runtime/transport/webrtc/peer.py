@@ -13,6 +13,22 @@ feed the model's paced frames at real time and keep the two streams aligned; the
 section below is how it does that without letting audio drift from video or
 garble.
 
+Per-peer audio isolation
+------------------------
+Each outbound audio track is created with
+``PeerConnectionFactory.create_audio_track_with_local_source()``, which backs the
+track with a ``LocalAudioSource`` — a custom ``AudioSourceInterface`` that
+maintains the list of sinks registered by each peer connection's voice send
+channel.  When ``track.push_pcm()`` is called, it delivers PCM directly to that
+track's encoder via ``AudioTrackSinkInterface::OnData``, bypassing the shared
+ADM entirely.  This means:
+
+* Audio pushed to peer A's track never reaches peer B's encoder.
+* Different audio content can be sent to different peer connections.
+* The single process-wide ``PeerConnectionFactory`` is kept (libwebrtc requires
+  at most one factory per process), while per-peer audio isolation is achieved
+  at the track level.
+
 Audio/video sync
 ----------------
 The synthetic audio device consumes exactly one 10 ms frame (480 samples at
@@ -31,7 +47,7 @@ Threading
 * The asyncio loop thread runs negotiation, ``add_ice``, stats, and close; every
   blocking libwebrtc call is dispatched to an executor so the loop never stalls.
 * A frame-drain thread pushes outbound video and buffers outbound audio; a
-  second thread feeds that audio to the device in steady 10 ms frames.
+  second thread feeds that audio to the peer's audio track in steady 10 ms frames.
 * libwebrtc's own signaling and network threads fire the observer callbacks;
   each one marshals its work onto the asyncio loop before touching peer state, so
   the callbacks the connection registered only ever run on that one loop.
@@ -97,8 +113,9 @@ _AUDIO_FRAME_SECONDS = 0.010
 # on overflow (sustained over-production) rather than letting latency grow.
 _AUDIO_BUFFER_MAX_SAMPLES = 9_600  # 200 ms at 48 kHz
 
-# Shared media engine: the factory owns the libwebrtc thread pool and the
-# synthetic audio device, created once and reused by every peer in the process.
+# Shared media engine: one PeerConnectionFactory per process (libwebrtc requires
+# this). Audio isolation between peers is achieved at the track level via
+# LocalAudioSource, not via separate factories.
 _factory_lock = threading.Lock()
 _factory: rw.PeerConnectionFactory | None = None
 
@@ -194,9 +211,11 @@ class WebRTCPeer:
         self._ice_gathering_done = threading.Event()
 
         # Outbound media: the drain thread pushes video and buffers audio; the
-        # audio thread feeds that buffer to the device in steady 10 ms frames.
+        # audio thread feeds that buffer to this peer's LocalAudioSource track in
+        # steady 10 ms frames via track.push_pcm().
         self._frame_queue: queue.Queue[MediaBundle] = queue.Queue(maxsize=_FRAME_QUEUE_MAX)
         self._frame_thread: threading.Thread | None = None
+        self._audio_track: rw.Track | None = None
         self._audio_buf: npt.NDArray[np.int16] = np.array([], dtype=np.int16)
         self._audio_lock = threading.Lock()
         self._audio_thread: threading.Thread | None = None
@@ -302,11 +321,11 @@ class WebRTCPeer:
             info = self._track_by_mid.get(mid) if mid is not None else None
             if info is None or info.direction is not TrackDirection.OUT:
                 continue
-            track = (
-                factory.create_video_track(info.name)
-                if info.kind is TrackKind.VIDEO
-                else factory.create_audio_track(info.name)
-            )
+            if info.kind is TrackKind.VIDEO:
+                track = factory.create_video_track(info.name)
+            else:
+                track = factory.create_audio_track_with_local_source(info.name)
+                self._audio_track = track
             await loop.run_in_executor(None, transceiver.set_track, track)
             await loop.run_in_executor(
                 None, transceiver.set_direction, rw.TransceiverDirection.SendOnly
@@ -458,9 +477,7 @@ class WebRTCPeer:
         """Push a bundle's video and buffer its audio for the feeder thread.
 
         Video crosses the boundary immediately. Audio is appended to the shallow
-        buffer the feeder drains in 10 ms frames, rather than pushed here: the
-        device takes only one 10 ms frame per call, so a whole bundle's slice
-        cannot be handed over at once.
+        buffer the feeder drains in 10 ms frames via ``track.push_pcm()``.
         """
         for track_name, data in bundle.tracks.items():
             info = data.info
@@ -485,15 +502,16 @@ class WebRTCPeer:
                 self._audio_buf = self._audio_buf[-_AUDIO_BUFFER_MAX_SAMPLES:]
 
     def _audio_feed_loop(self) -> None:
-        """Feed one 10 ms frame per tick, letting the device self-silence on gaps.
+        """Feed one 10 ms frame per tick to this peer's LocalAudioSource track.
 
         The device plays out at real time, so the feed is paced to real time. When
-        the buffer holds a full frame it is handed over; when it does not, nothing
-        is pushed — the device fills the gap with real-time silence, which keeps
-        the audio clock advancing with the (repeated) video instead of injecting a
-        stale frame that would slide audio behind.
+        the buffer holds a full frame it is handed over via ``track.push_pcm()``;
+        when it does not, nothing is pushed — the device fills the gap with
+        real-time silence, which keeps the audio clock advancing with the
+        (repeated) video instead of injecting a stale frame that would slide audio
+        behind.
         """
-        factory = _get_factory()
+        track = self._audio_track
         next_tick = time.monotonic() + _AUDIO_FRAME_SECONDS
         while not self._stop_event.is_set():
             chunk: npt.NDArray[np.int16] | None = None
@@ -501,12 +519,11 @@ class WebRTCPeer:
                 if self._audio_buf.size >= _AUDIO_FRAME_SAMPLES:
                     chunk = self._audio_buf[:_AUDIO_FRAME_SAMPLES]
                     self._audio_buf = self._audio_buf[_AUDIO_FRAME_SAMPLES:]
-            if chunk is not None:
+            if chunk is not None and track is not None:
                 try:
-                    factory.push_audio_frame(chunk.tobytes(), _AUDIO_SAMPLE_RATE, 1)
+                    track.push_pcm(chunk.tobytes(), _AUDIO_SAMPLE_RATE, 1)
                 except Exception:
                     logger.debug("audio feed push failed", exc_info=True)
-
             now = time.monotonic()
             sleep = next_tick - now
             next_tick += _AUDIO_FRAME_SECONDS

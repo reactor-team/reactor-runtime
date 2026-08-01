@@ -29,6 +29,7 @@ from reactor_runtime.transport.webrtc.config import (  # noqa: E402
     WebRtcConfig,
 )
 from reactor_runtime.transport.webrtc.peer import (  # noqa: E402
+    _AUDIO_BUFFER_MAX_SAMPLES,
     WebRTCPeer,
     _build_rtc_config,
     _is_terminal_state,
@@ -174,8 +175,6 @@ def test_enqueue_audio_caps_the_buffer_depth() -> None:
     peer = WebRTCPeer()
     for _ in range(50):
         peer._enqueue_audio(np.zeros(1_000, dtype=np.int16))
-    from reactor_runtime.transport.webrtc.peer import _AUDIO_BUFFER_MAX_SAMPLES
-
     assert peer._audio_buf.size == _AUDIO_BUFFER_MAX_SAMPLES
 
 
