@@ -412,7 +412,7 @@ class Runner(ServiceComponent, ConnectionSink):
         """
         if self._bridge is None:
             return
-        openapi = self._bridge.contract.render_schema().to_openapi()
+        openapi = self._render_schema()
         self._connections.send_response(
             conn_id,
             lambda version: self._codec_for(version).encode_schema_response(request_id, openapi),
@@ -640,7 +640,7 @@ class Runner(ServiceComponent, ConnectionSink):
         if self._bridge is None:
             return descriptor
         contract = self._bridge.contract
-        descriptor["model"] = {"name": contract.model}
+        descriptor["model"] = {"name": self._cfg.model_name or contract.model}
         descriptor["capabilities"] = {
             "protocol_version": _V0_PROTOCOL,
             "tracks": [
@@ -663,9 +663,20 @@ class Runner(ServiceComponent, ConnectionSink):
         """
         if self._bridge is None:
             return {}
-        return self._bridge.contract.render_schema().to_openapi()
+        return self._render_schema()
 
     # -- internals ------------------------------------------------------------
+
+    def _render_schema(self) -> dict[str, Any]:
+        """Render the loaded model's contract as an OpenAPI document.
+
+        Titled with the name the manifest publishes the model under, so the
+        document a client reads over the wire is the one the schema command
+        renders from the same directory.
+        """
+        assert self._bridge is not None
+        contract = self._bridge.contract
+        return contract.render_schema(name=self._cfg.model_name).to_openapi()
 
     async def _submit_command(self, command: InboundCommand) -> None:
         """Submit a decoded client command to the model through the bridge.

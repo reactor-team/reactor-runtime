@@ -74,6 +74,22 @@ def test_render_emits_the_model_identity(model_dir: Path) -> None:
     assert doc["x-reactor"]["tracks"] == [{"name": "video", "kind": "video", "direction": "out"}]
 
 
+def test_render_titles_the_document_with_the_published_name(tmp_path: Path) -> None:
+    # The published name is the model's identity, and it carries characters a
+    # class name cannot. Titling from the class would spell this one "demo".
+    module = f"demo_{next(_MODULE_NAMES)}"
+    (tmp_path / f"{module}.py").write_text(_MODEL_SOURCE)
+    (tmp_path / "reactor.yaml").write_text(
+        f"model:\n  name: mage-vl\nruntime:\n  import: {module}:Demo\n"
+    )
+
+    assert render(tmp_path)["info"]["title"] == "mage-vl"
+
+
+def test_render_falls_back_to_the_class_when_the_manifest_names_none(model_dir: Path) -> None:
+    assert render(model_dir)["info"]["title"] == "demo"
+
+
 def test_render_answers_a_command_with_its_reply_component(model_dir: Path) -> None:
     doc = render(model_dir)
 

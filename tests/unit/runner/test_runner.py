@@ -565,6 +565,29 @@ async def test_schema_renders_the_model_contract(started_runner: Runner) -> None
     assert "set_mode" in str(schema)
 
 
+async def test_the_published_name_titles_the_schema_and_the_descriptor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The served document has to agree with the one the schema command renders
+    # from the same manifest, and the descriptor has to name the same model, so
+    # all three read the published name.
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
+    runner = Runner(RuntimeConfig(model_ref="fake:Model", model_name="mage-vl"))
+    await runner.start()
+    try:
+        runner.start_session({})
+        assert runner.schema()["info"]["title"] == "mage-vl"
+        assert runner.descriptor()["model"]["name"] == "mage-vl"
+    finally:
+        await runner.stop()
+
+
+async def test_schema_falls_back_to_the_class_when_no_name_is_published(
+    started_runner: Runner,
+) -> None:
+    assert started_runner.schema()["info"]["title"] == "fake_model"
+
+
 # --- the dispatch brain ---------------------------------------------------
 
 

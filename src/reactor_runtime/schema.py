@@ -69,14 +69,15 @@ def render(path: Path, version: str = _DEFAULT_VERSION) -> dict[str, Any]:
     manifest = path / MANIFEST
     if not manifest.is_file():
         raise SystemExit(f"no {MANIFEST} found in {path}")
-    model_ref = load_config(manifest).model_ref
+    config = load_config(manifest)
     previous_path = list(sys.path)
     sys.path.insert(0, str(manifest.parent))
     try:
-        model_cls = import_model_class(model_ref)
+        model_cls = import_model_class(config.model_ref)
     finally:
         sys.path[:] = previous_path
-    return ModelContract.of(model_cls).render_schema(tag).to_openapi()
+    contract = ModelContract.of(model_cls)
+    return contract.render_schema(tag, config.model_name).to_openapi()
 
 
 def _tag(value: str) -> str:

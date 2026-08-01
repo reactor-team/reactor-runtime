@@ -25,6 +25,40 @@ def test_load_config_reads_the_model_reference_from_runtime_import(tmp_path: Pat
     assert cfg.model_ref == "pipeline:Demo"
 
 
+def test_load_config_reads_the_published_name_from_model_name(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_MANIFEST)
+
+    assert load_config(manifest).model_name == "demo"
+
+
+def test_load_config_keeps_a_published_name_a_class_cannot_spell(tmp_path: Path) -> None:
+    # A published name carries characters a Python class name cannot, which is
+    # why the schema cannot be titled from the class.
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text("model:\n  name: mage-vl\nruntime:\n  import: pipeline:Demo\n")
+
+    assert load_config(manifest).model_name == "mage-vl"
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        "runtime:\n  import: pipeline:Demo\n",
+        "model:\n  version: 0.1.0\nruntime:\n  import: pipeline:Demo\n",
+        "model: demo\nruntime:\n  import: pipeline:Demo\n",
+        "model:\n  name: ''\nruntime:\n  import: pipeline:Demo\n",
+    ],
+)
+def test_load_config_leaves_the_name_unset_when_the_manifest_states_none(
+    tmp_path: Path, document: str
+) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(document)
+
+    assert load_config(manifest).model_name is None
+
+
 def test_load_config_resolves_runtime_config_against_the_manifest_dir(tmp_path: Path) -> None:
     manifest = tmp_path / "reactor.yaml"
     manifest.write_text(_MANIFEST)
