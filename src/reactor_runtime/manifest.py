@@ -32,17 +32,19 @@ def load_config(manifest: Path) -> RuntimeConfig:
 
     ``runtime.import`` — the ``"module:Class"`` model reference — and
     ``runtime.config`` — the path to the model's own config file — name the
-    model, and the top-level ``recording:`` block configures the recorder; the
-    rest of the manifest describes the model to the platform and is not the
-    runtime's concern. The config path is passed to the model verbatim (resolved
-    to an absolute path); the runtime never parses its contents.
+    model, ``model.name`` is the name it is published under, and the top-level
+    ``recording:`` block configures the recorder; the rest of the manifest
+    describes the model to the platform and is not the runtime's concern. The
+    config path is passed to the model verbatim (resolved to an absolute path);
+    the runtime never parses its contents.
 
     Args:
         manifest: Path to the ``reactor.yaml`` file.
 
     Returns:
-        A configuration naming the model the manifest points at, the path to its
-        config file when present, and the recorder's settings.
+        A configuration naming the model the manifest points at, the name it
+        publishes under, the path to its config file when present, and the
+        recorder's settings.
 
     Raises:
         SystemExit: If the manifest is not valid YAML, is not a mapping, or
@@ -61,9 +63,29 @@ def load_config(manifest: Path) -> RuntimeConfig:
         raise SystemExit(f"{manifest}: missing runtime.import (the model reference)")
     return RuntimeConfig(
         model_ref=model_ref,
+        model_name=_model_name(document.get("model")),
         config_path=_resolve_config_path(runtime, manifest),
         recording=_recording_from_manifest(document.get("recording")),
     )
+
+
+def _model_name(block: Any) -> str | None:
+    """Read ``model.name``, the name the model is published under.
+
+    The name is the model's identity on the platform, and it carries characters
+    a Python class name cannot — ``mage-vl`` and ``morpheus-v4`` are hyphenated.
+    A manifest that omits it leaves the name to be derived from the class.
+
+    Args:
+        block: The raw ``model:`` value from the manifest, if any.
+
+    Returns:
+        The published name, or ``None`` when the manifest states none.
+    """
+    if not isinstance(block, dict):
+        return None
+    name = block.get("name")
+    return name if isinstance(name, str) and name else None
 
 
 def import_model_class(model_ref: str) -> type[ReactorCore]:

@@ -269,11 +269,14 @@ class ModelContract:
 
         return spec.command(**kwargs)
 
-    def render_schema(self, version: str = "v0.0.0") -> ModelSchema:
+    def render_schema(self, version: str = "v0.0.0", name: str | None = None) -> ModelSchema:
         """Render the contract as a versioned :class:`ModelSchema`.
 
         Args:
             version: The release tag to stamp, carrying a leading ``v``.
+            name: The name the model is published under, which titles the
+                schema. Defaults to the name derived from the class, which is
+                all a model declared outside a manifest has.
 
         Returns:
             The schema, ready to emit as an OpenAPI document.
@@ -303,7 +306,7 @@ class ModelContract:
         tracks = {name: track_schema(track) for name, track in self.tracks.items()}
         return ModelSchema(
             version=version,
-            name=self.model,
+            name=name or self.model,
             description=self.description,
             tracks=tracks,
             commands=commands,
