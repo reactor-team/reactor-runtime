@@ -27,12 +27,24 @@ from reactor_runtime.core import ConnectionSink, ConnId
 from reactor_runtime.metrics import WebRtcMetrics
 from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.transport.acceptor import ConnectionAcceptor
+from reactor_runtime.transport.router import TooManyConnectionsError
 from reactor_runtime.transport.webrtc.config import IceServer, WebRtcConfig
 from reactor_runtime.transport.webrtc.connection import WebRTCConnection
 from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpAnswer, SdpOffer, TrackMap
 
 logger = logging.getLogger(__name__)
+
+# Bounds on candidates buffered before their offer is negotiated. Trickle ICE
+# can race ahead of the answer, but a candidate for a connection that never
+# offers would otherwise be held for the session's life. These cap the buffer in
+# both directions — distinct pre-offer connections, and candidates per one — so
+# a client sending candidates for ids that never negotiate cannot grow it
+# without bound. Real ICE gathering yields well under these before the offer
+# lands; excess is dropped, and a connection that does negotiate replays what
+# was kept.
+_MAX_PENDING_ICE_CONNS = 128
+_MAX_PENDING_ICE_PER_CONN = 256
 
 
 class WebRTCAcceptor(ConnectionAcceptor):
@@ -102,7 +114,14 @@ class WebRTCAcceptor(ConnectionAcceptor):
         gathers against, overriding the configured ones for this connection only;
         ``None`` falls back to the acceptor's configuration. Supplied per offer,
         so a reconnect can carry fresh credentials.
+
+        Raises:
+            TooManyConnectionsError: If *conn_id* is a new connection and the
+                acceptor already holds its configured maximum. A re-offer on a
+                connection already negotiating or live is a reconnect and is
+                admitted regardless of the ceiling.
         """
+        self._guard_capacity(conn_id)
         in_flight = self._negotiating.pop(conn_id, None)
         if in_flight is not None:
             in_flight.cancel()
@@ -112,6 +131,20 @@ class WebRTCAcceptor(ConnectionAcceptor):
         self._negotiating[conn_id] = asyncio.create_task(
             self._negotiate(conn_id, sdp_offer, tracks, version, ice_servers, offered_at=offered_at)
         )
+
+    def _guard_capacity(self, conn_id: ConnId) -> None:
+        """Refuse a new connection once the concurrent ceiling is reached.
+
+        A connection already negotiating or live is known, so its re-offer (a
+        reconnect) passes; only a fresh id is measured against the ceiling. A
+        ceiling of ``0`` or less is treated as no limit.
+        """
+        limit = self._config.max_connections
+        if limit <= 0:
+            return
+        known = conn_id in self._conns or conn_id in self._negotiating
+        if not known and len(set(self._conns) | set(self._negotiating)) >= limit:
+            raise TooManyConnectionsError(limit)
 
     def take_answer(self, conn_id: ConnId) -> SdpAnswer | None:
         """Return and clear the negotiated answer, or ``None`` while still pending."""
@@ -190,13 +223,27 @@ class WebRTCAcceptor(ConnectionAcceptor):
         """Forward a trickle-ICE candidate to its connection, buffering if early.
 
         A candidate for a connection whose offer has not yet been negotiated is
-        held and replayed when the offer arrives, rather than dropped.
+        held and replayed when the offer arrives, rather than dropped. The buffer
+        is bounded per connection and across connections; a candidate past either
+        bound is dropped, so candidates for ids that never offer cannot grow it
+        without limit.
         """
         conn = self._conns.get(conn_id)
         if conn is None:
-            self._pending_ice.setdefault(conn_id, []).append(candidate)
+            self._buffer_early_ice(conn_id, candidate)
             return
         await conn.add_ice(candidate)
+
+    def _buffer_early_ice(self, conn_id: ConnId, candidate: IceCandidate) -> None:
+        """Hold a pre-offer candidate within the buffer's bounds, else drop it."""
+        pending = self._pending_ice.get(conn_id)
+        if pending is None:
+            if len(self._pending_ice) >= _MAX_PENDING_ICE_CONNS:
+                return
+            pending = self._pending_ice[conn_id] = []
+        if len(pending) >= _MAX_PENDING_ICE_PER_CONN:
+            return
+        pending.append(candidate)
 
     def _opened(self, conn_id: ConnId, conn: WebRTCConnection) -> None:
         """Announce a connection upward once its wire is live."""

@@ -8,6 +8,7 @@ from conftest import FakePeer
 from reactor_runtime.core import Connection, ConnId, InputFrame
 from reactor_runtime.metrics import RuntimeMetrics, WebRtcMetrics
 from reactor_runtime.protocol import Channel, ProtocolVersion
+from reactor_runtime.transport import TooManyConnectionsError
 from reactor_runtime.transport.webrtc import (
     SdpAnswer,
     SdpOffer,
@@ -16,6 +17,10 @@ from reactor_runtime.transport.webrtc import (
     WebRtcConfig,
     WebRTCPeer,
     WebRtcPeerFactory,
+)
+from reactor_runtime.transport.webrtc.acceptor import (
+    _MAX_PENDING_ICE_CONNS,
+    _MAX_PENDING_ICE_PER_CONN,
 )
 from reactor_runtime.transport.webrtc.config import IceServer
 from reactor_runtime.transport.webrtc.signaling import IceCandidate
@@ -425,3 +430,102 @@ async def test_a_superseded_offer_is_not_measured(
     # answer nor a failure and counting it either way would be a lie.
     assert _sample(metrics, "runtime_webrtc_negotiation_seconds_count", outcome="ok") == 1.0
     assert _sample(metrics, "runtime_webrtc_negotiation_seconds_count", outcome="failed") is None
+
+
+def _capped_acceptor(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    limit: int,
+) -> WebRTCAcceptor:
+    return WebRTCAcceptor(
+        sink=FakeSink(),
+        config=WebRtcConfig(ping_timeout=0.0, max_connections=limit),
+        peer_factory=factory_for(fake_peer),
+        metrics=WebRtcMetrics(_metrics()),
+    )
+
+
+async def test_a_new_offer_past_the_ceiling_is_refused(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    acceptor = _capped_acceptor(fake_peer, factory_for, limit=1)
+    acceptor.start_offer(ConnId(7), SdpOffer("first"), out_av_tracks, ProtocolVersion.V0)
+
+    # The first connection fills the single slot, so a second, distinct
+    # connection is refused rather than negotiated into a second native peer.
+    with pytest.raises(TooManyConnectionsError):
+        acceptor.start_offer(ConnId(8), SdpOffer("second"), out_av_tracks, ProtocolVersion.V0)
+    assert ConnId(8) not in acceptor._negotiating
+    await acceptor._negotiating[ConnId(7)]
+
+
+async def test_a_reconnect_is_admitted_at_the_ceiling(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    acceptor = _capped_acceptor(fake_peer, factory_for, limit=1)
+    await _negotiate(acceptor, ConnId(7), SdpOffer("first"), out_av_tracks)
+
+    # A re-offer on the connection already holding the slot is a reconnect, not a
+    # new peer, so it passes even with no slot free.
+    acceptor.start_offer(ConnId(7), SdpOffer("again"), out_av_tracks, ProtocolVersion.V0)
+    await acceptor._negotiating[ConnId(7)]
+    assert acceptor.take_answer(ConnId(7)) is not None
+
+
+async def test_a_freed_slot_admits_a_later_connection(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    acceptor = _capped_acceptor(fake_peer, factory_for, limit=1)
+    await _negotiate(acceptor, ConnId(7), SdpOffer("first"), out_av_tracks)
+    fake_peer.fire_connected()
+    fake_peer.fire_disconnect()
+
+    # The first connection dropped and freed the slot, so a fresh connection is
+    # admitted: the ceiling bounds concurrency, not the session's lifetime total.
+    acceptor.start_offer(ConnId(8), SdpOffer("second"), out_av_tracks, ProtocolVersion.V0)
+    await acceptor._negotiating[ConnId(8)]
+
+
+async def test_zero_ceiling_disables_the_cap(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    acceptor = _capped_acceptor(fake_peer, factory_for, limit=0)
+    tasks = []
+    for cid in range(7, 20):
+        acceptor.start_offer(ConnId(cid), SdpOffer("offer"), out_av_tracks, ProtocolVersion.V0)
+        tasks.append(acceptor._negotiating[ConnId(cid)])
+    await asyncio.gather(*tasks)
+
+
+async def test_pre_offer_ice_is_bounded_per_connection(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+) -> None:
+    acceptor = _acceptor(FakeSink(), fake_peer, factory_for)
+    for i in range(_MAX_PENDING_ICE_PER_CONN + 50):
+        await acceptor.add_ice(ConnId(7), IceCandidate(f"cand-{i}", "0", 0))
+
+    # A connection that buffers ICE before ever offering cannot grow the buffer
+    # without bound; candidates past the per-connection cap are dropped.
+    assert len(acceptor._pending_ice[ConnId(7)]) == _MAX_PENDING_ICE_PER_CONN
+
+
+async def test_pre_offer_ice_is_bounded_across_connections(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+) -> None:
+    acceptor = _acceptor(FakeSink(), fake_peer, factory_for)
+    for cid in range(_MAX_PENDING_ICE_CONNS + 50):
+        await acceptor.add_ice(ConnId(cid), IceCandidate("cand", "0", 0))
+
+    # Candidates addressed to a flood of connections that never offer cannot grow
+    # the set of buffered connections without bound.
+    assert len(acceptor._pending_ice) == _MAX_PENDING_ICE_CONNS

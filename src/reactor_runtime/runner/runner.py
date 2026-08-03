@@ -271,6 +271,7 @@ class Runner(ServiceComponent, ConnectionSink):
         """
         self._cancel_orphan_timeout()
         await self._drain_teardown()
+        await asyncio.to_thread(self._recorder.close)
         if self._bridge is not None:
             await self._bridge.stop()
 

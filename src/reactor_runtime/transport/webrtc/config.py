@@ -109,6 +109,11 @@ class WebRtcConfig:
         upnp: Whether the ICE agent attempts UPnP port mapping.
         ice_gathering_timeout_ms: How long to wait for ICE gathering before
             resolving the SDP answer with whatever candidates are in hand.
+        max_connections: The most connections the acceptor negotiates at once.
+            Each holds a native media peer, so this caps the peers one session
+            can be driven to build: an offer for a new connection past the
+            ceiling is refused, while a re-offer on a live connection (a
+            reconnect) is always admitted. ``0`` or less removes the ceiling.
     """
 
     ice_servers: tuple[IceServer, ...] = ()
@@ -129,3 +134,4 @@ class WebRtcConfig:
     ice_tcp: bool = False
     upnp: bool = False
     ice_gathering_timeout_ms: int = 3000
+    max_connections: int = 64

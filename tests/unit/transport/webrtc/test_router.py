@@ -9,7 +9,11 @@ from fastapi.testclient import TestClient
 from reactor_runtime.core import Connection, ConnId, InputFrame
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.protocol import Channel, ProtocolVersion
-from reactor_runtime.transport import SessionNotRunningError, UnknownSessionError
+from reactor_runtime.transport import (
+    ConnectionsExhaustedError,
+    SessionNotRunningError,
+    UnknownSessionError,
+)
 from reactor_runtime.transport.webrtc import WebRtcConfig, WebRtcPeerFactory, WebRtcRouter
 from reactor_runtime.transport.webrtc.config import IceServer
 
@@ -269,3 +273,29 @@ def test_routes_reject_unknown_session_id(
     client = _client(FakeRunner(session_id="other"), fake_peer, factory_for)
     response = client.post(f"{_PREFIX}/connections")
     assert response.status_code == 404
+
+
+def test_register_reports_503_when_the_id_pool_is_exhausted(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+) -> None:
+    class ExhaustedRunner(FakeRunner):
+        def new_conn_id(self) -> ConnId:
+            raise ConnectionsExhaustedError
+
+    client = _client(ExhaustedRunner(), fake_peer, factory_for)
+    response = client.post(f"{_PREFIX}/connections")
+    assert response.status_code == 503
+
+
+def test_offer_past_the_connection_ceiling_reports_503(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+) -> None:
+    config = WebRtcConfig(ping_timeout=0.0, max_connections=1)
+    with _client(FakeRunner(), fake_peer, factory_for, config=config) as client:
+        first = client.post(f"{_PREFIX}/connections/5001/sdp_params", json={"sdp_offer": "one"})
+        assert first.status_code == 202
+        # A second, distinct connection is past the single-slot ceiling.
+        second = client.post(f"{_PREFIX}/connections/6001/sdp_params", json={"sdp_offer": "two"})
+    assert second.status_code == 503

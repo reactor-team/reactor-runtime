@@ -22,9 +22,11 @@ from pydantic import BaseModel, Field
 from reactor_runtime.core import ConnId
 from reactor_runtime.metrics import RuntimeMetrics, WebRtcMetrics
 from reactor_runtime.transport.router import (
+    ConnectionsExhaustedError,
     ErrorDetail,
     SessionControl,
     SessionNotRunningError,
+    TooManyConnectionsError,
     TransportRouter,
     UnknownSessionError,
 )
@@ -43,6 +45,14 @@ _PREFIX = "/sessions/{sid}/transport/webrtc"
 _GUARD_RESPONSES: dict[int | str, dict[str, Any]] = {
     400: {"model": ErrorDetail},
     404: {"model": ErrorDetail},
+}
+
+# Routes that create a connection add a 503: minting an id when the session's id
+# space is used up, or offering past the concurrent-connection ceiling, is a
+# transient refusal a client retries once a slot frees.
+_CONNECT_RESPONSES: dict[int | str, dict[str, Any]] = {
+    **_GUARD_RESPONSES,
+    503: {"model": ErrorDetail},
 }
 
 
@@ -197,15 +207,23 @@ class WebRtcRouter(TransportRouter):
         async def _unknown_session(request: Request, exc: Exception) -> Response:
             return JSONResponse(status_code=404, content={"detail": "Unknown session"})
 
+        async def _connections_exhausted(request: Request, exc: Exception) -> Response:
+            return JSONResponse(status_code=503, content={"detail": "No connection ids left"})
+
+        async def _too_many_connections(request: Request, exc: Exception) -> Response:
+            return JSONResponse(status_code=503, content={"detail": "Connection limit reached"})
+
         app.add_exception_handler(SessionNotRunningError, _session_not_running)
         app.add_exception_handler(UnknownSessionError, _unknown_session)
+        app.add_exception_handler(ConnectionsExhaustedError, _connections_exhausted)
+        app.add_exception_handler(TooManyConnectionsError, _too_many_connections)
 
         @app.get(f"{_PREFIX}/ice_servers", responses=_GUARD_RESPONSES)
         async def ice_servers(sid: str) -> dict[str, Any]:
             runner.require_session_running(sid)
             return _ice_servers_payload(self._config)
 
-        @app.post(f"{_PREFIX}/connections", status_code=201, responses=_GUARD_RESPONSES)
+        @app.post(f"{_PREFIX}/connections", status_code=201, responses=_CONNECT_RESPONSES)
         async def register(sid: str) -> RegisterConnectionResponse:
             runner.require_session_running(sid)
             return RegisterConnectionResponse(
@@ -235,8 +253,8 @@ class WebRtcRouter(TransportRouter):
             return OfferAccepted(connection_id=cid)
 
         offer_path = f"{_PREFIX}/connections/{{cid}}/sdp_params"
-        app.post(offer_path, status_code=202, responses=_GUARD_RESPONSES)(offer)
-        app.put(offer_path, status_code=202, responses=_GUARD_RESPONSES)(offer)
+        app.post(offer_path, status_code=202, responses=_CONNECT_RESPONSES)(offer)
+        app.put(offer_path, status_code=202, responses=_CONNECT_RESPONSES)(offer)
 
         @app.get(
             f"{_PREFIX}/connections/{{cid}}/sdp_params",

@@ -25,12 +25,20 @@ from reactor_runtime.core import (
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.runner.state_machine import SessionStateMachine
+from reactor_runtime.transport.router import ConnectionsExhaustedError
 
 # Connection ids are minted at random in this inclusive range, the same id space
 # a production director hands out. 1000 is invalid and 1001 is reserved for
 # legacy single-connection compatibility, so explicit ids start at 1002.
 _MIN_CONN_ID = 1002
 _MAX_CONN_ID = 9999
+
+# The most ids one session may mint. Ids are retained for the session's life
+# (never reused after a drop), so this bounds the used pool well below the id
+# range: minting stays a cheap random draw with a low collision rate, and an
+# exhausted pool raises rather than spinning the draw forever. Far above any
+# real session's connection count.
+_MAX_SESSION_CONN_IDS = 4096
 
 
 class ConnectionManager:
@@ -69,7 +77,14 @@ class ConnectionManager:
         so connections arriving through several transports cannot collide, and
         held in the session's used-id pool so a new connection never reuses the id
         of one that has since dropped; the pool clears on session teardown.
+
+        Raises:
+            ConnectionsExhaustedError: If the session has minted its whole
+                allowance of ids. Raising bounds the draw: it never loops
+                looking for a free id in a full pool.
         """
+        if len(self._used_conn_ids) >= _MAX_SESSION_CONN_IDS:
+            raise ConnectionsExhaustedError
         while True:
             conn_id = ConnId(random.randint(_MIN_CONN_ID, _MAX_CONN_ID))
             if conn_id not in self._used_conn_ids:

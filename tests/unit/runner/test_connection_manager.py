@@ -12,6 +12,7 @@ from reactor_runtime.core import (
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.runner import ConnectionManager, SessionStateMachine
+from reactor_runtime.transport import ConnectionsExhaustedError
 
 
 class FakeConnection:
@@ -87,6 +88,19 @@ def test_new_conn_id_is_not_reused_after_a_drop() -> None:
     # The dropped id stays in the session's used pool, so no later mint returns it.
     later = {cm.new_conn_id() for _ in range(100)}
     assert first not in later
+
+
+def test_new_conn_id_raises_once_the_id_pool_is_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A session mints only up to its allowance; the next mint refuses rather than
+    # spinning the random draw looking for a free id in a full pool.
+    monkeypatch.setattr("reactor_runtime.runner.connection_manager._MAX_SESSION_CONN_IDS", 3)
+    cm, _ = waiting_manager()
+    minted = {cm.new_conn_id() for _ in range(3)}
+    assert len(minted) == 3
+    with pytest.raises(ConnectionsExhaustedError):
+        cm.new_conn_id()
 
 
 @pytest.mark.asyncio

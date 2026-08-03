@@ -19,6 +19,7 @@ import contextlib
 import math
 import queue
 import re
+import shutil
 import tempfile
 import threading
 import time
@@ -49,6 +50,16 @@ _INIT_FILENAME = "init.mp4"
 # (which has no successor to prove it closed) is recognised as fetchable.
 _COMPLETE_MARKER = ".complete"
 _HLS_MEDIA_TYPE = "application/vnd.apple.mpegurl"
+
+# How long a finished recording is kept on disk before it is reaped. Clips stay
+# fetchable for a window after the session ends — long enough for a client to
+# pull the last snap — then the directory is deleted so recordings do not
+# accumulate across the sequential sessions one process serves, and a later
+# session cannot read an earlier one's bytes. Only a finished recording (one
+# that carries its completion marker) ages out; the live one is never touched.
+_RETENTION_SECONDS = 300.0
+# How often the reaper sweeps the recordings root for aged-out directories.
+_REAP_INTERVAL_SECONDS = 30.0
 # A recording id is a lowercase UUID. Validating a URL path segment against this
 # shape before joining it onto the recordings root closes the path-traversal
 # vector on ``/clips`` and ``/clips/chunks/{id}/{file}``.
@@ -199,6 +210,11 @@ class Recorder:
         self._feed_stop = threading.Event()
         self._watch_thread: threading.Thread | None = None
         self._watch_stop = threading.Event()
+        # The process-lifetime reaper that ages finished recordings out of the
+        # root. Started once the root is materialised and stopped by close(); it
+        # outlives any one session, so it is not reset between them.
+        self._reaper_thread: threading.Thread | None = None
+        self._reaper_stop = threading.Event()
 
         self._pending: list[tuple[int, ClipResult]] = []
         self._pending_lock = threading.Lock()
@@ -257,6 +273,7 @@ class Recorder:
                 else Path(tempfile.mkdtemp(prefix="reactor-recordings-"))
             )
             self._root.mkdir(parents=True, exist_ok=True)
+        self._ensure_reaper()
         self._session_id = session_id
         self._session_dir = self._root / self._session_id
         self._session_dir.mkdir(parents=True, exist_ok=True)
@@ -318,6 +335,64 @@ class Recorder:
             recording_id=self._session_id,
             dropped=self._dropped_frames,
         )
+
+    def close(self) -> None:
+        """Stop the retention reaper. Idempotent; safe when never started.
+
+        The reaper outlives any one session, so the runner calls this once on
+        process teardown rather than on each session's stop. Blocks briefly while
+        the reaper thread joins, so the runner runs it off the event loop.
+        """
+        self._reaper_stop.set()
+        reaper = self._reaper_thread
+        self._reaper_thread = None
+        if reaper is not None:
+            reaper.join(timeout=2.0)
+
+    # -- retention ------------------------------------------------------------
+
+    def _ensure_reaper(self) -> None:
+        """Start the retention reaper once the root exists, at most once."""
+        if self._reaper_thread is not None:
+            return
+        self._reaper_stop.clear()
+        self._reaper_thread = threading.Thread(
+            target=self._reap_loop, name="recording-reaper", daemon=True
+        )
+        self._reaper_thread.start()
+
+    def _reap_loop(self) -> None:
+        """Sweep aged-out recordings from the root until close() stops the reaper."""
+        while not self._reaper_stop.is_set():
+            try:
+                self._reap_expired(time.time())
+            except Exception:
+                logger.exception("recording reaper sweep failed")
+            self._reaper_stop.wait(_REAP_INTERVAL_SECONDS)
+
+    def _reap_expired(self, now: float) -> None:
+        """Delete every finished recording whose retention window has passed.
+
+        A recording ages out once its completion marker is older than the
+        retention window. A recording still in progress carries no marker and is
+        skipped, so the live session's directory is never removed no matter how
+        long the session runs.
+        """
+        root = self._root
+        if root is None:
+            return
+        for session_dir in root.iterdir():
+            if not session_dir.is_dir():
+                continue
+            marker = session_dir / _COMPLETE_MARKER
+            try:
+                finished_at = marker.stat().st_mtime
+            except OSError:
+                continue
+            if now - finished_at <= _RETENTION_SECONDS:
+                continue
+            shutil.rmtree(session_dir, ignore_errors=True)
+            logger.info("reaped aged-out recording", recording_id=session_dir.name)
 
     def _reset_session_state(self) -> None:
         """Clear per-session state so a restart never inherits the last session."""
