@@ -89,18 +89,19 @@ like) is not part of this runtime. Remove those imports — only the package-roo
 surface is supported, and reaching past it is exactly what breaks on the next
 change.
 
-## Recording and clips do nothing
+## `UploadedFile` is `name` / `mime_type` / `data`
 
-A `recording:` block in `reactor.yaml` is inert, `requestClip` /
-`requestRecording` are unanswered, and there is no clip endpoint. If the model
-or its client assumed any of these, drop that assumption — recording is not
-wired here.
+Uploads work as they did: a field or `@event` parameter typed `UploadedFile` is
+an upload slot, and the runtime fetches the bytes and hands the handler a file.
+What changed is the shape of that file. It carries the name, the mime type, and
+the bytes — the upload id the client addressed it by stays inside the runtime and
+never crosses the model boundary.
 
-## Uploads are gone
-
-There is no upload store, and an `@event` cannot take an uploaded-file argument.
-A command that consumed an upload must be reworked to take the data over an
-input track instead.
+`size` is a property derived from the bytes (`len(data)`), not a field the client
+fills in. The two agree by construction: an upload is admitted only when its
+bytes match the length the client announced, so a handler that read `file.size`
+before keeps reading the same number, and it is now measured rather than
+asserted. `len(file.data)` says the same thing if you prefer it explicit.
 
 ## Pacing moved out of the model — `buffer_size` and `output_buffer` are gone
 
@@ -124,6 +125,10 @@ produces them.
 `.reset()`. Weights are still located with `get_weights_path()` (now imported
 from `reactor_runtime`); it returns `$REACTOR_WEIGHTS_PATH` or
 `~/.cache/reactor_registry`.
+
+Recording needs nothing from the model either: the `recording:` block in
+`reactor.yaml` configures the recorder, and clip requests are answered off the
+runtime's own surface. Keep the block as it is.
 
 Once the breaks above are cleared the model should import, `load`, and run; a
 `reactor.yaml` naming the `ReactorModel` via `runtime.import` is all the runtime

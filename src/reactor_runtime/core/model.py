@@ -200,6 +200,16 @@ class UploadedFile:
     mime_type: str
     data: bytes
 
+    @property
+    def size(self) -> int:
+        """Return the file's size in bytes, measured from the bytes themselves.
+
+        An upload reaches a handler only once its bytes match the length the
+        client announced, so this is both the length that arrived and the length
+        that was promised.
+        """
+        return len(self.data)
+
 
 @dataclass(frozen=True)
 class ReactorEvent:
