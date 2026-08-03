@@ -47,6 +47,17 @@ async def test_put_then_fetch_returns_the_model_facing_view() -> None:
     assert not hasattr(file, "upload_id")
 
 
+async def test_fetched_size_agrees_with_the_size_the_client_declared() -> None:
+    store = UploadStore()
+    upload_id = store.create_slot("cat.png", "image/png", 4)
+    declared = store.expected_size(upload_id)
+    store.put(upload_id, b"\x89PNG")
+
+    file = await store.fetch(upload_id)
+
+    assert file.size == declared
+
+
 async def test_fetch_is_repeatable_within_a_session() -> None:
     store = UploadStore()
     upload_id = store.create_slot("a.bin", "application/octet-stream", 2)
