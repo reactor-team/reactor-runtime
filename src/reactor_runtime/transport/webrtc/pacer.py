@@ -40,6 +40,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_FRAME_DIMENSIONS: tuple[int, int, int] = (720, 1280, 3)
 """Black-frame shape used until the first real video frame reveals the true size."""
 
+CHUNKS_OF_HEADROOM = 2
+"""Chunks the queue grows to hold: one draining while the next one is produced."""
+
 FrameSink = Callable[[MediaBundle], None]
 """Receives one single-frame bundle per tick, at the pacer's cadence."""
 
@@ -56,8 +59,9 @@ class MediaPacer:
         video_tracks: The connection's outbound video tracks, used to synthesise
             black frames before the first real frame arrives.
         on_frame: The sink one single-frame bundle is handed to each tick.
-        queue_depth: How many frames may sit queued before :meth:`submit` drops,
-            so a fast producer never blocks the thread that submits it.
+        queue_depth: The floor on how many frames may sit queued. The real
+            capacity grows with the chunks the model turns out to emit, so a
+            model that batches is never bounded below one of its own chunks.
         fps: The initial pacing rate, used until the first chunk sets its own.
     """
 
@@ -74,7 +78,11 @@ class MediaPacer:
         }
         self._on_frame = on_frame
 
-        self._queue: queue.Queue[MediaBundle] = queue.Queue(maxsize=queue_depth)
+        # The queue is unbounded in itself; `_capacity` is the bound, checked on
+        # submit so it can grow once the first chunk reveals how much media a
+        # model hands over at a time.
+        self._queue: queue.Queue[MediaBundle] = queue.Queue()
+        self._capacity = queue_depth
 
         self._interval = 1.0 / fps if fps > 0 else 1.0 / 30.0
 
@@ -91,9 +99,15 @@ class MediaPacer:
         """Split *chunk* into single frames, adopt its rate, and enqueue them.
 
         The pacing rate is updated to the chunk's ``fps`` so a dynamic-rate model
-        paces at the throughput it is actually producing. Frames that do not fit
-        the queue are dropped rather than blocking the producer, which runs on
-        the model thread and must never stall on one slow connection.
+        paces at the throughput it is actually producing, and the capacity grows
+        to :data:`CHUNKS_OF_HEADROOM` of them, so a whole chunk always fits with
+        room for its successor. A model that emits a batch per inference would
+        otherwise lose most of every batch to a bound smaller than one chunk, and
+        the wire would hold on the last frame until the next chunk arrived.
+
+        Frames beyond the capacity are dropped from the tail rather than blocking
+        the producer, which runs on the model thread and must never stall on one
+        slow connection.
 
         Args:
             chunk: A finished media chunk, possibly batched.
@@ -103,13 +117,19 @@ class MediaPacer:
         """
         if chunk.fps > 0:
             self._interval = 1.0 / chunk.fps
+        self._capacity = max(self._capacity, CHUNKS_OF_HEADROOM * chunk.n_frames)
         enqueued = 0
         for frame in chunk.frames():
-            try:
-                self._queue.put_nowait(frame)
-                enqueued += 1
-            except queue.Full:
-                pass
+            if self._queue.qsize() >= self._capacity:
+                break
+            self._queue.put_nowait(frame)
+            enqueued += 1
+        if enqueued < chunk.n_frames:
+            logger.warning(
+                "Media pacer queue full; dropped %d of %d frames",
+                chunk.n_frames - enqueued,
+                chunk.n_frames,
+            )
         return enqueued
 
     def start(self) -> None:
