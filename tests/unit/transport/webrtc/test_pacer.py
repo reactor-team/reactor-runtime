@@ -10,7 +10,11 @@ from reactor_runtime.core.values import (
     TrackInfo,
     TrackKind,
 )
-from reactor_runtime.transport.webrtc.pacer import DEFAULT_FRAME_DIMENSIONS, MediaPacer
+from reactor_runtime.transport.webrtc.pacer import (
+    CHUNKS_OF_HEADROOM,
+    DEFAULT_FRAME_DIMENSIONS,
+    MediaPacer,
+)
 
 
 def video_info(name: str = "main") -> TrackInfo:
@@ -63,14 +67,54 @@ def test_submit_adopts_the_chunk_rate() -> None:
     assert pacer._interval == 1.0 / 60.0
 
 
-def test_submit_drops_frames_that_overflow_the_queue() -> None:
+def test_submit_drops_frames_once_the_queue_is_really_full() -> None:
     pacer, _ = make_pacer()
-    pacer._queue.maxsize = 2
-    # A ten-frame batch cannot fit a depth-2 queue while the thread is stopped.
-    enqueued = pacer.submit(
-        chunk(video_bundle(np.zeros((10, 4, 4, 3), dtype=np.uint8)), n_frames=10)
-    )
-    assert enqueued == 2
+    batch = np.zeros((10, 4, 4, 3), dtype=np.uint8)
+    # Two chunks of headroom, and nothing draining because the thread is stopped,
+    # so the third batch has nowhere to go.
+    for _ in range(CHUNKS_OF_HEADROOM):
+        assert pacer.submit(chunk(video_bundle(batch), n_frames=10)) == 10
+    assert pacer.submit(chunk(video_bundle(batch), n_frames=10)) == 0
+
+
+# --- capacity follows the size of the chunks a model actually emits -------
+
+
+def test_a_batch_larger_than_the_floor_is_enqueued_whole() -> None:
+    # The regression: a model emitting 29 frames per inference lost everything
+    # past the fixed depth, so most of every batch never reached the wire.
+    pacer, _ = make_pacer()
+    batch = np.zeros((29, 4, 4, 3), dtype=np.uint8)
+    assert pacer.submit(chunk(video_bundle(batch), n_frames=29)) == 29
+
+
+def test_capacity_grows_to_hold_a_chunk_with_headroom() -> None:
+    pacer, _ = make_pacer()
+    pacer.submit(chunk(video_bundle(np.zeros((29, 4, 4, 3), dtype=np.uint8)), n_frames=29))
+    assert pacer._capacity == CHUNKS_OF_HEADROOM * 29
+
+
+def test_a_single_frame_model_keeps_the_default_floor() -> None:
+    pacer, _ = make_pacer()
+    pacer.submit(chunk(video_bundle(np.zeros((4, 4, 3), dtype=np.uint8))))
+    assert pacer._capacity == 10
+
+
+def test_capacity_does_not_shrink_on_a_smaller_chunk() -> None:
+    pacer, _ = make_pacer()
+    pacer.submit(chunk(video_bundle(np.zeros((29, 4, 4, 3), dtype=np.uint8)), n_frames=29))
+    grown = pacer._capacity
+    pacer.submit(chunk(video_bundle(np.zeros((4, 4, 3), dtype=np.uint8))))
+    assert pacer._capacity == grown
+
+
+def test_successive_batches_fit_while_the_previous_one_drains() -> None:
+    # Two chunks of headroom means the next batch is accepted in full even
+    # though none of the previous one has been paced out yet.
+    pacer, _ = make_pacer()
+    first = pacer.submit(chunk(video_bundle(np.zeros((29, 4, 4, 3), dtype=np.uint8)), n_frames=29))
+    second = pacer.submit(chunk(video_bundle(np.zeros((29, 4, 4, 3), dtype=np.uint8)), n_frames=29))
+    assert (first, second) == (29, 29)
 
 
 # --- per-tick emission logic ----------------------------------------------
@@ -129,3 +173,30 @@ def test_pacing_thread_delivers_submitted_frames() -> None:
 def test_stop_is_idempotent_before_start() -> None:
     pacer, _ = make_pacer()
     pacer.stop()  # never started; must not raise
+
+
+def test_a_batching_model_keeps_the_wire_in_fresh_frames() -> None:
+    """Every frame of every batch reaches the sink, in order and exactly once.
+
+    The symptom of a queue that cannot hold a chunk is a wire fed a handful of
+    real frames and then the same one repeated until the next batch, so this
+    asserts on what actually arrives rather than on the queue's bookkeeping.
+    """
+    pacer, sink = make_pacer()
+    frames_per_batch, batches = 8, 3
+    fps = 400.0  # drains a batch in ~20ms, keeping the test quick
+
+    for batch_index in range(batches):
+        batch = np.zeros((frames_per_batch, 4, 4, 3), dtype=np.uint8)
+        for frame_index in range(frames_per_batch):
+            batch[frame_index, 0, 0, 0] = batch_index * frames_per_batch + frame_index + 1
+        pacer.submit(chunk(video_bundle(batch), fps=fps, n_frames=frames_per_batch))
+        pacer.start()
+        time.sleep(frames_per_batch / fps * 1.5)
+    pacer.stop()
+
+    stamps = [int(bundle.tracks["main"].data[0, 0, 0]) for bundle in sink.seen]
+    distinct = [
+        stamp for index, stamp in enumerate(stamps) if index == 0 or stamp != stamps[index - 1]
+    ]
+    assert distinct == list(range(1, frames_per_batch * batches + 1))
