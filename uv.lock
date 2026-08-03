@@ -565,7 +565,7 @@ requires-dist = [
     { name = "prometheus-client", specifier = ">=0.26.0" },
     { name = "protobuf", specifier = ">=7.35.1" },
     { name = "pyyaml", specifier = ">=6.0.3" },
-    { name = "reactor-webrtc", specifier = ">=0.3.0" },
+    { name = "reactor-webrtc", specifier = ">=0.4.0" },
     { name = "uvicorn", specifier = ">=0.49.0" },
 ]
 
@@ -582,13 +582,14 @@ dev = [
 
 [[package]]
 name = "reactor-webrtc"
-version = "0.3.0"
+version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/86/2e/8121e11e38219a0fe0b9c6f71ee21436f3a6834e76d94db7cc8471b425e4/reactor_webrtc-0.3.0-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:507b173e0a268708c1d8ad2b68f0f6401d9d4d0cfdc864d588eee25b8235cc36", size = 6997162, upload-time = "2026-08-01T02:12:06.604Z" },
-    { url = "https://files.pythonhosted.org/packages/7d/59/7b5587004650c6b958fd2ca905bb4772a290d2ff68614fcef0884c56b10e/reactor_webrtc-0.3.0-cp310-abi3-manylinux_2_34_aarch64.whl", hash = "sha256:9e0a99de6034766c759d2e50d2f47921adde76cb3f5666c61c3f2dfb6b604c02", size = 8247883, upload-time = "2026-08-01T02:12:08.642Z" },
-    { url = "https://files.pythonhosted.org/packages/a5/2f/4d0e6b56a4b7cb21eb2d38813e921cf6cad5526be37a54b7e7922d48c63e/reactor_webrtc-0.3.0-cp310-abi3-manylinux_2_34_x86_64.whl", hash = "sha256:4239d25ce056265f1ac18fa3514ce713d12b02be253fdd023e9c7f2de077b57a", size = 8792368, upload-time = "2026-08-01T02:12:10.286Z" },
-    { url = "https://files.pythonhosted.org/packages/20/3f/cdfb8d436bd8e975085325ace3dbbe9e78ad31423c25c4d3c8d603e1101b/reactor_webrtc-0.3.0-cp310-abi3-win_amd64.whl", hash = "sha256:9082e3725aad102e342f7afcf97c4dba912fd7241b7805392ffdbcd65a577f59", size = 7752728, upload-time = "2026-08-01T02:12:12.792Z" },
+    { url = "https://files.pythonhosted.org/packages/4e/b1/5159ef95f415e38e442cf7e215750b522cae078afe644e397f2fd766161a/reactor_webrtc-0.4.0-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:514a7ab395fa8656f4d1fa3dadd44598cf5ae63609faf2470feaa199f9aff44d", size = 7004135, upload-time = "2026-08-03T20:19:45.942Z" },
+    { url = "https://files.pythonhosted.org/packages/3c/96/14f3c1e314865e74040ec58d1e5639773f440058cec739081ac2fe5272e8/reactor_webrtc-0.4.0-cp310-abi3-macosx_13_0_x86_64.whl", hash = "sha256:17d1223bfb2550dae1dd6f54507a725a7043e860bb58365916f7ee607d8f0e8e", size = 8032192, upload-time = "2026-08-03T20:19:47.663Z" },
+    { url = "https://files.pythonhosted.org/packages/28/73/ded4cfbdf150a640359ba42f4fb73ea9171b9cb79674250274c48bd8147c/reactor_webrtc-0.4.0-cp310-abi3-manylinux_2_34_aarch64.whl", hash = "sha256:0a7e816739ae05acad669a2bc006aa49014a99e34dc505af28369cb8d3f5db5b", size = 8258221, upload-time = "2026-08-03T20:19:49.237Z" },
+    { url = "https://files.pythonhosted.org/packages/4e/61/12be1dac9151602b29dee46175dee15f16d7cd7142cfa9316ddeff95a544/reactor_webrtc-0.4.0-cp310-abi3-manylinux_2_34_x86_64.whl", hash = "sha256:98972f4d3f0e4eedb4cccf95a7089bb9059a870cd5dc3db9f4adbb07eae7aee1", size = 8797255, upload-time = "2026-08-03T20:19:50.767Z" },
+    { url = "https://files.pythonhosted.org/packages/20/08/8435206a5434d73f0e9c7a08442aa67c6cc0fc01e650a27d1011e5a1f861/reactor_webrtc-0.4.0-cp310-abi3-win_amd64.whl", hash = "sha256:9e0c530e4b5cb0a7d049aee9a93545334fa901e2f740ac9e00e210d68b988589", size = 7760369, upload-time = "2026-08-03T20:19:52.99Z" },
 ]
 
 [[package]]
