@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Callable, Iterator
+from typing import Any
 
 import numpy as np
 import pytest
@@ -23,6 +24,7 @@ from reactor_runtime.core.model import (
     SessionStarted,
 )
 from reactor_runtime.core.values import ConnId
+from reactor_runtime.interface.internal.input_buffer import BufferClosed
 from reactor_runtime.interface.internal.reactor_core import CommandEnvelope
 from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.interface.pipeline.reactor_pipeline import _GeneratorEnded
@@ -385,6 +387,97 @@ async def test_an_inference_error_is_fatal_and_closes_the_generator() -> None:
     with pytest.raises(TypeError):
         await pipe.run()
     assert pipe.closed is True
+
+
+# -- teardown failures --------------------------------------------------------
+
+
+class FailingCleanupPipe(ReactorPipeline):
+    state: State
+    output: Frame
+    fps = 12
+
+    def inference(self) -> Iterator[Frame]:
+        try:
+            while True:
+                yield _frame()
+        finally:
+            raise RuntimeError("world reset failed")
+
+
+class UnwindingCleanupPipe(ReactorPipeline):
+    state: State
+    output: Frame
+    fps = 12
+
+    def inference(self) -> Iterator[object]:
+        try:
+            yield 123  # not an Output, Idle, or None
+        finally:
+            raise RuntimeError("world reset failed")
+
+
+class BufferClosedCleanupPipe(FailingCleanupPipe):
+    def __init__(self) -> None:
+        super().__init__()
+        self.advances = 0
+
+    async def _advance(self, gen: Any, is_async: bool) -> tuple[Output | None, float]:
+        # Produce one frame so the generator is running, then report the buffer as
+        # closed. A generator that never started skips its own cleanup on close.
+        self.advances += 1
+        if self.advances == 1:
+            return await super()._advance(gen, is_async)
+        raise BufferClosed
+
+
+async def test_a_cleanup_failure_after_a_clean_session_end_ends_the_model_loop() -> None:
+    pipe = FailingCleanupPipe()
+    _ready(pipe)
+    _open_session(pipe)
+    task = asyncio.create_task(pipe.run())
+    await asyncio.sleep(0.05)
+    # The client leaves, so the session loop finishes without an exception of its
+    # own and the cleanup failure is the only one to report.
+    pipe._runnable.clear()
+    with pytest.raises(RuntimeError, match="world reset failed"):
+        await task
+    assert pipe.state is None
+
+
+async def test_a_cleanup_failure_while_unwinding_keeps_the_original_exception() -> None:
+    pipe = UnwindingCleanupPipe()
+    _ready(pipe)
+    _open_session(pipe)
+    # The bad yield is the fault worth reporting; the cleanup failure on the way
+    # out must not replace it.
+    with pytest.raises(TypeError):
+        await pipe.run()
+    assert pipe.state is None
+
+
+async def test_a_cleanup_failure_after_a_closed_buffer_ends_the_model_loop() -> None:
+    pipe = BufferClosedCleanupPipe()
+    _ready(pipe)
+    _open_session(pipe)
+    # A closed input buffer breaks the loop without an exception, so it counts as
+    # a clean end and the cleanup failure propagates.
+    with pytest.raises(RuntimeError, match="world reset failed"):
+        await pipe.run()
+
+
+async def test_cancelling_the_loop_with_a_failing_cleanup_stays_cancelled() -> None:
+    pipe = FailingCleanupPipe()
+    _ready(pipe)
+    _open_session(pipe)
+    task = asyncio.create_task(pipe.run())
+    await asyncio.sleep(0.05)
+    # A shutdown cancels the loop. The cleanup failure is logged and dropped so a
+    # graceful stop does not look like a crash.
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert pipe.state is None
 
 
 # -- session-aware gating -----------------------------------------------------
