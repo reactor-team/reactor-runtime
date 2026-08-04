@@ -522,8 +522,7 @@ class WebRTCPeer:
                 # A bundle reaching the wire holds one frame, so it holds one
                 # metadata value: a batch's list is resolved when it is split.
                 metadata = data.metadata if isinstance(data.metadata, bytes) else None
-                # `user_data` is missing from the wheel's stub, not from the wheel.
-                track.push_video_frame(bgra, width, height, user_data=metadata)  # type: ignore[ty:unknown-argument]
+                track.push_video_frame(bgra, width, height, user_data=metadata)
             else:
                 self._enqueue_audio(to_int16_mono(data.data))
 
