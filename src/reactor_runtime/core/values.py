@@ -61,10 +61,14 @@ class InputFrame:
             frame; audio is ``(1, M)`` ``int16`` mono samples.
         pts: Presentation timestamp in seconds, or ``None`` when the transport
             could not provide one.
+        metadata: What the sender attached to this frame, as the bytes it sent,
+            or ``None`` for a frame that carried nothing. Decoding them is the
+            model's business: the transport treats them as opaque.
     """
 
     data: npt.NDArray[Any]
     pts: float | None = None
+    metadata: bytes | None = None
 
 
 class TrackKind(StrEnum):

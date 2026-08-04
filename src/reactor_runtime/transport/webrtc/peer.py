@@ -410,11 +410,26 @@ class WebRTCPeer:
             return matching[seen].name
         return f"{kind.value}-{seen + 1}"
 
-    def _make_video_sink(self, name: str) -> Callable[[bytes, int, int], None]:
-        def sink(bgra: bytes, width: int, height: int) -> None:
+    def _make_video_sink(
+        self, name: str
+    ) -> Callable[[bytes, int, int, rw.FrameMetadata | None], None]:
+        """Build the callback that turns one decoded video frame into an InputFrame.
+
+        The fourth argument is the metadata the sender attached, when the trailer
+        was there to read and the receiver transform is in place to strip it.
+        """
+
+        def sink(
+            bgra: bytes, width: int, height: int, meta: rw.FrameMetadata | None = None
+        ) -> None:
             if self._stop_event.is_set():
                 return
-            frame = InputFrame(data=bgra_to_rgb(bgra, width, height))
+            metadata = bytes(meta.user_data) if meta is not None else b""
+            frame = InputFrame(
+                data=bgra_to_rgb(bgra, width, height),
+                # An empty trailer is a frame the sender attached nothing to.
+                metadata=metadata or None,
+            )
             self._fire(self._cb_media, name, frame)
 
         return sink
