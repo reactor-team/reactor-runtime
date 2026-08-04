@@ -27,12 +27,24 @@ from reactor_runtime.core import ConnectionSink, ConnId
 from reactor_runtime.metrics import WebRtcMetrics
 from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.transport.acceptor import ConnectionAcceptor
+from reactor_runtime.transport.router import TooManyConnectionsError
 from reactor_runtime.transport.webrtc.config import IceServer, WebRtcConfig
 from reactor_runtime.transport.webrtc.connection import WebRTCConnection
 from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpAnswer, SdpOffer, TrackMap
 
 logger = logging.getLogger(__name__)
+
+# Bounds on candidates buffered before their offer is negotiated. Trickle ICE
+# can race ahead of the answer, but a candidate for a connection that never
+# offers would otherwise be held for the session's life. These cap the buffer in
+# both directions — distinct pre-offer connections, and candidates per one — so
+# a client sending candidates for ids that never negotiate cannot grow it
+# without bound. Real ICE gathering yields well under these before the offer
+# lands; excess is dropped, and a connection that does negotiate replays what
+# was kept.
+_MAX_PENDING_ICE_CONNS = 128
+_MAX_PENDING_ICE_PER_CONN = 256
 
 
 class WebRTCAcceptor(ConnectionAcceptor):
@@ -80,6 +92,14 @@ class WebRTCAcceptor(ConnectionAcceptor):
         # connection opens or is reaped so a client that never arrives leaves
         # nothing behind.
         self._offered_at: dict[ConnId, float] = {}
+        # The deadline task for each in-flight connection, keyed with the offer
+        # generation that armed it: it reaps a connection that answers but never
+        # reaches a live wire, so a stalled half-open offer cannot hold its slot
+        # against the ceiling forever. Cancelled the moment the connection opens
+        # or is torn down — but only by its own generation, since a reconnect's
+        # teardown of the superseded connection runs while the new offer's
+        # deadline is already armed and must not carry it off.
+        self._deadlines: dict[ConnId, tuple[float, asyncio.Task[None]]] = {}
 
     def start_offer(
         self,
@@ -102,16 +122,110 @@ class WebRTCAcceptor(ConnectionAcceptor):
         gathers against, overriding the configured ones for this connection only;
         ``None`` falls back to the acceptor's configuration. Supplied per offer,
         so a reconnect can carry fresh credentials.
+
+        Raises:
+            TooManyConnectionsError: If *conn_id* is a new connection and the
+                acceptor already holds its configured maximum. A re-offer on a
+                connection already negotiating or live is a reconnect and is
+                admitted regardless of the ceiling.
         """
+        self._guard_capacity(conn_id)
         in_flight = self._negotiating.pop(conn_id, None)
         if in_flight is not None:
             in_flight.cancel()
+        self._cancel_deadline(conn_id)
         self._answers.pop(conn_id, None)
         offered_at = time.monotonic()
         self._offered_at[conn_id] = offered_at
         self._negotiating[conn_id] = asyncio.create_task(
             self._negotiate(conn_id, sdp_offer, tracks, version, ice_servers, offered_at=offered_at)
         )
+        self._arm_deadline(conn_id, offered_at)
+
+    def _guard_capacity(self, conn_id: ConnId) -> None:
+        """Refuse a new connection once the concurrent ceiling is reached.
+
+        A connection already negotiating or live is known, so its re-offer (a
+        reconnect) passes; only a fresh id is measured against the ceiling. A
+        ceiling of ``0`` or less is treated as no limit.
+        """
+        limit = self._config.max_connections
+        if limit <= 0:
+            return
+        known = conn_id in self._conns or conn_id in self._negotiating
+        if not known and len(set(self._conns) | set(self._negotiating)) >= limit:
+            raise TooManyConnectionsError(limit)
+
+    def _arm_deadline(self, conn_id: ConnId, offered_at: float) -> None:
+        """Start the reaper that frees this connection's slot if it never goes live."""
+        if self._config.negotiation_timeout <= 0:
+            return
+        self._deadlines[conn_id] = (
+            offered_at,
+            asyncio.create_task(self._enforce_deadline(conn_id, offered_at)),
+        )
+
+    def _cancel_deadline(self, conn_id: ConnId, offered_at: float | None = None) -> None:
+        """Cancel a connection's negotiation deadline, if one is armed.
+
+        With *offered_at*, only a deadline armed by that same offer generation is
+        cancelled: a reconnect tears the superseded connection down after the new
+        offer has already armed its own deadline, and that teardown must not
+        carry the new deadline off — the same ordering :meth:`_drop_offer` guards
+        against. ``None`` cancels unconditionally, for the superseding offer
+        itself. Skips the running deadline task, so a reap that tears the
+        connection down (and unwinds through here) does not cancel the very task
+        driving it.
+        """
+        entry = self._deadlines.get(conn_id)
+        if entry is None:
+            return
+        armed_at, task = entry
+        if offered_at is not None and armed_at != offered_at:
+            return
+        del self._deadlines[conn_id]
+        if task is not asyncio.current_task():
+            task.cancel()
+
+    async def _enforce_deadline(self, conn_id: ConnId, offered_at: float) -> None:
+        """Reap a connection that has not reached a live wire in time.
+
+        A connection whose offer answered but whose ICE never completed sits in
+        ``_conns`` holding a ceiling slot, with no watchdog (that arms only on
+        connect) to release it. When the deadline passes with the connection
+        still not live and still the current offer for its id, it is closed and
+        forgotten so the slot is genuinely tied to a live wire. The task removes
+        its own ``_deadlines`` entry on every exit, so a deadline that outlived
+        its offer cannot pile up under a client-supplied id.
+        """
+        try:
+            try:
+                await asyncio.sleep(self._config.negotiation_timeout)
+            except asyncio.CancelledError:
+                return
+            # A newer offer took this id, or the wire came up: nothing to reap.
+            if self._offered_at.get(conn_id) != offered_at or conn_id in self._live:
+                return
+            logger.warning(
+                "WebRTC connection %s never reached a live wire; reaping its slot", conn_id
+            )
+            negotiating = self._negotiating.pop(conn_id, None)
+            if negotiating is not None:
+                negotiating.cancel()
+            conn = self._conns.get(conn_id)
+            if conn is not None:
+                # close() fires on_closed → _forget, which clears the bookkeeping.
+                await conn.close()
+                return
+            # Negotiation was still in flight or produced nothing, so no
+            # connection exists to close; clear what the offer left behind.
+            self._pending_ice.pop(conn_id, None)
+            self._answers.pop(conn_id, None)
+            self._drop_offer(conn_id, offered_at)
+        finally:
+            entry = self._deadlines.get(conn_id)
+            if entry is not None and entry[1] is asyncio.current_task():
+                del self._deadlines[conn_id]
 
     def take_answer(self, conn_id: ConnId) -> SdpAnswer | None:
         """Return and clear the negotiated answer, or ``None`` while still pending."""
@@ -158,7 +272,7 @@ class WebRTCAcceptor(ConnectionAcceptor):
             )
             conn.on_media(lambda track, frame: self._sink.media_received(conn_id, track, frame))
             conn.on_ping(lambda: self._sink.keepalive(conn_id))
-            conn.on_connected(lambda: self._opened(conn_id, conn))
+            conn.on_connected(lambda: self._opened(conn_id, conn, offered_at))
             conn.on_disconnect(lambda: self._closed(conn_id, offered_at))
             conn.on_closed(lambda: self._forget(conn_id, offered_at))
             self._conns[conn_id] = conn
@@ -177,8 +291,10 @@ class WebRTCAcceptor(ConnectionAcceptor):
             raise
         except Exception:
             self._metrics.negotiation_failed(since=offered_at)
-            # No connection was built, so nothing else will ever reap this id.
+            # No connection was built, so nothing else will ever reap this id;
+            # its deadline has nothing left to guard either.
             self._drop_offer(conn_id, offered_at)
+            self._cancel_deadline(conn_id, offered_at)
             logger.exception("WebRTC negotiation failed for connection %s", conn_id)
         finally:
             # Only clear our own entry: a superseding offer may have already
@@ -190,19 +306,46 @@ class WebRTCAcceptor(ConnectionAcceptor):
         """Forward a trickle-ICE candidate to its connection, buffering if early.
 
         A candidate for a connection whose offer has not yet been negotiated is
-        held and replayed when the offer arrives, rather than dropped.
+        held and replayed when the offer arrives, rather than dropped. The buffer
+        is bounded per connection and across connections; a candidate past either
+        bound is dropped, so candidates for ids that never offer cannot grow it
+        without limit.
         """
         conn = self._conns.get(conn_id)
         if conn is None:
-            self._pending_ice.setdefault(conn_id, []).append(candidate)
+            self._buffer_early_ice(conn_id, candidate)
             return
         await conn.add_ice(candidate)
 
-    def _opened(self, conn_id: ConnId, conn: WebRTCConnection) -> None:
-        """Announce a connection upward once its wire is live."""
-        offered_at = self._offered_at.pop(conn_id, None)
-        if offered_at is not None:
-            self._metrics.connected(since=offered_at)
+    def _buffer_early_ice(self, conn_id: ConnId, candidate: IceCandidate) -> None:
+        """Hold a pre-offer candidate within the buffer's bounds.
+
+        A new connection at the across-connections bound evicts the oldest
+        pre-offer entry rather than refusing the new one, so a flood of ids that
+        never offer cannot permanently occupy the buffer and starve a later
+        client's candidates. Within one connection the per-connection bound drops
+        the excess.
+        """
+        pending = self._pending_ice.get(conn_id)
+        if pending is None:
+            if len(self._pending_ice) >= _MAX_PENDING_ICE_CONNS:
+                oldest = next(iter(self._pending_ice))
+                del self._pending_ice[oldest]
+            pending = self._pending_ice[conn_id] = []
+        if len(pending) >= _MAX_PENDING_ICE_PER_CONN:
+            return
+        pending.append(candidate)
+
+    def _opened(self, conn_id: ConnId, conn: WebRTCConnection, offered_at: float) -> None:
+        """Announce a connection upward once its wire is live.
+
+        *offered_at* is the generation of the offer that built this connection,
+        so opening cancels only its own deadline and drops only its own offer
+        timestamp — a reconnect already waiting on this id keeps both.
+        """
+        self._cancel_deadline(conn_id, offered_at)
+        self._drop_offer(conn_id, offered_at)
+        self._metrics.connected(since=offered_at)
         self._live.add(conn_id)
         self._sink.connection_opened(conn)
 
@@ -213,6 +356,7 @@ class WebRTCAcceptor(ConnectionAcceptor):
         reaches the sink — the session must not advance for an offer that never
         completed.
         """
+        self._cancel_deadline(conn_id, offered_at)
         self._conns.pop(conn_id, None)
         self._pending_ice.pop(conn_id, None)
         self._answers.pop(conn_id, None)
@@ -230,6 +374,7 @@ class WebRTCAcceptor(ConnectionAcceptor):
         Without this the acceptor would hold a dead connection for the life of
         the process, since a commanded close is silent.
         """
+        self._cancel_deadline(conn_id, offered_at)
         self._conns.pop(conn_id, None)
         self._pending_ice.pop(conn_id, None)
         self._answers.pop(conn_id, None)

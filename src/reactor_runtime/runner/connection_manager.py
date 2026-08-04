@@ -25,12 +25,21 @@ from reactor_runtime.core import (
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.runner.state_machine import SessionStateMachine
+from reactor_runtime.transport.router import ConnectionsExhaustedError
 
 # Connection ids are minted at random in this inclusive range, the same id space
 # a production director hands out. 1000 is invalid and 1001 is reserved for
 # legacy single-connection compatibility, so explicit ids start at 1002.
 _MIN_CONN_ID = 1002
 _MAX_CONN_ID = 9999
+
+# The most times a mint redraws before giving up. Bounding the draw count keeps
+# allocation from spinning the event loop when the id space is dense, without
+# imposing a lifetime allowance that would let a client lock out registration by
+# minting far below the space. With any realistic number of live-plus-retained
+# ids the first draw is almost always free, so this is only ever approached when
+# the space is genuinely near-full.
+_MAX_MINT_ATTEMPTS = 100
 
 
 class ConnectionManager:
@@ -69,12 +78,19 @@ class ConnectionManager:
         so connections arriving through several transports cannot collide, and
         held in the session's used-id pool so a new connection never reuses the id
         of one that has since dropped; the pool clears on session teardown.
+
+        Raises:
+            ConnectionsExhaustedError: If a free id is not drawn within the
+                bounded number of attempts, which only happens when the id space
+                is near-full. Raising bounds the draw: it never loops looking for
+                a free id in a full pool.
         """
-        while True:
+        for _ in range(_MAX_MINT_ATTEMPTS):
             conn_id = ConnId(random.randint(_MIN_CONN_ID, _MAX_CONN_ID))
             if conn_id not in self._used_conn_ids:
                 self._used_conn_ids.add(conn_id)
                 return conn_id
+        raise ConnectionsExhaustedError
 
     def register(self, conn: Connection) -> None:
         """Add a connection and advance the session for it.

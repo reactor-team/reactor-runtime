@@ -8,6 +8,7 @@ from conftest import FakePeer
 from reactor_runtime.core import Connection, ConnId, InputFrame
 from reactor_runtime.metrics import RuntimeMetrics, WebRtcMetrics
 from reactor_runtime.protocol import Channel, ProtocolVersion
+from reactor_runtime.transport import TooManyConnectionsError
 from reactor_runtime.transport.webrtc import (
     SdpAnswer,
     SdpOffer,
@@ -16,6 +17,10 @@ from reactor_runtime.transport.webrtc import (
     WebRtcConfig,
     WebRTCPeer,
     WebRtcPeerFactory,
+)
+from reactor_runtime.transport.webrtc.acceptor import (
+    _MAX_PENDING_ICE_CONNS,
+    _MAX_PENDING_ICE_PER_CONN,
 )
 from reactor_runtime.transport.webrtc.config import IceServer
 from reactor_runtime.transport.webrtc.signaling import IceCandidate
@@ -89,7 +94,7 @@ def _acceptor(
 ) -> WebRTCAcceptor:
     return WebRTCAcceptor(
         sink=sink,
-        config=WebRtcConfig(ping_timeout=0.0),
+        config=WebRtcConfig(ping_timeout=0.0, negotiation_timeout=0.0),
         peer_factory=factory_for(peer),
         metrics=WebRtcMetrics(metrics or _metrics()),
     )
@@ -425,3 +430,215 @@ async def test_a_superseded_offer_is_not_measured(
     # answer nor a failure and counting it either way would be a lie.
     assert _sample(metrics, "runtime_webrtc_negotiation_seconds_count", outcome="ok") == 1.0
     assert _sample(metrics, "runtime_webrtc_negotiation_seconds_count", outcome="failed") is None
+
+
+def _capped_acceptor(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    limit: int,
+    negotiation_timeout: float = 0.0,
+) -> WebRTCAcceptor:
+    return WebRTCAcceptor(
+        sink=FakeSink(),
+        config=WebRtcConfig(
+            ping_timeout=0.0, max_connections=limit, negotiation_timeout=negotiation_timeout
+        ),
+        peer_factory=factory_for(fake_peer),
+        metrics=WebRtcMetrics(_metrics()),
+    )
+
+
+async def test_a_new_offer_past_the_ceiling_is_refused(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    acceptor = _capped_acceptor(fake_peer, factory_for, limit=1)
+    acceptor.start_offer(ConnId(7), SdpOffer("first"), out_av_tracks, ProtocolVersion.V0)
+
+    # The first connection fills the single slot, so a second, distinct
+    # connection is refused rather than negotiated into a second native peer.
+    with pytest.raises(TooManyConnectionsError):
+        acceptor.start_offer(ConnId(8), SdpOffer("second"), out_av_tracks, ProtocolVersion.V0)
+    assert ConnId(8) not in acceptor._negotiating
+    await acceptor._negotiating[ConnId(7)]
+
+
+async def test_a_reconnect_is_admitted_at_the_ceiling(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    acceptor = _capped_acceptor(fake_peer, factory_for, limit=1)
+    await _negotiate(acceptor, ConnId(7), SdpOffer("first"), out_av_tracks)
+
+    # A re-offer on the connection already holding the slot is a reconnect, not a
+    # new peer, so it passes even with no slot free.
+    acceptor.start_offer(ConnId(7), SdpOffer("again"), out_av_tracks, ProtocolVersion.V0)
+    await acceptor._negotiating[ConnId(7)]
+    assert acceptor.take_answer(ConnId(7)) is not None
+
+
+async def test_a_freed_slot_admits_a_later_connection(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    acceptor = _capped_acceptor(fake_peer, factory_for, limit=1)
+    await _negotiate(acceptor, ConnId(7), SdpOffer("first"), out_av_tracks)
+    fake_peer.fire_connected()
+    fake_peer.fire_disconnect()
+
+    # The first connection dropped and freed the slot, so a fresh connection is
+    # admitted: the ceiling bounds concurrency, not the session's lifetime total.
+    acceptor.start_offer(ConnId(8), SdpOffer("second"), out_av_tracks, ProtocolVersion.V0)
+    await acceptor._negotiating[ConnId(8)]
+
+
+async def test_zero_ceiling_disables_the_cap(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    acceptor = _capped_acceptor(fake_peer, factory_for, limit=0)
+    tasks = []
+    for cid in range(7, 20):
+        acceptor.start_offer(ConnId(cid), SdpOffer("offer"), out_av_tracks, ProtocolVersion.V0)
+        tasks.append(acceptor._negotiating[ConnId(cid)])
+    await asyncio.gather(*tasks)
+
+
+async def test_pre_offer_ice_is_bounded_per_connection(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+) -> None:
+    acceptor = _acceptor(FakeSink(), fake_peer, factory_for)
+    for i in range(_MAX_PENDING_ICE_PER_CONN + 50):
+        await acceptor.add_ice(ConnId(7), IceCandidate(f"cand-{i}", "0", 0))
+
+    # A connection that buffers ICE before ever offering cannot grow the buffer
+    # without bound; candidates past the per-connection cap are dropped.
+    assert len(acceptor._pending_ice[ConnId(7)]) == _MAX_PENDING_ICE_PER_CONN
+
+
+async def test_pre_offer_ice_is_bounded_across_connections(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+) -> None:
+    acceptor = _acceptor(FakeSink(), fake_peer, factory_for)
+    for cid in range(_MAX_PENDING_ICE_CONNS + 50):
+        await acceptor.add_ice(ConnId(cid), IceCandidate("cand", "0", 0))
+
+    # Candidates addressed to a flood of connections that never offer cannot grow
+    # the set of buffered connections without bound.
+    assert len(acceptor._pending_ice) == _MAX_PENDING_ICE_CONNS
+
+
+async def test_pre_offer_ice_evicts_the_oldest_connection_at_the_bound(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+) -> None:
+    acceptor = _acceptor(FakeSink(), fake_peer, factory_for)
+    for cid in range(_MAX_PENDING_ICE_CONNS):
+        await acceptor.add_ice(ConnId(cid), IceCandidate("cand", "0", 0))
+
+    # A fresh connection at the bound evicts the oldest pre-offer entry rather
+    # than being refused, so junk ids that never offer cannot starve it.
+    await acceptor.add_ice(ConnId(9999), IceCandidate("late", "0", 0))
+    assert len(acceptor._pending_ice) == _MAX_PENDING_ICE_CONNS
+    assert ConnId(0) not in acceptor._pending_ice
+    assert ConnId(9999) in acceptor._pending_ice
+
+
+async def test_negotiation_deadline_reaps_a_connection_that_never_goes_live(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    acceptor = _capped_acceptor(fake_peer, factory_for, limit=1, negotiation_timeout=0.05)
+    answer = await _negotiate(acceptor, ConnId(7), SdpOffer("offer"), out_av_tracks)
+    assert answer is not None
+    assert ConnId(7) in acceptor._conns
+
+    # The connection answered but never fired connected, so the deadline closes
+    # it and frees its slot.
+    _, deadline = acceptor._deadlines[ConnId(7)]
+    await deadline
+    assert ConnId(7) not in acceptor._conns
+    assert ConnId(7) not in acceptor._deadlines
+    assert fake_peer.closed is True
+
+    # The freed slot admits a fresh connection at the single-slot ceiling.
+    acceptor.start_offer(ConnId(8), SdpOffer("second"), out_av_tracks, ProtocolVersion.V0)
+    await acceptor._negotiating[ConnId(8)]
+
+
+async def test_the_deadline_is_cancelled_when_the_wire_connects(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    acceptor = _capped_acceptor(fake_peer, factory_for, limit=1, negotiation_timeout=0.05)
+    await _negotiate(acceptor, ConnId(7), SdpOffer("offer"), out_av_tracks)
+    fake_peer.fire_connected()
+
+    # A connection that reached its live wire keeps its slot; its deadline is
+    # cancelled and never reaps it.
+    assert ConnId(7) not in acceptor._deadlines
+    await asyncio.sleep(0.1)
+    assert ConnId(7) in acceptor._live
+    assert fake_peer.closed is False
+    fake_peer.fire_disconnect()
+
+
+async def test_a_reconnects_deadline_survives_the_superseded_teardown(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    acceptor = _capped_acceptor(fake_peer, factory_for, limit=1, negotiation_timeout=0.05)
+    await _negotiate(acceptor, ConnId(7), SdpOffer("first"), out_av_tracks)
+
+    # Re-offering closes the superseded connection; that teardown runs after the
+    # new offer armed its deadline and must not carry it off.
+    await _negotiate(acceptor, ConnId(7), SdpOffer("second"), out_av_tracks)
+    assert ConnId(7) in acceptor._deadlines
+
+    # The reconnect never goes live either, so its own deadline reaps it and
+    # frees the slot — re-offering cannot pin a slot for the process's life.
+    _, deadline = acceptor._deadlines[ConnId(7)]
+    await deadline
+    assert ConnId(7) not in acceptor._conns
+    assert ConnId(7) not in acceptor._deadlines
+    acceptor.start_offer(ConnId(8), SdpOffer("third"), out_av_tracks, ProtocolVersion.V0)
+    await acceptor._negotiating[ConnId(8)]
+
+
+async def test_a_failed_negotiation_leaves_no_deadline_behind(
+    fake_peer: FakePeer,
+    out_av_tracks: TrackMap,
+) -> None:
+    def refuses(*args: object, **kwargs: object) -> WebRtcPeerFactory:
+        async def factory(
+            conn_id: ConnId,
+            offer: SdpOffer,
+            tracks: TrackMap,
+            config: WebRtcConfig,
+            version: ProtocolVersion,
+            /,
+        ) -> tuple[WebRTCPeer, SdpAnswer]:
+            raise RuntimeError("no peer today")
+
+        return factory
+
+    acceptor = _capped_acceptor(fake_peer, refuses, limit=1, negotiation_timeout=0.05)
+    for attempt in range(5):
+        acceptor.start_offer(
+            ConnId(100 + attempt), SdpOffer("offer"), out_av_tracks, ProtocolVersion.V0
+        )
+        await acceptor._negotiating[ConnId(100 + attempt)]
+
+    # A failed negotiation reaps its own offer, so its deadline is torn down
+    # with it: repeated failing offers on distinct ids cannot grow the map.
+    assert acceptor._deadlines == {}
+    assert acceptor._offered_at == {}

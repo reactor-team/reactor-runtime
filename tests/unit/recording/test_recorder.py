@@ -1,3 +1,4 @@
+import os
 import threading
 import time
 from pathlib import Path
@@ -24,6 +25,7 @@ from reactor_runtime.recording import (
     Recorder,
     RecorderDisabledError,
 )
+from reactor_runtime.recording.recorder import _RETENTION_SECONDS
 
 _SID = "00000000-0000-0000-0000-000000000001"
 
@@ -379,3 +381,85 @@ def test_records_a_real_frame_size_with_audio(tmp_path: Path, attempt: int) -> N
         assert recorder._dropped_frames < offered // 4
     finally:
         recorder.stop()
+
+
+# -- retention -------------------------------------------------------------
+
+
+def _finished_recording(root: Path, name: str, *, finished_at: float) -> Path:
+    """A recording directory carrying a completion marker aged to *finished_at*."""
+    session_dir = root / name
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "init.mp4").write_bytes(b"data")
+    marker = session_dir / ".complete"
+    marker.write_text("")
+    os.utime(marker, (finished_at, finished_at))
+    return session_dir
+
+
+def test_reap_deletes_a_recording_past_its_retention_window(tmp_path: Path) -> None:
+    recorder = _serving_recorder(tmp_path)
+    now = time.time()
+    aged = _finished_recording(tmp_path, _SID, finished_at=now - _RETENTION_SECONDS - 60)
+    recorder._reap_expired(now)
+    assert not aged.exists()
+
+
+def test_reap_keeps_a_recently_finished_recording(tmp_path: Path) -> None:
+    recorder = _serving_recorder(tmp_path)
+    now = time.time()
+    fresh = _finished_recording(tmp_path, _SID, finished_at=now - 5)
+    recorder._reap_expired(now)
+    assert fresh.exists()
+
+
+def test_reap_never_touches_an_in_progress_recording(tmp_path: Path) -> None:
+    # A live recording carries no completion marker, so it is never a candidate
+    # for reaping no matter how long the session has been running.
+    recorder = _serving_recorder(tmp_path)
+    live = tmp_path / _SID
+    live.mkdir(parents=True, exist_ok=True)
+    (live / "chunk_00000.m4s").write_bytes(b"data")
+    old = time.time() - _RETENTION_SECONDS * 10
+    os.utime(live, (old, old))
+    recorder._reap_expired(time.time())
+    assert live.exists()
+
+
+def test_close_is_idempotent_when_the_reaper_never_started(tmp_path: Path) -> None:
+    recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
+    recorder.close()
+    recorder.close()
+
+
+def test_start_clears_a_stale_completion_marker_from_a_reused_id(tmp_path: Path) -> None:
+    # A recording started under an id used before must not inherit the earlier
+    # run's completion marker, or the reaper would read the live recording as
+    # finished and delete it mid-write.
+    session_dir = tmp_path / _SID
+    session_dir.mkdir(parents=True)
+    (session_dir / ".complete").write_text("")
+    recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
+    recorder.start(_SID)
+    try:
+        assert not (session_dir / ".complete").exists()
+    finally:
+        recorder.stop()
+        recorder.close()
+
+
+def test_reap_skips_the_active_recording_even_with_a_stale_marker(tmp_path: Path) -> None:
+    recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
+    recorder.start(_SID)
+    try:
+        active = recorder._session_dir
+        assert active is not None
+        marker = active / ".complete"
+        marker.write_text("")
+        old = time.time() - _RETENTION_SECONDS * 2
+        os.utime(marker, (old, old))
+        recorder._reap_expired(time.time())
+        assert active.exists()
+    finally:
+        recorder.stop()
+        recorder.close()
