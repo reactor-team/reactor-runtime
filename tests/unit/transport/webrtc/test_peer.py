@@ -17,6 +17,7 @@ rw = pytest.importorskip("reactor_webrtc")
 
 from reactor_runtime.core import ConnId, MediaBundle  # noqa: E402
 from reactor_runtime.core.values import (  # noqa: E402
+    InputFrame,
     TrackData,
     TrackDirection,
     TrackInfo,
@@ -176,6 +177,46 @@ def test_push_bundle_sends_no_metadata_for_an_unsplit_batch() -> None:
     peer._push_bundle(_video_bundle("v", metadata=[b"a", b"b"]))
     assert len(track.pushed) == 1
     assert track.user_data == [None]
+
+
+# ── Inbound metadata ─────────────────────────────────────────────────────────
+
+
+async def test_video_sink_surfaces_the_metadata_the_sender_attached() -> None:
+    peer = WebRTCPeer()
+    peer._loop = asyncio.get_running_loop()
+    frames: list[InputFrame] = []
+    peer.on_media(lambda _name, frame: frames.append(frame))
+
+    peer._make_video_sink("cam")(bytes(2 * 2 * 4), 2, 2, rw.FrameMetadata(user_data=b'{"pose":1}'))
+    await asyncio.sleep(0.01)
+
+    assert frames[0].metadata == b'{"pose":1}'
+    assert frames[0].data.shape == (2, 2, 3)
+
+
+async def test_video_sink_reads_an_empty_trailer_as_no_metadata() -> None:
+    peer = WebRTCPeer()
+    peer._loop = asyncio.get_running_loop()
+    frames: list[InputFrame] = []
+    peer.on_media(lambda _name, frame: frames.append(frame))
+
+    peer._make_video_sink("cam")(bytes(2 * 2 * 4), 2, 2, rw.FrameMetadata(user_data=b""))
+    await asyncio.sleep(0.01)
+
+    assert frames[0].metadata is None
+
+
+async def test_video_sink_accepts_a_frame_that_carries_no_trailer() -> None:
+    peer = WebRTCPeer()
+    peer._loop = asyncio.get_running_loop()
+    frames: list[InputFrame] = []
+    peer.on_media(lambda _name, frame: frames.append(frame))
+
+    peer._make_video_sink("cam")(bytes(2 * 2 * 4), 2, 2, None)
+    await asyncio.sleep(0.01)
+
+    assert frames[0].metadata is None
 
 
 def test_push_bundle_skips_paused_track() -> None:

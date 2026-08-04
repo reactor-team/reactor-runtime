@@ -4,9 +4,9 @@ Drives :func:`libwebrtc_peer_factory` against a second libwebrtc peer standing i
 for a browser client: the stand-in offers one track the model sends on and one it
 receives on, plus a data channel, and the two negotiate a real connection over
 loopback ICE. The test then asserts the seam actually carries traffic both ways —
-outbound video reaches the client, the metadata the model attached to a frame
-arrives with it, inbound video surfaces through ``on_media``, and a data-channel
-frame surfaces through ``on_message``.
+outbound video reaches the client carrying the metadata the model attached to it,
+inbound video surfaces through ``on_media`` carrying what the client attached, and
+a data-channel frame surfaces through ``on_message``.
 
 Requires the native ``reactor_webrtc`` wheel; the module skips cleanly when it is
 absent.
@@ -25,6 +25,7 @@ rw = pytest.importorskip("reactor_webrtc")
 
 from reactor_runtime.core import ConnId, MediaBundle  # noqa: E402
 from reactor_runtime.core.values import (  # noqa: E402
+    InputFrame,
     TrackData,
     TrackDirection,
     TrackInfo,
@@ -103,7 +104,6 @@ class _Client:
         self.received_metadata: list[bytes] = []
         self.video_track_seen = threading.Event()
         self._recv_tracks: list[rw.Track] = []
-        self._recv_transform: object | None = None
 
         observer = rw.PeerConnectionObserver()
         ice = self.ice
@@ -120,15 +120,14 @@ class _Client:
         self.send_track = factory.create_video_track("client-cam")
         self.send = self.pc.add_transceiver(rw.MediaKind.Video, rw.TransceiverDirection.SendOnly)
         self.send.set_track(self.send_track)
+        # Nothing to attach for metadata in either direction: reactor-webrtc
+        # advertises the capability in the offer, the runtime's answer mirrors it,
+        # and both peers install their own embed/strip steps on negotiation.
         self.data = self.pc.create_data_channel("data")
 
     def _on_track(self, kind: rw.MediaKind, track: rw.Track) -> None:
         self._recv_tracks.append(track)
         if kind == rw.MediaKind.Video:
-            # Built here because the transform comes off the track, which only
-            # exists once negotiation produces it; the test attaches it to the
-            # transceiver, whose handle it already holds.
-            self._recv_transform = track.receiver_metadata_transform()
 
             def _count_video(_bgra: bytes, _w: int, _h: int, meta: Any = None) -> None:
                 self.received_video += 1
@@ -178,11 +177,6 @@ class _Client:
         for candidate in _ice_from_answer(sdp):
             await self.pc.add_ice_candidate(candidate)
 
-    def read_frame_metadata(self) -> None:
-        """Strip and surface the metadata trailer on the track the model sends on."""
-        assert self._recv_transform is not None, "no inbound video track to read metadata from"
-        self.recv.set_receiver_transform(self._recv_transform)
-
 
 async def _trickle_until(client: _Client, peer: WebRTCPeer, stop: asyncio.Event) -> None:
     """Forward the client's ICE candidates to the peer as they are gathered.
@@ -213,6 +207,7 @@ async def test_loopback_carries_media_and_messages() -> None:
 
     messages: list[tuple[bytes | str, ProtocolVersion, Channel]] = []
     inbound_media: dict[str, int] = {}
+    inbound_metadata: list[bytes] = []
     connected = asyncio.Event()
     loop = asyncio.get_running_loop()
 
@@ -230,10 +225,13 @@ async def test_loopback_carries_media_and_messages() -> None:
         messages.append((payload, version, channel))
         message_arrived.set()
 
+    def _record_media(name: str, frame: InputFrame) -> None:
+        inbound_media[name] = inbound_media.get(name, 0) + 1
+        if frame.metadata is not None:
+            inbound_metadata.append(frame.metadata)
+
     peer.on_message(_record_message)
-    peer.on_media(
-        lambda name, _frame: inbound_media.__setitem__(name, inbound_media.get(name, 0) + 1)
-    )
+    peer.on_media(_record_media)
     peer.on_ping(lambda: None)
     peer.on_connected(connected.set)
     peer.on_disconnect(lambda: None)
@@ -245,12 +243,11 @@ async def test_loopback_carries_media_and_messages() -> None:
 
         assert await _reached(connected), "peer connection never reached connected"
 
-        # The client reads the metadata trailer off the track the model sends on,
-        # which it only has a handle to once negotiation has produced it.
+        # Wait for the model's outbound track to reach the client before pumping:
+        # the frame sink is attached when it arrives.
         assert await asyncio.to_thread(client.video_track_seen.wait, _TIMEOUT_S), (
             "the model's outbound video track never reached the client"
         )
-        client.read_frame_metadata()
 
         # Pump media until every leg has produced output: outbound model video
         # and audio must both reach the client, the metadata attached to a frame
@@ -269,6 +266,7 @@ async def test_loopback_carries_media_and_messages() -> None:
                 and client.received_audio
                 and client.received_metadata
                 and inbound_media.get("in_video")
+                and inbound_metadata
             ):
                 break
             value += 1
@@ -286,7 +284,9 @@ async def test_loopback_carries_media_and_messages() -> None:
                 )
             )
             bgra, width, height = rgb_to_bgra(_solid_frame(value + 128))
-            client.send_track.push_video_frame(bgra, width, height)
+            client.send_track.push_video_frame(
+                bgra, width, height, user_data=f'{{"client":{value}}}'.encode()
+            )
             await asyncio.sleep(0.033)
 
         assert client.received_video, "outbound model video never reached the client"
@@ -295,6 +295,10 @@ async def test_loopback_carries_media_and_messages() -> None:
         assert client.received_metadata, "frame metadata never reached the client"
         assert client.received_metadata[0].startswith(b'{"frame":'), (
             f"unexpected metadata on the wire: {client.received_metadata[0]!r}"
+        )
+        assert inbound_metadata, "the client's frame metadata never surfaced via on_media"
+        assert inbound_metadata[0].startswith(b'{"client":'), (
+            f"unexpected inbound metadata: {inbound_metadata[0]!r}"
         )
 
         # A client data-channel frame must surface through on_message, tagged with
