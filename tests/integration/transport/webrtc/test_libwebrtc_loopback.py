@@ -4,8 +4,9 @@ Drives :func:`libwebrtc_peer_factory` against a second libwebrtc peer standing i
 for a browser client: the stand-in offers one track the model sends on and one it
 receives on, plus a data channel, and the two negotiate a real connection over
 loopback ICE. The test then asserts the seam actually carries traffic both ways —
-outbound video reaches the client, inbound video surfaces through ``on_media``,
-and a data-channel frame surfaces through ``on_message``.
+outbound video reaches the client, the metadata the model attached to a frame
+arrives with it, inbound video surfaces through ``on_media``, and a data-channel
+frame surfaces through ``on_message``.
 
 Requires the native ``reactor_webrtc`` wheel; the module skips cleanly when it is
 absent.
@@ -14,6 +15,8 @@ absent.
 from __future__ import annotations
 
 import asyncio
+import threading
+from typing import Any
 
 import numpy as np
 import pytest
@@ -97,7 +100,10 @@ class _Client:
         self.ice: list[rw.IceCandidate] = []
         self.received_video = 0
         self.received_audio = 0
+        self.received_metadata: list[bytes] = []
+        self.video_track_seen = threading.Event()
         self._recv_tracks: list[rw.Track] = []
+        self._recv_transform: object | None = None
 
         observer = rw.PeerConnectionObserver()
         ice = self.ice
@@ -119,11 +125,18 @@ class _Client:
     def _on_track(self, kind: rw.MediaKind, track: rw.Track) -> None:
         self._recv_tracks.append(track)
         if kind == rw.MediaKind.Video:
+            # Built here because the transform comes off the track, which only
+            # exists once negotiation produces it; the test attaches it to the
+            # transceiver, whose handle it already holds.
+            self._recv_transform = track.receiver_metadata_transform()
 
-            def _count_video(_bgra: bytes, _w: int, _h: int) -> None:
+            def _count_video(_bgra: bytes, _w: int, _h: int, meta: Any = None) -> None:
                 self.received_video += 1
+                if meta is not None:
+                    self.received_metadata.append(bytes(meta.user_data))
 
             track.on_video_frame(_count_video)
+            self.video_track_seen.set()
         elif kind == rw.MediaKind.Audio:
 
             def _count_audio(_pcm: bytes, _sr: int, _ch: int, _frames: int) -> None:
@@ -164,6 +177,11 @@ class _Client:
         await self.pc.set_remote_description(rw.SessionDescription("answer", sdp))
         for candidate in _ice_from_answer(sdp):
             await self.pc.add_ice_candidate(candidate)
+
+    def read_frame_metadata(self) -> None:
+        """Strip and surface the metadata trailer on the track the model sends on."""
+        assert self._recv_transform is not None, "no inbound video track to read metadata from"
+        self.recv.set_receiver_transform(self._recv_transform)
 
 
 async def _trickle_until(client: _Client, peer: WebRTCPeer, stop: asyncio.Event) -> None:
@@ -227,25 +245,42 @@ async def test_loopback_carries_media_and_messages() -> None:
 
         assert await _reached(connected), "peer connection never reached connected"
 
+        # The client reads the metadata trailer off the track the model sends on,
+        # which it only has a handle to once negotiation has produced it.
+        assert await asyncio.to_thread(client.video_track_seen.wait, _TIMEOUT_S), (
+            "the model's outbound video track never reached the client"
+        )
+        client.read_frame_metadata()
+
         # Pump media until every leg has produced output: outbound model video
-        # and audio must both reach the client, and the client's inbound video
-        # must surface through on_media. Video and audio ride the same bundle, so
-        # the seam pushes them together each tick. A single frame is not enough
-        # for the codecs to emit, so pump on a frame-rate cadence.
+        # and audio must both reach the client, the metadata attached to a frame
+        # must arrive with it, and the client's inbound video must surface
+        # through on_media. Video and audio ride the same bundle, so the seam
+        # pushes them together each tick. A single frame is not enough for the
+        # codecs to emit, so pump on a frame-rate cadence.
         video_info = tracks.tracks[0].info
         audio_info = tracks.tracks[1].info
         samples_per_tick = 48_000 // 30  # one 30 fps frame's worth of 48 kHz audio
         deadline = loop.time() + _TIMEOUT_S
         value = 0
         while loop.time() < deadline:
-            if client.received_video and client.received_audio and inbound_media.get("in_video"):
+            if (
+                client.received_video
+                and client.received_audio
+                and client.received_metadata
+                and inbound_media.get("in_video")
+            ):
                 break
             value += 1
             audio = np.full((1, samples_per_tick), (value % 100) - 50, dtype=np.int16)
             peer.send_media(
                 MediaBundle(
                     tracks={
-                        "out_video": TrackData(info=video_info, data=_solid_frame(value)),
+                        "out_video": TrackData(
+                            info=video_info,
+                            data=_solid_frame(value),
+                            metadata=f'{{"frame":{value}}}'.encode(),
+                        ),
                         "out_audio": TrackData(info=audio_info, data=audio),
                     }
                 )
@@ -257,6 +292,10 @@ async def test_loopback_carries_media_and_messages() -> None:
         assert client.received_video, "outbound model video never reached the client"
         assert client.received_audio, "outbound model audio never reached the client"
         assert inbound_media.get("in_video"), "inbound client video never surfaced via on_media"
+        assert client.received_metadata, "frame metadata never reached the client"
+        assert client.received_metadata[0].startswith(b'{"frame":'), (
+            f"unexpected metadata on the wire: {client.received_metadata[0]!r}"
+        )
 
         # A client data-channel frame must surface through on_message, tagged with
         # the sniffed codec version and the channel it arrived on.
