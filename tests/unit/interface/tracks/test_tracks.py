@@ -1,4 +1,7 @@
-from reactor_runtime import Audio, Input, Output, Video
+import numpy as np
+import pytest
+
+from reactor_runtime import Audio, Input, Output, TrackPayload, Video
 from reactor_runtime.core.values import TrackDirection, TrackKind
 
 
@@ -44,3 +47,33 @@ def test_a_class_with_no_track_fields_has_no_tracks() -> None:
         pass
 
     assert Empty.__tracks__ == {}
+
+
+def test_a_bare_payload_binds_the_array_and_no_metadata() -> None:
+    frame = np.zeros((2, 2, 3), dtype=np.uint8)
+    output = GameOutput(main_video=frame, narration=np.zeros((1, 4), dtype=np.int16))
+    assert output.main_video is frame
+    assert output.__metadata__ == {}
+
+
+def test_a_wrapped_payload_keeps_the_array_on_the_track() -> None:
+    frame = np.zeros((2, 2, 3), dtype=np.uint8)
+    output = GameOutput(
+        main_video=TrackPayload(frame, metadata={"seed": 1}),
+        narration=np.zeros((1, 4), dtype=np.int16),
+    )
+    assert output.main_video is frame
+    assert output.__metadata__ == {"main_video": {"seed": 1}}
+
+
+def test_a_payload_without_metadata_records_none() -> None:
+    output = GameOutput(
+        main_video=TrackPayload(np.zeros((2, 2, 3), dtype=np.uint8)),
+        narration=np.zeros((1, 4), dtype=np.int16),
+    )
+    assert output.__metadata__ == {}
+
+
+def test_payloads_must_still_cover_every_track() -> None:
+    with pytest.raises(TypeError, match="expects payloads"):
+        GameOutput(main_video=TrackPayload(np.zeros((2, 2, 3), dtype=np.uint8)))

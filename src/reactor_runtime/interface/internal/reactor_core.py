@@ -12,12 +12,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import threading
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar, TypeVar, get_type_hints
+
+import numpy.typing as npt
 
 from reactor_runtime.core.model import Command, ReactorEvent
 from reactor_runtime.core.values import (
@@ -27,10 +30,12 @@ from reactor_runtime.core.values import (
     MediaBundle,
     MediaChunk,
     TrackData,
+    TrackInfo,
+    TrackKind,
 )
 from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.input_buffer import InputBuffer
-from reactor_runtime.interface.tracks import Input, Output
+from reactor_runtime.interface.tracks import Input, Metadata, Output
 
 logger = logging.getLogger(__name__)
 
@@ -252,10 +257,22 @@ class ReactorCore:
         waits while downstream is full, throttling the model to the playout
         rate; ``drop=True`` discards the overflow instead.
 
+        Metadata a payload carries is encoded here, on the model thread, so a
+        value the wire cannot take is raised at the emit that produced it rather
+        than dropped quietly further down.
+
         Args:
-            output: The produced output, one payload per declared track.
+            output: The produced output, one payload per declared track. A
+                payload passed as a :class:`TrackPayload` also carries the
+                metadata to send with its frame.
             compute_time: Wall-clock seconds spent producing it, if measured.
-            drop: Discard overflow downstream instead of waiting for room.
+            drop: Retained for source compatibility; overflow is now handled by
+                each downstream consumer, so this has no effect here.
+
+        Raises:
+            ValueError: If a track's metadata cannot be sent: an audio track
+                carrying any, entries that do not line up with a batch, or a
+                mapping that is not JSON-serialisable.
         """
         await self.output.emit(output, compute_time=compute_time, drop=drop)
 
@@ -396,10 +413,14 @@ class ReactorCore:
 
     def _to_bundle(self, output: Output) -> MediaBundle:
         """Convert a typed output into a neutral media bundle."""
-        tracks = {
-            name: TrackData(info=info, data=getattr(output, name))
-            for name, info in type(output).__tracks__.items()
-        }
+        tracks: dict[str, TrackData] = {}
+        for name, info in type(output).__tracks__.items():
+            data = getattr(output, name)
+            tracks[name] = TrackData(
+                info=info,
+                data=data,
+                metadata=_encode_metadata(info, data, output.__metadata__.get(name)),
+            )
         return MediaBundle(tracks=tracks)
 
     def _wire_input_buffers(self) -> None:
@@ -423,3 +444,50 @@ class ReactorCore:
             if isinstance(hint, type) and issubclass(hint, base) and hint is not base:
                 return attr_name, hint
         return None
+
+
+def _encode_metadata(
+    info: TrackInfo, data: npt.NDArray[Any], metadata: Metadata | list[Metadata] | None
+) -> bytes | list[bytes] | None:
+    """Encode one track's metadata into the bytes the transport carries.
+
+    Args:
+        info: The track the metadata was given for.
+        data: The payload it accompanies, which decides how many entries fit.
+        metadata: What the author attached, if anything.
+
+    Returns:
+        The encoded metadata, shaped the way *data* is: one value for a frame,
+        one per frame for a batch.
+
+    Raises:
+        ValueError: If the track cannot carry metadata, the entries do not line
+            up with a batch, or a mapping is not JSON-serialisable.
+    """
+    if metadata is None:
+        return None
+    if info.kind is not TrackKind.VIDEO:
+        raise ValueError(f"track '{info.name}' is audio, which carries no frame metadata")
+    if not isinstance(metadata, list):
+        return _encode_frame_metadata(info.name, metadata)
+    if data.ndim != 4:
+        raise ValueError(
+            f"track '{info.name}' carries one frame, so it takes one metadata value, "
+            f"not a list of {len(metadata)}"
+        )
+    if len(metadata) != data.shape[0]:
+        raise ValueError(
+            f"track '{info.name}' carries {len(metadata)} metadata entries "
+            f"for {data.shape[0]} frames"
+        )
+    return [_encode_frame_metadata(info.name, entry) for entry in metadata]
+
+
+def _encode_frame_metadata(track: str, metadata: Metadata) -> bytes:
+    """Encode one frame's metadata, leaving bytes the author built untouched."""
+    if isinstance(metadata, bytes):
+        return metadata
+    try:
+        return json.dumps(metadata, separators=(",", ":")).encode("utf-8")
+    except TypeError as exc:
+        raise ValueError(f"track '{track}' metadata is not JSON-serialisable: {exc}") from exc
