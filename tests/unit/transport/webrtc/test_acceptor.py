@@ -562,8 +562,10 @@ async def test_negotiation_deadline_reaps_a_connection_that_never_goes_live(
 
     # The connection answered but never fired connected, so the deadline closes
     # it and frees its slot.
-    await acceptor._deadlines[ConnId(7)]
+    _, deadline = acceptor._deadlines[ConnId(7)]
+    await deadline
     assert ConnId(7) not in acceptor._conns
+    assert ConnId(7) not in acceptor._deadlines
     assert fake_peer.closed is True
 
     # The freed slot admits a fresh connection at the single-slot ceiling.
@@ -587,3 +589,56 @@ async def test_the_deadline_is_cancelled_when_the_wire_connects(
     assert ConnId(7) in acceptor._live
     assert fake_peer.closed is False
     fake_peer.fire_disconnect()
+
+
+async def test_a_reconnects_deadline_survives_the_superseded_teardown(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    acceptor = _capped_acceptor(fake_peer, factory_for, limit=1, negotiation_timeout=0.05)
+    await _negotiate(acceptor, ConnId(7), SdpOffer("first"), out_av_tracks)
+
+    # Re-offering closes the superseded connection; that teardown runs after the
+    # new offer armed its deadline and must not carry it off.
+    await _negotiate(acceptor, ConnId(7), SdpOffer("second"), out_av_tracks)
+    assert ConnId(7) in acceptor._deadlines
+
+    # The reconnect never goes live either, so its own deadline reaps it and
+    # frees the slot — re-offering cannot pin a slot for the process's life.
+    _, deadline = acceptor._deadlines[ConnId(7)]
+    await deadline
+    assert ConnId(7) not in acceptor._conns
+    assert ConnId(7) not in acceptor._deadlines
+    acceptor.start_offer(ConnId(8), SdpOffer("third"), out_av_tracks, ProtocolVersion.V0)
+    await acceptor._negotiating[ConnId(8)]
+
+
+async def test_a_failed_negotiation_leaves_no_deadline_behind(
+    fake_peer: FakePeer,
+    out_av_tracks: TrackMap,
+) -> None:
+    def refuses(*args: object, **kwargs: object) -> WebRtcPeerFactory:
+        async def factory(
+            conn_id: ConnId,
+            offer: SdpOffer,
+            tracks: TrackMap,
+            config: WebRtcConfig,
+            version: ProtocolVersion,
+            /,
+        ) -> tuple[WebRTCPeer, SdpAnswer]:
+            raise RuntimeError("no peer today")
+
+        return factory
+
+    acceptor = _capped_acceptor(fake_peer, refuses, limit=1, negotiation_timeout=0.05)
+    for attempt in range(5):
+        acceptor.start_offer(
+            ConnId(100 + attempt), SdpOffer("offer"), out_av_tracks, ProtocolVersion.V0
+        )
+        await acceptor._negotiating[ConnId(100 + attempt)]
+
+    # A failed negotiation reaps its own offer, so its deadline is torn down
+    # with it: repeated failing offers on distinct ids cannot grow the map.
+    assert acceptor._deadlines == {}
+    assert acceptor._offered_at == {}

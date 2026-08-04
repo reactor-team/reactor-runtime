@@ -92,11 +92,14 @@ class WebRTCAcceptor(ConnectionAcceptor):
         # connection opens or is reaped so a client that never arrives leaves
         # nothing behind.
         self._offered_at: dict[ConnId, float] = {}
-        # The deadline task for each in-flight connection: it reaps a connection
-        # that answers but never reaches a live wire, so a stalled half-open
-        # offer cannot hold its slot against the ceiling forever. Cancelled the
-        # moment the connection opens or is torn down.
-        self._deadlines: dict[ConnId, asyncio.Task[None]] = {}
+        # The deadline task for each in-flight connection, keyed with the offer
+        # generation that armed it: it reaps a connection that answers but never
+        # reaches a live wire, so a stalled half-open offer cannot hold its slot
+        # against the ceiling forever. Cancelled the moment the connection opens
+        # or is torn down — but only by its own generation, since a reconnect's
+        # teardown of the superseded connection runs while the new offer's
+        # deadline is already armed and must not carry it off.
+        self._deadlines: dict[ConnId, tuple[float, asyncio.Task[None]]] = {}
 
     def start_offer(
         self,
@@ -157,17 +160,31 @@ class WebRTCAcceptor(ConnectionAcceptor):
         """Start the reaper that frees this connection's slot if it never goes live."""
         if self._config.negotiation_timeout <= 0:
             return
-        self._deadlines[conn_id] = asyncio.create_task(self._enforce_deadline(conn_id, offered_at))
+        self._deadlines[conn_id] = (
+            offered_at,
+            asyncio.create_task(self._enforce_deadline(conn_id, offered_at)),
+        )
 
-    def _cancel_deadline(self, conn_id: ConnId) -> None:
+    def _cancel_deadline(self, conn_id: ConnId, offered_at: float | None = None) -> None:
         """Cancel a connection's negotiation deadline, if one is armed.
 
-        Skips the running deadline task itself, so a reap that tears the
+        With *offered_at*, only a deadline armed by that same offer generation is
+        cancelled: a reconnect tears the superseded connection down after the new
+        offer has already armed its own deadline, and that teardown must not
+        carry the new deadline off — the same ordering :meth:`_drop_offer` guards
+        against. ``None`` cancels unconditionally, for the superseding offer
+        itself. Skips the running deadline task, so a reap that tears the
         connection down (and unwinds through here) does not cancel the very task
         driving it.
         """
-        task = self._deadlines.pop(conn_id, None)
-        if task is not None and task is not asyncio.current_task():
+        entry = self._deadlines.get(conn_id)
+        if entry is None:
+            return
+        armed_at, task = entry
+        if offered_at is not None and armed_at != offered_at:
+            return
+        del self._deadlines[conn_id]
+        if task is not asyncio.current_task():
             task.cancel()
 
     async def _enforce_deadline(self, conn_id: ConnId, offered_at: float) -> None:
@@ -177,30 +194,38 @@ class WebRTCAcceptor(ConnectionAcceptor):
         ``_conns`` holding a ceiling slot, with no watchdog (that arms only on
         connect) to release it. When the deadline passes with the connection
         still not live and still the current offer for its id, it is closed and
-        forgotten so the slot is genuinely tied to a live wire.
+        forgotten so the slot is genuinely tied to a live wire. The task removes
+        its own ``_deadlines`` entry on every exit, so a deadline that outlived
+        its offer cannot pile up under a client-supplied id.
         """
         try:
-            await asyncio.sleep(self._config.negotiation_timeout)
-        except asyncio.CancelledError:
-            return
-        # A newer offer took this id, or the wire came up: nothing to reap.
-        if self._offered_at.get(conn_id) != offered_at or conn_id in self._live:
-            return
-        self._deadlines.pop(conn_id, None)
-        logger.warning("WebRTC connection %s never reached a live wire; reaping its slot", conn_id)
-        negotiating = self._negotiating.pop(conn_id, None)
-        if negotiating is not None:
-            negotiating.cancel()
-        conn = self._conns.get(conn_id)
-        if conn is not None:
-            # close() fires on_closed → _forget, which clears the bookkeeping.
-            await conn.close()
-            return
-        # Negotiation was still in flight or produced nothing, so no connection
-        # exists to close; clear what the offer left behind directly.
-        self._pending_ice.pop(conn_id, None)
-        self._answers.pop(conn_id, None)
-        self._drop_offer(conn_id, offered_at)
+            try:
+                await asyncio.sleep(self._config.negotiation_timeout)
+            except asyncio.CancelledError:
+                return
+            # A newer offer took this id, or the wire came up: nothing to reap.
+            if self._offered_at.get(conn_id) != offered_at or conn_id in self._live:
+                return
+            logger.warning(
+                "WebRTC connection %s never reached a live wire; reaping its slot", conn_id
+            )
+            negotiating = self._negotiating.pop(conn_id, None)
+            if negotiating is not None:
+                negotiating.cancel()
+            conn = self._conns.get(conn_id)
+            if conn is not None:
+                # close() fires on_closed → _forget, which clears the bookkeeping.
+                await conn.close()
+                return
+            # Negotiation was still in flight or produced nothing, so no
+            # connection exists to close; clear what the offer left behind.
+            self._pending_ice.pop(conn_id, None)
+            self._answers.pop(conn_id, None)
+            self._drop_offer(conn_id, offered_at)
+        finally:
+            entry = self._deadlines.get(conn_id)
+            if entry is not None and entry[1] is asyncio.current_task():
+                del self._deadlines[conn_id]
 
     def take_answer(self, conn_id: ConnId) -> SdpAnswer | None:
         """Return and clear the negotiated answer, or ``None`` while still pending."""
@@ -247,7 +272,7 @@ class WebRTCAcceptor(ConnectionAcceptor):
             )
             conn.on_media(lambda track, frame: self._sink.media_received(conn_id, track, frame))
             conn.on_ping(lambda: self._sink.keepalive(conn_id))
-            conn.on_connected(lambda: self._opened(conn_id, conn))
+            conn.on_connected(lambda: self._opened(conn_id, conn, offered_at))
             conn.on_disconnect(lambda: self._closed(conn_id, offered_at))
             conn.on_closed(lambda: self._forget(conn_id, offered_at))
             self._conns[conn_id] = conn
@@ -266,8 +291,10 @@ class WebRTCAcceptor(ConnectionAcceptor):
             raise
         except Exception:
             self._metrics.negotiation_failed(since=offered_at)
-            # No connection was built, so nothing else will ever reap this id.
+            # No connection was built, so nothing else will ever reap this id;
+            # its deadline has nothing left to guard either.
             self._drop_offer(conn_id, offered_at)
+            self._cancel_deadline(conn_id, offered_at)
             logger.exception("WebRTC negotiation failed for connection %s", conn_id)
         finally:
             # Only clear our own entry: a superseding offer may have already
@@ -309,12 +336,16 @@ class WebRTCAcceptor(ConnectionAcceptor):
             return
         pending.append(candidate)
 
-    def _opened(self, conn_id: ConnId, conn: WebRTCConnection) -> None:
-        """Announce a connection upward once its wire is live."""
-        self._cancel_deadline(conn_id)
-        offered_at = self._offered_at.pop(conn_id, None)
-        if offered_at is not None:
-            self._metrics.connected(since=offered_at)
+    def _opened(self, conn_id: ConnId, conn: WebRTCConnection, offered_at: float) -> None:
+        """Announce a connection upward once its wire is live.
+
+        *offered_at* is the generation of the offer that built this connection,
+        so opening cancels only its own deadline and drops only its own offer
+        timestamp — a reconnect already waiting on this id keeps both.
+        """
+        self._cancel_deadline(conn_id, offered_at)
+        self._drop_offer(conn_id, offered_at)
+        self._metrics.connected(since=offered_at)
         self._live.add(conn_id)
         self._sink.connection_opened(conn)
 
@@ -325,7 +356,7 @@ class WebRTCAcceptor(ConnectionAcceptor):
         reaches the sink — the session must not advance for an offer that never
         completed.
         """
-        self._cancel_deadline(conn_id)
+        self._cancel_deadline(conn_id, offered_at)
         self._conns.pop(conn_id, None)
         self._pending_ice.pop(conn_id, None)
         self._answers.pop(conn_id, None)
@@ -343,7 +374,7 @@ class WebRTCAcceptor(ConnectionAcceptor):
         Without this the acceptor would hold a dead connection for the life of
         the process, since a commanded close is silent.
         """
-        self._cancel_deadline(conn_id)
+        self._cancel_deadline(conn_id, offered_at)
         self._conns.pop(conn_id, None)
         self._pending_ice.pop(conn_id, None)
         self._answers.pop(conn_id, None)
