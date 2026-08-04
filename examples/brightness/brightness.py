@@ -12,7 +12,10 @@ It also shows commands that reply with a typed message, so the schema links a
 command to its response: ``set_brightness`` overrides the auto-generated setter
 to return a :class:`BrightnessSet` confirming the value now in effect, and
 ``set_image`` takes an uploaded file and returns an :class:`ImageSet` ack, while
-``get_state`` returns a full :class:`BrightnessSnapshot`. Run this module directly
+``get_state`` returns a full :class:`BrightnessSnapshot`. ``set_image`` also shows
+the other half of a request/response command: a file it cannot use raises
+:class:`CommandError`, and the client receives that code and message. Run this
+module directly
 to print the model's OpenAPI schema and see each message defined once under
 ``components/schemas`` and referenced by ``$ref`` from both its webhook and the
 command's ``responses.200``.
@@ -34,6 +37,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from reactor_runtime import (
     Audio,
+    CommandError,
     Idle,
     InputField,
     InputState,
@@ -171,7 +175,12 @@ class Brightness(ReactorPipeline):
         The ``UploadedFile`` parameter makes the command carry an upload reference
         in its request body; returning an :class:`ImageSet` gives the client a
         confirmation carrying the accepted file's name.
+
+        A file this model cannot use raises :class:`CommandError`, so the caller
+        rejects with a code it can branch on rather than waiting for a reply.
         """
+        if not image.mime_type.startswith("image/"):
+            raise CommandError("unsupported_media", f"{image.name} is not an image.")
         self._reference = image
         logger.info("reference image set", name=image.name, size=len(image.data))
         return ImageSet(filename=image.name)

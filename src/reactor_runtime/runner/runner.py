@@ -23,10 +23,12 @@ import uuid
 from collections.abc import Callable, Coroutine, Mapping
 from typing import Any
 
+from reactor_runtime.codes import INVALID_COMMAND, UNRESOLVED_UPLOAD
 from reactor_runtime.core import (
     JOURNAL_EVENTS,
     ClientConnected,
     ClientDisconnected,
+    CommandFailure,
     Connection,
     ConnectionSink,
     ConnId,
@@ -718,7 +720,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 self._reject_command(
                     command.conn_id,
                     command.request_id,
-                    "unresolved_upload",
+                    UNRESOLVED_UPLOAD,
                     f"command {command.name!r} references an unresolved upload",
                 )
             return
@@ -752,7 +754,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 self._reject_command(
                     command.conn_id,
                     command.request_id,
-                    "invalid_command",
+                    INVALID_COMMAND,
                     outcome.reason or "command rejected",
                 )
 
@@ -817,15 +819,26 @@ class Runner(ServiceComponent, ConnectionSink):
         )
 
     def _send_addressed(
-        self, conn_id: ConnId, message: ModelMessage | None, request_id: str | None
+        self,
+        conn_id: ConnId,
+        message: ModelMessage | CommandFailure | None,
+        request_id: str | None,
     ) -> None:
         """Send a model's reply to one connection, in its codec, correlated.
 
-        A ``None`` message is the bodyless acknowledgement of a command whose
-        handler returned nothing; it is sent only when there is a request id to
-        correlate, and withheld from legacy clients whose commands are
-        fire-and-forget.
+        A :class:`CommandFailure` is a handler's reported failure and travels as
+        an error frame. A ``None`` message is the bodyless acknowledgement of a
+        command whose handler returned nothing. Both are sent only when there is
+        a request id to correlate, so every response the client receives can be
+        matched to the command that caused it, and both are withheld from legacy
+        clients, whose commands are fire-and-forget. A failure is journalled
+        either way, so a reply the client cannot be told about is still auditable.
         """
+        if isinstance(message, CommandFailure):
+            self._on_handler_failure(message, conn_id, request_id)
+            if request_id is not None:
+                self._reject_command(conn_id, request_id, message.code, message.message)
+            return
         if message is None:
             if request_id is None:
                 return
@@ -842,15 +855,41 @@ class Runner(ServiceComponent, ConnectionSink):
             )[1],
         )
 
-    def _reject_command(self, conn_id: ConnId, request_id: str, code: str, detail: str) -> None:
-        """Reject a command the model never saw, correlated by *request_id*.
+    def _on_handler_failure(
+        self, failure: CommandFailure, conn_id: ConnId, request_id: str | None
+    ) -> None:
+        """Journal a handler's failure, hopping onto the loop.
 
-        Covers failures upstream of the model — a payload the contract rejects
-        or an upload that cannot be resolved — where no handler runs and only
-        the runtime can tell the client why. A handler that raises sends
-        nothing: surfacing failures from model code is the model author's
-        choice. The reply is withheld from legacy clients, whose commands are
-        fire-and-forget.
+        The model reports the failure from its own thread, so the journal move is
+        scheduled on the runtime loop, where the state machine and the egress
+        journal are single-writer.
+        """
+        loop = self._loop
+        if loop is not None:
+            loop.call_soon_threadsafe(self._emit_handler_failure, failure, conn_id, request_id)
+
+    def _emit_handler_failure(
+        self, failure: CommandFailure, conn_id: ConnId, request_id: str | None
+    ) -> None:
+        """Journal a handler failure as a self-loop move on the session machine.
+
+        Carries the connection and the request id so the entry lines up with the
+        :attr:`SessionEvent.COMMAND` move that admitted the command, rather than
+        leaving an operator to match the two by timestamp.
+        """
+        self._sm.send(
+            SessionEvent.ERROR,
+            message=f"command handler failed ({failure.code}: {failure.message})",
+            conn_id=conn_id,
+            request_id=request_id,
+        )
+
+    def _reject_command(self, conn_id: ConnId, request_id: str, code: str, detail: str) -> None:
+        """Answer a command with an error, correlated by *request_id*.
+
+        Covers a payload the contract rejects, an upload that cannot be
+        resolved, and a handler that raised. The reply is withheld from legacy
+        clients, whose commands are fire-and-forget.
         """
         self._connections.send_command_ack(
             conn_id,

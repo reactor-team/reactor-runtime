@@ -1,10 +1,10 @@
 """Neutral value vocabulary shared across the runtime.
 
-The plain data every component passes around: connection identifiers, inbound
-and outbound media, the capabilities a transport advertises, and the health a
-component reports. These carry no behaviour beyond small pure helpers and
-depend on nothing else in the package, so they sit at the root of the import
-graph.
+The plain data every component passes around: connection identifiers, command
+failures, inbound and outbound media, the capabilities a transport advertises,
+and the health a component reports. These carry no behaviour beyond small pure
+helpers and depend on nothing else in the package, so they sit at the root of
+the import graph.
 """
 
 from __future__ import annotations
@@ -24,6 +24,24 @@ Allocated centrally so that multiple ingresses cannot collide. A type distinct
 from a bare ``int`` keeps connection ids from being confused with counts,
 indices, or other integers at the boundaries.
 """
+
+
+@dataclass(frozen=True)
+class CommandFailure:
+    """A command's failure, on its way back to the client that issued it.
+
+    What a handler's failure looks like once it leaves model code: the reason a
+    client can read, stripped of the exception that produced it. The runtime
+    carries it out the same path as a successful reply, correlated with the same
+    request id, so an awaiting client rejects rather than waits.
+
+    Attributes:
+        code: Short, stable token the client branches on.
+        message: Readable explanation for the client.
+    """
+
+    code: str
+    message: str
 
 
 @dataclass(frozen=True, eq=False)
