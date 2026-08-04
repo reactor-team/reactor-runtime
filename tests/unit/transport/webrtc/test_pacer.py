@@ -26,8 +26,12 @@ def audio_info(name: str = "audio") -> TrackInfo:
     return TrackInfo(name=name, kind=TrackKind.AUDIO, rate=48_000, direction=TrackDirection.OUT)
 
 
-def video_bundle(data: np.ndarray, name: str = "main") -> MediaBundle:
-    return MediaBundle(tracks={name: TrackData(info=video_info(name), data=data)})
+def video_bundle(
+    data: np.ndarray, name: str = "main", metadata: bytes | list[bytes] | None = None
+) -> MediaBundle:
+    return MediaBundle(
+        tracks={name: TrackData(info=video_info(name), data=data, metadata=metadata)}
+    )
 
 
 def chunk(
@@ -256,6 +260,31 @@ def test_flush_drains_the_queue_and_rearms_the_boundary_black() -> None:
     pacer._emit_one_tick()  # then silence
     assert len(sink.seen) == 2
     assert not sink.seen[1].tracks["main"].data.any()
+
+
+def test_each_frame_of_a_batch_is_paced_out_with_its_own_metadata() -> None:
+    pacer, sink = make_pacer()
+    batch = np.zeros((3, 4, 4, 3), dtype=np.uint8)
+    pacer.submit(chunk(video_bundle(batch, metadata=[b"a", b"b", b"c"]), n_frames=3))
+    for _ in range(3):
+        pacer._emit_one_tick()
+    assert [bundle.tracks["main"].metadata for bundle in sink.seen] == [b"a", b"b", b"c"]
+
+
+def test_a_gap_fill_repeat_carries_the_metadata_of_the_frame_it_repeats() -> None:
+    # The repeat shows the same picture, so a client reading the metadata to
+    # interpret it must be told the same thing about it.
+    pacer, sink = make_pacer()
+    pacer.submit(chunk(video_bundle(np.zeros((4, 4, 3), dtype=np.uint8), metadata=b"pose-7")))
+    pacer._emit_one_tick()  # consumes the real frame
+    pacer._emit_one_tick()  # queue empty -> gap-fill
+    assert [bundle.tracks["main"].metadata for bundle in sink.seen] == [b"pose-7", b"pose-7"]
+
+
+def test_a_black_frame_carries_no_metadata() -> None:
+    pacer, sink = make_pacer()
+    pacer._emit_one_tick()
+    assert sink.seen[0].tracks["main"].metadata is None
 
 
 def test_black_uses_the_dimensions_of_the_last_real_frame() -> None:
