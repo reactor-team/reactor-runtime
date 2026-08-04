@@ -90,17 +90,28 @@ def test_new_conn_id_is_not_reused_after_a_drop() -> None:
     assert first not in later
 
 
-def test_new_conn_id_raises_once_the_id_pool_is_exhausted(
+def test_new_conn_id_raises_when_the_draw_keeps_colliding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A session mints only up to its allowance; the next mint refuses rather than
-    # spinning the random draw looking for a free id in a full pool.
-    monkeypatch.setattr("reactor_runtime.runner.connection_manager._MAX_SESSION_CONN_IDS", 3)
+    # A one-id range is used up after a single mint, so the next mint's draws all
+    # collide and it refuses within the bounded attempts rather than spinning.
+    monkeypatch.setattr("reactor_runtime.runner.connection_manager._MIN_CONN_ID", 1002)
+    monkeypatch.setattr("reactor_runtime.runner.connection_manager._MAX_CONN_ID", 1002)
     cm, _ = waiting_manager()
-    minted = {cm.new_conn_id() for _ in range(3)}
-    assert len(minted) == 3
+    assert int(cm.new_conn_id()) == 1002
     with pytest.raises(ConnectionsExhaustedError):
         cm.new_conn_id()
+
+
+def test_new_conn_id_still_mints_when_some_ids_are_taken(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A dense but not full range still yields the free id within the attempt
+    # bound: the allowance is not a lifetime cap, only a spin guard.
+    monkeypatch.setattr("reactor_runtime.runner.connection_manager._MIN_CONN_ID", 1002)
+    monkeypatch.setattr("reactor_runtime.runner.connection_manager._MAX_CONN_ID", 1003)
+    cm, _ = waiting_manager()
+    assert {int(cm.new_conn_id()), int(cm.new_conn_id())} == {1002, 1003}
 
 
 @pytest.mark.asyncio

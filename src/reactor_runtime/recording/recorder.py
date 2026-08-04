@@ -277,6 +277,10 @@ class Recorder:
         self._session_id = session_id
         self._session_dir = self._root / self._session_id
         self._session_dir.mkdir(parents=True, exist_ok=True)
+        # A session recorded under an id used before inherits that run's
+        # completion marker. Clear it before the workers start, so the reaper
+        # never reads a live recording as finished and deletes it mid-write.
+        (self._session_dir / _COMPLETE_MARKER).unlink(missing_ok=True)
         self._markers = MarkerBookkeeper()
         self._feed_stop.clear()
         self._watch_stop.clear()
@@ -374,15 +378,18 @@ class Recorder:
         """Delete every finished recording whose retention window has passed.
 
         A recording ages out once its completion marker is older than the
-        retention window. A recording still in progress carries no marker and is
-        skipped, so the live session's directory is never removed no matter how
-        long the session runs.
+        retention window. The live session's directory is skipped outright, and a
+        recording still in progress carries no marker anyway, so an active
+        recording is never removed no matter how long the session runs.
         """
         root = self._root
         if root is None:
             return
+        active = self._session_dir
         for session_dir in root.iterdir():
             if not session_dir.is_dir():
+                continue
+            if active is not None and session_dir == active:
                 continue
             marker = session_dir / _COMPLETE_MARKER
             try:

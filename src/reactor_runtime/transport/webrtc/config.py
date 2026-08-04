@@ -114,6 +114,11 @@ class WebRtcConfig:
             can be driven to build: an offer for a new connection past the
             ceiling is refused, while a re-offer on a live connection (a
             reconnect) is always admitted. ``0`` or less removes the ceiling.
+        negotiation_timeout: Seconds a connection has to reach its live wire
+            after its offer lands. A connection that answers but never completes
+            ICE is closed and its slot freed once this passes, so a stalled or
+            hostile half-open offer cannot hold a slot against ``max_connections``
+            for the process's life. ``0`` or less disables the deadline.
     """
 
     ice_servers: tuple[IceServer, ...] = ()
@@ -135,3 +140,4 @@ class WebRtcConfig:
     upnp: bool = False
     ice_gathering_timeout_ms: int = 3000
     max_connections: int = 64
+    negotiation_timeout: float = 30.0

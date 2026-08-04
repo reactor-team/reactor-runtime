@@ -430,3 +430,36 @@ def test_close_is_idempotent_when_the_reaper_never_started(tmp_path: Path) -> No
     recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
     recorder.close()
     recorder.close()
+
+
+def test_start_clears_a_stale_completion_marker_from_a_reused_id(tmp_path: Path) -> None:
+    # A recording started under an id used before must not inherit the earlier
+    # run's completion marker, or the reaper would read the live recording as
+    # finished and delete it mid-write.
+    session_dir = tmp_path / _SID
+    session_dir.mkdir(parents=True)
+    (session_dir / ".complete").write_text("")
+    recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
+    recorder.start(_SID)
+    try:
+        assert not (session_dir / ".complete").exists()
+    finally:
+        recorder.stop()
+        recorder.close()
+
+
+def test_reap_skips_the_active_recording_even_with_a_stale_marker(tmp_path: Path) -> None:
+    recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
+    recorder.start(_SID)
+    try:
+        active = recorder._session_dir
+        assert active is not None
+        marker = active / ".complete"
+        marker.write_text("")
+        old = time.time() - _RETENTION_SECONDS * 2
+        os.utime(marker, (old, old))
+        recorder._reap_expired(time.time())
+        assert active.exists()
+    finally:
+        recorder.stop()
+        recorder.close()

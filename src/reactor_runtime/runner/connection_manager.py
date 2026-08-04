@@ -33,12 +33,13 @@ from reactor_runtime.transport.router import ConnectionsExhaustedError
 _MIN_CONN_ID = 1002
 _MAX_CONN_ID = 9999
 
-# The most ids one session may mint. Ids are retained for the session's life
-# (never reused after a drop), so this bounds the used pool well below the id
-# range: minting stays a cheap random draw with a low collision rate, and an
-# exhausted pool raises rather than spinning the draw forever. Far above any
-# real session's connection count.
-_MAX_SESSION_CONN_IDS = 4096
+# The most times a mint redraws before giving up. Bounding the draw count keeps
+# allocation from spinning the event loop when the id space is dense, without
+# imposing a lifetime allowance that would let a client lock out registration by
+# minting far below the space. With any realistic number of live-plus-retained
+# ids the first draw is almost always free, so this is only ever approached when
+# the space is genuinely near-full.
+_MAX_MINT_ATTEMPTS = 100
 
 
 class ConnectionManager:
@@ -79,17 +80,17 @@ class ConnectionManager:
         of one that has since dropped; the pool clears on session teardown.
 
         Raises:
-            ConnectionsExhaustedError: If the session has minted its whole
-                allowance of ids. Raising bounds the draw: it never loops
-                looking for a free id in a full pool.
+            ConnectionsExhaustedError: If a free id is not drawn within the
+                bounded number of attempts, which only happens when the id space
+                is near-full. Raising bounds the draw: it never loops looking for
+                a free id in a full pool.
         """
-        if len(self._used_conn_ids) >= _MAX_SESSION_CONN_IDS:
-            raise ConnectionsExhaustedError
-        while True:
+        for _ in range(_MAX_MINT_ATTEMPTS):
             conn_id = ConnId(random.randint(_MIN_CONN_ID, _MAX_CONN_ID))
             if conn_id not in self._used_conn_ids:
                 self._used_conn_ids.add(conn_id)
                 return conn_id
+        raise ConnectionsExhaustedError
 
     def register(self, conn: Connection) -> None:
         """Add a connection and advance the session for it.
