@@ -74,6 +74,53 @@ container at run time. The runtime resolves it to an absolute path and hands
 body that indexed a dict needs the parse line above prepended; the rest is
 unchanged.
 
+## Connection counting breaks — use `@session_started` for per-session init
+
+Two lifecycle semantics differ on this runtime, and together they silently
+break a pattern common in models written against older runtimes: gating
+"first client of a session" initialization on a connection counter.
+
+```python
+# broken here
+@connected
+async def on_connect(self) -> None:
+    if self._connected_count == 0:
+        self.state._prompt_schedule = {}
+    self._connected_count += 1
+
+@disconnected
+async def on_disconnect(self) -> None:
+    self._connected_count -= 1
+```
+
+Why it fails: when the session itself ends (for example, closed through the
+API while clients are attached), the runtime tears the connections down
+wholesale — the model hears `@session_ended` once, **not** one
+`@disconnected` per client. `@disconnected` fires only when a client itself
+drops mid-session. So after any server-side session end, the counter never
+returns to zero. Meanwhile `self.state` is rebuilt fresh for every session,
+its private fields back at their class defaults. From the second session
+onward the init branch never runs and the model works against default state —
+typically a `None` where the first session had a dict, surfacing as a
+`TypeError` in a handler or, worse, inside the inference loop. Single-session
+testing passes; only a second session on the same process exposes it.
+
+Hook the session, not the clients:
+
+```python
+@session_started
+async def on_session_started(self) -> None:
+    self.state._prompt_schedule = {}
+```
+
+`@session_started` fires exactly once per session, before any client
+connects. If first-vs-later-client logic *within* one session is genuinely
+needed, keep the flag on `self.state`: it is session-scoped by construction,
+so it cannot leak into the next session the way an attribute on the model
+instance does. Audit every use of a connection counter when porting —
+teardown logic hung off `@disconnected` (dropping caches, releasing a
+sub-session) has the same blind spot and belongs in `@session_ended`.
+
 ## Profiler imports are gone — strip them
 
 `get_profiler` and the whole `reactor_runtime.profiling` module
