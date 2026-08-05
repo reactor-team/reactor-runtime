@@ -113,10 +113,16 @@ class TrackData:
         data: Payload array. Video is ``(H, W, 3)`` ``uint8`` RGB for one frame
             (or ``(N, H, W, 3)`` for a batch); audio is ``(1, M)`` ``int16``
             mono samples.
+        metadata: Serialised application metadata the transport carries
+            alongside the payload, or ``None`` for none. Follows the shape of
+            :attr:`data`: one value for a single frame, or one value per frame
+            for a batch, which :func:`split_batch` resolves down to a single
+            value per frame.
     """
 
     info: TrackInfo
     data: npt.NDArray[Any]
+    metadata: bytes | list[bytes] | None = None
 
 
 @dataclass
@@ -176,6 +182,10 @@ def split_batch(bundle: MediaBundle) -> list[MediaBundle]:
     and is repeated into every frame. Audio is divided proportionally across the
     frames. All batched video tracks must agree on ``N``.
 
+    A track's metadata follows its payload: a list carries one entry per frame
+    and is distributed across them, while a single value is repeated onto every
+    frame, the same way an unbatched video payload is.
+
     Args:
         bundle: The bundle to split.
 
@@ -184,7 +194,8 @@ def split_batch(bundle: MediaBundle) -> list[MediaBundle]:
         there is nothing to split.
 
     Raises:
-        ValueError: If two batched video tracks disagree on the batch size.
+        ValueError: If two batched video tracks disagree on the batch size, or a
+            track's metadata list does not cover every frame.
     """
     video_tracks = bundle.get_tracks_by_kind(TrackKind.VIDEO)
     if not video_tracks:
@@ -195,13 +206,25 @@ def split_batch(bundle: MediaBundle) -> list[MediaBundle]:
         return [bundle]
 
     n_frames = batched[0][1]
+    for track in bundle.get_tracks():
+        if isinstance(track.metadata, list) and len(track.metadata) != n_frames:
+            raise ValueError(
+                f"Track '{track.info.name}' carries {len(track.metadata)} metadata "
+                f"entries for {n_frames} frames"
+            )
+
     if n_frames == 1:
         # Squeeze the batch dimension into a fresh bundle rather than editing the
         # caller's: the multi-frame path below also leaves the input untouched,
         # and a producer must be able to read back what it submitted.
-        squeezed = dict(bundle.tracks)
-        for track, _ in batched:
-            squeezed[track.info.name] = TrackData(info=track.info, data=track.data[0])
+        squeezed = {
+            name: TrackData(
+                info=track.info,
+                data=track.data[0] if track.data.ndim == 4 else track.data,
+                metadata=_frame_metadata(track, 0),
+            )
+            for name, track in bundle.tracks.items()
+        }
         return [MediaBundle(tracks=squeezed)]
 
     for track, size in batched:
@@ -225,16 +248,29 @@ def split_batch(bundle: MediaBundle) -> list[MediaBundle]:
             audio = audio.reshape(1, -1)
         audio_splits[track.info.name] = np.array_split(audio, n_frames, axis=1)
 
-    info_by_name = {track.info.name: track.info for track in bundle.get_tracks()}
+    by_name = {track.info.name: track for track in bundle.get_tracks()}
     result: list[MediaBundle] = []
     for index in range(n_frames):
         tracks: dict[str, TrackData] = {}
-        for name, frames in video_splits.items():
-            tracks[name] = TrackData(info=info_by_name[name], data=frames[index])
-        for name, chunks in audio_splits.items():
-            tracks[name] = TrackData(info=info_by_name[name], data=chunks[index])
+        for name, payloads in (*video_splits.items(), *audio_splits.items()):
+            source = by_name[name]
+            tracks[name] = TrackData(
+                info=source.info,
+                data=payloads[index],
+                metadata=_frame_metadata(source, index),
+            )
         result.append(MediaBundle(tracks=tracks))
     return result
+
+
+def _frame_metadata(track: TrackData, index: int) -> bytes | None:
+    """Return the metadata frame *index* of *track* carries, if any.
+
+    A list holds one entry per frame; a single value belongs to every frame.
+    """
+    if isinstance(track.metadata, list):
+        return track.metadata[index]
+    return track.metadata
 
 
 @dataclass(frozen=True)
