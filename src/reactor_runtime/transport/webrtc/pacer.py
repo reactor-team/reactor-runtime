@@ -6,7 +6,9 @@ at whatever rate its compute finishes; a client needs frames at a smooth, steady
 cadence. :class:`MediaPacer` is the seam between the two on one WebRTC
 connection: it takes the connection's share of each chunk, splits any batch into
 single frames, and a dedicated thread drains them to the wire at the chunk's
-declared rate, repeating the last frame to fill a gap so the stream never stalls.
+declared rate. When the queue runs dry nothing is sent — the client keeps the
+frame it has — and a single black frame marks each boundary (connection start,
+or a flush) so the wire never replays stale content.
 
 One pacer lives per connection and dies with it, so there is no cross-session
 state to reset — a fresh connection starts with a fresh pacer. Everything above it hands the
@@ -40,9 +42,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_FRAME_DIMENSIONS: tuple[int, int, int] = (720, 1280, 3)
 """Black-frame shape used until the first real video frame reveals the true size."""
 
-CHUNKS_OF_HEADROOM = 2
-"""Chunks the queue grows to hold: one draining while the next one is produced."""
-
 FrameSink = Callable[[MediaBundle], None]
 """Receives one single-frame bundle per tick, at the pacer's cadence."""
 
@@ -52,16 +51,17 @@ class MediaPacer:
 
     The producer calls :meth:`submit`; a dedicated thread, started by
     :meth:`start`, delivers one frame per tick to the frame sink. When no new
-    frame is ready the last one is repeated (a gap-fill) so the wire stays live;
-    before the first real frame a black frame stands in.
+    frame is ready nothing is sent — the client keeps its current frame;
+    a single black frame stands in at each boundary (connection start, or a
+    flush) before real media arrives.
 
     Args:
         video_tracks: The connection's outbound video tracks, used to synthesise
             black frames before the first real frame arrives.
         on_frame: The sink one single-frame bundle is handed to each tick.
-        queue_depth: The floor on how many frames may sit queued. The real
-            capacity grows with the chunks the model turns out to emit, so a
-            model that batches is never bounded below one of its own chunks.
+        queue_depth: How many frames may sit queued between the model and the
+            wire — the buffered-latency bound. Never applied below one chunk,
+            so a model that batches always fits a whole chunk.
         fps: The initial pacing rate, used until the first chunk sets its own.
     """
 
@@ -78,11 +78,17 @@ class MediaPacer:
         }
         self._on_frame = on_frame
 
-        # The queue is unbounded in itself; `_capacity` is the bound, checked on
-        # submit so it can grow once the first chunk reveals how much media a
-        # model hands over at a time.
+        # The queue is unbounded in itself; the depth is the bound, checked on
+        # submit. The effective capacity never sits below one chunk, so a
+        # batching model always fits a whole chunk regardless of the depth.
         self._queue: queue.Queue[MediaBundle] = queue.Queue()
-        self._capacity = queue_depth
+        self._depth = queue_depth
+        # Signalled by the pacing thread after each dequeue so a blocking
+        # submit (chunk.wait) can sleep until room opens instead of polling.
+        self._room = threading.Condition()
+        # Bumped by flush(); a submit in flight notices and abandons the
+        # rest of its chunk, so flushed content cannot trickle back in.
+        self._epoch = 0
 
         self._interval = 1.0 / fps if fps > 0 else 1.0 / 30.0
 
@@ -92,22 +98,25 @@ class MediaPacer:
         self._stop.set()
         self._lifecycle_lock = threading.Lock()
 
-        self._last_emitted: MediaBundle | None = None
+        # One black frame marks a boundary (start of the connection, or a
+        # flush); after it the pacer stays silent until real media arrives,
+        # so the wire carries only frames the model actually produced.
+        self._boundary_black_pending = True
         self._frame_dims: tuple[int, int, int] | None = None
 
     def submit(self, chunk: MediaChunk) -> int:
         """Split *chunk* into single frames, adopt its rate, and enqueue them.
 
         The pacing rate is updated to the chunk's ``fps`` so a dynamic-rate model
-        paces at the throughput it is actually producing, and the capacity grows
-        to :data:`CHUNKS_OF_HEADROOM` of them, so a whole chunk always fits with
-        room for its successor. A model that emits a batch per inference would
-        otherwise lose most of every batch to a bound smaller than one chunk, and
-        the wire would hold on the last frame until the next chunk arrived.
+        paces at the throughput it is actually producing. The queue bound is the
+        configured depth, never applied below one chunk, so a batching model
+        always fits a whole chunk.
 
-        Frames beyond the capacity are dropped from the tail rather than blocking
-        the producer, which runs on the model thread and must never stall on one
-        slow connection.
+        When the chunk asks for backpressure (``chunk.wait``), a full queue makes
+        this call wait until the pacing thread drains room — throttling the
+        producer to the playout rate. Otherwise frames beyond the capacity are
+        dropped from the tail, so a producer that prefers skipping to waiting
+        never stalls.
 
         Args:
             chunk: A finished media chunk, possibly batched.
@@ -117,20 +126,77 @@ class MediaPacer:
         """
         if chunk.fps > 0:
             self._interval = 1.0 / chunk.fps
-        self._capacity = max(self._capacity, CHUNKS_OF_HEADROOM * chunk.n_frames)
+        epoch = self._epoch
         enqueued = 0
+        aborted = False
         for frame in chunk.frames():
-            if self._queue.qsize() >= self._capacity:
-                break
+            # One authoritative bound: the configured depth, never below one
+            # chunk so a batching model's whole chunk always fits. Re-read
+            # each iteration so a concurrent set_depth applies mid-chunk.
+            capacity = max(self._depth, chunk.n_frames)
+            if chunk.wait:
+                with self._room:
+                    while (
+                        not self._stop.is_set()
+                        and self._epoch == epoch
+                        and self._queue.qsize() >= capacity
+                    ):
+                        self._room.wait(timeout=0.1)
+                if self._stop.is_set() or self._epoch != epoch:
+                    aborted = True
+                    break
+            else:
+                # A flush mid-chunk abandons the rest of it on this path too;
+                # the flushed run's tail must not trickle in after the cut.
+                if self._epoch != epoch:
+                    aborted = True
+                    break
+                if self._queue.qsize() >= capacity:
+                    break
             self._queue.put_nowait(frame)
             enqueued += 1
-        if enqueued < chunk.n_frames:
+        if enqueued < chunk.n_frames and not chunk.wait and not aborted:
             logger.warning(
                 "Media pacer queue full; dropped %d of %d frames",
                 chunk.n_frames - enqueued,
                 chunk.n_frames,
             )
         return enqueued
+
+    def set_rate(self, fps: float) -> None:
+        """Set the playout rate, re-pacing already-queued frames immediately.
+
+        A subsequent chunk's own ``fps`` tag supersedes it, so this is the
+        between-emits control rather than a pin.
+        """
+        if fps > 0:
+            self._interval = 1.0 / fps
+
+    def set_depth(self, depth: int) -> None:
+        """Set the queue bound, waking any producer blocked on the old one."""
+        if depth <= 0:
+            return
+        with self._room:
+            self._depth = depth
+            self._room.notify_all()
+
+    def flush(self) -> None:
+        """Drop queued frames and cut playout to black.
+
+        The queue is drained, the boundary black re-armed, and any producer
+        blocked in a backpressure submit abandons the rest of its chunk — so
+        the next tick emits a black frame and none of the flushed content
+        plays afterwards.
+        """
+        with self._room:
+            self._epoch += 1
+            while True:
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    break
+            self._boundary_black_pending = True
+            self._room.notify_all()
 
     def start(self) -> None:
         """Start the pacing thread, idempotently."""
@@ -153,6 +219,10 @@ class MediaPacer:
             self._stop.set()
             thread = self._thread
             self._thread = None
+        # Wake any producer blocked in a backpressure submit, so teardown
+        # cannot deadlock behind a queue nobody will drain.
+        with self._room:
+            self._room.notify_all()
         if thread is not None:
             thread.join(timeout=2.0)
             if thread.is_alive():
@@ -178,22 +248,30 @@ class MediaPacer:
             self._stop.set()
 
     def _emit_one_tick(self) -> None:
-        """Emit the next queued frame, or a gap-fill duplicate, or black."""
+        """Emit the next queued frame, or the one boundary black, or nothing.
+
+        An empty queue sends nothing: the client keeps showing the frame it
+        already has, and no bandwidth is spent repeating it. The single black
+        frame marks a boundary (connection start or flush) so the client
+        transitions off stale content exactly once.
+        """
         try:
             item = self._queue.get_nowait()
         except queue.Empty:
             item = None
+        else:
+            with self._room:
+                self._room.notify_all()
 
         if item is not None:
             video = item.get_tracks_by_kind(TrackKind.VIDEO)
             if video and video[0].data.ndim == 3:
                 shape = video[0].data.shape
                 self._frame_dims = (shape[0], shape[1], shape[2])
-            self._last_emitted = item
+            self._boundary_black_pending = False
             self._dispatch(item)
-        elif self._last_emitted is not None:
-            self._dispatch(self._video_only(self._last_emitted))
-        else:
+        elif self._boundary_black_pending:
+            self._boundary_black_pending = False
             self._dispatch(self._black_bundle())
 
     def _dispatch(self, bundle: MediaBundle) -> None:
@@ -217,21 +295,6 @@ class MediaPacer:
                 return
             if remaining > self._SLEEP_CHUNK and self._stop.wait(timeout=self._SLEEP_CHUNK):
                 return
-
-    @staticmethod
-    def _video_only(bundle: MediaBundle) -> MediaBundle:
-        """Return a copy of *bundle* carrying only its video tracks.
-
-        A gap-fill repeats the last video frame but not its audio, which would
-        otherwise be replayed and heard as a stutter.
-        """
-        return MediaBundle(
-            tracks={
-                name: track
-                for name, track in bundle.tracks.items()
-                if track.info.kind is TrackKind.VIDEO
-            }
-        )
 
     def _black_bundle(self) -> MediaBundle:
         """Build a black frame for each outbound video track."""

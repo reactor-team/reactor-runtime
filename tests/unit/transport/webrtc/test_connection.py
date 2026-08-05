@@ -122,6 +122,22 @@ async def test_send_media_paces_a_chunk_to_the_peer(
     assert delivered.tracks["main_video"].data.shape == (4, 4, 3)
 
 
+async def test_playout_operations_reach_the_pacer(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    conn = await _connect(fake_peer, factory_for(fake_peer), out_av_tracks)
+    conn.set_media_rate(50.0)
+    assert conn._pacer._interval == 1.0 / 50.0
+    conn.set_media_depth(3)
+    assert conn._pacer._depth == 3
+    conn.send_media(_video_chunk())
+    conn.flush_media()
+    assert conn._pacer._queue.qsize() == 0
+    await conn.close()
+
+
 async def test_send_media_stops_pacing_after_close(
     fake_peer: FakePeer,
     factory_for: Callable[..., WebRtcPeerFactory],

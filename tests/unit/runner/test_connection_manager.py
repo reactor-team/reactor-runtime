@@ -36,6 +36,9 @@ class FakeConnection:
         self.resumed: list[str] = []
         self.paused: list[str] = []
         self.closed = False
+        self.flushed = False
+        self.media_rate: float | None = None
+        self.media_depth: int | None = None
 
     def send_message(self, payload: bytes | str) -> None:
         self.messages.append(payload)
@@ -45,6 +48,15 @@ class FakeConnection:
 
     def send_media(self, chunk: MediaChunk) -> None:
         self.media.append(chunk)
+
+    def flush_media(self) -> None:
+        self.flushed = True
+
+    def set_media_rate(self, fps: float) -> None:
+        self.media_rate = fps
+
+    def set_media_depth(self, depth: int) -> None:
+        self.media_depth = depth
 
     def resume_track(self, name: str) -> None:
         self.resumed.append(name)
@@ -297,6 +309,47 @@ def test_media_skips_data_only_connections() -> None:
     cm.broadcast_media(chunk)
     assert media.media == [chunk]
     assert data_only.media == []
+
+
+def test_broadcast_media_aborts_between_connections() -> None:
+    cm, _ = waiting_manager()
+    a, b = FakeConnection(1), FakeConnection(2)
+    cm.register(a)
+    cm.register(b)
+    chunk = MediaChunk(bundle=MediaBundle(), fps=30.0, n_frames=1)
+    # The abort flips once the first connection has media, so the second
+    # never receives the chunk — the flush-mid-fan-out contract.
+    cm.broadcast_media(chunk, abort=lambda: len(a.media) > 0)
+    assert a.media == [chunk]
+    assert b.media == []
+
+
+def test_flush_media_reaches_every_connection() -> None:
+    cm, _ = waiting_manager()
+    a, b = FakeConnection(1), FakeConnection(2)
+    cm.register(a)
+    cm.register(b)
+    cm.flush_media()
+    assert a.flushed
+    assert b.flushed
+
+
+def test_set_media_rate_reaches_every_connection() -> None:
+    cm, _ = waiting_manager()
+    a, b = FakeConnection(1), FakeConnection(2)
+    cm.register(a)
+    cm.register(b)
+    cm.set_media_rate(24.0)
+    assert (a.media_rate, b.media_rate) == (24.0, 24.0)
+
+
+def test_set_media_depth_reaches_every_connection() -> None:
+    cm, _ = waiting_manager()
+    a, b = FakeConnection(1), FakeConnection(2)
+    cm.register(a)
+    cm.register(b)
+    cm.set_media_depth(8)
+    assert (a.media_depth, b.media_depth) == (8, 8)
 
 
 def test_first_publisher_wins_and_resumes_the_track() -> None:

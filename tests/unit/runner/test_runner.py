@@ -48,6 +48,7 @@ from reactor_runtime.interface.internal.bridge import CommandOutcome
 from reactor_runtime.interface.internal.reactor_core import (
     AddressedSink,
     BroadcastSink,
+    MediaOps,
     MediaSink,
 )
 from reactor_runtime.message_gateway import InboundCommand
@@ -104,10 +105,17 @@ class FakeModel(ReactorModel):
         self.loaded = config_path
 
     def bind_output(
-        self, *, broadcast: BroadcastSink, addressed: AddressedSink, media: MediaSink
+        self,
+        *,
+        broadcast: BroadcastSink,
+        addressed: AddressedSink,
+        media: MediaSink,
+        media_ops: MediaOps | None = None,
     ) -> None:
         self.events.append("bind")
-        super().bind_output(broadcast=broadcast, addressed=addressed, media=media)
+        super().bind_output(
+            broadcast=broadcast, addressed=addressed, media=media, media_ops=media_ops
+        )
 
     def start_thread(self) -> None:
         self.events.append("start")
@@ -133,6 +141,9 @@ class FakeConnection:
         self.sent: list[bytes | str] = []
         self.control: list[bytes | str] = []
         self.closed = False
+        self.media_rate: float | None = None
+        self.media_depth: int | None = None
+        self.flushed = False
 
     def send_message(self, payload: bytes | str) -> None:
         self.sent.append(payload)
@@ -141,6 +152,15 @@ class FakeConnection:
         self.control.append(payload)
 
     def send_media(self, chunk: MediaChunk) -> None: ...
+
+    def flush_media(self) -> None:
+        self.flushed = True
+
+    def set_media_rate(self, fps: float) -> None:
+        self.media_rate = fps
+
+    def set_media_depth(self, depth: int) -> None:
+        self.media_depth = depth
 
     def resume_track(self, name: str) -> None: ...
 
@@ -234,6 +254,57 @@ def test_broadcast_encodes_a_model_message_and_fans_it_out() -> None:
     assert isinstance(decoded, data_pb2.DataServerMessage)
     assert decoded.message.type == "greeting"
     assert struct_to_dict(decoded.message.data) == {"text": "hello"}
+
+
+def test_playout_settings_fan_out_and_reach_a_late_joiner() -> None:
+    # The model's output-handle operations land on every live connection and
+    # are remembered, so a connection opening later starts with them.
+    runner = _runner()
+    early = FakeConnection(1)
+    runner.connection_opened(early)
+
+    runner._set_media_rate(24.0)
+    runner._set_media_depth(8)
+    late = FakeConnection(2)
+    runner.connection_opened(late)
+
+    assert (early.media_rate, early.media_depth) == (24.0, 8)
+    assert (late.media_rate, late.media_depth) == (24.0, 8)
+
+
+def test_flush_media_cuts_every_connection() -> None:
+    runner = _runner()
+    a, b = FakeConnection(1), FakeConnection(2)
+    runner.connection_opened(a)
+    runner.connection_opened(b)
+
+    runner._flush_media()
+
+    assert a.flushed
+    assert b.flushed
+
+
+def test_a_flush_during_fan_out_abandons_the_remaining_connections() -> None:
+    # A flush landing mid-broadcast must cut every connection: the chunk being
+    # fanned out belongs to the flushed run and may reach no further wire.
+    runner = _runner()
+    delivered: list[ConnId] = []
+
+    class Flushing(FakeConnection):
+        def send_media(self, chunk: MediaChunk) -> None:
+            delivered.append(self.id)
+            runner._flush_media()
+
+    class Recording(FakeConnection):
+        def send_media(self, chunk: MediaChunk) -> None:
+            delivered.append(self.id)
+
+    runner.connection_opened(Flushing(1))
+    runner.connection_opened(Recording(2))
+
+    runner._emit_media(MediaChunk(bundle=MediaBundle(), fps=30.0, n_frames=1))
+
+    assert delivered == [ConnId(1)]
 
 
 def test_addressed_send_reaches_only_the_target() -> None:

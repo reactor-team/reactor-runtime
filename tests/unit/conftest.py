@@ -12,8 +12,8 @@ scope.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable, Iterator
-from typing import get_type_hints
 
 import pytest
 
@@ -56,10 +56,19 @@ def _register(*classes: type) -> None:
 
 
 def _register_model(model_cls: type) -> None:
-    """Re-register a model's full client-facing surface into the registries."""
-    for hint in get_type_hints(model_cls).values():
-        if isinstance(hint, type) and issubclass(hint, (Output, Input)):
-            _register(hint)
+    """Re-register a model's full client-facing surface into the registries.
+
+    Track classes register when they are *defined*, so the replay walks the
+    model's module for every module-level ``Output`` / ``Input`` subclass —
+    the registrations that module's import made before the per-test clear.
+    Track classes defined inside test functions stay invisible, preserving
+    per-test isolation.
+    """
+    module = sys.modules.get(model_cls.__module__)
+    if module is not None:
+        for obj in vars(module).values():
+            if isinstance(obj, type) and issubclass(obj, (Output, Input)):
+                _register(obj)
     for name, spec in ModelContract.of(model_cls).commands.items():
         EVENT_REGISTRY[name] = spec.command
         if spec.response is not None:
@@ -81,8 +90,9 @@ def register() -> Callable[..., None]:
 def register_model() -> Callable[[type], None]:
     """Return a helper that re-registers a model's full surface after the clear.
 
-    Restores the track holders the model annotates, every command its handlers
-    declare, and the message types those commands reply with — the registrations
-    a class declaration makes at import, replayed after a per-test clear.
+    Restores the track classes the model's module declares, every command its
+    handlers declare, and the message types those commands reply with — the
+    registrations a class declaration makes at import, replayed after a
+    per-test clear.
     """
     return _register_model

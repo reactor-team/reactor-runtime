@@ -127,7 +127,6 @@ class Brightness(ReactorPipeline):
     """Generate an animated gradient and tone whose look and pitch track the state."""
 
     state: BrightnessState
-    output: BrightnessOutput
     fps = FPS
     _reference: UploadedFile | None = None
 

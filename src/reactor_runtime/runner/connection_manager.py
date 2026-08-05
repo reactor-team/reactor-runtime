@@ -279,17 +279,43 @@ class ConnectionManager:
         else:
             conn.send_message(frame)
 
-    def broadcast_media(self, chunk: MediaChunk) -> None:
+    def broadcast_media(
+        self, chunk: MediaChunk, *, abort: Callable[[], bool] | None = None
+    ) -> None:
         """Send a media chunk to every connection whose wire carries media.
 
         Data-only connections are skipped rather than relying on a silent no-op, so
         a chunk only reaches a wire that can deliver it. Each connection paces the
         chunk itself, so this fans the same unpaced chunk out and does no timing.
+
+        Args:
+            chunk: The unpaced chunk to fan out.
+            abort: Checked before each connection; a truthy result abandons
+                the rest of the fan-out. The runner points it at its flush
+                generation so a chunk flushed mid-broadcast reaches no
+                further connection.
         """
         for conn in self._by_id.values():
+            if abort is not None and abort():
+                return
             caps = conn.capabilities
             if caps.carries_video or caps.carries_audio:
                 conn.send_media(chunk)
+
+    def flush_media(self) -> None:
+        """Drop every connection's queued media and cut playout to black."""
+        for conn in self._by_id.values():
+            conn.flush_media()
+
+    def set_media_rate(self, fps: float) -> None:
+        """Re-pace every connection's queued media at *fps* immediately."""
+        for conn in self._by_id.values():
+            conn.set_media_rate(fps)
+
+    def set_media_depth(self, depth: int) -> None:
+        """Bound every connection's media queue at *depth* frames."""
+        for conn in self._by_id.values():
+            conn.set_media_depth(depth)
 
     def note_keepalive(self, cid: ConnId) -> None:
         """Record a per-connection liveness ping.

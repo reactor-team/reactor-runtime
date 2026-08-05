@@ -43,7 +43,6 @@ class State(InputState):
 
 class Pipe(ReactorPipeline):
     state: State
-    output: Frame
     fps = 12
 
     def inference(self) -> Iterator[Frame]:
@@ -105,7 +104,6 @@ def test_auto_setters_render_though_they_never_enter_the_event_registry() -> Non
 
     class LocalPipe(ReactorPipeline):
         state: LocalState
-        output: Frame
 
         def inference(self) -> Iterator[Frame]:
             while True:
@@ -119,7 +117,6 @@ def test_auto_setters_render_though_they_never_enter_the_event_registry() -> Non
 def test_a_custom_event_shadows_the_generated_setter() -> None:
     class Custom(ReactorPipeline):
         state: State
-        output: Frame
 
         @event(name="set_speed", description="hand written")
         def set_speed(self, speed: float = InputField(default=2.0)) -> None:
@@ -136,8 +133,6 @@ def test_a_custom_event_shadows_the_generated_setter() -> None:
 
 def test_missing_state_annotation_raises_on_instantiation() -> None:
     class NoState(ReactorPipeline):
-        output: Frame
-
         def inference(self) -> Iterator[Frame]:
             yield _frame()
 
@@ -252,7 +247,6 @@ async def test_advance_rejects_a_non_output_yield() -> None:
 
 class FixedRecorder(ReactorPipeline):
     state: State
-    output: Frame
     fps = 12
 
     def __init__(self) -> None:
@@ -273,7 +267,6 @@ class FixedRecorder(ReactorPipeline):
 
 class DynamicRecorder(ReactorPipeline):
     state: State
-    output: Frame
 
     def __init__(self) -> None:
         super().__init__()
@@ -336,7 +329,6 @@ class _PinnedBase(ReactorPipeline):
 
 class InheritedFpsRecorder(_PinnedBase):
     state: State
-    output: Frame
 
     def __init__(self) -> None:
         super().__init__()
@@ -365,7 +357,6 @@ async def test_fps_pinned_on_an_intermediate_base_is_treated_as_fixed() -> None:
 
 class FatalInferencePipe(ReactorPipeline):
     state: State
-    output: Frame
     fps = 12
 
     def __init__(self) -> None:
@@ -395,7 +386,6 @@ async def test_an_inference_error_is_fatal_and_closes_the_generator() -> None:
 
 class FailingCleanupPipe(ReactorPipeline):
     state: State
-    output: Frame
     fps = 12
 
     def inference(self) -> Iterator[Frame]:
@@ -408,7 +398,6 @@ class FailingCleanupPipe(ReactorPipeline):
 
 class UnwindingCleanupPipe(ReactorPipeline):
     state: State
-    output: Frame
     fps = 12
 
     def inference(self) -> Iterator[object]:
@@ -538,7 +527,6 @@ class _ScheduleState(InputState):
 
 class _SessionInitPipe(ReactorPipeline):
     state: _ScheduleState
-    output: Frame
     fps = 12
 
     def inference(self) -> Iterator[Frame]:
@@ -565,7 +553,6 @@ async def test_session_started_hook_runs_with_the_fresh_state_in_place() -> None
 
 class Streamer(ReactorPipeline):
     state: State
-    output: Frame
     fps = 12
 
     def __init__(self) -> None:

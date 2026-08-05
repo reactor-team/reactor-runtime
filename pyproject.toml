@@ -20,7 +20,7 @@ version = "1.20260722.6"
 
 [project]
 name = "reactor-runtime"
-version = "3.0.1"
+version = "3.0.2"
 description = "A Python framework for building real-time, interactive video models"
 readme = "README.md"
 license = "Apache-2.0"
@@ -41,7 +41,7 @@ dependencies = [
     "prometheus-client>=0.26.0",
     "protobuf>=7.35.1",
     "pyyaml>=6.0.3",
-    "reactor-webrtc>=0.4.0",
+    "reactor-webrtc>=0.4.2",
     "uvicorn>=0.49.0",
 ]
 

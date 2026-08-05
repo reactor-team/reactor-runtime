@@ -36,6 +36,7 @@ from reactor_runtime.interface.internal.input_buffer import (
     InputBuffer,
     ReadMode,
 )
+from reactor_runtime.interface.internal.reactor_core import OutputStream
 from reactor_runtime.interface.model import ReactorModel
 from reactor_runtime.interface.pipeline import Idle, InputState, ReactorPipeline
 from reactor_runtime.interface.tracks import (
@@ -70,6 +71,7 @@ __all__ = [
     "MessageField",
     "ModelMessage",
     "Output",
+    "OutputStream",
     "ReactorModel",
     "ReactorPipeline",
     "ReadMode",
