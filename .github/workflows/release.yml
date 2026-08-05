@@ -42,7 +42,7 @@ jobs:
           # The decision reads the tag set, so the full history must be present.
           fetch-depth: 0
 
-      - uses: jdx/mise-action@v2
+      - uses: jdx/mise-action@v4
         with:
           version: ${{ env.MISE_VERSION }}
 
@@ -79,7 +79,7 @@ jobs:
           # the history and the tag set must both be present.
           fetch-depth: 0
 
-      - uses: jdx/mise-action@v2
+      - uses: jdx/mise-action@v4
         with:
           version: ${{ env.MISE_VERSION }}
 
@@ -135,7 +135,7 @@ jobs:
           # the full history and tag set must be present.
           fetch-depth: 0
 
-      - uses: jdx/mise-action@v2
+      - uses: jdx/mise-action@v4
         with:
           version: ${{ env.MISE_VERSION }}
 
