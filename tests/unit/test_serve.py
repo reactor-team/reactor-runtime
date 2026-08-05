@@ -169,6 +169,43 @@ def test_webrtc_config_rejects_a_non_integer_bwe_value(
         _webrtc_config_from_env()
 
 
+def test_webrtc_config_rejects_bwe_max_below_the_default_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A partial override: only WEBRTC_BWE_MAX_KBPS is set, below the default target
+    # (4000). Left unchecked, this passes boot and fails every negotiation instead.
+    monkeypatch.setenv("WEBRTC_BWE_MAX_KBPS", "3000")
+
+    with pytest.raises(SystemExit):
+        _webrtc_config_from_env()
+
+
+def test_webrtc_config_rejects_bwe_min_above_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WEBRTC_BWE_MIN_KBPS", "5000")
+    monkeypatch.setenv("WEBRTC_BWE_TARGET_KBPS", "4000")
+
+    with pytest.raises(SystemExit):
+        _webrtc_config_from_env()
+
+
+def test_webrtc_config_accepts_a_consistent_bwe_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WEBRTC_BWE_MIN_KBPS", "800")
+    monkeypatch.setenv("WEBRTC_BWE_TARGET_KBPS", "3000")
+    monkeypatch.setenv("WEBRTC_BWE_MAX_KBPS", "3000")
+
+    config = _webrtc_config_from_env()
+
+    assert (config.bwe_min_kbps, config.bwe_target_kbps, config.bwe_max_kbps) == (
+        800,
+        3000,
+        3000,
+    )
+
+
 def test_webrtc_config_reads_stun_turn_policy_and_ping(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

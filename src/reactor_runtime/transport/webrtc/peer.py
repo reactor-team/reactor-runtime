@@ -159,6 +159,19 @@ def _build_rtc_config(config: WebRtcConfig) -> rw.RtcConfiguration:
     return rtc
 
 
+def _apply_bitrate_limits(pc: rw.PeerConnection, config: WebRtcConfig) -> None:
+    """Apply the configured congestion-control bitrate limits to a fresh peer connection.
+
+    ``set_bitrate`` takes bits per second in ``(min, start, max)`` order; the config
+    holds kbps floor/starting-point/ceiling, so this is the one place that converts.
+    """
+    pc.set_bitrate(
+        config.bwe_min_kbps * 1000,
+        config.bwe_target_kbps * 1000,
+        config.bwe_max_kbps * 1000,
+    )
+
+
 def _is_terminal_state(state: rw.PeerConnectionState) -> bool:
     """Return whether a peer-connection state means the wire is gone.
 
@@ -289,13 +302,7 @@ class WebRTCPeer:
 
         pc = factory.create_peer_connection(_build_rtc_config(self._config), observer)
         self._pc = pc
-        await loop.run_in_executor(
-            None,
-            pc.set_bitrate,
-            self._config.bwe_min_kbps * 1000,
-            self._config.bwe_target_kbps * 1000,
-            self._config.bwe_max_kbps * 1000,
-        )
+        await loop.run_in_executor(None, _apply_bitrate_limits, pc, self._config)
 
         offer = rw.SessionDescription("offer", deduplicate_bundle_pts(sdp_offer))
         await pc.set_remote_description(offer)

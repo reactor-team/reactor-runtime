@@ -8,7 +8,7 @@ the suite skips cleanly when the wheel is absent.
 
 import asyncio
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -31,6 +31,7 @@ from reactor_runtime.transport.webrtc.config import (  # noqa: E402
 from reactor_runtime.transport.webrtc.peer import (  # noqa: E402
     _AUDIO_BUFFER_MAX_SAMPLES,
     WebRTCPeer,
+    _apply_bitrate_limits,
     _build_rtc_config,
     _is_terminal_state,
     libwebrtc_peer_factory,
@@ -209,6 +210,23 @@ def test_build_rtc_config_maps_port_range() -> None:
 def test_build_rtc_config_leaves_port_range_at_default_when_unset() -> None:
     rtc = _build_rtc_config(WebRtcConfig())
     assert (rtc.min_port, rtc.max_port) == (0, 0)
+
+
+class _FakePeerConnection:
+    def __init__(self) -> None:
+        self.bitrate_calls: list[tuple[int, int, int]] = []
+
+    def set_bitrate(self, min_bps: int, start_bps: int, max_bps: int) -> None:
+        self.bitrate_calls.append((min_bps, start_bps, max_bps))
+
+
+def test_apply_bitrate_limits_converts_kbps_to_bps_in_min_start_max_order() -> None:
+    pc = _FakePeerConnection()
+    config = WebRtcConfig(bwe_min_kbps=800, bwe_target_kbps=3000, bwe_max_kbps=8000)
+
+    _apply_bitrate_limits(cast("rw.PeerConnection", pc), config)
+
+    assert pc.bitrate_calls == [(800_000, 3_000_000, 8_000_000)]
 
 
 # ── State classification ─────────────────────────────────────────────────────
