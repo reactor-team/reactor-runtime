@@ -80,7 +80,6 @@ Not on macOS, or pinning a release in CI? See [Install the CLI](https://deploy-d
 - [Quickstart](https://deploy-docs.reactor.inc/development/quickstart): from zero to a streaming model in 2 minutes
 - [Model anatomy](https://deploy-docs.reactor.inc/development/reactor-model/model-anatomy): every piece of a Reactor model, line by line
 - [The run loop](https://deploy-docs.reactor.inc/development/reactor-model/run-loop): emitting frames, batches, and frame rates
-- [Deploy to Reactor](https://deploy-docs.reactor.inc/platform/deploying): register, publish, and go live on Reactor's GPUs
 
 ## Development
 
