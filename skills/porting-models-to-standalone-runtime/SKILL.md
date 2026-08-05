@@ -206,6 +206,13 @@ self.output.flush()       # drop queued frames, cut playout to black
 await self.output.emit(x) # emit() on the model is an alias of this
 ```
 
+One caveat on `self.output.fps`: the assignment holds only for a model
+that declares a class-level `fps` or emits without `compute_time`. A
+pipeline that declares no `fps` is driven with the measured throughput on
+every yield, and each chunk's own tag supersedes the assignment — so on an
+unpinned pipeline it lasts one chunk. A `set_target_fps`-style command
+therefore belongs on a model that pins `fps`.
+
 Call `flush()` when generation resets or restarts, so the client cuts to
 black instead of holding the last frame of the old content. The session
 recording is not flushed — a playout cut is not an archive boundary. A probe

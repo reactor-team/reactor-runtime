@@ -1,3 +1,4 @@
+import queue
 import threading
 import time
 
@@ -178,6 +179,28 @@ def test_stop_releases_a_blocked_wait_submit() -> None:
     assert not thread.is_alive()
     assert result
     assert result[0] < 4
+
+
+def test_a_drop_chunk_stops_enqueueing_past_a_flush() -> None:
+    # A flush mid-chunk must abandon the rest of a drop chunk too, or the
+    # flushed run's tail trickles in after the black cut.
+    pacer, _ = make_pacer()
+
+    class FlushingQueue(queue.Queue[MediaBundle]):
+        """Flushes the pacer as a side effect of the first enqueue."""
+
+        puts = 0
+
+        def put_nowait(self, item: MediaBundle) -> None:
+            super().put_nowait(item)
+            FlushingQueue.puts += 1
+            if FlushingQueue.puts == 1:
+                pacer.flush()
+
+    pacer._queue = FlushingQueue()
+    enqueued = pacer.submit(chunk(video_bundle(batch(5)), n_frames=5))
+    assert enqueued == 1  # the flush landed after the first frame
+    assert pacer._queue.qsize() == 0  # and drained it
 
 
 def test_a_wait_chunk_does_not_block_while_pacing_is_stopped() -> None:

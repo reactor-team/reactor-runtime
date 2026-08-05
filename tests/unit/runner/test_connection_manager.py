@@ -311,6 +311,19 @@ def test_media_skips_data_only_connections() -> None:
     assert data_only.media == []
 
 
+def test_broadcast_media_aborts_between_connections() -> None:
+    cm, _ = waiting_manager()
+    a, b = FakeConnection(1), FakeConnection(2)
+    cm.register(a)
+    cm.register(b)
+    chunk = MediaChunk(bundle=MediaBundle(), fps=30.0, n_frames=1)
+    # The abort flips once the first connection has media, so the second
+    # never receives the chunk — the flush-mid-fan-out contract.
+    cm.broadcast_media(chunk, abort=lambda: len(a.media) > 0)
+    assert a.media == [chunk]
+    assert b.media == []
+
+
 def test_flush_media_reaches_every_connection() -> None:
     cm, _ = waiting_manager()
     a, b = FakeConnection(1), FakeConnection(2)

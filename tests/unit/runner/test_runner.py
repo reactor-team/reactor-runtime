@@ -284,6 +284,29 @@ def test_flush_media_cuts_every_connection() -> None:
     assert b.flushed
 
 
+def test_a_flush_during_fan_out_abandons_the_remaining_connections() -> None:
+    # A flush landing mid-broadcast must cut every connection: the chunk being
+    # fanned out belongs to the flushed run and may reach no further wire.
+    runner = _runner()
+    delivered: list[ConnId] = []
+
+    class Flushing(FakeConnection):
+        def send_media(self, chunk: MediaChunk) -> None:
+            delivered.append(self.id)
+            runner._flush_media()
+
+    class Recording(FakeConnection):
+        def send_media(self, chunk: MediaChunk) -> None:
+            delivered.append(self.id)
+
+    runner.connection_opened(Flushing(1))
+    runner.connection_opened(Recording(2))
+
+    runner._emit_media(MediaChunk(bundle=MediaBundle(), fps=30.0, n_frames=1))
+
+    assert delivered == [ConnId(1)]
+
+
 def test_addressed_send_reaches_only_the_target() -> None:
     runner = _runner()
     a, b = FakeConnection(1), FakeConnection(2)

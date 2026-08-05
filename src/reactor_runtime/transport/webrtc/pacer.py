@@ -128,6 +128,7 @@ class MediaPacer:
             self._interval = 1.0 / chunk.fps
         epoch = self._epoch
         enqueued = 0
+        aborted = False
         for frame in chunk.frames():
             # One authoritative bound: the configured depth, never below one
             # chunk so a batching model's whole chunk always fits. Re-read
@@ -142,12 +143,19 @@ class MediaPacer:
                     ):
                         self._room.wait(timeout=0.1)
                 if self._stop.is_set() or self._epoch != epoch:
+                    aborted = True
                     break
-            elif self._queue.qsize() >= capacity:
-                break
+            else:
+                # A flush mid-chunk abandons the rest of it on this path too;
+                # the flushed run's tail must not trickle in after the cut.
+                if self._epoch != epoch:
+                    aborted = True
+                    break
+                if self._queue.qsize() >= capacity:
+                    break
             self._queue.put_nowait(frame)
             enqueued += 1
-        if enqueued < chunk.n_frames and not chunk.wait:
+        if enqueued < chunk.n_frames and not chunk.wait and not aborted:
             logger.warning(
                 "Media pacer queue full; dropped %d of %d frames",
                 chunk.n_frames - enqueued,

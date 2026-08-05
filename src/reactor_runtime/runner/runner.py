@@ -175,6 +175,11 @@ class Runner(ServiceComponent, ConnectionSink):
         # so a connection that opens later starts with them.
         self._media_rate: float | None = None
         self._media_depth: int | None = None
+        # Bumped by every flush. A media fan-out captures it at entry and
+        # abandons the remaining connections when it moves, so a flush that
+        # lands mid-broadcast cuts every connection, not just the one whose
+        # pacer happened to be blocked.
+        self._media_generation = 0
         # One codec per wire version, built on first use. Inbound decode is
         # driven by the version a connection negotiated; outbound encode picks
         # the codec for each target connection, so a mixed-version session is
@@ -828,7 +833,8 @@ class Runner(ServiceComponent, ConnectionSink):
         for track in chunk.bundle.tracks:
             self._model_metrics.emitted(track, chunk.n_frames)
         self._recorder.on_chunk(chunk)
-        self._connections.broadcast_media(chunk)
+        generation = self._media_generation
+        self._connections.broadcast_media(chunk, abort=lambda: self._media_generation != generation)
 
     def _flush_media(self) -> None:
         """Drop queued media in every connection and cut playout to black.
@@ -837,6 +843,7 @@ class Runner(ServiceComponent, ConnectionSink):
         flushed: its stream is the session's archive, and a playout cut is
         not an archive boundary.
         """
+        self._media_generation += 1
         self._connections.flush_media()
 
     def _set_media_rate(self, fps: float) -> None:

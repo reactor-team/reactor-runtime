@@ -190,6 +190,14 @@ def test_an_undeclared_buffer_size_pushes_no_depth() -> None:
     assert all(name != "depth" for name, _ in calls)
 
 
+def test_a_non_positive_buffer_size_is_rejected_at_bind() -> None:
+    class Zero(OutputOnlyCore):
+        buffer_size = 0
+
+    with pytest.raises(ValueError, match="buffer_size must be positive"):
+        _capture_ops(Zero())
+
+
 def test_flush_fans_out_to_the_bound_ops() -> None:
     core = OutputOnlyCore()
     _, calls = _capture_ops(core)

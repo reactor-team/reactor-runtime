@@ -106,7 +106,9 @@ class OutputStream:
         Assigning re-paces already-queued frames on every connection
         immediately and tags subsequent emits with the new rate. A later
         chunk emitted with a measured ``compute_time`` supersedes it, so this
-        is the between-emits control rather than a pin.
+        is the between-emits control rather than a pin — on a pipeline that
+        declares no ``fps`` (driven with measured throughput every yield)
+        the assignment lasts one chunk.
         """
         return float(self._core.fps)
 
@@ -201,7 +203,8 @@ class ReactorCore:
     buffer_size: ClassVar[int | None] = None
     """How many frames may queue between the model and each wire — the
     buffered-latency bound a model declares. ``None`` accepts the runtime
-    default; the bound is never applied below one emitted chunk."""
+    default; a declared value must be positive (rejected at startup
+    otherwise), and the bound is never applied below one emitted chunk."""
 
     output: OutputStream
     """The model's handle onto its outbound media stream."""
@@ -276,13 +279,20 @@ class ReactorCore:
         Pushes the playout settings declared or set before binding — the
         model's ``buffer_size`` class attribute, and a rate assigned to
         ``self.output.fps`` during ``load()`` — down to the media consumers.
+
+        Raises:
+            ValueError: If the model declares a non-positive ``buffer_size``.
+                Binding runs before the loop starts, so this surfaces as a
+                startup failure rather than a silently inherited default.
         """
+        if self.buffer_size is not None and self.buffer_size <= 0:
+            raise ValueError(f"buffer_size must be positive, got {self.buffer_size}")
         self._out_broadcast = broadcast
         self._out_addressed = addressed
         self._out_media = media
         self._media_ops = media_ops
         if media_ops is not None:
-            if self.buffer_size is not None and self.buffer_size > 0:
+            if self.buffer_size is not None:
                 media_ops.set_depth(self.buffer_size)
             if "fps" in self.__dict__:
                 media_ops.set_rate(float(self.fps))
