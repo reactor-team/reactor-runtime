@@ -44,12 +44,16 @@ drifting apart.
 
 Threading
 ---------
-* The asyncio loop thread runs negotiation, ``add_ice``, stats, and close.
-  ``reactor_webrtc``'s signaling methods (``create_offer``, ``create_answer``,
+* The asyncio loop thread runs negotiation, ``add_ice``, stats, and close, and
+  is shared across every connection this process holds. ``reactor_webrtc``'s
+  signaling methods (``create_offer``, ``create_answer``,
   ``set_local_description``, ``set_remote_description``, ``add_ice_candidate``,
-  ``get_stats``) are natively awaitable, so they are called directly with
-  ``await`` — no executor wrapping needed; the blocking libwebrtc round-trip
-  runs on a dedicated Rust-side thread pool, never on this loop.
+  ``get_stats``) are awaitable: the blocking libwebrtc round-trip runs on a
+  Rust-side thread pool, never on this loop. Every other blocking call this
+  peer makes into ``reactor_webrtc`` or ``threading`` — attaching outbound
+  tracks to their transceivers, waiting on ICE gathering to complete — is
+  dispatched to an executor, so a connection negotiating never stalls the
+  loop other connections are running on.
 * A frame-drain thread pushes outbound video and buffers outbound audio; a
   second thread feeds that audio to the peer's audio track in steady 10 ms frames.
 * libwebrtc's own signaling and network threads fire the observer callbacks;
@@ -288,7 +292,7 @@ class WebRTCPeer:
         await pc.set_remote_description(offer)
         self._raise_if_stopped()
 
-        self._attach_out_tracks(pc, factory)
+        await self._attach_out_tracks(loop, pc, factory)
 
         answer = await pc.create_answer()
         await pc.set_local_description(answer)
@@ -307,8 +311,9 @@ class WebRTCPeer:
         self._start_pumps()
         return embed_ice_candidates(answer.sdp, candidates)
 
-    def _attach_out_tracks(
+    async def _attach_out_tracks(
         self,
+        loop: asyncio.AbstractEventLoop,
         pc: rw.PeerConnection,
         factory: rw.PeerConnectionFactory,
     ) -> None:
@@ -317,8 +322,13 @@ class WebRTCPeer:
         After ``set_remote_description`` libwebrtc has a transceiver per m-section
         carrying the offer's mid. A mid that maps to an ``OUT`` track (the client
         offered it recvonly) gets a fresh sender track and a send-only direction.
+
+        ``transceivers()``/``set_track()``/``set_direction()`` are synchronous
+        libwebrtc calls — dispatched to an executor so they never stall the
+        shared event loop other peers' connections are also running on.
         """
-        for transceiver in pc.transceivers():
+        transceivers = await loop.run_in_executor(None, pc.transceivers)
+        for transceiver in transceivers:
             mid = transceiver.mid()
             info = self._track_by_mid.get(mid) if mid is not None else None
             if info is None or info.direction is not TrackDirection.OUT:
@@ -328,8 +338,10 @@ class WebRTCPeer:
             else:
                 track = factory.create_audio_track_with_local_source(info.name)
                 self._audio_track = track
-            transceiver.set_track(track)
-            transceiver.set_direction(rw.TransceiverDirection.SendOnly)
+            await loop.run_in_executor(None, transceiver.set_track, track)
+            await loop.run_in_executor(
+                None, transceiver.set_direction, rw.TransceiverDirection.SendOnly
+            )
             self._out_tracks[info.name] = track
 
     def _raise_if_stopped(self) -> None:
