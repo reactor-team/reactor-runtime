@@ -6,9 +6,10 @@ public. These rules are non-negotiable.
 
 ## This repo is public: no private-system references
 
-Treat Reactor's private monorepo and production services as if they do not
-exist. Do not name them, link to them, depend on them, or write code that
-assumes them. The audience is an outside developer with no insider context.
+Treat any private, internal infrastructure or non-public services as if they
+do not exist. Do not name them, link to them, depend on them, or write code
+that assumes them. Rely only on publicly available tooling and artifacts. The
+audience is an outside developer with no insider context.
 
 In scope: this package's own APIs, its protocol, and the public-facing product
 surface. If a piece of functionality depends on something private, it does not
