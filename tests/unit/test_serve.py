@@ -190,6 +190,15 @@ def test_webrtc_config_rejects_bwe_min_above_target(
         _webrtc_config_from_env()
 
 
+def test_webrtc_config_rejects_a_negative_bwe_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WEBRTC_BWE_MIN_KBPS", "-1")
+
+    with pytest.raises(SystemExit):
+        _webrtc_config_from_env()
+
+
 def test_webrtc_config_accepts_a_consistent_bwe_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
