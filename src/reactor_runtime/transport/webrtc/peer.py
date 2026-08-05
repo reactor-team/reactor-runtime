@@ -288,7 +288,7 @@ class WebRTCPeer:
         await pc.set_remote_description(offer)
         self._raise_if_stopped()
 
-        await self._attach_out_tracks(pc, factory)
+        self._attach_out_tracks(pc, factory)
 
         answer = await pc.create_answer()
         await pc.set_local_description(answer)
@@ -307,7 +307,7 @@ class WebRTCPeer:
         self._start_pumps()
         return embed_ice_candidates(answer.sdp, candidates)
 
-    async def _attach_out_tracks(
+    def _attach_out_tracks(
         self,
         pc: rw.PeerConnection,
         factory: rw.PeerConnectionFactory,
@@ -565,8 +565,7 @@ class WebRTCPeer:
     async def add_ice(self, candidate: IceCandidate) -> None:
         """Add a trickle-ICE candidate; valid before and after the wire connects."""
         pc = self._pc
-        loop = self._loop
-        if self._stop_event.is_set() or pc is None or loop is None:
+        if self._stop_event.is_set() or pc is None:
             return
         ice = rw.IceCandidate(
             candidate=candidate.candidate,
@@ -594,8 +593,7 @@ class WebRTCPeer:
     async def stats(self) -> PeerStats:
         """Sample current transport statistics from libwebrtc."""
         pc = self._pc
-        loop = self._loop
-        if self._stop_event.is_set() or pc is None or loop is None:
+        if self._stop_event.is_set() or pc is None:
             return PeerStats()
         try:
             report = await pc.get_stats()
