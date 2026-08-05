@@ -76,6 +76,7 @@ jobs:
                - **Breaking Changes**: public API/protocol contract changes, backwards compatibility
                - **Missing Error Handling**: unhandled exceptions, missing validation
                - **Typing & docstring contract violations** against the AGENTS.md standards
+               - **Stale README**: the PR changes the authoring surface, the CLI workflow, or what the project does, without the matching `README.md` update (structure rules in AGENTS.md)
 
             4. **DO NOT comment on**:
                - Code that is already good or correct
