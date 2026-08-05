@@ -24,6 +24,7 @@ from reactor_runtime.interface.internal.reactor_core import (
     AddressedSink,
     BroadcastSink,
     FailureSink,
+    MediaOps,
     MediaSink,
     ReactorCore,
     RequestId,
@@ -140,6 +141,7 @@ class ModelBridge:
         broadcast: BroadcastSink,
         addressed: AddressedSink,
         media: MediaSink,
+        media_ops: MediaOps | None = None,
         failure: FailureSink | None = None,
     ) -> None:
         """Wire the model's outbound paths down into the runner. Call once.
@@ -147,15 +149,21 @@ class ModelBridge:
         ``broadcast`` delivers a message to every client; ``addressed`` delivers
         one to a single connection, correlated to a request id when it is a reply
         (a ``None`` message is the bodyless acknowledgement of a command that
-        returned nothing); ``media`` receives each emitted :class:`MediaChunk`,
-        unpaced, on the model thread. ``failure`` receives the exception that
-        ends the model's run loop, at most once, on the model thread — it is how
-        the owner learns the model died rather than idled.
+        returned nothing); ``media`` receives each emitted :class:`MediaChunk` —
+        a chunk asking for backpressure (``chunk.wait``) may hold the caller
+        until downstream has room, and the model side dispatches the call to a
+        worker thread accordingly. ``media_ops`` carries the playout operations
+        behind the model's ``output`` handle, each a one-way call with plain
+        arguments. ``failure`` receives the exception that ends the model's run
+        loop, at most once, on the model thread — it is how the owner learns
+        the model died rather than idled.
 
         Args:
             broadcast: Sink for a message sent to all clients.
             addressed: Sink for a reply sent to one connection.
             media: Sink for each emitted media chunk.
+            media_ops: Operations over the downstream media consumers, for
+                the model's ``output`` handle.
             failure: Sink for an unrecoverable crash of the model's run loop.
 
         Raises:
@@ -163,7 +171,9 @@ class ModelBridge:
         """
         if self._outbound_bound:
             raise RuntimeError("bind_outbound must be called once")
-        self._model.bind_output(broadcast=broadcast, addressed=addressed, media=media)
+        self._model.bind_output(
+            broadcast=broadcast, addressed=addressed, media=media, media_ops=media_ops
+        )
         if failure is not None:
             self._model.bind_failure(failure)
         self._outbound_bound = True

@@ -8,7 +8,7 @@ import pytest
 from reactor_runtime import Input, ModelMessage, Output, Video
 from reactor_runtime.core import Command, MediaChunk, SessionStarted
 from reactor_runtime.core.values import ConnId, InputFrame, TrackDirection
-from reactor_runtime.interface.internal.reactor_core import ReactorCore
+from reactor_runtime.interface.internal.reactor_core import MediaOps, ReactorCore
 
 
 class Out(Output):
@@ -20,7 +20,6 @@ class In(Input):
 
 
 class IdleCore(ReactorCore):
-    output: Out
     input: In
 
     async def run(self) -> None:
@@ -28,8 +27,6 @@ class IdleCore(ReactorCore):
 
 
 class OutputOnlyCore(ReactorCore):
-    output: Out
-
     async def run(self) -> None:
         await asyncio.sleep(60)
 
@@ -107,6 +104,101 @@ def test_emit_tags_a_batch_with_its_frame_count() -> None:
     # Four frames in 0.2s is 20 fps.
     assert chunks[0].n_frames == 4
     assert chunks[0].fps == 20
+
+
+def _capture_ops(core: ReactorCore) -> tuple[list[MediaChunk], list[tuple[str, float | int]]]:
+    """Bind a media sink and ops that record every emitted chunk and call."""
+    chunks: list[MediaChunk] = []
+    calls: list[tuple[str, float | int]] = []
+    core.bind_output(
+        broadcast=lambda msg: None,
+        addressed=lambda conn, msg, req: None,
+        media=chunks.append,
+        media_ops=MediaOps(
+            flush=lambda: calls.append(("flush", 0)),
+            set_rate=lambda fps: calls.append(("rate", fps)),
+            set_depth=lambda depth: calls.append(("depth", depth)),
+        ),
+    )
+    return chunks, calls
+
+
+def test_emit_requests_backpressure_by_default() -> None:
+    core = OutputOnlyCore()
+    chunks = _capture_media(core)
+    asyncio.run(core.emit(Out(main=np.zeros((4, 4, 3), dtype=np.uint8))))
+    assert chunks[0].wait is True
+
+
+def test_emit_with_drop_requests_dropping_downstream() -> None:
+    core = OutputOnlyCore()
+    chunks = _capture_media(core)
+    asyncio.run(core.emit(Out(main=np.zeros((4, 4, 3), dtype=np.uint8)), drop=True))
+    assert chunks[0].wait is False
+
+
+def test_emit_is_an_alias_of_the_output_handle() -> None:
+    core = OutputOnlyCore()
+    chunks = _capture_media(core)
+    data = np.zeros((4, 4, 3), dtype=np.uint8)
+    asyncio.run(core.emit(Out(main=data), compute_time=0.1))
+    asyncio.run(core.output.emit(Out(main=data), compute_time=0.1))
+    assert len(chunks) == 2
+    assert (chunks[0].fps, chunks[0].n_frames, chunks[0].wait) == (
+        chunks[1].fps,
+        chunks[1].n_frames,
+        chunks[1].wait,
+    )
+
+
+def test_output_fps_reads_the_declared_rate() -> None:
+    assert OutputOnlyCore().output.fps == 30.0
+
+
+def test_assigning_output_fps_repaces_and_retags() -> None:
+    core = OutputOnlyCore()
+    chunks, calls = _capture_ops(core)
+    core.output.fps = 24
+    assert ("rate", 24.0) in calls
+    asyncio.run(core.emit(Out(main=np.zeros((4, 4, 3), dtype=np.uint8))))
+    assert chunks[0].fps == 24
+
+
+def test_output_fps_rejects_a_non_positive_rate() -> None:
+    core = OutputOnlyCore()
+    with pytest.raises(ValueError, match="fps must be positive"):
+        core.output.fps = 0
+
+
+def test_fps_assigned_before_bind_is_pushed_at_bind() -> None:
+    core = OutputOnlyCore()
+    core.output.fps = 24  # as a model would in load(), before binding
+    _, calls = _capture_ops(core)
+    assert ("rate", 24.0) in calls
+
+
+def test_buffer_size_is_pushed_at_bind() -> None:
+    class Sized(OutputOnlyCore):
+        buffer_size = 8
+
+    _, calls = _capture_ops(Sized())
+    assert ("depth", 8) in calls
+
+
+def test_an_undeclared_buffer_size_pushes_no_depth() -> None:
+    _, calls = _capture_ops(OutputOnlyCore())
+    assert all(name != "depth" for name, _ in calls)
+
+
+def test_flush_fans_out_to_the_bound_ops() -> None:
+    core = OutputOnlyCore()
+    _, calls = _capture_ops(core)
+    core.output.flush()
+    assert ("flush", 0) in calls
+
+
+def test_flush_before_bind_is_a_noop() -> None:
+    OutputOnlyCore().output.flush()  # must not raise
 
 
 def test_push_media_routes_to_the_track_buffer() -> None:

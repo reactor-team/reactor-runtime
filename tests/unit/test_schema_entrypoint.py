@@ -26,8 +26,6 @@ class Out(Output):
 class Demo(ReactorModel):
     """A demo model."""
 
-    output: Out
-
     @event(name="set_level", description="Set the level.")
     def set_level(self, level: int = 1) -> LevelSet:
         return LevelSet(level=level)

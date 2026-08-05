@@ -59,6 +59,118 @@ FailureSink = Callable[[BaseException], None]
 
 
 @dataclass(frozen=True)
+class MediaOps:
+    """Operations the runtime exposes over its downstream media consumers.
+
+    Bound alongside the sinks; the model reaches them through its
+    :attr:`ReactorCore.output` handle. Like the sinks, each operation is a
+    one-way call carrying only plain values, so the boundary between the
+    model and the runtime stays a set of serialisable messages. Each fans
+    out to every live connection and is remembered for connections that
+    open later.
+
+    Attributes:
+        flush: Drop queued media and cut playout to black.
+        set_rate: Re-pace queued media at a new frames-per-second immediately.
+        set_depth: Bound how many frames may queue between model and wire.
+    """
+
+    flush: Callable[[], None]
+    set_rate: Callable[[float], None]
+    set_depth: Callable[[int], None]
+
+
+class OutputStream:
+    """The model's handle onto its outbound media stream, bound as ``self.output``.
+
+    Emission and playout control in one place: :meth:`emit` hands a finished
+    output downstream, :attr:`fps` is the live playout rate, and :meth:`flush`
+    drops everything queued and cuts playout to black.
+
+    There is no single buffer behind this handle — queued media lives
+    downstream, in each connection's own pacer — so every operation fans out
+    to all live connections and applies to connections that join later.
+    Operations invoked before the runtime binds its consumers (for example
+    inside ``load()``) are remembered and applied at bind time.
+    """
+
+    def __init__(self, core: ReactorCore) -> None:
+        self._core = core
+
+    @property
+    def fps(self) -> float:
+        """The playout rate, in frames per second.
+
+        Reading it returns the rate unmeasured chunks are tagged with — the
+        model's declared :attr:`ReactorCore.fps` until it is reassigned here.
+        Assigning re-paces already-queued frames on every connection
+        immediately and tags subsequent emits with the new rate. A later
+        chunk emitted with a measured ``compute_time`` supersedes it, so this
+        is the between-emits control rather than a pin.
+        """
+        return float(self._core.fps)
+
+    @fps.setter
+    def fps(self, fps: float) -> None:
+        if fps <= 0:
+            raise ValueError(f"fps must be positive, got {fps}")
+        self._core.fps = fps
+        ops = self._core._media_ops
+        if ops is not None:
+            ops.set_rate(float(fps))
+
+    async def emit(
+        self,
+        output: Output,
+        *,
+        compute_time: float | None = None,
+        drop: bool = False,
+    ) -> None:
+        """Hand a finished output downstream as a media chunk.
+
+        Converts the typed *output* into a neutral bundle and hands it to the
+        bound media sink as a :class:`MediaChunk`, tagged with the rate its
+        frames should play out at: the measured throughput when *compute_time*
+        is given, else :attr:`fps`.
+
+        By default this call waits while a downstream consumer's bounded
+        queue is full, throttling a producer that outruns the playout rate.
+        The wait runs on a worker thread, so the model loop keeps dispatching
+        commands and lifecycle events. Pass ``drop=True`` for a producer that
+        prefers skipping frames to waiting — the overflow is discarded
+        downstream and this call returns as soon as the chunk is handed over.
+
+        Args:
+            output: The produced output, one payload per declared track.
+            compute_time: Wall-clock seconds spent producing it, if measured.
+            drop: Discard overflow downstream instead of waiting for room.
+        """
+        core = self._core
+        bundle = core._to_bundle(output)
+        n_frames = bundle.frame_count
+        if compute_time is not None and compute_time > 0:
+            fps = n_frames / compute_time
+        else:
+            fps = float(core.fps)
+        if core._out_media is not None:
+            chunk = MediaChunk(bundle=bundle, fps=fps, n_frames=n_frames, wait=not drop)
+            await asyncio.to_thread(core._out_media, chunk)
+        await asyncio.sleep(0)
+
+    def flush(self) -> None:
+        """Drop queued media on every connection and cut playout to black.
+
+        Call it when generation resets or restarts, so nothing of the old
+        content plays after the cut. Releases a producer blocked in
+        :meth:`emit` and discards the rest of its chunk. The session
+        recording is not flushed — a playout cut is not an archive boundary.
+        """
+        ops = self._core._media_ops
+        if ops is not None:
+            ops.flush()
+
+
+@dataclass(frozen=True)
 class CommandEnvelope:
     """A validated command plus the addressing a reply needs.
 
@@ -82,7 +194,17 @@ class ReactorCore:
     until a subclass supplies the drain loops via :meth:`_background_coros`.
     """
 
-    fps: ClassVar[int] = 30
+    fps: float = 30.0
+    """The declared playout rate, tagging unmeasured emits. Adjustable at any
+    time through :attr:`OutputStream.fps` on the :attr:`output` handle."""
+
+    buffer_size: ClassVar[int | None] = None
+    """How many frames may queue between the model and each wire — the
+    buffered-latency bound a model declares. ``None`` accepts the runtime
+    default; the bound is never applied below one emitted chunk."""
+
+    output: OutputStream
+    """The model's handle onto its outbound media stream."""
 
     def __init__(self) -> None:
         self._loop = asyncio.new_event_loop()
@@ -95,7 +217,9 @@ class ReactorCore:
         self._out_broadcast: BroadcastSink | None = None
         self._out_addressed: AddressedSink | None = None
         self._out_media: MediaSink | None = None
+        self._media_ops: MediaOps | None = None
         self._on_failure: FailureSink | None = None
+        self.output = OutputStream(self)
 
         self._input_buffers: dict[str, InputBuffer] = {}
         self._wire_input_buffers()
@@ -119,30 +243,18 @@ class ReactorCore:
     async def emit(
         self, output: Output, *, compute_time: float | None = None, drop: bool = False
     ) -> None:
-        """Hand a finished output downstream as a media chunk.
+        """Hand a finished output downstream — an alias of ``self.output.emit``.
 
-        Converts the typed *output* into a neutral bundle and hands it to the
-        bound media sink as a :class:`MediaChunk`, tagged with the rate its
-        frames should play out at: the measured throughput when *compute_time* is
-        given, else the model's declared :attr:`fps`. Emission does not pace or
-        block — a consumer (a transport connection, a recorder) owns pacing and
-        any overflow handling downstream.
+        See :meth:`OutputStream.emit` for the contract. By default the call
+        waits while downstream is full, throttling the model to the playout
+        rate; ``drop=True`` discards the overflow instead.
 
         Args:
             output: The produced output, one payload per declared track.
             compute_time: Wall-clock seconds spent producing it, if measured.
-            drop: Retained for source compatibility; overflow is now handled by
-                each downstream consumer, so this has no effect here.
+            drop: Discard overflow downstream instead of waiting for room.
         """
-        bundle = self._to_bundle(output)
-        n_frames = bundle.frame_count
-        if compute_time is not None and compute_time > 0:
-            fps = n_frames / compute_time
-        else:
-            fps = float(self.fps)
-        if self._out_media is not None:
-            self._out_media(MediaChunk(bundle=bundle, fps=fps, n_frames=n_frames))
-        await asyncio.sleep(0)
+        await self.output.emit(output, compute_time=compute_time, drop=drop)
 
     async def send(self, message: ModelMessage) -> None:
         """Broadcast a typed message to every connected client."""
@@ -152,12 +264,28 @@ class ReactorCore:
     # -- outbound binding (called once by the bridge) -------------------------
 
     def bind_output(
-        self, *, broadcast: BroadcastSink, addressed: AddressedSink, media: MediaSink
+        self,
+        *,
+        broadcast: BroadcastSink,
+        addressed: AddressedSink,
+        media: MediaSink,
+        media_ops: MediaOps | None = None,
     ) -> None:
-        """Bind the outbound sinks. Called once before the loop starts."""
+        """Bind the outbound sinks. Called once before the loop starts.
+
+        Pushes the playout settings declared or set before binding — the
+        model's ``buffer_size`` class attribute, and a rate assigned to
+        ``self.output.fps`` during ``load()`` — down to the media consumers.
+        """
         self._out_broadcast = broadcast
         self._out_addressed = addressed
         self._out_media = media
+        self._media_ops = media_ops
+        if media_ops is not None:
+            if self.buffer_size is not None and self.buffer_size > 0:
+                media_ops.set_depth(self.buffer_size)
+            if "fps" in self.__dict__:
+                media_ops.set_rate(float(self.fps))
 
     def bind_failure(self, callback: FailureSink) -> None:
         """Bind the sink that receives an unrecoverable crash of :meth:`run`.

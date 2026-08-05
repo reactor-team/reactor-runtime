@@ -40,7 +40,6 @@ class InTracks(Input):
 class EchoModel(ReactorModel):
     """A tiny echo model."""
 
-    output: OutTracks
     input: InTracks
 
     @event(name="set_prompt", description="Set the prompt")

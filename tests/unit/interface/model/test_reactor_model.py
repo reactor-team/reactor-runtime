@@ -38,8 +38,6 @@ class BrightnessSet(ModelMessage):
 
 
 class Model(ReactorModel):
-    output: Out
-
     def __init__(self) -> None:
         super().__init__()
         self.calls: list[tuple[Any, ...]] = []

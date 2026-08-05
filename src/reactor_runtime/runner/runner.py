@@ -52,6 +52,7 @@ from reactor_runtime.core import (
 from reactor_runtime.event_stream import EventStream
 from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.bridge import ModelBridge
+from reactor_runtime.interface.internal.reactor_core import MediaOps
 from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.log import get_logger
 from reactor_runtime.manifest import import_model_class
@@ -170,6 +171,10 @@ class Runner(ServiceComponent, ConnectionSink):
             on_chunk_ready=self._on_chunk_ready,
         )
         self._connections = ConnectionManager(state_machine=self._sm)
+        # Playout settings the model set through its output handle, remembered
+        # so a connection that opens later starts with them.
+        self._media_rate: float | None = None
+        self._media_depth: int | None = None
         # One codec per wire version, built on first use. Inbound decode is
         # driven by the version a connection negotiated; outbound encode picks
         # the codec for each target connection, so a mixed-version session is
@@ -229,6 +234,11 @@ class Runner(ServiceComponent, ConnectionSink):
                 broadcast=self._broadcast_message,
                 addressed=self._send_addressed,
                 media=self._emit_media,
+                media_ops=MediaOps(
+                    flush=self._flush_media,
+                    set_rate=self._set_media_rate,
+                    set_depth=self._set_media_depth,
+                ),
                 failure=self._on_model_failure,
             )
             bridge.start()
@@ -307,8 +317,16 @@ class Runner(ServiceComponent, ConnectionSink):
     # -- inbound (ConnectionSink) ---------------------------------------------
 
     def connection_opened(self, conn: Connection) -> None:
-        """Register a connection whose wire has reached its connected state."""
+        """Register a connection whose wire has reached its connected state.
+
+        The model's playout settings (rate, queue depth) apply to every
+        connection, so one that opens after they were set receives them here.
+        """
         self._connections.register(conn)
+        if self._media_depth is not None:
+            conn.set_media_depth(self._media_depth)
+        if self._media_rate is not None:
+            conn.set_media_rate(self._media_rate)
 
     def connection_closed(self, conn_id: ConnId) -> None:
         """Drop a previously opened connection that has gone away."""
@@ -799,18 +817,37 @@ class Runner(ServiceComponent, ConnectionSink):
         return codec
 
     def _emit_media(self, chunk: MediaChunk) -> None:
-        """Fan one emitted media chunk out to the connections and the recorder.
+        """Fan one emitted media chunk out to the recorder and the connections.
 
-        Called on the model thread. Both consumers are non-blocking — the
-        connections pace the chunk on their own threads, and the recorder queues
-        it — so a slow wire or a slow encoder never stalls the model. The
-        recorder tap is where recording reads the model's output now that it no
-        longer shares an emission buffer with the transport.
+        Called off the model loop (emit dispatches to a worker thread). The
+        recorder is fed first and always queues without blocking, so a
+        backpressure wait in a connection's pacer (``chunk.wait``) delays the
+        producer, never the recording. A chunk emitted with ``drop=True``
+        keeps every consumer non-blocking.
         """
         for track in chunk.bundle.tracks:
             self._model_metrics.emitted(track, chunk.n_frames)
-        self._connections.broadcast_media(chunk)
         self._recorder.on_chunk(chunk)
+        self._connections.broadcast_media(chunk)
+
+    def _flush_media(self) -> None:
+        """Drop queued media in every connection and cut playout to black.
+
+        The model's ``output.flush()`` lands here. The recorder is not
+        flushed: its stream is the session's archive, and a playout cut is
+        not an archive boundary.
+        """
+        self._connections.flush_media()
+
+    def _set_media_rate(self, fps: float) -> None:
+        """Re-pace every connection now and remember the rate for new ones."""
+        self._media_rate = fps
+        self._connections.set_media_rate(fps)
+
+    def _set_media_depth(self, depth: int) -> None:
+        """Bound every connection's queue now and remember it for new ones."""
+        self._media_depth = depth
+        self._connections.set_media_depth(depth)
 
     def _broadcast_message(self, message: ModelMessage) -> None:
         """Broadcast a model message, encoded for each connection's codec."""

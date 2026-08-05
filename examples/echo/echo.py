@@ -86,7 +86,6 @@ class Echo(ReactorModel):
     """Echo the client's A/V back, optionally applying a real-time video effect."""
 
     input: EchoInput
-    output: EchoOutput
     fps = FPS
 
     def load(self, config_path: Path | None) -> None:

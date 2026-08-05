@@ -34,8 +34,6 @@ class Out(Output):
 class DemoModel(ReactorModel):
     """A demo model."""
 
-    output: Out
-
     @event(name="set_level", description="Set the level")
     async def set_level(self, level: int = InputField(default=1, ge=0, le=10)) -> None: ...
 

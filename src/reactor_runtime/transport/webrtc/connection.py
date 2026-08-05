@@ -202,10 +202,23 @@ class WebRTCConnection:
 
         The pacer splits the chunk into single frames and drains them to the peer
         at the chunk's declared rate, so the model's bursty, unpaced emission
-        reaches the wire as a steady stream. Non-blocking: a chunk that does not
-        fit the pacer's queue is dropped rather than stalling the model thread.
+        reaches the wire as a steady stream. A chunk that asks for backpressure
+        (``chunk.wait``) makes this call wait for queue room, throttling the
+        producer to the playout rate; otherwise overflow is dropped.
         """
         self._pacer.submit(chunk)
+
+    def flush_media(self) -> None:
+        """Drop this connection's queued media and cut playout to black."""
+        self._pacer.flush()
+
+    def set_media_rate(self, fps: float) -> None:
+        """Re-pace this connection's queued media at *fps* immediately."""
+        self._pacer.set_rate(fps)
+
+    def set_media_depth(self, depth: int) -> None:
+        """Bound how many frames may queue between the model and this wire."""
+        self._pacer.set_depth(depth)
 
     def resume_track(self, name: str) -> None:
         """Resume the named outbound track (publisher arbitration)."""

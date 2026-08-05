@@ -29,6 +29,15 @@ class FakeConnection:
     def send_media(self, chunk: MediaChunk) -> None:
         pass
 
+    def flush_media(self) -> None:
+        pass
+
+    def set_media_rate(self, fps: float) -> None:
+        pass
+
+    def set_media_depth(self, depth: int) -> None:
+        pass
+
     def resume_track(self, name: str) -> None:
         pass
 

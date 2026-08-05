@@ -154,17 +154,63 @@ bytes match the length the client announced, so a handler that read `file.size`
 before keeps reading the same number, and it is now measured rather than
 asserted. `len(file.data)` says the same thing if you prefer it explicit.
 
-## Pacing moved out of the model — `buffer_size` and `output_buffer` are gone
+## Drop the `output: MyOutput` class annotation — `self.output` is a handle
 
-The model no longer paces its own output. `emit()` hands the whole batch of
-frames straight downstream, tagged with the rate they should play out at
-(measured from `compute_time` when given, else the class `fps`); the transport
-paces each connection itself. There is no `buffer_size` class attribute and no
-`self.output_buffer` — drop any reference to either. A model that set
-`buffer_size` for latency simply removes it; a probe that read
-`self.output_buffer._q` / `_queue` has nothing to read and should be dropped. The
-model's only output concern is emitting media chunks at whatever rate it
-produces them.
+Models written for earlier cuts of this runtime often carried an inert class
+annotation naming their `Output` subclass:
+
+```python
+class MyModel(ReactorPipeline):
+    state: MyState
+    output: MyOutput   # remove this line
+```
+
+Outbound tracks register when the `Output` subclass is *defined*; the
+annotation was never read. On this runtime the name is taken: the base class
+declares `output: OutputStream` and binds the model's playout handle there
+(see the next section), so a subclass re-annotating it with an `Output` type
+contradicts the real attribute and fails a type check. Delete the line —
+track registration is unaffected.
+
+## Pacing: `emit()` backpressures, `self.output` controls playout
+
+`emit()` hands the whole batch of frames downstream, tagged with the rate
+they should play out at (measured from `compute_time` when given, else the
+class `fps`); each connection paces itself. By default **emit waits while
+downstream is full**, throttling the model to the playout rate — the same
+backpressure older runtimes applied through their blocking output buffer, so
+a fast model needs no rate limiter of its own. The wait runs off the model
+loop; commands and lifecycle events keep dispatching. A producer that would
+rather skip frames than wait (a camera-driven model) passes
+`emit(..., drop=True)` and the overflow is discarded downstream.
+
+Never tag a chunk with a doctored rate. Playout follows the tag, so a
+"debuffed" or pinned `compute_time` makes the model permanently outrun its
+own playout — pass the honest measured time, or none at all and let the
+declared `fps` stand.
+
+Two pieces of the older authoring surface are back, one renamed:
+
+- **`buffer_size`** (class attribute) declares how many frames may queue
+  between the model and each wire — the buffered-latency bound. It is never
+  applied below one emitted chunk, so a batching model always fits a whole
+  chunk. Leave it undeclared to accept the default.
+- **`self.output`** is the model's handle onto its outbound stream — the
+  successor of the old `output_buffer`, named for what it is: there is no
+  single buffer, and the operations fan out to every connection's own queue
+  (including connections that join later).
+
+```python
+self.output.fps = 24      # re-pace queued frames now; tag emits from here on
+self.output.flush()       # drop queued frames, cut playout to black
+await self.output.emit(x) # emit() on the model is an alias of this
+```
+
+Call `flush()` when generation resets or restarts, so the client cuts to
+black instead of holding the last frame of the old content. The session
+recording is not flushed — a playout cut is not an archive boundary. A probe
+that read `self.output_buffer._q` / `_queue` still has nothing to read; the
+queues live per connection, downstream.
 
 ## What did not change
 

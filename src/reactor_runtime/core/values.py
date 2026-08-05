@@ -253,11 +253,15 @@ class MediaChunk:
             should play out — the model's measured throughput when it emitted
             with a compute time, else its declared rate. Always positive.
         n_frames: How many frames the chunk carries (the batch size, or ``1``).
+        wait: Whether a consumer with a bounded queue should make the producer
+            wait for room (backpressure, throttling the model to the playout
+            rate) instead of dropping the overflow.
     """
 
     bundle: MediaBundle
     fps: float
     n_frames: int = 1
+    wait: bool = False
 
     def frames(self) -> list[MediaBundle]:
         """Split the chunk into one single-frame bundle per carried frame."""

@@ -75,8 +75,6 @@ def test_a_payload_less_message_is_published_as_a_webhook() -> None:
         main: Video
 
     class Model(ReactorModel):
-        output: Out
-
         @event(name="go")
         async def go(self) -> None: ...
 
@@ -99,8 +97,6 @@ def test_a_broadcast_only_message_is_published_in_the_schema() -> None:
         level: str
 
     class Model(ReactorModel):
-        output: Out
-
         @event(name="go")
         async def go(self) -> None:
             # Never returns Alert — the model would self.send() it instead.
@@ -143,7 +139,6 @@ def test_a_track_declared_in_both_directions_is_rejected_on_read() -> None:
         shared: Video
 
     class Model(ReactorModel):
-        output: Out
         input: In
 
     with pytest.raises(ValueError, match="both input and output"):
