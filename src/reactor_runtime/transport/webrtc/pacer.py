@@ -1,4 +1,3 @@
-# Copyright (c) 2026 Reactor Technologies, Inc. All rights reserved.
 """Per-connection media pacer.
 
 A model emits finished media in bursts, one :class:`MediaChunk` per inference,
