@@ -6,9 +6,10 @@ public. These rules are non-negotiable.
 
 ## This repo is public: no private-system references
 
-Treat Reactor's private monorepo and production services as if they do not
-exist. Do not name them, link to them, depend on them, or write code that
-assumes them. The audience is an outside developer with no insider context.
+Treat any private, internal infrastructure or non-public services as if they
+do not exist. Do not name them, link to them, depend on them, or write code
+that assumes them. Rely only on publicly available tooling and artifacts. The
+audience is an outside developer with no insider context.
 
 In scope: this package's own APIs, its protocol, and the public-facing product
 surface. If a piece of functionality depends on something private, it does not
@@ -17,6 +18,23 @@ belong in this repo.
 Bad: "The Redis runner connects to the Coordinator over gRPC."
 Good: "Production runners are distributed separately as packages built on top
 of this runtime."
+
+## README
+
+`README.md` is the project's front page for an outside developer. It keeps
+this structure, in this order: banner, one-line pitch with doc links,
+introduction, Highlights, How it works, Install, Learn more, Development,
+License. Edits refine sections in place; do not reorder, drop, or duplicate
+them.
+
+- Install is through the `reactor` CLI and Docker only. Never add a
+  `pip install reactor-runtime` path or any other direct-package install;
+  the package is consumed inside the image the CLI builds.
+- Documentation links point at https://deploy-docs.reactor.inc.
+- The README must not fall behind the code. A PR that changes the authoring
+  surface, the CLI workflow, or what the project does updates `README.md` in
+  the same PR, and review flags a PR that changes behaviour the README
+  describes without touching it.
 
 ## Toolchain
 

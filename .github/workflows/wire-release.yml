@@ -35,7 +35,7 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - uses: jdx/mise-action@v2
+      - uses: jdx/mise-action@v4
         with:
           version: ${{ env.MISE_VERSION }}
 
@@ -61,7 +61,7 @@ jobs:
       - name: Generate TypeScript bindings
         run: mise run //proto:gen-ts
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
