@@ -15,6 +15,7 @@ from reactor_runtime import (
     ReactorPipeline,
     Video,
     event,
+    session_started,
 )
 from reactor_runtime.core.model import (
     ClientConnected,
@@ -507,6 +508,59 @@ async def test_the_last_client_leaving_clears_the_run_gate() -> None:
     await pipe._dispatch_reactor_event(ClientConnected(ConnId(1001), 1))
     await pipe._dispatch_reactor_event(ClientDisconnected(ConnId(1001), 0))
     assert not pipe._runnable.is_set()
+
+
+async def test_state_is_built_at_session_start_and_cleared_at_session_end() -> None:
+    pipe = Pipe()
+    _ready(pipe)
+    assert pipe.state is None
+    await pipe._dispatch_reactor_event(SessionStarted("s"))
+    assert isinstance(pipe.state, State)
+    await pipe._dispatch_reactor_event(SessionEnded("s", EndReason.STOPPED))
+    assert pipe.state is None
+
+
+async def test_state_survives_a_client_leaving_and_rejoining_mid_session() -> None:
+    pipe = Pipe()
+    _ready(pipe)
+    await pipe._dispatch_reactor_event(SessionStarted("s"))
+    await pipe._dispatch_reactor_event(ClientConnected(ConnId(1001), 1))
+    pipe.state.speed = 7.0
+    await pipe._dispatch_reactor_event(ClientDisconnected(ConnId(1001), 0))
+    await pipe._dispatch_reactor_event(ClientConnected(ConnId(1002), 1))
+    assert pipe.state.speed == 7.0
+
+
+class _ScheduleState(InputState):
+    speed: float = InputField(default=1.0)
+    _schedule: Any = None
+
+
+class _SessionInitPipe(ReactorPipeline):
+    state: _ScheduleState
+    output: Frame
+    fps = 12
+
+    def inference(self) -> Iterator[Frame]:
+        while True:
+            yield _frame()
+
+    @session_started
+    async def _init_schedule(self) -> None:
+        self.state._schedule = {}
+
+
+async def test_session_started_hook_runs_with_the_fresh_state_in_place() -> None:
+    pipe = _SessionInitPipe()
+    _ready(pipe)
+    await pipe._dispatch_reactor_event(SessionStarted("s"))
+    assert pipe.state._schedule == {}
+
+    # A mutation survives for the whole session and does not leak into the next.
+    pipe.state._schedule[3] = "prompt"
+    await pipe._dispatch_reactor_event(SessionEnded("s", EndReason.STOPPED))
+    await pipe._dispatch_reactor_event(SessionStarted("s2"))
+    assert pipe.state._schedule == {}
 
 
 class Streamer(ReactorPipeline):

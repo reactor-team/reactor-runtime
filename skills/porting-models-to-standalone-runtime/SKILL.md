@@ -114,9 +114,13 @@ async def on_session_started(self) -> None:
 ```
 
 `@session_started` fires exactly once per session, before any client
-connects. If first-vs-later-client logic *within* one session is genuinely
-needed, keep the flag on `self.state`: it is session-scoped by construction,
-so it cannot leak into the next session the way an attribute on the model
+connects, and for a `ReactorPipeline` it runs with the session's fresh
+`self.state` already built: the runtime constructs `state` when the session
+starts and clears it only after `@session_ended`, so a private field
+initialized here stays alive across client disconnects and rejoins within
+the session. If first-vs-later-client logic *within* one session is
+genuinely needed, keep the flag on `self.state`: it is session-scoped, so
+it cannot leak into the next session the way an attribute on the model
 instance does. Audit every use of a connection counter when porting —
 teardown logic hung off `@disconnected` (dropping caches, releasing a
 sub-session) has the same blind spot and belongs in `@session_ended`.

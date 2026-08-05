@@ -57,7 +57,7 @@ def _coerce_nested(value: Any) -> Any:
     """Return *value* with every nested mapping key coerced to its string form."""
     if isinstance(value, Mapping):
         return {_coerce_key(key): _coerce_nested(item) for key, item in value.items()}
-    if isinstance(value, Sequence) and not isinstance(value, str | bytes):
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
         return [_coerce_nested(item) for item in value]
     return value
 

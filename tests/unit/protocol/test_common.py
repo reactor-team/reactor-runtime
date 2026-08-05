@@ -66,3 +66,11 @@ def test_coercion_matches_json_dumps() -> None:
 def test_unsupported_key_type_names_the_key() -> None:
     with pytest.raises(TypeError, match=r"tuple: \(1, 2\)"):
         dict_to_struct({"outer": {(1, 2): "a"}})
+
+
+def test_bytearray_values_still_raise() -> None:
+    # A bytearray registers as a MutableSequence; coercion must not quietly
+    # expand it into a list of ints — a Struct has no bytes representation, so
+    # the loud failure is the correct behavior.
+    with pytest.raises((TypeError, ValueError)):
+        dict_to_struct({"frame": bytearray(b"\x00\x01")})
