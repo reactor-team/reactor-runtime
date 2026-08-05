@@ -52,7 +52,8 @@ class ReactorModel(ReactorCore):
     """Base class an author subclasses to define a model.
 
     Decorate methods with ``@event`` to expose commands, and with the lifecycle
-    decorators to hook session and connection events. Declaring the subclass
+    decorators to hook session and connection events — ``@session_started`` is
+    the hook for once-per-session initialization. Declaring the subclass
     resolves the contract and caches it on the class, reachable through
     :meth:`ModelContract.of`.
 
