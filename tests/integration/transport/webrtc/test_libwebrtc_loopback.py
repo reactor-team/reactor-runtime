@@ -131,9 +131,9 @@ class _Client:
 
             track.on_audio_frame(_count_audio)
 
-    def create_offer(self) -> str:
-        offer = self.pc.create_offer()
-        self.pc.set_local_description(offer)
+    async def create_offer(self) -> str:
+        offer = await self.pc.create_offer()
+        await self.pc.set_local_description(offer)
         return offer.sdp
 
     def track_map(self) -> TrackMap:
@@ -160,10 +160,10 @@ class _Client:
             )
         )
 
-    def accept_answer(self, sdp: str) -> None:
-        self.pc.set_remote_description(rw.SessionDescription("answer", sdp))
+    async def accept_answer(self, sdp: str) -> None:
+        await self.pc.set_remote_description(rw.SessionDescription("answer", sdp))
         for candidate in _ice_from_answer(sdp):
-            self.pc.add_ice_candidate(candidate)
+            await self.pc.add_ice_candidate(candidate)
 
 
 async def _trickle_until(client: _Client, peer: WebRTCPeer, stop: asyncio.Event) -> None:
@@ -190,7 +190,7 @@ async def _trickle_until(client: _Client, peer: WebRTCPeer, stop: asyncio.Event)
 async def test_loopback_carries_media_and_messages() -> None:
     factory = _get_factory()
     client = _Client(factory)
-    offer_sdp = client.create_offer()
+    offer_sdp = await client.create_offer()
     tracks = client.track_map()
 
     messages: list[tuple[bytes | str, ProtocolVersion, Channel]] = []
@@ -223,7 +223,7 @@ async def test_loopback_carries_media_and_messages() -> None:
     stop_trickle = asyncio.Event()
     trickle_task = asyncio.create_task(_trickle_until(client, peer, stop_trickle))
     try:
-        client.accept_answer(answer.sdp)
+        await client.accept_answer(answer.sdp)
 
         assert await _reached(connected), "peer connection never reached connected"
 

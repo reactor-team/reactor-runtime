@@ -44,8 +44,16 @@ drifting apart.
 
 Threading
 ---------
-* The asyncio loop thread runs negotiation, ``add_ice``, stats, and close; every
-  blocking libwebrtc call is dispatched to an executor so the loop never stalls.
+* The asyncio loop thread runs negotiation, ``add_ice``, stats, and close, and
+  is shared across every connection this process holds. ``reactor_webrtc``'s
+  signaling methods (``create_offer``, ``create_answer``,
+  ``set_local_description``, ``set_remote_description``, ``add_ice_candidate``,
+  ``get_stats``) are awaitable: the blocking libwebrtc round-trip runs on a
+  Rust-side thread pool, never on this loop. Every other blocking call this
+  peer makes into ``reactor_webrtc`` or ``threading`` — attaching outbound
+  tracks to their transceivers, waiting on ICE gathering to complete — is
+  dispatched to an executor, so a connection negotiating never stalls the
+  loop other connections are running on.
 * A frame-drain thread pushes outbound video and buffers outbound audio; a
   second thread feeds that audio to the peer's audio track in steady 10 ms frames.
 * libwebrtc's own signaling and network threads fire the observer callbacks;
@@ -281,13 +289,13 @@ class WebRTCPeer:
         self._pc = pc
 
         offer = rw.SessionDescription("offer", deduplicate_bundle_pts(sdp_offer))
-        await loop.run_in_executor(None, pc.set_remote_description, offer)
+        await pc.set_remote_description(offer)
         self._raise_if_stopped()
 
         await self._attach_out_tracks(loop, pc, factory)
 
-        answer = await loop.run_in_executor(None, pc.create_answer)
-        await loop.run_in_executor(None, pc.set_local_description, answer)
+        answer = await pc.create_answer()
+        await pc.set_local_description(answer)
         self._raise_if_stopped()
 
         timeout_s = self._config.ice_gathering_timeout_ms / 1000.0
@@ -314,6 +322,10 @@ class WebRTCPeer:
         After ``set_remote_description`` libwebrtc has a transceiver per m-section
         carrying the offer's mid. A mid that maps to an ``OUT`` track (the client
         offered it recvonly) gets a fresh sender track and a send-only direction.
+
+        ``transceivers()``/``set_track()``/``set_direction()`` are synchronous
+        libwebrtc calls — dispatched to an executor so they never stall the
+        shared event loop other peers' connections are also running on.
         """
         transceivers = await loop.run_in_executor(None, pc.transceivers)
         for transceiver in transceivers:
@@ -565,15 +577,14 @@ class WebRTCPeer:
     async def add_ice(self, candidate: IceCandidate) -> None:
         """Add a trickle-ICE candidate; valid before and after the wire connects."""
         pc = self._pc
-        loop = self._loop
-        if self._stop_event.is_set() or pc is None or loop is None:
+        if self._stop_event.is_set() or pc is None:
             return
         ice = rw.IceCandidate(
             candidate=candidate.candidate,
             sdp_mid=candidate.sdp_mid,
             sdp_mline_index=candidate.sdp_mline_index,
         )
-        await loop.run_in_executor(None, pc.add_ice_candidate, ice)
+        await pc.add_ice_candidate(ice)
 
     # =========================================================================
     # Seam: track arbitration
@@ -594,11 +605,10 @@ class WebRTCPeer:
     async def stats(self) -> PeerStats:
         """Sample current transport statistics from libwebrtc."""
         pc = self._pc
-        loop = self._loop
-        if self._stop_event.is_set() or pc is None or loop is None:
+        if self._stop_event.is_set() or pc is None:
             return PeerStats()
         try:
-            report = await loop.run_in_executor(None, pc.get_stats)
+            report = await pc.get_stats()
         except Exception:
             logger.debug("stats sample failed", exc_info=True)
             return PeerStats()
