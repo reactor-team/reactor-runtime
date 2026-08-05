@@ -139,7 +139,7 @@ def _get_factory() -> rw.PeerConnectionFactory:
 
 
 def _build_rtc_config(config: WebRtcConfig) -> rw.RtcConfiguration:
-    """Translate the transport config's ICE servers into a libwebrtc config."""
+    """Translate the transport config's ICE servers and port range into a libwebrtc config."""
     rtc = rw.RtcConfiguration()
     if config.transport_policy is IceTransportPolicy.RELAY:
         # The binding exposes no relay-only knob; gather every candidate type and
@@ -154,6 +154,8 @@ def _build_rtc_config(config: WebRtcConfig) -> rw.RtcConfiguration:
             )
             for server in config.ice_servers
         ]
+    if config.port_range is not None:
+        rtc.min_port, rtc.max_port = config.port_range
     return rtc
 
 
@@ -287,6 +289,13 @@ class WebRTCPeer:
 
         pc = factory.create_peer_connection(_build_rtc_config(self._config), observer)
         self._pc = pc
+        await loop.run_in_executor(
+            None,
+            pc.set_bitrate,
+            self._config.bwe_min_kbps * 1000,
+            self._config.bwe_target_kbps * 1000,
+            self._config.bwe_max_kbps * 1000,
+        )
 
         offer = rw.SessionDescription("offer", deduplicate_bundle_pts(sdp_offer))
         await pc.set_remote_description(offer)

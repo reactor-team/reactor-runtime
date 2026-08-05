@@ -43,6 +43,9 @@ _WEBRTC_ENV = (
     "WEBRTC_PORT_RANGE",
     "ICE_TRANSPORT_POLICY",
     "WEBRTC_CLIENT_PING_TIMEOUT_SECONDS",
+    "WEBRTC_BWE_MIN_KBPS",
+    "WEBRTC_BWE_MAX_KBPS",
+    "WEBRTC_BWE_TARGET_KBPS",
 )
 
 _RUNTIME_ENV = (
@@ -140,6 +143,30 @@ def test_webrtc_config_falls_back_to_a_public_stun_when_unconfigured() -> None:
     assert config.transport_policy is IceTransportPolicy.ALL
     assert config.port_range is None
     assert config.ping_timeout == 20.0
+    assert config.bwe_min_kbps == WebRtcConfig.bwe_min_kbps
+    assert config.bwe_max_kbps == WebRtcConfig.bwe_max_kbps
+    assert config.bwe_target_kbps == WebRtcConfig.bwe_target_kbps
+
+
+def test_webrtc_config_reads_bwe_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WEBRTC_BWE_MIN_KBPS", "800")
+    monkeypatch.setenv("WEBRTC_BWE_MAX_KBPS", "8000")
+    monkeypatch.setenv("WEBRTC_BWE_TARGET_KBPS", "3000")
+
+    config = _webrtc_config_from_env()
+
+    assert config.bwe_min_kbps == 800
+    assert config.bwe_max_kbps == 8000
+    assert config.bwe_target_kbps == 3000
+
+
+def test_webrtc_config_rejects_a_non_integer_bwe_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WEBRTC_BWE_MIN_KBPS", "not-a-number")
+
+    with pytest.raises(SystemExit):
+        _webrtc_config_from_env()
 
 
 def test_webrtc_config_reads_stun_turn_policy_and_ping(

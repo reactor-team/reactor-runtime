@@ -201,6 +201,16 @@ def test_build_rtc_config_relay_policy_does_not_raise() -> None:
     assert _build_rtc_config(config) is not None
 
 
+def test_build_rtc_config_maps_port_range() -> None:
+    rtc = _build_rtc_config(WebRtcConfig(port_range=(10000, 10100)))
+    assert (rtc.min_port, rtc.max_port) == (10000, 10100)
+
+
+def test_build_rtc_config_leaves_port_range_at_default_when_unset() -> None:
+    rtc = _build_rtc_config(WebRtcConfig())
+    assert (rtc.min_port, rtc.max_port) == (0, 0)
+
+
 # ── State classification ─────────────────────────────────────────────────────
 
 

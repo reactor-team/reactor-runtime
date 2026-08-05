@@ -8,10 +8,10 @@ platform.
 
 This is also the runtime's one configuration boundary: the manifest names the
 model, and the surrounding deployment names everything else (bind address, the
-ICE servers and port range, the lifecycle timeouts) through environment
-variables. The transport and lifecycle config objects stay free of environment
-reads; the small adapter here is the only place that translates the outside
-world into them.
+ICE servers and port range, the congestion-control bitrate limits, the
+lifecycle timeouts) through environment variables. The transport and lifecycle
+config objects stay free of environment reads; the small adapter here is the
+only place that translates the outside world into them.
 """
 
 from __future__ import annotations
@@ -134,6 +134,21 @@ def _float_env(name: str, default: float) -> float:
         raise SystemExit(f"{name} {raw!r} must be a number") from None
 
 
+def _int_env(name: str, default: int) -> int:
+    """Return env var *name* as an int, or *default* when unset/empty.
+
+    Raises:
+        SystemExit: If the value is set but not an integer.
+    """
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise SystemExit(f"{name} {raw!r} must be an integer") from None
+
+
 def _webrtc_config_from_env() -> WebRtcConfig:
     """Build the WebRTC transport config from the environment.
 
@@ -145,6 +160,9 @@ def _webrtc_config_from_env() -> WebRtcConfig:
         port_range=_port_range_from_env(),
         transport_policy=_ice_policy_from_env(),
         ping_timeout=_float_env("WEBRTC_CLIENT_PING_TIMEOUT_SECONDS", 20.0),
+        bwe_min_kbps=_int_env("WEBRTC_BWE_MIN_KBPS", WebRtcConfig.bwe_min_kbps),
+        bwe_max_kbps=_int_env("WEBRTC_BWE_MAX_KBPS", WebRtcConfig.bwe_max_kbps),
+        bwe_target_kbps=_int_env("WEBRTC_BWE_TARGET_KBPS", WebRtcConfig.bwe_target_kbps),
     )
 
 

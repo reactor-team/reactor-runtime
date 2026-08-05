@@ -1,8 +1,9 @@
 """WebRTC connection configuration.
 
 The tunables the acceptor threads into every connection it builds: the ICE
-servers and policy that shape candidate gathering, the UDP port range, and the
-liveness timeout the connection's ping watchdog enforces.
+servers and policy that shape candidate gathering, the UDP port range, the
+congestion-control bitrate limits, and the liveness timeout the connection's
+ping watchdog enforces.
 """
 
 from __future__ import annotations
