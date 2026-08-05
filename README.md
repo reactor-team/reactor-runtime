@@ -2,7 +2,7 @@
 
 <img src="assets/banner.png" alt="Reactor Runtime" width="100%" />
 
-**Build real-time, interactive video AI models in Python.**
+**Build real-time AI models in Python.**
 
 [📖 Documentation](https://deploy-docs.reactor.inc) · [🚀 Quickstart](https://deploy-docs.reactor.inc/development/quickstart) · [🌐 Reactor](https://reactor.inc)
 
@@ -10,7 +10,7 @@
 
 ---
 
-Reactor Runtime turns an inference pipeline into a live, interactive video stream. You write `load()` and `run()`; the runtime handles the session lifecycle, the WebRTC media transport, and the wire protocol that connects clients to your model. Viewers watch frames as they are generated and change what the model is doing mid-stream, with no restart and no re-queue.
+Reactor Runtime turns an inference pipeline into a real-time, interactive media and data stream. You write `load()` and `run()`; the runtime handles the session lifecycle, the WebRTC media transport, and the wire protocol that connects clients to your model. Viewers watch frames as they are generated and change what the model is doing mid-stream, with no restart and no re-queue.
 
 ## Highlights
 
@@ -22,7 +22,7 @@ Reactor Runtime turns an inference pipeline into a live, interactive video strea
 
 ## How it works
 
-A model is a `ReactorModel` subclass in `model.py`. Declare the media it sends, load your weights once, and write the loop that produces frames:
+A model is a `ReactorModel` subclass in `model.py`. Declare the media it sends, load your weights once, and write the loop that receives or produces frames, data, and more:
 
 ```python
 from pathlib import Path
