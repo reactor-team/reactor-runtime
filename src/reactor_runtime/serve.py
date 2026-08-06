@@ -152,7 +152,7 @@ def _int_env(name: str, default: int) -> int:
 def _bwe_limits_from_env() -> tuple[int, int, int]:
     """Read the congestion-control bitrate limits, enforcing libwebrtc's own ordering.
 
-    ``set_bitrate`` requires ``0 <= min <= target <= max``; checking it here, once at
+    ``set_bitrate`` requires ``0 <= min <= initial <= max``; checking it here, once at
     boot, turns a misconfigured deployment into a startup failure instead of a
     ``RuntimeError`` repeated on every connection's negotiation.
 
@@ -161,13 +161,13 @@ def _bwe_limits_from_env() -> tuple[int, int, int]:
     """
     min_kbps = _int_env("WEBRTC_BWE_MIN_KBPS", WebRtcConfig.bwe_min_kbps)
     max_kbps = _int_env("WEBRTC_BWE_MAX_KBPS", WebRtcConfig.bwe_max_kbps)
-    target_kbps = _int_env("WEBRTC_BWE_TARGET_KBPS", WebRtcConfig.bwe_target_kbps)
-    if not 0 <= min_kbps <= target_kbps <= max_kbps:
+    initial_kbps = _int_env("WEBRTC_BWE_INITIAL_KBPS", WebRtcConfig.bwe_initial_kbps)
+    if not 0 <= min_kbps <= initial_kbps <= max_kbps:
         raise SystemExit(
-            "WEBRTC_BWE_MIN_KBPS, WEBRTC_BWE_TARGET_KBPS, and WEBRTC_BWE_MAX_KBPS must "
-            f"satisfy 0 <= min <= target <= max; got {min_kbps} <= {target_kbps} <= {max_kbps}"
+            "WEBRTC_BWE_MIN_KBPS, WEBRTC_BWE_INITIAL_KBPS, and WEBRTC_BWE_MAX_KBPS must "
+            f"satisfy 0 <= min <= initial <= max; got {min_kbps} <= {initial_kbps} <= {max_kbps}"
         )
-    return min_kbps, max_kbps, target_kbps
+    return min_kbps, max_kbps, initial_kbps
 
 
 def _webrtc_config_from_env() -> WebRtcConfig:
@@ -176,7 +176,7 @@ def _webrtc_config_from_env() -> WebRtcConfig:
     The transport config object itself reads no environment; this adapter is the
     single place the outside world is translated into it.
     """
-    bwe_min_kbps, bwe_max_kbps, bwe_target_kbps = _bwe_limits_from_env()
+    bwe_min_kbps, bwe_max_kbps, bwe_initial_kbps = _bwe_limits_from_env()
     return WebRtcConfig(
         ice_servers=_ice_servers_from_env(),
         port_range=_port_range_from_env(),
@@ -184,7 +184,7 @@ def _webrtc_config_from_env() -> WebRtcConfig:
         ping_timeout=_float_env("WEBRTC_CLIENT_PING_TIMEOUT_SECONDS", 20.0),
         bwe_min_kbps=bwe_min_kbps,
         bwe_max_kbps=bwe_max_kbps,
-        bwe_target_kbps=bwe_target_kbps,
+        bwe_initial_kbps=bwe_initial_kbps,
     )
 
 

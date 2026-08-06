@@ -167,7 +167,7 @@ def _apply_bitrate_limits(pc: rw.PeerConnection, config: WebRtcConfig) -> None:
     """
     pc.set_bitrate(
         config.bwe_min_kbps * 1000,
-        config.bwe_target_kbps * 1000,
+        config.bwe_initial_kbps * 1000,
         config.bwe_max_kbps * 1000,
     )
 

@@ -222,7 +222,7 @@ class _FakePeerConnection:
 
 def test_apply_bitrate_limits_converts_kbps_to_bps_in_min_start_max_order() -> None:
     pc = _FakePeerConnection()
-    config = WebRtcConfig(bwe_min_kbps=800, bwe_target_kbps=3000, bwe_max_kbps=8000)
+    config = WebRtcConfig(bwe_min_kbps=800, bwe_initial_kbps=3000, bwe_max_kbps=8000)
 
     _apply_bitrate_limits(cast("rw.PeerConnection", pc), config)
 
