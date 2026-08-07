@@ -98,10 +98,12 @@ class MediaPacer:
         self._lifecycle_lock = threading.Lock()
 
         # One black frame marks a boundary (start of the connection, or a
-        # flush); after it the pacer stays silent until real media arrives,
-        # so the wire carries only frames the model actually produced.
+        # flush); after it the pacer repeats the last metadata-carrying frame
+        # (video only) as a gap-fill until new media arrives, so metadata
+        # reaches the client even during brief underruns.
         self._boundary_black_pending = True
         self._frame_dims: tuple[int, int, int] | None = None
+        self._last_frame: MediaBundle | None = None
 
     def submit(self, chunk: MediaChunk) -> int:
         """Split *chunk* into single frames, adopt its rate, and enqueue them.
@@ -195,6 +197,7 @@ class MediaPacer:
                 except queue.Empty:
                     break
             self._boundary_black_pending = True
+            self._last_frame = None
             self._room.notify_all()
 
     def start(self) -> None:
@@ -247,12 +250,15 @@ class MediaPacer:
             self._stop.set()
 
     def _emit_one_tick(self) -> None:
-        """Emit the next queued frame, or the one boundary black, or nothing.
+        """Emit the next queued frame, the boundary black, or a gap-fill repeat.
 
-        An empty queue sends nothing: the client keeps showing the frame it
-        already has, and no bandwidth is spent repeating it. The single black
-        frame marks a boundary (connection start or flush) so the client
-        transitions off stale content exactly once.
+        A real frame is dispatched and remembered as the last frame. An empty
+        queue after the boundary black repeats the last real frame (video only,
+        with its metadata) as a gap-fill — audio is excluded to avoid replaying
+        it as a stutter. The single boundary black marks a transition (connection
+        start or flush) so the client moves off stale content exactly once; after
+        a flush ``_last_frame`` is cleared, so the gap-fill stays silent until
+        new media arrives.
         """
         try:
             item = self._queue.get_nowait()
@@ -268,10 +274,18 @@ class MediaPacer:
                 shape = video[0].data.shape
                 self._frame_dims = (shape[0], shape[1], shape[2])
             self._boundary_black_pending = False
+            self._last_frame = item
             self._dispatch(item)
         elif self._boundary_black_pending:
             self._boundary_black_pending = False
             self._dispatch(self._black_bundle())
+        elif self._last_frame is not None:
+            # Only repeat as a gap-fill when the last frame carried metadata —
+            # the goal is to keep metadata reaching the client during underruns,
+            # not to repeat video the client already holds.
+            video_only = self._video_only(self._last_frame)
+            if any(t.metadata is not None for t in video_only.tracks.values()):
+                self._dispatch(video_only)
 
     def _dispatch(self, bundle: MediaBundle) -> None:
         """Hand one frame to the sink, isolating its failure from the loop."""
@@ -294,6 +308,24 @@ class MediaPacer:
                 return
             if remaining > self._SLEEP_CHUNK and self._stop.wait(timeout=self._SLEEP_CHUNK):
                 return
+
+    @staticmethod
+    def _video_only(bundle: MediaBundle) -> MediaBundle:
+        """Return a copy of *bundle* carrying only its video tracks.
+
+        A gap-fill repeats the last video frame but not its audio, which would
+        otherwise be replayed and heard as a stutter. The video track is reused
+        whole, metadata included: the repeat puts the same picture on the wire, so
+        a client that reads metadata to interpret what it is looking at has to be
+        told the same thing about it.
+        """
+        return MediaBundle(
+            tracks={
+                name: track
+                for name, track in bundle.tracks.items()
+                if track.info.kind is TrackKind.VIDEO
+            }
+        )
 
     def _black_bundle(self) -> MediaBundle:
         """Build a black frame for each outbound video track."""
