@@ -7,6 +7,9 @@ the suite skips cleanly when the wheel is absent.
 """
 
 import asyncio
+import logging
+import threading
+import time
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -425,3 +428,36 @@ async def test_factory_rejects_empty_offer() -> None:
         await libwebrtc_peer_factory(
             ConnId(1), SdpOffer(sdp="   "), TrackMap(), WebRtcConfig(), ProtocolVersion.V0
         )
+
+
+def test_a_failing_outbound_push_is_warned_not_swallowed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The drain loop reports a push that raises, with its traceback.
+
+    Swallowing it takes the model's output off the wire while the device keeps
+    filling the gap, so the session looks healthy and only the content is
+    missing — the one failure here that a debug line is not enough for.
+    """
+    peer = WebRTCPeer()
+    # A track object with no push_video_frame, so the push raises inside the loop.
+    peer._out_tracks["v"] = cast(Any, object())
+    peer._frame_queue.put_nowait(_video_bundle("v"))
+
+    thread = threading.Thread(target=peer._frame_drain_loop, daemon=True)
+    with caplog.at_level(logging.WARNING):
+        thread.start()
+        try:
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and peer._push_failures == 0:
+                time.sleep(0.01)
+        finally:
+            peer._stop_event.set()
+            thread.join(timeout=5.0)
+
+    assert peer._push_failures >= 1, "the drain loop never attempted the push"
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("outbound frame push failed" in r.getMessage() for r in warnings), (
+        f"the failure was not warned about: {[r.getMessage() for r in warnings]}"
+    )
+    assert any(r.exc_info for r in warnings), "the warning carried no traceback"
