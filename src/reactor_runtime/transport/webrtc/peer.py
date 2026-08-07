@@ -85,7 +85,7 @@ from reactor_runtime.core import (
     TrackKind,
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion, sniff
-from reactor_runtime.transport.webrtc.config import IceTransportPolicy, WebRtcConfig
+from reactor_runtime.transport.webrtc.config import WebRtcConfig
 from reactor_runtime.transport.webrtc.frames import (
     bgra_to_rgb,
     inbound_audio_to_mono,
@@ -141,10 +141,7 @@ def _get_factory() -> rw.PeerConnectionFactory:
 def _build_rtc_config(config: WebRtcConfig) -> rw.RtcConfiguration:
     """Translate the transport config's ICE servers and port range into a libwebrtc config."""
     rtc = rw.RtcConfiguration()
-    if config.transport_policy is IceTransportPolicy.RELAY:
-        # The binding exposes no relay-only knob; gather every candidate type and
-        # note that a relay-only policy cannot be honoured here.
-        logger.debug("relay-only ICE policy is not supported by libwebrtc binding")
+    rtc.ice_transport_type = str(config.transport_policy)
     if config.ice_servers:
         rtc.ice_servers = [
             rw.IceServer(

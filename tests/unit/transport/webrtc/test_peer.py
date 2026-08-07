@@ -197,9 +197,13 @@ def test_build_rtc_config_without_servers_is_empty() -> None:
     assert list(_build_rtc_config(WebRtcConfig()).ice_servers) == []
 
 
-def test_build_rtc_config_relay_policy_does_not_raise() -> None:
+def test_build_rtc_config_maps_relay_policy() -> None:
     config = WebRtcConfig(transport_policy=IceTransportPolicy.RELAY)
-    assert _build_rtc_config(config) is not None
+    assert _build_rtc_config(config).ice_transport_type == "relay"
+
+
+def test_build_rtc_config_defaults_to_all_policy() -> None:
+    assert _build_rtc_config(WebRtcConfig()).ice_transport_type == "all"
 
 
 def test_build_rtc_config_maps_port_range() -> None:
