@@ -48,7 +48,7 @@ Threading
   is shared across every connection this process holds. ``reactor_webrtc``'s
   signaling methods (``create_offer``, ``create_answer``,
   ``set_local_description``, ``set_remote_description``, ``add_ice_candidate``,
-  ``get_stats``) are awaitable: the blocking libwebrtc round-trip runs on a
+  ``get_stats``, ``set_bitrate``) are awaitable: the blocking libwebrtc round-trip runs on a
   Rust-side thread pool, never on this loop. Every other blocking call this
   peer makes into ``reactor_webrtc`` or ``threading`` — attaching outbound
   tracks to their transceivers, waiting on ICE gathering to complete — is
@@ -85,7 +85,7 @@ from reactor_runtime.core import (
     TrackKind,
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion, sniff
-from reactor_runtime.transport.webrtc.config import IceTransportPolicy, WebRtcConfig
+from reactor_runtime.transport.webrtc.config import WebRtcConfig
 from reactor_runtime.transport.webrtc.frames import (
     bgra_to_rgb,
     inbound_audio_to_mono,
@@ -139,12 +139,9 @@ def _get_factory() -> rw.PeerConnectionFactory:
 
 
 def _build_rtc_config(config: WebRtcConfig) -> rw.RtcConfiguration:
-    """Translate the transport config's ICE servers into a libwebrtc config."""
+    """Translate the transport config's ICE servers and port range into a libwebrtc config."""
     rtc = rw.RtcConfiguration()
-    if config.transport_policy is IceTransportPolicy.RELAY:
-        # The binding exposes no relay-only knob; gather every candidate type and
-        # note that a relay-only policy cannot be honoured here.
-        logger.debug("relay-only ICE policy is not supported by libwebrtc binding")
+    rtc.ice_transport_type = str(config.transport_policy)
     if config.ice_servers:
         rtc.ice_servers = [
             rw.IceServer(
@@ -154,7 +151,22 @@ def _build_rtc_config(config: WebRtcConfig) -> rw.RtcConfiguration:
             )
             for server in config.ice_servers
         ]
+    if config.port_range is not None:
+        rtc.min_port, rtc.max_port = config.port_range
     return rtc
+
+
+async def _apply_bitrate_limits(pc: rw.PeerConnection, config: WebRtcConfig) -> None:
+    """Apply the configured congestion-control bitrate limits to a fresh peer connection.
+
+    ``set_bitrate`` takes bits per second in ``(min, start, max)`` order; the config
+    holds kbps floor/starting-point/ceiling, so this is the one place that converts.
+    """
+    await pc.set_bitrate(
+        config.bwe_min_kbps * 1000,
+        config.bwe_initial_kbps * 1000,
+        config.bwe_max_kbps * 1000,
+    )
 
 
 def _is_terminal_state(state: rw.PeerConnectionState) -> bool:
@@ -287,6 +299,7 @@ class WebRTCPeer:
 
         pc = factory.create_peer_connection(_build_rtc_config(self._config), observer)
         self._pc = pc
+        await _apply_bitrate_limits(pc, self._config)
 
         offer = rw.SessionDescription("offer", deduplicate_bundle_pts(sdp_offer))
         await pc.set_remote_description(offer)

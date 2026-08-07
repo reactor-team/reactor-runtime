@@ -1,8 +1,9 @@
 """WebRTC connection configuration.
 
 The tunables the acceptor threads into every connection it builds: the ICE
-servers and policy that shape candidate gathering, the UDP port range, and the
-liveness timeout the connection's ping watchdog enforces.
+servers and policy that shape candidate gathering, the UDP port range, the
+congestion-control bitrate limits, and the liveness timeout the connection's
+ping watchdog enforces.
 """
 
 from __future__ import annotations
@@ -93,7 +94,7 @@ class WebRtcConfig:
             when the offer includes them.
         bwe_min_kbps: Floor for the congestion-control bitrate estimate.
         bwe_max_kbps: Ceiling for the congestion-control bitrate estimate.
-        bwe_target_kbps: Starting target bitrate before estimates arrive.
+        bwe_initial_kbps: Starting bitrate before estimates arrive.
         bwe_target_update_threshold: Relative change below which a new bitrate
             estimate is ignored rather than re-applied to the encoders.
         rtx_max_size_packets: Retransmission history depth, in packets.
@@ -131,7 +132,7 @@ class WebRtcConfig:
     rtp_header_extensions: tuple[str, ...] = (_TRANSPORT_WIDE_CC,)
     bwe_min_kbps: int = 500
     bwe_max_kbps: int = 10000
-    bwe_target_kbps: int = 4000
+    bwe_initial_kbps: int = 4000
     bwe_target_update_threshold: float = 0.05
     rtx_max_size_packets: int = 512
     rtx_max_size_time_ms: int = 200
