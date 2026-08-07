@@ -6,6 +6,10 @@ effect and its intensity, and a typed message back when either changes. It
 exercises the whole spine — inbound media, commands, lifecycle hooks, and
 bidirectional A/V — with no model weights.
 
+Per-frame metadata round-trips too: whatever a client attaches to a webcam frame
+comes back on the processed frame it produced, so a client can correlate the two
+without a side channel. Frames the client sent untagged come back untagged.
+
 Effects use OpenCV (``opencv-python-headless``); see ``requirements.txt``.
 """
 
@@ -28,6 +32,7 @@ from reactor_runtime import (
     Output,
     ReactorModel,
     ReadMode,
+    TrackPayload,
     UploadedFile,
     Video,
     connected,
@@ -203,6 +208,10 @@ class Echo(ReactorModel):
         backlog, trims the backlog to ~2 video frames of audio (dropping bursts
         from client-side pauses), and emits both. Rate-matching the two streams
         keeps playback in sync on the client.
+
+        The inbound frame's metadata rides back out on the frame produced from it.
+        It is echoed as the bytes it arrived as — this model does not interpret
+        it, so whatever the client encoded is what the client gets back.
         """
         # The runtime binds a live InputBuffer to each declared input track; the
         # track annotations (Video/Audio) only carry the kind for the contract.
@@ -240,12 +249,18 @@ class Echo(ReactorModel):
                 else:
                     main_audio = np.zeros((1, 0), dtype=np.int16)
 
-                processed = _apply_effect(frames[0].data, self.effect, self.intensity)
+                frame = frames[0]
+                processed = _apply_effect(frame.data, self.effect, self.intensity)
                 if self._overlay is not None:
                     processed = _overlay_image(processed, self._overlay, self._overlay_strength)
                 if self._caption:
                     processed = _draw_caption(processed, self._caption)
-                await self.emit(EchoOutput(main_video=processed, main_audio=main_audio))
+                # A bare array when the frame carried nothing, so "attached
+                # nothing" stays a single case on the client too.
+                video: np.ndarray | TrackPayload = processed
+                if frame.metadata is not None:
+                    video = TrackPayload(processed, metadata=frame.metadata)
+                await self.emit(EchoOutput(main_video=video, main_audio=main_audio))
 
 
 def _trim_backlog(backlog: list[InputFrame], max_samples: int) -> None:

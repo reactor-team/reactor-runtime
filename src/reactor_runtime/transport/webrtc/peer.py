@@ -390,7 +390,15 @@ class WebRTCPeer:
             self._ice_candidates.append((candidate.sdp_mline_index, candidate.candidate))
 
     def _on_track(self, kind: rw.MediaKind, track: rw.Track) -> None:
-        """Wire an inbound track's frames to the media callback, by track name."""
+        """Wire an inbound track's frames to the media callback, by track name.
+
+        Fires on a libwebrtc thread while the remote description is being applied.
+
+        A frame's metadata arrives on ``VideoFrame.metadata`` whenever the sender
+        attached a trailer and both peers negotiated support for it: the binding
+        advertises the capability in the SDP and reads the trailer off the wire on
+        its own.
+        """
         in_tracks = self._track_map.by_direction(TrackDirection.IN)
         if kind == rw.MediaKind.Video:
             name = self._inbound_name(in_tracks, TrackKind.VIDEO, self._in_video_seen)
