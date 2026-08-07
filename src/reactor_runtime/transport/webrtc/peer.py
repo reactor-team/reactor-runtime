@@ -339,6 +339,11 @@ class WebRTCPeer:
         ``transceivers()``/``set_track()``/``set_direction()`` are synchronous
         libwebrtc calls — dispatched to an executor so they never stall the
         shared event loop other peers' connections are also running on.
+
+        A video sender also gets the transform that carries frame metadata. It
+        has to be attached here, before the answer is created, so every outbound
+        video track has one whether or not the model turns out to send metadata:
+        a frame pushed without any is forwarded untouched.
         """
         transceivers = await loop.run_in_executor(None, pc.transceivers)
         for transceiver in transceivers:
@@ -501,7 +506,8 @@ class WebRTCPeer:
     def _push_bundle(self, bundle: MediaBundle) -> None:
         """Push a bundle's video and buffer its audio for the feeder thread.
 
-        Video crosses the boundary immediately. Audio is appended to the shallow
+        Video crosses the boundary immediately, carrying the frame's metadata
+        into the encoded packet's trailer. Audio is appended to the shallow
         buffer the feeder drains in 10 ms frames via ``track.push_pcm()``.
         """
         for track_name, data in bundle.tracks.items():
@@ -513,7 +519,10 @@ class WebRTCPeer:
                 if track is None:
                     continue
                 bgra, width, height = rgb_to_bgra(data.data)
-                track.push_video_frame(bgra, width, height)
+                # A bundle reaching the wire holds one frame, so it holds one
+                # metadata value: a batch's list is resolved when it is split.
+                metadata = data.metadata if isinstance(data.metadata, bytes) else None
+                track.push_video_frame(bgra, width, height, user_data=metadata)
             else:
                 self._enqueue_audio(to_int16_mono(data.data))
 

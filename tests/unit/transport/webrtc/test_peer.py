@@ -42,9 +42,13 @@ from reactor_runtime.transport.webrtc.signaling import MappedTrack, SdpOffer, Tr
 class _FakeTrack:
     def __init__(self) -> None:
         self.pushed: list[tuple[bytes, int, int]] = []
+        self.user_data: list[bytes | None] = []
 
-    def push_video_frame(self, bgra: bytes, width: int, height: int) -> None:
+    def push_video_frame(
+        self, bgra: bytes, width: int, height: int, user_data: bytes | None = None
+    ) -> None:
         self.pushed.append((bgra, width, height))
+        self.user_data.append(user_data)
 
 
 class _FakeChannel:
@@ -55,10 +59,14 @@ class _FakeChannel:
         self.sent.append((data, binary))
 
 
-def _video_bundle(name: str, value: int = 1) -> MediaBundle:
+def _video_bundle(
+    name: str, value: int = 1, metadata: bytes | list[bytes] | None = None
+) -> MediaBundle:
     info = TrackInfo(name=name, kind=TrackKind.VIDEO, direction=TrackDirection.OUT)
     return MediaBundle(
-        tracks={name: TrackData(info=info, data=np.full((2, 2, 3), value, np.uint8))}
+        tracks={
+            name: TrackData(info=info, data=np.full((2, 2, 3), value, np.uint8), metadata=metadata)
+        }
     )
 
 
@@ -141,6 +149,33 @@ def test_push_bundle_routes_video_to_its_track() -> None:
     bgra, width, height = track.pushed[0]
     assert (width, height) == (2, 2)
     assert len(bgra) == 2 * 2 * 4
+
+
+def test_push_bundle_hands_frame_metadata_to_the_track() -> None:
+    peer = WebRTCPeer()
+    track: Any = _FakeTrack()
+    peer._out_tracks["v"] = track
+    peer._push_bundle(_video_bundle("v", metadata=b'{"seed":7}'))
+    assert track.user_data == [b'{"seed":7}']
+
+
+def test_push_bundle_sends_no_metadata_when_the_frame_carries_none() -> None:
+    peer = WebRTCPeer()
+    track: Any = _FakeTrack()
+    peer._out_tracks["v"] = track
+    peer._push_bundle(_video_bundle("v"))
+    assert track.user_data == [None]
+
+
+def test_push_bundle_sends_no_metadata_for_an_unsplit_batch() -> None:
+    # A bundle reaching the wire holds a single frame, so a list here is a
+    # bundle that skipped the split; the frame still goes out, undescribed.
+    peer = WebRTCPeer()
+    track: Any = _FakeTrack()
+    peer._out_tracks["v"] = track
+    peer._push_bundle(_video_bundle("v", metadata=[b"a", b"b"]))
+    assert len(track.pushed) == 1
+    assert track.user_data == [None]
 
 
 def test_push_bundle_skips_paused_track() -> None:
