@@ -5,7 +5,7 @@ from collections.abc import Callable
 import numpy as np
 import pytest
 
-from reactor_runtime import Input, ModelMessage, Output, Video
+from reactor_runtime import Audio, Input, ModelMessage, Output, TrackPayload, Video
 from reactor_runtime.core import Command, MediaChunk, SessionStarted
 from reactor_runtime.core.values import ConnId, InputFrame, TrackDirection
 from reactor_runtime.interface.internal.reactor_core import MediaOps, ReactorCore
@@ -13,6 +13,11 @@ from reactor_runtime.interface.internal.reactor_core import MediaOps, ReactorCor
 
 class Out(Output):
     main: Video
+
+
+class AvOut(Output):
+    main: Video
+    speech: Audio
 
 
 class In(Input):
@@ -77,6 +82,67 @@ def test_to_bundle_converts_a_typed_output() -> None:
     assert set(bundle.tracks) == {"main"}
     assert bundle.tracks["main"].data is data
     assert bundle.tracks["main"].info.direction is TrackDirection.OUT
+
+
+def test_to_bundle_encodes_a_mapping_as_json() -> None:
+    core = OutputOnlyCore()
+    data = np.zeros((4, 4, 3), dtype=np.uint8)
+    bundle = core._to_bundle(Out(main=TrackPayload(data, metadata={"seed": 7})))
+    assert bundle.tracks["main"].data is data
+    assert bundle.tracks["main"].metadata == b'{"seed":7}'
+
+
+def test_to_bundle_passes_author_encoded_bytes_through() -> None:
+    core = OutputOnlyCore()
+    bundle = core._to_bundle(
+        Out(main=TrackPayload(np.zeros((4, 4, 3), dtype=np.uint8), metadata=b"\x00raw"))
+    )
+    assert bundle.tracks["main"].metadata == b"\x00raw"
+
+
+def test_to_bundle_encodes_one_entry_per_batched_frame() -> None:
+    core = OutputOnlyCore()
+    batch = np.zeros((2, 4, 4, 3), dtype=np.uint8)
+    bundle = core._to_bundle(Out(main=TrackPayload(batch, metadata=[{"i": 0}, {"i": 1}])))
+    assert bundle.tracks["main"].metadata == [b'{"i":0}', b'{"i":1}']
+
+
+def test_to_bundle_leaves_a_bare_payload_without_metadata() -> None:
+    core = OutputOnlyCore()
+    bundle = core._to_bundle(Out(main=np.zeros((4, 4, 3), dtype=np.uint8)))
+    assert bundle.tracks["main"].metadata is None
+
+
+def test_to_bundle_rejects_metadata_on_an_audio_track() -> None:
+    core = OutputOnlyCore()
+    output = AvOut(
+        main=np.zeros((4, 4, 3), dtype=np.uint8),
+        speech=TrackPayload(np.zeros((1, 480), dtype=np.int16), metadata={"say": "hi"}),
+    )
+    with pytest.raises(ValueError, match="carries no frame metadata"):
+        core._to_bundle(output)
+
+
+def test_to_bundle_rejects_a_list_of_metadata_for_a_single_frame() -> None:
+    core = OutputOnlyCore()
+    payload = TrackPayload(np.zeros((4, 4, 3), dtype=np.uint8), metadata=[{"i": 0}, {"i": 1}])
+    with pytest.raises(ValueError, match="takes one metadata value"):
+        core._to_bundle(Out(main=payload))
+
+
+def test_to_bundle_rejects_metadata_that_does_not_cover_the_batch() -> None:
+    core = OutputOnlyCore()
+    payload = TrackPayload(np.zeros((3, 4, 4, 3), dtype=np.uint8), metadata=[{"i": 0}])
+    with pytest.raises(ValueError, match="1 metadata entries for 3 frames"):
+        core._to_bundle(Out(main=payload))
+
+
+def test_emit_raises_on_metadata_the_wire_cannot_take() -> None:
+    core = OutputOnlyCore()
+    _capture_media(core)
+    payload = TrackPayload(np.zeros((4, 4, 3), dtype=np.uint8), metadata={"when": object()})
+    with pytest.raises(ValueError, match="not JSON-serialisable"):
+        asyncio.run(core.emit(Out(main=payload)))
 
 
 def test_emit_tags_the_chunk_with_measured_throughput() -> None:
