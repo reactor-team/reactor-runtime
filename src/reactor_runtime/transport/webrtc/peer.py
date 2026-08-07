@@ -339,11 +339,6 @@ class WebRTCPeer:
         ``transceivers()``/``set_track()``/``set_direction()`` are synchronous
         libwebrtc calls — dispatched to an executor so they never stall the
         shared event loop other peers' connections are also running on.
-
-        A video sender also gets the transform that carries frame metadata. It
-        has to be attached here, before the answer is created, so every outbound
-        video track has one whether or not the model turns out to send metadata:
-        a frame pushed without any is forwarded untouched.
         """
         transceivers = await loop.run_in_executor(None, pc.transceivers)
         for transceiver in transceivers:
