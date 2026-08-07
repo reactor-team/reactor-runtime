@@ -12,9 +12,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from examples.echo.echo import Echo, EchoInput, EchoOutput, EffectChanged
+from reactor_runtime import TrackPayload
 from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.manifest import import_model_class, load_config
 
@@ -112,3 +114,21 @@ def test_model_constructs_with_input_buffers_and_loads() -> None:
 
 def test_output_carries_both_tracks() -> None:
     assert set(EchoOutput.__tracks__) == {"main_video", "main_audio"}
+
+
+def test_output_carries_the_metadata_a_frame_arrived_with() -> None:
+    """A tagged inbound frame's metadata rides back out on what it produced."""
+    output = EchoOutput(
+        main_video=TrackPayload(np.zeros((2, 2, 3), np.uint8), metadata=b'{"seq":3}'),
+        main_audio=np.zeros((1, 4), np.int16),
+    )
+    assert output.__metadata__["main_video"] == b'{"seq":3}'
+
+
+def test_output_carries_no_metadata_for_an_untagged_frame() -> None:
+    """A frame the client sent untagged goes back out untagged."""
+    output = EchoOutput(
+        main_video=np.zeros((2, 2, 3), np.uint8),
+        main_audio=np.zeros((1, 4), np.int16),
+    )
+    assert "main_video" not in output.__metadata__
