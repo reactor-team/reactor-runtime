@@ -216,15 +216,15 @@ class _FakePeerConnection:
     def __init__(self) -> None:
         self.bitrate_calls: list[tuple[int, int, int]] = []
 
-    def set_bitrate(self, min_bps: int, start_bps: int, max_bps: int) -> None:
+    async def set_bitrate(self, min_bps: int, start_bps: int, max_bps: int) -> None:
         self.bitrate_calls.append((min_bps, start_bps, max_bps))
 
 
-def test_apply_bitrate_limits_converts_kbps_to_bps_in_min_start_max_order() -> None:
+async def test_apply_bitrate_limits_converts_kbps_to_bps_in_min_start_max_order() -> None:
     pc = _FakePeerConnection()
     config = WebRtcConfig(bwe_min_kbps=800, bwe_initial_kbps=3000, bwe_max_kbps=8000)
 
-    _apply_bitrate_limits(cast("rw.PeerConnection", pc), config)
+    await _apply_bitrate_limits(cast("rw.PeerConnection", pc), config)
 
     assert pc.bitrate_calls == [(800_000, 3_000_000, 8_000_000)]
 
