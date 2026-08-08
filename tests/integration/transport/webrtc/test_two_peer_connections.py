@@ -68,3 +68,55 @@ def test_a_third_peer_connection_after_dropping_the_first() -> None:
     logger.info("peer connection B created")
 
     assert second is not None
+
+
+async def test_a_second_peer_connection_after_the_first_is_set_up() -> None:
+    """Build up the first peer connection the way a client does, then create a second.
+
+    Bare peer connections coexist fine, so what stalls the loopback is the state
+    the first one is carrying by the time the second is created, not the count.
+    This adds that state one piece at a time — transceivers, a track, a data
+    channel, an offer applied locally — and creates the second peer connection at
+    the end.
+
+    Every step logs before and after, so a stall names the piece that caused it:
+    the last line printed is the step that never finished.
+    """
+    factory = _get_factory()
+    config = _build_rtc_config(WebRtcConfig())
+
+    logger.info("step 1: create the first peer connection")
+    first = factory.create_peer_connection(config, rw.PeerConnectionObserver())
+    logger.info("step 1 done")
+
+    logger.info("step 2: add a recvonly video transceiver")
+    first.add_transceiver(rw.MediaKind.Video, rw.TransceiverDirection.RecvOnly)
+    logger.info("step 2 done")
+
+    logger.info("step 3: add a recvonly audio transceiver")
+    first.add_transceiver(rw.MediaKind.Audio, rw.TransceiverDirection.RecvOnly)
+    logger.info("step 3 done")
+
+    logger.info("step 4: create a video track and send it on a new transceiver")
+    track = factory.create_video_track("probe-cam")
+    sender = first.add_transceiver(rw.MediaKind.Video, rw.TransceiverDirection.SendOnly)
+    sender.set_track(track)
+    logger.info("step 4 done")
+
+    logger.info("step 5: create a data channel")
+    first.create_data_channel("probe-data")
+    logger.info("step 5 done")
+
+    logger.info("step 6: create the offer")
+    offer = await first.create_offer()
+    logger.info("step 6 done")
+
+    logger.info("step 7: apply the offer locally (starts ICE gathering)")
+    await first.set_local_description(offer)
+    logger.info("step 7 done")
+
+    logger.info("step 8: create the second peer connection")
+    second = factory.create_peer_connection(config, rw.PeerConnectionObserver())
+    logger.info("step 8 done")
+
+    assert second is not None
