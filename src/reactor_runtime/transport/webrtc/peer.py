@@ -108,6 +108,8 @@ CONTROL_CHANNEL_LABEL = "control"
 # Outbound frame queue depth: a bundle that arrives when the drain thread is
 # behind is dropped rather than allowed to grow unbounded latency.
 _FRAME_QUEUE_MAX = 10
+# How often a still-failing outbound push repeats its warning, in frames.
+_PUSH_FAILURE_LOG_EVERY = 300
 
 # Outbound audio is 48 kHz mono, matching the runtime's audio frames and the
 # rate the synthetic audio device plays out at. The device takes one 10 ms frame
@@ -234,6 +236,9 @@ class WebRTCPeer:
         # audio thread feeds that buffer to this peer's LocalAudioSource track in
         # steady 10 ms frames via track.push_pcm().
         self._frame_queue: queue.Queue[MediaBundle] = queue.Queue(maxsize=_FRAME_QUEUE_MAX)
+        # Outbound pushes that raised, counted so a persistent fault is reported
+        # without one line per frame.
+        self._push_failures = 0
         self._frame_thread: threading.Thread | None = None
         self._audio_track: rw.Track | None = None
         self._audio_buf: npt.NDArray[np.int16] = np.array([], dtype=np.int16)
@@ -519,7 +524,18 @@ class WebRTCPeer:
             try:
                 self._push_bundle(bundle)
             except Exception:
-                logger.debug("outbound frame push failed", exc_info=True)
+                self._push_failures += 1
+                # A push that fails takes the model's output off the wire while the
+                # device keeps filling the gap, so the session looks alive and only
+                # the content is missing. That is worth a warning. The first one
+                # carries the traceback and the rest are counted, because this runs
+                # per frame — repeating it would bury the log at frame rate.
+                if self._push_failures == 1:
+                    logger.warning("outbound frame push failed", exc_info=True)
+                elif self._push_failures % _PUSH_FAILURE_LOG_EVERY == 0:
+                    logger.warning(
+                        "outbound frame push still failing (%d frames)", self._push_failures
+                    )
 
     def _push_bundle(self, bundle: MediaBundle) -> None:
         """Push a bundle's video and buffer its audio for the feeder thread.

@@ -63,4 +63,35 @@ def integration(session: nox.Session) -> None:
     notably the ``reactor_webrtc`` wheel — present rather than skipped.
     """
     _install_locked(session)
-    session.run("pytest", "-q", "tests/integration", *session.posargs)
+    # Diagnostic settings while an integration hang is being chased in CI: -v names
+    # each test as it starts, -s keeps output unbuffered so the last line before a
+    # stall is real, --log-cli-level streams the runtime's own logging, and the
+    # faulthandler timeout dumps every thread's stack and aborts rather than
+    # letting the job sit until the runner is reclaimed.
+    # The isolation file runs in its own invocation, and first: faulthandler
+    # aborts the whole process on a stall, so anything collected after the
+    # loopback never gets to report.
+    session.run(
+        "pytest",
+        "-v",
+        "-s",
+        "-o",
+        "faulthandler_timeout=60",
+        "-o",
+        "faulthandler_exit_on_timeout=true",
+        "--log-cli-level=INFO",
+        "tests/integration/transport/webrtc/test_two_peer_connections.py",
+        success_codes=[0, 1, 2, 3, 4, 5],
+    )
+    session.run(
+        "pytest",
+        "-v",
+        "-s",
+        "-o",
+        "faulthandler_timeout=120",
+        "-o",
+        "faulthandler_exit_on_timeout=true",
+        "--log-cli-level=INFO",
+        "tests/integration",
+        *session.posargs,
+    )
