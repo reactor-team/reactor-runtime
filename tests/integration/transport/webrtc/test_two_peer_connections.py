@@ -120,3 +120,58 @@ async def test_a_second_peer_connection_after_the_first_is_set_up() -> None:
     logger.info("step 8 done")
 
     assert second is not None
+
+
+async def test_a_second_peer_connection_whose_observer_carries_callbacks() -> None:
+    """Repeat the build-up, but give the second peer connection real callbacks.
+
+    The one thing the passing variants leave out is the observer the runtime
+    actually uses: five bound Python callables rather than an empty observer. With
+    callbacks registered the native side can call into Python while the creating
+    thread still holds the GIL, which is the shape of a deadlock and would explain
+    a stall with no Python frame on the other thread.
+
+    Same eight steps, same logs. Step 8 is the only line that differs from the
+    variant that passes, so a stall here names the observer as the cause and
+    nothing else.
+    """
+    factory = _get_factory()
+    config = _build_rtc_config(WebRtcConfig())
+
+    logger.info("step 1: create the first peer connection")
+    first = factory.create_peer_connection(config, rw.PeerConnectionObserver())
+    logger.info("step 1 done")
+
+    logger.info("step 2-3: add recvonly video and audio transceivers")
+    first.add_transceiver(rw.MediaKind.Video, rw.TransceiverDirection.RecvOnly)
+    first.add_transceiver(rw.MediaKind.Audio, rw.TransceiverDirection.RecvOnly)
+    logger.info("step 2-3 done")
+
+    logger.info("step 4: create a video track and send it on a new transceiver")
+    track = factory.create_video_track("probe-cam-cb")
+    sender = first.add_transceiver(rw.MediaKind.Video, rw.TransceiverDirection.SendOnly)
+    sender.set_track(track)
+    logger.info("step 4 done")
+
+    logger.info("step 5: create a data channel")
+    first.create_data_channel("probe-data-cb")
+    logger.info("step 5 done")
+
+    logger.info("step 6-7: create the offer and apply it locally")
+    offer = await first.create_offer()
+    await first.set_local_description(offer)
+    logger.info("step 6-7 done")
+
+    seen: list[str] = []
+    observer = rw.PeerConnectionObserver()
+    observer.on_connection_state_change = lambda state: seen.append(f"state:{state}")
+    observer.on_ice_gathering_change = lambda state: seen.append(f"gathering:{state}")
+    observer.on_ice_candidate = lambda candidate: seen.append("candidate")
+    observer.on_track = lambda kind, remote: seen.append(f"track:{kind}")
+    observer.on_data_channel = lambda channel: seen.append("channel")
+
+    logger.info("step 8: create the second peer connection, observer with callbacks")
+    second = factory.create_peer_connection(config, observer)
+    logger.info("step 8 done")
+
+    assert second is not None
