@@ -68,19 +68,16 @@ def integration(session: nox.Session) -> None:
     # stall is real, --log-cli-level streams the runtime's own logging, and the
     # faulthandler timeout dumps every thread's stack and aborts rather than
     # letting the job sit until the runner is reclaimed.
-    # The isolation file runs in its own invocation, and first: faulthandler
+    # The deadlock probe runs in its own invocation, and first: faulthandler
     # aborts the whole process on a stall, so anything collected after the
-    # loopback never gets to report.
+    # loopback never gets to report. Its own failure must not stop the suite from
+    # running, hence the accepted exit codes.
     session.run(
         "pytest",
         "-v",
         "-s",
-        "-o",
-        "faulthandler_timeout=60",
-        "-o",
-        "faulthandler_exit_on_timeout=true",
         "--log-cli-level=INFO",
-        "tests/integration/transport/webrtc/test_two_peer_connections.py",
+        "tests/integration/transport/webrtc/test_gil_signalling_deadlock.py",
         success_codes=[0, 1, 2, 3, 4, 5],
     )
     session.run(

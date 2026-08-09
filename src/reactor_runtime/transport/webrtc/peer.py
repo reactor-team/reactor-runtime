@@ -302,29 +302,18 @@ class WebRTCPeer:
         observer.on_track = self._on_track
         observer.on_data_channel = self._on_data_channel
 
-        logger.warning("TRACE about to create_peer_connection")
         pc = factory.create_peer_connection(_build_rtc_config(self._config), observer)
-        logger.warning("TRACE create_peer_connection returned")
         self._pc = pc
-        logger.warning("TRACE about to apply bitrate limits")
         await _apply_bitrate_limits(pc, self._config)
-        logger.warning("TRACE bitrate limits applied")
 
         offer = rw.SessionDescription("offer", deduplicate_bundle_pts(sdp_offer))
-        logger.warning("TRACE about to set_remote_description")
         await pc.set_remote_description(offer)
-        logger.warning("TRACE set_remote_description returned")
         self._raise_if_stopped()
 
-        logger.warning("TRACE about to attach out tracks")
         await self._attach_out_tracks(loop, pc, factory)
-        logger.warning("TRACE out tracks attached")
 
-        logger.warning("TRACE about to create_answer")
         answer = await pc.create_answer()
-        logger.warning("TRACE create_answer returned")
         await pc.set_local_description(answer)
-        logger.warning("TRACE answer applied locally")
         self._raise_if_stopped()
 
         timeout_s = self._config.ice_gathering_timeout_ms / 1000.0
