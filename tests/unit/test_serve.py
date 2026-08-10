@@ -15,10 +15,11 @@ from reactor_runtime.serve import (
     _log_level_from_env,
     _port_range_from_env,
     _version,
+    _video_codecs_from_env,
     _webrtc_config_from_env,
     main,
 )
-from reactor_runtime.transport.webrtc.config import IceTransportPolicy, WebRtcConfig
+from reactor_runtime.transport.webrtc.config import CodecEntry, IceTransportPolicy, WebRtcConfig
 from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.signaling import SdpAnswer, SdpOffer, TrackMap
 
@@ -46,6 +47,7 @@ _WEBRTC_ENV = (
     "WEBRTC_BWE_MIN_KBPS",
     "WEBRTC_BWE_MAX_KBPS",
     "WEBRTC_BWE_INITIAL_KBPS",
+    "WEBRTC_VIDEO_CODECS",
 )
 
 _RUNTIME_ENV = (
@@ -212,6 +214,40 @@ def test_webrtc_config_accepts_a_consistent_bwe_override(
         800,
         3000,
         3000,
+    )
+
+
+def test_video_codecs_from_env_defaults_to_the_config_default() -> None:
+    assert _video_codecs_from_env() == WebRtcConfig.supported_video_codecs
+
+
+def test_video_codecs_from_env_reads_a_preference_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WEBRTC_VIDEO_CODECS", "vp8,VP9")
+
+    codecs = _video_codecs_from_env()
+
+    assert codecs == (cast(CodecEntry, {"codec": "VP8"}), cast(CodecEntry, {"codec": "VP9"}))
+
+
+def test_video_codecs_from_env_rejects_an_unknown_codec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WEBRTC_VIDEO_CODECS", "VP8,Theora")
+
+    with pytest.raises(SystemExit):
+        _video_codecs_from_env()
+
+
+def test_webrtc_config_reads_video_codecs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WEBRTC_VIDEO_CODECS", "H264,VP8")
+
+    config = _webrtc_config_from_env()
+
+    assert config.supported_video_codecs == (
+        cast(CodecEntry, {"codec": "H264"}),
+        cast(CodecEntry, {"codec": "VP8"}),
     )
 
 
