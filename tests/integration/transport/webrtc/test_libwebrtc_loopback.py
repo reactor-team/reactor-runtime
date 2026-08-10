@@ -315,3 +315,58 @@ async def test_loopback_carries_media_and_messages() -> None:
         trickle_task.cancel()
         await peer.close()
         client.pc = None  # type: ignore[assignment]
+
+
+def _first_video_codec(sdp: str) -> str:
+    """The `rtpmap` codec name for the first payload type on the `m=video` line."""
+    video_line = next(line for line in sdp.splitlines() if line.startswith("m=video"))
+    first_pt = video_line.split()[3]
+    rtpmap = next(line for line in sdp.splitlines() if line.startswith(f"a=rtpmap:{first_pt} "))
+    return rtpmap.split(" ", 1)[1].split("/")[0]
+
+
+async def test_libwebrtc_peer_factory_applies_configured_video_codec_preference() -> None:
+    """``WebRtcConfig.supported_video_codecs`` reorders the answer's video codecs.
+
+    Negotiates against a real libwebrtc offer twice: once with the default
+    config, to discover which builtin codec libwebrtc puts first on its own,
+    then again asking for the other one — proving the config actually reaches
+    ``Transceiver.set_codec_preferences`` rather than being silently unused.
+    """
+    factory = _get_factory()
+
+    default_client = _Client(factory)
+    default_offer = await default_client.create_offer()
+    default_peer, default_answer = await libwebrtc_peer_factory(
+        ConnId(101),
+        SdpOffer(sdp=default_offer),
+        default_client.track_map(),
+        WebRtcConfig(ice_gathering_timeout_ms=500),
+        ProtocolVersion.V0,
+    )
+    try:
+        default_first = _first_video_codec(default_answer.sdp)
+    finally:
+        await default_peer.close()
+        default_client.pc = None  # type: ignore[assignment]
+
+    preferred_name = "VP8" if default_first.upper() == "VP9" else "VP9"
+    client = _Client(factory)
+    offer_sdp = await client.create_offer()
+    peer, answer = await libwebrtc_peer_factory(
+        ConnId(102),
+        SdpOffer(sdp=offer_sdp),
+        client.track_map(),
+        WebRtcConfig(
+            ice_gathering_timeout_ms=500,
+            supported_video_codecs=({"codec": preferred_name},),
+        ),
+        ProtocolVersion.V0,
+    )
+    try:
+        assert _first_video_codec(answer.sdp) == preferred_name
+        # Reordered, not dropped: the default codec is still offered somewhere.
+        assert f" {default_first}/" in answer.sdp
+    finally:
+        await peer.close()
+        client.pc = None  # type: ignore[assignment]

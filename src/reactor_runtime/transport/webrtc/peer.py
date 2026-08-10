@@ -156,6 +156,31 @@ def _build_rtc_config(config: WebRtcConfig) -> rw.RtcConfiguration:
     return rtc
 
 
+_VIDEO_CODEC_BY_NAME: dict[str, rw.VideoCodec] = {
+    "VP8": rw.VideoCodec.Vp8,
+    "VP9": rw.VideoCodec.Vp9,
+    "AV1": rw.VideoCodec.Av1,
+    "H264": rw.VideoCodec.H264,
+    "H265": rw.VideoCodec.H265,
+}
+
+
+def _video_codec_preferences(config: WebRtcConfig) -> list[rw.VideoCodec]:
+    """Map the configured video codec preference order to the binding's enum.
+
+    A name ``reactor_webrtc`` does not recognize is skipped rather than
+    raising, matching ``Transceiver.set_codec_preferences``'s own behaviour
+    for a codec this build did not compile in (e.g. hardware H264 on a
+    software-only build): the caller's fallback order still applies to
+    whatever the endpoint actually supports.
+    """
+    return [
+        _VIDEO_CODEC_BY_NAME[entry["codec"]]
+        for entry in config.supported_video_codecs
+        if entry["codec"] in _VIDEO_CODEC_BY_NAME
+    ]
+
+
 async def _apply_bitrate_limits(pc: rw.PeerConnection, config: WebRtcConfig) -> None:
     """Apply the configured congestion-control bitrate limits to a fresh peer connection.
 
@@ -332,16 +357,29 @@ class WebRTCPeer:
     ) -> None:
         """Bind an outbound track to each transceiver the model sends on.
 
+        Also applies the configured video codec preference order to every video
+        transceiver.
+
         After ``set_remote_description`` libwebrtc has a transceiver per m-section
         carrying the offer's mid. A mid that maps to an ``OUT`` track (the client
         offered it recvonly) gets a fresh sender track and a send-only direction.
+        Every video transceiver — sending or receiving — gets the codec preference
+        order so both directions of a bundled connection negotiate the same
+        preferred codec, not just the ones this side sends on.
 
-        ``transceivers()``/``set_track()``/``set_direction()`` are synchronous
-        libwebrtc calls — dispatched to an executor so they never stall the
-        shared event loop other peers' connections are also running on.
+        ``transceivers()`` is natively awaitable; ``set_track()``/``set_direction()``/
+        ``set_codec_preferences()`` are synchronous libwebrtc calls dispatched to an
+        executor so they never stall the shared event loop other peers' connections
+        are also running on. Must run before ``create_answer()``: a codec preference
+        only takes effect on the next SDP generated for that transceiver.
         """
-        transceivers = await loop.run_in_executor(None, pc.transceivers)
+        transceivers = await pc.transceivers()
+        codec_preferences = _video_codec_preferences(self._config)
         for transceiver in transceivers:
+            if codec_preferences and transceiver.kind() == rw.MediaKind.Video:
+                await loop.run_in_executor(
+                    None, transceiver.set_codec_preferences, codec_preferences
+                )
             mid = transceiver.mid()
             info = self._track_by_mid.get(mid) if mid is not None else None
             if info is None or info.direction is not TrackDirection.OUT:
