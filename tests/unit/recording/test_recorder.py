@@ -309,6 +309,74 @@ def _av_bundle(width: int, height: int) -> MediaBundle:
     )
 
 
+def _batched_av_bundle(n_frames: int) -> MediaBundle:
+    """A bundle carrying a whole emit burst: *n_frames* of video plus stereo audio."""
+    frames = np.zeros((n_frames, 8, 8, 3), dtype=np.uint8)
+    video = TrackInfo(
+        name="main_video", kind=TrackKind.VIDEO, rate=float(n_frames), direction=TrackDirection.OUT
+    )
+    audio = TrackInfo(
+        name="main_audio", kind=TrackKind.AUDIO, rate=48_000.0, direction=TrackDirection.OUT
+    )
+    left = np.full((1, 48_000), 100, dtype=np.int16)
+    right = np.full((1, 48_000), 300, dtype=np.int16)
+    samples = np.concatenate([left, right], axis=0)
+    return MediaBundle(
+        tracks={
+            "main_video": TrackData(info=video, data=frames),
+            "main_audio": TrackData(info=audio, data=samples),
+        }
+    )
+
+
+def _park_feed_worker(recorder: Recorder) -> None:
+    """Stop the feed worker so `on_chunk`'s queueing is observable."""
+    recorder._feed_stop.set()
+    feed_thread = recorder._feed_thread
+    assert feed_thread is not None
+    feed_thread.join(timeout=2.0)
+
+
+def test_a_batched_emit_queues_every_grid_frame(tmp_path: Path) -> None:
+    # A batching model hands the fan-out a whole second of media in one emit.
+    # Every grid frame of that burst has to fit the feed queue up front: the
+    # emit thread only pays out real time in the connection pacers *after*
+    # `on_chunk` returns, so a queue smaller than the burst loses the excess
+    # before the encoder ever gets a chance to drain it.
+    recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
+    recorder.start(_SID)
+    try:
+        _park_feed_worker(recorder)
+
+        recorder.on_chunk(MediaChunk(bundle=_batched_av_bundle(24), fps=24.0, n_frames=24))
+
+        assert recorder._dropped_frames == 0
+        assert recorder._feed_queue.qsize() == 30
+    finally:
+        recorder.stop()
+
+
+def test_stereo_audio_is_downmixed_to_mono(tmp_path: Path) -> None:
+    # A `(2, M)` stereo track mixes down per sample, the same way the live
+    # transport does. Flattening it channel-after-channel instead would fill
+    # the first grid slots entirely with left-channel samples.
+    recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
+    recorder.start(_SID)
+    try:
+        _park_feed_worker(recorder)
+
+        recorder.on_chunk(MediaChunk(bundle=_batched_av_bundle(24), fps=24.0, n_frames=24))
+
+        item = recorder._feed_queue.get_nowait()
+        assert item is not None
+        _video, audio = item
+        assert audio is not None
+        assert audio.dtype == np.int16
+        assert np.all(audio == 200)
+    finally:
+        recorder.stop()
+
+
 def test_a_saturated_feed_queue_drops_a_frame_and_keeps_recording(tmp_path: Path) -> None:
     # An encoder that falls behind costs frames, never the session. The queue is
     # the only thing between the model thread and the encoder, so a full one makes

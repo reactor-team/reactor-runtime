@@ -36,6 +36,7 @@ from reactor_runtime.core import MediaBundle, MediaChunk, RecordingConfig, Track
 from reactor_runtime.log import get_logger
 from reactor_runtime.recording.chunk_encoder import ChunkEncoder
 from reactor_runtime.recording.markers import MarkerBookkeeper
+from reactor_runtime.transport.webrtc.frames import to_int16_mono
 
 logger = get_logger(__name__)
 
@@ -44,6 +45,15 @@ logger = get_logger(__name__)
 # from the model's declared cadence rather than the wall-clock arrival time — a
 # model that runs slower or faster than real time still records at true duration.
 RECORDING_FPS = 30
+
+# A model may hand the fan-out several seconds of media in one emit (a batching
+# model produces a whole generation window at a time), and `on_chunk` queues the
+# entire resampled burst before the emit thread moves on to the connection
+# pacers — which is where it pays out the same media in real time, giving the
+# encoder that long to drain. The queue therefore has to hold the largest burst
+# a single emit produces on the recording grid; two seconds covers every
+# current model with margin while bounding memory to that many frames.
+_FEED_QUEUE_MAX_FRAMES = 2 * RECORDING_FPS
 
 _INIT_FILENAME = "init.mp4"
 # Written into a recording's directory once it is finished, so its final segment
@@ -205,7 +215,9 @@ class Recorder:
         self._started = False
         self._disabled = False
 
-        self._feed_queue: queue.Queue[_FeedItem | None] = queue.Queue(maxsize=4)
+        self._feed_queue: queue.Queue[_FeedItem | None] = queue.Queue(
+            maxsize=_FEED_QUEUE_MAX_FRAMES
+        )
         self._feed_thread: threading.Thread | None = None
         self._feed_stop = threading.Event()
         self._watch_thread: threading.Thread | None = None
@@ -463,13 +475,16 @@ class Recorder:
             try:
                 self._feed_queue.put_nowait((video_data, audio_data))
             except queue.Full:
+                # Drop this grid slot (its audio was already pulled, so the
+                # tracks stay aligned) and keep going: the encoder drains
+                # concurrently, so later slots in the same chunk may still fit.
                 self._dropped_frames += 1
                 if self._dropped_frames == 1 or self._dropped_frames % 300 == 0:
                     logger.warning(
                         "recorder feed queue full; dropping a frame to keep the model unblocked",
                         dropped_total=self._dropped_frames,
                     )
-                break
+                continue
             fed += 1
         if fed:
             markers.advance(fed / RECORDING_FPS)
@@ -558,14 +573,18 @@ class Recorder:
 
         The whole chunk's audio is buffered once; :meth:`_take_audio` then pulls a
         grid slot's worth per recorded frame, so the audio DTS tracks the video
-        PTS regardless of how the chunk's frames map onto the grid.
+        PTS regardless of how the chunk's frames map onto the grid. The track is
+        reduced through :func:`to_int16_mono` — the same reduction the live
+        transport applies — so multi-channel audio is mixed down and float
+        samples are scaled, and the buffer always holds the encoder's mono
+        int16 form.
         """
         if self._audio_track is None:
             return
         track = bundle.get_track(self._audio_track)
         if track is None or track.data.size == 0:
             return
-        flat = np.ascontiguousarray(track.data, dtype=np.int16).reshape(-1)
+        flat = np.ascontiguousarray(to_int16_mono(track.data))
         self._audio_jitter_buf.append(flat)
         self._audio_buffered_samples += int(flat.size)
         cap = self._audio_sample_rate
