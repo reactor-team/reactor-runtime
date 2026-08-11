@@ -156,12 +156,16 @@ def _build_rtc_config(config: WebRtcConfig) -> rw.RtcConfiguration:
     return rtc
 
 
+# Derived from the binding itself rather than hand-listed, so a codec
+# reactor_webrtc adds later is recognized here with no code change — the
+# name reactor-webrtc's own capability matching expects is one `.upper()`
+# away from each variant's Rust name for every current codec (Vp8 -> "VP8",
+# Av1 -> "AV1", ...). isinstance guards against a future non-variant
+# attribute (a method PyO3 adds to the class) being mistaken for one.
 _VIDEO_CODEC_BY_NAME: dict[str, rw.VideoCodec] = {
-    "VP8": rw.VideoCodec.Vp8,
-    "VP9": rw.VideoCodec.Vp9,
-    "AV1": rw.VideoCodec.Av1,
-    "H264": rw.VideoCodec.H264,
-    "H265": rw.VideoCodec.H265,
+    name.upper(): value
+    for name in dir(rw.VideoCodec)
+    if isinstance(value := getattr(rw.VideoCodec, name), rw.VideoCodec)
 }
 
 
