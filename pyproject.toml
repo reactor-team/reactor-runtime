@@ -41,7 +41,11 @@ dependencies = [
     "prometheus-client>=0.26.0",
     "protobuf>=7.35.1",
     "pyyaml>=6.0.3",
-    "reactor-webrtc>=0.7.2",
+    # Pinned exactly, not floored: reactor-webrtc is pre-1.0 and its API still
+    # breaks between releases, so the runtime adopts one deliberately rather than
+    # resolving to whatever is newest. Bumping it is its own change, with the
+    # transport suites run against the new binding.
+    "reactor-webrtc==0.7.2",
     "uvicorn>=0.49.0",
 ]
 

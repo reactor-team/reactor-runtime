@@ -555,7 +555,7 @@ requires-dist = [
     { name = "prometheus-client", specifier = ">=0.26.0" },
     { name = "protobuf", specifier = ">=7.35.1" },
     { name = "pyyaml", specifier = ">=6.0.3" },
-    { name = "reactor-webrtc", specifier = ">=0.7.2" },
+    { name = "reactor-webrtc", specifier = "==0.7.2" },
     { name = "uvicorn", specifier = ">=0.49.0" },
 ]
 
