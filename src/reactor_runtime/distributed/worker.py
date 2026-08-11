@@ -1,5 +1,3 @@
-# Copyright (c) 2026 Reactor Technologies, Inc. All rights reserved.
-
 """Per-GPU worker base class and process entry point.
 
 Every rank runs the same command loop in lockstep: the controller
@@ -25,6 +23,8 @@ import numpy as np
 
 from reactor_runtime.distributed.frames import SharedFrameBuffer
 from reactor_runtime.distributed.protocol import Reply, Verb
+from reactor_runtime.log import configure as configure_logging
+from reactor_runtime.log import get_logger
 
 
 class DistributedWorker:
@@ -53,17 +53,30 @@ class DistributedWorker:
         return self.rank == 0
 
     def setup(self, **setup_kwargs: Any) -> None:
-        """Load models and process-lifetime resources. Called once."""
+        """Load models and process-lifetime resources. Called once.
+
+        Receives whatever :class:`WorkerGroup` was given as ``setup_kwargs``, so
+        an override declares the arguments it actually wants
+        (``def setup(self, *, weights_path: str)``). That narrows this signature,
+        which a strict type checker reports as an incompatible override — suppress
+        it on the override, since the framework only ever calls this by keyword.
+        """
         raise NotImplementedError
 
     def warmup(self) -> None:
-        """Prime kernels/graphs before the group reports ready. Runs
-        after :meth:`setup`; warmup ordering is often model-sensitive,
-        so everything order-dependent belongs here, explicitly."""
+        """Prime kernels and graphs before the group reports ready.
+
+        Runs right after :meth:`setup`. Compilation, graph capture and engine
+        deserialization are order-sensitive, so they get a hook of their own
+        that runs at a known point rather than being folded into ``setup``.
+        """
 
     def start_session(self, params: dict[str, Any]) -> None:
-        """Initialize per-session state. The framework has already
-        seeded RNGs identically on every rank."""
+        """Initialize per-session state.
+
+        The framework has already seeded ``random``, ``numpy`` and ``torch``
+        identically on every rank by the time this runs.
+        """
         raise NotImplementedError
 
     def generate_chunk(self, index: int, controls: dict[str, Any]) -> Any:
@@ -91,7 +104,8 @@ class DistributedWorker:
 def _torch() -> Any:
     """Lazy torch import — the controller side must stay torch-free."""
     try:
-        import torch
+        # An optional runtime dependency, so ty cannot resolve it here.
+        import torch  # ty: ignore[unresolved-import]
 
         return torch
     except ImportError:
@@ -112,15 +126,16 @@ def worker_main(
     init_process_group: bool,
 ) -> None:
     """Entry point every rank runs (spawned by :class:`WorkerGroup`)."""
-    # Fresh interpreter: the parent's logging config does not propagate.
-    # Non-leader ranks demote to WARNING to avoid N-fold duplicate lines.
-    logging.basicConfig(
+    # Fresh interpreter: the parent's logging config does not propagate, so this
+    # process installs the runtime's own formatter rather than a bare one — its
+    # lines land in the same stream the runtime's do and share their shape.
+    # Non-leader ranks demote to WARNING to avoid N-fold duplicate lines, and
+    # every line carries ``rank`` as a field so the ranks stay tellable apart.
+    configure_logging(
         level=log_level if rank == 0 else max(log_level, logging.WARNING),
-        format=f"[rank {rank}] %(asctime)s %(levelname)s %(name)s: %(message)s",
         stream=sys.stderr,
-        force=True,
     )
-    logger = logging.getLogger(__name__)
+    logger = get_logger(__name__)
 
     # Torchrun-parity env, set in THIS child process only: env:// rendezvous
     # in init_process_group reads MASTER_ADDR/PORT/RANK/WORLD_SIZE, and model
@@ -142,7 +157,7 @@ def worker_main(
 
     dist: Any = None
     if init_process_group and world_size > 1 and torch is not None:
-        import torch.distributed as torch_dist
+        import torch.distributed as torch_dist  # ty: ignore[unresolved-import]
 
         dist = torch_dist
         backend = "nccl" if device.startswith("cuda") else "gloo"
@@ -195,8 +210,11 @@ def worker_main(
                 try:
                     worker.start_session(cmd[1])
                     result_queue.put((Reply.OK,))
-                except Exception as exc:  # noqa: BLE001 - reported to controller
-                    logger.exception("init_session failed")
+                except Exception as exc:
+                    # Reported to the controller rather than raised: every rank
+                    # answers this verb, so the controller can decide (and retry)
+                    # with the whole reply set in hand.
+                    logger.exception("init_session failed", rank=rank)
                     result_queue.put((Reply.ERROR, f"rank {rank}: init_session: {exc}"))
 
             elif verb is Verb.CHUNK:
@@ -210,15 +228,15 @@ def worker_main(
                     # the controller reads frames only once every rank
                     # has replied, so all slices have landed by then.
                     result_queue.put((Reply.FRAMES, int(end_row)))
-                except Exception as exc:  # noqa: BLE001 - reported, then fail-fast
+                except Exception as exc:
+                    # Reported, then re-raised: a mid-chunk failure is not
+                    # recoverable, so this rank tells the controller and dies.
                     # Re-raise so all ranks exit together: a mid-chunk
                     # failure usually means a peer is wedged in the
                     # interrupted collective, and NCCL's async error
                     # handling will surface it there.
-                    logger.exception("chunk %s failed", cmd[1])
-                    result_queue.put(
-                        (Reply.ERROR, f"rank {rank}: chunk {cmd[1]}: {exc}")
-                    )
+                    logger.exception("chunk failed", rank=rank, chunk=cmd[1])
+                    result_queue.put((Reply.ERROR, f"rank {rank}: chunk {cmd[1]}: {exc}"))
                     reported = True
                     raise
 
@@ -230,14 +248,15 @@ def worker_main(
                 result_queue.put((Reply.OK,))
 
             else:
-                logger.warning("unknown verb %r", verb)
+                logger.warning("unknown verb", rank=rank, verb=repr(verb))
 
         clean_exit = True
-    except Exception as exc:  # noqa: BLE001 - reported to controller
-        # Startup failures land here. Chunk failures already posted their
-        # ERROR before re-raising — posting again would leave a straggler
-        # on the queue for a later _collect to misread (e.g. an
-        # end_session during teardown reporting a stale chunk error).
+    except Exception as exc:
+        # Reported to the controller, which watches the result queue rather than
+        # this process's exception. Startup failures land here. Chunk failures
+        # already posted their ERROR before re-raising — posting again would
+        # leave a straggler on the queue for a later _collect to misread (e.g.
+        # an end_session during teardown reporting a stale chunk error).
         if not reported:
             result_queue.put((Reply.ERROR, f"rank {rank}: {exc}"))
         raise

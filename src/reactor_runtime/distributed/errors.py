@@ -1,5 +1,3 @@
-# Copyright (c) 2026 Reactor Technologies, Inc. All rights reserved.
-
 """Typed failures surfaced by :class:`reactor_runtime.distributed.WorkerGroup`."""
 
 
@@ -13,9 +11,9 @@ class WorkerError(RuntimeError):
     """
 
 
-class WorkerCrashed(RuntimeError):
+class WorkerCrashed(RuntimeError):  # noqa: N818 — the established name a model author catches
     """A worker process died without reporting (segfault, OOM-kill).
 
-    The group is unusable; the pipeline should let the exception
-    propagate so the runtime fails fast and the pod restarts.
+    The group is unusable; the model should let the exception propagate so
+    the runtime fails fast and the container restarts.
     """

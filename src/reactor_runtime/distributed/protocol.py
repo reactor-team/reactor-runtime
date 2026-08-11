@@ -1,5 +1,3 @@
-# Copyright (c) 2026 Reactor Technologies, Inc. All rights reserved.
-
 """Typed message tags for the controller ↔ worker queues.
 
 Messages are tuples whose first element is a tag below; enums pickle by
@@ -24,8 +22,12 @@ class Verb(enum.Enum):
 
 
 class Reply(enum.Enum):
-    """Worker → controller results. Every rank replies to every verb;
-    the controller collects the full reply set before proceeding."""
+    """Worker → controller results.
+
+    Every rank replies to every verb, and the controller collects the full
+    reply set before proceeding — which is the framework's only
+    synchronization mechanism.
+    """
 
     READY = enum.auto()
     OK = enum.auto()

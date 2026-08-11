@@ -1,5 +1,3 @@
-# Copyright (c) 2026 Reactor Technologies, Inc. All rights reserved.
-
 """Shared-memory frame transport between worker ranks and the controller.
 
 One uint8 buffer of ``frame_shape`` is shared by every process. Workers
@@ -19,7 +17,7 @@ from typing import Any
 
 import numpy as np
 
-from reactor_runtime.utils.log import get_logger
+from reactor_runtime.log import get_logger
 
 logger = get_logger(__name__)
 
@@ -67,30 +65,46 @@ class SharedFrameBuffer:
         return end_row
 
     def read(self, n: int) -> np.ndarray:
-        """Copy the first ``n`` frames out (releases the buffer for the
-        next chunk — never hand out a view)."""
+        """Copy the first ``n`` frames out.
+
+        A copy, never a view: a view would let the next chunk overwrite frames
+        the caller still holds, so copying is what releases the buffer.
+        """
         return self.array[:n].copy()
 
     def pin(self) -> bool:
-        """Best-effort ``cudaHostRegister`` of the buffer in this
-        process's CUDA context, so GPU→buffer copies take the pinned DMA
-        fast path. Registration is per-process. Failure (no torch, no
-        CUDA, ``ulimit -l`` too low) logs and falls back to pageable —
-        slower, not broken."""
+        """Register the buffer as pinned host memory, best effort.
+
+        ``cudaHostRegister`` in this process's CUDA context, so GPU→buffer
+        copies take the pinned DMA fast path. Registration is per-process, so
+        every rank calls it for itself.
+
+        Returns:
+            Whether the buffer is now pinned. No torch, no CUDA, or a
+            ``ulimit -l`` too low to lock the pages all log and return False,
+            leaving copies pageable — slower, not broken.
+        """
         try:
-            import torch
+            # torch is an optional runtime dependency: the controller side runs
+            # without it, so it is imported where it is used, not at module
+            # level. ty cannot see an optional dependency, hence the ignore.
+            import torch  # ty: ignore[unresolved-import]
 
             if not torch.cuda.is_available():
                 return False
             ptr = self.array.ctypes.data
             err = int(torch.cuda.cudart().cudaHostRegister(ptr, self._shm.size, 0))
-        except Exception as exc:  # noqa: BLE001 - degrade, never fail startup
-            logger.warning(f"SharedFrameBuffer.pin failed ({exc}); pageable copies")
+        except Exception as exc:
+            # Any failure degrades to pageable copies rather than failing
+            # startup: a slower copy is always better than a dead worker.
+            logger.warning("host-memory pinning unavailable; copies stay pageable", error=str(exc))
             return False
         if err != 0:
             logger.warning(
-                f"cudaHostRegister failed (err={err}, {self._shm.size} bytes); "
-                f"pageable copies. Likely ulimit -l too low."
+                "cudaHostRegister failed; copies stay pageable. "
+                "The usual cause is a low 'ulimit -l'.",
+                error_code=err,
+                bytes=self._shm.size,
             )
             return False
         self._pinned = True
@@ -100,7 +114,7 @@ class SharedFrameBuffer:
         """Detach (and unlink, in the creating process)."""
         if self._pinned:
             with contextlib.suppress(Exception):
-                import torch
+                import torch  # ty: ignore[unresolved-import]
 
                 torch.cuda.cudart().cudaHostUnregister(self.array.ctypes.data)
             self._pinned = False
