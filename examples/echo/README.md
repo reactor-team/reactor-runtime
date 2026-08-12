@@ -1,34 +1,44 @@
 # Echo example
 
 Receives the client's webcam and microphone, applies a real-time video effect,
-and echoes both back over WebRTC. Exercises inbound media, commands, lifecycle
-hooks, bidirectional A/V, and file uploads (an uploaded image blended over the
-output video).
+and echoes both back over WebRTC. Exercises inbound media, commands, the session
+and connection lifecycle hooks, bidirectional A/V, and file uploads (an uploaded
+image blended over the output video).
 
 ## Run
 
-The effects use OpenCV, which is not a runtime dependency, so add it for the run.
-Run it as a layered dependency with `--with` rather than installing into the
-project venv — `uv run` re-syncs the project on every invocation, so a manually
-`uv pip install`ed package gets dropped (and pulling in an old OpenCV would
-downgrade the runtime's numpy 2.x and break the ABI):
+This directory is a `reactor` workspace: `reactor.yaml` names the model, the
+`Dockerfile` builds the image, and `requirements.txt` pins the runtime alongside
+OpenCV (which powers the effects). The CLI builds the image with the runtime
+inside and runs it — nothing to install on your host but the CLI and Docker.
 
 ```sh
 cd examples/echo
-uv run --with 'opencv-python-headless>=4.10' python -m reactor_runtime.serve
+reactor build
+reactor run
 ```
 
-Serves on `0.0.0.0:8080`. Point a client (e.g. the test-frontend) at it, or:
+`reactor run` reuses the image `reactor build` produced (it builds one on first
+run if none exists), then serves WebRTC signaling on `http://localhost:8080`.
+Rebuild after editing anything baked into the image:
+
+```sh
+reactor build && reactor run
+```
+
+Connect a client from the [Reactor Sandbox](https://reactor-sandbox.vercel.app/)
+(pick **Local (Direct)**), or point the [JS SDK](https://docs.reactor.inc) at it
+with `local: true`. A quick liveness check:
 
 ```sh
 curl -s localhost:8080/health
-curl -s -X POST localhost:8080/start_session -H 'content-type: application/json' -d '{}'
 ```
 
 ## Commands
 
 - `set_effect` — `none | grayscale | sepia | edges | invert | blur | pixelate`
 - `set_intensity` — `0.0`–`1.0`
+- `set_caption` — draw a text caption over the output video (up to 200 chars).
 - `set_overlay_image` — blend an uploaded image over the output video.
   `overlay_image` is a file reference (`UploadedFile`); `overlay_strength` is
   `0.0`–`1.0`. From the JS SDK: `const ref = await uploadFile(file); await
@@ -37,7 +47,7 @@ curl -s -X POST localhost:8080/start_session -H 'content-type: application/json'
 ## Recording
 
 `reactor.yaml` enables recording, so the runtime continuously encodes the echoed
-output to local fMP4 segments and serves them under `/clips`. This needs
-`ffmpeg` on `PATH`. From the JS SDK, `requestClip(durationSeconds)` grabs the
-last N seconds and `requestRecording()` grabs the whole session; both resolve to
-a clip the client downloads from `/clips`.
+output to fMP4 segments in process and serves them under `/clips`. From the JS
+SDK, `requestClip(durationSeconds)` grabs the last N seconds and
+`requestRecording()` grabs the whole session; both resolve to a clip the client
+downloads from `/clips`.
