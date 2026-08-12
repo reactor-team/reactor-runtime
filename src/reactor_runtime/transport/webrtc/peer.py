@@ -3,14 +3,15 @@
 The WebRTC peer backed by ``reactor_webrtc`` (a PyO3 wrapper around libwebrtc). The peer delegates
 encoding, decoding, RTP/RTCP, ICE, and DTLS-SRTP to libwebrtc and works only at
 the media boundary:
-it feeds outbound video to a track as BGRA and outbound audio to the shared
-device as int16 PCM, and surfaces inbound media and data-channel frames back
+it feeds outbound video to a track as BGRA and outbound audio to that track's
+own source as int16 PCM, and surfaces inbound media and data-channel frames back
 through the callbacks the connection registers on it.
 
-The work at that boundary is timing, not codecs. libwebrtc's video track and its
-audio device each play out on their own real-time clock, so the peer's job is to
-feed the model's paced frames at real time and keep the two streams aligned; the
-section below is how it does that without letting audio drift from video or
+The work at that boundary is timing, not codecs. libwebrtc timestamps each video
+frame from the moment it is pushed and derives the audio timestamp from the count
+of samples it has been handed, so both clocks are the peer's to drive: its job is
+to feed the model's paced frames at real time and keep the two streams aligned.
+The section below is how it does that without letting audio drift from video or
 garble.
 
 Per-peer audio isolation
@@ -31,16 +32,25 @@ ADM entirely.  This means:
 
 Audio/video sync
 ----------------
-The synthetic audio device consumes exactly one 10 ms frame (480 samples at
-48 kHz) per push and plays out on its own real-time clock, so audio is fed in
-480-sample frames at a steady 10 ms cadence by a dedicated thread, drawn from a
-small buffer the drain thread fills. Two things keep it aligned with video and
-free of the artefacts a naive feeder introduces: the buffer is shallow, so the
-audio it holds ahead of the wire is a small, bounded offset rather than a
-growing lag; and an empty buffer feeds nothing rather than repeating the last
-frame — the device fills the gap with real-time silence itself, so a model
-stall leaves audio and video advancing on the same real-time clock instead of
-drifting apart.
+Outbound audio carries no timestamp of its own. A track's RTP timestamp is a
+sample counter, advanced by however many samples each ``push_pcm`` hands over,
+so wall-clock time reaches the wire only as samples. A 10 ms tick that pushes
+nothing is 10 ms the stream never accounts for — and since the packets either
+side of it stay contiguous in both sequence number and timestamp, the client
+cannot see that a gap happened. It sees the whole stream arriving late and
+irregularly, and grows its jitter buffer to absorb what looks like network
+burstiness.
+
+The feeder therefore pushes exactly one 10 ms frame (480 samples at 48 kHz)
+per 10 ms tick, unconditionally: the model's samples when the buffer holds a
+frame, silence when it does not. Silence is how a gap is expressed, and keeping
+the pushed-sample count locked to the wall clock is what keeps audio and video
+advancing together. A short scheduling stall is repaid in frames for the same
+reason. The buffer between the drain thread and the feeder stays shallow, so
+the audio held ahead of the wire is a small bounded offset rather than a growing
+lag; trimming it discards samples, which is reported through
+:class:`~reactor_runtime.transport.webrtc.stats.OutboundMediaHealth` rather than
+left to be inferred from the sound.
 
 Threading
 ---------
@@ -64,7 +74,6 @@ Threading
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import queue
 import threading
@@ -98,7 +107,7 @@ from reactor_runtime.transport.webrtc.sdp import (
     embed_ice_candidates,
 )
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpAnswer, SdpOffer, TrackMap
-from reactor_runtime.transport.webrtc.stats import PeerStats, TrackStat
+from reactor_runtime.transport.webrtc.stats import OutboundMediaHealth, PeerStats, TrackStat
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +129,15 @@ _AUDIO_FRAME_SECONDS = 0.010
 # the residual audio-behind-video offset stays small. Oldest samples are dropped
 # on overflow (sustained over-production) rather than letting latency grow.
 _AUDIO_BUFFER_MAX_SAMPLES = 9_600  # 200 ms at 48 kHz
+# What one silent 10 ms frame looks like on the wire.
+_AUDIO_SILENT_FRAME = np.zeros(_AUDIO_FRAME_SAMPLES, dtype=np.int16).tobytes()
+# How much of a scheduling stall the feeder repays in frames before resyncing.
+# Repaying keeps the sample count on the wall clock; the cap keeps a long stall
+# (host suspend) from bursting seconds of audio onto the wire at once.
+_AUDIO_MAX_CATCHUP_FRAMES = 5
+# Share of a stats window that may be runtime-inserted silence before the
+# under-production is worth a warning.
+_AUDIO_SILENCE_WARN_RATIO = 0.05
 
 # Shared media engine: one PeerConnectionFactory per process (libwebrtc requires
 # this). Audio isolation between peers is achieved at the track level via
@@ -239,6 +257,16 @@ class WebRTCPeer:
         self._audio_buf: npt.NDArray[np.int16] = np.array([], dtype=np.int16)
         self._audio_lock = threading.Lock()
         self._audio_thread: threading.Thread | None = None
+
+        # Outbound media the peer manufactured or discarded. Each counter is
+        # written by one thread and read by the stats sampler, which only ever
+        # needs a recent value, so plain ints are enough.
+        self._silence_frames = 0
+        self._dropped_samples = 0
+        self._dropped_bundles = 0
+        # (monotonic time, silence frame count) of the previous stats sample,
+        # the baseline the under-production warning is measured against.
+        self._last_silence_sample: tuple[float, int] | None = None
 
         self._paused_tracks: set[str] = set()
         self._stop_event = threading.Event()
@@ -545,55 +573,83 @@ class WebRTCPeer:
                 self._enqueue_audio(to_int16_mono(data.data))
 
     def _enqueue_audio(self, samples: npt.NDArray[np.int16]) -> None:
-        """Append mono samples to the outbound audio buffer, capping its depth."""
+        """Append mono samples to the outbound audio buffer, capping its depth.
+
+        Trimming an overfull buffer discards the oldest samples, which the wire
+        can only express by pulling everything after them earlier. The count is
+        reported so sustained over-production is a number rather than a
+        complaint about the sound.
+        """
         if not samples.size:
             return
         with self._audio_lock:
             self._audio_buf = np.concatenate([self._audio_buf, samples])
-            if self._audio_buf.size > _AUDIO_BUFFER_MAX_SAMPLES:
-                self._audio_buf = self._audio_buf[-_AUDIO_BUFFER_MAX_SAMPLES:]
+            overflow = self._audio_buf.size - _AUDIO_BUFFER_MAX_SAMPLES
+            if overflow > 0:
+                self._audio_buf = self._audio_buf[overflow:]
+                self._dropped_samples += overflow
 
     def _audio_feed_loop(self) -> None:
         """Feed one 10 ms frame per tick to this peer's LocalAudioSource track.
 
-        The device plays out at real time, so the feed is paced to real time. When
-        the buffer holds a full frame it is handed over via ``track.push_pcm()``;
-        when it does not, nothing is pushed — the device fills the gap with
-        real-time silence, which keeps the audio clock advancing with the
-        (repeated) video instead of injecting a stale frame that would slide audio
-        behind.
+        The track's RTP timestamp counts the samples handed to it, so the feed is
+        what carries wall-clock time onto the wire: every tick pushes a frame,
+        the model's when the buffer holds one and silence when it does not. A
+        stall long enough to miss whole ticks is repaid in frames, up to
+        ``_AUDIO_MAX_CATCHUP_FRAMES``, so the sample count stays on the clock.
         """
         track = self._audio_track
         next_tick = time.monotonic() + _AUDIO_FRAME_SECONDS
         while not self._stop_event.is_set():
-            chunk: npt.NDArray[np.int16] | None = None
-            with self._audio_lock:
-                if self._audio_buf.size >= _AUDIO_FRAME_SAMPLES:
-                    chunk = self._audio_buf[:_AUDIO_FRAME_SAMPLES]
-                    self._audio_buf = self._audio_buf[_AUDIO_FRAME_SAMPLES:]
-            if chunk is not None and track is not None:
-                try:
-                    track.push_pcm(chunk.tobytes(), _AUDIO_SAMPLE_RATE, 1)
-                except Exception:
-                    logger.debug("audio feed push failed", exc_info=True)
-            now = time.monotonic()
-            sleep = next_tick - now
+            self._push_audio_frame(track)
             next_tick += _AUDIO_FRAME_SECONDS
-            if next_tick < now:
-                next_tick = now + _AUDIO_FRAME_SECONDS
+            now = time.monotonic()
+            if now > next_tick:
+                missed = min(
+                    int((now - next_tick) / _AUDIO_FRAME_SECONDS) + 1, _AUDIO_MAX_CATCHUP_FRAMES
+                )
+                for _ in range(missed):
+                    self._push_audio_frame(track)
+                next_tick += missed * _AUDIO_FRAME_SECONDS
+                if next_tick < now:
+                    next_tick = now + _AUDIO_FRAME_SECONDS
+            sleep = next_tick - time.monotonic()
             if sleep > 0:
                 time.sleep(sleep)
+
+    def _push_audio_frame(self, track: rw.Track | None) -> None:
+        """Hand the track exactly one 10 ms frame, the model's or silence."""
+        chunk: npt.NDArray[np.int16] | None = None
+        with self._audio_lock:
+            if self._audio_buf.size >= _AUDIO_FRAME_SAMPLES:
+                chunk = self._audio_buf[:_AUDIO_FRAME_SAMPLES]
+                self._audio_buf = self._audio_buf[_AUDIO_FRAME_SAMPLES:]
+        if chunk is None:
+            self._silence_frames += 1
+        if track is None:
+            return
+        payload = _AUDIO_SILENT_FRAME if chunk is None else chunk.tobytes()
+        try:
+            track.push_pcm(payload, _AUDIO_SAMPLE_RATE, 1)
+        except Exception:
+            logger.debug("audio feed push failed", exc_info=True)
 
     # =========================================================================
     # Seam: sending
     # =========================================================================
 
     def send_media(self, bundle: MediaBundle) -> None:
-        """Enqueue a media bundle for the drain thread, dropping it when full."""
+        """Enqueue a media bundle for the drain thread, dropping it when full.
+
+        A dropped bundle takes its audio with it, so the drop is counted rather
+        than left to surface as a shift between audio and video.
+        """
         if self._stop_event.is_set() or not self._out_tracks:
             return
-        with contextlib.suppress(queue.Full):
+        try:
             self._frame_queue.put_nowait(bundle)
+        except queue.Full:
+            self._dropped_bundles += 1
 
     def send_message(self, payload: bytes | str) -> None:
         """Send an already-encoded frame over the data channel (text or binary)."""
@@ -643,16 +699,58 @@ class WebRTCPeer:
     # =========================================================================
 
     async def stats(self) -> PeerStats:
-        """Sample current transport statistics from libwebrtc."""
+        """Sample current transport statistics from libwebrtc.
+
+        Sampling is also when sustained audio under-production is noticed, so a
+        session that is quietly padding its stream with silence says so in the
+        log rather than only in the sound.
+        """
+        self._warn_on_audio_underrun()
         pc = self._pc
         if self._stop_event.is_set() or pc is None:
-            return PeerStats()
+            return PeerStats(media=self._media_health())
         try:
             report = await pc.get_stats()
         except Exception:
             logger.debug("stats sample failed", exc_info=True)
-            return PeerStats()
+            return PeerStats(media=self._media_health())
         return self._stats_from_report(report)
+
+    def _media_health(self) -> OutboundMediaHealth:
+        """Snapshot the peer's outbound manufacture-and-discard counters."""
+        return OutboundMediaHealth(
+            silence_frames=self._silence_frames,
+            dropped_samples=self._dropped_samples,
+            dropped_bundles=self._dropped_bundles,
+        )
+
+    def _warn_on_audio_underrun(self) -> None:
+        """Warn when too much of the window since the last sample was silence.
+
+        The silence is the runtime's own: samples the model never produced, which
+        the wire cannot distinguish from samples it did. Measuring it here — at
+        the source, in whole 10 ms frames — reports the shortfall exactly,
+        without inferring it from a packet rate whose expected value depends on
+        the encoder's packetisation.
+        """
+        now = time.monotonic()
+        frames = self._silence_frames
+        baseline = self._last_silence_sample
+        self._last_silence_sample = (now, frames)
+        if baseline is None:
+            return
+        elapsed = now - baseline[0]
+        if elapsed <= 0:
+            return
+        silence = (frames - baseline[1]) * _AUDIO_FRAME_SECONDS
+        if silence / elapsed < _AUDIO_SILENCE_WARN_RATIO:
+            return
+        logger.warning(
+            "Outbound audio ran below real time: %.1fs of the last %.1fs was silence "
+            "inserted because the model produced no audio for it",
+            silence,
+            elapsed,
+        )
 
     def _stats_from_report(self, report: rw.StatsReport) -> PeerStats:
         rtt: float | None = None
@@ -674,6 +772,7 @@ class WebRTCPeer:
                     name=out_infos[i].name,
                     direction=TrackDirection.OUT,
                     bitrate_bps=int(out.target_bitrate_bps) if out.target_bitrate_bps else None,
+                    packets_sent=int(out.packets_sent),
                 )
             )
 
@@ -690,7 +789,7 @@ class WebRTCPeer:
                 )
             )
 
-        return PeerStats(rtt_seconds=rtt, tracks=tuple(tracks))
+        return PeerStats(rtt_seconds=rtt, tracks=tuple(tracks), media=self._media_health())
 
     async def close(self) -> None:
         """Tear the peer connection down, joining the pump threads off the loop."""
