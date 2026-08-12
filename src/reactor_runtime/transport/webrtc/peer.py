@@ -334,16 +334,11 @@ class WebRTCPeer:
         await pc.set_remote_description(offer)
         self._raise_if_stopped()
 
-        out_video_transceivers = await self._attach_out_tracks(loop, pc, factory)
+        await self._attach_out_tracks(pc, factory)
 
         answer = await pc.create_answer()
         await pc.set_local_description(answer)
         self._raise_if_stopped()
-
-        # set_codec_preferences only shapes negotiation; only after the answer is
-        # set does the sender's negotiated codec list exist to lock onto.
-        for transceiver in out_video_transceivers:
-            await loop.run_in_executor(None, transceiver.lock_negotiated_send_codec)
 
         timeout_s = self._config.ice_gathering_timeout_ms / 1000.0
         gathered = await loop.run_in_executor(
@@ -360,10 +355,9 @@ class WebRTCPeer:
 
     async def _attach_out_tracks(
         self,
-        loop: asyncio.AbstractEventLoop,
         pc: rw.PeerConnection,
         factory: rw.PeerConnectionFactory,
-    ) -> list[rw.Transceiver]:
+    ) -> None:
         """Bind an outbound track to each transceiver the model sends on.
 
         Also applies the configured video codec preference order to every video
@@ -376,20 +370,18 @@ class WebRTCPeer:
         order so both directions of a bundled connection negotiate the same
         preferred codec, not just the ones this side sends on.
 
-        Returns the OUT video transceivers, so the caller can
-        :meth:`lock_negotiated_send_codec` on each once negotiation completes:
-        ``set_codec_preferences`` only controls what gets negotiated, not which
-        of the negotiated codecs this side's own sender actually encodes with.
+        ``set_local_description`` makes each video transceiver's own sender
+        actually encode with whichever preferred codec was negotiated, once
+        negotiation completes — ``set_codec_preferences`` here only shapes what
+        gets negotiated.
 
-        ``transceivers()`` is natively awaitable; ``set_track()``/``set_direction()``/
-        ``set_codec_preferences()`` are synchronous libwebrtc calls dispatched to an
-        executor so they never stall the shared event loop other peers' connections
-        are also running on. Must run before ``create_answer()``: a codec preference
-        only takes effect on the next SDP generated for that transceiver.
+        ``transceivers()``, ``set_direction()``, ``set_track()``, and
+        ``set_codec_preferences()`` are all natively awaitable. Must run before
+        ``create_answer()``: a codec preference only takes effect on the next
+        SDP generated for that transceiver.
         """
         transceivers = await pc.transceivers()
         codec_preferences = _video_codec_preferences(self._config)
-        out_video_transceivers = []
         for transceiver in transceivers:
             mid = transceiver.mid()
             info = self._track_by_mid.get(mid) if mid is not None else None
@@ -399,18 +391,11 @@ class WebRTCPeer:
                 else:
                     track = factory.create_audio_track_with_local_source(info.name)
                     self._audio_track = track
-                await loop.run_in_executor(None, transceiver.set_track, track)
-                await loop.run_in_executor(
-                    None, transceiver.set_direction, rw.TransceiverDirection.SendOnly
-                )
+                await transceiver.set_track(track)
+                await transceiver.set_direction(rw.TransceiverDirection.SendOnly)
                 self._out_tracks[info.name] = track
-                if info.kind is TrackKind.VIDEO and codec_preferences:
-                    out_video_transceivers.append(transceiver)
             if codec_preferences and transceiver.kind() == rw.MediaKind.Video:
-                await loop.run_in_executor(
-                    None, transceiver.set_codec_preferences, codec_preferences
-                )
-        return out_video_transceivers
+                await transceiver.set_codec_preferences(codec_preferences)
 
     def _raise_if_stopped(self) -> None:
         if self._stop_event.is_set():

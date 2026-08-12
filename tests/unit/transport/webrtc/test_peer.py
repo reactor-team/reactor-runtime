@@ -353,13 +353,13 @@ class _FakeTransceiver:
     def mid(self) -> str | None:
         return self._mid
 
-    def set_codec_preferences(self, codecs: list[Any]) -> None:
+    async def set_codec_preferences(self, codecs: list[Any]) -> None:
         self.codec_preference_calls.append(list(codecs))
 
-    def set_track(self, track: Any) -> None:
+    async def set_track(self, track: Any) -> None:
         self.track_calls.append(track)
 
-    def set_direction(self, direction: Any) -> None:
+    async def set_direction(self, direction: Any) -> None:
         self.direction_calls.append(direction)
 
 
@@ -390,7 +390,7 @@ async def test_attach_out_tracks_applies_codec_preferences_to_every_video_transc
     audio = _FakeTransceiver(rw.MediaKind.Audio, "2")
     pc: Any = _FakeTransceiverPeerConnection([out_video, in_video, audio])
 
-    await peer._attach_out_tracks(asyncio.get_running_loop(), pc, cast("Any", _FakeTrackFactory()))
+    await peer._attach_out_tracks(pc, cast("Any", _FakeTrackFactory()))
 
     expected = [rw.VideoCodec.Vp9, rw.VideoCodec.Vp8]
     assert out_video.codec_preference_calls == [expected]
@@ -406,7 +406,7 @@ async def test_attach_out_tracks_skips_set_codec_preferences_when_none_configure
     video = _FakeTransceiver(rw.MediaKind.Video, None)
     pc: Any = _FakeTransceiverPeerConnection([video])
 
-    await peer._attach_out_tracks(asyncio.get_running_loop(), pc, cast("Any", _FakeTrackFactory()))
+    await peer._attach_out_tracks(pc, cast("Any", _FakeTrackFactory()))
 
     assert video.codec_preference_calls == []
 

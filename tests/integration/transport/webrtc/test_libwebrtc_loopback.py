@@ -95,7 +95,11 @@ def _ice_from_answer(sdp: str) -> list[rw.IceCandidate]:
 
 
 class _Client:
-    """A libwebrtc peer standing in for the browser, driven synchronously."""
+    """A libwebrtc peer standing in for the browser, driven synchronously.
+
+    Construct via the async `create()` factory, not directly: attaching the
+    send track is natively awaitable in `reactor-webrtc`, which `__init__`
+    cannot await."""
 
     def __init__(self, factory: rw.PeerConnectionFactory) -> None:
         self.ice: list[rw.IceCandidate] = []
@@ -119,11 +123,16 @@ class _Client:
         )
         self.send_track = factory.create_video_track("client-cam")
         self.send = self.pc.add_transceiver(rw.MediaKind.Video, rw.TransceiverDirection.SendOnly)
-        self.send.set_track(self.send_track)
         # Nothing to attach for metadata in either direction: reactor-webrtc
         # advertises the capability in the offer, the runtime's answer mirrors it,
         # and both peers install their own embed/strip steps on negotiation.
         self.data = self.pc.create_data_channel("data")
+
+    @classmethod
+    async def create(cls, factory: rw.PeerConnectionFactory) -> _Client:
+        self = cls(factory)
+        await self.send.set_track(self.send_track)
+        return self
 
     def _on_track(self, kind: rw.MediaKind, track: rw.Track) -> None:
         self._recv_tracks.append(track)
@@ -201,7 +210,7 @@ async def _trickle_until(client: _Client, peer: WebRTCPeer, stop: asyncio.Event)
 
 async def test_loopback_carries_media_and_messages() -> None:
     factory = _get_factory()
-    client = _Client(factory)
+    client = await _Client.create(factory)
     offer_sdp = await client.create_offer()
     tracks = client.track_map()
 
@@ -335,7 +344,7 @@ async def test_libwebrtc_peer_factory_applies_configured_video_codec_preference(
     """
     factory = _get_factory()
 
-    default_client = _Client(factory)
+    default_client = await _Client.create(factory)
     default_offer = await default_client.create_offer()
     default_peer, default_answer = await libwebrtc_peer_factory(
         ConnId(101),
@@ -351,7 +360,7 @@ async def test_libwebrtc_peer_factory_applies_configured_video_codec_preference(
         default_client.pc = None  # type: ignore[assignment]
 
     preferred_name = "VP8" if default_first.upper() == "VP9" else "VP9"
-    client = _Client(factory)
+    client = await _Client.create(factory)
     offer_sdp = await client.create_offer()
     peer, answer = await libwebrtc_peer_factory(
         ConnId(102),
