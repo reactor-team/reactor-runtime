@@ -7,6 +7,9 @@ the suite skips cleanly when the wheel is absent.
 """
 
 import asyncio
+import logging
+import threading
+import time
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -31,6 +34,9 @@ from reactor_runtime.transport.webrtc.config import (  # noqa: E402
 )
 from reactor_runtime.transport.webrtc.peer import (  # noqa: E402
     _AUDIO_BUFFER_MAX_SAMPLES,
+    _AUDIO_FRAME_SAMPLES,
+    _AUDIO_SILENT_FRAME,
+    _FRAME_QUEUE_MAX,
     WebRTCPeer,
     _apply_bitrate_limits,
     _build_rtc_config,
@@ -51,6 +57,14 @@ class _FakeTrack:
     ) -> None:
         self.pushed.append((bgra, width, height))
         self.user_data.append(user_data)
+
+
+class _FakeAudioTrack:
+    def __init__(self) -> None:
+        self.pushed: list[tuple[bytes, int, int]] = []
+
+    def push_pcm(self, pcm: bytes, sample_rate: int, channels: int) -> None:
+        self.pushed.append((pcm, sample_rate, channels))
 
 
 class _FakeChannel:
@@ -256,6 +270,86 @@ def test_enqueue_audio_caps_the_buffer_depth() -> None:
     assert peer._audio_buf.size == _AUDIO_BUFFER_MAX_SAMPLES
 
 
+def test_enqueue_audio_counts_the_samples_the_cap_discards() -> None:
+    peer = WebRTCPeer()
+    peer._enqueue_audio(np.zeros(_AUDIO_BUFFER_MAX_SAMPLES + 1_500, dtype=np.int16))
+    assert peer._dropped_samples == 1_500
+
+
+def test_send_media_counts_bundles_the_full_queue_rejects() -> None:
+    peer = WebRTCPeer()
+    peer._out_tracks["v"] = cast(Any, _FakeTrack())
+    for _ in range(_FRAME_QUEUE_MAX + 3):
+        peer.send_media(_video_bundle("v"))
+    assert peer._dropped_bundles == 3
+
+
+# ── Outbound audio feed ──────────────────────────────────────────────────────
+
+
+def test_audio_feed_pushes_the_model_samples_when_a_frame_is_ready() -> None:
+    peer = WebRTCPeer()
+    track = _FakeAudioTrack()
+    peer._enqueue_audio(np.full(_AUDIO_FRAME_SAMPLES, 7, dtype=np.int16))
+
+    peer._push_audio_frame(cast(Any, track))
+
+    expected = np.full(_AUDIO_FRAME_SAMPLES, 7, dtype=np.int16).tobytes()
+    assert track.pushed == [(expected, 48_000, 1)]
+    assert peer._silence_frames == 0
+
+
+def test_audio_feed_pushes_silence_when_the_buffer_is_empty() -> None:
+    """An empty buffer still owes the wire 10 ms, or the sample clock stalls."""
+    peer = WebRTCPeer()
+    track = _FakeAudioTrack()
+
+    peer._push_audio_frame(cast(Any, track))
+
+    assert track.pushed == [(np.zeros(_AUDIO_FRAME_SAMPLES, np.int16).tobytes(), 48_000, 1)]
+    assert peer._silence_frames == 1
+
+
+def test_audio_feed_counts_a_partial_frame_as_silence() -> None:
+    peer = WebRTCPeer()
+    track = _FakeAudioTrack()
+    peer._enqueue_audio(np.ones(_AUDIO_FRAME_SAMPLES - 1, dtype=np.int16))
+
+    peer._push_audio_frame(cast(Any, track))
+
+    assert peer._silence_frames == 1
+    assert peer._audio_buf.size == _AUDIO_FRAME_SAMPLES - 1
+
+
+def test_audio_feed_survives_a_track_that_raises() -> None:
+    peer = WebRTCPeer()
+
+    class _Raising:
+        def push_pcm(self, pcm: bytes, rate: int, channels: int) -> None:
+            raise RuntimeError("boom")
+
+    peer._push_audio_frame(cast(Any, _Raising()))
+
+    assert peer._silence_frames == 1
+
+
+def test_audio_feed_loop_keeps_the_wire_fed_through_an_empty_buffer() -> None:
+    peer = WebRTCPeer()
+    track = _FakeAudioTrack()
+    peer._audio_track = cast(Any, track)
+    thread = threading.Thread(target=peer._audio_feed_loop, daemon=True)
+
+    thread.start()
+    time.sleep(0.15)
+    peer._stop_event.set()
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    # 150 ms of 10 ms ticks, with generous headroom for a loaded scheduler.
+    assert len(track.pushed) >= 5
+    assert all(pcm == _AUDIO_SILENT_FRAME for pcm, _, _ in track.pushed)
+
+
 # ── ICE configuration ────────────────────────────────────────────────────────
 
 
@@ -457,7 +551,7 @@ def test_stats_from_report_maps_tracks_and_rtt() -> None:
         )
     )
     report: Any = SimpleNamespace(
-        outbound_rtp=[SimpleNamespace(target_bitrate_bps=5000.0)],
+        outbound_rtp=[SimpleNamespace(target_bitrate_bps=5000.0, packets_sent=417)],
         inbound_rtp=[SimpleNamespace(packets_lost=3, jitter_s=0.02)],
         candidate_pairs=[
             SimpleNamespace(
@@ -471,6 +565,7 @@ def test_stats_from_report_maps_tracks_and_rtt() -> None:
     out = next(t for t in stats.tracks if t.direction is TrackDirection.OUT)
     assert out.name == "out_v"
     assert out.bitrate_bps == 5000
+    assert out.packets_sent == 417
     inbound = next(t for t in stats.tracks if t.direction is TrackDirection.IN)
     assert inbound.name == "in_v"
     assert inbound.packet_loss == 3
@@ -495,6 +590,71 @@ def test_stats_from_report_ignores_negative_packet_loss() -> None:
     stats = peer._stats_from_report(report)
     assert stats.rtt_seconds is None
     assert stats.tracks[0].packet_loss == 0
+
+
+def test_stats_report_carries_the_outbound_media_counters() -> None:
+    peer = WebRTCPeer()
+    peer._silence_frames = 12
+    peer._dropped_samples = 480
+    peer._dropped_bundles = 2
+    report: Any = SimpleNamespace(outbound_rtp=[], inbound_rtp=[], candidate_pairs=[])
+
+    media = peer._stats_from_report(report).media
+
+    assert media.silence_frames == 12
+    assert media.dropped_samples == 480
+    assert media.dropped_bundles == 2
+
+
+async def test_stats_on_a_closed_peer_still_reports_media_counters() -> None:
+    peer = WebRTCPeer()
+    peer._silence_frames = 3
+
+    stats = await peer.stats()
+
+    assert stats.media.silence_frames == 3
+
+
+def _warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_underrun_warning_needs_a_baseline_sample(caplog: pytest.LogCaptureFixture) -> None:
+    peer = WebRTCPeer()
+    peer._silence_frames = 10_000
+
+    with caplog.at_level(logging.WARNING):
+        peer._warn_on_audio_underrun()
+
+    assert _warnings(caplog) == []
+
+
+def test_underrun_warning_fires_once_silence_dominates_the_window(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    peer = WebRTCPeer()
+    # A second of frames, a fifth of it silence the runtime inserted.
+    peer._last_silence_sample = (time.monotonic() - 1.0, 0)
+    peer._silence_frames = 20
+
+    with caplog.at_level(logging.WARNING):
+        peer._warn_on_audio_underrun()
+
+    assert len(_warnings(caplog)) == 1
+    assert "below real time" in _warnings(caplog)[0]
+
+
+def test_underrun_warning_stays_quiet_for_an_occasional_gap(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    peer = WebRTCPeer()
+    peer._last_silence_sample = (time.monotonic() - 1.0, 0)
+    peer._silence_frames = 2
+
+    with caplog.at_level(logging.WARNING):
+        peer._warn_on_audio_underrun()
+
+    assert _warnings(caplog) == []
 
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────

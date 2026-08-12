@@ -14,6 +14,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
+from dataclasses import replace
 
 from reactor_runtime.core import (
     ConnectionCapabilities,
@@ -328,6 +329,12 @@ class WebRTCConnection:
                 except Exception:
                     logger.debug("WebRTC stats sample failed", exc_info=True)
                     continue
+                # The pacer is the one place outbound media is discarded that
+                # the peer cannot see, so the connection folds its count in.
+                stats = replace(
+                    stats,
+                    media=replace(stats.media, dropped_frames=self._pacer.dropped_frames),
+                )
                 self._latest_stats = stats
                 if self._on_stats is not None:
                     self._on_stats(stats)
