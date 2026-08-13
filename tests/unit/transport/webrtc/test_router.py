@@ -31,6 +31,7 @@ class FakeRunner:
         self.opened: list[ConnId] = []
         self.closed: list[ConnId] = []
         self.answered: list[tuple[ConnId, dict[str, str]]] = []
+        self.admitted: list[ConnId] = []
 
     def require_session_running(self, sid: str) -> None:
         if not self._running:
@@ -41,6 +42,9 @@ class FakeRunner:
     def new_conn_id(self) -> ConnId:
         self._next += 1
         return ConnId(self._next)
+
+    def offer_admitted(self, conn_id: ConnId) -> None:
+        self.admitted.append(conn_id)
 
     def track_map(self) -> dict[str, Any]:
         return {"tracks": [{"name": "main_video", "kind": "video"}]}

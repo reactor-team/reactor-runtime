@@ -567,6 +567,52 @@ async def test_a_connection_opened_with_no_session_open_is_refused_and_closed(
     assert late.closed
 
 
+async def test_a_connection_opened_after_termination_is_refused_and_closed(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    started_runner._on_model_failure(RuntimeError("gpu fell off"))
+    await asyncio.sleep(0.05)  # let the loop run the scheduled eviction callback
+    _expect_state(started_runner, SessionState.TERMINATED)
+
+    late = FakeConnection(7)
+    started_runner.connection_opened(late)
+
+    await asyncio.sleep(0.01)
+    assert started_runner._connections.count == 0
+    assert late.closed
+
+
+async def test_a_wire_admitted_in_an_earlier_session_cannot_join_the_next(
+    started_runner: Runner,
+) -> None:
+    # The offer is admitted in the first session, but its wire only connects
+    # once the next session is running — the state looks valid, so only the
+    # offer's epoch stamp can tell the sessions apart.
+    started_runner.start_session({})
+    stale_id = started_runner.new_conn_id()
+    started_runner.offer_admitted(stale_id)
+    started_runner.stop_session()
+    await asyncio.sleep(0.01)
+    _expect_state(started_runner, SessionState.READY)
+    started_runner.start_session({})
+
+    stale = FakeConnection(stale_id)
+    started_runner.connection_opened(stale)
+
+    await asyncio.sleep(0.01)
+    assert started_runner._connections.count == 0
+    assert stale.closed
+
+    # An offer admitted in the live session still registers.
+    fresh_id = started_runner.new_conn_id()
+    started_runner.offer_admitted(fresh_id)
+    fresh = FakeConnection(fresh_id)
+    started_runner.connection_opened(fresh)
+    assert started_runner._connections.count == 1
+    assert not fresh.closed
+
+
 async def test_connection_answered_rides_a_self_loop_transition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
