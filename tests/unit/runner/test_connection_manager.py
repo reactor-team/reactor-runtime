@@ -1,3 +1,4 @@
+import logging
 import sys
 import threading
 from collections.abc import Callable
@@ -389,6 +390,17 @@ def test_set_media_depth_reaches_every_connection() -> None:
 
 FanOut = Callable[[ConnectionManager], None]
 
+
+def _refuse_to_encode_frame(_version: ProtocolVersion) -> bytes | str:
+    """Stand in for a codec handed a payload it cannot render."""
+    raise TypeError("value is not serialisable")
+
+
+def _refuse_to_encode_response(_version: ProtocolVersion) -> tuple[Channel, bytes | str]:
+    """The channel-picking form of :func:`_refuse_to_encode_frame`."""
+    raise TypeError("value is not serialisable")
+
+
 # Every fan-out that walks the whole registry, each invoked the way its caller
 # does. A client dropping mid-fan-out has to be survivable on all of them, not
 # only on the media path where it was first seen.
@@ -448,6 +460,55 @@ def test_fan_out_reaches_the_rest_when_one_connection_raises() -> None:
     cm.broadcast_media(chunk)
 
     assert healthy.media == [chunk]
+
+
+def test_an_absorbed_failure_names_the_wire_it_came_from(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An absorbed failure has to identify its connection to be actionable.
+
+    Every client in a session logs through the same fan-out, so the operation
+    alone cannot tell an operator which wire is the one failing.
+    """
+    cm, _ = waiting_manager()
+
+    def fail() -> None:
+        raise RuntimeError("wire is gone")
+
+    cm.register(FakeConnection(1, on_outbound=fail))
+    chunk = MediaChunk(bundle=MediaBundle(), fps=30.0, n_frames=1)
+
+    with caplog.at_level(logging.ERROR, logger="reactor_runtime.runner.connection_manager"):
+        cm.broadcast_media(chunk)
+
+    assert len(caplog.records) == 1
+    fields = getattr(caplog.records[0], "reactor_fields", {})
+    assert fields["conn_id"] == ConnId(1)
+    assert fields["operation"] == "broadcast_media"
+
+
+_ENCODING_FAN_OUTS: list[tuple[str, FanOut]] = [
+    ("broadcast", lambda cm: cm.broadcast(_refuse_to_encode_frame)),
+    ("broadcast_response", lambda cm: cm.broadcast_response(_refuse_to_encode_response)),
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "fan_out"), _ENCODING_FAN_OUTS, ids=[name for name, _ in _ENCODING_FAN_OUTS]
+)
+def test_an_encode_failure_propagates_out_of_the_fan_out(name: str, fan_out: FanOut) -> None:
+    """Encoding is not one client's to fail, so its failure is not absorbed.
+
+    A payload the codec cannot render fails identically for every connection, so
+    absorbing it would report an authoring mistake as N wire failures and let the
+    message reach nobody. It belongs to the caller that built the payload.
+    """
+    cm, _ = waiting_manager()
+    cm.register(FakeConnection(1))
+    cm.register(FakeConnection(2))
+
+    with pytest.raises(TypeError, match="not serialisable"):
+        fan_out(cm)
 
 
 def test_media_fan_out_is_safe_against_concurrent_connection_churn() -> None:

@@ -71,20 +71,28 @@ _MAX_MINT_ATTEMPTS = 100
 
 
 def _deliver(conn: Connection, operation: str, act: Callable[[Connection], None]) -> None:
-    """Apply one fan-out step to one connection, containing what it raises.
+    """Hand one already-encoded frame to one wire, containing what the wire raises.
 
     A fan-out reaches every client in the session, so a failure on one wire is
     the fan-out's to absorb: the remaining connections are still owed the frame,
     and the caller — often the model's own thread, mid-``emit`` — has no wire of
     its own to fail. Left to propagate, one connection's exception would surface
     as a crash of the model's run loop and end the session for everyone on it.
-    The failure is logged with its traceback so a wire that fails every time is
-    still visible rather than silently dark.
+    The failure is logged with its traceback, naming the wire, so one connection
+    that fails every time is visible rather than silently dark.
+
+    Only the delivery belongs in here. *act* must already hold its frame, because
+    encoding is the model's or the codec's to get right rather than any one
+    client's: a payload the codec cannot render fails identically for every
+    connection, and absorbing it would turn one authoring mistake into a message
+    that silently reaches nobody and a log line per client blaming their wires.
     """
     try:
         act(conn)
     except Exception:
-        logger.exception("connection rejected an outbound fan-out", operation=operation)
+        logger.exception(
+            "connection rejected an outbound frame", operation=operation, conn_id=conn.id
+        )
 
 
 class ConnectionManager:
@@ -256,9 +264,12 @@ class ConnectionManager:
         *encode* renders the outbound frame for a given wire version. Each
         connection is sent the frame encoded for the codec it negotiated, so a
         mixed-version session reaches every client in the version it speaks.
+        Encoding happens outside the per-wire containment, so a frame the codec
+        cannot render raises here rather than being absorbed once per client.
         """
         for conn in self._by_id.values():
-            _deliver(conn, "broadcast", lambda c: c.send_message(encode(c.protocol_version)))
+            frame = encode(conn.protocol_version)
+            _deliver(conn, "broadcast", lambda c, payload=frame: c.send_message(payload))
 
     def send(self, cid: ConnId, encode: Callable[[ProtocolVersion], bytes | str]) -> None:
         """Encode and send a frame to one connection in its codec, if registered."""
@@ -304,7 +315,8 @@ class ConnectionManager:
         conn = self._by_id.get(cid)
         if conn is None:
             return
-        self._send_on_channel(conn, encode)
+        channel, frame = encode(conn.protocol_version)
+        self._send_on_channel(conn, channel, frame)
 
     def broadcast_response(
         self, encode: Callable[[ProtocolVersion], tuple[Channel, bytes | str]]
@@ -314,17 +326,21 @@ class ConnectionManager:
         The all-connections analogue of :meth:`send_response`: each connection
         receives the frame encoded for its negotiated codec, on the physical
         channel that codec picks for it. A runtime-authored notice with no single
-        addressee — a moderation verdict — rides this.
+        addressee — a moderation verdict — rides this. As in :meth:`broadcast`,
+        encoding happens outside the per-wire containment so a frame the codec
+        cannot render raises rather than being absorbed once per client.
         """
         for conn in self._by_id.values():
-            _deliver(conn, "broadcast_response", lambda c: self._send_on_channel(c, encode))
+            channel, frame = encode(conn.protocol_version)
+            _deliver(
+                conn,
+                "broadcast_response",
+                lambda c, ch=channel, payload=frame: self._send_on_channel(c, ch, payload),
+            )
 
     @staticmethod
-    def _send_on_channel(
-        conn: Connection, encode: Callable[[ProtocolVersion], tuple[Channel, bytes | str]]
-    ) -> None:
-        """Encode a frame for one connection and route it to the channel picked."""
-        channel, frame = encode(conn.protocol_version)
+    def _send_on_channel(conn: Connection, channel: Channel, frame: bytes | str) -> None:
+        """Send an already-encoded frame on the channel its codec picked for it."""
         if channel is Channel.CONTROL:
             conn.send_control(frame)
         else:
