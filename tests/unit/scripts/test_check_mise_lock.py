@@ -18,6 +18,13 @@ SCRIPT = HERE.parent.parent.parent / "mise-tasks" / "lint" / "mise-lock.py"
 FIXTURES = HERE / "fixtures" / "check-mise-lock"
 
 
+def _clean_env() -> dict[str, str]:
+    # Git exports repo-pinning variables (GIT_DIR and friends) to hooks, so a
+    # suite run from a hook would point every git call below at the developer's
+    # checkout instead of the scratch repo the test built.
+    return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+
+
 def _run(case: str) -> subprocess.CompletedProcess[str]:
     # Copy the fixture out of the repo so the script's git short-circuit
     # doesn't see untracked fixture files and incorrectly skip the check.
@@ -26,7 +33,7 @@ def _run(case: str) -> subprocess.CompletedProcess[str]:
             src = FIXTURES / case / name
             if src.exists():
                 shutil.copy(src, Path(tmp) / name)
-        env = os.environ.copy()
+        env = _clean_env()
         env["MISE_LOCK_CHECK_ROOT"] = tmp
         return subprocess.run(
             [str(SCRIPT)],
@@ -134,7 +141,9 @@ def test_malformed_mise_lock_dies():
 
 
 def _git(*args: str, cwd: Path) -> None:
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", *args], cwd=cwd, env=_clean_env(), check=True, capture_output=True, text=True
+    )
 
 
 def _init_repo_with_fixture(tmp: Path, fixture: str) -> None:
@@ -152,7 +161,7 @@ def _init_repo_with_fixture(tmp: Path, fixture: str) -> None:
 def _run_script(
     tmp: Path, source: str | None = None, base_ref: str = "does-not-exist"
 ) -> subprocess.CompletedProcess[str]:
-    env = os.environ.copy()
+    env = _clean_env()
     env["MISE_LOCK_CHECK_ROOT"] = str(tmp)
     env["BASE_REF"] = base_ref  # point at a missing ref by default to disable the short-circuit
     if source is not None:
