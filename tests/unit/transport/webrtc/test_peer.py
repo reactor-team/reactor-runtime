@@ -45,25 +45,43 @@ from reactor_runtime.transport.webrtc.peer import (  # noqa: E402
 )
 from reactor_runtime.transport.webrtc.signaling import MappedTrack, SdpOffer, TrackMap  # noqa: E402
 
+# A capture timestamp standing in for one read of libwebrtc's clock.
+_CAPTURED_US = 1_000_000
+
 
 class _FakeTrack:
     def __init__(self) -> None:
         self.pushed: list[tuple[bytes, int, int]] = []
         self.user_data: list[bytes | None] = []
+        self.capture_times: list[int | None] = []
 
     def push_video_frame(
-        self, bgra: bytes, width: int, height: int, user_data: bytes | None = None
+        self,
+        bgra: bytes,
+        width: int,
+        height: int,
+        user_data: bytes | None = None,
+        capture_time_us: int | None = None,
     ) -> None:
         self.pushed.append((bgra, width, height))
         self.user_data.append(user_data)
+        self.capture_times.append(capture_time_us)
 
 
 class _FakeAudioTrack:
     def __init__(self) -> None:
         self.pushed: list[tuple[bytes, int, int]] = []
+        self.capture_times: list[int | None] = []
 
-    def push_pcm(self, pcm: bytes, sample_rate: int, channels: int) -> None:
+    def push_pcm(
+        self,
+        pcm: bytes,
+        sample_rate: int,
+        channels: int,
+        capture_time_us: int | None = None,
+    ) -> None:
         self.pushed.append((pcm, sample_rate, channels))
+        self.capture_times.append(capture_time_us)
 
 
 class _FakeChannel:
@@ -159,7 +177,7 @@ def test_push_bundle_routes_video_to_its_track() -> None:
     peer = WebRTCPeer()
     track: Any = _FakeTrack()
     peer._out_tracks["v"] = track
-    peer._push_bundle(_video_bundle("v", value=9))
+    peer._push_bundle(_video_bundle("v", value=9), _CAPTURED_US)
     assert len(track.pushed) == 1
     bgra, width, height = track.pushed[0]
     assert (width, height) == (2, 2)
@@ -170,7 +188,7 @@ def test_push_bundle_hands_frame_metadata_to_the_track() -> None:
     peer = WebRTCPeer()
     track: Any = _FakeTrack()
     peer._out_tracks["v"] = track
-    peer._push_bundle(_video_bundle("v", metadata=b'{"seed":7}'))
+    peer._push_bundle(_video_bundle("v", metadata=b'{"seed":7}'), _CAPTURED_US)
     assert track.user_data == [b'{"seed":7}']
 
 
@@ -178,7 +196,7 @@ def test_push_bundle_sends_no_metadata_when_the_frame_carries_none() -> None:
     peer = WebRTCPeer()
     track: Any = _FakeTrack()
     peer._out_tracks["v"] = track
-    peer._push_bundle(_video_bundle("v"))
+    peer._push_bundle(_video_bundle("v"), _CAPTURED_US)
     assert track.user_data == [None]
 
 
@@ -188,7 +206,7 @@ def test_push_bundle_sends_no_metadata_for_an_unsplit_batch() -> None:
     peer = WebRTCPeer()
     track: Any = _FakeTrack()
     peer._out_tracks["v"] = track
-    peer._push_bundle(_video_bundle("v", metadata=[b"a", b"b"]))
+    peer._push_bundle(_video_bundle("v", metadata=[b"a", b"b"]), _CAPTURED_US)
     assert len(track.pushed) == 1
     assert track.user_data == [None]
 
@@ -238,10 +256,10 @@ def test_push_bundle_skips_paused_track() -> None:
     track: Any = _FakeTrack()
     peer._out_tracks["v"] = track
     peer.pause_track("v")
-    peer._push_bundle(_video_bundle("v"))
+    peer._push_bundle(_video_bundle("v"), _CAPTURED_US)
     assert track.pushed == []
     peer.resume_track("v")
-    peer._push_bundle(_video_bundle("v"))
+    peer._push_bundle(_video_bundle("v"), _CAPTURED_US)
     assert len(track.pushed) == 1
 
 
@@ -249,7 +267,7 @@ def test_push_bundle_buffers_audio_for_the_feeder() -> None:
     peer = WebRTCPeer()
     info = TrackInfo(name="a", kind=TrackKind.AUDIO, direction=TrackDirection.OUT)
     bundle = MediaBundle(tracks={"a": TrackData(info=info, data=np.zeros((1, 240), np.int16))})
-    peer._push_bundle(bundle)
+    peer._push_bundle(bundle, _CAPTURED_US)
     assert peer._audio_buf.size == 240
 
 
@@ -257,7 +275,7 @@ def test_push_bundle_gap_fill_buffers_no_audio() -> None:
     peer = WebRTCPeer()
     track: Any = _FakeTrack()
     peer._out_tracks["v"] = track
-    peer._push_bundle(_video_bundle("v"))
+    peer._push_bundle(_video_bundle("v"), _CAPTURED_US)
     assert len(track.pushed) == 1
     assert peer._audio_buf.size == 0
 
@@ -265,13 +283,13 @@ def test_push_bundle_gap_fill_buffers_no_audio() -> None:
 def test_enqueue_audio_caps_the_buffer_depth() -> None:
     peer = WebRTCPeer()
     for _ in range(50):
-        peer._enqueue_audio(np.zeros(1_000, dtype=np.int16))
+        peer._enqueue_audio(np.zeros(1_000, dtype=np.int16), _CAPTURED_US)
     assert peer._audio_buf.size == _AUDIO_BUFFER_MAX_SAMPLES
 
 
 def test_enqueue_audio_counts_the_samples_the_cap_discards() -> None:
     peer = WebRTCPeer()
-    peer._enqueue_audio(np.zeros(_AUDIO_BUFFER_MAX_SAMPLES + 1_500, dtype=np.int16))
+    peer._enqueue_audio(np.zeros(_AUDIO_BUFFER_MAX_SAMPLES + 1_500, dtype=np.int16), _CAPTURED_US)
     assert peer._dropped_samples == 1_500
 
 
@@ -289,7 +307,7 @@ def test_send_media_counts_bundles_the_full_queue_rejects() -> None:
 def test_audio_feed_pushes_the_model_samples_when_a_frame_is_ready() -> None:
     peer = WebRTCPeer()
     track = _FakeAudioTrack()
-    peer._enqueue_audio(np.full(_AUDIO_FRAME_SAMPLES, 7, dtype=np.int16))
+    peer._enqueue_audio(np.full(_AUDIO_FRAME_SAMPLES, 7, dtype=np.int16), _CAPTURED_US)
 
     peer._push_audio_frame(cast(Any, track))
 
@@ -312,7 +330,7 @@ def test_audio_feed_pushes_silence_when_the_buffer_is_empty() -> None:
 def test_audio_feed_counts_a_partial_frame_as_silence() -> None:
     peer = WebRTCPeer()
     track = _FakeAudioTrack()
-    peer._enqueue_audio(np.ones(_AUDIO_FRAME_SAMPLES - 1, dtype=np.int16))
+    peer._enqueue_audio(np.ones(_AUDIO_FRAME_SAMPLES - 1, dtype=np.int16), _CAPTURED_US)
 
     peer._push_audio_frame(cast(Any, track))
 
@@ -330,6 +348,129 @@ def test_audio_feed_survives_a_track_that_raises() -> None:
     peer._push_audio_frame(cast(Any, _Raising()))
 
     assert peer._silence_frames == 1
+
+
+# ── Shared capture timestamps ────────────────────────────────────────────────
+
+
+def test_send_media_stamps_the_bundle_once() -> None:
+    """The producer's tick is the instant both tracks have to agree on."""
+    peer = WebRTCPeer()
+    peer._out_tracks["v"] = cast(Any, _FakeTrack())
+
+    peer.send_media(_video_bundle("v"))
+
+    captured_us, bundle = peer._frame_queue.get_nowait()
+    assert captured_us > 0
+    assert bundle.tracks["v"].info.name == "v"
+
+
+def test_video_carries_the_bundles_capture_time() -> None:
+    peer = WebRTCPeer()
+    track = _FakeTrack()
+    peer._out_tracks["v"] = cast(Any, track)
+
+    peer._push_bundle(_video_bundle("v"), _CAPTURED_US)
+
+    assert track.capture_times == [_CAPTURED_US]
+
+
+def test_audio_carries_the_capture_time_of_the_bundle_it_came_from() -> None:
+    peer = WebRTCPeer()
+    track = _FakeAudioTrack()
+    peer._enqueue_audio(np.ones(_AUDIO_FRAME_SAMPLES, dtype=np.int16), _CAPTURED_US)
+
+    peer._push_audio_frame(cast(Any, track))
+
+    assert track.capture_times == [_CAPTURED_US]
+
+
+def test_the_anchor_advances_one_frame_per_frame_emitted() -> None:
+    """Buffered audio is contiguous, so one anchor dates all of it."""
+    peer = WebRTCPeer()
+    track = _FakeAudioTrack()
+    peer._enqueue_audio(np.ones(_AUDIO_FRAME_SAMPLES * 3, dtype=np.int16), _CAPTURED_US)
+
+    for _ in range(3):
+        peer._push_audio_frame(cast(Any, track))
+
+    assert track.capture_times == [
+        _CAPTURED_US,
+        _CAPTURED_US + 10_000,
+        _CAPTURED_US + 20_000,
+    ]
+
+
+def test_audio_and_video_of_one_bundle_share_a_capture_time() -> None:
+    peer = WebRTCPeer()
+    video = _FakeTrack()
+    audio = _FakeAudioTrack()
+    peer._out_tracks["v"] = cast(Any, video)
+    info = TrackInfo(name="a", kind=TrackKind.AUDIO, direction=TrackDirection.OUT)
+    bundle = MediaBundle(
+        tracks={
+            "v": _video_bundle("v").tracks["v"],
+            "a": TrackData(info=info, data=np.ones((1, _AUDIO_FRAME_SAMPLES), np.int16)),
+        }
+    )
+
+    peer._push_bundle(bundle, _CAPTURED_US)
+    peer._push_audio_frame(cast(Any, audio))
+
+    assert video.capture_times == [_CAPTURED_US]
+    assert audio.capture_times == [_CAPTURED_US]
+
+
+def test_a_fresh_arrival_re_reads_the_anchor() -> None:
+    """After a gap the buffer holds new media, not a continuation of the old."""
+    peer = WebRTCPeer()
+    track = _FakeAudioTrack()
+    peer._enqueue_audio(np.ones(_AUDIO_FRAME_SAMPLES, dtype=np.int16), _CAPTURED_US)
+    peer._push_audio_frame(cast(Any, track))  # drains the buffer
+
+    later = _CAPTURED_US + 5_000_000
+    peer._enqueue_audio(np.ones(_AUDIO_FRAME_SAMPLES, dtype=np.int16), later)
+    peer._push_audio_frame(cast(Any, track))
+
+    assert track.capture_times == [_CAPTURED_US, later]
+
+
+def test_a_continuation_keeps_the_running_anchor() -> None:
+    """Audio arriving on top of a full frame continues the same stream."""
+    peer = WebRTCPeer()
+    track = _FakeAudioTrack()
+    peer._enqueue_audio(np.ones(_AUDIO_FRAME_SAMPLES * 2, dtype=np.int16), _CAPTURED_US)
+    peer._enqueue_audio(np.ones(_AUDIO_FRAME_SAMPLES, dtype=np.int16), _CAPTURED_US + 999_999)
+
+    for _ in range(3):
+        peer._push_audio_frame(cast(Any, track))
+
+    assert track.capture_times == [
+        _CAPTURED_US,
+        _CAPTURED_US + 10_000,
+        _CAPTURED_US + 20_000,
+    ]
+
+
+def test_trimming_the_buffer_moves_the_anchor_past_what_it_dropped() -> None:
+    peer = WebRTCPeer()
+    peer._enqueue_audio(np.ones(_AUDIO_BUFFER_MAX_SAMPLES + 480, dtype=np.int16), _CAPTURED_US)
+    # 480 samples discarded is 10 ms of the stream the wire never sees.
+    assert peer._audio_head_us == _CAPTURED_US + 10_000
+
+
+def test_silence_is_stamped_now_not_from_the_anchor() -> None:
+    """Inserted silence is time passing, not media captured earlier."""
+    peer = WebRTCPeer()
+    track = _FakeAudioTrack()
+    peer._audio_head_us = _CAPTURED_US
+
+    peer._push_audio_frame(cast(Any, track))
+
+    stamped = track.capture_times[0]
+    assert stamped is not None
+    assert stamped != _CAPTURED_US
+    assert stamped > 0
 
 
 def test_audio_feed_loop_keeps_the_wire_fed_through_an_empty_buffer() -> None:
