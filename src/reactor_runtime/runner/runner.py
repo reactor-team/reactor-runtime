@@ -77,6 +77,13 @@ from reactor_runtime.upload_store import UnknownUploadError, UploadStore
 
 _RUNNING_STATES = frozenset({SessionState.WAITING, SessionState.STREAMING, SessionState.ORPHANED})
 
+# The states a stale wire can land in. An offer is only admitted while a
+# session runs, so a connection whose negotiation completes after the session
+# moved on arrives in one of these — and must not join the registry.
+_STALE_CONNECTION_STATES = frozenset(
+    {SessionState.READY, SessionState.CLOSING, SessionState.TERMINATED}
+)
+
 # The lifecycle word reported for each session state. Coarser than the session
 # machine on purpose: an outside observer cares whether the process is loading,
 # free, occupied, or finished — not which serving sub-state the session is in.
@@ -326,7 +333,21 @@ class Runner(ServiceComponent, ConnectionSink):
 
         The model's playout settings (rate, queue depth) apply to every
         connection, so one that opens after they were set receives them here.
+
+        A wire that connects after its session moved on — its negotiation
+        finishing once teardown began, or after the session unwound to ready —
+        is closed instead of registered. Registered, it would sit outside the
+        teardown's snapshot and stay live into the next session.
         """
+        if self._sm.current_state in _STALE_CONNECTION_STATES:
+            logger.warning(
+                "refusing a connection outside a running session",
+                conn_id=conn.id,
+                state=self._sm.current_state.name.lower(),
+            )
+            if self._loop is not None:
+                self._spawn_teardown(conn.close())
+            return
         self._connections.register(conn)
         if self._media_depth is not None:
             conn.set_media_depth(self._media_depth)

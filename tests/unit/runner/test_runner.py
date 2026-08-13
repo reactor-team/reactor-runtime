@@ -366,6 +366,7 @@ async def test_schema_request_v0_replies_on_the_data_channel(
 ) -> None:
     runner = await _started_runner(monkeypatch)
     try:
+        runner.start_session({})
         conn = FakeConnection(1)
         runner.connection_opened(conn)
         runner.schema_requested(ConnId(1), "ctrl_3")
@@ -381,6 +382,7 @@ async def test_schema_request_v1_replies_on_control_correlated_by_id(
 ) -> None:
     runner = await _started_runner(monkeypatch)
     try:
+        runner.start_session({})
         conn = FakeConnection(2)
         conn.protocol_version = V1
         runner.connection_opened(conn)
@@ -536,6 +538,33 @@ def test_connection_opened_registers_the_connection() -> None:
     assert runner._connections.count == 1
     runner.connection_closed(ConnId(1))
     assert runner._connections.count == 0
+
+
+async def test_a_connection_opened_during_closing_is_refused_and_closed(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    started_runner.stop_session()
+    assert started_runner._sm.current_state is SessionState.CLOSING
+
+    late = FakeConnection(7)
+    started_runner.connection_opened(late)
+
+    await asyncio.sleep(0.01)
+    assert started_runner._sm.current_state is SessionState.READY
+    assert started_runner._connections.count == 0
+    assert late.closed
+
+
+async def test_a_connection_opened_with_no_session_open_is_refused_and_closed(
+    started_runner: Runner,
+) -> None:
+    late = FakeConnection(7)
+    started_runner.connection_opened(late)
+
+    await asyncio.sleep(0.01)
+    assert started_runner._connections.count == 0
+    assert late.closed
 
 
 async def test_connection_answered_rides_a_self_loop_transition(
