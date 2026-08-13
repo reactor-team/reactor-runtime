@@ -44,13 +44,24 @@ burstiness.
 The feeder therefore pushes exactly one 10 ms frame (480 samples at 48 kHz)
 per 10 ms tick, unconditionally: the model's samples when the buffer holds a
 frame, silence when it does not. Silence is how a gap is expressed, and keeping
-the pushed-sample count locked to the wall clock is what keeps audio and video
-advancing together. A short scheduling stall is repaid in frames for the same
-reason. The buffer between the drain thread and the feeder stays shallow, so
-the audio held ahead of the wire is a small bounded offset rather than a growing
-lag; trimming it discards samples, which is reported through
+the pushed-sample count locked to the wall clock is what keeps the stream on
+real time. A short scheduling stall is repaid in frames for the same reason.
+The buffer between the drain thread and the feeder stays shallow, so the audio
+held ahead of the wire is a small bounded offset rather than a growing lag;
+trimming it discards samples, which is reported through
 :class:`~reactor_runtime.transport.webrtc.stats.OutboundMediaHealth` rather than
 left to be inferred from the sound.
+
+Running on real time is what keeps each stream honest; a shared capture
+timestamp is what ties them to each other. ``send_media`` reads
+``rw.time_micros()`` once per bundle, on the producer's tick, and both tracks
+are stamped with it — video as it is pushed, audio when the feeder reaches
+those samples, which is however much later the buffer holds. Without the stamp
+each track would be dated by its own path to the encoder, and those paths
+differ by a depth that moves. The buffer carries one anchor rather than a
+timestamp per sample: it holds one contiguous 48 kHz stream, so the capture
+time of its first remaining sample dates all of it, and the anchor is re-read
+whenever what remains is too short to fill a frame.
 
 Threading
 ---------
@@ -138,6 +149,10 @@ _AUDIO_MAX_CATCHUP_FRAMES = 5
 # Share of a stats window that may be runtime-inserted silence before the
 # under-production is worth a warning.
 _AUDIO_SILENCE_WARN_RATIO = 0.05
+# Capture time advances by these, in libwebrtc's microsecond clock: one frame
+# per push, one sample per buffered sample.
+_AUDIO_FRAME_MICROS = 10_000
+_MICROS_PER_SAMPLE = 1_000_000 / _AUDIO_SAMPLE_RATE
 
 # Shared media engine: one PeerConnectionFactory per process (libwebrtc requires
 # this). Audio isolation between peers is achieved at the track level via
@@ -280,10 +295,17 @@ class WebRTCPeer:
         # Outbound media: the drain thread pushes video and buffers audio; the
         # audio thread feeds that buffer to this peer's LocalAudioSource track in
         # steady 10 ms frames via track.push_pcm().
-        self._frame_queue: queue.Queue[MediaBundle] = queue.Queue(maxsize=_FRAME_QUEUE_MAX)
+        # Each entry is the bundle and the capture timestamp both its tracks
+        # are stamped with, read once when the producer released it.
+        self._frame_queue: queue.Queue[tuple[int, MediaBundle]] = queue.Queue(
+            maxsize=_FRAME_QUEUE_MAX
+        )
         self._frame_thread: threading.Thread | None = None
         self._audio_track: rw.Track | None = None
         self._audio_buf: npt.NDArray[np.int16] = np.array([], dtype=np.int16)
+        # When the buffer's first remaining sample was captured. Everything
+        # after it follows at the sample rate, so one anchor dates the lot.
+        self._audio_head_us = 0
         self._audio_lock = threading.Lock()
         self._audio_thread: threading.Thread | None = None
 
@@ -581,20 +603,26 @@ class WebRTCPeer:
     def _frame_drain_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
-                bundle = self._frame_queue.get(timeout=0.05)
+                captured_us, bundle = self._frame_queue.get(timeout=0.05)
             except queue.Empty:
                 continue
             try:
-                self._push_bundle(bundle)
+                self._push_bundle(bundle, captured_us)
             except Exception:
                 logger.debug("outbound frame push failed", exc_info=True)
 
-    def _push_bundle(self, bundle: MediaBundle) -> None:
+    def _push_bundle(self, bundle: MediaBundle, captured_us: int) -> None:
         """Push a bundle's video and buffer its audio for the feeder thread.
 
         Video crosses the boundary immediately, carrying the frame's metadata
         into the encoded packet's trailer. Audio is appended to the shallow
         buffer the feeder drains in 10 ms frames via ``track.push_pcm()``.
+
+        Both are stamped with *captured_us*, the one instant the bundle was
+        released to the wire. The two tracks reach the encoder at different
+        moments — video from this thread, audio from the feeder, however much
+        later the buffer holds — so the shared stamp is what tells the client
+        they belong to the same instant.
         """
         for track_name, data in bundle.tracks.items():
             info = data.info
@@ -608,26 +636,38 @@ class WebRTCPeer:
                 # A bundle reaching the wire holds one frame, so it holds one
                 # metadata value: a batch's list is resolved when it is split.
                 metadata = data.metadata if isinstance(data.metadata, bytes) else None
-                track.push_video_frame(bgra, width, height, user_data=metadata)
+                track.push_video_frame(
+                    bgra, width, height, user_data=metadata, capture_time_us=captured_us
+                )
             else:
-                self._enqueue_audio(to_int16_mono(data.data))
+                self._enqueue_audio(to_int16_mono(data.data), captured_us)
 
-    def _enqueue_audio(self, samples: npt.NDArray[np.int16]) -> None:
+    def _enqueue_audio(self, samples: npt.NDArray[np.int16], captured_us: int) -> None:
         """Append mono samples to the outbound audio buffer, capping its depth.
 
+        The buffer holds one contiguous 48 kHz stream, so one timestamp
+        describes all of it: ``_audio_head_us`` is when its first remaining
+        sample was captured, and every later sample follows at 1/48000 s. That
+        anchor is re-read from *captured_us* whenever what remains is too short
+        to fill a frame — the point at which the next frame out is new media
+        rather than a continuation.
+
         Trimming an overfull buffer discards the oldest samples, which the wire
-        can only express by pulling everything after them earlier. The count is
-        reported so sustained over-production is a number rather than a
-        complaint about the sound.
+        can only express by pulling everything after them earlier, so the anchor
+        moves past what was dropped. The count is reported so sustained
+        over-production is a number rather than a complaint about the sound.
         """
         if not samples.size:
             return
         with self._audio_lock:
+            if self._audio_buf.size < _AUDIO_FRAME_SAMPLES:
+                self._audio_head_us = captured_us
             self._audio_buf = np.concatenate([self._audio_buf, samples])
             overflow = self._audio_buf.size - _AUDIO_BUFFER_MAX_SAMPLES
             if overflow > 0:
                 self._audio_buf = self._audio_buf[overflow:]
                 self._dropped_samples += overflow
+                self._audio_head_us += round(overflow * _MICROS_PER_SAMPLE)
 
     def _audio_feed_loop(self) -> None:
         """Feed one 10 ms frame per tick to this peer's LocalAudioSource track.
@@ -665,19 +705,28 @@ class WebRTCPeer:
         wire that carries no audio is owed nothing. Counting it anyway would put
         every video-only session permanently over the under-production
         threshold.
+
+        A frame of the model's audio is stamped from the buffer's anchor, which
+        then advances by the 10 ms it just gave up. Silence is stamped now: it
+        is time passing, not media the model captured earlier, and the anchor is
+        left alone because the next arrival re-reads it anyway.
         """
-        if track is None:
-            return
         chunk: npt.NDArray[np.int16] | None = None
+        captured_us = 0
         with self._audio_lock:
             if self._audio_buf.size >= _AUDIO_FRAME_SAMPLES:
                 chunk = self._audio_buf[:_AUDIO_FRAME_SAMPLES]
                 self._audio_buf = self._audio_buf[_AUDIO_FRAME_SAMPLES:]
+                captured_us = self._audio_head_us
+                self._audio_head_us += _AUDIO_FRAME_MICROS
         if chunk is None:
             self._silence_frames += 1
+            captured_us = rw.time_micros()
+        if track is None:
+            return
         payload = _AUDIO_SILENT_FRAME if chunk is None else chunk.tobytes()
         try:
-            track.push_pcm(payload, _AUDIO_SAMPLE_RATE, 1)
+            track.push_pcm(payload, _AUDIO_SAMPLE_RATE, 1, capture_time_us=captured_us)
         except Exception:
             logger.debug("audio feed push failed", exc_info=True)
 
@@ -688,13 +737,18 @@ class WebRTCPeer:
     def send_media(self, bundle: MediaBundle) -> None:
         """Enqueue a media bundle for the drain thread, dropping it when full.
 
+        The capture timestamp is read here, on the producer's tick, rather than
+        at either push: this is the one instant that belongs to the bundle as a
+        whole, and both tracks have to agree on it. Reading it further down
+        would date each track by how long its own path to the encoder took.
+
         A dropped bundle takes its audio with it, so the drop is counted rather
         than left to surface as a shift between audio and video.
         """
         if self._stop_event.is_set() or not self._out_tracks:
             return
         try:
-            self._frame_queue.put_nowait(bundle)
+            self._frame_queue.put_nowait((rw.time_micros(), bundle))
         except queue.Full:
             self._dropped_bundles += 1
 
