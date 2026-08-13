@@ -152,6 +152,11 @@ class V0Codec(Codec):
             return Channel.DATA, _runtime("clipFailed", {"reason": message.clip_failed.reason})
         if which == "moderation":
             return Channel.DATA, _runtime("moderation", _moderation_to_dict(message.moderation))
+        if which == "session_ended":
+            ended = message.session_ended
+            return Channel.DATA, _runtime(
+                "sessionEnded", {"reason": ended.reason, "message": ended.message}
+            )
         if which == "publish_track":
             return Channel.CONTROL, _dump(
                 {
@@ -313,6 +318,14 @@ class V0Codec(Codec):
             return control_pb2.ControlServerMessage(
                 kind=_KIND.MESSAGE_KIND_NOTIFICATION,
                 moderation=_dict_to_moderation(data),
+            )
+        if kind == "sessionEnded":
+            return control_pb2.ControlServerMessage(
+                kind=_KIND.MESSAGE_KIND_NOTIFICATION,
+                session_ended=platform_pb2.SessionEnded(
+                    reason=str(data.get("reason", "")),
+                    message=str(data.get("message", "")),
+                ),
             )
         raise UnsupportedMessageError(f"unrecognized v0 runtime server message: {kind!r}")
 

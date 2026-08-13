@@ -297,6 +297,28 @@ CASES = [
     ),
     pytest.param(
         control_pb2.ControlServerMessage(
+            kind=K.MESSAGE_KIND_NOTIFICATION,
+            session_ended=platform_pb2.SessionEnded(
+                reason="deployment",
+                message="Session terminated: the model was redeployed.",
+            ),
+        ),
+        SERVER,
+        DATA,
+        {
+            "scope": "runtime",
+            "data": {
+                "type": "sessionEnded",
+                "data": {
+                    "reason": "deployment",
+                    "message": "Session terminated: the model was redeployed.",
+                },
+            },
+        },
+        id="session-ended",
+    ),
+    pytest.param(
+        control_pb2.ControlServerMessage(
             request_id="ctrl_1",
             kind=K.MESSAGE_KIND_RESPONSE,
             publish_track=track_pb2.PublishTrackResponse(),
@@ -584,3 +606,28 @@ def test_v1_moderation_rides_control_as_an_uncorrelated_notification() -> None:
     assert decoded.WhichOneof("payload") == "moderation"
     assert decoded.moderation.action == "terminate"
     assert decoded.moderation.message == "policy violation"
+
+
+def test_v0_session_ended_rides_the_data_channel_in_the_runtime_scope() -> None:
+    codec = protocol.select(protocol.ProtocolVersion.V0)
+    channel, frame = codec.encode_session_ended(reason="deployment", message="redeployed")
+    assert channel is DATA
+    assert isinstance(frame, str)
+    body = json.loads(frame)
+    assert body["scope"] == "runtime"
+    assert body["data"]["type"] == "sessionEnded"
+    assert body["data"]["data"]["reason"] == "deployment"
+    assert body["data"]["data"]["message"] == "redeployed"
+
+
+def test_v1_session_ended_rides_control_as_an_uncorrelated_notification() -> None:
+    codec = protocol.select(protocol.ProtocolVersion.V1)
+    channel, frame = codec.encode_session_ended(reason="deployment", message="redeployed")
+    assert channel is CONTROL
+    decoded = codec.decode(frame, CONTROL, SERVER)
+    assert isinstance(decoded, control_pb2.ControlServerMessage)
+    assert decoded.kind == K.MESSAGE_KIND_NOTIFICATION
+    assert decoded.request_id == ""
+    assert decoded.WhichOneof("payload") == "session_ended"
+    assert decoded.session_ended.reason == "deployment"
+    assert decoded.session_ended.message == "redeployed"
