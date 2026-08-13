@@ -222,6 +222,64 @@ async def test_moderated_stop_conflicts_when_nothing_is_running(
     assert response.status_code == 409
 
 
+async def test_reasoned_stop_returns_ok(client: tuple[httpx.AsyncClient, Runner]) -> None:
+    http_client, _ = client
+    await http_client.post("/start_session", json={})
+
+    response = await http_client.post("/stop_session", json={"reason": "deployment"})
+
+    assert response.status_code == 200
+
+
+async def test_reasoned_stop_threads_the_close_reason_into_the_journal(
+    client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, runner = client
+    await http_client.post("/start_session", json={})
+
+    await http_client.post("/stop_session", json={"moderate": False, "reason": "deployment"})
+
+    transitions = [event.transition for _seq, event in runner.events._history]
+    stops = [t for t in transitions if t.event.name.lower() == "stop_session"]
+    assert stops
+    assert stops[-1].detail["reason"] == "stopped"
+    assert stops[-1].detail["close_reason"] == "deployment"
+
+
+async def test_stop_session_without_a_reason_journals_no_close_reason(
+    client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, runner = client
+    await http_client.post("/start_session", json={})
+
+    await http_client.post("/stop_session", json={"moderate": True})
+
+    transitions = [event.transition for _seq, event in runner.events._history]
+    stops = [t for t in transitions if t.event.name.lower() == "stop_session"]
+    assert "close_reason" not in stops[-1].detail
+
+
+async def test_reasoned_stop_conflicts_when_nothing_is_running(
+    client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, _ = client
+
+    response = await http_client.post("/stop_session", json={"reason": "deployment"})
+
+    assert response.status_code == 409
+
+
+async def test_stop_session_rejects_an_oversized_reason(
+    client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, _ = client
+    await http_client.post("/start_session", json={})
+
+    response = await http_client.post("/stop_session", json={"reason": "x" * 65})
+
+    assert response.status_code == 422
+
+
 async def test_health_is_available_once_the_model_is_up(
     client: tuple[httpx.AsyncClient, Runner],
 ) -> None:

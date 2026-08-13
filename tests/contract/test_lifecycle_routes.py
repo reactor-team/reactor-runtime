@@ -141,3 +141,17 @@ async def test_moderated_stop_with_nothing_running_conflicts(harness: Harness) -
     response = await harness.client.post("/stop_session", json={"moderate": True})
 
     assert response.status_code == 409
+
+
+async def test_reasoned_stop_returns_200(harness: Harness) -> None:
+    await harness.client.post("/start_session", json={})
+
+    response = await harness.client.post("/stop_session", json={"reason": "deployment"})
+
+    assert response.status_code == 200
+
+
+async def test_reasoned_stop_with_nothing_running_conflicts(harness: Harness) -> None:
+    response = await harness.client.post("/stop_session", json={"reason": "deployment"})
+
+    assert response.status_code == 409

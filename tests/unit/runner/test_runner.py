@@ -890,6 +890,118 @@ async def test_plain_stop_sends_no_moderation_notice(started_runner: Runner) -> 
     assert not any(isinstance(f, str) and "moderation" in f for f in conn.sent)
 
 
+async def test_reasoned_stop_notifies_every_client_before_teardown(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    v0_conn = FakeConnection(1)
+    v1_conn = FakeConnection(2)
+    v1_conn.protocol_version = V1
+    started_runner.connection_opened(v0_conn)
+    started_runner.connection_opened(v1_conn)
+
+    started_runner.stop_session(reason="deployment")
+
+    # The notice is queued synchronously on entering CLOSING; the connections
+    # only close in the teardown task that has not run yet.
+    assert not v0_conn.closed
+    assert not v1_conn.closed
+    # The v0 client sees the legacy runtime-scope JSON on the data channel.
+    v0_frame = next(f for f in v0_conn.sent if isinstance(f, str) and "sessionEnded" in f)
+    body = json.loads(v0_frame)
+    assert body["scope"] == "runtime"
+    assert body["data"]["type"] == "sessionEnded"
+    assert body["data"]["data"]["reason"] == "deployment"
+    assert body["data"]["data"]["message"] == "Session terminated: the model was redeployed."
+    # The v1 client sees the binary notification on the control channel.
+    raw = v1_conn.control[-1]
+    assert isinstance(raw, bytes)
+    decoded = protocol.select(V1).decode(raw, CONTROL, SERVER)
+    assert isinstance(decoded, control_pb2.ControlServerMessage)
+    assert decoded.WhichOneof("payload") == "session_ended"
+    assert decoded.session_ended.reason == "deployment"
+    assert decoded.session_ended.message == "Session terminated: the model was redeployed."
+
+    await asyncio.sleep(0.01)
+    assert v0_conn.closed
+    assert v1_conn.closed
+
+
+async def test_reasoned_stop_ends_the_session_as_stopped(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = _record_reactor_events(started_runner, monkeypatch)
+    started_runner.start_session({})
+    started_runner.stop_session(reason="deployment")
+    await asyncio.sleep(0.01)
+    ended = [e for e in events if isinstance(e, SessionEnded)]
+    assert len(ended) == 1
+    assert ended[0].reason is EndReason.STOPPED
+
+
+async def test_an_unknown_close_reason_falls_back_to_the_generic_sentence(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    conn = FakeConnection(1)
+    started_runner.connection_opened(conn)
+
+    started_runner.stop_session(reason="cosmic_rays")
+
+    frame = next(f for f in conn.sent if isinstance(f, str) and "sessionEnded" in f)
+    body = json.loads(frame)
+    assert body["data"]["data"]["reason"] == "cosmic_rays"
+    assert body["data"]["data"]["message"] == "Session terminated by the platform."
+
+
+async def test_plain_stop_sends_no_session_ended_notice(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    conn = FakeConnection(1)
+    started_runner.connection_opened(conn)
+
+    started_runner.stop_session()
+
+    assert not any(isinstance(f, str) and "sessionEnded" in f for f in conn.sent)
+
+
+async def test_a_moderated_and_reasoned_stop_sends_only_the_moderation_notice(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    conn = FakeConnection(1)
+    started_runner.connection_opened(conn)
+
+    started_runner.stop_session(moderated=True, reason="deployment")
+
+    assert any(isinstance(f, str) and "moderation" in f for f in conn.sent)
+    assert not any(isinstance(f, str) and "sessionEnded" in f for f in conn.sent)
+
+
+async def test_reasoned_stop_without_a_client_still_stops(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    started_runner.stop_session(reason="deployment")
+    assert started_runner._sm.current_state is SessionState.CLOSING
+
+
+async def test_reasoned_stop_survives_a_failing_broadcast(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started_runner.start_session({})
+    started_runner.connection_opened(FakeConnection(1))
+
+    def explode(encode: Any) -> None:
+        raise RuntimeError("wire fell over")
+
+    monkeypatch.setattr(started_runner._connections, "broadcast_response", explode)
+
+    started_runner.stop_session(reason="deployment")
+
+    # The teardown still runs to completion: the session unwinds to READY
+    # rather than stranding in CLOSING behind the failed notice.
+    await asyncio.sleep(0.01)
+    assert started_runner._sm.current_state is SessionState.READY
+
+
 async def test_drain_ends_an_active_session_within_grace(started_runner: Runner) -> None:
     started_runner.start_session({})
     await started_runner.drain()

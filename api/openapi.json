@@ -307,12 +307,18 @@
         "type": "object"
       },
       "StopSessionRequest": {
-        "description": "Optional qualifiers on a session stop.\n\n``moderate`` marks the stop as a content-moderation verdict: the session\nends as moderated and clients are notified before their connections close.\nThe body itself is optional \u2014 a bare ``POST /stop_session`` is a plain stop.",
+        "description": "Optional qualifiers on a session stop.\n\n``moderate`` marks the stop as a content-moderation verdict: the session\nends as moderated and clients are notified before their connections close.\n``reason`` is the platform's close-reason token (e.g. ``\"deployment\"``):\nwhen set, clients receive a session-ended notice naming the reason before\ntheir connections close. A moderated stop outranks the token \u2014 clients see\nonly the moderation notice. The body itself is optional \u2014 a bare\n``POST /stop_session`` is a plain stop.",
         "properties": {
           "moderate": {
             "default": false,
             "title": "Moderate",
             "type": "boolean"
+          },
+          "reason": {
+            "default": "",
+            "maxLength": 64,
+            "title": "Reason",
+            "type": "string"
           }
         },
         "title": "StopSessionRequest",
