@@ -1,3 +1,8 @@
+import logging
+import sys
+import threading
+from collections.abc import Callable
+
 import pytest
 
 from reactor_runtime.core import (
@@ -16,7 +21,12 @@ from reactor_runtime.transport import ConnectionsExhaustedError
 
 
 class FakeConnection:
-    """A shape-conforming stand-in that records what the manager calls on it."""
+    """A shape-conforming stand-in that records what the manager calls on it.
+
+    *on_outbound* runs at the head of every outbound call, so a test can make a
+    connection act on the manager — drop a peer, or raise — from inside a
+    fan-out that is iterating the registry.
+    """
 
     def __init__(
         self,
@@ -24,6 +34,7 @@ class FakeConnection:
         *,
         capabilities: ConnectionCapabilities | None = None,
         protocol_version: ProtocolVersion = ProtocolVersion.V0,
+        on_outbound: Callable[[], None] | None = None,
     ) -> None:
         self.id = ConnId(cid)
         self.capabilities = capabilities or ConnectionCapabilities(
@@ -39,23 +50,34 @@ class FakeConnection:
         self.flushed = False
         self.media_rate: float | None = None
         self.media_depth: int | None = None
+        self._on_outbound = on_outbound
+
+    def _outbound(self) -> None:
+        if self._on_outbound is not None:
+            self._on_outbound()
 
     def send_message(self, payload: bytes | str) -> None:
+        self._outbound()
         self.messages.append(payload)
 
     def send_control(self, payload: bytes | str) -> None:
+        self._outbound()
         self.control.append(payload)
 
     def send_media(self, chunk: MediaChunk) -> None:
+        self._outbound()
         self.media.append(chunk)
 
     def flush_media(self) -> None:
+        self._outbound()
         self.flushed = True
 
     def set_media_rate(self, fps: float) -> None:
+        self._outbound()
         self.media_rate = fps
 
     def set_media_depth(self, depth: int) -> None:
+        self._outbound()
         self.media_depth = depth
 
     def resume_track(self, name: str) -> None:
@@ -66,6 +88,20 @@ class FakeConnection:
 
     async def close(self) -> None:
         self.closed = True
+
+
+class SilentConnection(FakeConnection):
+    """A connection that discards what it is sent, for long concurrent runs.
+
+    The recording fake accumulates one entry per call, which a fan-out spinning
+    for the length of a churn loop turns into millions of them.
+    """
+
+    def send_message(self, payload: bytes | str) -> None:
+        pass
+
+    def send_media(self, chunk: MediaChunk) -> None:
+        pass
 
 
 def expect_state(sm: SessionStateMachine, state: SessionState) -> None:
@@ -350,6 +386,172 @@ def test_set_media_depth_reaches_every_connection() -> None:
     cm.register(b)
     cm.set_media_depth(8)
     assert (a.media_depth, b.media_depth) == (8, 8)
+
+
+FanOut = Callable[[ConnectionManager], None]
+
+
+def _refuse_to_encode_frame(_version: ProtocolVersion) -> bytes | str:
+    """Stand in for a codec handed a payload it cannot render."""
+    raise TypeError("value is not serialisable")
+
+
+def _refuse_to_encode_response(_version: ProtocolVersion) -> tuple[Channel, bytes | str]:
+    """The channel-picking form of :func:`_refuse_to_encode_frame`."""
+    raise TypeError("value is not serialisable")
+
+
+# Every fan-out that walks the whole registry, each invoked the way its caller
+# does. A client dropping mid-fan-out has to be survivable on all of them, not
+# only on the media path where it was first seen.
+_FAN_OUTS: list[tuple[str, FanOut]] = [
+    ("broadcast", lambda cm: cm.broadcast(lambda _version: "frame")),
+    (
+        "broadcast_response",
+        lambda cm: cm.broadcast_response(lambda _version: (Channel.DATA, "frame")),
+    ),
+    (
+        "broadcast_media",
+        lambda cm: cm.broadcast_media(MediaChunk(bundle=MediaBundle(), fps=30.0, n_frames=1)),
+    ),
+    ("flush_media", lambda cm: cm.flush_media()),
+    ("set_media_rate", lambda cm: cm.set_media_rate(24.0)),
+    ("set_media_depth", lambda cm: cm.set_media_depth(8)),
+]
+
+
+@pytest.mark.parametrize(("name", "fan_out"), _FAN_OUTS, ids=[name for name, _ in _FAN_OUTS])
+def test_fan_out_survives_a_drop_landing_inside_it(name: str, fan_out: FanOut) -> None:
+    """A client leaving mid-fan-out must not break the fan-out.
+
+    Dropping the second connection from inside the first one's outbound call is
+    the deterministic form of the real race, where the drop arrives on the event
+    loop while the model's thread is part-way through the registry.
+    """
+    cm, _ = waiting_manager()
+    leaving = FakeConnection(2)
+    staying = FakeConnection(1, on_outbound=lambda: cm.drop(leaving.id))
+    cm.register(staying)
+    cm.register(leaving)
+
+    fan_out(cm)
+
+    assert cm.count == 1
+
+
+def test_fan_out_reaches_the_rest_when_one_connection_raises() -> None:
+    """One failing wire is the fan-out's to absorb, not the session's to die on.
+
+    The fan-out runs on the model's own thread, so an exception let through here
+    would surface as a crash of the model's run loop and end the session for
+    every client on it.
+    """
+    cm, _ = waiting_manager()
+
+    def fail() -> None:
+        raise RuntimeError("wire is gone")
+
+    broken = FakeConnection(1, on_outbound=fail)
+    healthy = FakeConnection(2)
+    cm.register(broken)
+    cm.register(healthy)
+    chunk = MediaChunk(bundle=MediaBundle(), fps=30.0, n_frames=1)
+
+    cm.broadcast_media(chunk)
+
+    assert healthy.media == [chunk]
+
+
+def test_an_absorbed_failure_names_the_wire_it_came_from(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An absorbed failure has to identify its connection to be actionable.
+
+    Every client in a session logs through the same fan-out, so the operation
+    alone cannot tell an operator which wire is the one failing.
+    """
+    cm, _ = waiting_manager()
+
+    def fail() -> None:
+        raise RuntimeError("wire is gone")
+
+    cm.register(FakeConnection(1, on_outbound=fail))
+    chunk = MediaChunk(bundle=MediaBundle(), fps=30.0, n_frames=1)
+
+    with caplog.at_level(logging.ERROR, logger="reactor_runtime.runner.connection_manager"):
+        cm.broadcast_media(chunk)
+
+    assert len(caplog.records) == 1
+    fields = getattr(caplog.records[0], "reactor_fields", {})
+    assert fields["conn_id"] == ConnId(1)
+    assert fields["operation"] == "broadcast_media"
+
+
+_ENCODING_FAN_OUTS: list[tuple[str, FanOut]] = [
+    ("broadcast", lambda cm: cm.broadcast(_refuse_to_encode_frame)),
+    ("broadcast_response", lambda cm: cm.broadcast_response(_refuse_to_encode_response)),
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "fan_out"), _ENCODING_FAN_OUTS, ids=[name for name, _ in _ENCODING_FAN_OUTS]
+)
+def test_an_encode_failure_propagates_out_of_the_fan_out(name: str, fan_out: FanOut) -> None:
+    """Encoding is not one client's to fail, so its failure is not absorbed.
+
+    A payload the codec cannot render fails identically for every connection, so
+    absorbing it would report an authoring mistake as N wire failures and let the
+    message reach nobody. It belongs to the caller that built the payload.
+    """
+    cm, _ = waiting_manager()
+    cm.register(FakeConnection(1))
+    cm.register(FakeConnection(2))
+
+    with pytest.raises(TypeError, match="not serialisable"):
+        fan_out(cm)
+
+
+def test_media_fan_out_is_safe_against_concurrent_connection_churn() -> None:
+    """The reported shape: one thread fanning out while another registers and drops.
+
+    Reads come off the model's thread and its emit worker while writes come off
+    the runtime's event loop, so the two genuinely run at once in production. The
+    residents widen each pass over the registry and the short switch interval
+    lands the writer inside one, which is what makes the race reproducible here
+    rather than merely possible.
+    """
+    cm, _ = waiting_manager()
+    for cid in range(1, 64):
+        cm.register(SilentConnection(cid))
+    chunk = MediaChunk(bundle=MediaBundle(), fps=30.0, n_frames=1)
+    failures: list[Exception] = []
+    stop = threading.Event()
+
+    def fan_out_until_stopped() -> None:
+        # Held rather than swallowed: the main thread re-raises it below, so a
+        # failure keeps the traceback that a thread would otherwise only print.
+        try:
+            while not stop.is_set():
+                cm.broadcast_media(chunk)
+        except Exception as error:
+            failures.append(error)
+
+    thread = threading.Thread(target=fan_out_until_stopped, name="fan-out")
+    previous_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    thread.start()
+    try:
+        for cid in range(1000, 3000):
+            cm.register(SilentConnection(cid))
+            cm.drop(ConnId(cid))
+    finally:
+        stop.set()
+        thread.join(timeout=10.0)
+        sys.setswitchinterval(previous_interval)
+
+    assert not thread.is_alive()
+    if failures:
+        raise failures[0]
 
 
 def test_first_publisher_wins_and_resumes_the_track() -> None:
