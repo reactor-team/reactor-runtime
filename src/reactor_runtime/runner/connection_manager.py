@@ -10,12 +10,37 @@ turns into a client event.
 It is deliberately wire-blind. Connections enter as the neutral ``Connection``
 shape and the manager only ever calls that shape — it never asks which transport
 produced a connection, which is exactly what lets one session mix transports.
+
+Threading
+---------
+Writers run on one thread and readers run on several, so the registry is
+replaced rather than edited.
+
+* Every write — a register, a drop, a teardown — arrives on the runtime's event
+  loop, because a transport reports a connection opening or closing through the
+  sink from that loop. Writers therefore never race each other, and the manager
+  holds no lock.
+* Reads arrive from any thread. The model's own thread broadcasts messages and
+  drives the playout controls, and a worker thread off that loop fans each
+  emitted media chunk out, so a fan-out is iterating the registry while a
+  client's disconnect is landing on the loop.
+* The registry is bound as an immutable ``Mapping`` and swapped for a fresh one
+  on every change. A reader takes one attribute load and iterates a mapping
+  nothing will ever mutate, so a disconnect mid-fan-out is invisible to it — the
+  chunk simply reaches a connection that has just gone, whose stopped pacer no
+  longer puts anything on the wire. A lock would be worse than unnecessary
+  here: a fan-out can block for seconds inside a connection's pacer waiting for
+  queue room, and a lock spanning that wait would hold the event loop out of
+  the very disconnect it needs to process.
+* The publisher table and the used-id pool stay ordinary mutable containers.
+  Both are read and written only on the event loop, and nothing iterates them
+  from another thread.
 """
 
 from __future__ import annotations
 
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from reactor_runtime.core import (
     Connection,
@@ -23,9 +48,12 @@ from reactor_runtime.core import (
     MediaChunk,
     SessionEvent,
 )
+from reactor_runtime.log import get_logger
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.runner.state_machine import SessionStateMachine
 from reactor_runtime.transport.router import ConnectionsExhaustedError
+
+logger = get_logger(__name__)
 
 # Connection ids are minted at random in this inclusive range, the same id space
 # a production director hands out. 1000 is invalid and 1001 is reserved for
@@ -42,6 +70,23 @@ _MAX_CONN_ID = 9999
 _MAX_MINT_ATTEMPTS = 100
 
 
+def _deliver(conn: Connection, operation: str, act: Callable[[Connection], None]) -> None:
+    """Apply one fan-out step to one connection, containing what it raises.
+
+    A fan-out reaches every client in the session, so a failure on one wire is
+    the fan-out's to absorb: the remaining connections are still owed the frame,
+    and the caller — often the model's own thread, mid-``emit`` — has no wire of
+    its own to fail. Left to propagate, one connection's exception would surface
+    as a crash of the model's run loop and end the session for everyone on it.
+    The failure is logged with its traceback so a wire that fails every time is
+    still visible rather than silently dark.
+    """
+    try:
+        act(conn)
+    except Exception:
+        logger.exception("connection rejected an outbound fan-out", operation=operation)
+
+
 class ConnectionManager:
     """Registry and multiplexer of the live connections in one session.
 
@@ -49,12 +94,19 @@ class ConnectionManager:
     first and last connection, arbitrates publisher tracks first-come-first-served,
     and exposes the broadcast / addressed / media sends the model's outbound path
     binds to. Constructed with the machine it drives; nothing here is async.
+
+    Reads are safe from any thread and writes belong to the runtime's event
+    loop; see the module docstring for what that buys and what it costs.
     """
 
     def __init__(self, *, state_machine: SessionStateMachine) -> None:
         """Bind the manager to the session machine it advances."""
         self._sm = state_machine
-        self._by_id: dict[ConnId, Connection] = {}
+        # Bound as a read-only mapping and swapped whole on every change, so a
+        # reader on another thread iterates a snapshot that cannot move under
+        # it. The type is what holds the invariant: an in-place write here is a
+        # type error rather than a race discovered in production.
+        self._by_id: Mapping[ConnId, Connection] = {}
         # The owner of each published track. First publisher wins: a track is held
         # by one connection until it releases or drops, and a later claim on a held
         # track is refused.
@@ -103,11 +155,10 @@ class ConnectionManager:
         replaces the handle without re-driving the session — connection identity
         across a reconnect is the transport's concern, not the manager's.
         """
-        if conn.id in self._by_id:
-            self._by_id[conn.id] = conn
-            return
-        self._by_id[conn.id] = conn
-        self._sm.send(SessionEvent.CONNECTION_OPENED, conn_id=conn.id)
+        known = conn.id in self._by_id
+        self._by_id = {**self._by_id, conn.id: conn}
+        if not known:
+            self._sm.send(SessionEvent.CONNECTION_OPENED, conn_id=conn.id)
 
     def drop(self, cid: ConnId) -> None:
         """Remove a connection and advance the session for its loss.
@@ -121,7 +172,7 @@ class ConnectionManager:
         """
         if cid not in self._by_id:
             return
-        del self._by_id[cid]
+        self._by_id = {other: conn for other, conn in self._by_id.items() if other != cid}
         self._sm.send(SessionEvent.CONNECTION_CLOSED, conn_id=cid)
         held = [name for name, owner in self._publishers.items() if owner == cid]
         for name in held:
@@ -141,7 +192,7 @@ class ConnectionManager:
         too, so the next session starts with the whole id range free again.
         """
         conns = list(self._by_id.values())
-        self._by_id.clear()
+        self._by_id = {}
         self._publishers.clear()
         self._used_conn_ids.clear()
         for conn in conns:
@@ -207,7 +258,7 @@ class ConnectionManager:
         mixed-version session reaches every client in the version it speaks.
         """
         for conn in self._by_id.values():
-            conn.send_message(encode(conn.protocol_version))
+            _deliver(conn, "broadcast", lambda c: c.send_message(encode(c.protocol_version)))
 
     def send(self, cid: ConnId, encode: Callable[[ProtocolVersion], bytes | str]) -> None:
         """Encode and send a frame to one connection in its codec, if registered."""
@@ -266,7 +317,7 @@ class ConnectionManager:
         addressee — a moderation verdict — rides this.
         """
         for conn in self._by_id.values():
-            self._send_on_channel(conn, encode)
+            _deliver(conn, "broadcast_response", lambda c: self._send_on_channel(c, encode))
 
     @staticmethod
     def _send_on_channel(
@@ -300,22 +351,22 @@ class ConnectionManager:
                 return
             caps = conn.capabilities
             if caps.carries_video or caps.carries_audio:
-                conn.send_media(chunk)
+                _deliver(conn, "broadcast_media", lambda c: c.send_media(chunk))
 
     def flush_media(self) -> None:
         """Drop every connection's queued media and cut playout to black."""
         for conn in self._by_id.values():
-            conn.flush_media()
+            _deliver(conn, "flush_media", lambda c: c.flush_media())
 
     def set_media_rate(self, fps: float) -> None:
         """Re-pace every connection's queued media at *fps* immediately."""
         for conn in self._by_id.values():
-            conn.set_media_rate(fps)
+            _deliver(conn, "set_media_rate", lambda c: c.set_media_rate(fps))
 
     def set_media_depth(self, depth: int) -> None:
         """Bound every connection's media queue at *depth* frames."""
         for conn in self._by_id.values():
-            conn.set_media_depth(depth)
+            _deliver(conn, "set_media_depth", lambda c: c.set_media_depth(depth))
 
     def note_keepalive(self, cid: ConnId) -> None:
         """Record a per-connection liveness ping.
