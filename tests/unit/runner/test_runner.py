@@ -55,7 +55,13 @@ from reactor_runtime.message_gateway import InboundCommand
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.protocol.common import dict_to_struct, struct_to_dict
 from reactor_runtime.recording import ClipResult
-from reactor_runtime.runner.runner import _RUNTIME_STATES, SESSION_ID, Runner
+from reactor_runtime.runner.runner import (
+    _RUNTIME_STATES,
+    _SESSION_ENDED_FALLBACK,
+    _SESSION_ENDED_MESSAGES,
+    SESSION_ID,
+    Runner,
+)
 from reactor_runtime.transport.router import (
     SessionControl,
     SessionNotRunningError,
@@ -952,6 +958,27 @@ async def test_an_unknown_close_reason_falls_back_to_the_generic_sentence(
     body = json.loads(frame)
     assert body["data"]["data"]["reason"] == "cosmic_rays"
     assert body["data"]["data"]["message"] == "Session terminated by the platform."
+
+
+@pytest.mark.parametrize(("token", "message"), sorted(_SESSION_ENDED_MESSAGES.items()))
+async def test_every_close_reason_token_delivers_its_own_sentence(
+    started_runner: Runner, token: str, message: str
+) -> None:
+    # Parametrized over the token map, so a token added without a real
+    # sentence of its own fails here instead of shipping the fallback.
+    assert message
+    assert message != _SESSION_ENDED_FALLBACK
+
+    started_runner.start_session({})
+    conn = FakeConnection(1)
+    started_runner.connection_opened(conn)
+
+    started_runner.stop_session(reason=token)
+
+    frame = next(f for f in conn.sent if isinstance(f, str) and "sessionEnded" in f)
+    body = json.loads(frame)
+    assert body["data"]["data"]["reason"] == token
+    assert body["data"]["data"]["message"] == message
 
 
 async def test_plain_stop_sends_no_session_ended_notice(started_runner: Runner) -> None:
