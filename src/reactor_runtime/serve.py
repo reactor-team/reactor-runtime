@@ -8,10 +8,11 @@ platform.
 
 This is also the runtime's one configuration boundary: the manifest names the
 model, and the surrounding deployment names everything else (bind address, the
-ICE servers and port range, the congestion-control bitrate limits, the
-lifecycle timeouts) through environment variables. The transport and lifecycle
-config objects stay free of environment reads; the small adapter here is the
-only place that translates the outside world into them.
+ICE servers and port range, the congestion-control bitrate limits, the video
+codec preference order, the lifecycle timeouts) through environment variables.
+The transport and lifecycle config objects stay free of environment reads; the
+small adapter here is the only place that translates the outside world into
+them.
 """
 
 from __future__ import annotations
@@ -32,11 +33,12 @@ from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.runner import Runner
 from reactor_runtime.service import Service
 from reactor_runtime.transport.webrtc.config import (
+    CodecEntry,
     IceServer,
     IceTransportPolicy,
     WebRtcConfig,
 )
-from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
+from reactor_runtime.transport.webrtc.peer import _VIDEO_CODEC_BY_NAME, WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.router import WebRtcRouter
 
 # Public STUN server used when no STUN/TURN is configured, so the SDP answer
@@ -119,6 +121,34 @@ def _ice_policy_from_env() -> IceTransportPolicy:
         raise SystemExit(f"ICE_TRANSPORT_POLICY {raw!r} must be 'all' or 'relay'") from None
 
 
+def _video_codecs_from_env() -> tuple[CodecEntry, ...]:
+    """Read ``WEBRTC_VIDEO_CODECS`` (comma-separated names, most preferred first).
+
+    Defaults to ``WebRtcConfig.supported_video_codecs`` when unset. A name not
+    in ``_VIDEO_CODEC_BY_NAME`` (the names ``reactor_webrtc`` recognizes at
+    all) is a typo or an unsupported codec and fails fast at boot; a name it
+    recognizes but this build did not compile in (e.g. hardware H264 on a
+    software-only host) is accepted here and silently skipped at negotiation
+    time by ``Transceiver.set_codec_preferences`` instead.
+
+    Raises:
+        SystemExit: If an entry isn't a name reactor_webrtc recognizes.
+    """
+    names = _csv("WEBRTC_VIDEO_CODECS")
+    if not names:
+        return WebRtcConfig.supported_video_codecs
+    codecs: list[CodecEntry] = []
+    for name in names:
+        upper = name.upper()
+        if upper not in _VIDEO_CODEC_BY_NAME:
+            raise SystemExit(
+                f"WEBRTC_VIDEO_CODECS entry {name!r} must be one of "
+                f"{', '.join(sorted(_VIDEO_CODEC_BY_NAME))}"
+            )
+        codecs.append({"codec": upper})
+    return tuple(codecs)
+
+
 def _float_env(name: str, default: float) -> float:
     """Return env var *name* as a float, or *default* when unset/empty.
 
@@ -182,6 +212,7 @@ def _webrtc_config_from_env() -> WebRtcConfig:
         port_range=_port_range_from_env(),
         transport_policy=_ice_policy_from_env(),
         ping_timeout=_float_env("WEBRTC_CLIENT_PING_TIMEOUT_SECONDS", 20.0),
+        supported_video_codecs=_video_codecs_from_env(),
         bwe_min_kbps=bwe_min_kbps,
         bwe_max_kbps=bwe_max_kbps,
         bwe_initial_kbps=bwe_initial_kbps,

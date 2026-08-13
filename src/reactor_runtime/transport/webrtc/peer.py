@@ -156,6 +156,35 @@ def _build_rtc_config(config: WebRtcConfig) -> rw.RtcConfiguration:
     return rtc
 
 
+# Derived from the binding itself rather than hand-listed, so a codec
+# reactor_webrtc adds later is recognized here with no code change — the
+# name reactor-webrtc's own capability matching expects is one `.upper()`
+# away from each variant's Rust name for every current codec (Vp8 -> "VP8",
+# Av1 -> "AV1", ...). isinstance guards against a future non-variant
+# attribute (a method PyO3 adds to the class) being mistaken for one.
+_VIDEO_CODEC_BY_NAME: dict[str, rw.VideoCodec] = {
+    name.upper(): value
+    for name in dir(rw.VideoCodec)
+    if isinstance(value := getattr(rw.VideoCodec, name), rw.VideoCodec)
+}
+
+
+def _video_codec_preferences(config: WebRtcConfig) -> list[rw.VideoCodec]:
+    """Map the configured video codec preference order to the binding's enum.
+
+    A name ``reactor_webrtc`` does not recognize is skipped rather than
+    raising, matching ``Transceiver.set_codec_preferences``'s own behaviour
+    for a codec this build did not compile in (e.g. hardware H264 on a
+    software-only build): the caller's fallback order still applies to
+    whatever the endpoint actually supports.
+    """
+    return [
+        _VIDEO_CODEC_BY_NAME[entry["codec"]]
+        for entry in config.supported_video_codecs
+        if entry["codec"] in _VIDEO_CODEC_BY_NAME
+    ]
+
+
 async def _apply_bitrate_limits(pc: rw.PeerConnection, config: WebRtcConfig) -> None:
     """Apply the configured congestion-control bitrate limits to a fresh peer connection.
 
@@ -305,7 +334,7 @@ class WebRTCPeer:
         await pc.set_remote_description(offer)
         self._raise_if_stopped()
 
-        await self._attach_out_tracks(loop, pc, factory)
+        await self._attach_out_tracks(pc, factory)
 
         answer = await pc.create_answer()
         await pc.set_local_description(answer)
@@ -326,36 +355,47 @@ class WebRTCPeer:
 
     async def _attach_out_tracks(
         self,
-        loop: asyncio.AbstractEventLoop,
         pc: rw.PeerConnection,
         factory: rw.PeerConnectionFactory,
     ) -> None:
         """Bind an outbound track to each transceiver the model sends on.
 
+        Also applies the configured video codec preference order to every video
+        transceiver.
+
         After ``set_remote_description`` libwebrtc has a transceiver per m-section
         carrying the offer's mid. A mid that maps to an ``OUT`` track (the client
         offered it recvonly) gets a fresh sender track and a send-only direction.
+        Every video transceiver — sending or receiving — gets the codec preference
+        order so both directions of a bundled connection negotiate the same
+        preferred codec, not just the ones this side sends on.
 
-        ``transceivers()``/``set_track()``/``set_direction()`` are synchronous
-        libwebrtc calls — dispatched to an executor so they never stall the
-        shared event loop other peers' connections are also running on.
+        ``set_local_description`` makes each video transceiver's own sender
+        actually encode with whichever preferred codec was negotiated, once
+        negotiation completes — ``set_codec_preferences`` here only shapes what
+        gets negotiated.
+
+        ``transceivers()``, ``set_direction()``, ``set_track()``, and
+        ``set_codec_preferences()`` are all natively awaitable. Must run before
+        ``create_answer()``: a codec preference only takes effect on the next
+        SDP generated for that transceiver.
         """
-        transceivers = await loop.run_in_executor(None, pc.transceivers)
+        transceivers = await pc.transceivers()
+        codec_preferences = _video_codec_preferences(self._config)
         for transceiver in transceivers:
             mid = transceiver.mid()
             info = self._track_by_mid.get(mid) if mid is not None else None
-            if info is None or info.direction is not TrackDirection.OUT:
-                continue
-            if info.kind is TrackKind.VIDEO:
-                track = factory.create_video_track(info.name)
-            else:
-                track = factory.create_audio_track_with_local_source(info.name)
-                self._audio_track = track
-            await loop.run_in_executor(None, transceiver.set_track, track)
-            await loop.run_in_executor(
-                None, transceiver.set_direction, rw.TransceiverDirection.SendOnly
-            )
-            self._out_tracks[info.name] = track
+            if info is not None and info.direction is TrackDirection.OUT:
+                if info.kind is TrackKind.VIDEO:
+                    track = factory.create_video_track(info.name)
+                else:
+                    track = factory.create_audio_track_with_local_source(info.name)
+                    self._audio_track = track
+                await transceiver.set_track(track)
+                await transceiver.set_direction(rw.TransceiverDirection.SendOnly)
+                self._out_tracks[info.name] = track
+            if codec_preferences and transceiver.kind() == rw.MediaKind.Video:
+                await transceiver.set_codec_preferences(codec_preferences)
 
     def _raise_if_stopped(self) -> None:
         if self._stop_event.is_set():
