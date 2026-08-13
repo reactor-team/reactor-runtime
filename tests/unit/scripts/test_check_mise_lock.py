@@ -27,11 +27,16 @@ def _clean_env() -> dict[str, str]:
     # Git exports repo-pinning variables (GIT_DIR and friends) to hooks, so a
     # suite run from a hook would point every git call below at the developer's
     # checkout instead of the scratch repo the test built.
-    return {
+    env = {
         key: value
         for key, value in os.environ.items()
         if not key.startswith("GIT_") and key not in _CONTROL_VARIABLES
     }
+    # The scratch repos must not read the developer's global or system git
+    # config either (a core.hooksPath or init.templateDir would reach them).
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    return env
 
 
 def _run(case: str) -> subprocess.CompletedProcess[str]:
@@ -185,6 +190,35 @@ def _run_script(
     if source is not None:
         env["MISE_LOCK_CHECK_FROM"] = source
     return subprocess.run([str(SCRIPT)], capture_output=True, text=True, env=env, check=False)
+
+
+def test_scratch_repo_helpers_do_not_touch_an_ambient_git_dir(monkeypatch):
+    # A hook run exports GIT_DIR. Without the scrub in _clean_env(), every
+    # _git() call below would land its commits and config in that repo
+    # instead of the scratch repo the test built.
+    with tempfile.TemporaryDirectory(prefix="mise-lock-decoy-") as decoy_str:
+        decoy = Path(decoy_str)
+        _git("init", "-q", "-b", "main", cwd=decoy)
+        monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+        with tempfile.TemporaryDirectory(prefix="mise-lock-git-") as tmp_str:
+            tmp = Path(tmp_str)
+            _init_repo_with_fixture(tmp, "valid")
+            result = _run_script(tmp, source="head")
+            assert result.returncode == 0, result.stderr
+        probe = subprocess.run(
+            ["git", "--git-dir", str(decoy / ".git"), "rev-list", "--all", "--count"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert probe.stdout.strip() == "0"
+        config = subprocess.run(
+            ["git", "--git-dir", str(decoy / ".git"), "config", "--local", "user.name"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert config.returncode != 0
 
 
 # Exercise MISE_LOCK_CHECK_FROM=index|head and merge-base short-circuit.
