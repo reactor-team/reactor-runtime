@@ -18,11 +18,20 @@ SCRIPT = HERE.parent.parent.parent / "mise-tasks" / "lint" / "mise-lock.py"
 FIXTURES = HERE / "fixtures" / "check-mise-lock"
 
 
+# The script's own control variables; an ambient value (a dev shell export, a
+# hook's environment) must not reach the scratch runs, which set their own.
+_CONTROL_VARIABLES = ("MISE_LOCK_CHECK_ROOT", "MISE_LOCK_CHECK_FROM", "BASE_REF")
+
+
 def _clean_env() -> dict[str, str]:
     # Git exports repo-pinning variables (GIT_DIR and friends) to hooks, so a
     # suite run from a hook would point every git call below at the developer's
     # checkout instead of the scratch repo the test built.
-    return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("GIT_") and key not in _CONTROL_VARIABLES
+    }
 
 
 def _run(case: str) -> subprocess.CompletedProcess[str]:
@@ -50,6 +59,15 @@ def test_valid_lockfile_passes():
     assert "mise.lock OK" in result.stdout
     assert "2 tool(s)" in result.stdout
     assert "2 platform(s)" in result.stdout
+
+
+def test_ambient_git_and_control_variables_do_not_reach_the_script(monkeypatch):
+    monkeypatch.setenv("GIT_DIR", "/nonexistent")
+    monkeypatch.setenv("MISE_LOCK_CHECK_FROM", "index")
+    monkeypatch.setenv("BASE_REF", "main")
+    result = _run("valid")
+    assert result.returncode == 0, result.stderr
+    assert "mise.lock OK" in result.stdout
 
 
 def test_missing_tool_fails():
