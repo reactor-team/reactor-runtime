@@ -121,14 +121,6 @@ _V0_PROTOCOL = "v0"
 # client only sends.
 _CLIENT_DIRECTION = {"out": "recvonly", "in": "sendonly"}
 
-# Client-facing sentences for the platform's session close-reason tokens. Only
-# the platform authors tokens; the runtime owns their wording. A token with no
-# entry is delivered with an empty message: the runtime states only what it
-# knows, and the client renders its own copy for the token or nothing.
-_SESSION_ENDED_MESSAGES = {
-    "deployment": "Session terminated: the model was redeployed.",
-}
-
 logger = get_logger(__name__)
 
 
@@ -606,18 +598,17 @@ class Runner(ServiceComponent, ConnectionSink):
         it ends with :attr:`~reactor_runtime.core.model.EndReason.MODERATED`
         and the clients are told why before their connections close.
 
-        *reason* is the platform's close-reason token (for example
-        ``"deployment"``). When set, the clients receive a session-ended notice
-        carrying the token before their connections close, with a
-        human-readable sentence for the tokens the runtime has wording for and
-        an empty message otherwise. A moderated stop outranks it: a stop
-        carrying both sends only the moderation notice. Delivery is
-        best-effort: a session with no live client, or a send that fails, is
-        logged and the stop runs regardless.
+        *reason* is the platform's human-readable description of why the
+        session is ending (for example ``"Session ended: the model was
+        updated."``). When set, the clients receive a session-ended notice
+        carrying it verbatim before their connections close. A moderated stop
+        outranks it: a stop carrying both sends only the moderation notice.
+        Delivery is best-effort: a session with no live client, or a send that
+        fails, is logged and the stop runs regardless.
 
         Args:
             moderated: Whether the stop enforces a moderation verdict.
-            reason: The platform's close-reason token, empty for a plain stop.
+            reason: The platform's close reason, empty for a plain stop.
 
         Raises:
             SessionTransitionError: If there is no running session to stop.
@@ -1022,22 +1013,20 @@ class Runner(ServiceComponent, ConnectionSink):
     def _broadcast_session_ended(self, reason: str) -> None:
         """Tell every client why the platform is ending the session.
 
-        Broadcast synchronously as the session enters ``CLOSING``, before the
-        connection teardown is spawned, so the frame is queued on each ordered
-        channel ahead of its close and the client sees the reason rather than a
-        bare disconnect. Best-effort by contract: a session with no live client
-        or a broadcast that raises logs a warning, and the stop proceeds either
-        way.
+        *reason* is the platform-authored, human-readable description and is
+        delivered verbatim. Broadcast synchronously as the session enters
+        ``CLOSING``, before the connection teardown is spawned, so the frame is
+        queued on each ordered channel ahead of its close and the client sees
+        the reason rather than a bare disconnect. Best-effort by contract: a
+        session with no live client or a broadcast that raises logs a warning,
+        and the stop proceeds either way.
         """
-        message = _SESSION_ENDED_MESSAGES.get(reason, "")
         if self._connections.count == 0:
             logger.warning("no live client to notify of session end", reason=reason)
             return
         try:
             self._connections.broadcast_response(
-                lambda version: self._codec_for(version).encode_session_ended(
-                    reason=reason, message=message
-                )
+                lambda version: self._codec_for(version).encode_session_ended(reason=reason)
             )
         except Exception:
             logger.warning(

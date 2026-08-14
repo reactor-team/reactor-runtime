@@ -55,12 +55,7 @@ from reactor_runtime.message_gateway import InboundCommand
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.protocol.common import dict_to_struct, struct_to_dict
 from reactor_runtime.recording import ClipResult
-from reactor_runtime.runner.runner import (
-    _RUNTIME_STATES,
-    _SESSION_ENDED_MESSAGES,
-    SESSION_ID,
-    Runner,
-)
+from reactor_runtime.runner.runner import _RUNTIME_STATES, SESSION_ID, Runner
 from reactor_runtime.transport.router import (
     SessionControl,
     SessionNotRunningError,
@@ -905,7 +900,7 @@ async def test_reasoned_stop_notifies_every_client_before_teardown(
     started_runner.connection_opened(v0_conn)
     started_runner.connection_opened(v1_conn)
 
-    started_runner.stop_session(reason="deployment")
+    started_runner.stop_session(reason="Session ended: the model was updated.")
 
     # The notice is queued synchronously on entering CLOSING; the connections
     # only close in the teardown task that has not run yet.
@@ -916,16 +911,14 @@ async def test_reasoned_stop_notifies_every_client_before_teardown(
     body = json.loads(v0_frame)
     assert body["scope"] == "runtime"
     assert body["data"]["type"] == "sessionEnded"
-    assert body["data"]["data"]["reason"] == "deployment"
-    assert body["data"]["data"]["message"] == "Session terminated: the model was redeployed."
+    assert body["data"]["data"]["reason"] == "Session ended: the model was updated."
     # The v1 client sees the binary notification on the control channel.
     raw = v1_conn.control[-1]
     assert isinstance(raw, bytes)
     decoded = protocol.select(V1).decode(raw, CONTROL, SERVER)
     assert isinstance(decoded, control_pb2.ControlServerMessage)
     assert decoded.WhichOneof("payload") == "session_ended"
-    assert decoded.session_ended.reason == "deployment"
-    assert decoded.session_ended.message == "Session terminated: the model was redeployed."
+    assert decoded.session_ended.reason == "Session ended: the model was updated."
 
     await asyncio.sleep(0.01)
     assert v0_conn.closed
@@ -944,41 +937,19 @@ async def test_reasoned_stop_ends_the_session_as_stopped(
     assert ended[0].reason is EndReason.STOPPED
 
 
-async def test_an_unknown_close_reason_is_delivered_with_an_empty_message(
+async def test_the_close_reason_reaches_the_client_verbatim(
     started_runner: Runner,
 ) -> None:
-    # The runtime words only the tokens it knows; an unknown token still
-    # reaches the client to branch on, with no invented sentence beside it.
+    # The platform authors the wording; the runtime must not rewrite it.
     started_runner.start_session({})
     conn = FakeConnection(1)
     started_runner.connection_opened(conn)
 
-    started_runner.stop_session(reason="cosmic_rays")
+    started_runner.stop_session(reason="cosmic rays flipped a bit")
 
     frame = next(f for f in conn.sent if isinstance(f, str) and "sessionEnded" in f)
     body = json.loads(frame)
-    assert body["data"]["data"]["reason"] == "cosmic_rays"
-    assert body["data"]["data"]["message"] == ""
-
-
-@pytest.mark.parametrize(("token", "message"), sorted(_SESSION_ENDED_MESSAGES.items()))
-async def test_every_close_reason_token_delivers_its_own_sentence(
-    started_runner: Runner, token: str, message: str
-) -> None:
-    # Parametrized over the token map, so a token added without a real
-    # sentence of its own fails here instead of shipping an empty message.
-    assert message
-
-    started_runner.start_session({})
-    conn = FakeConnection(1)
-    started_runner.connection_opened(conn)
-
-    started_runner.stop_session(reason=token)
-
-    frame = next(f for f in conn.sent if isinstance(f, str) and "sessionEnded" in f)
-    body = json.loads(frame)
-    assert body["data"]["data"]["reason"] == token
-    assert body["data"]["data"]["message"] == message
+    assert body["data"]["data"]["reason"] == "cosmic rays flipped a bit"
 
 
 async def test_plain_stop_sends_no_session_ended_notice(started_runner: Runner) -> None:
