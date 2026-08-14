@@ -18,6 +18,27 @@ SCRIPT = HERE.parent.parent.parent / "mise-tasks" / "lint" / "mise-lock.py"
 FIXTURES = HERE / "fixtures" / "check-mise-lock"
 
 
+# The script's own control variables; an ambient value (a dev shell export, a
+# hook's environment) must not reach the scratch runs, which set their own.
+_CONTROL_VARIABLES = ("MISE_LOCK_CHECK_ROOT", "MISE_LOCK_CHECK_FROM", "BASE_REF")
+
+
+def _clean_env() -> dict[str, str]:
+    # Git exports repo-pinning variables (GIT_DIR and friends) to hooks, so a
+    # suite run from a hook would point every git call below at the developer's
+    # checkout instead of the scratch repo the test built.
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("GIT_") and key not in _CONTROL_VARIABLES
+    }
+    # The scratch repos must not read the developer's global or system git
+    # config either (a core.hooksPath or init.templateDir would reach them).
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    return env
+
+
 def _run(case: str) -> subprocess.CompletedProcess[str]:
     # Copy the fixture out of the repo so the script's git short-circuit
     # doesn't see untracked fixture files and incorrectly skip the check.
@@ -26,7 +47,7 @@ def _run(case: str) -> subprocess.CompletedProcess[str]:
             src = FIXTURES / case / name
             if src.exists():
                 shutil.copy(src, Path(tmp) / name)
-        env = os.environ.copy()
+        env = _clean_env()
         env["MISE_LOCK_CHECK_ROOT"] = tmp
         return subprocess.run(
             [str(SCRIPT)],
@@ -43,6 +64,15 @@ def test_valid_lockfile_passes():
     assert "mise.lock OK" in result.stdout
     assert "2 tool(s)" in result.stdout
     assert "2 platform(s)" in result.stdout
+
+
+def test_ambient_git_and_control_variables_do_not_reach_the_script(monkeypatch):
+    monkeypatch.setenv("GIT_DIR", "/nonexistent")
+    monkeypatch.setenv("MISE_LOCK_CHECK_FROM", "index")
+    monkeypatch.setenv("BASE_REF", "main")
+    result = _run("valid")
+    assert result.returncode == 0, result.stderr
+    assert "mise.lock OK" in result.stdout
 
 
 def test_missing_tool_fails():
@@ -134,7 +164,9 @@ def test_malformed_mise_lock_dies():
 
 
 def _git(*args: str, cwd: Path) -> None:
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", *args], cwd=cwd, env=_clean_env(), check=True, capture_output=True, text=True
+    )
 
 
 def _init_repo_with_fixture(tmp: Path, fixture: str) -> None:
@@ -152,12 +184,41 @@ def _init_repo_with_fixture(tmp: Path, fixture: str) -> None:
 def _run_script(
     tmp: Path, source: str | None = None, base_ref: str = "does-not-exist"
 ) -> subprocess.CompletedProcess[str]:
-    env = os.environ.copy()
+    env = _clean_env()
     env["MISE_LOCK_CHECK_ROOT"] = str(tmp)
     env["BASE_REF"] = base_ref  # point at a missing ref by default to disable the short-circuit
     if source is not None:
         env["MISE_LOCK_CHECK_FROM"] = source
     return subprocess.run([str(SCRIPT)], capture_output=True, text=True, env=env, check=False)
+
+
+def test_scratch_repo_helpers_do_not_touch_an_ambient_git_dir(monkeypatch):
+    # A hook run exports GIT_DIR. Without the scrub in _clean_env(), every
+    # _git() call below would land its commits and config in that repo
+    # instead of the scratch repo the test built.
+    with tempfile.TemporaryDirectory(prefix="mise-lock-decoy-") as decoy_str:
+        decoy = Path(decoy_str)
+        _git("init", "-q", "-b", "main", cwd=decoy)
+        monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+        with tempfile.TemporaryDirectory(prefix="mise-lock-git-") as tmp_str:
+            tmp = Path(tmp_str)
+            _init_repo_with_fixture(tmp, "valid")
+            result = _run_script(tmp, source="head")
+            assert result.returncode == 0, result.stderr
+        probe = subprocess.run(
+            ["git", "--git-dir", str(decoy / ".git"), "rev-list", "--all", "--count"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert probe.stdout.strip() == "0"
+        config = subprocess.run(
+            ["git", "--git-dir", str(decoy / ".git"), "config", "--local", "user.name"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert config.returncode != 0
 
 
 # Exercise MISE_LOCK_CHECK_FROM=index|head and merge-base short-circuit.
