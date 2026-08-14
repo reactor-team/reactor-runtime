@@ -330,6 +330,24 @@ async def test_stats_polling_samples(
     await conn.close()
 
 
+async def test_stats_carry_the_frames_the_pacer_dropped(
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    """The pacer is the one place outbound media is lost that the peer cannot see."""
+    peer = FakePeer(stats=PeerStats(rtt_seconds=0.25))
+    conn = await _connect(peer, factory_for(peer), out_av_tracks, ping_timeout=0.0)
+    conn._STATS_INTERVAL_SECONDS = 0.01
+    conn._pacer._dropped_frames = 7
+
+    peer.fire_connected()
+    await asyncio.sleep(0.05)
+
+    assert conn.latest_stats is not None
+    assert conn.latest_stats.media.dropped_frames == 7
+    await conn.close()
+
+
 async def test_stats_loop_survives_a_failed_sample(
     factory_for: Callable[..., WebRtcPeerFactory],
     out_av_tracks: TrackMap,

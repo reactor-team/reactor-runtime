@@ -338,6 +338,16 @@ def test_audio_feed_counts_a_partial_frame_as_silence() -> None:
     assert peer._audio_buf.size == _AUDIO_FRAME_SAMPLES - 1
 
 
+def test_a_session_without_audio_reports_no_shortfall() -> None:
+    """A wire that carries no audio is owed none, so none is counted missing."""
+    peer = WebRTCPeer()
+
+    for _ in range(100):  # a second of ticks on a video-only session
+        peer._push_audio_frame(None)
+
+    assert peer._silence_frames == 0
+
+
 def test_audio_feed_survives_a_track_that_raises() -> None:
     peer = WebRTCPeer()
 

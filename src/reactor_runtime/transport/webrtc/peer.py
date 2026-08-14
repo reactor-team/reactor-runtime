@@ -660,7 +660,15 @@ class WebRTCPeer:
         then advances by the 10 ms it just gave up. Silence is stamped now: it
         is time passing, not media the model captured earlier, and the anchor is
         left alone because the next arrival re-reads it anyway.
+
+        A session whose model sends no audio has no track here, and no shortfall
+        to report either: silence counts what the model owed the wire, and a
+        wire that carries no audio is owed nothing. Counting it anyway would put
+        every video-only session permanently over the under-production
+        threshold.
         """
+        if track is None:
+            return
         chunk: npt.NDArray[np.int16] | None = None
         captured_us = 0
         with self._audio_lock:
@@ -672,8 +680,6 @@ class WebRTCPeer:
         if chunk is None:
             self._silence_frames += 1
             captured_us = rw.time_micros()
-        if track is None:
-            return
         payload = _AUDIO_SILENT_FRAME if chunk is None else chunk.tobytes()
         try:
             track.push_pcm(payload, _AUDIO_SAMPLE_RATE, 1, capture_time_us=captured_us)
