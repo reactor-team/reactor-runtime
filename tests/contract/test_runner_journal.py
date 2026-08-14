@@ -142,6 +142,19 @@ async def test_a_moderated_stop_journals_the_session_as_moderated(harness: Harne
         await journal.aclose()
 
 
+async def test_a_reasoned_stop_journals_the_close_reason(harness: Harness) -> None:
+    journal = JournalReader(harness.runner)
+    try:
+        await harness.client.post("/start_session", json={})
+        response = await harness.client.post("/stop_session", json={"reason": "deployment"})
+        assert response.status_code == 200
+
+        stopped = await journal.expect("stop_session")
+        assert stopped["detail"] == {"reason": "stopped", "close_reason": "deployment"}
+    finally:
+        await journal.aclose()
+
+
 async def test_the_recording_is_addressed_by_the_start_session_id(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:

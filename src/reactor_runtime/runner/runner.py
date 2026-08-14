@@ -121,6 +121,11 @@ _V0_PROTOCOL = "v0"
 # client only sends.
 _CLIENT_DIRECTION = {"out": "recvonly", "in": "sendonly"}
 
+# The close reason a drain sends to clients. The runtime initiates this stop,
+# so the runtime words it; every other close reason arrives from the platform.
+# Kept within the 64-character bound the stop route enforces on the platform's.
+_DRAIN_CLOSE_REASON = "Session ended: the server is shutting down."
+
 logger = get_logger(__name__)
 
 
@@ -279,11 +284,18 @@ class Runner(ServiceComponent, ConnectionSink):
         """Stop accepting new sessions and let an active one end on grace.
 
         A running session is asked to stop and given the grace period to unwind
-        to ready; the model itself stays up until :meth:`stop`.
+        to ready; the model itself stays up until :meth:`stop`. The stop carries
+        a close reason authored here — the runtime initiates this stop, so the
+        runtime words it — and the clients are told before their connections
+        close, the same notice a platform-reasoned stop sends.
         """
         self._accepting = False
         if self._sm.current_state in _RUNNING_STATES:
-            self._sm.send(SessionEvent.STOP_SESSION, reason=EndReason.STOPPED)
+            self._sm.send(
+                SessionEvent.STOP_SESSION,
+                reason=EndReason.STOPPED,
+                close_reason=_DRAIN_CLOSE_REASON,
+            )
             await self._await_ready(self._cfg.grace_period)
 
     async def stop(self) -> None:
@@ -586,7 +598,7 @@ class Runner(ServiceComponent, ConnectionSink):
         self._offer_epochs.session_started()
         self._model_metrics.session_started()
 
-    def stop_session(self, *, moderated: bool = False) -> None:
+    def stop_session(self, *, moderated: bool = False, reason: str = "") -> None:
         """Close the active session, leaving the model loaded and ready again.
 
         Not idempotent, like :meth:`start_session`: a stop is legal only from a
@@ -598,14 +610,26 @@ class Runner(ServiceComponent, ConnectionSink):
         it ends with :attr:`~reactor_runtime.core.model.EndReason.MODERATED`
         and the clients are told why before their connections close.
 
+        *reason* is the platform's human-readable description of why the
+        session is ending (for example ``"Session ended: the model was
+        updated."``). When set, the clients receive a session-ended notice
+        carrying it verbatim before their connections close. A moderated stop
+        outranks it: a stop carrying both sends only the moderation notice.
+        Delivery is best-effort: a session with no live client, or a send that
+        fails, is logged and the stop runs regardless.
+
         Args:
             moderated: Whether the stop enforces a moderation verdict.
+            reason: The platform's close reason, empty for a plain stop.
 
         Raises:
             SessionTransitionError: If there is no running session to stop.
         """
-        reason = EndReason.MODERATED if moderated else EndReason.STOPPED
-        if not self._sm.send(SessionEvent.STOP_SESSION, reason=reason):
+        end_reason = EndReason.MODERATED if moderated else EndReason.STOPPED
+        detail: dict[str, Any] = {"reason": end_reason}
+        if reason:
+            detail["close_reason"] = reason
+        if not self._sm.send(SessionEvent.STOP_SESSION, **detail):
             raise SessionTransitionError("stop", self._sm.current_state)
 
     def new_conn_id(self) -> ConnId:
@@ -998,6 +1022,31 @@ class Runner(ServiceComponent, ConnectionSink):
             )
         )
 
+    def _broadcast_session_ended(self, reason: str) -> None:
+        """Tell every client why the platform is ending the session.
+
+        *reason* is the platform-authored, human-readable description and is
+        delivered verbatim. Broadcast synchronously as the session enters
+        ``CLOSING``, before the connection teardown is spawned, so the frame is
+        queued on each ordered channel ahead of its close and the client sees
+        the reason rather than a bare disconnect. Best-effort by contract: a
+        session with no live client or a broadcast that raises logs a warning,
+        and the stop proceeds either way.
+        """
+        if self._connections.count == 0:
+            logger.warning("no live client to notify of session end", reason=reason)
+            return
+        try:
+            self._connections.broadcast_response(
+                lambda version: self._codec_for(version).encode_session_ended(reason=reason)
+            )
+        except Exception:
+            logger.warning(
+                "failed to send session-ended notice; stopping anyway",
+                reason=reason,
+                exc_info=True,
+            )
+
     def _dispatch_transition(self, transition: Transition) -> None:
         """Run every side effect a session transition drives, in one place.
 
@@ -1038,8 +1087,13 @@ class Runner(ServiceComponent, ConnectionSink):
             self._reset_orphan_timeout(transition.to_state)
         if entered and transition.to_state is SessionState.CLOSING and self._loop is not None:
             reason = transition.detail.get("reason", EndReason.STOPPED)
+            close_reason = transition.detail.get("close_reason", "")
+            # One stop, one notice: a moderation verdict outranks a close-reason
+            # token, so a stop carrying both explains itself once.
             if reason is EndReason.MODERATED:
                 self._broadcast_moderation_notice()
+            elif close_reason:
+                self._broadcast_session_ended(close_reason)
             self._uploads.clear()
             self._spawn_teardown(asyncio.to_thread(self._recorder.stop))
             self._spawn_teardown(self._close_session(reason))
