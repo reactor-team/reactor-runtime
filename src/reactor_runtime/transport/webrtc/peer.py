@@ -153,6 +153,7 @@ from reactor_runtime.transport.webrtc.frames import (
 )
 from reactor_runtime.transport.webrtc.sdp import (
     Candidate,
+    bump_session_version,
     deduplicate_bundle_pts,
     embed_ice_candidates,
     set_media_direction,
@@ -391,6 +392,9 @@ class WebRTCPeer:
         # unset so the first change always applies, then tracks what was
         # actually accepted so a request that changes nothing does nothing.
         self._applied_pauses: frozenset[str] | None = None
+        # How many local renegotiations have gone out. Each description has to
+        # carry a session version past the last one, or it describes no change.
+        self._renegotiations = 0
         # Serialises those re-applications: a pause and a resume racing would
         # leave libwebrtc holding whichever description landed last.
         self._sdp_lock = asyncio.Lock()
@@ -978,7 +982,9 @@ class WebRTCPeer:
             # says, and renegotiating that would restart streams for nothing.
             if paused == self._applied_pauses:
                 return
-            offer_sdp, answer_sdp = self._offer_sdp, self._answer_sdp
+            self._renegotiations += 1
+            offer_sdp = bump_session_version(self._offer_sdp, self._renegotiations)
+            answer_sdp = bump_session_version(self._answer_sdp, self._renegotiations)
             for mid, info in self._track_by_mid.items():
                 if info.direction is not TrackDirection.OUT:
                     continue
@@ -999,8 +1005,7 @@ class WebRTCPeer:
                 await self._restate_out_tracks(pc, paused)
                 await pc.set_local_description(rw.SessionDescription("answer", answer_sdp))
             except Exception:
-                logger.warning("could not apply track pauses %s", sorted(paused))
-                logger.debug("direction change failed", exc_info=True)
+                logger.warning("could not apply track pauses %s", sorted(paused), exc_info=True)
                 return
             self._applied_pauses = paused
 

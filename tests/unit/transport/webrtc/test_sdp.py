@@ -7,6 +7,7 @@ directly, without the ``reactor_webrtc`` wheel.
 import pytest
 
 from reactor_runtime.transport.webrtc.sdp import (
+    bump_session_version,
     deduplicate_bundle_pts,
     embed_ice_candidates,
     set_media_direction,
@@ -150,3 +151,27 @@ def test_set_media_direction_leaves_an_unknown_mid_alone() -> None:
 def test_set_media_direction_rejects_a_value_that_is_not_a_direction() -> None:
     with pytest.raises(ValueError, match="not an SDP direction"):
         set_media_direction(_TWO_SECTIONS, "1", "sendonly-ish")
+
+
+# ── bump_session_version ─────────────────────────────────────────────────────
+
+_WITH_ORIGIN = "v=0\r\no=- 7503906533368660784 2 IN IP4 127.0.0.1\r\ns=-\r\n"
+
+
+def test_bump_session_version_advances_only_the_version_field() -> None:
+    out = bump_session_version(_WITH_ORIGIN, 1)
+    assert out.split("\r\n")[1] == "o=- 7503906533368660784 3 IN IP4 127.0.0.1"
+
+
+def test_bump_session_version_counts_from_the_negotiated_one() -> None:
+    """Each pass starts from the base, so it carries how far past it is."""
+    assert "7503906533368660784 5 " in bump_session_version(_WITH_ORIGIN, 3)
+
+
+def test_bump_session_version_leaves_a_description_with_no_origin_alone() -> None:
+    assert bump_session_version("v=0\r\ns=-\r\n", 1) == "v=0\r\ns=-\r\n"
+
+
+def test_bump_session_version_leaves_an_unparsable_origin_alone() -> None:
+    sdp = "v=0\r\no=- session two IN IP4 127.0.0.1\r\n"
+    assert bump_session_version(sdp, 1) == sdp

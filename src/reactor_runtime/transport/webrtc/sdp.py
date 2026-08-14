@@ -206,3 +206,36 @@ def set_media_direction(sdp: str, mid: str, direction: str) -> str:
             lines.insert(start + after_mid + 1, f"a={direction}")
         break
     return "\r\n".join(lines)
+
+
+def bump_session_version(sdp: str, by: int) -> str:
+    """Advance the session version in the ``o=`` line by *by*.
+
+    RFC 3264 §8 requires the version to increase on each offer or answer within
+    a session, so a description re-applied with the version it already carried
+    describes no change and is free to be treated as the duplicate it looks
+    like. A local renegotiation has to advance it for the same reason a
+    signalled one does.
+
+    The origin line is ``o=<user> <sess-id> <sess-version> <nettype> <addrtype>
+    <address>``, so only the third field moves.
+
+    Args:
+        sdp: The description to rewrite.
+        by: How far past the negotiated version to place this one.
+
+    Returns:
+        The description with its session version advanced, or unchanged when it
+        has no parsable origin line.
+    """
+    lines = sdp.split("\r\n")
+    for index, line in enumerate(lines):
+        if not line.startswith("o="):
+            continue
+        fields = line.split(" ")
+        if len(fields) < 3 or not fields[2].isdigit():
+            break
+        fields[2] = str(int(fields[2]) + by)
+        lines[index] = " ".join(fields)
+        break
+    return "\r\n".join(lines)
