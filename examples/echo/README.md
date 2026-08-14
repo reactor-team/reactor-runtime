@@ -39,6 +39,9 @@ curl -s localhost:8080/health
 - `set_effect` — `none | grayscale | sepia | edges | invert | blur | pixelate`
 - `set_intensity` — `0.0`–`1.0`
 - `set_caption` — draw a text caption over the output video (up to 200 chars).
+- `set_burst` — `1`–`30` frames per emit. `1` emits on every tick; higher holds
+  frames back and sends them together, which is how a batching model produces.
+  Useful for watching the transport smooth an uneven producer in a live session.
 - `set_overlay_image` — blend an uploaded image over the output video.
   `overlay_image` is a file reference (`UploadedFile`); `overlay_strength` is
   `0.0`–`1.0`. From the JS SDK: `const ref = await uploadFile(file); await

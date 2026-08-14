@@ -34,7 +34,13 @@ def _seed_registries(
 
 def test_commands_are_exactly_the_declared_set() -> None:
     commands = ModelContract.of(Echo).commands
-    assert set(commands) == {"set_effect", "set_intensity", "set_caption", "set_overlay_image"}
+    assert set(commands) == {
+        "set_effect",
+        "set_intensity",
+        "set_burst",
+        "set_caption",
+        "set_overlay_image",
+    }
 
 
 def test_set_effect_offers_every_effect() -> None:
@@ -82,6 +88,7 @@ def test_schema_renders_the_full_surface() -> None:
     assert set(doc["paths"]) == {
         "/events/set_effect",
         "/events/set_intensity",
+        "/events/set_burst",
         "/events/set_caption",
         "/events/set_overlay_image",
     }
@@ -167,3 +174,36 @@ def test_output_carries_no_metadata_for_an_untagged_frame() -> None:
         main_audio=np.zeros((1, 4), np.int16),
     )
     assert "main_video" not in output.__metadata__
+
+
+async def test_set_burst_bounds_and_records_the_batch_size() -> None:
+    model = Echo()
+    model.load(None)
+    assert model.burst == 1  # a steady tick by default
+
+    await model.set_burst(12)
+
+    assert model.burst == 12
+
+
+async def test_session_start_returns_the_burst_to_a_steady_tick() -> None:
+    model = Echo()
+    model.load(None)
+    await model.set_burst(12)
+
+    await model.on_session_start()
+
+    assert model.burst == 1
+
+
+def test_a_burst_pads_untagged_frames_with_an_empty_trailer() -> None:
+    """A batch needs one metadata entry per frame, tagged or not."""
+    out = EchoOutput(
+        main_video=TrackPayload(
+            np.zeros((3, 2, 2, 3), np.uint8),
+            metadata=[b'{"seq":0}', b"", b'{"seq":2}'],
+        ),
+        main_audio=np.zeros((1, 1440), np.int16),
+    )
+
+    assert out.__metadata__["main_video"] == [b'{"seq":0}', b"", b'{"seq":2}']
