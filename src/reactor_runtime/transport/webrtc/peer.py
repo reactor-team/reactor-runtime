@@ -380,12 +380,17 @@ class WebRTCPeer:
         self._last_silence_sample: tuple[float, dict[str, int]] | None = None
 
         self._paused_tracks: set[str] = set()
-        # The descriptions libwebrtc currently holds, kept so a pause can hand
-        # them back with one section's direction flipped. The binding exposes no
-        # getter for them, and re-deriving an offer would be a real
-        # renegotiation rather than the local one this is.
+        # The descriptions negotiation settled on, never mutated. Every pause
+        # rewrites them from scratch against the current pause set rather than
+        # editing the last rewrite: an edit only carries the change it makes, so
+        # resuming one track would hand back a description that had forgotten
+        # every other track was paused.
         self._offer_sdp = ""
         self._answer_sdp = ""
+        # Which tracks the descriptions libwebrtc holds are paused for. Starts
+        # unset so the first change always applies, then tracks what was
+        # actually accepted so a request that changes nothing does nothing.
+        self._applied_pauses: frozenset[str] | None = None
         # Serialises those re-applications: a pause and a resume racing would
         # leave libwebrtc holding whichever description landed last.
         self._sdp_lock = asyncio.Lock()
@@ -459,6 +464,9 @@ class WebRTCPeer:
         answer = await pc.create_answer()
         self._answer_sdp = answer.sdp
         await pc.set_local_description(answer)
+        # Nothing is paused on a fresh session, so a claim on a track asks for
+        # what the descriptions already say and changes nothing.
+        self._applied_pauses = frozenset()
         self._raise_if_stopped()
 
         timeout_s = self._config.ice_gathering_timeout_ms / 1000.0
@@ -936,43 +944,77 @@ class WebRTCPeer:
         loop = self._loop
         if loop is None or loop.is_closed() or self._stop_event.is_set():
             return
-        loop.call_soon_threadsafe(lambda: loop.create_task(self._set_direction(name, active)))
+        loop.call_soon_threadsafe(lambda: loop.create_task(self._apply_pauses()))
 
-    async def _set_direction(self, name: str, active: bool) -> None:
-        """Start or stop one track's sender by re-applying the descriptions.
+    async def _apply_pauses(self) -> None:
+        """Put the session's directions in step with which tracks are paused.
 
-        A sender that merely stops being fed keeps its RTP timestamp where it
-        was while the sender reports carry on estimating theirs forward, so the
-        audio that follows a pause is dated too early and plays ahead of the
-        video. Taking the section out of the session instead stops the stream at
-        the engine, and starting it again is the one event that makes
-        ``ChannelSend`` re-anchor its sample counter from the capture time —
-        which is what turns the pause into the gap it actually was.
+        A paused track's section goes inactive, which stops the stream at the
+        engine; starting it again is the one event that makes ``ChannelSend``
+        re-anchor its sample counter from the capture time, so the gap reaches
+        the client as the gap it was rather than as audio dated too early. A
+        sender that merely stops being fed cannot get that, because the sender
+        reports carry on estimating their timestamp forward while the packets
+        do not.
 
-        Both descriptions go back with that one section's direction flipped, and
-        nothing is signalled: the client's session is unchanged, and it simply
-        receives nothing on that track meanwhile.
+        Every outbound section is written on every pass, from the descriptions
+        negotiation settled on. Editing the previous rewrite instead would carry
+        only the change being made, so resuming one of two paused tracks would
+        hand libwebrtc a description that had forgotten the other one was
+        paused, and resume both.
+
+        Nothing is signalled: the client's view of the session is unchanged and
+        it simply receives nothing on a paused track meanwhile.
         """
-        mid = next((m for m, info in self._track_by_mid.items() if info.name == name), None)
         pc = self._pc
-        if mid is None or pc is None:
+        if pc is None or not self._offer_sdp:
             return
         async with self._sdp_lock:
             if self._stop_event.is_set() or self._pc is None:
                 return
-            remote = "recvonly" if active else "inactive"
-            local = "sendonly" if active else "inactive"
-            offer_sdp = set_media_direction(self._offer_sdp, mid, remote)
-            answer_sdp = set_media_direction(self._answer_sdp, mid, local)
+            out_names = {info.name for info in self._track_by_mid.values()}
+            paused = frozenset(self._paused_tracks & out_names)
+            # A claim on an unpaused track asks for what the session already
+            # says, and renegotiating that would restart streams for nothing.
+            if paused == self._applied_pauses:
+                return
+            offer_sdp, answer_sdp = self._offer_sdp, self._answer_sdp
+            for mid, info in self._track_by_mid.items():
+                if info.direction is not TrackDirection.OUT:
+                    continue
+                inactive = info.name in paused
+                offer_sdp = set_media_direction(
+                    offer_sdp, mid, "inactive" if inactive else "recvonly"
+                )
+                answer_sdp = set_media_direction(
+                    answer_sdp, mid, "inactive" if inactive else "sendonly"
+                )
             try:
                 await pc.set_remote_description(rw.SessionDescription("offer", offer_sdp))
                 await pc.set_local_description(rw.SessionDescription("answer", answer_sdp))
+                await self._rebind_out_tracks(pc)
             except Exception:
-                logger.warning("could not %s track %r", "resume" if active else "pause", name)
+                logger.warning("could not apply track pauses %s", sorted(paused))
                 logger.debug("direction change failed", exc_info=True)
                 return
-            self._offer_sdp = offer_sdp
-            self._answer_sdp = answer_sdp
+            self._applied_pauses = paused
+
+    async def _rebind_out_tracks(self, pc: rw.PeerConnection) -> None:
+        """Put each outbound track back on its transceiver after a re-apply.
+
+        Re-applying the descriptions runs the negotiation again, and a sender
+        that comes out of it without its track sends nothing at all. The tracks
+        themselves are reused — creating fresh ones would restart the streams
+        this is trying to leave alone.
+        """
+        for transceiver in await pc.transceivers():
+            mid = transceiver.mid()
+            info = self._track_by_mid.get(mid) if mid is not None else None
+            if info is None or info.direction is not TrackDirection.OUT:
+                continue
+            track = self._out_tracks.get(info.name)
+            if track is not None:
+                await transceiver.set_track(track)
 
     # =========================================================================
     # Seam: stats and teardown

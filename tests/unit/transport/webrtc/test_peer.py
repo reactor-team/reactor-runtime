@@ -1211,15 +1211,31 @@ _SESSION_ANSWER = (
 )
 
 
+class _RecordingTransceiver:
+    def __init__(self, mid: str) -> None:
+        self._mid = mid
+        self.tracks: list[Any] = []
+
+    def mid(self) -> str:
+        return self._mid
+
+    async def set_track(self, track: Any) -> None:
+        self.tracks.append(track)
+
+
 class _RecordingPc:
     def __init__(self) -> None:
         self.applied: list[tuple[str, str]] = []
+        self.transceiver_list = [_RecordingTransceiver("0"), _RecordingTransceiver("1")]
 
     async def set_remote_description(self, sdp: Any) -> None:
         self.applied.append(("remote", sdp.sdp))
 
     async def set_local_description(self, sdp: Any) -> None:
         self.applied.append(("local", sdp.sdp))
+
+    async def transceivers(self) -> list[_RecordingTransceiver]:
+        return self.transceiver_list
 
 
 def _negotiated_peer() -> tuple[WebRTCPeer, _RecordingPc]:
@@ -1228,48 +1244,70 @@ def _negotiated_peer() -> tuple[WebRTCPeer, _RecordingPc]:
     peer._pc = cast(Any, pc)
     peer._offer_sdp = _SESSION_OFFER
     peer._answer_sdp = _SESSION_ANSWER
+    peer._applied_pauses = frozenset()
     peer._track_by_mid = {
         "0": TrackInfo(name="v", kind=TrackKind.VIDEO, direction=TrackDirection.OUT),
         "1": TrackInfo(name="a", kind=TrackKind.AUDIO, direction=TrackDirection.OUT),
     }
+    peer._out_tracks["v"] = cast(Any, _FakeTrack())
+    peer._out_tracks["a"] = cast(Any, _FakeAudioTrack())
     return peer, pc
 
 
 async def test_pausing_takes_only_that_section_out_of_the_session() -> None:
     peer, pc = _negotiated_peer()
 
-    await peer._set_direction("a", active=False)
+    peer.pause_track("a")
+    await peer._apply_pauses()
 
-    assert [side for side, _ in pc.applied] == ["remote", "local"]
     remote, local = pc.applied[0][1], pc.applied[1][1]
     assert "a=mid:1\r\na=inactive" in remote
     assert "a=mid:1\r\na=inactive" in local
-    assert "a=mid:0\r\na=recvonly" in remote  # the video section is untouched
+    assert "a=mid:0\r\na=recvonly" in remote  # the video section stays up
     assert "a=mid:0\r\na=sendonly" in local
 
 
-async def test_resuming_puts_the_section_back() -> None:
+async def test_resuming_one_of_two_paused_tracks_leaves_the_other_paused() -> None:
+    """Every section is written on every pass, or a resume forgets the rest."""
     peer, pc = _negotiated_peer()
-    await peer._set_direction("a", active=False)
+    peer.pause_track("a")
+    await peer._apply_pauses()
+    peer.pause_track("v")
+    await peer._apply_pauses()
     pc.applied.clear()
 
-    await peer._set_direction("a", active=True)
+    peer.resume_track("a")
+    await peer._apply_pauses()
 
-    assert peer._offer_sdp == _SESSION_OFFER
-    assert peer._answer_sdp == _SESSION_ANSWER
-
-
-async def test_a_direction_change_is_remembered_for_the_next_one() -> None:
-    """Each change starts from what libwebrtc holds, not from the original."""
-    peer, _ = _negotiated_peer()
-
-    await peer._set_direction("a", active=False)
-
-    assert "a=mid:1\r\na=inactive" in peer._offer_sdp
-    assert "a=mid:1\r\na=inactive" in peer._answer_sdp
+    remote, local = pc.applied[0][1], pc.applied[1][1]
+    assert "a=mid:1\r\na=recvonly" in remote  # resumed
+    assert "a=mid:1\r\na=sendonly" in local
+    assert "a=mid:0\r\na=inactive" in remote  # still paused
+    assert "a=mid:0\r\na=inactive" in local
 
 
-async def test_a_failed_direction_change_keeps_the_descriptions_it_had() -> None:
+async def test_a_claim_on_a_track_that_is_not_paused_renegotiates_nothing() -> None:
+    """publish_track resumes on claim; renegotiating there restarts the session."""
+    peer, pc = _negotiated_peer()
+
+    peer.resume_track("a")
+    await peer._apply_pauses()
+
+    assert pc.applied == []
+
+
+async def test_pausing_puts_the_tracks_back_on_their_transceivers() -> None:
+    """A sender that comes out of a re-apply without its track sends nothing."""
+    peer, pc = _negotiated_peer()
+
+    peer.pause_track("a")
+    await peer._apply_pauses()
+
+    assert pc.transceiver_list[0].tracks == [peer._out_tracks["v"]]
+    assert pc.transceiver_list[1].tracks == [peer._out_tracks["a"]]
+
+
+async def test_a_failed_apply_leaves_the_session_where_it_was() -> None:
     peer, _ = _negotiated_peer()
 
     class _Rejecting:
@@ -1277,16 +1315,21 @@ async def test_a_failed_direction_change_keeps_the_descriptions_it_had() -> None
             raise RuntimeError("rejected")
 
     peer._pc = cast(Any, _Rejecting())
+    peer.pause_track("a")
 
-    await peer._set_direction("a", active=False)
+    await peer._apply_pauses()
 
-    assert peer._offer_sdp == _SESSION_OFFER  # not advanced past what libwebrtc holds
+    assert peer._applied_pauses == frozenset()  # not recorded as applied
+    assert peer._offer_sdp == _SESSION_OFFER  # the base is never mutated
+
+
+async def test_the_base_descriptions_are_never_edited() -> None:
+    peer, _ = _negotiated_peer()
+
+    peer.pause_track("a")
+    await peer._apply_pauses()
+    peer.resume_track("a")
+    await peer._apply_pauses()
+
+    assert peer._offer_sdp == _SESSION_OFFER
     assert peer._answer_sdp == _SESSION_ANSWER
-
-
-async def test_a_track_with_no_section_changes_nothing() -> None:
-    peer, pc = _negotiated_peer()
-
-    await peer._set_direction("nope", active=False)
-
-    assert pc.applied == []
