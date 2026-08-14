@@ -61,7 +61,8 @@ message Moderation {
 // The platform is ending the session, and this is why. Sent best-effort
 // before the connections close, so the client sees the reason rather than a
 // bare disconnect. `reason` is a stable token to branch on (for example
-// "deployment"); `message` is a human-readable sentence rendered for it.
+// "deployment"); `message` is a human-readable sentence rendered for it,
+// empty when the sender has no wording for the token.
 message SessionEnded {
   string reason = 1;
   string message = 2;
