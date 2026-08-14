@@ -173,6 +173,16 @@ _AUDIO_MAX_CATCHUP_FRAMES = 5
 # Share of a stats window that may be runtime-inserted silence before the
 # under-production is worth a warning.
 _AUDIO_SILENCE_WARN_RATIO = 0.05
+# How long the feeder keeps covering for a track that has stopped delivering.
+# Silence fills a gap in a stream that is running; past this the track is not
+# stalled, it is idle — the model has nothing to say, or the client has
+# unpublished — and there is no gap left to describe.
+#
+# Sized from the capture that prompted this work: its stalls ran 1.5 to 2 s, with a
+# median of 1.54 s, so anything shorter leaves the tail of a real stall
+# uncovered and hands the client back the gap it cannot see. Three seconds
+# clears them with margin and still bounds what an idle track costs.
+_AUDIO_GRACE_TICKS = 300  # 3 s
 # Capture time advances by these, in libwebrtc's microsecond clock: one frame
 # per push, one sample per buffered sample.
 _AUDIO_FRAME_MICROS = 10_000
