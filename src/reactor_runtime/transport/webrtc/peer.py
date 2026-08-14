@@ -43,16 +43,22 @@ burstiness.
 
 The feeder therefore pushes exactly one 10 ms frame (480 samples at 48 kHz)
 per 10 ms tick for as long as the client wants the track: the model's samples
-when the buffer holds a frame, silence when it does not, and nothing at all
-once the track is paused — silence describes media the model owed, and a pause
-is the client declining the stream. Silence is how a gap is expressed, and keeping
-the pushed-sample count locked to the wall clock is what keeps the stream on
-real time. A short scheduling stall is repaid in frames for the same reason.
+when that track's buffer holds a frame, silence when it does not, and nothing
+at all once the track is paused — silence describes media the model owed, and a
+pause is the client declining the stream. Silence is how a gap is expressed, and
+keeping the pushed-sample count locked to the wall clock is what keeps the stream
+on real time. A short scheduling stall is repaid in frames for the same reason.
 The buffer between the drain thread and the feeder stays shallow, so the audio
 held ahead of the wire is a small bounded offset rather than a growing lag;
 trimming it discards samples, which is reported through
 :class:`~reactor_runtime.transport.webrtc.stats.OutboundMediaHealth` rather than
 left to be inferred from the sound.
+
+A model may send several audio tracks, and each is a separate stream on the
+wire — its own libwebrtc track, buffer, capture anchor, pause state and silence
+count, all keyed by track name, exactly as video already was. One feeder thread
+serves them all on one tick, so they share a cadence instead of drifting apart
+on N clocks.
 
 Running on real time is what keeps each stream honest; a shared capture
 timestamp is what ties them to each other. ``send_media`` reads
@@ -78,7 +84,8 @@ Threading
   dispatched to an executor, so a connection negotiating never stalls the
   loop other connections are running on.
 * A frame-drain thread pushes outbound video and buffers outbound audio; a
-  second thread feeds that audio to the peer's audio track in steady 10 ms frames.
+  second thread feeds that audio to each of the peer's audio tracks in steady
+  10 ms frames.
 * libwebrtc's own signaling and network threads fire the observer callbacks;
   each one marshals its work onto the asyncio loop before touching peer state, so
   the callbacks the connection registered only ever run on that one loop.
@@ -144,6 +151,9 @@ _AUDIO_FRAME_SECONDS = 0.010
 _AUDIO_BUFFER_MAX_SAMPLES = 9_600  # 200 ms at 48 kHz
 # What one silent 10 ms frame looks like on the wire.
 _AUDIO_SILENT_FRAME = np.zeros(_AUDIO_FRAME_SAMPLES, dtype=np.int16).tobytes()
+# Stands in for a track that has not buffered anything yet, so a first push
+# reads the same as any other.
+_EMPTY_AUDIO: npt.NDArray[np.int16] = np.array([], dtype=np.int16)
 # How much of a scheduling stall the feeder repays in frames before resyncing.
 # Repaying keeps the sample count on the wall clock; the cap keeps a long stall
 # (host suspend) from bursting seconds of audio onto the wire at once.
@@ -303,27 +313,31 @@ class WebRTCPeer:
             maxsize=_FRAME_QUEUE_MAX
         )
         self._frame_thread: threading.Thread | None = None
-        self._audio_track: rw.Track | None = None
-        # The outbound audio track's name, so the feeder can tell whether the
-        # client has paused it — the feeder runs on its own clock and never
-        # sees a bundle to read the name from.
-        self._audio_track_name: str | None = None
-        self._audio_buf: npt.NDArray[np.int16] = np.array([], dtype=np.int16)
-        # When the buffer's first remaining sample was captured. Everything
-        # after it follows at the sample rate, so one anchor dates the lot.
-        self._audio_head_us = 0
+        # Outbound audio, all keyed by track name. A model may send several
+        # audio tracks and each is its own stream on the wire: its own buffer,
+        # its own capture anchor, its own pause state. Names are the feeder's
+        # only handle on them — it runs on its own clock and never sees a
+        # bundle to read one from.
+        self._audio_tracks: dict[str, rw.Track] = {}
+        self._audio_bufs: dict[str, npt.NDArray[np.int16]] = {}
+        # Per track, when its buffer's first remaining sample was captured.
+        # Everything after it follows at the sample rate, so one anchor dates
+        # that track's lot.
+        self._audio_head_us: dict[str, int] = {}
         self._audio_lock = threading.Lock()
         self._audio_thread: threading.Thread | None = None
 
         # Outbound media the peer manufactured or discarded. Each counter is
         # written by one thread and read by the stats sampler, which only ever
         # needs a recent value, so plain ints are enough.
-        self._silence_frames = 0
+        self._silence_frames: dict[str, int] = {}
         self._dropped_samples = 0
         self._dropped_bundles = 0
-        # (monotonic time, silence frame count) of the previous stats sample,
-        # the baseline the under-production warning is measured against.
-        self._last_silence_sample: tuple[float, int] | None = None
+        # (monotonic time, per-track silence counts) of the previous stats
+        # sample, the baseline the under-production warning is measured
+        # against. Per track, so one starved stream is not averaged away by
+        # the others keeping up.
+        self._last_silence_sample: tuple[float, dict[str, int]] | None = None
 
         self._paused_tracks: set[str] = set()
         self._stop_event = threading.Event()
@@ -446,8 +460,7 @@ class WebRTCPeer:
                     track = factory.create_video_track(info.name)
                 else:
                     track = factory.create_audio_track_with_local_source(info.name)
-                    self._audio_track = track
-                    self._audio_track_name = info.name
+                    self._audio_tracks[info.name] = track
                 await transceiver.set_track(track)
                 await transceiver.set_direction(rw.TransceiverDirection.SendOnly)
                 self._out_tracks[info.name] = track
@@ -584,6 +597,7 @@ class WebRTCPeer:
         self._data_channel = None
         self._control_channel = None
         self._out_tracks.clear()
+        self._audio_tracks.clear()
         self._in_tracks.clear()
 
     def _fire(self, callback: Callable[..., None] | None, *args: Any) -> None:
@@ -635,29 +649,41 @@ class WebRTCPeer:
             info = data.info
             if track_name in self._paused_tracks or info.name in self._paused_tracks:
                 continue
+            name = self._attached_name(track_name, info)
+            if name is None:
+                continue
             if info.kind is TrackKind.VIDEO:
-                track = self._out_tracks.get(info.name) or self._out_tracks.get(track_name)
-                if track is None:
-                    continue
                 bgra, width, height = rgb_to_bgra(data.data)
                 # A bundle reaching the wire holds one frame, so it holds one
                 # metadata value: a batch's list is resolved when it is split.
                 metadata = data.metadata if isinstance(data.metadata, bytes) else None
-                track.push_video_frame(
+                self._out_tracks[name].push_video_frame(
                     bgra, width, height, user_data=metadata, capture_time_us=captured_us
                 )
             else:
-                self._enqueue_audio(to_int16_mono(data.data), captured_us)
+                self._enqueue_audio(name, to_int16_mono(data.data), captured_us)
 
-    def _enqueue_audio(self, samples: npt.NDArray[np.int16], captured_us: int) -> None:
-        """Append mono samples to the outbound audio buffer, capping its depth.
+    def _attached_name(self, track_name: str, info: TrackInfo) -> str | None:
+        """Resolve a bundle entry to the name its outbound track is held under.
 
-        The buffer holds one contiguous 48 kHz stream, so one timestamp
-        describes all of it: ``_audio_head_us`` is when its first remaining
-        sample was captured, and every later sample follows at 1/48000 s. That
-        anchor is re-read from *captured_us* whenever what remains is too short
-        to fill a frame — the point at which the next frame out is new media
-        rather than a continuation.
+        A producer may key a bundle by either the track's own name or the name
+        the model declared it under; the wire knows it by one of them.
+        """
+        if info.name in self._out_tracks:
+            return info.name
+        if track_name in self._out_tracks:
+            return track_name
+        return None
+
+    def _enqueue_audio(self, name: str, samples: npt.NDArray[np.int16], captured_us: int) -> None:
+        """Append mono samples to *name*'s outbound buffer, capping its depth.
+
+        Each audio track carries its own contiguous 48 kHz stream, so one
+        timestamp describes all of that track's buffer: ``_audio_head_us[name]``
+        is when its first remaining sample was captured, and every later sample
+        follows at 1/48000 s. That anchor is re-read from *captured_us* whenever
+        what remains is too short to fill a frame — the point at which the next
+        frame out is new media rather than a continuation.
 
         Trimming an overfull buffer discards the oldest samples, which the wire
         can only express by pulling everything after them earlier, so the anchor
@@ -667,28 +693,32 @@ class WebRTCPeer:
         if not samples.size:
             return
         with self._audio_lock:
-            if self._audio_buf.size < _AUDIO_FRAME_SAMPLES:
-                self._audio_head_us = captured_us
-            self._audio_buf = np.concatenate([self._audio_buf, samples])
-            overflow = self._audio_buf.size - _AUDIO_BUFFER_MAX_SAMPLES
+            buf = self._audio_bufs.get(name, _EMPTY_AUDIO)
+            if buf.size < _AUDIO_FRAME_SAMPLES:
+                self._audio_head_us[name] = captured_us
+            buf = np.concatenate([buf, samples])
+            overflow = buf.size - _AUDIO_BUFFER_MAX_SAMPLES
             if overflow > 0:
-                self._audio_buf = self._audio_buf[overflow:]
+                buf = buf[overflow:]
                 self._dropped_samples += overflow
-                self._audio_head_us += round(overflow * _MICROS_PER_SAMPLE)
+                self._audio_head_us[name] += round(overflow * _MICROS_PER_SAMPLE)
+            self._audio_bufs[name] = buf
 
     def _audio_feed_loop(self) -> None:
-        """Feed one 10 ms frame per tick to this peer's LocalAudioSource track.
+        """Feed one 10 ms frame per tick to every LocalAudioSource track.
 
-        The track's RTP timestamp counts the samples handed to it, so the feed is
-        what carries wall-clock time onto the wire: every tick pushes a frame,
-        the model's when the buffer holds one and silence when it does not. A
-        stall long enough to miss whole ticks is repaid in frames, up to
-        ``_AUDIO_MAX_CATCHUP_FRAMES``, so the sample count stays on the clock.
+        A track's RTP timestamp counts the samples handed to it, so the feed is
+        what carries wall-clock time onto the wire: every tick pushes a frame to
+        each track, the model's when that track's buffer holds one and silence
+        when it does not. One thread serves them all — a 10 ms tick is far more
+        time than N buffer reads need, and a shared tick keeps the tracks on one
+        cadence rather than N drifting ones. A stall long enough to miss whole
+        ticks is repaid in frames, up to ``_AUDIO_MAX_CATCHUP_FRAMES``, so the
+        sample counts stay on the clock.
         """
-        track = self._audio_track
         next_tick = time.monotonic() + _AUDIO_FRAME_SECONDS
         while not self._stop_event.is_set():
-            self._push_audio_frame(track)
+            self._push_audio_tick()
             next_tick += _AUDIO_FRAME_SECONDS
             now = time.monotonic()
             if now > next_tick:
@@ -696,7 +726,7 @@ class WebRTCPeer:
                     int((now - next_tick) / _AUDIO_FRAME_SECONDS) + 1, _AUDIO_MAX_CATCHUP_FRAMES
                 )
                 for _ in range(missed):
-                    self._push_audio_frame(track)
+                    self._push_audio_tick()
                 next_tick += missed * _AUDIO_FRAME_SECONDS
                 if next_tick < now:
                     next_tick = now + _AUDIO_FRAME_SECONDS
@@ -704,8 +734,8 @@ class WebRTCPeer:
             if sleep > 0:
                 time.sleep(sleep)
 
-    def _push_audio_frame(self, track: rw.Track | None) -> None:
-        """Hand the track exactly one 10 ms frame, the model's or silence.
+    def _push_audio_tick(self) -> None:
+        """Hand every unpaused audio track its one frame for this tick.
 
         A session whose model sends no audio has no track here, and no shortfall
         to report either: silence counts what the model owed the wire, and a
@@ -713,28 +743,39 @@ class WebRTCPeer:
         every video-only session permanently over the under-production
         threshold.
 
-        A frame of the model's audio is stamped from the buffer's anchor, which
+        Iterates a snapshot: negotiation and teardown both rewrite the track
+        map from other threads.
+        """
+        for name, track in list(self._audio_tracks.items()):
+            if name in self._paused_tracks:
+                continue
+            self._push_audio_frame(name, track)
+
+    def _push_audio_frame(self, name: str, track: rw.Track | None) -> None:
+        """Hand one track exactly one 10 ms frame, the model's or silence.
+
+        A frame of the model's audio is stamped from that track's anchor, which
         then advances by the 10 ms it just gave up. Silence is stamped now: it
         is time passing, not media the model captured earlier, and the anchor is
         left alone because the next arrival re-reads it anyway.
 
-        A paused track is handed nothing at all. Silence stands in for media the
-        model owed and did not produce; a pause is the client declining the
-        stream, so there is no gap to describe, no bandwidth to spend on
-        describing it, and nothing to count against the model's output.
+        A paused track is handed nothing at all — see :meth:`_push_audio_tick`.
+        Silence stands in for media the model owed and did not produce; a pause
+        is the client declining the stream, so there is no gap to describe, no
+        bandwidth to spend on describing it, and nothing to count against the
+        model's output.
         """
-        if self._audio_paused():
-            return
         chunk: npt.NDArray[np.int16] | None = None
         captured_us = 0
         with self._audio_lock:
-            if self._audio_buf.size >= _AUDIO_FRAME_SAMPLES:
-                chunk = self._audio_buf[:_AUDIO_FRAME_SAMPLES]
-                self._audio_buf = self._audio_buf[_AUDIO_FRAME_SAMPLES:]
-                captured_us = self._audio_head_us
-                self._audio_head_us += _AUDIO_FRAME_MICROS
+            buf = self._audio_bufs.get(name, _EMPTY_AUDIO)
+            if buf.size >= _AUDIO_FRAME_SAMPLES:
+                chunk = buf[:_AUDIO_FRAME_SAMPLES]
+                self._audio_bufs[name] = buf[_AUDIO_FRAME_SAMPLES:]
+                captured_us = self._audio_head_us.get(name, 0)
+                self._audio_head_us[name] = captured_us + _AUDIO_FRAME_MICROS
         if chunk is None:
-            self._silence_frames += 1
+            self._silence_frames[name] = self._silence_frames.get(name, 0) + 1
             captured_us = rw.time_micros()
         if track is None:
             return
@@ -813,15 +854,11 @@ class WebRTCPeer:
     def pause_track(self, name: str) -> None:
         """Pause the named outbound track (publisher arbitration).
 
-        The track stops reaching the wire: video frames are dropped as bundles
-        arrive, and the audio feeder stops pushing entirely rather than filling
-        the pause with silence.
+        That track alone stops reaching the wire, and the others carry on: its
+        video frames are dropped as bundles arrive, and the audio feeder skips
+        it rather than filling the pause with silence.
         """
         self._paused_tracks.add(name)
-
-    def _audio_paused(self) -> bool:
-        """Return whether the client has paused this peer's outbound audio."""
-        return self._audio_track_name is not None and self._audio_track_name in self._paused_tracks
 
     # =========================================================================
     # Seam: stats and teardown
@@ -846,24 +883,30 @@ class WebRTCPeer:
         return self._stats_from_report(report)
 
     def _media_health(self) -> OutboundMediaHealth:
-        """Snapshot the peer's outbound manufacture-and-discard counters."""
+        """Snapshot the peer's outbound manufacture-and-discard counters.
+
+        The silence count totals every audio track, since the figure is how much
+        the runtime manufactured across this peer; which track fell short is the
+        warning's job to name.
+        """
         return OutboundMediaHealth(
-            silence_frames=self._silence_frames,
+            silence_frames=sum(self._silence_frames.values()),
             dropped_samples=self._dropped_samples,
             dropped_bundles=self._dropped_bundles,
         )
 
     def _warn_on_audio_underrun(self) -> None:
-        """Warn when too much of the window since the last sample was silence.
+        """Warn for each track too much of whose window since the last sample was silence.
 
         The silence is the runtime's own: samples the model never produced, which
         the wire cannot distinguish from samples it did. Measuring it here — at
-        the source, in whole 10 ms frames — reports the shortfall exactly,
-        without inferring it from a packet rate whose expected value depends on
-        the encoder's packetisation.
+        the source, per track, in whole 10 ms frames — reports the shortfall
+        exactly, without inferring it from a packet rate whose expected value
+        depends on the encoder's packetisation, and without one starved track
+        being averaged away by the others keeping up.
         """
         now = time.monotonic()
-        frames = self._silence_frames
+        frames = dict(self._silence_frames)
         baseline = self._last_silence_sample
         self._last_silence_sample = (now, frames)
         if baseline is None:
@@ -871,15 +914,17 @@ class WebRTCPeer:
         elapsed = now - baseline[0]
         if elapsed <= 0:
             return
-        silence = (frames - baseline[1]) * _AUDIO_FRAME_SECONDS
-        if silence / elapsed < _AUDIO_SILENCE_WARN_RATIO:
-            return
-        logger.warning(
-            "Outbound audio ran below real time: %.1fs of the last %.1fs was silence "
-            "inserted because the model produced no audio for it",
-            silence,
-            elapsed,
-        )
+        for name, count in frames.items():
+            silence = (count - baseline[1].get(name, 0)) * _AUDIO_FRAME_SECONDS
+            if silence / elapsed < _AUDIO_SILENCE_WARN_RATIO:
+                continue
+            logger.warning(
+                "Outbound audio track %r ran below real time: %.1fs of the last %.1fs was "
+                "silence inserted because the model produced no audio for it",
+                name,
+                silence,
+                elapsed,
+            )
 
     def _stats_from_report(self, report: rw.StatsReport) -> PeerStats:
         rtt: float | None = None
