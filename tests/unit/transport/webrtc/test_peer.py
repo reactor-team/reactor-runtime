@@ -1215,12 +1215,16 @@ class _RecordingTransceiver:
     def __init__(self, mid: str) -> None:
         self._mid = mid
         self.tracks: list[Any] = []
+        self.directions: list[Any] = []
 
     def mid(self) -> str:
         return self._mid
 
     async def set_track(self, track: Any) -> None:
         self.tracks.append(track)
+
+    async def set_direction(self, direction: Any) -> None:
+        self.directions.append(direction)
 
 
 class _RecordingPc:
@@ -1305,6 +1309,47 @@ async def test_pausing_puts_the_tracks_back_on_their_transceivers() -> None:
 
     assert pc.transceiver_list[0].tracks == [peer._out_tracks["v"]]
     assert pc.transceiver_list[1].tracks == [peer._out_tracks["a"]]
+
+
+async def test_the_transceiver_direction_follows_the_pause() -> None:
+    """libwebrtc answers from the transceiver, not from the SDP string."""
+    peer, pc = _negotiated_peer()
+
+    peer.pause_track("a")
+    await peer._apply_pauses()
+
+    assert pc.transceiver_list[0].directions == [rw.TransceiverDirection.SendOnly]
+    assert pc.transceiver_list[1].directions == [rw.TransceiverDirection.Inactive]
+
+
+async def test_the_transceivers_are_restated_before_the_local_description() -> None:
+    """The order negotiation itself uses: remote, transceivers, then local."""
+    order: list[str] = []
+
+    class _OrderedTransceiver(_RecordingTransceiver):
+        async def set_direction(self, direction: Any) -> None:
+            order.append("direction")
+
+    class _OrderedPc(_RecordingPc):
+        def __init__(self) -> None:
+            super().__init__()
+            self.transceiver_list = [_OrderedTransceiver("0"), _OrderedTransceiver("1")]
+
+        async def set_remote_description(self, sdp: Any) -> None:
+            order.append("remote")
+
+        async def set_local_description(self, sdp: Any) -> None:
+            order.append("local")
+
+    peer, _ = _negotiated_peer()
+    peer._pc = cast(Any, _OrderedPc())
+
+    peer.pause_track("a")
+    await peer._apply_pauses()
+
+    assert order[0] == "remote"
+    assert order[-1] == "local"
+    assert "direction" in order[1:-1]
 
 
 async def test_a_failed_apply_leaves_the_session_where_it_was() -> None:

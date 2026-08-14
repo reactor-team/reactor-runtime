@@ -990,22 +990,32 @@ class WebRTCPeer:
                     answer_sdp, mid, "inactive" if inactive else "sendonly"
                 )
             try:
+                # The same order negotiation itself uses: the remote description
+                # first, then the transceivers, then the local description.
+                # Rewriting the SDP alone leaves each transceiver's own
+                # direction where `_attach_out_tracks` set it, and libwebrtc
+                # answers from the transceiver, not from the string.
                 await pc.set_remote_description(rw.SessionDescription("offer", offer_sdp))
+                await self._restate_out_tracks(pc, paused)
                 await pc.set_local_description(rw.SessionDescription("answer", answer_sdp))
-                await self._rebind_out_tracks(pc)
             except Exception:
                 logger.warning("could not apply track pauses %s", sorted(paused))
                 logger.debug("direction change failed", exc_info=True)
                 return
             self._applied_pauses = paused
 
-    async def _rebind_out_tracks(self, pc: rw.PeerConnection) -> None:
-        """Put each outbound track back on its transceiver after a re-apply.
+    async def _restate_out_tracks(self, pc: rw.PeerConnection, paused: frozenset[str]) -> None:
+        """Put each outbound transceiver back in the state the pauses describe.
 
-        Re-applying the descriptions runs the negotiation again, and a sender
-        that comes out of it without its track sends nothing at all. The tracks
-        themselves are reused — creating fresh ones would restart the streams
-        this is trying to leave alone.
+        Both halves matter. A transceiver carries its own direction, which the
+        SDP does not set — libwebrtc answers from the transceiver — so a section
+        written inactive while its transceiver still says send-only is a
+        description that disagrees with the engine behind it. And re-applying the
+        descriptions runs the negotiation again, so a sender that comes out of it
+        without its track sends nothing at all.
+
+        The tracks themselves are reused: creating fresh ones would restart the
+        streams this exists to leave alone.
         """
         for transceiver in await pc.transceivers():
             mid = transceiver.mid()
@@ -1015,6 +1025,11 @@ class WebRTCPeer:
             track = self._out_tracks.get(info.name)
             if track is not None:
                 await transceiver.set_track(track)
+            await transceiver.set_direction(
+                rw.TransceiverDirection.Inactive
+                if info.name in paused
+                else rw.TransceiverDirection.SendOnly
+            )
 
     # =========================================================================
     # Seam: stats and teardown
