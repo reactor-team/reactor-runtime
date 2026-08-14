@@ -55,7 +55,12 @@ from reactor_runtime.message_gateway import InboundCommand
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.protocol.common import dict_to_struct, struct_to_dict
 from reactor_runtime.recording import ClipResult
-from reactor_runtime.runner.runner import _RUNTIME_STATES, SESSION_ID, Runner
+from reactor_runtime.runner.runner import (
+    _DRAIN_CLOSE_REASON,
+    _RUNTIME_STATES,
+    SESSION_ID,
+    Runner,
+)
 from reactor_runtime.transport.router import (
     SessionControl,
     SessionNotRunningError,
@@ -1004,6 +1009,23 @@ async def test_drain_ends_an_active_session_within_grace(started_runner: Runner)
     started_runner.start_session({})
     await started_runner.drain()
     assert started_runner._sm.current_state is SessionState.READY
+
+
+async def test_drain_tells_clients_the_server_is_stopping(started_runner: Runner) -> None:
+    # The runtime initiates a drain stop, so it authors the close reason; the
+    # notice must reach the client before the drain closes its connection.
+    started_runner.start_session({})
+    conn = FakeConnection(1)
+    started_runner.connection_opened(conn)
+
+    await started_runner.drain()
+
+    frame = next(f for f in conn.sent if isinstance(f, str) and "sessionEnded" in f)
+    body = json.loads(frame)
+    assert body["data"]["data"]["reason"] == _DRAIN_CLOSE_REASON
+    # The bound the stop route enforces on platform reasons; ours obeys it too.
+    assert len(_DRAIN_CLOSE_REASON) <= 64
+    assert conn.closed
 
 
 # --- orphan timeout, teardown, egress journal, fatal exit -----------------

@@ -121,6 +121,11 @@ _V0_PROTOCOL = "v0"
 # client only sends.
 _CLIENT_DIRECTION = {"out": "recvonly", "in": "sendonly"}
 
+# The close reason a drain sends to clients. The runtime initiates this stop,
+# so the runtime words it; every other close reason arrives from the platform.
+# Kept within the 64-character bound the stop route enforces on the platform's.
+_DRAIN_CLOSE_REASON = "Session ended: the server is stopping. Reconnect to continue."
+
 logger = get_logger(__name__)
 
 
@@ -279,11 +284,18 @@ class Runner(ServiceComponent, ConnectionSink):
         """Stop accepting new sessions and let an active one end on grace.
 
         A running session is asked to stop and given the grace period to unwind
-        to ready; the model itself stays up until :meth:`stop`.
+        to ready; the model itself stays up until :meth:`stop`. The stop carries
+        a close reason authored here — the runtime initiates this stop, so the
+        runtime words it — and the clients are told before their connections
+        close, the same notice a platform-reasoned stop sends.
         """
         self._accepting = False
         if self._sm.current_state in _RUNNING_STATES:
-            self._sm.send(SessionEvent.STOP_SESSION, reason=EndReason.STOPPED)
+            self._sm.send(
+                SessionEvent.STOP_SESSION,
+                reason=EndReason.STOPPED,
+                close_reason=_DRAIN_CLOSE_REASON,
+            )
             await self._await_ready(self._cfg.grace_period)
 
     async def stop(self) -> None:
