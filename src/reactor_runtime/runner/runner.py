@@ -122,11 +122,12 @@ _V0_PROTOCOL = "v0"
 _CLIENT_DIRECTION = {"out": "recvonly", "in": "sendonly"}
 
 # Client-facing sentences for the platform's session close-reason tokens. Only
-# the platform authors tokens; the runtime owns their wording.
+# the platform authors tokens; the runtime owns their wording. A token with no
+# entry is delivered with an empty message: the runtime states only what it
+# knows, and the client renders its own copy for the token or nothing.
 _SESSION_ENDED_MESSAGES = {
     "deployment": "Session terminated: the model was redeployed.",
 }
-_SESSION_ENDED_FALLBACK = "Session terminated by the platform."
 
 logger = get_logger(__name__)
 
@@ -607,11 +608,12 @@ class Runner(ServiceComponent, ConnectionSink):
 
         *reason* is the platform's close-reason token (for example
         ``"deployment"``). When set, the clients receive a session-ended notice
-        carrying the token and a human-readable sentence before their
-        connections close. A moderated stop outranks it: a stop carrying both
-        sends only the moderation notice. Delivery is best-effort: a session
-        with no live client, or a send that fails, is logged and the stop runs
-        regardless.
+        carrying the token before their connections close, with a
+        human-readable sentence for the tokens the runtime has wording for and
+        an empty message otherwise. A moderated stop outranks it: a stop
+        carrying both sends only the moderation notice. Delivery is
+        best-effort: a session with no live client, or a send that fails, is
+        logged and the stop runs regardless.
 
         Args:
             moderated: Whether the stop enforces a moderation verdict.
@@ -1027,7 +1029,7 @@ class Runner(ServiceComponent, ConnectionSink):
         or a broadcast that raises logs a warning, and the stop proceeds either
         way.
         """
-        message = _SESSION_ENDED_MESSAGES.get(reason, _SESSION_ENDED_FALLBACK)
+        message = _SESSION_ENDED_MESSAGES.get(reason, "")
         if self._connections.count == 0:
             logger.warning("no live client to notify of session end", reason=reason)
             return

@@ -57,7 +57,6 @@ from reactor_runtime.protocol.common import dict_to_struct, struct_to_dict
 from reactor_runtime.recording import ClipResult
 from reactor_runtime.runner.runner import (
     _RUNTIME_STATES,
-    _SESSION_ENDED_FALLBACK,
     _SESSION_ENDED_MESSAGES,
     SESSION_ID,
     Runner,
@@ -945,9 +944,11 @@ async def test_reasoned_stop_ends_the_session_as_stopped(
     assert ended[0].reason is EndReason.STOPPED
 
 
-async def test_an_unknown_close_reason_falls_back_to_the_generic_sentence(
+async def test_an_unknown_close_reason_is_delivered_with_an_empty_message(
     started_runner: Runner,
 ) -> None:
+    # The runtime words only the tokens it knows; an unknown token still
+    # reaches the client to branch on, with no invented sentence beside it.
     started_runner.start_session({})
     conn = FakeConnection(1)
     started_runner.connection_opened(conn)
@@ -957,7 +958,7 @@ async def test_an_unknown_close_reason_falls_back_to_the_generic_sentence(
     frame = next(f for f in conn.sent if isinstance(f, str) and "sessionEnded" in f)
     body = json.loads(frame)
     assert body["data"]["data"]["reason"] == "cosmic_rays"
-    assert body["data"]["data"]["message"] == "Session terminated by the platform."
+    assert body["data"]["data"]["message"] == ""
 
 
 @pytest.mark.parametrize(("token", "message"), sorted(_SESSION_ENDED_MESSAGES.items()))
@@ -965,9 +966,8 @@ async def test_every_close_reason_token_delivers_its_own_sentence(
     started_runner: Runner, token: str, message: str
 ) -> None:
     # Parametrized over the token map, so a token added without a real
-    # sentence of its own fails here instead of shipping the fallback.
+    # sentence of its own fails here instead of shipping an empty message.
     assert message
-    assert message != _SESSION_ENDED_FALLBACK
 
     started_runner.start_session({})
     conn = FakeConnection(1)
