@@ -243,8 +243,10 @@ class WebRtcRouter(TransportRouter):
         ) -> OfferAccepted:
             runner.require_session_running(sid)
             tracks = TrackMap.from_client(entry.model_dump() for entry in req.track_mapping)
+            conn_id = ConnId(cid)
+            runner.offer_admitted(conn_id)
             acceptor.start_offer(
-                ConnId(cid),
+                conn_id,
                 SdpOffer(req.sdp_offer),
                 tracks,
                 protocol_for_transport(webrtc_version),

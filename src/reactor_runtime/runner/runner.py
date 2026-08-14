@@ -67,6 +67,7 @@ from reactor_runtime.metrics import (
 from reactor_runtime.protocol import Channel, Codec, ProtocolVersion, select
 from reactor_runtime.recording import ClipResult, Recorder, RecorderError
 from reactor_runtime.runner.connection_manager import ConnectionManager
+from reactor_runtime.runner.offer_epochs import OfferEpochs
 from reactor_runtime.runner.state_machine import SessionStateMachine
 from reactor_runtime.transport.router import (
     SessionNotRunningError,
@@ -76,6 +77,13 @@ from reactor_runtime.transport.router import (
 from reactor_runtime.upload_store import UnknownUploadError, UploadStore
 
 _RUNNING_STATES = frozenset({SessionState.WAITING, SessionState.STREAMING, SessionState.ORPHANED})
+
+# The states a stale wire can land in. An offer is only admitted while a
+# session runs, so a connection whose negotiation completes after the session
+# moved on arrives in one of these — and must not join the registry.
+_STALE_CONNECTION_STATES = frozenset(
+    {SessionState.READY, SessionState.CLOSING, SessionState.TERMINATED}
+)
 
 # The lifecycle word reported for each session state. Coarser than the session
 # machine on purpose: an outside observer cares whether the process is loading,
@@ -171,6 +179,7 @@ class Runner(ServiceComponent, ConnectionSink):
             on_chunk_ready=self._on_chunk_ready,
         )
         self._connections = ConnectionManager(state_machine=self._sm)
+        self._offer_epochs = OfferEpochs()
         # Playout settings the model set through its output handle, remembered
         # so a connection that opens later starts with them.
         self._media_rate: float | None = None
@@ -326,7 +335,26 @@ class Runner(ServiceComponent, ConnectionSink):
 
         The model's playout settings (rate, queue depth) apply to every
         connection, so one that opens after they were set receives them here.
+
+        A wire that connects after its session moved on — its negotiation
+        finishing once teardown began, after the session unwound to ready, or
+        with a later session already running — is closed instead of registered.
+        Registered, it would sit outside its own session's teardown snapshot
+        and receive another session's traffic. The cross-session case is caught
+        by the epoch stamped on the offer at admission; a connection with no
+        stamp (a transport that does not stamp, or a directly driven test) is
+        gated on state alone.
         """
+        stale_epoch = self._offer_epochs.consume(conn.id)
+        if self._sm.current_state in _STALE_CONNECTION_STATES or stale_epoch:
+            logger.warning(
+                "refusing a connection that does not belong to the live session",
+                conn_id=conn.id,
+                state=self._sm.current_state.name.lower(),
+            )
+            if self._loop is not None:
+                self._spawn_teardown(conn.close())
+            return
         self._connections.register(conn)
         if self._media_depth is not None:
             conn.set_media_depth(self._media_depth)
@@ -555,6 +583,7 @@ class Runner(ServiceComponent, ConnectionSink):
         self._recording_id = str(params.get("session_id") or uuid.uuid4())
         if not self._sm.send(SessionEvent.START_SESSION, params=dict(params)):
             raise SessionTransitionError("start", self._sm.current_state)
+        self._offer_epochs.session_started()
         self._model_metrics.session_started()
 
     def stop_session(self, *, moderated: bool = False) -> None:
@@ -586,6 +615,17 @@ class Runner(ServiceComponent, ConnectionSink):
         runner forwards rather than keeping a second counter that could diverge.
         """
         return self._connections.new_conn_id()
+
+    def offer_admitted(self, conn_id: ConnId) -> None:
+        """Stamp an admitted offer with the session it was admitted into.
+
+        A transport calls this as it accepts a connection offer. The stamp is
+        compared when the wire connects: negotiation is asynchronous, so a wire
+        can reach its connected state after its session ended, and if the next
+        session is already running by then the state alone looks valid. A
+        re-offer on the same id restamps it.
+        """
+        self._offer_epochs.stamp(conn_id)
 
     def require_session_running(self, sid: str) -> None:
         """Admit a request only against the live, correctly-addressed session.
