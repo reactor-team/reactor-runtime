@@ -173,7 +173,10 @@ class Echo(ReactorModel):
     async def set_burst(
         self,
         burst: int = InputField(
-            default=1, ge=1, le=30, description="1 emits every frame; higher emits in bursts"
+            default=1,
+            ge=1,
+            le=120,
+            description="1 emits every frame; higher emits in bursts (120 is 4s at 30 fps)",
         ),
     ) -> None:
         """Set how many frames pile up before an emit.
@@ -183,6 +186,11 @@ class Echo(ReactorModel):
         into that shape on demand — the same media, delivered unevenly — which
         is what makes the transport's pacing and gap-filling observable in a
         live session instead of only under a synthetic load.
+
+        The ceiling is four seconds of media at the model's 30 fps, which is far
+        past what a batching model would hold and well into where the wire has
+        to work for it. A burst that large also holds every one of its frames in
+        memory until it is emitted, so the setting costs resolution times count.
         """
         self.burst = burst
 

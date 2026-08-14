@@ -177,7 +177,7 @@ def test_output_carries_no_metadata_for_an_untagged_frame() -> None:
     assert "main_video" not in output.__metadata__
 
 
-async def test_set_burst_bounds_and_records_the_batch_size() -> None:
+async def test_set_burst_records_the_batch_size() -> None:
     model = Echo()
     model.load(None)
     assert model.burst == 1  # a steady tick by default
@@ -185,6 +185,13 @@ async def test_set_burst_bounds_and_records_the_batch_size() -> None:
     await model.set_burst(12)
 
     assert model.burst == 12
+
+
+def test_set_burst_reaches_four_seconds_of_media() -> None:
+    """The ceiling has to be past where a batching model would ever sit."""
+    info = ModelContract.of(Echo).commands["set_burst"].command.__command_fields__["burst"]
+    assert info.info.ge == 1
+    assert info.info.le == 120  # 4s at the model's 30 fps
 
 
 async def test_session_start_returns_the_burst_to_a_steady_tick() -> None:
