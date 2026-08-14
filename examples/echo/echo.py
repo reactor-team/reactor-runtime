@@ -94,7 +94,16 @@ class Echo(ReactorModel):
     fps = FPS
 
     def load(self, config_path: Path | None) -> None:
-        """Start with no effect at full intensity and no overlay. Reads no config."""
+        """Set the starting effect state. Reads no config."""
+        self._reset_state()
+
+    def _reset_state(self) -> None:
+        """Return the shared effect controls to their session defaults.
+
+        Called at load and again at the start of every session, so an effect,
+        caption, or overlay a previous session's clients set never carries into
+        the next session on the same instance.
+        """
         self.effect: Effect = "none"
         self.intensity: float = 1.0
         # An uploaded image blended over every output frame, set via
@@ -104,36 +113,36 @@ class Echo(ReactorModel):
         # A free-text caption drawn over every output frame, set via
         # ``set_caption``; empty means no caption.
         self._caption: str = ""
-        # Connected client count; the first client of a session resets shared state.
-        self._connected_count = 0
 
     @session_started
     async def on_session_start(self) -> None:
-        """Log the session boundary (fires once, before any client connects)."""
+        """Reset the shared effect state for the session that is starting.
+
+        Fires once, before any client connects, and owns the state shared by
+        every client in the session. Per-client work belongs in ``on_connect``.
+        """
+        self._reset_state()
         logger.info("model lifecycle: session_started")
 
     @session_ended
     async def on_session_end(self) -> None:
-        """Log the session boundary (fires once, after the last client leaves)."""
+        """Release the overlay the session held (fires once, after the last client leaves).
+
+        A server-side session close tears every client down at once, so this
+        runs even when no ``on_disconnect`` does.
+        """
+        self._overlay = None
         logger.info("model lifecycle: session_ended")
 
     @connected
     async def on_connect(self) -> None:
-        """Reset shared state for the first client of a session; log every join."""
-        if self._connected_count == 0:
-            self.effect = "none"
-            self.intensity = 1.0
-            self._overlay = None
-            self._overlay_strength = 0.5
-            self._caption = ""
-        self._connected_count += 1
-        logger.info("model lifecycle: connected", clients=self._connected_count)
+        """Note a client joining. Per client, and leaves shared state alone."""
+        logger.info("model lifecycle: connected")
 
     @disconnected
     async def on_disconnect(self) -> None:
-        """Note a client leaving; log every leave."""
-        self._connected_count = max(0, self._connected_count - 1)
-        logger.info("model lifecycle: disconnected", clients=self._connected_count)
+        """Note a client leaving. Per client, distinct from the session ending."""
+        logger.info("model lifecycle: disconnected")
 
     @event(name="set_effect", description="Video effect to apply")
     async def set_effect(

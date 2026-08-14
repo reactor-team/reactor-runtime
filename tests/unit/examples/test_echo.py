@@ -112,6 +112,41 @@ def test_model_constructs_with_input_buffers_and_loads() -> None:
     assert model.effect == "none"
 
 
+async def test_session_start_resets_shared_state() -> None:
+    """The session hook owns the shared state, so each session starts clean.
+
+    A previous session's clients can leave the effect, caption, and overlay
+    changed; ``on_session_start`` fires once at the top of the next session and
+    restores the defaults, which no per-connection counter could guarantee
+    across a server-side close.
+    """
+    model = Echo()
+    model.load(None)
+    model.effect = "sepia"
+    model.intensity = 0.25
+    model._caption = "left over"
+    model._overlay = np.zeros((2, 2, 3), np.uint8)
+
+    await model.on_session_start()
+
+    assert model.effect == "none"
+    assert model.intensity == 1.0
+    assert model._caption == ""
+    assert model._overlay is None
+
+
+async def test_connect_leaves_shared_state_alone() -> None:
+    """Connecting is per-client, so a later client never resets what a peer set."""
+    model = Echo()
+    model.load(None)
+    await model.on_session_start()
+    model.effect = "invert"
+
+    await model.on_connect()
+
+    assert model.effect == "invert"
+
+
 def test_output_carries_both_tracks() -> None:
     assert set(EchoOutput.__tracks__) == {"main_video", "main_audio"}
 

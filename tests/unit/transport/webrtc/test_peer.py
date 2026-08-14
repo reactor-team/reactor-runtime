@@ -35,6 +35,7 @@ from reactor_runtime.transport.webrtc.peer import (  # noqa: E402
     _apply_bitrate_limits,
     _build_rtc_config,
     _is_terminal_state,
+    _video_codec_preferences,
     libwebrtc_peer_factory,
 )
 from reactor_runtime.transport.webrtc.signaling import MappedTrack, SdpOffer, TrackMap  # noqa: E402
@@ -307,6 +308,107 @@ async def test_apply_bitrate_limits_converts_kbps_to_bps_in_min_start_max_order(
     await _apply_bitrate_limits(cast("rw.PeerConnection", pc), config)
 
     assert pc.bitrate_calls == [(800_000, 3_000_000, 8_000_000)]
+
+
+# ── Video codec preferences ──────────────────────────────────────────────────
+
+
+def test_video_codec_preferences_maps_known_names_in_order() -> None:
+    config = WebRtcConfig(
+        supported_video_codecs=({"codec": "VP9"}, {"codec": "H264"}, {"codec": "AV1"})
+    )
+    assert _video_codec_preferences(config) == [
+        rw.VideoCodec.Vp9,
+        rw.VideoCodec.H264,
+        rw.VideoCodec.Av1,
+    ]
+
+
+def test_video_codec_preferences_skips_names_the_binding_does_not_recognize() -> None:
+    config = WebRtcConfig(supported_video_codecs=({"codec": "VP8"}, {"codec": "Theora"}))
+    assert _video_codec_preferences(config) == [rw.VideoCodec.Vp8]
+
+
+def test_video_codec_preferences_defaults_to_the_documented_order() -> None:
+    assert _video_codec_preferences(WebRtcConfig()) == [
+        rw.VideoCodec.Vp9,
+        rw.VideoCodec.Vp8,
+        rw.VideoCodec.H264,
+        rw.VideoCodec.Av1,
+        rw.VideoCodec.H265,
+    ]
+
+
+class _FakeTransceiver:
+    def __init__(self, kind: Any, mid: str | None) -> None:
+        self._kind = kind
+        self._mid = mid
+        self.codec_preference_calls: list[list[Any]] = []
+        self.track_calls: list[Any] = []
+        self.direction_calls: list[Any] = []
+
+    def kind(self) -> Any:
+        return self._kind
+
+    def mid(self) -> str | None:
+        return self._mid
+
+    async def set_codec_preferences(self, codecs: list[Any]) -> None:
+        self.codec_preference_calls.append(list(codecs))
+
+    async def set_track(self, track: Any) -> None:
+        self.track_calls.append(track)
+
+    async def set_direction(self, direction: Any) -> None:
+        self.direction_calls.append(direction)
+
+
+class _FakeTransceiverPeerConnection:
+    def __init__(self, transceivers: list[_FakeTransceiver]) -> None:
+        self._transceivers = transceivers
+
+    async def transceivers(self) -> list[_FakeTransceiver]:
+        return self._transceivers
+
+
+class _FakeTrackFactory:
+    def create_video_track(self, name: str) -> Any:
+        return SimpleNamespace(name=name)
+
+    def create_audio_track_with_local_source(self, name: str) -> Any:
+        return SimpleNamespace(name=name)
+
+
+async def test_attach_out_tracks_applies_codec_preferences_to_every_video_transceiver() -> None:
+    peer = WebRTCPeer()
+    peer._config = WebRtcConfig(supported_video_codecs=({"codec": "VP9"}, {"codec": "VP8"}))
+    peer._track_by_mid = {
+        "0": TrackInfo(name="cam", kind=TrackKind.VIDEO, direction=TrackDirection.OUT),
+    }
+    out_video = _FakeTransceiver(rw.MediaKind.Video, "0")
+    in_video = _FakeTransceiver(rw.MediaKind.Video, "1")  # recvonly: not in _track_by_mid as OUT
+    audio = _FakeTransceiver(rw.MediaKind.Audio, "2")
+    pc: Any = _FakeTransceiverPeerConnection([out_video, in_video, audio])
+
+    await peer._attach_out_tracks(pc, cast("Any", _FakeTrackFactory()))
+
+    expected = [rw.VideoCodec.Vp9, rw.VideoCodec.Vp8]
+    assert out_video.codec_preference_calls == [expected]
+    assert in_video.codec_preference_calls == [expected]
+    assert audio.codec_preference_calls == []
+    assert out_video.track_calls  # the OUT mid still gets its sender track
+    assert in_video.track_calls == []  # a receiving transceiver is untouched otherwise
+
+
+async def test_attach_out_tracks_skips_set_codec_preferences_when_none_configured() -> None:
+    peer = WebRTCPeer()
+    peer._config = WebRtcConfig(supported_video_codecs=({"codec": "Theora"},))
+    video = _FakeTransceiver(rw.MediaKind.Video, None)
+    pc: Any = _FakeTransceiverPeerConnection([video])
+
+    await peer._attach_out_tracks(pc, cast("Any", _FakeTrackFactory()))
+
+    assert video.codec_preference_calls == []
 
 
 # ── State classification ─────────────────────────────────────────────────────
