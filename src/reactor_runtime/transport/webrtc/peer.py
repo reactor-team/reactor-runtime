@@ -618,7 +618,16 @@ class WebRTCPeer:
                 time.sleep(sleep)
 
     def _push_audio_frame(self, track: rw.Track | None) -> None:
-        """Hand the track exactly one 10 ms frame, the model's or silence."""
+        """Hand the track exactly one 10 ms frame, the model's or silence.
+
+        A session whose model sends no audio has no track here, and no shortfall
+        to report either: silence counts what the model owed the wire, and a
+        wire that carries no audio is owed nothing. Counting it anyway would put
+        every video-only session permanently over the under-production
+        threshold.
+        """
+        if track is None:
+            return
         chunk: npt.NDArray[np.int16] | None = None
         with self._audio_lock:
             if self._audio_buf.size >= _AUDIO_FRAME_SAMPLES:
@@ -626,8 +635,6 @@ class WebRTCPeer:
                 self._audio_buf = self._audio_buf[_AUDIO_FRAME_SAMPLES:]
         if chunk is None:
             self._silence_frames += 1
-        if track is None:
-            return
         payload = _AUDIO_SILENT_FRAME if chunk is None else chunk.tobytes()
         try:
             track.push_pcm(payload, _AUDIO_SAMPLE_RATE, 1)
