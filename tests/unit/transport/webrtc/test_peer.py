@@ -1378,3 +1378,49 @@ async def test_the_base_descriptions_are_never_edited() -> None:
 
     assert peer._offer_sdp == _SESSION_OFFER
     assert peer._answer_sdp == _SESSION_ANSWER
+
+
+async def test_outbound_tracks_negotiate_as_sending() -> None:
+    """A joining client reads a normal session; the pause lands behind it."""
+    peer = WebRTCPeer()
+    peer._track_by_mid = {
+        "0": TrackInfo(name="v", kind=TrackKind.VIDEO, direction=TrackDirection.OUT),
+        "1": TrackInfo(name="a", kind=TrackKind.AUDIO, direction=TrackDirection.OUT),
+        "2": TrackInfo(name="cam", kind=TrackKind.VIDEO, direction=TrackDirection.IN),
+    }
+
+    class _Factory:
+        def create_video_track(self, name: str) -> Any:
+            return _FakeTrack()
+
+        def create_audio_track_with_local_source(self, name: str) -> Any:
+            return _FakeAudioTrack()
+
+    pc = _RecordingPc()
+    pc.transceiver_list = [
+        _RecordingTransceiver("0"),
+        _RecordingTransceiver("1"),
+        _RecordingTransceiver("2"),
+    ]
+
+    await peer._attach_out_tracks(cast(Any, pc), cast(Any, _Factory()))
+
+    assert pc.transceiver_list[0].directions == [rw.TransceiverDirection.SendOnly]
+    assert pc.transceiver_list[1].directions == [rw.TransceiverDirection.SendOnly]
+    assert pc.transceiver_list[2].directions == []
+
+
+async def test_a_first_subscription_leaves_the_others_out() -> None:
+    """Everything is paused after negotiation; a resume brings back one track."""
+    peer, pc = _negotiated_peer()
+    peer._paused_tracks = {"v", "a"}
+    peer._applied_pauses = frozenset({"v", "a"})
+
+    peer.resume_track("a")
+    await peer._apply_pauses()
+
+    remote, local = pc.applied[0][1], pc.applied[1][1]
+    assert "a=mid:1\r\na=recvonly" in remote  # asked for
+    assert "a=mid:1\r\na=sendonly" in local
+    assert "a=mid:0\r\na=inactive" in remote  # not asked for
+    assert "a=mid:0\r\na=inactive" in local

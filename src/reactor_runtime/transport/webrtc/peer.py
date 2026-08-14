@@ -56,12 +56,18 @@ ahead of the video. An idle stretch therefore changes only who is blamed for the
 silence, never whether it is sent: past a short grace it stops counting as
 under-production and keeps going.
 
-Pausing is the one thing that does stop a track, and it stops it a level lower
-— see :meth:`WebRTCPeer.pause_track`. Taking the section out of the session stops
-the stream at the engine, which is what lets ``ChannelSend`` re-anchor its
-counter when the section comes back, so the gap reaches the client as the gap it
-was. Pushes meanwhile are dropped before they reach the counter, so the feeder
-needs no case for it.
+An outbound track is negotiated as sending and then paused, so nothing goes out
+until a client asks for it: subscription is the client's to declare, and a wire
+that sends before anyone says they are watching spends the model's output and
+the client's bandwidth on nothing. Answering ``inactive`` would say as much in
+the session itself, which a joining client is not expecting to read — so the
+answer describes a normal sending track and the pause lands behind it.
+
+Pausing takes that section out of the session, which stops the stream at the
+engine and is what lets ``ChannelSend`` re-anchor its sample counter when the
+section comes back, so a gap reaches the client as the gap it was. Pushes
+meanwhile are dropped before they reach the counter, so the feeder needs no
+case for it — see :meth:`WebRTCPeer.pause_track`.
 
 A short scheduling stall is repaid in frames, for the same reason silence
 covers a gap: the time has to reach the wire somehow. The buffer between the
@@ -468,8 +474,8 @@ class WebRTCPeer:
         answer = await pc.create_answer()
         self._answer_sdp = answer.sdp
         await pc.set_local_description(answer)
-        # Nothing is paused on a fresh session, so a claim on a track asks for
-        # what the descriptions already say and changes nothing.
+        # The answer describes every outbound track as sending, which is the
+        # session a joining client expects to read.
         self._applied_pauses = frozenset()
         self._raise_if_stopped()
 
@@ -484,6 +490,14 @@ class WebRTCPeer:
             candidates = list(self._ice_candidates)
 
         self._start_pumps()
+        # Nothing goes out until a client asks for it. The answer already
+        # describes these tracks as sending, so this is a pause like any other
+        # rather than a special case in the negotiation: it takes each section
+        # out of the session behind the answer, and the client's `resume_track`
+        # puts back the ones it wants.
+        for info in self._track_by_mid.values():
+            if info.direction is TrackDirection.OUT:
+                self.pause_track(info.name)
         return embed_ice_candidates(answer.sdp, candidates)
 
     async def _attach_out_tracks(
@@ -924,7 +938,10 @@ class WebRTCPeer:
     # =========================================================================
 
     def resume_track(self, name: str) -> None:
-        """Resume the named outbound track (publisher arbitration).
+        """Resume the named outbound track — the client subscribing to it.
+
+        Outbound tracks start paused, so this is how a track first reaches the
+        wire as well as how it comes back.
 
         Audio resumes on the buffer the pause left behind, which by then holds
         less than a frame, so the feeder re-anchors to whatever arrives next
