@@ -733,36 +733,40 @@ class WebRTCPeer:
                 time.sleep(sleep)
 
     def _push_audio_tick(self) -> None:
-        """Hand every unpaused audio track its one frame for this tick.
+        """Hand every unpaused outbound track its one frame for this tick.
 
-        The outbound tracks are the one place a track is held, so the audio
-        ones are picked out by asking each — a field read across the binding,
-        far cheaper than the second dict that keeping the answer would cost,
-        and incapable of going stale against the first.
+        Which of them are audio is settled in :meth:`_push_audio_frame`, along
+        with whether they are still there at all; this decides only who the
+        client is still asking for.
 
-        Iterates a snapshot: negotiation and teardown both rewrite the map from
-        other threads.
+        Iterates a snapshot of the names: negotiation and teardown both rewrite
+        the map from other threads.
         """
-        for name, track in list(self._out_tracks.items()):
-            # The binding hands out a fresh enum per call, so match by value.
-            if track.kind() != rw.MediaKind.Audio or name in self._paused_tracks:
-                continue
-            self._push_audio_frame(name, track)
+        for name in list(self._out_tracks):
+            if name not in self._paused_tracks:
+                self._push_audio_frame(name)
 
-    def _push_audio_frame(self, name: str, track: rw.Track | None) -> None:
-        """Hand one track exactly one 10 ms frame, the model's or silence.
+    def _push_audio_frame(self, name: str) -> None:
+        """Hand one audio track exactly one 10 ms frame, the model's or silence.
+
+        Resolves the track itself, and does nothing at all — no buffer read, no
+        silence counted — unless *name* still names an audio track on this wire.
+        Silence counts what the model owed the wire, so counting it for a track
+        that is not there, or was never audio, charges the model for audio
+        nobody asked it to produce: a session sending only video would sit
+        permanently over the under-production threshold. Deciding that here,
+        where the counting happens, is what keeps a future caller from
+        reintroducing it.
 
         A frame of the model's audio is stamped from that track's anchor, which
         then advances by the 10 ms it just gave up. Silence is stamped now: it
         is time passing, not media the model captured earlier, and the anchor is
         left alone because the next arrival re-reads it anyway.
-
-        A paused track is handed nothing at all — see :meth:`_push_audio_tick`.
-        Silence stands in for media the model owed and did not produce; a pause
-        is the client declining the stream, so there is no gap to describe, no
-        bandwidth to spend on describing it, and nothing to count against the
-        model's output.
         """
+        track = self._out_tracks.get(name)
+        # The binding hands out a fresh enum per call, so match by value.
+        if track is None or track.kind() != rw.MediaKind.Audio:
+            return
         chunk: npt.NDArray[np.int16] | None = None
         captured_us = 0
         with self._audio_lock:
