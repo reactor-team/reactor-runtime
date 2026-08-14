@@ -11,12 +11,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pytest
 
 from examples.echo.echo import Echo, EchoInput, EchoOutput, EffectChanged
-from reactor_runtime import TrackPayload
+from reactor_runtime import Output, TrackPayload
 from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.manifest import import_model_class, load_config
 
@@ -207,3 +208,52 @@ def test_a_burst_pads_untagged_frames_with_an_empty_trailer() -> None:
     )
 
     assert out.__metadata__["main_video"] == [b'{"seq":0}', b"", b'{"seq":2}']
+
+
+def _gather(model: Echo, monkeypatch: pytest.MonkeyPatch) -> list[EchoOutput]:
+    """Capture what a model emits instead of sending it downstream."""
+    emitted: list[EchoOutput] = []
+
+    async def _capture(output: Output, **_: object) -> None:
+        emitted.append(cast(EchoOutput, output))
+
+    monkeypatch.setattr(model, "emit", _capture)
+    return emitted
+
+
+async def test_a_resolution_change_ends_the_batch_instead_of_breaking_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WebRTC rescales inbound video mid-stream; a batch is one array."""
+    model = Echo()
+    model.load(None)
+    emitted = _gather(model, monkeypatch)
+    small = [np.zeros((2, 2, 3), np.uint8), np.zeros((2, 2, 3), np.uint8)]
+    audio = [np.zeros((1, 480), np.int16) for _ in small]
+
+    await model._emit_burst(small, audio, [None, None])
+
+    assert len(emitted) == 1
+    assert cast(np.ndarray, emitted[0].main_video).shape == (2, 2, 2, 3)
+    assert small == []  # the burst is left empty for the next one
+
+
+async def test_a_burst_of_one_emits_a_plain_frame(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A batch of length one is a frame, not a batch."""
+    model = Echo()
+    model.load(None)
+    emitted = _gather(model, monkeypatch)
+
+    await model._emit_burst([np.zeros((2, 2, 3), np.uint8)], [np.zeros((1, 480), np.int16)], [None])
+
+    assert cast(np.ndarray, emitted[0].main_video).shape == (2, 2, 3)
+
+
+async def test_an_empty_burst_emits_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    model = Echo()
+    model.load(None)
+    emitted = _gather(model, monkeypatch)
+
+    await model._emit_burst([], [], [])
+
+    assert emitted == []

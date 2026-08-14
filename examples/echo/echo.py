@@ -295,39 +295,59 @@ class Echo(ReactorModel):
                     processed = _overlay_image(processed, self._overlay, self._overlay_strength)
                 if self._caption:
                     processed = _draw_caption(processed, self._caption)
+                # A batch is one array, so every frame in it has to be the same
+                # size. WebRTC rescales an inbound track as bandwidth and CPU
+                # move, so a resolution change lands mid-burst; it ends the
+                # batch rather than being resized into it, and the new size
+                # opens the next one.
+                if pending_video and processed.shape != pending_video[0].shape:
+                    await self._emit_burst(pending_video, pending_audio, pending_metadata)
+
                 pending_video.append(processed)
                 pending_audio.append(main_audio)
                 pending_metadata.append(frame.metadata)
-                if len(pending_video) < self.burst:
-                    continue
+                if len(pending_video) >= self.burst:
+                    await self._emit_burst(pending_video, pending_audio, pending_metadata)
 
-                # One emit carries the whole burst: the video frames stacked
-                # into a batch and the audio they span concatenated. The runtime
-                # splits both back apart and paces them out, so the media is the
-                # same either way — only its arrival is lumpier.
-                batched = np.stack(pending_video) if self.burst > 1 else pending_video[0]
-                # A bare array when no frame in the burst carried anything, so
-                # "attached nothing" stays a single case on the client too.
-                video: np.ndarray | TrackPayload = batched
-                if any(m is not None for m in pending_metadata):
-                    # A burst needs one entry per frame, so frames that carried
-                    # nothing take an empty trailer — which is how the runtime
-                    # already spells "attached nothing" on the way back out.
-                    metadata: bytes | list[dict[str, Any] | bytes] = (
-                        [m or b"" for m in pending_metadata]
-                        if self.burst > 1
-                        else pending_metadata[0] or b""
-                    )
-                    video = TrackPayload(batched, metadata=metadata)
-                await self.emit(
-                    EchoOutput(
-                        main_video=video,
-                        main_audio=np.concatenate(pending_audio, axis=1),
-                    )
-                )
-                pending_video.clear()
-                pending_audio.clear()
-                pending_metadata.clear()
+    async def _emit_burst(
+        self,
+        video_frames: list[np.ndarray],
+        audio_chunks: list[np.ndarray],
+        metadata_entries: list[bytes | None],
+    ) -> None:
+        """Emit what a burst has gathered and leave it empty for the next one.
+
+        One emit carries the whole burst: the video frames stacked into a batch
+        and the audio they span concatenated. The runtime splits both back apart
+        and paces them out, so the media is the same as a frame-at-a-time model
+        would send — only its arrival is lumpier.
+
+        The count comes from what was actually gathered, not from ``burst``: a
+        resolution change ends a batch early, and a batch of one is a plain
+        frame rather than a batch of length one.
+        """
+        if not video_frames:
+            return
+        batched = np.stack(video_frames) if len(video_frames) > 1 else video_frames[0]
+        # A bare array when no frame in the burst carried anything, so "attached
+        # nothing" stays a single case on the client too.
+        video: np.ndarray | TrackPayload = batched
+        if any(m is not None for m in metadata_entries):
+            # A batch needs one entry per frame, so frames that carried nothing
+            # take an empty trailer — which is how the runtime already spells
+            # "attached nothing" on the way back out.
+            metadata: bytes | list[dict[str, Any] | bytes] = (
+                [m or b"" for m in metadata_entries]
+                if len(video_frames) > 1
+                else metadata_entries[0] or b""
+            )
+            video = TrackPayload(batched, metadata=metadata)
+        await self.emit(
+            EchoOutput(main_video=video, main_audio=np.concatenate(audio_chunks, axis=1))
+        )
+        video_frames.clear()
+        audio_chunks.clear()
+        metadata_entries.clear()
 
 
 def _trim_backlog(backlog: list[InputFrame], max_samples: int) -> None:
