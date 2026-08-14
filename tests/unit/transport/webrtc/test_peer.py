@@ -56,6 +56,9 @@ class _FakeTrack:
         self.user_data: list[bytes | None] = []
         self.capture_times: list[int | None] = []
 
+    def kind(self) -> Any:
+        return rw.MediaKind.Video
+
     def push_video_frame(
         self,
         bgra: bytes,
@@ -73,6 +76,9 @@ class _FakeAudioTrack:
     def __init__(self) -> None:
         self.pushed: list[tuple[bytes, int, int]] = []
         self.capture_times: list[int | None] = []
+
+    def kind(self) -> Any:
+        return rw.MediaKind.Audio
 
     def push_pcm(
         self,
@@ -506,7 +512,6 @@ def _wired_peer() -> tuple[WebRTCPeer, _FakeTrack, _FakeAudioTrack]:
     video, audio = _FakeTrack(), _FakeAudioTrack()
     peer._out_tracks["v"] = cast(Any, video)
     peer._out_tracks["a"] = cast(Any, audio)
-    peer._audio_tracks["a"] = cast(Any, audio)
     return peer, video, audio
 
 
@@ -600,7 +605,6 @@ def _two_audio_peer() -> tuple[WebRTCPeer, _FakeAudioTrack, _FakeAudioTrack]:
     voice, music = _FakeAudioTrack(), _FakeAudioTrack()
     for name, track in (("voice", voice), ("music", music)):
         peer._out_tracks[name] = cast(Any, track)
-        peer._audio_tracks[name] = cast(Any, track)
     return peer, voice, music
 
 
@@ -721,6 +725,17 @@ def test_the_under_production_warning_names_the_starved_track(
     assert "'voice'" in warnings[0]
 
 
+def test_the_feeder_leaves_the_video_tracks_alone() -> None:
+    """The outbound tracks hold both kinds; only the audio ones are fed."""
+    peer, video, audio = _wired_peer()
+
+    peer._push_audio_tick()
+
+    assert video.pushed == []
+    assert len(audio.pushed) == 1
+    assert peer._silence_frames == {"a": 1}
+
+
 def test_media_health_totals_the_silence_of_every_track() -> None:
     peer, _, _ = _two_audio_peer()
     peer._silence_frames = {"voice": 12, "music": 5}
@@ -741,7 +756,7 @@ def test_the_feeder_ignores_a_pause_on_a_track_that_is_not_its_own() -> None:
 def test_audio_feed_loop_keeps_the_wire_fed_through_an_empty_buffer() -> None:
     peer = WebRTCPeer()
     track = _FakeAudioTrack()
-    peer._audio_tracks["a"] = cast(Any, track)
+    peer._out_tracks["a"] = cast(Any, track)
     thread = threading.Thread(target=peer._audio_feed_loop, daemon=True)
 
     thread.start()

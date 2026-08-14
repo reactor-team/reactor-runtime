@@ -58,7 +58,8 @@ A model may send several audio tracks, and each is a separate stream on the
 wire — its own libwebrtc track, buffer, capture anchor, pause state and silence
 count, all keyed by track name, exactly as video already was. One feeder thread
 serves them all on one tick, so they share a cadence instead of drifting apart
-on N clocks.
+on N clocks; it picks them out of the outbound tracks by kind rather than
+holding a second reference that could go stale against the first.
 
 Running on real time is what keeps each stream honest; a shared capture
 timestamp is what ties them to each other. ``send_media`` reads
@@ -313,12 +314,11 @@ class WebRTCPeer:
             maxsize=_FRAME_QUEUE_MAX
         )
         self._frame_thread: threading.Thread | None = None
-        # Outbound audio, all keyed by track name. A model may send several
-        # audio tracks and each is its own stream on the wire: its own buffer,
-        # its own capture anchor, its own pause state. Names are the feeder's
-        # only handle on them — it runs on its own clock and never sees a
-        # bundle to read one from.
-        self._audio_tracks: dict[str, rw.Track] = {}
+        # Outbound audio, keyed by track name. A model may send several audio
+        # tracks and each is its own stream on the wire: its own buffer, its
+        # own capture anchor, its own pause state. The tracks themselves live
+        # in _out_tracks with the video ones; holding a second reference to
+        # them here is how the two views drift apart.
         self._audio_bufs: dict[str, npt.NDArray[np.int16]] = {}
         # Per track, when its buffer's first remaining sample was captured.
         # Everything after it follows at the sample rate, so one anchor dates
@@ -460,7 +460,6 @@ class WebRTCPeer:
                     track = factory.create_video_track(info.name)
                 else:
                     track = factory.create_audio_track_with_local_source(info.name)
-                    self._audio_tracks[info.name] = track
                 await transceiver.set_track(track)
                 await transceiver.set_direction(rw.TransceiverDirection.SendOnly)
                 self._out_tracks[info.name] = track
@@ -597,7 +596,6 @@ class WebRTCPeer:
         self._data_channel = None
         self._control_channel = None
         self._out_tracks.clear()
-        self._audio_tracks.clear()
         self._in_tracks.clear()
 
     def _fire(self, callback: Callable[..., None] | None, *args: Any) -> None:
@@ -737,17 +735,17 @@ class WebRTCPeer:
     def _push_audio_tick(self) -> None:
         """Hand every unpaused audio track its one frame for this tick.
 
-        A session whose model sends no audio has no track here, and no shortfall
-        to report either: silence counts what the model owed the wire, and a
-        wire that carries no audio is owed nothing. Counting it anyway would put
-        every video-only session permanently over the under-production
-        threshold.
+        The outbound tracks are the one place a track is held, so the audio
+        ones are picked out by asking each — a field read across the binding,
+        far cheaper than the second dict that keeping the answer would cost,
+        and incapable of going stale against the first.
 
-        Iterates a snapshot: negotiation and teardown both rewrite the track
-        map from other threads.
+        Iterates a snapshot: negotiation and teardown both rewrite the map from
+        other threads.
         """
-        for name, track in list(self._audio_tracks.items()):
-            if name in self._paused_tracks:
+        for name, track in list(self._out_tracks.items()):
+            # The binding hands out a fresh enum per call, so match by value.
+            if track.kind() != rw.MediaKind.Audio or name in self._paused_tracks:
                 continue
             self._push_audio_frame(name, track)
 
