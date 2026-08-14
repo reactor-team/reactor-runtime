@@ -124,7 +124,7 @@ _CLIENT_DIRECTION = {"out": "recvonly", "in": "sendonly"}
 # The close reason a drain sends to clients. The runtime initiates this stop,
 # so the runtime words it; every other close reason arrives from the platform.
 # Kept within the 64-character bound the stop route enforces on the platform's.
-_DRAIN_CLOSE_REASON = "Session ended: the server is stopping. Reconnect to continue."
+_DRAIN_CLOSE_REASON = "Session ended: the server is shutting down."
 
 logger = get_logger(__name__)
 
