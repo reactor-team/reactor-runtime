@@ -42,8 +42,10 @@ irregularly, and grows its jitter buffer to absorb what looks like network
 burstiness.
 
 The feeder therefore pushes exactly one 10 ms frame (480 samples at 48 kHz)
-per 10 ms tick, unconditionally: the model's samples when the buffer holds a
-frame, silence when it does not. Silence is how a gap is expressed, and keeping
+per 10 ms tick for as long as the client wants the track: the model's samples
+when the buffer holds a frame, silence when it does not, and nothing at all
+once the track is paused — silence describes media the model owed, and a pause
+is the client declining the stream. Silence is how a gap is expressed, and keeping
 the pushed-sample count locked to the wall clock is what keeps the stream on
 real time. A short scheduling stall is repaid in frames for the same reason.
 The buffer between the drain thread and the feeder stays shallow, so the audio
@@ -302,6 +304,10 @@ class WebRTCPeer:
         )
         self._frame_thread: threading.Thread | None = None
         self._audio_track: rw.Track | None = None
+        # The outbound audio track's name, so the feeder can tell whether the
+        # client has paused it — the feeder runs on its own clock and never
+        # sees a bundle to read the name from.
+        self._audio_track_name: str | None = None
         self._audio_buf: npt.NDArray[np.int16] = np.array([], dtype=np.int16)
         # When the buffer's first remaining sample was captured. Everything
         # after it follows at the sample rate, so one anchor dates the lot.
@@ -441,6 +447,7 @@ class WebRTCPeer:
                 else:
                     track = factory.create_audio_track_with_local_source(info.name)
                     self._audio_track = track
+                    self._audio_track_name = info.name
                 await transceiver.set_track(track)
                 await transceiver.set_direction(rw.TransceiverDirection.SendOnly)
                 self._out_tracks[info.name] = track
@@ -710,7 +717,14 @@ class WebRTCPeer:
         then advances by the 10 ms it just gave up. Silence is stamped now: it
         is time passing, not media the model captured earlier, and the anchor is
         left alone because the next arrival re-reads it anyway.
+
+        A paused track is handed nothing at all. Silence stands in for media the
+        model owed and did not produce; a pause is the client declining the
+        stream, so there is no gap to describe, no bandwidth to spend on
+        describing it, and nothing to count against the model's output.
         """
+        if self._audio_paused():
+            return
         chunk: npt.NDArray[np.int16] | None = None
         captured_us = 0
         with self._audio_lock:
@@ -788,12 +802,26 @@ class WebRTCPeer:
     # =========================================================================
 
     def resume_track(self, name: str) -> None:
-        """Resume the named outbound track (publisher arbitration)."""
+        """Resume the named outbound track (publisher arbitration).
+
+        Audio resumes on the buffer the pause left behind, which by then holds
+        less than a frame, so the feeder re-anchors to whatever arrives next
+        rather than dating it from before the pause.
+        """
         self._paused_tracks.discard(name)
 
     def pause_track(self, name: str) -> None:
-        """Pause the named outbound track (publisher arbitration)."""
+        """Pause the named outbound track (publisher arbitration).
+
+        The track stops reaching the wire: video frames are dropped as bundles
+        arrive, and the audio feeder stops pushing entirely rather than filling
+        the pause with silence.
+        """
         self._paused_tracks.add(name)
+
+    def _audio_paused(self) -> bool:
+        """Return whether the client has paused this peer's outbound audio."""
+        return self._audio_track_name is not None and self._audio_track_name in self._paused_tracks
 
     # =========================================================================
     # Seam: stats and teardown

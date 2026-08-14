@@ -484,6 +484,121 @@ def test_silence_is_stamped_now_not_from_the_anchor() -> None:
     assert stamped > 0
 
 
+# ── Pause and resume ─────────────────────────────────────────────────────────
+
+
+def _av_bundle() -> MediaBundle:
+    video = TrackInfo(name="v", kind=TrackKind.VIDEO, direction=TrackDirection.OUT)
+    audio = TrackInfo(name="a", kind=TrackKind.AUDIO, direction=TrackDirection.OUT)
+    return MediaBundle(
+        tracks={
+            "v": TrackData(info=video, data=np.zeros((2, 2, 3), np.uint8)),
+            "a": TrackData(info=audio, data=np.ones((1, _AUDIO_FRAME_SAMPLES), np.int16)),
+        }
+    )
+
+
+def _wired_peer() -> tuple[WebRTCPeer, _FakeTrack, _FakeAudioTrack]:
+    peer = WebRTCPeer()
+    video, audio = _FakeTrack(), _FakeAudioTrack()
+    peer._out_tracks["v"] = cast(Any, video)
+    peer._audio_track = cast(Any, audio)
+    peer._audio_track_name = "a"
+    return peer, video, audio
+
+
+def test_pausing_video_stops_the_frames_and_leaves_audio_alone() -> None:
+    peer, video, audio = _wired_peer()
+
+    peer.pause_track("v")
+    for _ in range(3):
+        peer._push_bundle(_av_bundle(), _CAPTURED_US)
+        peer._push_audio_frame(cast(Any, audio))
+
+    assert video.pushed == []
+    assert len(audio.pushed) == 3
+
+
+def test_resuming_video_puts_frames_back_on_the_wire() -> None:
+    peer, video, _ = _wired_peer()
+    peer.pause_track("v")
+    peer._push_bundle(_av_bundle(), _CAPTURED_US)
+    assert video.pushed == []
+
+    peer.resume_track("v")
+    peer._push_bundle(_av_bundle(), _CAPTURED_US + 5_000_000)
+
+    assert len(video.pushed) == 1
+    # The resumed frame is dated when it was produced, so the pause reaches
+    # the client as the gap it was.
+    assert video.capture_times == [_CAPTURED_US + 5_000_000]
+
+
+def test_pausing_audio_stops_the_feeder_rather_than_filling_with_silence() -> None:
+    """A pause is the client declining the stream, not a gap to describe."""
+    peer, _, audio = _wired_peer()
+
+    peer.pause_track("a")
+    for _ in range(5):
+        peer._push_bundle(_av_bundle(), _CAPTURED_US)
+        peer._push_audio_frame(cast(Any, audio))
+
+    assert audio.pushed == []
+
+
+def test_a_paused_audio_track_is_not_counted_as_under_production() -> None:
+    """Otherwise a client that pauses trips the model's under-production warning."""
+    peer, _, audio = _wired_peer()
+
+    peer.pause_track("a")
+    for _ in range(20):
+        peer._push_audio_frame(cast(Any, audio))
+
+    assert peer._silence_frames == 0
+
+
+def test_resuming_audio_feeds_the_wire_again() -> None:
+    peer, _, audio = _wired_peer()
+    peer.pause_track("a")
+    peer._push_bundle(_av_bundle(), _CAPTURED_US)
+    peer._push_audio_frame(cast(Any, audio))
+    assert audio.pushed == []
+
+    later = _CAPTURED_US + 5_000_000
+    peer.resume_track("a")
+    peer._push_bundle(_av_bundle(), later)
+    peer._push_audio_frame(cast(Any, audio))
+
+    assert len(audio.pushed) == 1
+    assert audio.pushed[0][0] != _AUDIO_SILENT_FRAME
+    # Re-anchored to the bundle that arrived after the pause, not to before it.
+    assert audio.capture_times == [later]
+
+
+def test_a_pause_leaves_no_stale_audio_to_replay_on_resume() -> None:
+    """The buffer drains during the pause, so resume plays what arrives next."""
+    peer, _, audio = _wired_peer()
+    peer._push_bundle(_av_bundle(), _CAPTURED_US)  # a frame's worth arrives
+    peer.pause_track("a")
+
+    for _ in range(10):
+        peer._push_bundle(_av_bundle(), _CAPTURED_US)  # discarded while paused
+        peer._push_audio_frame(cast(Any, audio))
+
+    assert peer._audio_buf.size == _AUDIO_FRAME_SAMPLES  # only the pre-pause frame
+    assert audio.pushed == []
+
+
+def test_the_feeder_ignores_a_pause_on_a_track_that_is_not_its_own() -> None:
+    peer, _, audio = _wired_peer()
+
+    peer.pause_track("v")
+    peer._push_bundle(_av_bundle(), _CAPTURED_US)
+    peer._push_audio_frame(cast(Any, audio))
+
+    assert len(audio.pushed) == 1
+
+
 def test_audio_feed_loop_keeps_the_wire_fed_through_an_empty_buffer() -> None:
     peer = WebRTCPeer()
     track = _FakeAudioTrack()
