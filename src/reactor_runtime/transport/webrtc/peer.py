@@ -47,21 +47,15 @@ samples when the buffer holds a frame, and silence when it does not. Silence is
 how a gap is expressed, and keeping the pushed-sample count locked to the wall
 clock is what keeps the stream on real time.
 
-Simply feeding it less is not an option the wire leaves open. The sender reports
-libwebrtc emits alongside the stream estimate their RTP timestamp as the last
-frame's plus the time since it, so a feeder that stops leaves the reports and the
-packets disagreeing by exactly the time it stopped for; the client dates the
-audio that follows from the reports, finds it older than it is, and plays it
-ahead of the video. An idle stretch therefore changes only who is blamed for the
-silence, never whether it is sent: past a short grace it stops counting as
-under-production and keeps going.
-
-Pausing is the one thing that does stop a track, and it stops it a level lower
-— see :meth:`WebRTCPeer.pause_track`. Taking the section out of the session stops
-the stream at the engine, which is what lets ``ChannelSend`` re-anchor its
-counter when the section comes back, so the gap reaches the client as the gap it
-was. Pushes meanwhile are dropped before they reach the counter, so the feeder
-needs no case for it.
+Stopping is not an option the wire leaves open. The sender reports libwebrtc
+emits alongside the stream estimate their RTP timestamp as the last frame's plus
+the time since it, so a feeder that stops leaves the reports and the packets
+disagreeing by exactly the time it stopped for; the client dates the audio that
+follows from the reports, finds it older than it is, and plays it ahead of the
+video. A pause and an idle stretch change what is sent and who is blamed for it,
+never whether anything is sent: a paused track is fed silence rather than the
+model's audio, and a track that has been quiet past a short grace stops counting
+its silence as under-production.
 
 A short scheduling stall is repaid in frames, for the same reason silence
 covers a gap: the time has to reach the wire somehow. The buffer between the
@@ -155,7 +149,6 @@ from reactor_runtime.transport.webrtc.sdp import (
     Candidate,
     deduplicate_bundle_pts,
     embed_ice_candidates,
-    set_media_direction,
 )
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpAnswer, SdpOffer, TrackMap
 from reactor_runtime.transport.webrtc.stats import OutboundMediaHealth, PeerStats, TrackStat
@@ -380,15 +373,6 @@ class WebRTCPeer:
         self._last_silence_sample: tuple[float, dict[str, int]] | None = None
 
         self._paused_tracks: set[str] = set()
-        # The descriptions libwebrtc currently holds, kept so a pause can hand
-        # them back with one section's direction flipped. The binding exposes no
-        # getter for them, and re-deriving an offer would be a real
-        # renegotiation rather than the local one this is.
-        self._offer_sdp = ""
-        self._answer_sdp = ""
-        # Serialises those re-applications: a pause and a resume racing would
-        # leave libwebrtc holding whichever description landed last.
-        self._sdp_lock = asyncio.Lock()
         self._stop_event = threading.Event()
         self._connected = threading.Event()
 
@@ -449,15 +433,13 @@ class WebRTCPeer:
         self._pc = pc
         await _apply_bitrate_limits(pc, self._config)
 
-        self._offer_sdp = deduplicate_bundle_pts(sdp_offer)
-        offer = rw.SessionDescription("offer", self._offer_sdp)
+        offer = rw.SessionDescription("offer", deduplicate_bundle_pts(sdp_offer))
         await pc.set_remote_description(offer)
         self._raise_if_stopped()
 
         await self._attach_out_tracks(pc, factory)
 
         answer = await pc.create_answer()
-        self._answer_sdp = answer.sdp
         await pc.set_local_description(answer)
         self._raise_if_stopped()
 
@@ -919,60 +901,15 @@ class WebRTCPeer:
         rather than dating it from before the pause.
         """
         self._paused_tracks.discard(name)
-        self._schedule_direction(name, active=True)
 
     def pause_track(self, name: str) -> None:
         """Pause the named outbound track (publisher arbitration).
 
         That track alone stops reaching the wire, and the others carry on: its
-        video frames are dropped as bundles arrive, and its sender is taken out
-        of the session so nothing at all goes out for it.
+        video frames are dropped as bundles arrive, and the audio feeder skips
+        it rather than filling the pause with silence.
         """
         self._paused_tracks.add(name)
-        self._schedule_direction(name, active=False)
-
-    def _schedule_direction(self, name: str, *, active: bool) -> None:
-        """Run the direction change on the loop, from whatever thread asked."""
-        loop = self._loop
-        if loop is None or loop.is_closed() or self._stop_event.is_set():
-            return
-        loop.call_soon_threadsafe(lambda: loop.create_task(self._set_direction(name, active)))
-
-    async def _set_direction(self, name: str, active: bool) -> None:
-        """Start or stop one track's sender by re-applying the descriptions.
-
-        A sender that merely stops being fed keeps its RTP timestamp where it
-        was while the sender reports carry on estimating theirs forward, so the
-        audio that follows a pause is dated too early and plays ahead of the
-        video. Taking the section out of the session instead stops the stream at
-        the engine, and starting it again is the one event that makes
-        ``ChannelSend`` re-anchor its sample counter from the capture time —
-        which is what turns the pause into the gap it actually was.
-
-        Both descriptions go back with that one section's direction flipped, and
-        nothing is signalled: the client's session is unchanged, and it simply
-        receives nothing on that track meanwhile.
-        """
-        mid = next((m for m, info in self._track_by_mid.items() if info.name == name), None)
-        pc = self._pc
-        if mid is None or pc is None:
-            return
-        async with self._sdp_lock:
-            if self._stop_event.is_set() or self._pc is None:
-                return
-            remote = "recvonly" if active else "inactive"
-            local = "sendonly" if active else "inactive"
-            offer_sdp = set_media_direction(self._offer_sdp, mid, remote)
-            answer_sdp = set_media_direction(self._answer_sdp, mid, local)
-            try:
-                await pc.set_remote_description(rw.SessionDescription("offer", offer_sdp))
-                await pc.set_local_description(rw.SessionDescription("answer", answer_sdp))
-            except Exception:
-                logger.warning("could not %s track %r", "resume" if active else "pause", name)
-                logger.debug("direction change failed", exc_info=True)
-                return
-            self._offer_sdp = offer_sdp
-            self._answer_sdp = answer_sdp
 
     # =========================================================================
     # Seam: stats and teardown

@@ -4,12 +4,9 @@ Pure string transforms with no native dependency: they exercise the module
 directly, without the ``reactor_webrtc`` wheel.
 """
 
-import pytest
-
 from reactor_runtime.transport.webrtc.sdp import (
     deduplicate_bundle_pts,
     embed_ice_candidates,
-    set_media_direction,
 )
 
 _TWO_SECTION_ANSWER = (
@@ -100,53 +97,3 @@ def test_deduplicate_bundle_pts_keeps_agreeing_rtx() -> None:
         "a=rtpmap:111 opus/48000/2\r\n"
     )
     assert deduplicate_bundle_pts(sdp) == sdp
-
-
-# ── set_media_direction ──────────────────────────────────────────────────────
-
-_TWO_SECTIONS = (
-    "v=0\r\n"
-    "m=video 9 UDP/TLS/RTP/SAVPF 96\r\n"
-    "a=mid:0\r\n"
-    "a=sendonly\r\n"
-    "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
-    "a=mid:1\r\n"
-    "a=sendonly\r\n"
-)
-
-
-def test_set_media_direction_changes_only_the_named_section() -> None:
-    out = set_media_direction(_TWO_SECTIONS, "1", "inactive")
-    assert out.split("\r\n") == [
-        "v=0",
-        "m=video 9 UDP/TLS/RTP/SAVPF 96",
-        "a=mid:0",
-        "a=sendonly",  # untouched
-        "m=audio 9 UDP/TLS/RTP/SAVPF 111",
-        "a=mid:1",
-        "a=inactive",
-        "",
-    ]
-
-
-def test_set_media_direction_round_trips() -> None:
-    paused = set_media_direction(_TWO_SECTIONS, "1", "inactive")
-    assert set_media_direction(paused, "1", "sendonly") == _TWO_SECTIONS
-
-
-def test_set_media_direction_adds_one_to_a_section_that_has_none() -> None:
-    """A section with no direction line is sendrecv, so the flip needs one."""
-    sdp = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:1\r\na=rtcp-mux\r\n"
-    out = set_media_direction(sdp, "1", "inactive")
-    assert (
-        out == "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:1\r\na=inactive\r\na=rtcp-mux\r\n"
-    )
-
-
-def test_set_media_direction_leaves_an_unknown_mid_alone() -> None:
-    assert set_media_direction(_TWO_SECTIONS, "9", "inactive") == _TWO_SECTIONS
-
-
-def test_set_media_direction_rejects_a_value_that_is_not_a_direction() -> None:
-    with pytest.raises(ValueError, match="not an SDP direction"):
-        set_media_direction(_TWO_SECTIONS, "1", "sendonly-ish")
