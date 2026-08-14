@@ -159,3 +159,50 @@ def deduplicate_bundle_pts(sdp: str) -> str:
         rebuilt.append(_strip_payload_types(section, conflicting))
 
     return "".join(session_lines) + "".join("".join(section) for section in rebuilt)
+
+
+_DIRECTIONS = ("sendrecv", "sendonly", "recvonly", "inactive")
+_MID_PREFIX = "a=mid:"
+
+
+def set_media_direction(sdp: str, mid: str, direction: str) -> str:
+    """Rewrite the direction of the m-section carrying *mid*.
+
+    Stopping one track's sender is a local renegotiation: the same descriptions
+    go back to libwebrtc with that section's direction flipped, and the engine
+    starts or stops the stream behind it. Nothing is signalled — the client's
+    view of the session does not change, and neither does anything else in the
+    SDP, so re-applying it is not an ICE restart or a codec change.
+
+    A section with no direction line is ``sendrecv`` by default; one is added
+    after its mid so the flip has something to act on.
+
+    Args:
+        sdp: The description to rewrite.
+        mid: The media id naming the section to change.
+        direction: One of ``sendrecv``, ``sendonly``, ``recvonly``, ``inactive``.
+
+    Returns:
+        The description with that one section's direction replaced.
+
+    Raises:
+        ValueError: If *direction* is not an SDP direction.
+    """
+    if direction not in _DIRECTIONS:
+        raise ValueError(f"not an SDP direction: {direction!r}")
+
+    lines = sdp.split("\r\n")
+    bounds = [i for i, line in enumerate(lines) if line.startswith("m=")]
+    for start, end in zip(bounds, [*bounds[1:], len(lines)], strict=True):
+        section = lines[start:end]
+        if f"{_MID_PREFIX}{mid}" not in section:
+            continue
+        for offset, line in enumerate(section):
+            if line.removeprefix("a=") in _DIRECTIONS:
+                lines[start + offset] = f"a={direction}"
+                break
+        else:
+            after_mid = next(i for i, line in enumerate(section) if line.startswith(_MID_PREFIX))
+            lines.insert(start + after_mid + 1, f"a={direction}")
+        break
+    return "\r\n".join(lines)
