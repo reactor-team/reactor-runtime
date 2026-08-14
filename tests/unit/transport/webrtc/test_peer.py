@@ -375,14 +375,15 @@ def test_send_media_stamps_the_bundle_once() -> None:
     assert bundle.tracks["v"].info.name == "v"
 
 
-def test_video_carries_the_bundles_capture_time() -> None:
+def test_video_goes_out_unstamped_while_audio_cannot_be_stamped_too() -> None:
+    """One stream stamped and the other not is a worse pair than neither."""
     peer = WebRTCPeer()
     track = _FakeTrack()
     peer._out_tracks["v"] = cast(Any, track)
 
     peer._push_bundle(_video_bundle("v"), _CAPTURED_US)
 
-    assert track.capture_times == [_CAPTURED_US]
+    assert track.capture_times == [None]
 
 
 def test_audio_carries_the_capture_time_of_the_bundle_it_came_from() -> None:
@@ -411,7 +412,8 @@ def test_the_anchor_advances_one_frame_per_frame_emitted() -> None:
     ]
 
 
-def test_audio_and_video_of_one_bundle_share_a_capture_time() -> None:
+def test_one_bundle_stamps_its_audio_and_leaves_its_video_bare() -> None:
+    """The stamp is read once; only the half the wire can carry is spent."""
     peer = WebRTCPeer()
     video = _FakeTrack()
     audio = _FakeAudioTrack()
@@ -427,7 +429,7 @@ def test_audio_and_video_of_one_bundle_share_a_capture_time() -> None:
     peer._push_bundle(bundle, _CAPTURED_US)
     peer._push_audio_frame(cast(Any, audio))
 
-    assert video.capture_times == [_CAPTURED_US]
+    assert video.capture_times == [None]
     assert audio.capture_times == [_CAPTURED_US]
 
 

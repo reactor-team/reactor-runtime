@@ -52,16 +52,27 @@ trimming it discards samples, which is reported through
 :class:`~reactor_runtime.transport.webrtc.stats.OutboundMediaHealth` rather than
 left to be inferred from the sound.
 
-Running on real time is what keeps each stream honest; a shared capture
-timestamp is what ties them to each other. ``send_media`` reads
-``rw.time_micros()`` once per bundle, on the producer's tick, and both tracks
-are stamped with it — video as it is pushed, audio when the feeder reaches
-those samples, which is however much later the buffer holds. Without the stamp
-each track would be dated by its own path to the encoder, and those paths
-differ by a depth that moves. The buffer carries one anchor rather than a
-timestamp per sample: it holds one contiguous 48 kHz stream, so the capture
-time of its first remaining sample dates all of it, and the anchor is re-read
-whenever what remains is too short to fill a frame.
+Running on real time is what keeps each stream honest. Tying the two to each
+other takes a shared capture timestamp, and that is only half available:
+``send_media`` reads ``rw.time_micros()`` once per bundle, on the producer's
+tick, and carries it to both pushes — but a capture time reaches the wire for
+audio only through the ``abs-capture-time`` header extension, which libwebrtc
+leaves unoffered and no peer here negotiates.
+
+So audio takes the stamp and video does not. Stamping video alone would move
+one stream's clock and leave the other's where it was, which is a worse pairing
+than dating both by when they reached the encoder: the client would spend the
+session hunting an offset that had shifted under it. Audio keeps the stamp
+because it costs nothing and buys one real thing today — ``ChannelSend``
+resyncs its sample counter from the capture time on the first frame after
+sending resumes, so a stream that pauses restarts at the right offset instead
+of closing the gap up. When the extension is negotiated at both ends, video
+takes its stamp back and the pair moves together.
+
+The buffer carries one anchor rather than a timestamp per sample: it holds one
+contiguous 48 kHz stream, so the capture time of its first remaining sample
+dates all of it, and the anchor is re-read whenever what remains is too short
+to fill a frame.
 
 Threading
 ---------
@@ -592,9 +603,8 @@ class WebRTCPeer:
                 # A bundle reaching the wire holds one frame, so it holds one
                 # metadata value: a batch's list is resolved when it is split.
                 metadata = data.metadata if isinstance(data.metadata, bytes) else None
-                track.push_video_frame(
-                    bgra, width, height, user_data=metadata, capture_time_us=captured_us
-                )
+                # Deliberately unstamped: see the module's Audio/video sync note.
+                track.push_video_frame(bgra, width, height, user_data=metadata)
             else:
                 self._enqueue_audio(to_int16_mono(data.data), captured_us)
 
