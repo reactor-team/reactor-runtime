@@ -367,7 +367,60 @@ def test_a_session_without_audio_reports_no_shortfall() -> None:
     for _ in range(100):  # a second of ticks on a video-only session
         peer._push_audio_frame(None)
 
-    assert peer._silence_frames == 0
+    assert peer._silence_frames == {}
+
+
+def test_a_track_that_never_delivered_is_fed_but_not_blamed() -> None:
+    """The clock runs from the first tick; the model is not charged for it."""
+    peer, track = _audio_peer()
+
+    for _ in range(200):  # two seconds of ticks
+        peer._push_audio_tick()
+
+    assert len(track.pushed) == 200
+    assert all(pcm == _AUDIO_SILENT_FRAME for pcm, _, _ in track.pushed)
+    assert peer._silence_frames == {}
+
+
+def test_a_track_that_goes_quiet_stops_being_covered() -> None:
+    """After an unpublish the model owes nothing, so silence stops too."""
+    peer, track = _audio_peer()
+    _make_live(peer, track)
+
+    for _ in range(300):  # three seconds with nothing arriving
+        peer._push_audio_tick()
+
+    # Covered through the grace, then left alone.
+    assert len(track.pushed) == _AUDIO_GRACE_TICKS
+    assert peer._silence_frames == {"a": _AUDIO_GRACE_TICKS}
+
+
+def test_a_gap_inside_the_grace_is_still_covered() -> None:
+    """A stall is what silence is for; it has to survive the idle rule."""
+    peer, track = _audio_peer()
+    _make_live(peer, track)
+
+    for _ in range(_AUDIO_GRACE_TICKS - 1):
+        peer._push_audio_tick()
+
+    assert len(track.pushed) == _AUDIO_GRACE_TICKS - 1
+    assert all(pcm == _AUDIO_SILENT_FRAME for pcm, _, _ in track.pushed)
+
+
+def test_audio_arriving_again_reopens_the_grace() -> None:
+    """A track that resumes is running again, gaps and all."""
+    peer, track = _audio_peer()
+    _make_live(peer, track)
+    for _ in range(300):
+        peer._push_audio_tick()
+    covered = len(track.pushed)
+
+    peer._enqueue_audio("a", np.ones(_AUDIO_FRAME_SAMPLES, dtype=np.int16), _CAPTURED_US)
+    peer._push_audio_tick()  # the real frame
+    for _ in range(300):
+        peer._push_audio_tick()
+
+    assert len(track.pushed) == covered + 1 + _AUDIO_GRACE_TICKS
 
 
 def test_audio_feed_survives_a_track_that_raises() -> None:
@@ -559,8 +612,8 @@ def test_resuming_video_puts_frames_back_on_the_wire() -> None:
     assert video.capture_times == [_CAPTURED_US + 5_000_000]
 
 
-def test_pausing_audio_stops_the_feeder_rather_than_filling_with_silence() -> None:
-    """A pause is the client declining the stream, not a gap to describe."""
+def test_pausing_audio_sends_silence_rather_than_the_models_audio() -> None:
+    """The client asked not to hear it, not to lose the clock behind it."""
     peer, _, audio = _wired_peer()
 
     peer.pause_track("a")
@@ -568,7 +621,8 @@ def test_pausing_audio_stops_the_feeder_rather_than_filling_with_silence() -> No
         peer._push_bundle(_av_bundle(), _CAPTURED_US)
         peer._push_audio_tick()
 
-    assert audio.pushed == []
+    assert len(audio.pushed) == 5
+    assert all(pcm == _AUDIO_SILENT_FRAME for pcm, _, _ in audio.pushed)
 
 
 def test_a_paused_audio_track_is_not_counted_as_under_production() -> None:
@@ -582,22 +636,22 @@ def test_a_paused_audio_track_is_not_counted_as_under_production() -> None:
     assert peer._silence_frames.get("a", 0) == 0
 
 
-def test_resuming_audio_feeds_the_wire_again() -> None:
+def test_resuming_audio_puts_the_models_samples_back() -> None:
     peer, _, audio = _wired_peer()
     peer.pause_track("a")
     peer._push_bundle(_av_bundle(), _CAPTURED_US)
     peer._push_audio_tick()
-    assert audio.pushed == []
+    assert audio.pushed[0][0] == _AUDIO_SILENT_FRAME
 
     later = _CAPTURED_US + 5_000_000
     peer.resume_track("a")
     peer._push_bundle(_av_bundle(), later)
     peer._push_audio_tick()
 
-    assert len(audio.pushed) == 1
-    assert audio.pushed[0][0] != _AUDIO_SILENT_FRAME
+    assert len(audio.pushed) == 2
+    assert audio.pushed[1][0] != _AUDIO_SILENT_FRAME
     # Re-anchored to the bundle that arrived after the pause, not to before it.
-    assert audio.capture_times == [later]
+    assert audio.capture_times[1] == later
 
 
 def test_a_pause_leaves_no_stale_audio_to_replay_on_resume() -> None:
@@ -611,7 +665,7 @@ def test_a_pause_leaves_no_stale_audio_to_replay_on_resume() -> None:
         peer._push_audio_tick()
 
     assert peer._audio_bufs["a"].size == _AUDIO_FRAME_SAMPLES  # only the pre-pause frame
-    assert audio.pushed == []
+    assert all(pcm == _AUDIO_SILENT_FRAME for pcm, _, _ in audio.pushed)
 
 
 # ── Several audio tracks ─────────────────────────────────────────────────────
@@ -707,8 +761,8 @@ def test_pausing_one_audio_track_leaves_the_other_playing() -> None:
     peer._push_bundle(_two_audio_bundle(), _CAPTURED_US)
     peer._push_audio_tick()
 
-    assert voice.pushed == []
-    assert len(music.pushed) == 1
+    assert voice.pushed[0][0] == _AUDIO_SILENT_FRAME  # the clock, not the audio
+    assert music.pushed[0][0] != _AUDIO_SILENT_FRAME
 
 
 def test_resuming_one_audio_track_leaves_the_other_undisturbed() -> None:
@@ -722,8 +776,9 @@ def test_resuming_one_audio_track_leaves_the_other_undisturbed() -> None:
     peer._push_bundle(_two_audio_bundle(), later)
     peer._push_audio_tick()
 
-    assert len(voice.pushed) == 1
-    assert voice.capture_times == [later]
+    assert len(voice.pushed) == 2
+    assert voice.pushed[1][0] != _AUDIO_SILENT_FRAME
+    assert voice.capture_times[1] == later
     assert len(music.pushed) == 2
 
 
@@ -1122,3 +1177,23 @@ async def test_factory_rejects_empty_offer() -> None:
         await libwebrtc_peer_factory(
             ConnId(1), SdpOffer(sdp="   "), TrackMap(), WebRtcConfig(), ProtocolVersion.V0
         )
+
+
+def test_the_clock_never_stops_while_the_track_is_on_the_wire() -> None:
+    """A feeder that stops leaves the sender reports dating the audio too early.
+
+    libwebrtc estimates a report's RTP timestamp as the last frame's plus the
+    time since it, while the packets only advance by samples actually sent. Stop
+    for five seconds and the two disagree by five seconds; the client dates the
+    audio that follows from the reports and plays it ahead of the video.
+    """
+    peer, track = _audio_peer()
+
+    peer.pause_track("a")
+    for _ in range(200):
+        peer._push_audio_tick()
+    peer.resume_track("a")
+    for _ in range(200):  # long past the idle grace
+        peer._push_audio_tick()
+
+    assert len(track.pushed) == 400  # one frame per tick, throughout

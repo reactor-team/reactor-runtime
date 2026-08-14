@@ -41,14 +41,25 @@ cannot see that a gap happened. It sees the whole stream arriving late and
 irregularly, and grows its jitter buffer to absorb what looks like network
 burstiness.
 
-The feeder therefore pushes exactly one 10 ms frame (480 samples at 48 kHz)
-per 10 ms tick for as long as the client wants the track: the model's samples
-when that track's buffer holds a frame, silence when it does not, and nothing
-at all once the track is paused — silence describes media the model owed, and a
-pause is the client declining the stream. Silence is how a gap is expressed, and
-keeping the pushed-sample count locked to the wall clock is what keeps the stream
-on real time. A short scheduling stall is repaid in frames for the same reason.
-The buffer between the drain thread and the feeder stays shallow, so the audio
+The feeder therefore pushes exactly one 10 ms frame (480 samples at 48 kHz) per
+10 ms tick, for the whole life of the track, without exception: the model's
+samples when the buffer holds a frame, and silence when it does not. Silence is
+how a gap is expressed, and keeping the pushed-sample count locked to the wall
+clock is what keeps the stream on real time.
+
+Stopping is not an option the wire leaves open. The sender reports libwebrtc
+emits alongside the stream estimate their RTP timestamp as the last frame's plus
+the time since it, so a feeder that stops leaves the reports and the packets
+disagreeing by exactly the time it stopped for; the client dates the audio that
+follows from the reports, finds it older than it is, and plays it ahead of the
+video. A pause and an idle stretch change what is sent and who is blamed for it,
+never whether anything is sent: a paused track is fed silence rather than the
+model's audio, and a track that has been quiet past a short grace stops counting
+its silence as under-production.
+
+A short scheduling stall is repaid in frames, for the same reason silence
+covers a gap: the time has to reach the wire somehow. The buffer between the
+drain thread and the feeder stays shallow, so the audio
 held ahead of the wire is a small bounded offset rather than a growing lag;
 trimming it discards samples, which is reported through
 :class:`~reactor_runtime.transport.webrtc.stats.OutboundMediaHealth` rather than
@@ -72,11 +83,12 @@ So audio takes the stamp and video does not. Stamping video alone would move
 one stream's clock and leave the other's where it was, which is a worse pairing
 than dating both by when they reached the encoder: the client would spend the
 session hunting an offset that had shifted under it. Audio keeps the stamp
-because it costs nothing and buys one real thing today — ``ChannelSend``
-resyncs its sample counter from the capture time on the first frame after
-sending resumes, so a stream that pauses restarts at the right offset instead
-of closing the gap up. When the extension is negotiated at both ends, video
-takes its stamp back and the pair moves together.
+because it costs nothing and is where the pair will be rebuilt from; today it
+reaches no further than the encoder. ``ChannelSend`` does resync its sample
+counter from a capture time, but only on the first frame after *sending* is
+restarted, which is a channel-level event and not something a feeder that
+stops and starts pushing can reach. When the extension is negotiated at both
+ends, video takes its stamp back and the pair moves together.
 
 The buffer carries one anchor rather than a timestamp per sample: it holds one
 contiguous 48 kHz stream, so the capture time of its first remaining sample
@@ -765,20 +777,30 @@ class WebRTCPeer:
         the map from other threads.
         """
         for name in list(self._out_tracks):
-            if name not in self._paused_tracks:
-                self._push_audio_frame(name)
+            self._push_audio_frame(name)
 
     def _push_audio_frame(self, name: str) -> None:
         """Hand one audio track exactly one 10 ms frame, the model's or silence.
 
-        Resolves the track itself, and does nothing at all — no buffer read, no
-        silence counted — unless *name* still names an audio track on this wire.
-        Silence counts what the model owed the wire, so counting it for a track
-        that is not there, or was never audio, charges the model for audio
-        nobody asked it to produce: a session sending only video would sit
-        permanently over the under-production threshold. Deciding that here,
-        where the counting happens, is what keeps a future caller from
-        reintroducing it.
+        Resolves the track itself and does nothing unless *name* still names an
+        audio track on this wire — a session sending only video is owed nothing
+        and must not be charged for it.
+
+        Every other tick pushes, without exception. The track's RTP timestamp is
+        a sample counter that only moves when samples are handed over, while the
+        sender reports libwebrtc emits alongside it estimate their timestamp as
+        "the last frame's plus the time since" — so a feeder that stops leaves
+        the two disagreeing by exactly the time it stopped for. The client dates
+        the audio that follows from the reports, finds it older than it is, and
+        plays it ahead of the video. Nothing on the wire can undo that: the
+        counter advances only by sending, so time only reaches the client as
+        samples.
+
+        What varies is which samples, and whose fault the silence is. A paused
+        track is fed silence rather than the model's audio — the client asked
+        not to hear it, not to lose the clock. A track past
+        ``_AUDIO_GRACE_TICKS`` without a frame is idle rather than stalled, so
+        its silence stops counting as under-production, but it does not stop.
 
         A frame of the model's audio is stamped from that track's anchor, which
         then advances by the 10 ms it just gave up. Silence is stamped now: it
@@ -789,20 +811,25 @@ class WebRTCPeer:
         # The binding hands out a fresh enum per call, so match by value.
         if track is None or track.kind() != rw.MediaKind.Audio:
             return
+        paused = name in self._paused_tracks
         chunk: npt.NDArray[np.int16] | None = None
         captured_us = 0
-        with self._audio_lock:
-            buf = self._audio_bufs.get(name, _EMPTY_AUDIO)
-            if buf.size >= _AUDIO_FRAME_SAMPLES:
-                chunk = buf[:_AUDIO_FRAME_SAMPLES]
-                self._audio_bufs[name] = buf[_AUDIO_FRAME_SAMPLES:]
-                captured_us = self._audio_head_us.get(name, 0)
-                self._audio_head_us[name] = captured_us + _AUDIO_FRAME_MICROS
-        if chunk is None:
-            self._silence_frames[name] = self._silence_frames.get(name, 0) + 1
+        if not paused:
+            with self._audio_lock:
+                buf = self._audio_bufs.get(name, _EMPTY_AUDIO)
+                if buf.size >= _AUDIO_FRAME_SAMPLES:
+                    chunk = buf[:_AUDIO_FRAME_SAMPLES]
+                    self._audio_bufs[name] = buf[_AUDIO_FRAME_SAMPLES:]
+                    captured_us = self._audio_head_us.get(name, 0)
+                    self._audio_head_us[name] = captured_us + _AUDIO_FRAME_MICROS
+        if chunk is not None:
+            self._idle_ticks[name] = 0
+        else:
             captured_us = rw.time_micros()
-        if track is None:
-            return
+            idle = self._idle_ticks.get(name, _AUDIO_GRACE_TICKS)
+            if not paused and idle < _AUDIO_GRACE_TICKS:
+                self._idle_ticks[name] = idle + 1
+                self._silence_frames[name] = self._silence_frames.get(name, 0) + 1
         payload = _AUDIO_SILENT_FRAME if chunk is None else chunk.tobytes()
         try:
             track.push_pcm(payload, _AUDIO_SAMPLE_RATE, 1, capture_time_us=captured_us)
