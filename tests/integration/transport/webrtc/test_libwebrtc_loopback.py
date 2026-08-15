@@ -258,6 +258,11 @@ async def test_loopback_carries_media_and_messages() -> None:
             "the model's outbound video track never reached the client"
         )
 
+        # Outbound tracks start paused, so a client that wants them says so.
+        # This is what a `resume_track` off the control channel reaches.
+        peer.resume_track("out_video")
+        peer.resume_track("out_audio")
+
         # Pump media until every leg has produced output: outbound model video
         # and audio must both reach the client, the metadata attached to a frame
         # must arrive with it, and the client's inbound video must surface
