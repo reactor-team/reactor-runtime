@@ -35,6 +35,7 @@ from reactor_runtime.transport.webrtc.config import (  # noqa: E402
 from reactor_runtime.transport.webrtc.peer import (  # noqa: E402
     _AUDIO_BUFFER_MAX_SAMPLES,
     _AUDIO_FRAME_SAMPLES,
+    _AUDIO_GRACE_TICKS,
     _AUDIO_SILENT_FRAME,
     _FRAME_QUEUE_MAX,
     WebRTCPeer,
@@ -184,7 +185,7 @@ def test_push_bundle_routes_video_to_its_track() -> None:
     peer = WebRTCPeer()
     track: Any = _FakeTrack()
     peer._out_tracks["v"] = track
-    peer._push_bundle(_video_bundle("v", value=9), _CAPTURED_US)
+    peer._push_bundle(_video_bundle("v", value=9))
     assert len(track.pushed) == 1
     bgra, width, height = track.pushed[0]
     assert (width, height) == (2, 2)
@@ -195,7 +196,7 @@ def test_push_bundle_hands_frame_metadata_to_the_track() -> None:
     peer = WebRTCPeer()
     track: Any = _FakeTrack()
     peer._out_tracks["v"] = track
-    peer._push_bundle(_video_bundle("v", metadata=b'{"seed":7}'), _CAPTURED_US)
+    peer._push_bundle(_video_bundle("v", metadata=b'{"seed":7}'))
     assert track.user_data == [b'{"seed":7}']
 
 
@@ -203,7 +204,7 @@ def test_push_bundle_sends_no_metadata_when_the_frame_carries_none() -> None:
     peer = WebRTCPeer()
     track: Any = _FakeTrack()
     peer._out_tracks["v"] = track
-    peer._push_bundle(_video_bundle("v"), _CAPTURED_US)
+    peer._push_bundle(_video_bundle("v"))
     assert track.user_data == [None]
 
 
@@ -213,7 +214,7 @@ def test_push_bundle_sends_no_metadata_for_an_unsplit_batch() -> None:
     peer = WebRTCPeer()
     track: Any = _FakeTrack()
     peer._out_tracks["v"] = track
-    peer._push_bundle(_video_bundle("v", metadata=[b"a", b"b"]), _CAPTURED_US)
+    peer._push_bundle(_video_bundle("v", metadata=[b"a", b"b"]))
     assert len(track.pushed) == 1
     assert track.user_data == [None]
 
@@ -263,10 +264,10 @@ def test_push_bundle_skips_paused_track() -> None:
     track: Any = _FakeTrack()
     peer._out_tracks["v"] = track
     peer.pause_track("v")
-    peer._push_bundle(_video_bundle("v"), _CAPTURED_US)
+    peer._push_bundle(_video_bundle("v"))
     assert track.pushed == []
     peer.resume_track("v")
-    peer._push_bundle(_video_bundle("v"), _CAPTURED_US)
+    peer._push_bundle(_video_bundle("v"))
     assert len(track.pushed) == 1
 
 
@@ -275,7 +276,7 @@ def test_push_bundle_buffers_audio_for_the_feeder() -> None:
     info = TrackInfo(name="a", kind=TrackKind.AUDIO, direction=TrackDirection.OUT)
     peer._out_tracks["a"] = cast(Any, _FakeAudioTrack())
     bundle = MediaBundle(tracks={"a": TrackData(info=info, data=np.zeros((1, 240), np.int16))})
-    peer._push_bundle(bundle, _CAPTURED_US)
+    peer._push_bundle(bundle)
     assert peer._audio_bufs["a"].size == 240
 
 
@@ -283,7 +284,7 @@ def test_push_bundle_ignores_a_track_the_wire_does_not_hold() -> None:
     peer = WebRTCPeer()
     info = TrackInfo(name="a", kind=TrackKind.AUDIO, direction=TrackDirection.OUT)
     bundle = MediaBundle(tracks={"a": TrackData(info=info, data=np.zeros((1, 240), np.int16))})
-    peer._push_bundle(bundle, _CAPTURED_US)
+    peer._push_bundle(bundle)
     assert peer._audio_bufs == {}
 
 
@@ -291,7 +292,7 @@ def test_push_bundle_gap_fill_buffers_no_audio() -> None:
     peer = WebRTCPeer()
     track: Any = _FakeTrack()
     peer._out_tracks["v"] = track
-    peer._push_bundle(_video_bundle("v"), _CAPTURED_US)
+    peer._push_bundle(_video_bundle("v"))
     assert len(track.pushed) == 1
     assert peer._audio_bufs == {}
 
@@ -299,15 +300,13 @@ def test_push_bundle_gap_fill_buffers_no_audio() -> None:
 def test_enqueue_audio_caps_the_buffer_depth() -> None:
     peer = WebRTCPeer()
     for _ in range(50):
-        peer._enqueue_audio("a", np.zeros(1_000, dtype=np.int16), _CAPTURED_US)
+        peer._enqueue_audio("a", np.zeros(1_000, dtype=np.int16))
     assert peer._audio_bufs["a"].size == _AUDIO_BUFFER_MAX_SAMPLES
 
 
 def test_enqueue_audio_counts_the_samples_the_cap_discards() -> None:
     peer = WebRTCPeer()
-    peer._enqueue_audio(
-        "a", np.zeros(_AUDIO_BUFFER_MAX_SAMPLES + 1_500, dtype=np.int16), _CAPTURED_US
-    )
+    peer._enqueue_audio("a", np.zeros(_AUDIO_BUFFER_MAX_SAMPLES + 1_500, dtype=np.int16))
     assert peer._dropped_samples == 1_500
 
 
@@ -329,9 +328,22 @@ def _audio_peer() -> tuple[WebRTCPeer, _FakeAudioTrack]:
     return peer, track
 
 
+def _make_live(peer: WebRTCPeer, track: _FakeAudioTrack, name: str = "a") -> None:
+    """Run one real frame through, so the track counts as delivering.
+
+    Silence covers a gap in a running stream, so a track that has never
+    delivered gets none — every test about gap-filling has to start here.
+    """
+    peer._enqueue_audio(name, np.ones(_AUDIO_FRAME_SAMPLES, dtype=np.int16))
+    peer._push_audio_frame(name)
+    track.pushed.clear()
+    track.capture_times.clear()
+    peer._silence_frames.clear()
+
+
 def test_audio_feed_pushes_the_model_samples_when_a_frame_is_ready() -> None:
     peer, track = _audio_peer()
-    peer._enqueue_audio("a", np.full(_AUDIO_FRAME_SAMPLES, 7, dtype=np.int16), _CAPTURED_US)
+    peer._enqueue_audio("a", np.full(_AUDIO_FRAME_SAMPLES, 7, dtype=np.int16))
 
     peer._push_audio_frame("a")
 
@@ -343,6 +355,7 @@ def test_audio_feed_pushes_the_model_samples_when_a_frame_is_ready() -> None:
 def test_audio_feed_pushes_silence_when_the_buffer_is_empty() -> None:
     """An empty buffer still owes the wire 10 ms, or the sample clock stalls."""
     peer, track = _audio_peer()
+    _make_live(peer, track)
 
     peer._push_audio_frame("a")
 
@@ -351,8 +364,9 @@ def test_audio_feed_pushes_silence_when_the_buffer_is_empty() -> None:
 
 
 def test_audio_feed_counts_a_partial_frame_as_silence() -> None:
-    peer, _ = _audio_peer()
-    peer._enqueue_audio("a", np.ones(_AUDIO_FRAME_SAMPLES - 1, dtype=np.int16), _CAPTURED_US)
+    peer, track = _audio_peer()
+    _make_live(peer, track)
+    peer._enqueue_audio("a", np.ones(_AUDIO_FRAME_SAMPLES - 1, dtype=np.int16))
 
     peer._push_audio_frame("a")
 
@@ -363,9 +377,10 @@ def test_audio_feed_counts_a_partial_frame_as_silence() -> None:
 def test_a_session_without_audio_reports_no_shortfall() -> None:
     """A wire that carries no audio is owed none, so none is counted missing."""
     peer = WebRTCPeer()
+    peer._out_tracks["v"] = cast(Any, _FakeTrack())  # video-only session
 
-    for _ in range(100):  # a second of ticks on a video-only session
-        peer._push_audio_frame(None)
+    for _ in range(100):  # a second of ticks
+        peer._push_audio_tick()
 
     assert peer._silence_frames == {}
 
@@ -415,7 +430,7 @@ def test_audio_arriving_again_reopens_the_grace() -> None:
         peer._push_audio_tick()
     covered = len(track.pushed)
 
-    peer._enqueue_audio("a", np.ones(_AUDIO_FRAME_SAMPLES, dtype=np.int16), _CAPTURED_US)
+    peer._enqueue_audio("a", np.ones(_AUDIO_FRAME_SAMPLES, dtype=np.int16))
     peer._push_audio_tick()  # the real frame
     for _ in range(300):
         peer._push_audio_tick()
@@ -435,6 +450,7 @@ def test_audio_feed_survives_a_track_that_raises() -> None:
         ) -> None:
             raise RuntimeError("boom")
 
+    peer._idle_ticks["a"] = 0  # a running track
     peer._out_tracks["a"] = cast(Any, _Raising())
     peer._push_audio_frame("a")
 
@@ -451,116 +467,6 @@ def test_a_name_that_is_not_an_audio_track_is_left_alone() -> None:
 
     assert peer._silence_frames == {}
     assert peer._audio_bufs == {}
-
-
-# ── Shared capture timestamps ────────────────────────────────────────────────
-
-
-def test_send_media_stamps_the_bundle_once() -> None:
-    """The producer's tick is the instant both tracks have to agree on."""
-    peer = WebRTCPeer()
-    peer._out_tracks["v"] = cast(Any, _FakeTrack())
-
-    peer.send_media(_video_bundle("v"))
-
-    captured_us, bundle = peer._frame_queue.get_nowait()
-    assert captured_us > 0
-    assert bundle.tracks["v"].info.name == "v"
-
-
-def test_video_goes_out_unstamped_while_audio_cannot_be_stamped_too() -> None:
-    """One stream stamped and the other not is a worse pair than neither."""
-    peer = WebRTCPeer()
-    track = _FakeTrack()
-    peer._out_tracks["v"] = cast(Any, track)
-
-    peer._push_bundle(_video_bundle("v"), _CAPTURED_US)
-
-    assert track.capture_times == [None]
-
-
-def test_audio_carries_the_capture_time_of_the_bundle_it_came_from() -> None:
-    peer, track = _audio_peer()
-    peer._enqueue_audio("a", np.ones(_AUDIO_FRAME_SAMPLES, dtype=np.int16), _CAPTURED_US)
-
-    peer._push_audio_frame("a")
-
-    assert track.capture_times == [_CAPTURED_US]
-
-
-def test_the_anchor_advances_one_frame_per_frame_emitted() -> None:
-    """Buffered audio is contiguous, so one anchor dates all of it."""
-    peer, track = _audio_peer()
-    peer._enqueue_audio("a", np.ones(_AUDIO_FRAME_SAMPLES * 3, dtype=np.int16), _CAPTURED_US)
-
-    for _ in range(3):
-        peer._push_audio_frame("a")
-
-    assert track.capture_times == [
-        _CAPTURED_US,
-        _CAPTURED_US + 10_000,
-        _CAPTURED_US + 20_000,
-    ]
-
-
-def test_one_bundle_stamps_its_audio_and_leaves_its_video_bare() -> None:
-    """The stamp is read once; only the half the wire can carry is spent."""
-    peer, video, audio = _wired_peer()
-
-    peer._push_bundle(_av_bundle(), _CAPTURED_US)
-    peer._push_audio_tick()
-
-    assert video.capture_times == [None]
-    assert audio.capture_times == [_CAPTURED_US]
-
-
-def test_a_fresh_arrival_re_reads_the_anchor() -> None:
-    """After a gap the buffer holds new media, not a continuation of the old."""
-    peer, track = _audio_peer()
-    peer._enqueue_audio("a", np.ones(_AUDIO_FRAME_SAMPLES, dtype=np.int16), _CAPTURED_US)
-    peer._push_audio_frame("a")  # drains the buffer
-
-    later = _CAPTURED_US + 5_000_000
-    peer._enqueue_audio("a", np.ones(_AUDIO_FRAME_SAMPLES, dtype=np.int16), later)
-    peer._push_audio_frame("a")
-
-    assert track.capture_times == [_CAPTURED_US, later]
-
-
-def test_a_continuation_keeps_the_running_anchor() -> None:
-    """Audio arriving on top of a full frame continues the same stream."""
-    peer, track = _audio_peer()
-    peer._enqueue_audio("a", np.ones(_AUDIO_FRAME_SAMPLES * 2, dtype=np.int16), _CAPTURED_US)
-    peer._enqueue_audio("a", np.ones(_AUDIO_FRAME_SAMPLES, dtype=np.int16), _CAPTURED_US + 999_999)
-
-    for _ in range(3):
-        peer._push_audio_frame("a")
-
-    assert track.capture_times == [
-        _CAPTURED_US,
-        _CAPTURED_US + 10_000,
-        _CAPTURED_US + 20_000,
-    ]
-
-
-def test_trimming_the_buffer_moves_the_anchor_past_what_it_dropped() -> None:
-    peer = WebRTCPeer()
-    peer._enqueue_audio("a", np.ones(_AUDIO_BUFFER_MAX_SAMPLES + 480, dtype=np.int16), _CAPTURED_US)
-    # 480 samples discarded is 10 ms of the stream the wire never sees.
-    assert peer._audio_head_us["a"] == _CAPTURED_US + 10_000
-
-
-def test_silence_is_stamped_now_not_from_the_anchor() -> None:
-    """Inserted silence is time passing, not media captured earlier."""
-    peer, track = _audio_peer()
-    peer._audio_head_us["a"] = _CAPTURED_US
-
-    peer._push_audio_frame("a")
-
-    stamped = track.capture_times[0]
-    assert stamped is not None
-    assert stamped != _CAPTURED_US
-    assert stamped > 0
 
 
 # ── Pause and resume ─────────────────────────────────────────────────────────
@@ -590,7 +496,7 @@ def test_pausing_video_stops_the_frames_and_leaves_audio_alone() -> None:
 
     peer.pause_track("v")
     for _ in range(3):
-        peer._push_bundle(_av_bundle(), _CAPTURED_US)
+        peer._push_bundle(_av_bundle())
         peer._push_audio_tick()
 
     assert video.pushed == []
@@ -600,16 +506,13 @@ def test_pausing_video_stops_the_frames_and_leaves_audio_alone() -> None:
 def test_resuming_video_puts_frames_back_on_the_wire() -> None:
     peer, video, _ = _wired_peer()
     peer.pause_track("v")
-    peer._push_bundle(_av_bundle(), _CAPTURED_US)
+    peer._push_bundle(_av_bundle())
     assert video.pushed == []
 
     peer.resume_track("v")
-    peer._push_bundle(_av_bundle(), _CAPTURED_US + 5_000_000)
+    peer._push_bundle(_av_bundle())
 
     assert len(video.pushed) == 1
-    # The resumed frame is dated when it was produced, so the pause reaches
-    # the client as the gap it was.
-    assert video.capture_times == [_CAPTURED_US + 5_000_000]
 
 
 def test_pausing_audio_sends_silence_rather_than_the_models_audio() -> None:
@@ -618,7 +521,7 @@ def test_pausing_audio_sends_silence_rather_than_the_models_audio() -> None:
 
     peer.pause_track("a")
     for _ in range(5):
-        peer._push_bundle(_av_bundle(), _CAPTURED_US)
+        peer._push_bundle(_av_bundle())
         peer._push_audio_tick()
 
     assert len(audio.pushed) == 5
@@ -639,29 +542,26 @@ def test_a_paused_audio_track_is_not_counted_as_under_production() -> None:
 def test_resuming_audio_puts_the_models_samples_back() -> None:
     peer, _, audio = _wired_peer()
     peer.pause_track("a")
-    peer._push_bundle(_av_bundle(), _CAPTURED_US)
+    peer._push_bundle(_av_bundle())
     peer._push_audio_tick()
     assert audio.pushed[0][0] == _AUDIO_SILENT_FRAME
 
-    later = _CAPTURED_US + 5_000_000
     peer.resume_track("a")
-    peer._push_bundle(_av_bundle(), later)
+    peer._push_bundle(_av_bundle())
     peer._push_audio_tick()
 
     assert len(audio.pushed) == 2
     assert audio.pushed[1][0] != _AUDIO_SILENT_FRAME
-    # Re-anchored to the bundle that arrived after the pause, not to before it.
-    assert audio.capture_times[1] == later
 
 
 def test_a_pause_leaves_no_stale_audio_to_replay_on_resume() -> None:
     """The buffer drains during the pause, so resume plays what arrives next."""
     peer, _, audio = _wired_peer()
-    peer._push_bundle(_av_bundle(), _CAPTURED_US)  # a frame's worth arrives
+    peer._push_bundle(_av_bundle())  # a frame's worth arrives
     peer.pause_track("a")
 
     for _ in range(10):
-        peer._push_bundle(_av_bundle(), _CAPTURED_US)  # discarded while paused
+        peer._push_bundle(_av_bundle())  # discarded while paused
         peer._push_audio_tick()
 
     assert peer._audio_bufs["a"].size == _AUDIO_FRAME_SAMPLES  # only the pre-pause frame
@@ -701,7 +601,7 @@ def test_each_audio_track_buffers_on_its_own() -> None:
     """Sharing one buffer would splice the tracks together in time."""
     peer, _, _ = _two_audio_peer()
 
-    peer._push_bundle(_two_audio_bundle(), _CAPTURED_US)
+    peer._push_bundle(_two_audio_bundle())
 
     assert peer._audio_bufs["voice"].size == _AUDIO_FRAME_SAMPLES
     assert peer._audio_bufs["music"].size == _AUDIO_FRAME_SAMPLES
@@ -709,7 +609,7 @@ def test_each_audio_track_buffers_on_its_own() -> None:
 
 def test_each_audio_track_gets_only_its_own_samples() -> None:
     peer, voice, music = _two_audio_peer()
-    peer._push_bundle(_two_audio_bundle(), _CAPTURED_US)
+    peer._push_bundle(_two_audio_bundle())
 
     peer._push_audio_tick()
 
@@ -723,7 +623,7 @@ def test_each_audio_track_gets_only_its_own_samples() -> None:
 
 def test_one_tick_feeds_every_audio_track_once() -> None:
     peer, voice, music = _two_audio_peer()
-    peer._push_bundle(_two_audio_bundle(), _CAPTURED_US)
+    peer._push_bundle(_two_audio_bundle())
 
     peer._push_audio_tick()
 
@@ -733,7 +633,9 @@ def test_one_tick_feeds_every_audio_track_once() -> None:
 
 def test_an_empty_track_falls_silent_while_the_other_plays() -> None:
     peer, voice, music = _two_audio_peer()
-    peer._enqueue_audio("voice", np.full(_AUDIO_FRAME_SAMPLES, 111, np.int16), _CAPTURED_US)
+    _make_live(peer, voice, "voice")
+    _make_live(peer, music, "music")
+    peer._enqueue_audio("voice", np.full(_AUDIO_FRAME_SAMPLES, 111, np.int16))
 
     peer._push_audio_tick()
 
@@ -742,23 +644,11 @@ def test_an_empty_track_falls_silent_while_the_other_plays() -> None:
     assert peer._silence_frames == {"music": 1}
 
 
-def test_each_audio_track_keeps_its_own_capture_anchor() -> None:
-    peer, voice, music = _two_audio_peer()
-    peer._enqueue_audio("voice", np.ones(_AUDIO_FRAME_SAMPLES, np.int16), _CAPTURED_US)
-    later = _CAPTURED_US + 5_000_000
-    peer._enqueue_audio("music", np.ones(_AUDIO_FRAME_SAMPLES, np.int16), later)
-
-    peer._push_audio_tick()
-
-    assert voice.capture_times == [_CAPTURED_US]
-    assert music.capture_times == [later]
-
-
 def test_pausing_one_audio_track_leaves_the_other_playing() -> None:
     peer, voice, music = _two_audio_peer()
 
     peer.pause_track("voice")
-    peer._push_bundle(_two_audio_bundle(), _CAPTURED_US)
+    peer._push_bundle(_two_audio_bundle())
     peer._push_audio_tick()
 
     assert voice.pushed[0][0] == _AUDIO_SILENT_FRAME  # the clock, not the audio
@@ -768,17 +658,15 @@ def test_pausing_one_audio_track_leaves_the_other_playing() -> None:
 def test_resuming_one_audio_track_leaves_the_other_undisturbed() -> None:
     peer, voice, music = _two_audio_peer()
     peer.pause_track("voice")
-    peer._push_bundle(_two_audio_bundle(), _CAPTURED_US)
+    peer._push_bundle(_two_audio_bundle())
     peer._push_audio_tick()
 
-    later = _CAPTURED_US + 5_000_000
     peer.resume_track("voice")
-    peer._push_bundle(_two_audio_bundle(), later)
+    peer._push_bundle(_two_audio_bundle())
     peer._push_audio_tick()
 
     assert len(voice.pushed) == 2
     assert voice.pushed[1][0] != _AUDIO_SILENT_FRAME
-    assert voice.capture_times[1] == later
     assert len(music.pushed) == 2
 
 
@@ -800,6 +688,7 @@ def test_the_under_production_warning_names_the_starved_track(
 def test_the_feeder_leaves_the_video_tracks_alone() -> None:
     """The outbound tracks hold both kinds; only the audio ones are fed."""
     peer, video, audio = _wired_peer()
+    _make_live(peer, audio)
 
     peer._push_audio_tick()
 
@@ -819,7 +708,7 @@ def test_the_feeder_ignores_a_pause_on_a_track_that_is_not_its_own() -> None:
     peer, _, audio = _wired_peer()
 
     peer.pause_track("v")
-    peer._push_bundle(_av_bundle(), _CAPTURED_US)
+    peer._push_bundle(_av_bundle())
     peer._push_audio_tick()
 
     assert len(audio.pushed) == 1
@@ -827,6 +716,7 @@ def test_the_feeder_ignores_a_pause_on_a_track_that_is_not_its_own() -> None:
 
 def test_audio_feed_loop_keeps_the_wire_fed_through_an_empty_buffer() -> None:
     peer, track = _audio_peer()
+    _make_live(peer, track)
     thread = threading.Thread(target=peer._audio_feed_loop, daemon=True)
 
     thread.start()
