@@ -1136,13 +1136,21 @@ _SESSION_ANSWER = (
 
 
 class _RecordingTransceiver:
-    def __init__(self, mid: str) -> None:
+    def __init__(self, mid: str, kind: Any = rw.MediaKind.Audio) -> None:
         self._mid = mid
+        self._kind = kind
         self.tracks: list[Any] = []
         self.directions: list[Any] = []
+        self.codec_preferences: list[Any] = []
 
     def mid(self) -> str:
         return self._mid
+
+    def kind(self) -> Any:
+        return self._kind
+
+    async def set_codec_preferences(self, codecs: Any) -> None:
+        self.codec_preferences.append(codecs)
 
     async def set_track(self, track: Any) -> None:
         self.tracks.append(track)
@@ -1322,9 +1330,9 @@ async def test_outbound_tracks_negotiate_as_sending() -> None:
 
     pc = _RecordingPc()
     pc.transceiver_list = [
-        _RecordingTransceiver("0"),
+        _RecordingTransceiver("0", rw.MediaKind.Video),
         _RecordingTransceiver("1"),
-        _RecordingTransceiver("2"),
+        _RecordingTransceiver("2", rw.MediaKind.Video),
     ]
 
     await peer._attach_out_tracks(cast(Any, pc), cast(Any, _Factory()))
