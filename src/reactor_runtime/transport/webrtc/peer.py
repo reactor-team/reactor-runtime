@@ -821,11 +821,9 @@ class WebRTCPeer:
                     self._audio_bufs[name] = buf[_AUDIO_FRAME_SAMPLES:]
         if chunk is not None:
             self._idle_ticks[name] = 0
-        else:
-            idle = self._idle_ticks.get(name, _AUDIO_GRACE_TICKS)
-            if not paused and idle < _AUDIO_GRACE_TICKS:
-                self._idle_ticks[name] = idle + 1
-                self._silence_frames[name] = self._silence_frames.get(name, 0) + 1
+        elif not paused and name in self._idle_ticks:
+            self._idle_ticks[name] = min(self._idle_ticks[name] + 1, _AUDIO_GRACE_TICKS)
+            self._silence_frames[name] = self._silence_frames.get(name, 0) + 1
         payload = _AUDIO_SILENT_FRAME if chunk is None else chunk.tobytes()
         try:
             track.push_pcm(payload, _AUDIO_SAMPLE_RATE, 1)
@@ -1044,6 +1042,11 @@ class WebRTCPeer:
         exactly, without inferring it from a packet rate whose expected value
         depends on the encoder's packetisation, and without one starved track
         being averaged away by the others keeping up.
+
+        A track silent for longer than ``_AUDIO_GRACE_TICKS`` is taken to have
+        nothing to say rather than to be failing to say it, and is passed over:
+        a model that only speaks in bursts would otherwise warn through every
+        gap between them.
         """
         now = time.monotonic()
         frames = dict(self._silence_frames)
@@ -1055,6 +1058,8 @@ class WebRTCPeer:
         if elapsed <= 0:
             return
         for name, count in frames.items():
+            if self._idle_ticks.get(name, 0) >= _AUDIO_GRACE_TICKS:
+                continue
             silence = (count - baseline[1].get(name, 0)) * _AUDIO_FRAME_SECONDS
             if silence / elapsed < _AUDIO_SILENCE_WARN_RATIO:
                 continue

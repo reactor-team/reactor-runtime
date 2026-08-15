@@ -410,6 +410,40 @@ def test_a_track_that_goes_quiet_stops_being_covered() -> None:
     assert peer._silence_frames == {"a": _AUDIO_GRACE_TICKS}
 
 
+def test_a_stall_past_the_grace_keeps_being_counted() -> None:
+    """The count is how far the audio sits from where the model put it.
+
+    Silence past the grace stops being the model's fault, but it does not stop
+    displacing everything the model sends after it — so it stays on the tally
+    even once it stops being warned about.
+    """
+    peer, track = _audio_peer()
+    _make_live(peer, track)
+
+    for _ in range(_AUDIO_GRACE_TICKS + 200):
+        peer._push_audio_tick()
+
+    assert peer._silence_frames == {"a": _AUDIO_GRACE_TICKS + 200}
+
+
+def test_a_track_stalled_past_the_grace_is_no_longer_warned_about(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A model that speaks in bursts would otherwise warn through every gap."""
+    peer, track = _audio_peer()
+    _make_live(peer, track)
+    for _ in range(_AUDIO_GRACE_TICKS):
+        peer._push_audio_tick()
+    peer._warn_on_audio_underrun()  # the baseline
+
+    for _ in range(200):
+        peer._push_audio_tick()
+    with caplog.at_level(logging.WARNING):
+        peer._warn_on_audio_underrun()
+
+    assert not [r for r in caplog.records if "below real time" in r.getMessage()]
+
+
 def test_a_gap_inside_the_grace_is_still_covered() -> None:
     """A stall is what silence is for; it has to survive the idle rule."""
     peer, track = _audio_peer()
