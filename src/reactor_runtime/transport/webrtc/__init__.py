@@ -19,13 +19,14 @@ from reactor_runtime.transport.webrtc.signaling import (
     SdpOffer,
     TrackMap,
 )
-from reactor_runtime.transport.webrtc.stats import PeerStats, TrackStat
+from reactor_runtime.transport.webrtc.stats import OutboundMediaHealth, PeerStats, TrackStat
 
 __all__ = [
     "IceCandidate",
     "IceServer",
     "IceTransportPolicy",
     "MappedTrack",
+    "OutboundMediaHealth",
     "PeerStats",
     "SdpAnswer",
     "SdpOffer",
