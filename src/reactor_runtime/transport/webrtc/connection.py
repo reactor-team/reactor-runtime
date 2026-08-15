@@ -30,7 +30,7 @@ from reactor_runtime.transport.webrtc.config import WebRtcConfig
 from reactor_runtime.transport.webrtc.pacer import MediaPacer
 from reactor_runtime.transport.webrtc.peer import WebRTCPeer, WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpAnswer, SdpOffer, TrackMap
-from reactor_runtime.transport.webrtc.stats import PeerStats
+from reactor_runtime.transport.webrtc.stats import OutboundMediaHealth, PeerStats
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +102,9 @@ class WebRTCConnection:
         self._watchdog_task: asyncio.Task[None] | None = None
         self._stats_task: asyncio.Task[None] | None = None
         self._latest_stats: PeerStats | None = None
+        # The counters as of the previous sample, so each report is what the
+        # window cost rather than what the connection has cost since it opened.
+        self._reported_media = OutboundMediaHealth()
 
     @classmethod
     async def create(
@@ -335,11 +338,38 @@ class WebRTCConnection:
                     stats,
                     media=replace(stats.media, dropped_frames=self._pacer.dropped_frames),
                 )
+                self._report_media_health(stats.media)
                 self._latest_stats = stats
                 if self._on_stats is not None:
                     self._on_stats(stats)
         except asyncio.CancelledError:
             return
+
+    def _report_media_health(self, media: OutboundMediaHealth) -> None:
+        """Log what the last window cost this connection's outbound media.
+
+        The counters are cumulative and nothing else reads them, so a window
+        that manufactured or discarded nothing says nothing. One that did says
+        it once, in the units it happened in, which is the whole reason they
+        are counted: none of it is visible in the sound until it is bad enough
+        to hear, and none of it appears in transport statistics at all.
+        """
+        previous, self._reported_media = self._reported_media, media
+        silence = media.silence_frames - previous.silence_frames
+        samples = media.dropped_samples - previous.dropped_samples
+        bundles = media.dropped_bundles - previous.dropped_bundles
+        frames = media.dropped_frames - previous.dropped_frames
+        if not (silence or samples or bundles or frames):
+            return
+        logger.info(
+            "outbound media over the last %.0fs: %d ms of silence inserted, "
+            "%d ms of audio discarded to cap the buffer, %d bundles and %d frames dropped",
+            self._STATS_INTERVAL_SECONDS,
+            silence * 10,
+            round(samples / 48),
+            bundles,
+            frames,
+        )
 
     async def _close_peer(self) -> None:
         """Close the media peer, logging but not raising on failure."""

@@ -1,13 +1,16 @@
 import asyncio
+import logging
 from collections.abc import Callable
 
 import numpy as np
+import pytest
 from conftest import FakePeer
 
 from reactor_runtime.core import Connection, ConnId, InputFrame, MediaBundle, MediaChunk
 from reactor_runtime.core.values import TrackData, TrackInfo, TrackKind
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.transport.webrtc import (
+    OutboundMediaHealth,
     PeerStats,
     SdpOffer,
     TrackMap,
@@ -361,4 +364,46 @@ async def test_stats_loop_survives_a_failed_sample(
 
     # The first sample raised; the sampler kept going and recorded a later one.
     assert conn.latest_stats == PeerStats(rtt_seconds=0.5)
+    await conn.close()
+
+
+async def test_media_health_is_reported_as_what_the_window_cost(
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The counters are cumulative; an operator needs the rate, not the total."""
+    peer = FakePeer(
+        stats=PeerStats(media=OutboundMediaHealth(silence_frames=50, dropped_samples=9_600))
+    )
+    conn = await _connect(peer, factory_for(peer), out_av_tracks, ping_timeout=0.0)
+    conn._STATS_INTERVAL_SECONDS = 0.01
+    conn._reported_media = OutboundMediaHealth(silence_frames=20, dropped_samples=4_800)
+
+    with caplog.at_level(logging.INFO):
+        peer.fire_connected()
+        await asyncio.sleep(0.05)
+
+    reports = [r.getMessage() for r in caplog.records if "outbound media" in r.getMessage()]
+    assert reports, "a window that cost something has to say so"
+    assert "300 ms of silence inserted" in reports[0]  # 30 frames since the last sample
+    assert "100 ms of audio discarded" in reports[0]  # 4800 samples at 48 kHz
+    await conn.close()
+
+
+async def test_a_window_that_cost_nothing_is_not_reported(
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    peer = FakePeer(stats=PeerStats(media=OutboundMediaHealth(silence_frames=7)))
+    conn = await _connect(peer, factory_for(peer), out_av_tracks, ping_timeout=0.0)
+    conn._STATS_INTERVAL_SECONDS = 0.01
+    conn._reported_media = OutboundMediaHealth(silence_frames=7)
+
+    with caplog.at_level(logging.INFO):
+        peer.fire_connected()
+        await asyncio.sleep(0.05)
+
+    assert not [r for r in caplog.records if "outbound media" in r.getMessage()]
     await conn.close()
