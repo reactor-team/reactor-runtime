@@ -42,7 +42,9 @@ class MyModel(ReactorModel):
         self.prompt = "a sunny meadow"
 
     @event(name="set_prompt", description="Scene the model renders")
-    async def set_prompt(self, prompt: str = InputField(default="a sunny meadow")) -> None:
+    async def set_prompt(
+        self, prompt: str = InputField(default="a sunny meadow", moderate=True)
+    ) -> None:
         self.prompt = prompt
 
     async def run(self) -> None:
