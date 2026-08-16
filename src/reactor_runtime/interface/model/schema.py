@@ -237,8 +237,9 @@ def _merge_constraints(schema: dict[str, Any], info: FieldInfo) -> None:
         schema["maxLength"] = info.max_length
     if info.choices is not None:
         schema["enum"] = info.choices
-    if info.moderate:
-        schema["x-reactor-moderate"] = True
+    # Unconditional, in both polarities: a consumer reads the preference off the
+    # document rather than inferring it from an absent key.
+    schema["x-reactor-moderate"] = info.moderate
 
 
 def _coerce_default(value: Any) -> Any:

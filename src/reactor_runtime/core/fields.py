@@ -42,9 +42,10 @@ class FieldInfo:
         min_length: Minimum length for a string or sequence value.
         max_length: Maximum length for a string or sequence value.
         choices: Exhaustive set of allowed values.
-        moderate: Whether the rendered schema marks the field for content
-            moderation. Defaults to ``False``; see :func:`InputField` for what
-            the mark does and which fields it applies to.
+        moderate: Whether the field is marked for content moderation in the
+            rendered schema, which states either polarity. Defaults to
+            ``False``; see :func:`InputField` for what the mark does and which
+            fields it applies to.
     """
 
     default: Any = NO_DEFAULT
@@ -87,9 +88,10 @@ def InputField(  # noqa: N802 — a capitalised factory reads as a type in field
         max_length: Maximum length for a string or sequence value.
         choices: Exhaustive set of allowed values.
         moderate: Whether to mark the field for content moderation. ``False``
-            by default, so a field carries the mark only when you ask for it.
-            The mark is a preference and nothing more: it adds
-            ``x-reactor-moderate`` to the field in the rendered schema, and the
+            by default, so a field is marked only when you ask for it. Either
+            way the rendered schema states the answer: the field carries
+            ``x-reactor-moderate: true`` or ``x-reactor-moderate: false``. The
+            mark is a preference and nothing more — it starts no check, and the
             runtime moderates nothing itself. Whether a check runs against a
             marked field is a deployment decision taken from that schema. Only
             free-text strings and uploaded files are ever eligible — typed,

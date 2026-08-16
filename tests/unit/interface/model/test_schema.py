@@ -89,11 +89,11 @@ def test_field_constraints_reach_the_schema() -> None:
     assert props["level"]["default"] == 1
 
 
-def test_a_field_carries_no_moderation_mark_by_default() -> None:
+def test_a_field_renders_an_unmarked_moderation_preference_by_default() -> None:
     props = schema()["paths"]["/events/set_level"]["post"]["requestBody"]["content"][
         "application/json"
     ]["schema"]["properties"]
-    assert "x-reactor-moderate" not in props["level"]
+    assert props["level"]["x-reactor-moderate"] is False
 
 
 def test_a_field_that_opts_in_renders_the_moderation_mark() -> None:
@@ -101,6 +101,14 @@ def test_a_field_that_opts_in_renders_the_moderation_mark() -> None:
         "application/json"
     ]["schema"]["properties"]
     assert props["prompt"]["x-reactor-moderate"] is True
+
+
+def test_an_upload_field_carries_its_preference_beside_the_reference() -> None:
+    props = schema()["paths"]["/events/attach"]["post"]["requestBody"]["content"][
+        "application/json"
+    ]["schema"]["properties"]
+    assert props["file"]["$ref"] == "#/components/schemas/ReactorUploadReference"
+    assert props["file"]["x-reactor-moderate"] is False
 
 
 def test_a_field_with_a_default_is_not_required() -> None:
@@ -123,7 +131,7 @@ def test_upload_field_renders_as_a_reference() -> None:
     props = schema()["paths"]["/events/attach"]["post"]["requestBody"]["content"][
         "application/json"
     ]["schema"]["properties"]
-    assert props["file"] == {"$ref": "#/components/schemas/ReactorUploadReference"}
+    assert props["file"]["$ref"] == "#/components/schemas/ReactorUploadReference"
 
 
 def test_messages_render_as_webhooks_referencing_their_component() -> None:
