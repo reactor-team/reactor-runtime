@@ -93,6 +93,14 @@ ignore = [
     "D107", # __init__ is documented on the class
 ]
 
+[tool.ruff.lint.flake8-bugbear]
+# `InputField(...)` is the declaration idiom for a field's default and
+# constraints, and it returns a frozen dataclass, so the shared-mutable-default
+# hazard B008 guards against cannot arise. Ruff exempts it already on fields
+# annotated with an immutable builtin; this extends that to every annotation,
+# an upload field included.
+extend-immutable-calls = ["reactor_runtime.InputField", "reactor_runtime.core.fields.InputField"]
+
 [tool.ruff.lint.isort]
 # The example models are first-party even though they live outside the package.
 # The generated wire bindings (reactor_wire) are first-party too, but they are

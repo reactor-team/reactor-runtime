@@ -198,21 +198,24 @@ class Echo(ReactorModel):
     async def set_caption(
         self,
         caption: str = InputField(
-            default="", max_length=200, description="Caption text; empty clears it"
+            default="",
+            max_length=200,
+            description="Caption text; empty clears it",
+            moderate=True,
         ),
     ) -> None:
         """Set the free-text caption drawn over every output frame.
 
         The one free-text command on this model: its value is user-authored
-        prose rather than a typed knob, which also makes it the natural fixture
-        for exercising content moderation of command text.
+        prose rather than a typed knob, so it asks for the moderation mark in
+        the rendered schema.
         """
         self._caption = caption
 
     @event(name="set_overlay_image", description="Blend an uploaded image over the output video")
     async def set_overlay_image(
         self,
-        overlay_image: UploadedFile,
+        overlay_image: UploadedFile = InputField(moderate=True),
         overlay_strength: float = InputField(
             default=0.5, ge=0.0, le=1.0, description="Overlay opacity (0=hidden, 1=opaque)"
         ),
@@ -222,6 +225,10 @@ class Echo(ReactorModel):
         The runtime resolves the upload reference to bytes before the handler
         runs, so ``overlay_image`` arrives as a fetched file. A non-image upload
         or one OpenCV cannot decode clears the overlay rather than failing.
+
+        The upload carries client-supplied content, so it asks for the
+        moderation mark; ``InputField`` supplies no default, so the file stays
+        required.
         """
         self._overlay_strength = overlay_strength
         if not overlay_image.mime_type.startswith("image/"):

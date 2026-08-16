@@ -44,6 +44,9 @@ class DemoModel(ReactorModel):
     @event(name="attach")
     async def attach(self, file: UploadedFile) -> None: ...
 
+    @event(name="set_prompt")
+    async def set_prompt(self, prompt: str = InputField(default="", moderate=True)) -> None: ...
+
 
 @pytest.fixture(autouse=True)
 def _seed_registries(
@@ -66,7 +69,12 @@ def test_document_is_openapi_3_1_with_model_identity() -> None:
 
 def test_commands_render_as_paths() -> None:
     paths = schema()["paths"]
-    assert set(paths) == {"/events/set_level", "/events/set_mode", "/events/attach"}
+    assert set(paths) == {
+        "/events/set_level",
+        "/events/set_mode",
+        "/events/attach",
+        "/events/set_prompt",
+    }
     op = paths["/events/set_level"]["post"]
     assert op["operationId"] == "set_level"
     assert op["summary"] == "Set the level"
@@ -79,6 +87,20 @@ def test_field_constraints_reach_the_schema() -> None:
     assert props["level"]["minimum"] == 0
     assert props["level"]["maximum"] == 10
     assert props["level"]["default"] == 1
+
+
+def test_a_field_carries_no_moderation_mark_by_default() -> None:
+    props = schema()["paths"]["/events/set_level"]["post"]["requestBody"]["content"][
+        "application/json"
+    ]["schema"]["properties"]
+    assert "x-reactor-moderate" not in props["level"]
+
+
+def test_a_field_that_opts_in_renders_the_moderation_mark() -> None:
+    props = schema()["paths"]["/events/set_prompt"]["post"]["requestBody"]["content"][
+        "application/json"
+    ]["schema"]["properties"]
+    assert props["prompt"]["x-reactor-moderate"] is True
 
 
 def test_a_field_with_a_default_is_not_required() -> None:

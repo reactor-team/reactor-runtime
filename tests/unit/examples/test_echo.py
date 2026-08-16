@@ -66,6 +66,16 @@ def test_set_overlay_image_bounds_its_strength() -> None:
     assert fields["overlay_strength"].info.le == 1.0
 
 
+def test_the_free_text_and_upload_fields_ask_for_moderation() -> None:
+    commands = ModelContract.of(Echo).commands
+    caption = commands["set_caption"].command.__command_fields__
+    overlay = commands["set_overlay_image"].command.__command_fields__
+    assert caption["caption"].info.moderate is True
+    assert overlay["overlay_image"].info.moderate is True
+    # A bounded knob carries no free text, so it asks for nothing.
+    assert overlay["overlay_strength"].info.moderate is False
+
+
 def test_tracks_are_bidirectional_audio_and_video() -> None:
     tracks = ModelContract.of(Echo).tracks
     assert {name: (t.kind.value, t.direction.value) for name, t in tracks.items()} == {

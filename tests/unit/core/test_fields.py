@@ -17,11 +17,19 @@ def test_input_field_carries_constraints() -> None:
     assert info.ge == 0.0
     assert info.le == 2.0
     assert info.description == "a level"
-    assert info.moderate is True
 
 
 def test_input_field_without_default_is_required() -> None:
     assert InputField().default is NO_DEFAULT
+
+
+def test_a_field_opts_out_of_moderation_by_default() -> None:
+    assert InputField().moderate is False
+    assert FieldInfo().moderate is False
+
+
+def test_a_field_opts_in_to_moderation_explicitly() -> None:
+    assert InputField(moderate=True).moderate is True
 
 
 def test_input_field_rejects_default_factory() -> None:

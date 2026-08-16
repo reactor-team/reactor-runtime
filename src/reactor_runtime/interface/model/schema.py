@@ -237,8 +237,8 @@ def _merge_constraints(schema: dict[str, Any], info: FieldInfo) -> None:
         schema["maxLength"] = info.max_length
     if info.choices is not None:
         schema["enum"] = info.choices
-    if not info.moderate:
-        schema["x-reactor-moderate"] = False
+    if info.moderate:
+        schema["x-reactor-moderate"] = True
 
 
 def _coerce_default(value: Any) -> Any:
