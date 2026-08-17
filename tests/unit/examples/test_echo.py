@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -64,6 +64,34 @@ def test_set_overlay_image_bounds_its_strength() -> None:
     fields = ModelContract.of(Echo).commands["set_overlay_image"].command.__command_fields__
     assert fields["overlay_strength"].info.ge == 0.0
     assert fields["overlay_strength"].info.le == 1.0
+
+
+def test_the_free_text_and_upload_fields_ask_for_moderation() -> None:
+    commands = ModelContract.of(Echo).commands
+    caption = commands["set_caption"].command.__command_fields__
+    overlay = commands["set_overlay_image"].command.__command_fields__
+    assert caption["caption"].info.moderate is True
+    assert overlay["overlay_image"].info.moderate is True
+    # A bounded knob carries no free text, so it asks for nothing.
+    assert overlay["overlay_strength"].info.moderate is False
+
+
+def test_the_rendered_schema_states_each_field_s_moderation_preference() -> None:
+    doc = ModelContract.of(Echo).render_schema().to_openapi()
+
+    def properties(command: str) -> dict[str, Any]:
+        body = doc["paths"][f"/events/{command}"]["post"]["requestBody"]["content"][
+            "application/json"
+        ]["schema"]
+        return body["properties"]
+
+    assert properties("set_caption")["caption"]["x-reactor-moderate"] is True
+    overlay = properties("set_overlay_image")
+    assert overlay["overlay_image"] == {
+        "$ref": "#/components/schemas/ReactorUploadReference",
+        "x-reactor-moderate": True,
+    }
+    assert overlay["overlay_strength"]["x-reactor-moderate"] is False
 
 
 def test_tracks_are_bidirectional_audio_and_video() -> None:

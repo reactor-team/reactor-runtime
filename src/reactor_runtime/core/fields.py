@@ -42,7 +42,10 @@ class FieldInfo:
         min_length: Minimum length for a string or sequence value.
         max_length: Maximum length for a string or sequence value.
         choices: Exhaustive set of allowed values.
-        moderate: Whether the field's value is eligible for content moderation.
+        moderate: Whether the field is marked for content moderation in the
+            rendered schema, which states either polarity. Defaults to
+            ``False``; see :func:`InputField` for what the mark does and which
+            fields it applies to.
     """
 
     default: Any = NO_DEFAULT
@@ -52,7 +55,7 @@ class FieldInfo:
     min_length: int | None = None
     max_length: int | None = None
     choices: list[Any] | None = None
-    moderate: bool = True
+    moderate: bool = False
 
 
 def InputField(  # noqa: N802 — a capitalised factory reads as a type in field declarations
@@ -65,7 +68,7 @@ def InputField(  # noqa: N802 — a capitalised factory reads as a type in field
     min_length: int | None = None,
     max_length: int | None = None,
     choices: list[Any] | None = None,
-    moderate: bool = True,
+    moderate: bool = False,
 ) -> Any:
     """Declare a default value and validation constraints for a field.
 
@@ -84,11 +87,16 @@ def InputField(  # noqa: N802 — a capitalised factory reads as a type in field
         min_length: Minimum length for a string or sequence value.
         max_length: Maximum length for a string or sequence value.
         choices: Exhaustive set of allowed values.
-        moderate: Whether the field's value is eligible for content moderation
-            when moderation is enabled. Only free-text strings and uploaded
-            files are ever moderated; typed, enum, and bounded numeric fields
-            are rejected before a handler sees them, so there is nothing left to
-            moderate.
+        moderate: Whether to mark the field for content moderation. ``False``
+            by default, so a field is marked only when you ask for it. Either
+            way the rendered schema states the answer: the field carries
+            ``x-reactor-moderate: true`` or ``x-reactor-moderate: false``. The
+            mark is a preference and nothing more — it starts no check, and the
+            runtime moderates nothing itself. Whether a check runs against a
+            marked field is a deployment decision taken from that schema. Only
+            free-text strings and uploaded files are ever eligible — typed,
+            enum, and bounded numeric fields carry no free text, so the mark
+            does nothing for them.
 
     Returns:
         A :class:`FieldInfo` carrying the supplied default and constraints.
