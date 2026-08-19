@@ -31,7 +31,13 @@ from typing import Any, ClassVar, get_type_hints
 
 from reactor_runtime.core.model import ReactorEvent, SessionEnded, SessionStarted
 from reactor_runtime.core.values import ConnId
-from reactor_runtime.interface.events.decorators import EVENT_ATTR, EventHandler, make_command
+from reactor_runtime.interface.events.decorators import (
+    EVENT_ATTR,
+    EventHandler,
+    event,
+    make_command,
+)
+from reactor_runtime.interface.events.errors import CommandError
 from reactor_runtime.interface.internal.input_buffer import BufferClosed
 from reactor_runtime.interface.internal.reactor_core import CommandEnvelope, ReactorCore
 from reactor_runtime.interface.model.reactor_model import ReactorModel
@@ -92,7 +98,10 @@ class ReactorPipeline(ReactorModel):
     """The session's :class:`InputState` instance, or ``None`` between sessions."""
 
     _gen_lock: asyncio.Lock | None
+    _paused: bool
     _session_active: bool
+    _step_requested: bool
+    _turn_ready: asyncio.Event
     _runnable: asyncio.Event
 
     def __init_subclass__(cls, **kwargs: object) -> None:
@@ -121,7 +130,10 @@ class ReactorPipeline(ReactorModel):
     def _on_loop_ready(self) -> None:
         super()._on_loop_ready()
         self._gen_lock = asyncio.Lock()
+        self._paused = False
         self._session_active = False
+        self._step_requested = False
+        self._turn_ready = asyncio.Event()
         self._runnable = asyncio.Event()
 
     # -- session-aware gating -------------------------------------------------
@@ -141,6 +153,8 @@ class ReactorPipeline(ReactorModel):
             # lives until the session ends: a client leaving and rejoining
             # mid-session keeps the same state.
             self.state = self.__pipeline_state__()
+            self._paused = False
+            self._step_requested = False
             self._session_active = True
         elif isinstance(event, SessionEnded):
             # Forbid generation before the hook runs so the driver, which checks
@@ -161,6 +175,26 @@ class ReactorPipeline(ReactorModel):
             self._runnable.set()
         else:
             self._runnable.clear()
+            self._step_requested = False
+            self._turn_ready.set()
+
+    @event(name="set_paused", description="Pause or resume continuous inference.")
+    def set_paused(self, paused: bool) -> None:
+        """Pause or resume generation at an inference-turn boundary."""
+        self._paused = paused
+        if not paused:
+            self._step_requested = False
+        self._turn_ready.set()
+
+    @event(name="step", description="Request one inference turn while paused.")
+    def step(self) -> None:
+        """Request one inference turn without resuming continuous generation."""
+        if not self._paused:
+            raise CommandError("not_paused", "Pause inference before requesting a step.")
+        if self._step_requested:
+            raise CommandError("step_busy", "An inference step is already pending.")
+        self._step_requested = True
+        self._turn_ready.set()
 
     # -- handler serialisation ------------------------------------------------
 
@@ -226,8 +260,15 @@ class ReactorPipeline(ReactorModel):
             ended_cleanly = False
             try:
                 while self._runnable.is_set():
+                    if self._paused and not self._step_requested:
+                        self._turn_ready.clear()
+                        await self._turn_ready.wait()
+                        continue
                     try:
                         async with lock:
+                            if self._paused and not self._step_requested:
+                                continue
+                            manual_step = self._paused
                             output, compute_time = await self._advance(gen, is_async)
                     except _GeneratorEnded:
                         gen = inference_fn()
@@ -238,12 +279,12 @@ class ReactorPipeline(ReactorModel):
 
                     if output is None:
                         await asyncio.sleep(_IDLE_SLEEP)
-                        continue
-
-                    if dynamic_fps:
+                    elif dynamic_fps:
                         await self.emit(output, compute_time=compute_time)
                     else:
                         await self.emit(output)
+                    if manual_step:
+                        self._step_requested = False
                 ended_cleanly = True
             finally:
                 try:

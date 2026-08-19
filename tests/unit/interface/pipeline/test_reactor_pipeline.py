@@ -25,6 +25,7 @@ from reactor_runtime.core.model import (
     SessionStarted,
 )
 from reactor_runtime.core.values import ConnId
+from reactor_runtime.interface.events.errors import CommandError
 from reactor_runtime.interface.internal.input_buffer import BufferClosed
 from reactor_runtime.interface.internal.reactor_core import CommandEnvelope
 from reactor_runtime.interface.model.contract import ModelContract
@@ -76,6 +77,12 @@ def test_public_state_fields_become_commands() -> None:
     commands = ModelContract.of(Pipe).commands
     assert "set_speed" in commands
     assert "set_seed" in commands
+
+
+def test_pipeline_controls_are_commands() -> None:
+    commands = ModelContract.of(Pipe).commands
+    assert "set_paused" in commands
+    assert "step" in commands
 
 
 def test_private_state_fields_are_not_exposed() -> None:
@@ -284,6 +291,27 @@ class DynamicRecorder(ReactorPipeline):
             self._runnable.clear()
 
 
+class SteppableRecorder(ReactorPipeline):
+    state: State
+    fps = 12
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.count = 0
+        self.emitted = asyncio.Event()
+
+    def inference(self) -> Iterator[Frame]:
+        while True:
+            yield _frame()
+
+    async def emit(
+        self, output: Output, *, compute_time: float | None = None, drop: bool = False
+    ) -> None:
+        self.count += 1
+        self.emitted.set()
+        await asyncio.sleep(0)
+
+
 def _open_session(pipe: ReactorPipeline) -> None:
     """Make a readied pipeline runnable, as a live session with a client would."""
     pipe._session_active = True
@@ -319,6 +347,43 @@ async def test_dynamic_fps_emits_with_a_compute_time() -> None:
     await _drive(pipe)
     assert pipe.emitted
     assert all(compute_time is not None for _, compute_time in pipe.emitted)
+
+
+async def test_pause_stops_generation_and_step_emits_one_turn() -> None:
+    pipe = SteppableRecorder()
+    _ready(pipe)
+    _open_session(pipe)
+    pipe.set_paused(True)
+    task = asyncio.create_task(pipe.run())
+    try:
+        await asyncio.sleep(0.02)
+        assert pipe.count == 0
+
+        pipe.step()
+        await asyncio.wait_for(pipe.emitted.wait(), timeout=0.1)
+        await asyncio.sleep(0.02)
+        assert pipe.count == 1
+
+        pipe.emitted.clear()
+        pipe.set_paused(False)
+        await asyncio.wait_for(pipe.emitted.wait(), timeout=0.1)
+        assert pipe.count > 1
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+def test_step_requires_pause_and_rejects_a_pending_turn() -> None:
+    pipe = Pipe()
+    _ready(pipe)
+    with pytest.raises(CommandError, match="Pause inference"):
+        pipe.step()
+
+    pipe.set_paused(True)
+    pipe.step()
+    with pytest.raises(CommandError, match="already pending"):
+        pipe.step()
 
 
 class _PinnedBase(ReactorPipeline):
