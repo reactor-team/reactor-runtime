@@ -219,6 +219,19 @@ recording is not flushed — a playout cut is not an archive boundary. A probe
 that read `self.output_buffer._q` / `_queue` still has nothing to read; the
 queues live per connection, downstream.
 
+## Inbound frames carry the sender's `capture_time_us`
+
+An `InputFrame` arrives with `capture_time_us` beside `pts` and `metadata`:
+the microsecond its sender stamped the frame, or `None` from a sender that
+stamps nothing. Nothing in the runtime reads it; it is there for a model
+that needs the source's own timing.
+
+Unlike `pts`, it is a reading of another machine's clock. Differences
+between stamps from one sender are that source's timing, which is the part
+worth having; a stamp minus a local clock reading is mostly the offset
+between two clocks that drift apart, so a latency computed that way
+measures the wrong thing.
+
 ## What did not change
 
 `ReactorModel` itself is the same shape: `load()` + `async def run()` driving
