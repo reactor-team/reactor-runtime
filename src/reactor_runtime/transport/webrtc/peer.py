@@ -581,8 +581,10 @@ class WebRTCPeer:
     ) -> Callable[[bytes, int, int, rw.FrameMetadata | None], None]:
         """Build the callback that turns one decoded video frame into an InputFrame.
 
-        The fourth argument is the metadata the sender attached, when the trailer
-        was there to read and the receiver transform is in place to strip it.
+        The fourth argument is the trailer the sender attached, when it was there
+        to read and the receiver transform is in place to strip it. It carries the
+        sender's own bytes and, beside them, the microsecond the sender stamped
+        the frame at, which reaches the model as that frame's capture time.
         """
 
         def sink(
@@ -591,10 +593,15 @@ class WebRTCPeer:
             if self._stop_event.is_set():
                 return
             metadata = bytes(meta.user_data) if meta is not None else b""
+            # The trailer leaves the stamp zero when the sender set none. Zero is
+            # not a clock reading, so it is the absence of a stamp rather than a
+            # frame captured at the epoch.
+            capture_us = meta.timestamp if meta is not None else 0
             frame = InputFrame(
                 data=bgra_to_rgb(bgra, width, height),
                 # An empty trailer is a frame the sender attached nothing to.
                 metadata=metadata or None,
+                capture_time_us=capture_us or None,
             )
             self._fire(self._cb_media, name, frame)
 
