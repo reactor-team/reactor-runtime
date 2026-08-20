@@ -322,9 +322,9 @@ def test_a_batched_emission_is_recorded_whole(tmp_path: Path) -> None:
     """A batch bigger than the feed queue must still reach the timeline.
 
     The model hands over frames in bursts — Helios emits 33 at a time, ~50 on the
-    30fps grid, into a queue holding 4 — so without waiting for the encoder the
-    recorder keeps the first handful of every emission and the media clock crawls
-    at a fraction of the media produced.
+    30fps grid, into a queue holding 4 — so the whole emission only lands if the
+    producer waits for the encoder to drain. The media clock is the witness: it
+    advances by the frames fed, so it reads short by exactly what was lost.
     """
     recorder = Recorder(RecordingConfig(enabled=True, chunk_seconds=4, recording_dir=str(tmp_path)))
     recorder.start(_SID)
@@ -361,10 +361,44 @@ def test_a_saturated_feed_queue_abandons_the_emission_and_keeps_recording(
 
         recorder.on_chunk(MediaChunk(bundle=_batched_bundle(9), fps=30.0, n_frames=9))
 
-        # Nine frames at 30fps on a 30fps grid: all nine are abandoned, and the
-        # count says nine rather than the one it used to report.
+        # Nine frames at 30fps on a 30fps grid, into a queue nothing drains: the
+        # wait expires, the whole emission is abandoned, and the count says nine —
+        # the size of what was lost, not of one frame in it. The session lives on.
         assert recorder._dropped_frames == 9
         assert not recorder._disabled
+    finally:
+        recorder.stop()
+
+
+def test_the_feed_wait_is_budgeted_per_emission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One emission cannot stall the model thread by more than the budget.
+
+    The wait belongs to the emission, not to each frame in it: ~50 grid frames
+    against a per-frame timeout would hold the producer — and the live broadcast
+    behind it — for fifty times what the constant advertises.
+    """
+    wait = 0.05
+    monkeypatch.setattr("reactor_runtime.recording.recorder._FEED_WAIT_SECONDS", wait)
+    recorder = Recorder(RecordingConfig(enabled=True, chunk_seconds=4, recording_dir=str(tmp_path)))
+    recorder.start(_SID)
+    try:
+        # Park the feed worker and fill the queue, so no wait can ever succeed.
+        recorder._feed_stop.set()
+        feed_thread = recorder._feed_thread
+        assert feed_thread is not None
+        feed_thread.join(timeout=2.0)
+        while not recorder._feed_queue.full():
+            recorder._feed_queue.put_nowait((np.zeros((4, 4, 3), dtype=np.uint8), None))
+
+        batch = 33  # ~50 frames on the grid, so a per-frame budget would show
+        started = time.monotonic()
+        recorder.on_chunk(MediaChunk(bundle=_batched_bundle(batch), fps=20.0, n_frames=batch))
+        elapsed = time.monotonic() - started
+
+        assert elapsed < wait * 10
+        assert recorder._dropped_frames > 0
     finally:
         recorder.stop()
 

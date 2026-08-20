@@ -45,13 +45,18 @@ logger = get_logger(__name__)
 # model that runs slower or faster than real time still records at true duration.
 RECORDING_FPS = 30
 
-#: How long :meth:`Recorder._feed_chunk` waits for room in the feed queue before
-#: giving the frame up. A batched emission is a burst — a model handing over 33
-#: frames at once needs ~50 grid frames written while the queue holds 4 — so the
-#: producer has to wait for the encoder rather than drop what does not fit. The
-#: wait is bounded so a wedged encoder stalls the recording, not the model: at a
-#: real output size the encoder drains a 720p frame in single-digit milliseconds,
-#: making this three orders of magnitude more than a healthy encoder ever needs.
+#: How long :meth:`Recorder._feed_chunk` waits, in total across one emission, for
+#: room in the feed queue. A batched emission is a burst — a model handing over
+#: 33 frames at once needs ~50 grid frames written while the queue holds 4 — so
+#: the producer has to wait for the encoder rather than drop what does not fit.
+#:
+#: The budget spans the emission rather than each frame because that is what
+#: bounds the stall: an encoder draining a frame every 0.9s never fills the queue
+#: long enough to raise `Full`, so a per-frame timeout would let 50 frames hold
+#: the model thread for 45s while advertising one second. At a real output size
+#: the encoder drains a 720p frame in single-digit milliseconds, which leaves
+#: this two orders of magnitude above what a healthy encoder needs for a whole
+#: emission.
 _FEED_WAIT_SECONDS = 1.0
 
 _INIT_FILENAME = "init.mp4"
@@ -432,7 +437,7 @@ class Recorder:
     # -- media fan-out tap ----------------------------------------------------
 
     def on_chunk(self, chunk: MediaChunk) -> None:
-        """Feed one emitted media chunk to the recording; non-blocking.
+        """Feed one emitted media chunk to the recording, waiting for encoder room.
 
         Called on the model thread by the runner's media fan-out. The chunk's
         frames are resampled from the chunk's own rate onto the fixed recording
@@ -446,7 +451,9 @@ class Recorder:
         room up to :data:`_FEED_WAIT_SECONDS`; only past that is the rest of the
         emission abandoned, since a recording that silently keeps a tenth of its
         frames is worse than a model thread that waits milliseconds for the
-        encoder. This is where the recorder parts ways with the pacer, which
+        encoder. The budget covers the emission, not each frame in it.
+
+        This is where the recorder parts ways with the pacer, which
         drops the overflow on a full queue unless the chunk asks otherwise
         (:attr:`MediaChunk.wait`): a late frame on the wire is worthless, while
         a missing frame in an artifact is permanent.
@@ -472,11 +479,14 @@ class Recorder:
         self._grid_debt -= grid_frames
         audio_target = round(self._audio_sample_rate / RECORDING_FPS) if self._has_audio else 0
         fed = 0
+        deadline = time.monotonic() + _FEED_WAIT_SECONDS
         for i in range(grid_frames):
             video_data = frames[i * len(frames) // grid_frames]
             audio_data = self._take_audio(audio_target) if self._has_audio else None
             try:
-                self._feed_queue.put((video_data, audio_data), timeout=_FEED_WAIT_SECONDS)
+                self._feed_queue.put(
+                    (video_data, audio_data), timeout=max(0.0, deadline - time.monotonic())
+                )
             except queue.Full:
                 # Abandoning the rest of the emission, not one frame of it: the
                 # count has to say so, or a recording that kept a tenth of its

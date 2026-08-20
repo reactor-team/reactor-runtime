@@ -889,16 +889,20 @@ class Runner(ServiceComponent, ConnectionSink):
         """Fan one emitted media chunk out to the recorder and the connections.
 
         Called off the model loop (emit dispatches to a worker thread). The
-        recorder is fed first and always queues without blocking, so a
-        backpressure wait in a connection's pacer (``chunk.wait``) delays the
-        producer, never the recording. A chunk emitted with ``drop=True``
-        keeps every consumer non-blocking.
+        connections are served first: both consumers can make the producer wait
+        for room — a pacer when the chunk asks for backpressure (``chunk.wait``),
+        the recorder whenever the encoder is behind — and of the two, only live
+        delivery is worthless late. So the archive waits behind the wire rather
+        than the wire behind the archive; the recording lags by that much and
+        loses nothing, because its timeline advances with the frames fed rather
+        than with the clock. A chunk emitted with ``drop=True`` keeps every
+        consumer non-blocking.
         """
         for track in chunk.bundle.tracks:
             self._model_metrics.emitted(track, chunk.n_frames)
-        self._recorder.on_chunk(chunk)
         generation = self._media_generation
         self._connections.broadcast_media(chunk, abort=lambda: self._media_generation != generation)
+        self._recorder.on_chunk(chunk)
 
     def _flush_media(self) -> None:
         """Drop queued media in every connection and cut playout to black.
