@@ -45,6 +45,15 @@ logger = get_logger(__name__)
 # model that runs slower or faster than real time still records at true duration.
 RECORDING_FPS = 30
 
+#: How long :meth:`Recorder._feed_chunk` waits for room in the feed queue before
+#: giving the frame up. A batched emission is a burst — a model handing over 33
+#: frames at once needs ~50 grid frames written while the queue holds 4 — so the
+#: producer has to wait for the encoder rather than drop what does not fit. The
+#: wait is bounded so a wedged encoder stalls the recording, not the model: at a
+#: real output size the encoder drains a 720p frame in single-digit milliseconds,
+#: making this three orders of magnitude more than a healthy encoder ever needs.
+_FEED_WAIT_SECONDS = 1.0
+
 _INIT_FILENAME = "init.mp4"
 # Written into a recording's directory once it is finished, so its final segment
 # (which has no successor to prove it closed) is recognised as fetchable.
@@ -433,8 +442,14 @@ class Recorder:
         duration. Fractional grid frames carry across chunks so the resampling
         accumulates no drift. The timeline advances by the media actually fed,
         not by wall-clock, so a pause simply stops advancing rather than
-        recording dead air. A frame that does not fit the feed queue is dropped
-        to keep the model thread unblocked.
+        recording dead air. A frame that does not fit the feed queue waits for
+        room up to :data:`_FEED_WAIT_SECONDS`; only past that is the rest of the
+        emission abandoned, since a recording that silently keeps a tenth of its
+        frames is worse than a model thread that waits milliseconds for the
+        encoder. This is where the recorder parts ways with the pacer, which
+        drops the overflow on a full queue unless the chunk asks otherwise
+        (:attr:`MediaChunk.wait`): a late frame on the wire is worthless, while
+        a missing frame in an artifact is permanent.
         """
         if self.disabled:
             return
@@ -461,14 +476,21 @@ class Recorder:
             video_data = frames[i * len(frames) // grid_frames]
             audio_data = self._take_audio(audio_target) if self._has_audio else None
             try:
-                self._feed_queue.put_nowait((video_data, audio_data))
+                self._feed_queue.put((video_data, audio_data), timeout=_FEED_WAIT_SECONDS)
             except queue.Full:
-                self._dropped_frames += 1
-                if self._dropped_frames == 1 or self._dropped_frames % 300 == 0:
-                    logger.warning(
-                        "recorder feed queue full; dropping a frame to keep the model unblocked",
-                        dropped_total=self._dropped_frames,
-                    )
+                # Abandoning the rest of the emission, not one frame of it: the
+                # count has to say so, or a recording that kept a tenth of its
+                # frames looks like one that lost a handful.
+                abandoned = grid_frames - fed
+                self._dropped_frames += abandoned
+                logger.warning(
+                    "recorder feed queue still full after waiting; abandoning the rest "
+                    "of the emission",
+                    abandoned=abandoned,
+                    of_grid_frames=grid_frames,
+                    dropped_total=self._dropped_frames,
+                    waited_seconds=_FEED_WAIT_SECONDS,
+                )
                 break
             fed += 1
         if fed:

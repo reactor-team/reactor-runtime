@@ -25,7 +25,7 @@ from reactor_runtime.recording import (
     Recorder,
     RecorderDisabledError,
 )
-from reactor_runtime.recording.recorder import _RETENTION_SECONDS
+from reactor_runtime.recording.recorder import _RETENTION_SECONDS, RECORDING_FPS
 
 _SID = "00000000-0000-0000-0000-000000000001"
 
@@ -291,6 +291,15 @@ def _video_bundle() -> MediaBundle:
     return MediaBundle(tracks={"main_video": TrackData(info=info, data=frame)})
 
 
+def _batched_bundle(n: int) -> MediaBundle:
+    """One emission carrying *n* frames, the way a batching model hands them over."""
+    data = np.zeros((n, 64, 64, 3), dtype=np.uint8)
+    info = TrackInfo(
+        name="main_video", kind=TrackKind.VIDEO, rate=30.0, direction=TrackDirection.OUT
+    )
+    return MediaBundle(tracks={"main_video": TrackData(info=info, data=data)})
+
+
 def _av_bundle(width: int, height: int) -> MediaBundle:
     """A bundle at a real output size, with the audio slot that pairs with it."""
     frame = np.zeros((height, width, 3), dtype=np.uint8)
@@ -309,13 +318,39 @@ def _av_bundle(width: int, height: int) -> MediaBundle:
     )
 
 
-def test_a_saturated_feed_queue_drops_a_frame_and_keeps_recording(tmp_path: Path) -> None:
+def test_a_batched_emission_is_recorded_whole(tmp_path: Path) -> None:
+    """A batch bigger than the feed queue must still reach the timeline.
+
+    The model hands over frames in bursts — Helios emits 33 at a time, ~50 on the
+    30fps grid, into a queue holding 4 — so without waiting for the encoder the
+    recorder keeps the first handful of every emission and the media clock crawls
+    at a fraction of the media produced.
+    """
+    recorder = Recorder(RecordingConfig(enabled=True, chunk_seconds=4, recording_dir=str(tmp_path)))
+    recorder.start(_SID)
+    try:
+        batch, fps = 33, 20.0
+        emissions = 3
+        for _ in range(emissions):
+            recorder.on_chunk(MediaChunk(bundle=_batched_bundle(batch), fps=fps, n_frames=batch))
+        assert recorder._markers is not None
+        expected = emissions * batch / fps
+        assert recorder._markers.now_marker() == pytest.approx(expected, abs=1 / RECORDING_FPS)
+        assert recorder._dropped_frames == 0
+    finally:
+        recorder.stop()
+
+
+def test_a_saturated_feed_queue_abandons_the_emission_and_keeps_recording(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # An encoder that falls behind costs frames, never the session. The queue is
     # the only thing between the model thread and the encoder, so a full one makes
     # `on_chunk` count the loss and return rather than wait to hand the frame over.
     recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
     recorder.start(_SID)
     try:
+        monkeypatch.setattr("reactor_runtime.recording.recorder._FEED_WAIT_SECONDS", 0.05)
         # Park the feed worker, so nothing drains what `on_chunk` queues.
         recorder._feed_stop.set()
         feed_thread = recorder._feed_thread
@@ -324,9 +359,11 @@ def test_a_saturated_feed_queue_drops_a_frame_and_keeps_recording(tmp_path: Path
         while not recorder._feed_queue.full():
             recorder._feed_queue.put_nowait((np.zeros((4, 4, 3), dtype=np.uint8), None))
 
-        recorder.on_chunk(MediaChunk(bundle=_video_bundle(), fps=30.0, n_frames=1))
+        recorder.on_chunk(MediaChunk(bundle=_batched_bundle(9), fps=30.0, n_frames=9))
 
-        assert recorder._dropped_frames == 1
+        # Nine frames at 30fps on a 30fps grid: all nine are abandoned, and the
+        # count says nine rather than the one it used to report.
+        assert recorder._dropped_frames == 9
         assert not recorder._disabled
     finally:
         recorder.stop()
