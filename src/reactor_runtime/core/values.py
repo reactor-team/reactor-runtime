@@ -64,11 +64,21 @@ class InputFrame:
         metadata: What the sender attached to this frame, as the bytes it sent,
             or ``None`` for a frame that carried nothing. Decoding them is the
             model's business: the transport treats them as opaque.
+        capture_time_us: The microsecond the sender stamped this frame as it went
+            to the wire — its capture instant for a source that sends as it
+            captures — or ``None`` for a frame that carried no stamp. The wire
+            value, unrounded, in the unit the sender's own SDK works in. It rides
+            with the metadata, so a sender or a transport that carries neither
+            leaves both unset. Unlike ``pts``, it is a reading of another
+            machine's clock: differences between stamps from one sender are that
+            source's own timing, while anything subtracted from a local clock is
+            mostly the offset between two clocks that drift independently.
     """
 
     data: npt.NDArray[Any]
     pts: float | None = None
     metadata: bytes | None = None
+    capture_time_us: int | None = None
 
 
 class TrackKind(StrEnum):

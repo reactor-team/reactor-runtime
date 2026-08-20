@@ -235,6 +235,36 @@ async def test_video_sink_surfaces_the_metadata_the_sender_attached() -> None:
     assert frames[0].data.shape == (2, 2, 3)
 
 
+async def test_video_sink_surfaces_the_capture_stamp_beside_the_metadata() -> None:
+    peer = WebRTCPeer()
+    peer._loop = asyncio.get_running_loop()
+    frames: list[InputFrame] = []
+    peer.on_media(lambda _name, frame: frames.append(frame))
+
+    peer._make_video_sink("cam")(
+        bytes(2 * 2 * 4), 2, 2, rw.FrameMetadata(timestamp=1_700_000_123_456, user_data=b"{}")
+    )
+    await asyncio.sleep(0.01)
+
+    assert frames[0].capture_time_us == 1_700_000_123_456
+    assert frames[0].metadata == b"{}"
+
+
+async def test_video_sink_reads_an_unset_stamp_as_no_capture_time() -> None:
+    """The trailer leaves the field zero when the sender set no stamp, and zero is
+    not a capture time — a sender's clock never reads it."""
+    peer = WebRTCPeer()
+    peer._loop = asyncio.get_running_loop()
+    frames: list[InputFrame] = []
+    peer.on_media(lambda _name, frame: frames.append(frame))
+
+    peer._make_video_sink("cam")(bytes(2 * 2 * 4), 2, 2, rw.FrameMetadata(user_data=b"{}"))
+    await asyncio.sleep(0.01)
+
+    assert frames[0].capture_time_us is None
+    assert frames[0].metadata == b"{}"
+
+
 async def test_video_sink_reads_an_empty_trailer_as_no_metadata() -> None:
     peer = WebRTCPeer()
     peer._loop = asyncio.get_running_loop()
@@ -257,6 +287,7 @@ async def test_video_sink_accepts_a_frame_that_carries_no_trailer() -> None:
     await asyncio.sleep(0.01)
 
     assert frames[0].metadata is None
+    assert frames[0].capture_time_us is None
 
 
 def test_push_bundle_skips_paused_track() -> None:
