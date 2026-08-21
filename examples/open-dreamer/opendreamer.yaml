@@ -1,0 +1,29 @@
+source:
+  revision: 797e41f052b5996740938fd2fe8161f1866de3a2
+
+checkpoint:
+  repo_id: reactor-team/open-dreamer
+  revision: 844af1b3bf13900e2d7fa4c4003cd071db69e87c
+
+platform: cuda
+memory_fraction: 0.9
+seed: 0
+num_steps: 4
+tau_ctx_target: 0.9
+warmup_steps: 1
+
+conditioning:
+  frames: 16
+  demos:
+    - name: demo_1
+      video: samples/vpt/cheeky-cornflower-setter-02e496ce4abb-20220421-092639.mp4
+      actions: samples/vpt/cheeky-cornflower-setter-02e496ce4abb-20220421-092639.jsonl
+      start_frame: 160
+    - name: demo_2
+      video: samples/vpt/cheeky-cornflower-setter-02e496ce4abb-20220421-092639.mp4
+      actions: samples/vpt/cheeky-cornflower-setter-02e496ce4abb-20220421-092639.jsonl
+      start_frame: 320
+    - name: demo_3
+      video: samples/vpt/cheeky-cornflower-setter-02e496ce4abb-20220421-092639.mp4
+      actions: samples/vpt/cheeky-cornflower-setter-02e496ce4abb-20220421-092639.jsonl
+      start_frame: 480

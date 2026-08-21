@@ -1,0 +1,13 @@
+# Python dependencies installed into the model image in one pass, so conflicts
+# fail during `reactor build` rather than during model loading.
+reactor-runtime==3.1.2
+jax[cuda12]==0.10.1
+flax==0.12.7
+orbax-checkpoint==0.11.40
+optax @ git+https://github.com/google-deepmind/optax.git@666c4a2b2d1ab03ac25f92b37f5ae8c2487038f0
+einops==0.8.2
+hydra-core==1.3.2
+huggingface-hub==1.17.0
+pillow==12.2.0
+tqdm==4.67.3
+nvidia-cusparse-cu12==12.5.10.65

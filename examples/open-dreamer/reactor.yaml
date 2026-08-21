@@ -1,0 +1,27 @@
+apiVersion: v1beta
+kind: VideoModel
+
+model:
+  name: open-dreamer
+  version: v0.0.1
+  description: |
+    Stream an interactive Minecraft rollout initialized from a configured
+    dataset demo or an uploaded screenshot and controlled with keyboard and
+    mouse commands.
+
+runtime:
+  import: opendreamer:OpenDreamer
+  config: opendreamer.yaml
+
+build:
+  runtime_version: "3.1.2"
+
+recording:
+  enabled: true
+  chunk_seconds: 4
+  clip_max_seconds: 300
+  video_track: main_video
+  video:
+    codec: h264
+    preset: veryfast
+    crf: 23

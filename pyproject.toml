@@ -126,7 +126,7 @@ python = ".venv"
 python-version = "3.12"
 # Import roots ty would not otherwise search: the repo root, so the example
 # models (`examples`, first-party but outside the package) resolve the way
-# pytest's pythonpath makes them importable; the `stepped` workspace, which the
+# pytest's pythonpath makes them importable; each example workspace, which the
 # runtime imports by its own directory, so its modules reach their siblings by
 # plain name the way a scaffolded model does; the WebRTC test directory, so its
 # tests can import their sibling `conftest` for the shared peer fakes; and the
@@ -134,6 +134,7 @@ python-version = "3.12"
 extra-paths = [
     ".",
     "examples/stepped",
+    "examples/open-dreamer",
     "tests/unit/transport/webrtc",
     "tests/contract",
 ]
