@@ -1587,6 +1587,48 @@ async def test_emitted_media_is_counted_in_frames_per_track(started_runner: Runn
     assert _metric(started_runner, "runtime_media_frames_total", track="main_audio") == 4.0
 
 
+async def test_media_reaches_the_connections_before_the_recorder(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Feeding the recorder can make the fan-out wait when the encoder is behind,
+    # bounded but real, while a pacer that waits is throttling to the playout
+    # rate it was asked for. Serving the connections first keeps a stalled
+    # archive off the live path.
+    started_runner.start_session({})
+    served: list[str] = []
+    monkeypatch.setattr(
+        started_runner._connections,
+        "broadcast_media",
+        lambda *_a, **_k: served.append("connections"),
+    )
+    monkeypatch.setattr(started_runner._recorder, "on_chunk", lambda _c: served.append("recorder"))
+
+    started_runner._emit_media(MediaChunk(bundle=_video_bundle(), fps=30.0, n_frames=1))
+
+    assert served == ["connections", "recorder"]
+
+
+async def test_a_flush_that_cuts_the_broadcast_short_still_records_the_chunk(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A playout cut is not an archive boundary. With the recorder served last,
+    # a flush landing mid-broadcast abandons the rest of the fan-out, and the
+    # archive still has to receive the whole chunk.
+    started_runner.start_session({})
+    recorded: list[MediaChunk] = []
+    monkeypatch.setattr(started_runner._recorder, "on_chunk", lambda c: recorded.append(c))
+    monkeypatch.setattr(
+        started_runner._connections,
+        "broadcast_media",
+        lambda *_a, **_k: started_runner._flush_media(),
+    )
+    chunk = MediaChunk(bundle=_video_bundle(), fps=30.0, n_frames=1)
+
+    started_runner._emit_media(chunk)
+
+    assert recorded == [chunk]
+
+
 async def test_every_output_track_the_model_declares_starts_at_zero(
     started_runner: Runner,
 ) -> None:

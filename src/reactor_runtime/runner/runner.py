@@ -888,17 +888,27 @@ class Runner(ServiceComponent, ConnectionSink):
     def _emit_media(self, chunk: MediaChunk) -> None:
         """Fan one emitted media chunk out to the recorder and the connections.
 
-        Called off the model loop (emit dispatches to a worker thread). The
-        recorder is fed first and always queues without blocking, so a
-        backpressure wait in a connection's pacer (``chunk.wait``) delays the
-        producer, never the recording. A chunk emitted with ``drop=True``
-        keeps every consumer non-blocking.
+        Called off the model loop (emit dispatches to a worker thread). Both
+        consumers bound their queue the same way — never below the emission
+        being handed over — so a whole chunk fits each of them and the fan-out
+        costs the producer nothing while they keep up. A consumer that falls
+        behind honours ``chunk.wait``, and a chunk emitted with ``drop=True``
+        leaves every consumer non-blocking.
+
+        The connections are served first so the archive is never in front of
+        the session. A pacer that makes the producer wait is throttling it to
+        the playout rate it asked for, and drains on its own thread meanwhile;
+        the recorder's wait is bounded instead, because an encoder can stall
+        outright. Feeding the recorder second keeps that bounded stall off the
+        live path, and leaves its queue the whole broadcast to drain into.
         """
         for track in chunk.bundle.tracks:
             self._model_metrics.emitted(track, chunk.n_frames)
-        self._recorder.on_chunk(chunk)
         generation = self._media_generation
         self._connections.broadcast_media(chunk, abort=lambda: self._media_generation != generation)
+        # The archive takes the whole chunk even when a flush cut the broadcast
+        # short: a playout cut is not an archive boundary.
+        self._recorder.on_chunk(chunk)
 
     def _flush_media(self) -> None:
         """Drop queued media in every connection and cut playout to black.

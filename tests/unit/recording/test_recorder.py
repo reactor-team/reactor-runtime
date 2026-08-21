@@ -1,7 +1,10 @@
+import contextlib
 import os
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -25,9 +28,18 @@ from reactor_runtime.recording import (
     Recorder,
     RecorderDisabledError,
 )
-from reactor_runtime.recording.recorder import _RETENTION_SECONDS
+from reactor_runtime.recording.recorder import (
+    _FEED_DEPTH,
+    _FEED_WAIT_SECONDS,
+    _RETENTION_SECONDS,
+    RECORDING_FPS,
+)
 
 _SID = "00000000-0000-0000-0000-000000000001"
+# Ceiling on how long a deliberately stalled encoder stays stalled. Well above
+# the deadline the tests measure, and absolute rather than per-frame, so a
+# regression that waits forever fails in seconds instead of hanging the suite.
+_WEDGE_TIMEOUT_SECONDS = 10.0
 
 
 def _serving_recorder(root: Path) -> Recorder:
@@ -309,25 +321,207 @@ def _av_bundle(width: int, height: int) -> MediaBundle:
     )
 
 
-def test_a_saturated_feed_queue_drops_a_frame_and_keeps_recording(tmp_path: Path) -> None:
-    # An encoder that falls behind costs frames, never the session. The queue is
-    # the only thing between the model thread and the encoder, so a full one makes
-    # `on_chunk` count the loss and return rather than wait to hand the frame over.
+def _batched_bundle(n_frames: int, fps: float = float(RECORDING_FPS)) -> MediaBundle:
+    """A batched video track, the shape a model that emits several frames hands over."""
+    data = np.zeros((n_frames, 64, 64, 3), dtype=np.uint8)
+    info = TrackInfo(
+        name="main_video", kind=TrackKind.VIDEO, rate=fps, direction=TrackDirection.OUT
+    )
+    return MediaBundle(tracks={"main_video": TrackData(info=info, data=data)})
+
+
+def _park_feed_worker(recorder: Recorder) -> None:
+    """Stop the feed worker so nothing drains what `on_chunk` queues."""
+    recorder._feed_stop.set()
+    feed_thread = recorder._feed_thread
+    assert feed_thread is not None
+    feed_thread.join(timeout=2.0)
+
+
+def _saturate(recorder: Recorder, depth: int) -> None:
+    """Fill the feed queue to *depth*, the capacity an emission of that size sees."""
+    for _ in range(depth):
+        recorder._feed_queue.put_nowait((np.zeros((4, 4, 3), dtype=np.uint8), None))
+
+
+@contextlib.contextmanager
+def _wedged_encoder(recorder: Recorder, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Stall the encoder so the feed worker can never open room in the queue.
+
+    ``_feed_stop`` is left clear, so a full queue is refused for the reason the
+    refusal exists — the encoder is behind — rather than short-circuited by the
+    recording winding down. The worker takes one frame and stalls inside the
+    encoder, so saturating one frame past the emission's capacity leaves the
+    queue full for as long as this context is open.
+    """
+    recorder._build_encoder(_batched_bundle(1))
+    encoder = recorder._encoder
+    assert encoder is not None
+    stalled = threading.Event()
+    give_up_at = time.monotonic() + _WEDGE_TIMEOUT_SECONDS
+
+    def stall(frame: Any) -> None:
+        stalled.wait(max(0.0, give_up_at - time.monotonic()))
+
+    monkeypatch.setattr(encoder, "feed_video", stall)
+    try:
+        yield
+    finally:
+        # Released before the recorder is stopped, so teardown never waits out
+        # the stall and a failed assertion cannot hang the suite.
+        stalled.set()
+
+
+def test_a_batched_emission_reaches_the_timeline_whole(tmp_path: Path) -> None:
+    # A model that batches hands over more frames at once than the queue's own
+    # depth. The bound is never applied below the emission being queued, so the
+    # whole batch is taken; a queue that gated at its depth instead would keep a
+    # fraction of every emission and record a fraction of the media produced.
     recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
     recorder.start(_SID)
     try:
-        # Park the feed worker, so nothing drains what `on_chunk` queues.
-        recorder._feed_stop.set()
-        feed_thread = recorder._feed_thread
-        assert feed_thread is not None
-        feed_thread.join(timeout=2.0)
-        while not recorder._feed_queue.full():
-            recorder._feed_queue.put_nowait((np.zeros((4, 4, 3), dtype=np.uint8), None))
+        _park_feed_worker(recorder)
+        n_frames = _FEED_DEPTH * 8
 
-        recorder.on_chunk(MediaChunk(bundle=_video_bundle(), fps=30.0, n_frames=1))
+        recorder.on_chunk(
+            MediaChunk(
+                bundle=_batched_bundle(n_frames),
+                fps=float(RECORDING_FPS),
+                n_frames=n_frames,
+                wait=True,
+            )
+        )
 
-        assert recorder._dropped_frames == 1
-        assert not recorder._disabled
+        assert recorder._feed_queue.qsize() == n_frames
+        assert recorder._dropped_frames == 0
+        markers = recorder._markers
+        assert markers is not None
+        assert markers.now_marker() == pytest.approx(n_frames / RECORDING_FPS)
+    finally:
+        recorder.stop()
+
+
+def test_a_batch_slower_than_the_grid_records_its_true_duration(tmp_path: Path) -> None:
+    # The shape a real batching model emits: frames at a rate below the recording
+    # grid, so the batch resamples up to more grid frames than it carries. The
+    # timeline has to reach the media time the emission represents, since that is
+    # what a clip's marker range and the encoded bytes are both read against.
+    recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
+    recorder.start(_SID)
+    try:
+        _park_feed_worker(recorder)
+        n_frames, fps = 33, 20.0
+
+        recorder.on_chunk(
+            MediaChunk(bundle=_batched_bundle(n_frames, fps), fps=fps, n_frames=n_frames, wait=True)
+        )
+
+        markers = recorder._markers
+        assert markers is not None
+        assert markers.now_marker() == pytest.approx(n_frames / fps, abs=1.0 / RECORDING_FPS)
+        assert recorder._dropped_frames == 0
+    finally:
+        recorder.stop()
+
+
+def test_a_saturated_feed_queue_drops_the_whole_overflow_and_keeps_recording(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An encoder that falls behind costs frames, never the session. A chunk that
+    # prefers skipping to waiting has its overflow dropped, and every abandoned
+    # frame is counted: a count that stopped at the first one would report a
+    # recording losing most of its media as losing a frame.
+    recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
+    recorder.start(_SID)
+    try:
+        with _wedged_encoder(recorder, monkeypatch):
+            n_frames = _FEED_DEPTH * 2
+            _saturate(recorder, n_frames + 1)
+
+            recorder.on_chunk(
+                MediaChunk(
+                    bundle=_batched_bundle(n_frames),
+                    fps=float(RECORDING_FPS),
+                    n_frames=n_frames,
+                    wait=False,
+                )
+            )
+
+            assert recorder._dropped_frames == n_frames
+            assert not recorder._disabled
+    finally:
+        recorder.stop()
+
+
+def test_a_waiting_emission_gives_up_on_an_encoder_that_never_drains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Backpressure is bounded, so a wedged encoder stalls the recording rather
+    # than the session: the emission waits its budget for room, then abandons
+    # what is left and hands the model thread back. The wait has to be the
+    # deadline expiring and nothing else, so the band excludes a zero wait —
+    # an emission that never waited would satisfy "gives up" for the wrong
+    # reason and leave the budget itself unmeasured.
+    recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
+    recorder.start(_SID)
+    try:
+        with _wedged_encoder(recorder, monkeypatch):
+            n_frames = _FEED_DEPTH * 2
+            _saturate(recorder, n_frames + 1)
+
+            started = time.monotonic()
+            recorder.on_chunk(
+                MediaChunk(
+                    bundle=_batched_bundle(n_frames),
+                    fps=float(RECORDING_FPS),
+                    n_frames=n_frames,
+                    wait=True,
+                )
+            )
+            elapsed = time.monotonic() - started
+
+            assert _FEED_WAIT_SECONDS <= elapsed < 2 * _FEED_WAIT_SECONDS
+            assert recorder._dropped_frames == n_frames
+            assert not recorder._disabled
+    finally:
+        recorder.stop()
+
+
+def test_a_recording_that_stops_mid_emission_reports_no_dropped_frames(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Teardown is not encoder pressure. A stop that lands while an emission is
+    # parked on a full queue releases it, and the frames it never handed over
+    # are not the encoder falling behind — counting them would put phantom
+    # losses on the very summary stop() logs as the recording's health.
+    recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
+    recorder.start(_SID)
+    try:
+        with _wedged_encoder(recorder, monkeypatch):
+            n_frames = _FEED_DEPTH * 2
+            _saturate(recorder, n_frames + 1)
+            emitting = threading.Thread(
+                target=recorder.on_chunk,
+                args=(
+                    MediaChunk(
+                        bundle=_batched_bundle(n_frames),
+                        fps=float(RECORDING_FPS),
+                        n_frames=n_frames,
+                        wait=True,
+                    ),
+                ),
+                daemon=True,
+            )
+            emitting.start()
+            # Park the emission on the full queue before the stop lands, so the
+            # stop is what releases it rather than the deadline.
+            time.sleep(0.2)
+
+            recorder.stop()
+            emitting.join(timeout=2 * _FEED_WAIT_SECONDS)
+
+            assert not emitting.is_alive()
+            assert recorder._dropped_frames == 0
     finally:
         recorder.stop()
 
