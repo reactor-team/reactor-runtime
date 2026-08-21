@@ -24,6 +24,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -84,6 +85,23 @@ _CHUNK_FILENAME_RE = re.compile(r"^(init\.mp4|chunk_\d{5}\.m4s)$")
 
 _AudioArray = npt.NDArray[Any]
 _FeedItem = tuple[npt.NDArray[Any], _AudioArray | None]
+
+
+class _Slot(Enum):
+    """The answer to asking the feed queue for room for one grid frame.
+
+    Separates the two reasons room is refused, because only one of them is a
+    fact about the recording's health: frames abandoned because the encoder is
+    behind are the recording losing media, while frames abandoned because the
+    recording is stopping are teardown and say nothing about the encoder.
+    """
+
+    TAKEN = "taken"
+    """There is room; the frame can be queued."""
+    FULL = "full"
+    """The encoder is behind, and any wait the chunk asked for has run out."""
+    WINDING_DOWN = "winding_down"
+    """The recording is stopping, so the rest of the emission is moot."""
 
 
 class RecorderError(Exception):
@@ -467,7 +485,10 @@ class Recorder:
         queue is full the chunk decides, exactly as it does at the wire: a chunk
         that asks for backpressure (``chunk.wait``) makes this call wait for
         room, bounded by :data:`_FEED_WAIT_SECONDS` across the emission, and one
-        that prefers skipping has its overflow dropped and counted.
+        that prefers skipping has its overflow dropped and counted. Only the
+        encoder falling behind is counted: an emission cut short because the
+        recording is stopping is teardown, and reporting it would put phantom
+        losses on the summary :meth:`stop` logs.
         """
         if self.disabled:
             return
@@ -494,38 +515,44 @@ class Recorder:
         capacity = max(_FEED_DEPTH, grid_frames)
         deadline = time.monotonic() + _FEED_WAIT_SECONDS
         fed = 0
+        outcome = _Slot.TAKEN
         for i in range(grid_frames):
-            if not self._claim_slot(capacity, wait=chunk.wait, deadline=deadline):
+            outcome = self._claim_slot(capacity, wait=chunk.wait, deadline=deadline)
+            if outcome is not _Slot.TAKEN:
                 break
             video_data = frames[i * len(frames) // grid_frames]
             audio_data = self._take_audio(audio_target) if self._has_audio else None
             self._feed_queue.put_nowait((video_data, audio_data))
             fed += 1
-        if fed < grid_frames:
+        if outcome is _Slot.FULL:
             self._count_dropped(grid_frames - fed, grid_frames)
         if fed:
             markers.advance(fed / RECORDING_FPS)
 
-    def _claim_slot(self, capacity: int, *, wait: bool, deadline: float) -> bool:
-        """Return whether the feed queue has room for one more grid frame.
+    def _claim_slot(self, capacity: int, *, wait: bool, deadline: float) -> _Slot:
+        """Ask the feed queue for room for one more grid frame.
 
         A chunk that asks for backpressure waits for the encoder to take a
-        frame, until *deadline* passes or the recording winds down; one that
-        does not reports the full queue immediately so its caller can drop.
+        frame, until *deadline* passes; one that does not reports the full queue
+        immediately so its caller can drop. A recording that is stopping answers
+        :attr:`_Slot.WINDING_DOWN` on either path, so teardown is never counted
+        against the encoder.
         """
         if self._feed_queue.qsize() < capacity:
-            return True
+            return _Slot.TAKEN
+        if self._feed_stop.is_set() or self._disabled:
+            return _Slot.WINDING_DOWN
         if not wait:
-            return False
+            return _Slot.FULL
         with self._feed_room:
             while self._feed_queue.qsize() >= capacity:
                 if self._feed_stop.is_set() or self._disabled:
-                    return False
+                    return _Slot.WINDING_DOWN
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    return False
+                    return _Slot.FULL
                 self._feed_room.wait(timeout=min(remaining, 0.1))
-        return True
+        return _Slot.TAKEN
 
     def _count_dropped(self, dropped: int, offered: int) -> None:
         """Record the frames an emission could not hand over, and say so.

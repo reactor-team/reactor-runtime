@@ -892,15 +892,23 @@ class Runner(ServiceComponent, ConnectionSink):
         consumers bound their queue the same way — never below the emission
         being handed over — so a whole chunk fits each of them and the fan-out
         costs the producer nothing while they keep up. A consumer that falls
-        behind honours ``chunk.wait``: a chunk emitted with ``drop=True``
-        leaves every consumer non-blocking, and the recorder's own wait is
-        bounded so a stalled encoder costs the recording, not the session.
+        behind honours ``chunk.wait``, and a chunk emitted with ``drop=True``
+        leaves every consumer non-blocking.
+
+        The connections are served first so the archive is never in front of
+        the session. A pacer that makes the producer wait is throttling it to
+        the playout rate it asked for, and drains on its own thread meanwhile;
+        the recorder's wait is bounded instead, because an encoder can stall
+        outright. Feeding the recorder second keeps that bounded stall off the
+        live path, and leaves its queue the whole broadcast to drain into.
         """
         for track in chunk.bundle.tracks:
             self._model_metrics.emitted(track, chunk.n_frames)
-        self._recorder.on_chunk(chunk)
         generation = self._media_generation
         self._connections.broadcast_media(chunk, abort=lambda: self._media_generation != generation)
+        # The archive takes the whole chunk even when a flush cut the broadcast
+        # short: a playout cut is not an archive boundary.
+        self._recorder.on_chunk(chunk)
 
     def _flush_media(self) -> None:
         """Drop queued media in every connection and cut playout to black.
