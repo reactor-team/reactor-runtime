@@ -242,7 +242,10 @@ async def test_video_sink_surfaces_the_capture_stamp_beside_the_metadata() -> No
     peer.on_media(lambda _name, frame: frames.append(frame))
 
     peer._make_video_sink("cam")(
-        bytes(2 * 2 * 4), 2, 2, rw.FrameMetadata(timestamp=1_700_000_123_456, user_data=b"{}")
+        bytes(2 * 2 * 4),
+        2,
+        2,
+        rw.FrameMetadata(capture_time_us=1_700_000_123_456, user_data=b"{}"),
     )
     await asyncio.sleep(0.01)
 
@@ -251,8 +254,13 @@ async def test_video_sink_surfaces_the_capture_stamp_beside_the_metadata() -> No
 
 
 async def test_video_sink_reads_an_unset_stamp_as_no_capture_time() -> None:
-    """The trailer leaves the field zero when the sender set no stamp, and zero is
-    not a capture time — a sender's clock never reads it."""
+    """Zero is the trailer's "unset", and a sender's clock never reads it.
+
+    A sender on a current transport always declares something, so this is the
+    hand-built trailer and the peer that carries the field without filling it —
+    still worth pinning, because reading zero as a capture time would put every
+    such frame at the epoch.
+    """
     peer = WebRTCPeer()
     peer._loop = asyncio.get_running_loop()
     frames: list[InputFrame] = []

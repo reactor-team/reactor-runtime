@@ -217,6 +217,8 @@ async def test_loopback_carries_media_and_messages() -> None:
     messages: list[tuple[bytes | str, ProtocolVersion, Channel]] = []
     inbound_media: dict[str, int] = {}
     inbound_metadata: list[bytes] = []
+    inbound_capture_times: list[int] = []
+    client_stamps: list[int] = []
     connected = asyncio.Event()
     loop = asyncio.get_running_loop()
 
@@ -238,6 +240,8 @@ async def test_loopback_carries_media_and_messages() -> None:
         inbound_media[name] = inbound_media.get(name, 0) + 1
         if frame.metadata is not None:
             inbound_metadata.append(frame.metadata)
+        if frame.capture_time_us is not None:
+            inbound_capture_times.append(frame.capture_time_us)
 
     peer.on_message(_record_message)
     peer.on_media(_record_media)
@@ -281,6 +285,7 @@ async def test_loopback_carries_media_and_messages() -> None:
                 and client.received_metadata
                 and inbound_media.get("in_video")
                 and inbound_metadata
+                and inbound_capture_times
             ):
                 break
             value += 1
@@ -298,8 +303,18 @@ async def test_loopback_carries_media_and_messages() -> None:
                 )
             )
             bgra, width, height = rgb_to_bgra(_solid_frame(value + 128))
+            # The client declares when it captured the frame, from the clock the
+            # transport reads capture times in. What the model sees for it is
+            # asserted below: the value this client chose, not an instant the
+            # transport picked on its behalf.
+            stamp = rw.time_micros()
+            client_stamps.append(stamp)
             client.send_track.push_video_frame(
-                bgra, width, height, user_data=f'{{"client":{value}}}'.encode()
+                bgra,
+                width,
+                height,
+                user_data=f'{{"client":{value}}}'.encode(),
+                capture_time_us=stamp,
             )
             await asyncio.sleep(0.033)
 
@@ -309,6 +324,11 @@ async def test_loopback_carries_media_and_messages() -> None:
         assert client.received_metadata, "frame metadata never reached the client"
         assert client.received_metadata[0].startswith(b'{"frame":'), (
             f"unexpected metadata on the wire: {client.received_metadata[0]!r}"
+        )
+        assert inbound_capture_times, "the client's capture stamp never surfaced via on_media"
+        assert inbound_capture_times[0] in client_stamps, (
+            f"capture time {inbound_capture_times[0]} is none of the stamps the client "
+            f"declared (first few: {client_stamps[:3]})"
         )
         assert inbound_metadata, "the client's frame metadata never surfaced via on_media"
         assert inbound_metadata[0].startswith(b'{"client":'), (
