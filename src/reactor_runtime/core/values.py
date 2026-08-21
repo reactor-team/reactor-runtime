@@ -64,15 +64,18 @@ class InputFrame:
         metadata: What the sender attached to this frame, as the bytes it sent,
             or ``None`` for a frame that carried nothing. Decoding them is the
             model's business: the transport treats them as opaque.
-        capture_time_us: The microsecond the sender stamped this frame as it went
-            to the wire — its capture instant for a source that sends as it
-            captures — or ``None`` for a frame that carried no stamp. The wire
-            value, unrounded, in the unit the sender's own SDK works in. It rides
-            with the metadata, so a sender or a transport that carries neither
-            leaves both unset. Unlike ``pts``, it is a reading of another
-            machine's clock: differences between stamps from one sender are that
-            source's own timing, while anything subtracted from a local clock is
-            mostly the offset between two clocks that drift independently.
+        capture_time_us: When the sender says this frame was captured, in
+            microseconds, or ``None`` for a frame that carried no stamp. The value
+            the sender declared, unrounded — a client that stamps several tracks
+            from one clock reading therefore delivers that one value on all of
+            them, which is what makes a multi-camera capture readable as a single
+            moment. A sender that declares nothing has its transport read a clock
+            for it, so a stamped frame is the normal case. It rides with the
+            metadata, so a sender or a transport that carries neither leaves both
+            unset. Unlike ``pts``, it is a reading of another machine's clock:
+            differences between stamps from one sender are that source's own
+            timing, while anything subtracted from a local clock is mostly the
+            offset between two clocks that drift independently.
     """
 
     data: npt.NDArray[Any]

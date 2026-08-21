@@ -583,8 +583,8 @@ class WebRTCPeer:
 
         The fourth argument is the trailer the sender attached, when it was there
         to read and the receiver transform is in place to strip it. It carries the
-        sender's own bytes and, beside them, the microsecond the sender stamped
-        the frame at, which reaches the model as that frame's capture time.
+        sender's own bytes and, beside them, the capture time the sender declared
+        for the frame, which reaches the model as that frame's capture time.
         """
 
         def sink(
@@ -593,10 +593,9 @@ class WebRTCPeer:
             if self._stop_event.is_set():
                 return
             metadata = bytes(meta.user_data) if meta is not None else b""
-            # The trailer leaves the stamp zero when the sender set none. Zero is
-            # not a clock reading, so it is the absence of a stamp rather than a
-            # frame captured at the epoch.
-            capture_us = meta.timestamp if meta is not None else 0
+            # Zero is the trailer's "unset", and it is not a clock reading: a frame
+            # captured at the epoch is not what a sender means by it.
+            capture_us = meta.capture_time_us if meta is not None else 0
             frame = InputFrame(
                 data=bgra_to_rgb(bgra, width, height),
                 # An empty trailer is a frame the sender attached nothing to.
