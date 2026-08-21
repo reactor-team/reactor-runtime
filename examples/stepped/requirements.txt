@@ -1,0 +1,10 @@
+# Python dependencies installed into the model image in one pip pass, so a
+# conflict between the runtime and the model's deps fails the build instead of
+# surfacing at model load.
+#
+# reactor-runtime is the runtime itself; bump this line to upgrade. Releases are
+# immutable — there is no `latest`.
+#
+# The model needs nothing else: it computes with the NumPy the runtime already
+# depends on, which is what keeps this example runnable without a GPU.
+reactor-runtime==3.1.2

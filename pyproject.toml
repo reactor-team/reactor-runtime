@@ -126,10 +126,17 @@ python = ".venv"
 python-version = "3.12"
 # Import roots ty would not otherwise search: the repo root, so the example
 # models (`examples`, first-party but outside the package) resolve the way
-# pytest's pythonpath makes them importable; the WebRTC test directory, so
-# its tests can import their sibling `conftest` for the shared peer fakes; and
-# the contract suite, so its tests can import their sibling `contract_helpers`.
-extra-paths = [".", "tests/unit/transport/webrtc", "tests/contract"]
+# pytest's pythonpath makes them importable; the `stepped` workspace, which the
+# runtime imports by its own directory, so its modules reach their siblings by
+# plain name the way a scaffolded model does; the WebRTC test directory, so its
+# tests can import their sibling `conftest` for the shared peer fakes; and the
+# contract suite, so its tests can import their sibling `contract_helpers`.
+extra-paths = [
+    ".",
+    "examples/stepped",
+    "tests/unit/transport/webrtc",
+    "tests/contract",
+]
 
 [tool.ty.src]
 # Check the package, its tests, and the example models; scripts/ ships developer
@@ -148,5 +155,8 @@ exclude = [
 testpaths = ["tests"]
 asyncio_mode = "auto"
 # The example models live at the repo root (outside the package) so they are not
-# shipped; put the root on the path so the suite can import them.
-pythonpath = ["."]
+# shipped; put the root on the path so the suite can import them. A workspace the
+# runtime imports by its own directory — `stepped`, whose model reaches its
+# sibling by plain name — is on the path as itself, so the tests import it
+# exactly as the runtime does.
+pythonpath = [".", "examples/stepped"]

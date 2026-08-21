@@ -258,7 +258,12 @@ class FixedRecorder(ReactorPipeline):
             yield _frame()
 
     async def emit(
-        self, output: Output, *, compute_time: float | None = None, drop: bool = False
+        self,
+        output: Output,
+        *,
+        compute_time: float | None = None,
+        fps: float | None = None,
+        drop: bool = False,
     ) -> None:
         self.emitted.append((output, compute_time))
         if len(self.emitted) >= 3:
@@ -277,7 +282,12 @@ class DynamicRecorder(ReactorPipeline):
             yield _frame()
 
     async def emit(
-        self, output: Output, *, compute_time: float | None = None, drop: bool = False
+        self,
+        output: Output,
+        *,
+        compute_time: float | None = None,
+        fps: float | None = None,
+        drop: bool = False,
     ) -> None:
         self.emitted.append((output, compute_time))
         if len(self.emitted) >= 3:
@@ -339,7 +349,12 @@ class InheritedFpsRecorder(_PinnedBase):
             yield _frame()
 
     async def emit(
-        self, output: Output, *, compute_time: float | None = None, drop: bool = False
+        self,
+        output: Output,
+        *,
+        compute_time: float | None = None,
+        fps: float | None = None,
+        drop: bool = False,
     ) -> None:
         self.emitted.append((output, compute_time))
         if len(self.emitted) >= 3:
@@ -564,7 +579,12 @@ class Streamer(ReactorPipeline):
             yield _frame()
 
     async def emit(
-        self, output: Output, *, compute_time: float | None = None, drop: bool = False
+        self,
+        output: Output,
+        *,
+        compute_time: float | None = None,
+        fps: float | None = None,
+        drop: bool = False,
     ) -> None:
         self.count += 1
         await asyncio.sleep(0)  # yield so other tasks (and a stop) get scheduled

@@ -7,12 +7,19 @@ once, from a single traversal of the class, and caches it on the class — the
 commands its ``@event`` handlers expose, the messages they return, its tracks,
 and its lifecycle hooks.
 
-This class supplies the *what* the engine leaves open: the two dispatch loops
-that drain the engine's typed queues into handlers. The command loop validates
-nothing — that happened at the bridge — and turns each :class:`CommandEnvelope`
-back into a handler call, replying with the handler's returned message to the
-one connection that sent the command. The reactor loop runs the lifecycle hooks
-and maintains :attr:`connected` from the live client count.
+Two things live here and nowhere else. The *authoring surface*: the annotations
+a model declares, the handful of methods it may override, and nothing besides.
+And the *what* the engine leaves open: the two dispatch loops that drain the
+engine's typed queues into handlers. The command loop validates nothing — that
+happened at the bridge — and turns each :class:`CommandEnvelope` back into a
+handler call, replying with the handler's returned message to the one connection
+that sent the command. The reactor loop runs the lifecycle hooks, maintains
+:attr:`connected` from the live client count, and builds the session's state.
+
+The default generation loop is deliberately not here: it lives in
+:class:`~reactor_runtime.interface.internal.step_driver.StepDriver`, which
+``run()`` creates and hands the loop to. A model that overrides ``run()`` has no
+driver at all, so it inherits no half-loop it has to reason about.
 """
 
 from __future__ import annotations
@@ -21,6 +28,7 @@ import asyncio
 import inspect
 import time
 from collections.abc import Callable, Coroutine
+from pathlib import Path
 from typing import Any, ClassVar
 
 from reactor_runtime.codes import INTERNAL_ERROR
@@ -42,7 +50,16 @@ from reactor_runtime.interface.internal.reactor_core import (
     ReactorCore,
     RequestId,
 )
+from reactor_runtime.interface.internal.step_driver import StepDriver
 from reactor_runtime.interface.model.contract import ModelContract
+from reactor_runtime.interface.model.input_state import InputState
+from reactor_runtime.interface.model.state_binding import (
+    STATE_TYPE_ATTR,
+    resolve_state_class,
+    stamp_auto_setters,
+)
+from reactor_runtime.interface.model.stepping import StepStats
+from reactor_runtime.interface.tracks.output import OUTPUT_REGISTRY, Output
 from reactor_runtime.log import get_logger
 
 logger = get_logger(__name__)
@@ -51,32 +68,233 @@ logger = get_logger(__name__)
 class ReactorModel(ReactorCore):
     """Base class an author subclasses to define a model.
 
+    Declare what the model exchanges, then fill in as much of the step as it
+    needs::
+
+        class Helios(ReactorModel):
+            state: HeliosState        # what a client may set, as set_<field> commands
+            input: HeliosInput        # inbound tracks, as live frame buffers
+            model: HeliosGenerator    # the model the runtime drives
+
     Decorate methods with ``@event`` to expose commands, and with the lifecycle
     decorators to hook session and connection events — ``@session_started`` is
     the hook for once-per-session initialization. Declaring the subclass
     resolves the contract and caches it on the class, reachable through
     :meth:`ModelContract.of`.
 
+    Two ways to produce. Declare ``model:`` and the runtime drives it, calling
+    :meth:`map_step` for its arguments and :meth:`to_output` with what it
+    produced. Or override :meth:`run` and own the loop, keeping the state, the
+    commands, the tracks, and the model binding exactly as they are.
+
     Class attributes:
         fps: The nominal rate, in frames per second, an emitted chunk plays out
-            at when the model does not measure its own compute time (default 30).
-            A model that passes ``compute_time`` to :meth:`emit` paces itself and
-            this is only the fallback.
+            at when neither the output nor a measurement says otherwise
+            (default 30). Declaring it pins playout to a fixed rate.
+
+    Attributes:
+        state: The session's :class:`InputState` instance, or ``None`` between
+            sessions. Built before ``@session_started`` runs and cleared after
+            ``@session_ended``, so it survives a client leaving and rejoining.
+        model: The model the runtime drives, when the class declares one.
 
     Lifecycle:
         connected: An :class:`asyncio.Event` set while at least one client is
-            connected and cleared when the last one leaves, so a ``run`` loop can
-            gate generation on having an audience.
+            connected and cleared when the last one leaves or the session ends,
+            so a ``run`` loop can gate generation on having an audience.
     """
 
     __reactor_contract__: ClassVar[ModelContract]
+
+    state: Any
+    """The session's state instance, or ``None`` between sessions."""
+
+    model: Any
+    """The model the runtime drives, when the class declares one."""
 
     connected: asyncio.Event
     _clients: dict[ConnId, ClientInfo]
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
+        # The generated set_<field> commands are stamped before the contract is
+        # assembled, so they are resolved as ordinary commands like any @event.
+        state_cls = resolve_state_class(cls)
+        if state_cls is not None:
+            setattr(cls, STATE_TYPE_ATTR, state_cls)
+            stamp_auto_setters(cls, state_cls)
         cls.__reactor_contract__ = ModelContract.build(cls)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.state = None
+        declared = getattr(type(self), "model", None)
+        if isinstance(declared, type):
+            # `model = TheModel` names a class for the runtime to build; an
+            # instance assigned in load() is the other, fuller form.
+            self.model = declared()
+
+    # -- author surface -------------------------------------------------------
+
+    def load(self, config_path: Path | None) -> None:
+        """Load weights and allocate resources, once, before any client connects.
+
+        The default hands *config_path* to the model bound as a class-level
+        default (``model = TheModel``), which is all a model that takes no
+        constructor arguments needs. Override it to build the model yourself::
+
+            def load(self, config_path):
+                self.model = HeliosGenerator()
+                self.model.load(config_path)
+
+        Args:
+            config_path: Path to the model's config file (from ``runtime.config``
+                in ``reactor.yaml``), or ``None`` when none is configured. The
+                runtime does not parse it; the model reads and interprets it
+                however it wants.
+        """
+        loader = getattr(getattr(self, "model", None), "load", None)
+        if loader is not None:
+            loader(config_path)
+
+    def map_step(self, state: Any, input: Any) -> dict[str, Any]:
+        """Build the arguments for one step. No side effects.
+
+        Read the values a client set off *state*, drain the frames that arrived
+        off *input*, and return the keyword arguments the model's ``generate``
+        wants. Raise :class:`~reactor_runtime.NotReady` when there is nothing to
+        step on yet — the driver holds the stream and tries again.
+
+        Both arguments are passed rather than read off ``self``, so a step is
+        visibly a function of exactly those two things and can be tested without
+        a session. Do not call the model, ``emit``, ``send``, or ``flush`` from
+        here; those belong to ``@event`` handlers and ``to_output``.
+
+        The default passes every public state field, by name, which is all a
+        model whose arguments *are* its state fields needs::
+
+            def map_step(self, state, input):
+                frames = input.webcam.try_read(4)
+                if frames is None:
+                    raise NotReady("waiting for webcam frames")
+                return {"driving": np.stack([f.data for f in frames]), "prompt": state.prompt}
+
+        Args:
+            state: The session's state instance, or ``None`` if none is declared.
+            input: The inbound track holder, or ``None`` if none is declared.
+
+        Returns:
+            The keyword arguments to call the model's ``generate`` with.
+
+        Raises:
+            NotReady: There is nothing to step on yet.
+        """
+        if state is None:
+            return {}
+        return {name: getattr(state, name) for name in type(state)._public_fields}
+
+    def to_output(self, *produced: Any, **products: Any) -> Any:
+        """Put what the model produced on the wire.
+
+        Return an :class:`Output` to emit media, a
+        :class:`~reactor_runtime.ModelMessage` to send one, a sequence of either
+        when a step does both, or ``None`` to publish nothing. Messages are sent
+        before the media, so an action never waits behind video.
+
+        What the model returned arrives here by shape: a mapping spreads into
+        keyword arguments, and anything else arrives as one positional argument.
+        Declare a ``stats`` parameter to receive the runtime's
+        :class:`~reactor_runtime.StepStats` for the step alongside it::
+
+            def to_output(self, *, frames, drift, stats: StepStats) -> MyOutput:
+                return MyOutput(
+                    main_video=TrackPayload(frames, metadata=[{"drift": d} for d in drift]),
+                    fps=CAMERA_FPS,
+                )
+
+        The default places a single produced value on the model's one declared
+        output track, and a mapping onto the tracks its keys name. A model with
+        several output classes, or with none because it only sends messages,
+        implements this instead. Overrides are free to declare the exact
+        parameters the model produces; the signature here accepts anything so
+        that a narrower one is still a valid override.
+
+        Args:
+            produced: What ``generate`` returned, when it was not a mapping.
+            products: The entries of the mapping ``generate`` returned.
+
+        Returns:
+            What to publish for this step.
+
+        Raises:
+            TypeError: If the default cannot tell which track a value belongs on.
+        """
+        output_cls = _sole_output_class(type(self))
+        if products:
+            return output_cls(**products)
+        tracks = output_cls.__tracks__
+        if len(tracks) != 1:
+            raise TypeError(
+                f"{output_cls.__name__} declares {len(tracks)} tracks, so "
+                f"{type(self).__name__} must implement to_output() to say which product "
+                f"goes on which track, or have generate() return a mapping keyed by track."
+            )
+        if not produced:
+            raise TypeError(
+                f"{type(self).__name__} produced nothing to place on "
+                f"'{next(iter(tracks))}'. Return the frames from generate(), or None to "
+                f"skip the step."
+            )
+        return output_cls(**{next(iter(tracks)): produced[0]})
+
+    async def on_state_changed(self, state: Any) -> None:
+        """React to the state having changed, after the change landed.
+
+        Called around every step — once with everything the commands since the
+        last step have written, and again if the step itself wrote to the state.
+        The place to mirror the state to clients, which is one line::
+
+            async def on_state_changed(self, state) -> None:
+                await self.send(Controls.from_state(state))
+
+        Left as a no-op by default. This is where a client is *told* about a
+        change; doing work in reaction to one belongs to the model, which sees
+        the values on the next step anyway.
+
+        Args:
+            state: The state as it now stands.
+        """
+
+    def on_step(self, stats: StepStats) -> None:
+        """React to a step that produced, after its products are on the wire.
+
+        The place for per-step application effects the wire contract does not
+        carry — a progress message, a metric, a counter. Left as a no-op by
+        default.
+
+        Args:
+            stats: What the runtime measured about the step.
+        """
+
+    async def run(self) -> None:
+        """Drive the declared ``model:`` while a client is connected.
+
+        Override this to own the generation loop, and everything else keeps
+        working: the state and its commands, the ``@event`` handlers, the
+        lifecycle hooks, the tracks, and the model binding. An override gates on
+        :attr:`connected` and emits on its own schedule::
+
+            async def run(self) -> None:
+                while True:
+                    await self.connected.wait()
+                    while self.connected.is_set():
+                        ...
+
+        Raises:
+            TypeError: If the class declares no ``model:`` to drive and does not
+                override this method.
+        """
+        await StepDriver(self).run()
 
     # -- engine hooks ---------------------------------------------------------
 
@@ -172,6 +390,10 @@ class ReactorModel(ReactorCore):
         wholesale without a per-connection close — so :attr:`connected` reads
         false for a ``run`` loop gating on it and the client registry does not
         leak across sessions. Upload events run their hooks directly.
+
+        The session's state is built before the ``@session_started`` hook, so
+        once-per-session initialization can write to it, and cleared after
+        ``@session_ended``, which may still read the ending session's values.
         """
         hooks = self.__reactor_contract__.lifecycle
         if isinstance(event, ClientConnected):
@@ -183,11 +405,15 @@ class ReactorModel(ReactorCore):
             await self._invoke_hook(hooks.disconnected, event.conn_id)
             self._clients.pop(event.conn_id, None)
         elif isinstance(event, SessionStarted):
+            state_type: type[InputState] | None = getattr(type(self), STATE_TYPE_ATTR, None)
+            if state_type is not None:
+                self.state = state_type()
             await self._invoke_hook(hooks.session_started, None)
         elif isinstance(event, SessionEnded):
             self._set_connected(0)
             await self._invoke_hook(hooks.session_ended, None)
             self._clients.clear()
+            self.state = None
         elif isinstance(event, FileUploaded):
             await self._invoke_hook(hooks.file_uploaded, event.conn_id, uploaded_file=event.file)
 
@@ -274,6 +500,36 @@ class ReactorModel(ReactorCore):
         """
         if self._out_addressed is not None:
             self._out_addressed(conn_id, message, request_id)
+
+
+def _sole_output_class(model_cls: type) -> type[Output]:
+    """Return the one declared :class:`Output` class the default mapping can use.
+
+    Args:
+        model_cls: The model class, named in the error when there is no single
+            unambiguous choice.
+
+    Returns:
+        The only registered output class.
+
+    Raises:
+        TypeError: If the model declares no output class, or more than one, so
+            the default cannot tell which to build.
+    """
+    declared = list(OUTPUT_REGISTRY.values())
+    if len(declared) == 1:
+        return declared[0]
+    if not declared:
+        raise TypeError(
+            f"{model_cls.__name__} declares no Output class, so there is no track to "
+            f"emit on. Declare one, or implement to_output() to return the messages "
+            f"this model publishes."
+        )
+    names = ", ".join(sorted(cls.__name__ for cls in declared))
+    raise TypeError(
+        f"{model_cls.__name__} declares several Output classes ({names}), so "
+        f"to_output() has to say which one a step builds."
+    )
 
 
 def _hook_reserved(hook: Callable[..., Any]) -> tuple[str, ...]:

@@ -77,3 +77,36 @@ def test_a_payload_without_metadata_records_none() -> None:
 def test_payloads_must_still_cover_every_track() -> None:
     with pytest.raises(TypeError, match="expects payloads"):
         GameOutput(main_video=TrackPayload(np.zeros((2, 2, 3), dtype=np.uint8)))
+
+
+def test_an_output_carries_no_rate_by_default() -> None:
+    output = GameOutput(
+        main_video=np.zeros((2, 2, 3), dtype=np.uint8),
+        narration=np.zeros((1, 4), dtype=np.int16),
+    )
+    assert output.fps is None
+
+
+def test_an_output_can_declare_its_playout_rate() -> None:
+    output = GameOutput(
+        main_video=np.zeros((2, 2, 3), dtype=np.uint8),
+        narration=np.zeros((1, 4), dtype=np.int16),
+        fps=24,
+    )
+    assert output.fps == 24
+
+
+def test_a_declared_rate_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="fps must be positive"):
+        GameOutput(
+            main_video=np.zeros((2, 2, 3), dtype=np.uint8),
+            narration=np.zeros((1, 4), dtype=np.int16),
+            fps=0,
+        )
+
+
+def test_a_track_cannot_be_named_after_the_reserved_rate() -> None:
+    with pytest.raises(TypeError, match="reserved"):
+
+        class Clashing(Output):
+            fps: Video

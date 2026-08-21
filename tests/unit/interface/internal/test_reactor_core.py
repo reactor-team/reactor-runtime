@@ -163,6 +163,23 @@ def test_emit_without_compute_time_uses_the_declared_fps() -> None:
     assert chunks[0].fps == 30
 
 
+def test_emit_prefers_the_rate_the_output_carries() -> None:
+    core = OutputOnlyCore()
+    chunks = _capture_media(core)
+    data = np.zeros((4, 4, 3), dtype=np.uint8)
+    # The output says how fast its frames play, so the measurement is not used.
+    asyncio.run(core.emit(Out(main=data, fps=24), compute_time=0.1))
+    assert chunks[0].fps == 24
+
+
+def test_emit_prefers_an_explicit_rate_over_everything() -> None:
+    core = OutputOnlyCore()
+    chunks = _capture_media(core)
+    data = np.zeros((4, 4, 3), dtype=np.uint8)
+    asyncio.run(core.emit(Out(main=data, fps=24), compute_time=0.1, fps=15))
+    assert chunks[0].fps == 15
+
+
 def test_emit_tags_a_batch_with_its_frame_count() -> None:
     core = OutputOnlyCore()
     chunks = _capture_media(core)

@@ -1,17 +1,18 @@
 """Typed, client-mutable session state — :class:`InputState`.
 
-A pipeline declares the parameters a client may change mid-session as fields on
-an :class:`InputState` subclass. A fresh instance is created for each client
-connection and read from inside ``inference()`` as ``self.state.<field>``.
+A model declares the parameters a client may change mid-session as fields on an
+:class:`InputState` subclass, and annotates ``state:`` with it. A fresh instance
+is created for each session and read as ``self.state.<field>``.
 
 Field visibility is by name:
 
 - A **public** field (no leading underscore) becomes a ``set_<field>`` command
-  the client can send. :class:`reactor_runtime.ReactorPipeline` generates the
-  handler from the field's type and :func:`InputField` constraints, so the
-  command is validated and documented exactly like a hand-written ``@event``.
+  the client can send. The runtime generates the handler from the field's type
+  and :func:`InputField` constraints, so the command is validated and
+  documented exactly like a hand-written ``@event``.
 - A **private** field (leading underscore) is a session-local cache the client
-  never sees — derived values a custom ``@event`` handler maintains.
+  never sees — derived values a custom ``@event`` handler or a mapping
+  maintains.
 - A field typed :class:`UploadedFile` is a public upload slot: its ``set_``
   command carries an upload reference the runtime resolves to bytes first.
 """
@@ -45,13 +46,13 @@ def _unwrap_optional(annotation: Any) -> Any:
 
 @dataclass_transform(field_specifiers=(InputField, FieldInfo))
 class InputState:
-    """Base for a pipeline's typed, per-connection session state.
+    """Base for a model's typed, session-scoped state.
 
     Subclass with annotated fields. Use :func:`InputField` as a field default to
     attach validation constraints. Public fields are surfaced to the client as
     ``set_<field>`` commands; underscore-prefixed fields stay private. Declaring
     the subclass partitions its fields and turns it into a dataclass, so a fresh
-    instance constructs from defaults at the start of every connection.
+    instance constructs from defaults at the start of every session.
 
     A field declared without a default is a required field; a client must set it
     before its value is read. Mutable defaults (``list`` / ``dict`` / ``set``)

@@ -37,8 +37,14 @@ from reactor_runtime.interface.internal.input_buffer import (
     ReadMode,
 )
 from reactor_runtime.interface.internal.reactor_core import OutputStream
-from reactor_runtime.interface.model import ReactorModel
-from reactor_runtime.interface.pipeline import Idle, InputState, ReactorPipeline
+from reactor_runtime.interface.model import (
+    InputState,
+    NotReady,
+    ReactorModel,
+    SteppedModel,
+    StepStats,
+)
+from reactor_runtime.interface.pipeline import Idle, ReactorPipeline
 from reactor_runtime.interface.tracks import (
     INPUT_REGISTRY,
     OUTPUT_REGISTRY,
@@ -73,11 +79,14 @@ __all__ = [
     "MessageField",
     "Metadata",
     "ModelMessage",
+    "NotReady",
     "Output",
     "OutputStream",
     "ReactorModel",
     "ReactorPipeline",
     "ReadMode",
+    "StepStats",
+    "SteppedModel",
     "Track",
     "TrackPayload",
     "UploadedFile",

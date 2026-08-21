@@ -131,14 +131,16 @@ class OutputStream:
         output: Output,
         *,
         compute_time: float | None = None,
+        fps: float | None = None,
         drop: bool = False,
     ) -> None:
         """Hand a finished output downstream as a media chunk.
 
         Converts the typed *output* into a neutral bundle and hands it to the
         bound media sink as a :class:`MediaChunk`, tagged with the rate its
-        frames should play out at: the measured throughput when *compute_time*
-        is given, else :attr:`fps`.
+        frames should play out at. The rate is the first of these that is set:
+        the *fps* argument, the rate the *output* itself carries, the measured
+        throughput from *compute_time*, and finally :attr:`fps`.
 
         By default this call waits while a downstream consumer's bounded
         queue is full, throttling a producer that outruns the playout rate.
@@ -150,12 +152,16 @@ class OutputStream:
         Args:
             output: The produced output, one payload per declared track.
             compute_time: Wall-clock seconds spent producing it, if measured.
+            fps: The rate these frames play out at, overriding everything else.
             drop: Discard overflow downstream instead of waiting for room.
         """
         core = self._core
         bundle = core._to_bundle(output)
         n_frames = bundle.frame_count
-        if compute_time is not None and compute_time > 0:
+        declared = fps if fps is not None else output.fps
+        if declared is not None:
+            fps = float(declared)
+        elif compute_time is not None and compute_time > 0:
             fps = n_frames / compute_time
         else:
             fps = float(core.fps)
@@ -249,7 +255,12 @@ class ReactorCore:
         raise NotImplementedError(f"{type(self).__name__} must implement run()")
 
     async def emit(
-        self, output: Output, *, compute_time: float | None = None, drop: bool = False
+        self,
+        output: Output,
+        *,
+        compute_time: float | None = None,
+        fps: float | None = None,
+        drop: bool = False,
     ) -> None:
         """Hand a finished output downstream — an alias of ``self.output.emit``.
 
@@ -266,6 +277,7 @@ class ReactorCore:
                 payload passed as a :class:`TrackPayload` also carries the
                 metadata to send with its frame.
             compute_time: Wall-clock seconds spent producing it, if measured.
+            fps: The rate these frames play out at, overriding everything else.
             drop: Retained for source compatibility; overflow is now handled by
                 each downstream consumer, so this has no effect here.
 
@@ -274,7 +286,7 @@ class ReactorCore:
                 carrying any, entries that do not line up with a batch, or a
                 mapping that is not JSON-serialisable.
         """
-        await self.output.emit(output, compute_time=compute_time, drop=drop)
+        await self.output.emit(output, compute_time=compute_time, fps=fps, drop=drop)
 
     async def send(self, message: ModelMessage) -> None:
         """Broadcast a typed message to every connected client."""
@@ -444,6 +456,29 @@ class ReactorCore:
             if isinstance(hint, type) and issubclass(hint, base) and hint is not base:
                 return attr_name, hint
         return None
+
+
+def fps_is_author_pinned(cls: type) -> bool:
+    """Return whether the model (or an intermediate base) pins ``fps`` itself.
+
+    The emission rate is adaptive unless the author declares ``fps``. The walk
+    covers the model's own classes but stops at :class:`ReactorCore`, whose
+    ``fps`` is the framework default rather than an author's choice — so a
+    subclass that inherits a pinned rate from an intermediate base counts as
+    pinned even without redeclaring it.
+
+    Args:
+        cls: The model class to inspect.
+
+    Returns:
+        Whether a class between *cls* and :class:`ReactorCore` declares ``fps``.
+    """
+    for klass in cls.__mro__:
+        if klass is ReactorCore:
+            break
+        if "fps" in vars(klass):
+            return True
+    return False
 
 
 def _encode_metadata(
