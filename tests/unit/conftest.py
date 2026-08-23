@@ -12,6 +12,7 @@ scope.
 
 from __future__ import annotations
 
+import logging
 import sys
 from collections.abc import Callable, Iterator
 
@@ -22,6 +23,17 @@ from reactor_runtime.interface.events.messages import MESSAGE_REGISTRY, ModelMes
 from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.interface.tracks.input import INPUT_REGISTRY, Input
 from reactor_runtime.interface.tracks.output import OUTPUT_REGISTRY, Output
+
+
+@pytest.fixture(autouse=True)
+def _restore_root_logging() -> Iterator[None]:
+    """Save and restore root handlers and level across each test."""
+    root = logging.getLogger()
+    saved_handlers = root.handlers[:]
+    saved_level = root.level
+    yield
+    root.handlers[:] = saved_handlers
+    root.setLevel(saved_level)
 
 
 @pytest.fixture(autouse=True)

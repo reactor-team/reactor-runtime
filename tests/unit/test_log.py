@@ -1,7 +1,6 @@
 import io
 import json
 import logging
-from collections.abc import Iterator
 
 import pytest
 
@@ -12,16 +11,6 @@ from reactor_runtime.log import (
     configure,
     get_logger,
 )
-
-
-@pytest.fixture(autouse=True)
-def _restore_root_logging() -> Iterator[None]:
-    root = logging.getLogger()
-    saved_handlers = root.handlers[:]
-    saved_level = root.level
-    yield
-    root.handlers[:] = saved_handlers
-    root.setLevel(saved_level)
 
 
 def configured_logger(
