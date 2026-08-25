@@ -109,21 +109,21 @@ def test_load_config_leaves_recording_at_defaults_when_absent(tmp_path: Path) ->
     assert load_config(manifest).recording == RecordingConfig()
 
 
-def test_load_config_reads_the_recording_block(tmp_path: Path) -> None:
+def test_load_config_reads_the_recording_block_nested_under_runtime(tmp_path: Path) -> None:
     manifest = tmp_path / "reactor.yaml"
     manifest.write_text(
         "runtime:\n"
         "  import: pipeline:Demo\n"
-        "recording:\n"
-        "  enabled: true\n"
-        "  chunk_seconds: 4\n"
-        "  video_track: video\n"
-        "  video:\n"
-        "    codec: libx264\n"
-        "    crf: 20\n"
-        "    target_width: 1280\n"
-        "  audio:\n"
-        "    bitrate_kbps: 96\n"
+        "  recording:\n"
+        "    enabled: true\n"
+        "    chunk_seconds: 4\n"
+        "    video_track: video\n"
+        "    video:\n"
+        "      codec: libx264\n"
+        "      crf: 20\n"
+        "      target_width: 1280\n"
+        "    audio:\n"
+        "      bitrate_kbps: 96\n"
     )
 
     recording = load_config(manifest).recording
@@ -135,6 +135,38 @@ def test_load_config_reads_the_recording_block(tmp_path: Path) -> None:
     assert recording.video_crf == 20
     assert recording.target_width == 1280
     assert recording.audio_bitrate_kbps == 96
+
+
+def test_load_config_reads_a_top_level_recording_block(tmp_path: Path) -> None:
+    # The legacy placement, still honored so older manifests keep working.
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(
+        "runtime:\n  import: pipeline:Demo\nrecording:\n  enabled: true\n  chunk_seconds: 4\n"
+    )
+
+    recording = load_config(manifest).recording
+
+    assert recording.enabled is True
+    assert recording.chunk_seconds == 4
+
+
+def test_load_config_prefers_the_nested_recording_block(tmp_path: Path) -> None:
+    # A manifest that declares both is ambiguous; the nested placement wins.
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(
+        "runtime:\n"
+        "  import: pipeline:Demo\n"
+        "  recording:\n"
+        "    chunk_seconds: 9\n"
+        "recording:\n"
+        "  enabled: true\n"
+        "  chunk_seconds: 4\n"
+    )
+
+    recording = load_config(manifest).recording
+
+    assert recording.chunk_seconds == 9
+    assert recording.enabled is False
 
 
 def test_load_config_ignores_unknown_recording_keys(tmp_path: Path) -> None:
