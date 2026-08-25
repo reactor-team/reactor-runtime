@@ -7,16 +7,21 @@ image blended over the output video).
 
 ## Run
 
-This directory is a `reactor` workspace: `reactor.yaml` names the model, the
-`Dockerfile` builds the image, and `requirements.txt` pins the runtime alongside
-OpenCV (which powers the effects). The CLI builds the image with the runtime
-inside and runs it — nothing to install on your host but the CLI and Docker.
+This directory is a `reactor` workspace: `reactor.yaml` names the model and
+defines the image in its `build:` block, and `requirements.txt` lists the
+model's own dependencies (OpenCV, which powers the effects). There is nothing
+to install on your host but the CLI and Docker.
 
 ```sh
 cd examples/echo
 reactor build
 reactor run
 ```
+
+The build is automatic: `reactor build` renders the image from `reactor.yaml`'s
+`build:` block — no Dockerfile to write or maintain. `build.runtime_version`
+pins the `reactor-runtime` release the image installs; bump it there to
+upgrade.
 
 `reactor run` reuses the image `reactor build` produced (it builds one on first
 run if none exists), then serves WebRTC signaling on `http://localhost:8080`.
