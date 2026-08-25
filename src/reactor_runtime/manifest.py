@@ -2,8 +2,8 @@
 
 The ``reactor.yaml`` manifest is the runtime's one configuration file:
 ``runtime.import`` names the model as a ``"module:Class"`` reference,
-``runtime.config`` points at the model's own config file, and the top-level
-``recording:`` block configures the recorder. This module turns that file into
+``runtime.config`` points at the model's own config file, and the
+``runtime.recording`` block configures the recorder. This module turns that file into
 a :class:`~reactor_runtime.core.RuntimeConfig` and the reference into the model
 class — and it is the only code that does either, so every entry point resolves
 the same model from the same directory.
@@ -32,8 +32,8 @@ def load_config(manifest: Path) -> RuntimeConfig:
 
     ``runtime.import`` — the ``"module:Class"`` model reference — and
     ``runtime.config`` — the path to the model's own config file — name the
-    model, ``model.name`` is the name it is published under, and the top-level
-    ``recording:`` block configures the recorder; the rest of the manifest
+    model, ``model.name`` is the name it is published under, and the
+    ``runtime.recording`` block configures the recorder; the rest of the manifest
     describes the model to the platform and is not the runtime's concern. The
     config path is passed to the model verbatim (resolved to an absolute path);
     the runtime never parses its contents.
@@ -65,7 +65,7 @@ def load_config(manifest: Path) -> RuntimeConfig:
         model_ref=model_ref,
         model_name=_model_name(document.get("model")),
         config_path=_resolve_config_path(runtime, manifest),
-        recording=_recording_from_manifest(document.get("recording")),
+        recording=_recording_from_manifest(runtime, document),
     )
 
 
@@ -110,19 +110,25 @@ def import_model_class(model_ref: str) -> type[ReactorCore]:
     return model_cls
 
 
-def _recording_from_manifest(block: Any) -> RecordingConfig:
+def _recording_from_manifest(runtime: dict[str, Any], document: dict[str, Any]) -> RecordingConfig:
     """Parse the manifest's ``recording:`` block into a :class:`RecordingConfig`.
 
-    A missing or non-mapping block leaves recording disabled at its defaults.
-    Unknown keys are ignored so a manifest can carry forward-looking settings
-    without breaking an older runtime.
+    The block nests under ``runtime:``. A top-level ``recording:`` block is
+    still honored for older manifests, and the nested block wins when both are
+    present. A missing or non-mapping block leaves recording disabled at its
+    defaults. Unknown keys are ignored so a manifest can carry forward-looking
+    settings without breaking an older runtime.
 
     Args:
-        block: The raw ``recording:`` value from the manifest, if any.
+        runtime: The manifest's ``runtime`` section.
+        document: The whole manifest document, for the legacy top-level block.
 
     Returns:
         The parsed recorder configuration.
     """
+    block = runtime.get("recording")
+    if not isinstance(block, dict):
+        block = document.get("recording")
     if not isinstance(block, dict):
         return RecordingConfig()
     raw_video = block.get("video")
