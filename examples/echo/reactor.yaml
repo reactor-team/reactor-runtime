@@ -1,10 +1,9 @@
-apiVersion: v1beta
-kind: VideoModel
+$schema: reactor/v1
 
 # `reactor build` / `reactor run` read this file: `model:` describes the model,
-# `runtime:` names the class to serve, and `build.runtime_version` records the
-# reactor-runtime release the workspace was scaffolded against (the install pin
-# lives in requirements.txt).
+# `runtime:` names the class to serve, and `build:` defines the image every
+# build produces — `build.runtime_version` pins the reactor-runtime release the
+# image installs.
 model:
   name: echo
   version: v0.0.1
@@ -15,7 +14,7 @@ runtime:
   import: echo:Echo
 
 build:
-  runtime_version: "3.1.2"
+  runtime_version: "3.2.3"
 
 recording:
   enabled: true

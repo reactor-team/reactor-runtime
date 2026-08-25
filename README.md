@@ -4,7 +4,7 @@
 
 **Build real-time AI models in Python.**
 
-[📖 Documentation](https://deploy-docs.reactor.inc) · [🚀 Quickstart](https://deploy-docs.reactor.inc/development/quickstart) · [🌐 Reactor](https://reactor.inc)
+[📖 Documentation](https://docs.reactor.inc/deploy/overview) · [🚀 Quickstart](https://docs.reactor.inc/deploy/development/overview) · [🌐 Reactor](https://reactor.inc)
 
 </div>
 
@@ -69,19 +69,19 @@ reactor run
 
 ## Install
 
-Everything runs through the [`reactor` CLI](https://deploy-docs.reactor.inc/platform/installation). There is nothing to install on your host but the CLI and Docker; the runtime ships inside the image the CLI builds for your workspace.
+Everything runs through the [`reactor` CLI](https://docs.reactor.inc/deploy/platform/installation). There is nothing to install on your host but the CLI and Docker; the runtime ships inside the image the CLI builds for your workspace.
 
 ```sh
 brew install reactor-team/tools/reactor-cli
 ```
 
-Not on macOS, or pinning a release in CI? See [Install the CLI](https://deploy-docs.reactor.inc/platform/installation).
+Not on macOS, or pinning a release in CI? See [Install the CLI](https://docs.reactor.inc/deploy/platform/installation).
 
 ## Learn more
 
-- [Quickstart](https://deploy-docs.reactor.inc/development/quickstart): from zero to a streaming model in 2 minutes
-- [Model anatomy](https://deploy-docs.reactor.inc/development/reactor-model/model-anatomy): every piece of a Reactor model, line by line
-- [The run loop](https://deploy-docs.reactor.inc/development/reactor-model/run-loop): emitting frames, batches, and frame rates
+- [Quickstart](https://docs.reactor.inc/deploy/development/overview): from zero to a streaming model in 2 minutes
+- [Model anatomy](https://docs.reactor.inc/deploy/development/reactor-model/model-anatomy): every piece of a Reactor model, line by line
+- [The run loop](https://docs.reactor.inc/deploy/development/reactor-model/run-loop): emitting frames, batches, and frame rates
 
 ## Development
 

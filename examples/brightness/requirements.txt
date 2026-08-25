@@ -1,10 +1,10 @@
-# Python dependencies installed into the model image in one pip pass, so a
-# conflict between the runtime and the model's deps fails the build instead of
+# Python dependencies installed into the model image, in one pass alongside
+# the runtime, so a version conflict between them fails the build instead of
 # surfacing at model load.
 #
-# reactor-runtime is the runtime itself; bump this line to upgrade. Releases are
-# immutable — there is no `latest`.
-reactor-runtime==3.1.2
+# reactor-runtime does not belong here: reactor.yaml's build.runtime_version
+# pins the release the image installs, and stating it twice is how the two
+# come to disagree.
 
 # Pillow draws the client-set caption over each frame. Must be >=10.1: the
 # scalable default font (ImageFont.load_default(size=...)) that keeps the caption
