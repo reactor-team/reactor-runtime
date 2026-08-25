@@ -19,6 +19,7 @@ Reactor Runtime turns an inference pipeline into a real-time, interactive media 
 - 🔌 **No transport code.** You never import a WebRTC library, manage a WebSocket, or encode video. The runtime ships its own media engine as a wheel, so a plain Python container is all a model needs.
 - ✅ **Typed, validated commands.** Declare the commands your model accepts with standard Python types and constraints. The runtime validates every payload before your handler runs and compiles the surface into an OpenAPI schema that drives typed client SDKs.
 - 📦 **One container, anywhere.** The `reactor` CLI scaffolds a workspace, builds a small image, and runs it locally. The same image deploys to [Reactor](https://reactor.inc)'s GPU cloud unchanged.
+- 🧩 **More than one GPU, without giving up the server.** A model that needs several devices keeps its single event loop, session, and output stream: subclass `DistributedWorker` for the per-GPU half and hold a `WorkerGroup` in the model. The framework spawns the ranks, gives them a process group, and then stays out of it — how you shard is yours.
 
 ## How it works
 
@@ -66,6 +67,8 @@ reactor run
 ```
 
 `reactor run` builds a container with the runtime inside and serves WebRTC signaling on port 8080. Point a browser at it with the [JS SDK](https://docs.reactor.inc), or connect from the [Reactor Sandbox](https://reactor-sandbox.vercel.app/) and watch frames stream immediately.
+
+A model too large for one GPU keeps that shape. Instead of running several copies of the server — which would contend for one port and race each other to the client — the process splits in two: the model above stays exactly as it is and touches no CUDA, while a `WorkerGroup` it builds in `load()` spawns one worker process per device, each an instance of your `DistributedWorker` subclass with its rank, device, and process group already set up. `workers.generate(...)` runs one chunk in lockstep on every rank and hands back the frames to `emit`, so `run()` reads the same as before. The framework issues no collectives of its own, which is what leaves you free to shard however your model wants — tensor-, sequence-, or context-parallel — including by carving sub-groups inside `setup()`.
 
 ## Install
 
