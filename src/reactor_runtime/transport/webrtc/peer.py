@@ -873,9 +873,14 @@ class WebRTCPeer:
             logger.debug("data-channel send failed", exc_info=True)
 
     async def add_ice(self, candidate: IceCandidate) -> None:
-        """Add a trickle-ICE candidate; valid before and after the wire connects."""
+        """Add a trickle-ICE candidate; valid before and after the wire connects.
+
+        An empty candidate string is the end-of-candidates marker, which the
+        native binding's parser rejects, so it is a no-op here rather than a
+        negotiation-aborting error.
+        """
         pc = self._pc
-        if self._stop_event.is_set() or pc is None:
+        if self._stop_event.is_set() or pc is None or not candidate.candidate.strip():
             return
         ice = rw.IceCandidate(
             candidate=candidate.candidate,

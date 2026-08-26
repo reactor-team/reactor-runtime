@@ -45,7 +45,12 @@ from reactor_runtime.transport.webrtc.peer import (  # noqa: E402
     _video_codec_preferences,
     libwebrtc_peer_factory,
 )
-from reactor_runtime.transport.webrtc.signaling import MappedTrack, SdpOffer, TrackMap  # noqa: E402
+from reactor_runtime.transport.webrtc.signaling import (  # noqa: E402
+    IceCandidate,
+    MappedTrack,
+    SdpOffer,
+    TrackMap,
+)
 
 # A capture timestamp standing in for one read of libwebrtc's clock.
 _CAPTURED_US = 1_000_000
@@ -838,6 +843,41 @@ def test_build_rtc_config_maps_port_range() -> None:
 def test_build_rtc_config_leaves_port_range_at_default_when_unset() -> None:
     rtc = _build_rtc_config(WebRtcConfig())
     assert (rtc.min_port, rtc.max_port) == (0, 0)
+
+
+# ── Trickle ICE ──────────────────────────────────────────────────────────────
+
+
+class _IceRecordingPc:
+    def __init__(self) -> None:
+        self.added: list[Any] = []
+
+    async def add_ice_candidate(self, candidate: Any) -> None:
+        self.added.append(candidate)
+
+
+async def test_add_ice_forwards_a_real_candidate() -> None:
+    peer = WebRTCPeer()
+    pc = _IceRecordingPc()
+    peer._pc = cast(Any, pc)
+
+    candidate = IceCandidate("candidate:1 1 udp 2122260223 192.0.2.1 50000 typ host", "0", 0)
+    await peer.add_ice(candidate)
+
+    assert len(pc.added) == 1
+    assert pc.added[0].candidate == candidate.candidate
+
+
+async def test_add_ice_ignores_the_end_of_candidates_marker() -> None:
+    """An empty candidate string is end-of-candidates; it never reaches libwebrtc."""
+    peer = WebRTCPeer()
+    pc = _IceRecordingPc()
+    peer._pc = cast(Any, pc)
+
+    await peer.add_ice(IceCandidate(""))
+    await peer.add_ice(IceCandidate("   "))
+
+    assert pc.added == []
 
 
 class _FakePeerConnection:
