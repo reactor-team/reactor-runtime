@@ -875,12 +875,11 @@ class WebRTCPeer:
     async def add_ice(self, candidate: IceCandidate) -> None:
         """Add a trickle-ICE candidate; valid before and after the wire connects.
 
-        An empty candidate string is the end-of-candidates marker, which the
-        native binding's parser rejects, so it is a no-op here rather than a
-        negotiation-aborting error.
+        An empty candidate string is the end-of-candidates marker (RFC 8838);
+        the native binding accepts it as a no-op.
         """
         pc = self._pc
-        if self._stop_event.is_set() or pc is None or not candidate.candidate.strip():
+        if self._stop_event.is_set() or pc is None:
             return
         ice = rw.IceCandidate(
             candidate=candidate.candidate,

@@ -868,16 +868,16 @@ async def test_add_ice_forwards_a_real_candidate() -> None:
     assert pc.added[0].candidate == candidate.candidate
 
 
-async def test_add_ice_ignores_the_end_of_candidates_marker() -> None:
-    """An empty candidate string is end-of-candidates; it never reaches libwebrtc."""
+async def test_add_ice_forwards_the_end_of_candidates_marker() -> None:
+    """The empty marker reaches the binding, which accepts it as a no-op."""
     peer = WebRTCPeer()
     pc = _IceRecordingPc()
     peer._pc = cast(Any, pc)
 
     await peer.add_ice(IceCandidate(""))
-    await peer.add_ice(IceCandidate("   "))
 
-    assert pc.added == []
+    assert len(pc.added) == 1
+    assert pc.added[0].candidate == ""
 
 
 class _FakePeerConnection:
