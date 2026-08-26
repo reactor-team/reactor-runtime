@@ -1,10 +1,10 @@
-# Python dependencies installed into the model image, in one pass alongside
-# the runtime, so a version conflict between them fails the build instead of
-# surfacing at model load.
+# Python dependencies installed into the model image, in one pip pass, so a
+# version conflict between them fails the build instead of surfacing at
+# model load.
 #
-# reactor-runtime does not belong here: reactor.yaml's build.runtime_version
-# pins the release the image installs, and stating it twice is how the two
-# come to disagree.
+# reactor-runtime is the runtime itself. Its version is pinned here; bump
+# this line to upgrade, and reactor.yaml's build.runtime_version to match.
+reactor-runtime==3.2.4
 
 # OpenCV powers the video effects. Must be >=4.10: the runtime ships numpy 2.x,
 # and only opencv-python(-headless) 4.10+ is built against the numpy 2 ABI. The
