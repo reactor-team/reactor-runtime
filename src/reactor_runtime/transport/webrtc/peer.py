@@ -873,7 +873,11 @@ class WebRTCPeer:
             logger.debug("data-channel send failed", exc_info=True)
 
     async def add_ice(self, candidate: IceCandidate) -> None:
-        """Add a trickle-ICE candidate; valid before and after the wire connects."""
+        """Add a trickle-ICE candidate; valid before and after the wire connects.
+
+        An empty candidate string is the end-of-candidates marker (RFC 8838);
+        the native binding accepts it as a no-op.
+        """
         pc = self._pc
         if self._stop_event.is_set() or pc is None:
             return
