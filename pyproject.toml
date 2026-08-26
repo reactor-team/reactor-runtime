@@ -20,7 +20,7 @@ version = "1.20260814.7"
 
 [project]
 name = "reactor-runtime"
-version = "3.2.4"
+version = "3.2.5"
 description = "A Python framework for building real-time, interactive video models"
 readme = "README.md"
 license = "Apache-2.0"
