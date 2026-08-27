@@ -69,6 +69,12 @@ class SessionEvent(Enum):
     ``CLOSING``, and carries an :class:`~reactor_runtime.core.model.EndReason`
     in ``detail.reason`` (and, for a crash, the error) so a consumer learns why.
 
+    ``INITIALIZING`` records that the runtime is still loading its weights. It is
+    a self-loop legal only in ``CREATED``, emitted once at boot before the load
+    blocks, so a consumer replaying the journal observes the loading phase — the
+    one phase otherwise silent, since the runner emits nothing until it leaves
+    ``CREATED`` on ``INITIALIZATION_SUCCESS``.
+
     ``CHUNK_READY``, ``CLIP_READY``, ``COMMAND``, ``ERROR``, and ``METRIC`` are
     the journal-only events (:data:`JOURNAL_EVENTS`): facts recorded for an
     external consumer rather than moves of the lifecycle. Each is a pure
@@ -81,6 +87,7 @@ class SessionEvent(Enum):
 
     INITIALIZATION_SUCCESS = auto()
     INITIALIZATION_FAIL = auto()
+    INITIALIZING = auto()
     START_SESSION = auto()
     STOP_SESSION = auto()
     TIMEOUT = auto()

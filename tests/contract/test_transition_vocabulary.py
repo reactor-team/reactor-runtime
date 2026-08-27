@@ -31,6 +31,7 @@ _EVENTS = frozenset(
     {
         "initialization_success",
         "initialization_fail",
+        "initializing",
         "start_session",
         "stop_session",
         "timeout",
@@ -115,6 +116,19 @@ def test_boot_edges() -> None:
         "initialization_fail",
         "created",
         "terminated",
+    )
+
+
+def test_initializing_self_loops_in_created() -> None:
+    # The "still loading" fact: a self-loop journalled once at boot before the
+    # load blocks, so a cold consumer sees the loading phase ahead of the
+    # initialization_success that leaves created.
+    payload = _apply(_machine("created"), SessionEvent.INITIALIZING)
+    assert payload is not None
+    assert (payload["event"], payload["from"], payload["to"]) == (
+        "initializing",
+        "created",
+        "created",
     )
 
 
@@ -235,6 +249,7 @@ def test_journal_facts_self_loop_in_every_state(state: str, fact: SessionEvent) 
     ("state", "event"),
     [
         ("ready", SessionEvent.INITIALIZATION_SUCCESS),
+        ("ready", SessionEvent.INITIALIZING),
         ("waiting", SessionEvent.START_SESSION),
         ("ready", SessionEvent.STOP_SESSION),
         ("ready", SessionEvent.TIMEOUT),

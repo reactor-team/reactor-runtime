@@ -547,14 +547,24 @@ async def test_events_replays_the_backlog_as_sse(
     client: tuple[httpx.AsyncClient, Runner],
 ) -> None:
     # The egress stream is unbounded, so drive the generator directly and read
-    # the first replayed message rather than consuming an endless HTTP body.
+    # the replayed messages rather than consuming an endless HTTP body.
     _, runner = client
     stream = _stream_events(runner, 0)
     try:
-        message = await asyncio.wait_for(anext(stream), timeout=1.0)
-        assert message.startswith("id: 1\n")
-        body = json.loads(message.split("data: ", 1)[1].strip())
+        # The loading self-loop is the first journalled fact — emitted on CREATED
+        # before the model finishes loading — so a consumer sees the pod is
+        # initializing during the load window.
+        first = await asyncio.wait_for(anext(stream), timeout=1.0)
+        assert first.startswith("id: 1\n")
+        body = json.loads(first.split("data: ", 1)[1].strip())
         assert body["type"] == "transition"
+        assert body["event"] == "initializing"
+        assert body["to"] == "created"
+
+        # The readiness transition follows once the load completes.
+        second = await asyncio.wait_for(anext(stream), timeout=1.0)
+        assert second.startswith("id: 2\n")
+        body = json.loads(second.split("data: ", 1)[1].strip())
         assert body["to"] == "ready"
     finally:
         await stream.aclose()

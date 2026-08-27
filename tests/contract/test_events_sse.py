@@ -3,7 +3,8 @@
 A consumer holds one long-lived subscription to ``GET /events``, parses only
 the ``id:`` and ``data:`` SSE fields, resumes with ``?since=<seq>``, and opens
 at ``since=0`` on a cold start expecting the retained backlog — including the
-``initialization_success`` journalled before it connected — to replay in order.
+``initializing`` and ``initialization_success`` journalled before it connected —
+to replay in order.
 """
 
 from __future__ import annotations
@@ -23,15 +24,22 @@ async def _run_full_session(harness: Harness) -> None:
 
 
 async def test_a_cold_consumer_replays_initialization_from_since_zero(harness: Harness) -> None:
-    frames = await read_sse(harness.app, "/events?since=0", count=1)
+    frames = await read_sse(harness.app, "/events?since=0", count=2)
 
     assert frames[0].seq == 1
-    payload = frames[0].payload
-    assert payload["type"] == "transition"
-    assert payload["event"] == "initialization_success"
-    assert payload["from"] == "created"
-    assert payload["to"] == "ready"
-    assert payload["detail"] == {}
+    boot = frames[0].payload
+    assert boot["type"] == "transition"
+    assert boot["event"] == "initializing"
+    assert boot["from"] == "created"
+    assert boot["to"] == "created"
+    assert boot["detail"] == {}
+
+    assert frames[1].seq == 2
+    ready = frames[1].payload
+    assert ready["event"] == "initialization_success"
+    assert ready["from"] == "created"
+    assert ready["to"] == "ready"
+    assert ready["detail"] == {}
 
 
 async def test_sequence_ids_are_contiguous_from_one(harness: Harness) -> None:
@@ -63,15 +71,17 @@ async def test_every_envelope_is_a_transition_with_the_locked_keys(harness: Harn
 async def test_the_full_lifecycle_replays_in_order(harness: Harness) -> None:
     await _run_full_session(harness)
 
-    frames = await read_sse(harness.app, "/events?since=0", count=4)
+    frames = await read_sse(harness.app, "/events?since=0", count=5)
 
     assert [frame.payload["event"] for frame in frames] == [
+        "initializing",
         "initialization_success",
         "start_session",
         "stop_session",
         "cleanup_complete",
     ]
     assert [(frame.payload["from"], frame.payload["to"]) for frame in frames] == [
+        ("created", "created"),
         ("created", "ready"),
         ("ready", "waiting"),
         ("waiting", "closing"),
@@ -82,9 +92,9 @@ async def test_the_full_lifecycle_replays_in_order(harness: Harness) -> None:
 async def test_since_resumes_strictly_after_the_given_sequence(harness: Harness) -> None:
     await _run_full_session(harness)
 
-    frames = await read_sse(harness.app, "/events?since=2", count=2)
+    frames = await read_sse(harness.app, "/events?since=3", count=2)
 
-    assert [frame.seq for frame in frames] == [3, 4]
+    assert [frame.seq for frame in frames] == [4, 5]
     assert [frame.payload["event"] for frame in frames] == ["stop_session", "cleanup_complete"]
 
 

@@ -237,11 +237,17 @@ class Runner(ServiceComponent, ConnectionSink):
 
         The model load runs off the event loop (it may block while it reads
         weights), so the HTTP surface — already up by the time this runs — stays
-        responsive throughout, and a client subscribed to ``/events`` observes
-        the ``initialization_success``/``initialization_fail`` transition live.
+        responsive throughout: a client subscribed to ``/events`` observes the
+        ``initializing`` self-loop journalled before the load, then the
+        ``initialization_success``/``initialization_fail`` transition when it ends.
         """
         self._loop = asyncio.get_running_loop()
         logger.info("loading model", model=self._cfg.model_ref)
+        # Journal the loading phase before the (blocking) load, so a consumer
+        # replaying /events sees the runtime is initializing during the load
+        # window rather than nothing until READY. A self-loop on CREATED: no
+        # state change, no side effect (the bridge is not built yet).
+        self._sm.send(SessionEvent.INITIALIZING)
         started_at = time.monotonic()
         try:
             model_cls = import_model_class(self._cfg.model_ref)

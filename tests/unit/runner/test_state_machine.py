@@ -11,6 +11,9 @@ from reactor_runtime.runner import SessionStateMachine
 LEGAL_EDGES: list[tuple[SessionState, SessionEvent, SessionState]] = [
     (SessionState.CREATED, SessionEvent.INITIALIZATION_SUCCESS, SessionState.READY),
     (SessionState.CREATED, SessionEvent.INITIALIZATION_FAIL, SessionState.TERMINATED),
+    # INITIALIZING is the loading self-loop: legal only in CREATED, changing no
+    # state, and rejected everywhere else.
+    (SessionState.CREATED, SessionEvent.INITIALIZING, SessionState.CREATED),
     (SessionState.READY, SessionEvent.START_SESSION, SessionState.WAITING),
     # Eviction is terminal from every live state — an idle eviction or a crash.
     (SessionState.CREATED, SessionEvent.EVICTION, SessionState.TERMINATED),
