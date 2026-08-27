@@ -208,6 +208,31 @@ async def _trickle_until(client: _Client, peer: WebRTCPeer, stop: asyncio.Event)
         await asyncio.sleep(0.05)
 
 
+async def test_add_ice_accepts_the_end_of_candidates_marker() -> None:
+    """The empty end-of-candidates marker is a no-op against the real binding.
+
+    Browsers such as Firefox trickle one empty candidate string per m-section
+    (RFC 8838); libwebrtc's own callback never produces one, so only an
+    explicit call pins that the binding accepts it instead of raising.
+    """
+    factory = _get_factory()
+    client = await _Client.create(factory)
+    offer_sdp = await client.create_offer()
+    peer, _answer = await libwebrtc_peer_factory(
+        ConnId(100),
+        SdpOffer(sdp=offer_sdp),
+        client.track_map(),
+        WebRtcConfig(ice_gathering_timeout_ms=500),
+        ProtocolVersion.V0,
+    )
+    try:
+        await peer.add_ice(IceCandidate(""))
+        await peer.add_ice(IceCandidate("", sdp_mid="0", sdp_mline_index=0))
+    finally:
+        await peer.close()
+        client.pc = None  # type: ignore[assignment]
+
+
 async def test_loopback_carries_media_and_messages() -> None:
     factory = _get_factory()
     client = await _Client.create(factory)
