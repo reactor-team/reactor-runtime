@@ -1,4 +1,6 @@
 $schema: reactor/v1
+apiVersion: v1beta
+kind: VideoModel
 
 # `reactor build` / `reactor run` read this file: `model:` describes the model,
 # `runtime:` names the class to serve, and `build:` defines the image every

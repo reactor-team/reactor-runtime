@@ -17,21 +17,22 @@ to install on your host but the CLI and Docker.
 
 ```sh
 cd examples/brightness
-reactor build
+reactor build --no-dockerfile
 reactor run
 ```
 
-The build is automatic: `reactor build` renders the image from `reactor.yaml`'s
-`build:` block — no Dockerfile to write or maintain. `build.runtime_version`
-pins the `reactor-runtime` release the image installs; bump it there to
+`--no-dockerfile` renders the image from `reactor.yaml`'s `build:` block — no
+Dockerfile to write or maintain. `build.runtime_version` must match the
+`reactor-runtime==<version>` pin in `requirements.txt`; bump both together to
 upgrade.
 
 `reactor run` reuses the image `reactor build` produced (it builds one on first
-run if none exists), then serves WebRTC signaling on `http://localhost:8080`.
-Rebuild after editing anything baked into the image:
+run if none exists, so pass `--no-dockerfile` there too), then serves WebRTC
+signaling on `http://localhost:8080`. Rebuild after editing anything baked
+into the image:
 
 ```sh
-reactor build && reactor run
+reactor build --no-dockerfile && reactor run
 ```
 
 Connect a client from the [Reactor Sandbox](https://reactor-sandbox.vercel.app/)
