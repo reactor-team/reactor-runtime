@@ -1,4 +1,4 @@
-"""Per-test isolation for the process-global interface registries.
+"""Per-test isolation for the runtime's process-global state.
 
 The interface layer auto-registers every declared ``Output`` / ``Input`` /
 ``ModelMessage`` / ``@event`` command into a process-global registry, and the
@@ -18,6 +18,7 @@ from collections.abc import Callable, Iterator
 
 import pytest
 
+from reactor_runtime import log
 from reactor_runtime.interface.events.decorators import EVENT_REGISTRY
 from reactor_runtime.interface.events.messages import MESSAGE_REGISTRY, ModelMessage
 from reactor_runtime.interface.model.contract import ModelContract
@@ -34,6 +35,19 @@ def _restore_root_logging() -> Iterator[None]:
     yield
     root.handlers[:] = saved_handlers
     root.setLevel(saved_level)
+
+
+@pytest.fixture(autouse=True)
+def _clear_log_session_id() -> Iterator[None]:
+    """Release the stamped session id after each test.
+
+    The id is process-global, so a test that opens a session would otherwise
+    leave every later test's records claiming it.
+    """
+    try:
+        yield
+    finally:
+        log.clear_session_id()
 
 
 @pytest.fixture(autouse=True)

@@ -54,7 +54,7 @@ from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.bridge import ModelBridge
 from reactor_runtime.interface.internal.reactor_core import MediaOps
 from reactor_runtime.interface.model.contract import ModelContract
-from reactor_runtime.log import get_logger
+from reactor_runtime.log import clear_session_id, get_logger, set_session_id
 from reactor_runtime.manifest import import_model_class
 from reactor_runtime.message_gateway import InboundCommand, MessageGateway
 from reactor_runtime.metrics import (
@@ -206,11 +206,13 @@ class Runner(ServiceComponent, ConnectionSink):
         self._teardown: set[asyncio.Task[None]] = set()
         self._orphan_task: asyncio.Task[None] | None = None
         self._session_id = SESSION_ID
-        # The id a recording is stored and addressed under, set per session in
-        # start_session. Separate from the fixed transport session id so a director
-        # can align a recording with the platform's session id; a session started
-        # without one mints a fresh id, so sequential recordings in a reused process
-        # never share a directory. The construction value is an unused placeholder.
+        # The session's own id, set per session in start_session: the id a
+        # recording is stored and addressed under, and the id stamped on the
+        # session's log records. Separate from the fixed transport session id so a
+        # caller can align both with the id it knows the session by; a session
+        # started without one mints a fresh id, so sequential recordings in a
+        # reused process never share a directory and the logs of one session are
+        # never read as another's. The construction value is an unused placeholder.
         self._recording_id = SESSION_ID
         self._accepting = True
         # The process-shutdown hook, wired by the assembly so the runner can ask
@@ -586,11 +588,12 @@ class Runner(ServiceComponent, ConnectionSink):
         The rejection surfaces the current state so the caller can report the
         precise reason. The parameters seed the session's initial state.
 
-        A ``session_id`` in *params* is adopted as the id this session's recording
-        is stored and addressed under, so a director can align clips with the
-        platform's session id; absent one, a fresh id is minted per session so
-        sequential recordings never overwrite each other. The transport session id
-        is unaffected — it is always :data:`SESSION_ID`.
+        A ``session_id`` in *params* is adopted as this session's own id: the id
+        its recording is stored and addressed under, and the id stamped on every
+        log record the session writes. A caller can therefore align both clips and
+        logs with the id it knows the session by. Absent one, a fresh id is minted
+        per session so sequential recordings never overwrite each other. The
+        transport session id is unaffected — it is always :data:`SESSION_ID`.
 
         Args:
             params: The initial session parameters supplied by the caller.
@@ -1084,11 +1087,18 @@ class Runner(ServiceComponent, ConnectionSink):
         declare a dead model ready again. Real moves log at info; journal
         self-loops log at debug so a per-segment ``chunk_ready`` does not flood
         the log.
+
+        The session boundary is also where the log's session context is bound and
+        released, so every record written while a session is live names it —
+        including the moves that open and close the session, which bind before
+        and release after their own line.
         """
+        if transition.is_session_start:
+            set_session_id(self._recording_id)
         log = logger.debug if transition.event in JOURNAL_EVENTS else logger.info
         log(
             "session transition",
-            session_id=self._session_id,
+            transport_session_id=self._session_id,
             event=transition.event.name.lower(),
             from_state=transition.from_state.name.lower(),
             to_state=transition.to_state.name.lower(),
@@ -1119,6 +1129,15 @@ class Runner(ServiceComponent, ConnectionSink):
                 self._spawn_teardown(asyncio.to_thread(self._recorder.stop))
                 self._spawn_teardown(self._connections.close_all())
             self.request_shutdown()
+        # Release the log's session context on every move that leaves no session
+        # live, so a record written between sessions claims none. A close unwinds
+        # to ready and the process goes on to host another session, which a stale
+        # id would misattribute; a terminal move ends the session just as
+        # squarely, so both release here.
+        if transition.is_session_end or (
+            entered and transition.to_state is SessionState.TERMINATED
+        ):
+            clear_session_id()
 
     def _start_recorder(self) -> None:
         """Arm the recorder for the session, best-effort.
