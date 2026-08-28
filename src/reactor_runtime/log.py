@@ -16,14 +16,17 @@ them; the wire shape is the formatter's concern, not the call site's.
 Two fields arrive without a call site naming them, stamped by
 :class:`SessionContextFilter` on the handler ``configure`` installs. While a
 session is live, every record carries its ``session_id``; from the moment the
-runtime boots, every record carries ``runtime_state``, the lifecycle state the
-process was in when the record was written — so the model-load window is
-retrievable as ``runtime_state="created"`` even though no session exists yet.
-Because the stamp happens where records are written rather than where they are
-made, it reaches a model's own ``logging.getLogger(__name__)`` and any
-third-party library that propagates to root, so a line can be traced to the
-session and phase that produced it without model code threading either through
-its call sites.
+runtime boots, every record carries ``state``, the lifecycle state the process
+was in when the record was written — so the model-load window is retrievable as
+``state="created"`` even though no session exists yet. The vocabulary is the
+session state machine's, the same words the session descriptor's ``state``
+field serves; the health route's coarse ``state`` (``loading`` / ``available``
+/ ``serving``) is a projection of it for outside observers and deliberately
+not what the records carry. Because the stamp happens where records are
+written rather than where they are made, it reaches a model's own
+``logging.getLogger(__name__)`` and any third-party library that propagates to
+root, so a line can be traced to the session and phase that produced it without
+model code threading either through its call sites.
 """
 
 from __future__ import annotations
@@ -107,22 +110,22 @@ def get_session_id() -> str | None:
 # the session id it needs no binding token: there is always exactly one current
 # state and the latest write is by definition the truth, so last-write-wins is
 # the correct semantics rather than a race to guard against.
-_runtime_state: str | None = None
+_state: str | None = None
 
 
-def set_runtime_state(state: str | None) -> None:
+def set_state(state: str | None) -> None:
     """Stamp *state* on every record written from now on.
 
     Args:
         state: The runtime's lifecycle state, or ``None`` to stamp nothing.
     """
-    global _runtime_state
-    _runtime_state = state
+    global _state
+    _state = state
 
 
-def get_runtime_state() -> str | None:
+def get_state() -> str | None:
     """Return the state currently being stamped, or ``None`` before boot."""
-    return _runtime_state
+    return _state
 
 
 def _logfmt_value(value: Any) -> str:
@@ -158,15 +161,15 @@ class SessionContextFilter(logging.Filter):
     Sits on the handler rather than on one logger, so it sees every record a
     handler writes: the runtime's own, a model's ``logging.getLogger(__name__)``,
     and a third-party library's that propagates to root. A call site that names
-    ``session_id`` or ``runtime_state`` itself keeps its own value, and a field
-    with nothing bound — the session id between sessions, the state before boot —
-    is absent rather than empty. ``runtime_state`` carries its own name, rather
-    than ``state``, so a model logging its own ``state`` never displaces it.
+    ``session_id`` or ``state`` itself keeps its own value — a model logging its
+    own ``state`` claims that record's field, deliberately — and a field with
+    nothing bound, the session id between sessions or the state before boot, is
+    absent rather than empty.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
         """Merge the ambient context into *record*'s structured fields."""
-        stamped = {"session_id": _session_id, "runtime_state": _runtime_state}
+        stamped = {"session_id": _session_id, "state": _state}
         context = {key: value for key, value in stamped.items() if value is not None}
         if not context:
             return True
@@ -305,9 +308,9 @@ __all__ = [
     "clear_session_id",
     "configure",
     "get_logger",
-    "get_runtime_state",
     "get_session_id",
+    "get_state",
     "release_session_id",
-    "set_runtime_state",
     "set_session_id",
+    "set_state",
 ]

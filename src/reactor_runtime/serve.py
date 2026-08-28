@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 
 from reactor_runtime import log
-from reactor_runtime.core import RuntimeConfig
+from reactor_runtime.core import RuntimeConfig, SessionState
 from reactor_runtime.http import HttpServer
 from reactor_runtime.manifest import MANIFEST, load_config
 from reactor_runtime.metrics import RuntimeMetrics
@@ -372,6 +372,11 @@ def main() -> None:
     from reactor_runtime.transport.webrtc.peer import libwebrtc_peer_factory
 
     log.configure(level=_log_level_from_env())
+    # The runner re-stamps this at construction and on every move; stamping here
+    # too covers the lines written before it exists — the process is up and the
+    # model is not loaded, which is exactly what CREATED names — so every record
+    # the process writes carries a state, the first one included.
+    log.set_state(SessionState.CREATED.name.lower())
     manifest = Path.cwd() / MANIFEST
     if not manifest.is_file():
         raise SystemExit(f"no {MANIFEST} found in {Path.cwd()}")

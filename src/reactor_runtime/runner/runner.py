@@ -54,7 +54,7 @@ from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.bridge import ModelBridge
 from reactor_runtime.interface.internal.reactor_core import MediaOps
 from reactor_runtime.interface.model.contract import ModelContract
-from reactor_runtime.log import get_logger, set_runtime_state, set_session_id
+from reactor_runtime.log import get_logger, set_session_id, set_state
 from reactor_runtime.manifest import import_model_class
 from reactor_runtime.message_gateway import InboundCommand, MessageGateway
 from reactor_runtime.metrics import (
@@ -172,7 +172,7 @@ class Runner(ServiceComponent, ConnectionSink):
         # The log's state context starts at the machine's starting state, so the
         # model-load window — records written before any transition — is already
         # stamped; every later move re-stamps in _dispatch_transition.
-        set_runtime_state(self._sm.current_state.name.lower())
+        set_state(self._sm.current_state.name.lower())
         self._sm.on_transition(self._dispatch_transition)
         # The session surface of the metrics is one listener over the same moves
         # the journal carries, so no session code below calls an instrument.
@@ -1109,7 +1109,7 @@ class Runner(ServiceComponent, ConnectionSink):
         if transition.is_session_start:
             self._log_binding = set_session_id(self._recording_id)
         if transition.from_state is not transition.to_state:
-            set_runtime_state(transition.to_state.name.lower())
+            set_state(transition.to_state.name.lower())
         log = logger.debug if transition.event in JOURNAL_EVENTS else logger.info
         # The fixed transport id (SESSION_ID) is deliberately not a field here:
         # one constant value per process carries nothing, and squatting on
