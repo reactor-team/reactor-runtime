@@ -78,7 +78,7 @@ logger = get_logger(__name__)
 logger.info("scene changed", prompt=self.prompt)
 ```
 
-Records render as `key=value` text by default, or as one JSON object per line under `REACTOR_LOG_FORMAT=json`. While a session is live, its id is stamped on every record, so tracing one run's logs never requires threading an id through your call sites. The stamp is applied where records are written rather than where they are made, so a plain `logging.getLogger(__name__)` and the libraries your model imports are covered too.
+Records render as `key=value` text by default, or as one JSON object per line under `REACTOR_LOG_FORMAT=json`. While a session is live, its id is stamped on every record, so tracing one run's logs never requires threading an id through your call sites. Every record also carries `runtime_state`, the lifecycle phase it was written in, so the logs of one phase — loading weights, a live session, teardown — are filterable on their own. The stamp is applied where records are written rather than where they are made, so a plain `logging.getLogger(__name__)` and the libraries your model imports are covered too.
 
 ## Install
 

@@ -54,7 +54,7 @@ from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.bridge import ModelBridge
 from reactor_runtime.interface.internal.reactor_core import MediaOps
 from reactor_runtime.interface.model.contract import ModelContract
-from reactor_runtime.log import get_logger, set_session_id
+from reactor_runtime.log import get_logger, set_runtime_state, set_session_id
 from reactor_runtime.manifest import import_model_class
 from reactor_runtime.message_gateway import InboundCommand, MessageGateway
 from reactor_runtime.metrics import (
@@ -169,6 +169,10 @@ class Runner(ServiceComponent, ConnectionSink):
         self._cfg = cfg
         self._metrics = metrics or RuntimeMetrics(version=_server_version(), model=cfg.model_ref)
         self._sm = SessionStateMachine()
+        # The log's state context starts at the machine's starting state, so the
+        # model-load window — records written before any transition — is already
+        # stamped; every later move re-stamps in _dispatch_transition.
+        set_runtime_state(self._sm.current_state.name.lower())
         self._sm.on_transition(self._dispatch_transition)
         # The session surface of the metrics is one listener over the same moves
         # the journal carries, so no session code below calls an instrument.
@@ -1098,10 +1102,14 @@ class Runner(ServiceComponent, ConnectionSink):
         event into the model, whose dispatch retires the binding once the
         ``@session_ended`` hook has returned. A terminal move dispatches no
         ``SessionEnded`` and releases nothing — the process is exiting, and its
-        last records belong to the session that brought it down.
+        last records belong to the session that brought it down. The log's state
+        context re-stamps here too, before the move's own line, so a record
+        reads the state the process was in when it was written.
         """
         if transition.is_session_start:
             self._log_binding = set_session_id(self._recording_id)
+        if transition.from_state is not transition.to_state:
+            set_runtime_state(transition.to_state.name.lower())
         log = logger.debug if transition.event in JOURNAL_EVENTS else logger.info
         # The fixed transport id (SESSION_ID) is deliberately not a field here:
         # one constant value per process carries nothing, and squatting on

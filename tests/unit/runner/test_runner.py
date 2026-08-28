@@ -729,6 +729,60 @@ async def test_a_live_session_stamps_its_id_on_the_logs(started_runner: Runner) 
     assert log.get_session_id() == supplied
 
 
+async def test_the_runtime_state_tracks_the_lifecycle(started_runner: Runner) -> None:
+    # The runner stamps its starting state at construction — the model-load
+    # window is what makes initialization logs retrievable — and re-stamps on
+    # every move, so a record always reads the phase it was written in.
+    assert log.get_runtime_state() == "ready"
+    started_runner.start_session({})
+    assert log.get_runtime_state() == "waiting"
+    conn = FakeConnection(1)
+    started_runner.connection_opened(conn)
+    _expect_state(started_runner, SessionState.STREAMING)
+    assert log.get_runtime_state() == "streaming"
+    started_runner.stop_session()
+    await asyncio.sleep(0.01)
+    _expect_state(started_runner, SessionState.READY)
+    assert log.get_runtime_state() == "ready"
+
+
+async def test_construction_stamps_the_created_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
+    assert log.get_runtime_state() is None
+    runner = _runner()
+    assert log.get_runtime_state() == "created"
+    await runner.start()
+    try:
+        assert log.get_runtime_state() == "ready"
+    finally:
+        await runner.stop()
+
+
+async def test_an_eviction_stamps_the_terminated_state(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    started_runner._on_model_failure(RuntimeError("gpu fell off"))
+    await asyncio.sleep(0.05)  # let the loop run the scheduled eviction callback
+    _expect_state(started_runner, SessionState.TERMINATED)
+    assert log.get_runtime_state() == "terminated"
+
+
+async def test_a_record_written_in_session_carries_state_and_id(
+    started_runner: Runner,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # caplog's handler bypasses the stamping filter, so run it explicitly over
+    # the captured record — this asserts the ambient context a real handler
+    # would stamp, on a record no call site enriched.
+    started_runner.start_session({"session_id": "11111111-2222-3333-4444-555555555555"})
+    with caplog.at_level(logging.INFO, logger="some.model.module"):
+        logging.getLogger("some.model.module").info("mid-session record")
+    record = caplog.records[-1]
+    assert log.SessionContextFilter().filter(record)
+    fields = getattr(record, "reactor_fields", {})
+    assert fields["session_id"] == "11111111-2222-3333-4444-555555555555"
+    assert fields["runtime_state"] == "waiting"
+
+
 async def test_closing_a_session_releases_the_stamped_id(started_runner: Runner) -> None:
     started_runner.start_session({"session_id": "11111111-2222-3333-4444-555555555555"})
     started_runner.stop_session()
