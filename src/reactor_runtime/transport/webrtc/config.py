@@ -97,6 +97,20 @@ class WebRtcConfig:
         bwe_initial_kbps: Starting bitrate before estimates arrive.
         bwe_target_update_threshold: Relative change below which a new bitrate
             estimate is ignored rather than re-applied to the encoders.
+        sender_max_kbps: Ceiling for each sendonly *video* track's own encoder,
+            which is
+            a different limit from ``bwe_max_kbps`` and the one that actually
+            caps a video stream. The two are conjunctive — the lower wins — and
+            without this a sender's maximum comes from libwebrtc's
+            resolution-keyed default, which is 2500 kbps for anything above
+            960x540. Every frame size we send at 720p or larger would cap at
+            2.5 Mbps no matter how much headroom the estimate had. ``0`` or less
+            leaves the libwebrtc default in place.
+        sender_min_kbps: Floor for each sendonly video track's own encoder. ``0`` or
+            less leaves it unset, which is the default: a floor stops the
+            encoder degrading gracefully, so on a link that cannot sustain it
+            the trade is lower quality for packet loss. Useful mainly when
+            several tracks compete and one must be preserved.
         rtx_max_size_packets: Retransmission history depth, in packets.
         rtx_max_size_time_ms: Retransmission history depth, in milliseconds;
             ``0`` means no time limit.
@@ -134,6 +148,8 @@ class WebRtcConfig:
     bwe_max_kbps: int = 10000
     bwe_initial_kbps: int = 4000
     bwe_target_update_threshold: float = 0.05
+    sender_max_kbps: int = 10000
+    sender_min_kbps: int = 0
     rtx_max_size_packets: int = 512
     rtx_max_size_time_ms: int = 200
     rtp_payload_mtu: int = 1200

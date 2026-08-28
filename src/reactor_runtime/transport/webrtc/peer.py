@@ -17,8 +17,8 @@ garble.
 Per-peer audio isolation
 ------------------------
 Each outbound audio track is created with
-``PeerConnectionFactory.create_audio_track_with_local_source()``, which backs the
-track with a ``LocalAudioSource`` — a custom ``AudioSourceInterface`` that
+``PeerConnectionFactory.create_audio_track_with_options(source=LocalPush)``,
+which backs the track with a ``LocalAudioSource`` — a custom ``AudioSourceInterface`` that
 maintains the list of sinks registered by each peer connection's voice send
 channel.  When ``track.push_pcm()`` is called, it delivers PCM directly to that
 track's encoder via ``AudioTrackSinkInterface::OnData``, bypassing the shared
@@ -272,6 +272,34 @@ async def _apply_bitrate_limits(pc: rw.PeerConnection, config: WebRtcConfig) -> 
     )
 
 
+async def _apply_sender_bitrate(transceiver: rw.Transceiver, config: WebRtcConfig) -> None:
+    """Apply the configured per-sender bitrate bounds to one sendonly video transceiver.
+
+    A different limit from ``_apply_bitrate_limits``: that one bounds the whole
+    connection's congestion-control estimate, this one bounds what a single
+    track's encoder may spend of it. They are conjunctive, so a stream runs fast
+    only when both allow it — and this is the one that has to be raised, because
+    with nothing set libwebrtc derives a sender's ceiling from the frame size
+    alone and it is 2500 kbps for anything above 960x540.
+
+    **Video only**, for two reasons that agree. The ceiling this lifts is
+    ``GetMaxDefaultVideoBitrateKbps``, so an audio sender has nothing to lift —
+    Opus is bounded by its own codec parameters, and a 10 Mbps ceiling on a
+    64 kbps stream says nothing. And an audio sender has no encodings to write
+    until the answer is applied, where a video one has them as soon as the
+    transceiver exists, so calling this here would fail on every audio track.
+
+    ``0`` or less in the config leaves that bound at the libwebrtc default, which
+    is how the rest of this config spells an absent limit; the binding takes
+    ``None`` for it. Applied per negotiation, since every offer rebuilds the peer
+    and its transceivers come up on library defaults.
+    """
+    await transceiver.set_send_bitrate(
+        min_bps=config.sender_min_kbps * 1000 if config.sender_min_kbps > 0 else None,
+        max_bps=config.sender_max_kbps * 1000 if config.sender_max_kbps > 0 else None,
+    )
+
+
 def _is_terminal_state(state: rw.PeerConnectionState) -> bool:
     """Return whether a peer-connection state means the wire is gone.
 
@@ -513,9 +541,16 @@ class WebRTCPeer:
                 if info.kind is TrackKind.VIDEO:
                     track = factory.create_video_track(info.name)
                 else:
-                    track = factory.create_audio_track_with_local_source(info.name)
+                    # LocalPush, not the factory ADM: each outbound audio track
+                    # gets its own source, so one peer's audio cannot reach
+                    # another's encoder. See the module docstring.
+                    track = factory.create_audio_track_with_options(
+                        info.name, source=rw.AudioTrackSource.LocalPush
+                    )
                 await transceiver.set_track(track)
                 await transceiver.set_direction(rw.TransceiverDirection.SendOnly)
+                if info.kind is TrackKind.VIDEO:
+                    await _apply_sender_bitrate(transceiver, self._config)
                 self._out_tracks[info.name] = track
             if codec_preferences and transceiver.kind() == rw.MediaKind.Video:
                 await transceiver.set_codec_preferences(codec_preferences)
@@ -1007,6 +1042,8 @@ class WebRTCPeer:
                 if info.name in paused
                 else rw.TransceiverDirection.SendOnly
             )
+            if info.kind is TrackKind.VIDEO:
+                await _apply_sender_bitrate(transceiver, self._config)
 
     # =========================================================================
     # Seam: stats and teardown
