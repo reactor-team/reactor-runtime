@@ -282,10 +282,12 @@ async def _apply_sender_bitrate(transceiver: rw.Transceiver, config: WebRtcConfi
     with nothing set libwebrtc derives a sender's ceiling from the frame size
     alone and it is 2500 kbps for anything above 960x540.
 
-    **Video only**, for two reasons that agree. The ceiling this lifts is
-    ``GetMaxDefaultVideoBitrateKbps``, so an audio sender has nothing to lift —
-    Opus is bounded by its own codec parameters, and a 10 Mbps ceiling on a
-    64 kbps stream says nothing. And an audio sender has no encodings to write
+    **Video only**, for two reasons that agree. The default being lifted is
+    ``GetMaxDefaultVideoBitrateKbps``, keyed on frame size, so there is no
+    equivalent for an audio sender to clear — the config's 10 Mbps ceiling would
+    say nothing to a 64 kbps Opus stream. (The bounds themselves do apply to
+    audio and would cap its allocation; we simply have no reason to.) And an
+    audio transceiver materialised from a remote offer has no encodings to write
     until the answer is applied, where a video one has them as soon as the
     transceiver exists, so calling this here would fail on every audio track.
 

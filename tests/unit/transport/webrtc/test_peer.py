@@ -1016,9 +1016,10 @@ async def test_attach_out_tracks_bounds_only_the_sending_transceivers() -> None:
 async def test_an_audio_sender_is_not_given_a_bitrate_bound() -> None:
     """Audio senders are skipped, and libwebrtc makes that non-optional.
 
-    The ceiling this config lifts is the resolution-keyed video one, so an audio
-    sender has nothing to lift — Opus is bounded by its own codec parameters.
-    And an audio sender has no encodings to write until the answer is applied,
+    The default this config lifts is the resolution-keyed video one, so there is
+    no equivalent for an audio sender to clear — its bounds would apply, we just
+    have no reason to set them. And an audio sender materialised from a remote
+    offer has no encodings to write until the answer is applied,
     where a video one has them as soon as the transceiver exists: calling it
     here raised ``sender has no encodings`` and failed the whole negotiation,
     which is how this was found.

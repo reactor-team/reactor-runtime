@@ -104,8 +104,10 @@ class WebRtcConfig:
             without this a sender's maximum comes from libwebrtc's
             resolution-keyed default, which is 2500 kbps for anything above
             960x540. Every frame size we send at 720p or larger would cap at
-            2.5 Mbps no matter how much headroom the estimate had. ``0`` or less
-            leaves the libwebrtc default in place.
+            2.5 Mbps no matter how much headroom the estimate had. Audio senders
+            are left alone: that default is keyed on frame size, so there is no
+            equivalent for them to clear. ``0`` or less leaves the libwebrtc
+            default in place.
         sender_min_kbps: Floor for each sendonly video track's own encoder. ``0`` or
             less leaves it unset, which is the default: a floor stops the
             encoder degrading gracefully, so on a link that cannot sustain it
