@@ -1100,9 +1100,11 @@ class Runner(ServiceComponent, ConnectionSink):
         if transition.is_session_start:
             self._log_binding = set_session_id(self._recording_id)
         log = logger.debug if transition.event in JOURNAL_EVENTS else logger.info
+        # The fixed transport id (SESSION_ID) is deliberately not a field here:
+        # one constant value per process carries nothing, and squatting on
+        # session_id would mask the id the session is known by.
         log(
             "session transition",
-            transport_session_id=self._session_id,
             event=transition.event.name.lower(),
             from_state=transition.from_state.name.lower(),
             to_state=transition.to_state.name.lower(),
