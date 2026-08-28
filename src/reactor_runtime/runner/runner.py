@@ -214,6 +214,10 @@ class Runner(ServiceComponent, ConnectionSink):
         # reused process never share a directory and the logs of one session are
         # never read as another's. The construction value is an unused placeholder.
         self._recording_id = SESSION_ID
+        # Names the log's current session binding, so the release that follows a
+        # session retires that binding and not a later session's. Zero until the
+        # first session binds one.
+        self._log_binding = 0
         self._accepting = True
         # The process-shutdown hook, wired by the assembly so the runner can ask
         # the service to bring the process down when the session is terminated
@@ -1094,7 +1098,7 @@ class Runner(ServiceComponent, ConnectionSink):
         and release after their own line.
         """
         if transition.is_session_start:
-            set_session_id(self._recording_id)
+            self._log_binding = set_session_id(self._recording_id)
         log = logger.debug if transition.event in JOURNAL_EVENTS else logger.info
         log(
             "session transition",
@@ -1137,22 +1141,28 @@ class Runner(ServiceComponent, ConnectionSink):
         if transition.is_session_end or (
             entered and transition.to_state is SessionState.TERMINATED
         ):
-            self._release_log_session(self._recording_id)
+            self._release_log_session(self._log_binding)
 
-    def _release_log_session(self, session_id: str) -> None:
-        """Unbind the log's session context once the session's teardown has finished.
+    def _release_log_session(self, binding: int) -> None:
+        """Retire the log's session context once the session's teardown has finished.
 
-        Teardown outlives the move that ends a session: the recorder stops on a
-        worker thread, and the model's ``@session_ended`` hook runs on the model's
-        own loop from a queued event. Both write records that belong to the
-        session, so unbinding the moment the move lands would strip the session
-        from exactly the lines that report how it ended. The release therefore
-        waits for the teardown already in flight.
+        Teardown outlives the move that ends a session. The recorder stops on a
+        worker thread, and its records — how much the session dropped — belong to
+        the session that produced them, so unbinding the moment the move lands
+        would strip them. The release therefore waits for the teardown tasks
+        already in flight.
+
+        The model's ``@session_ended`` hook is not one of them: it runs from an
+        event queued onto the model's own loop, which the runner holds no handle
+        on and so cannot await. The hook does land first whenever the recorder is
+        running, whose thread joins outlast a loop turn by far, but that is the
+        timing rather than a guarantee — with recording disabled the release can
+        win, and the hook's records carry no session.
 
         The move that ends a session is itself sent from a teardown task, so that
         task is excluded from the wait rather than awaited by the release it
-        triggered. Waiting also means the next session may be live by the time the
-        release runs, which is why it compares before unbinding.
+        triggered. Waiting also means a later session may be live by the time the
+        release runs, which is why it retires a named binding rather than an id.
         """
         loop = self._loop
         try:
@@ -1160,7 +1170,7 @@ class Runner(ServiceComponent, ConnectionSink):
         except RuntimeError:
             on_loop = False
         if not on_loop:
-            release_session_id(session_id)
+            release_session_id(binding)
             return
         running = asyncio.current_task()
         pending = tuple(task for task in self._teardown if task is not running)
@@ -1168,7 +1178,7 @@ class Runner(ServiceComponent, ConnectionSink):
         async def release() -> None:
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
-            release_session_id(session_id)
+            release_session_id(binding)
 
         # Snapshotting `pending` above is what lets this ride the teardown set:
         # tracked to completion like its siblings, without awaiting itself.

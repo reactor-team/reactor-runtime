@@ -204,16 +204,26 @@ def test_get_session_id_reports_what_is_stamped() -> None:
     assert get_session_id() is None
 
 
-def test_releasing_the_live_session_unbinds_it() -> None:
-    set_session_id("s-one")
-    release_session_id("s-one")
+def test_releasing_the_live_binding_unbinds_it() -> None:
+    binding = set_session_id("s-one")
+    release_session_id(binding)
     assert get_session_id() is None
 
 
-def test_releasing_an_earlier_session_leaves_the_live_one_bound() -> None:
+def test_releasing_an_earlier_binding_leaves_the_live_one_bound() -> None:
     # A release is deferred until the session's teardown finishes, so the next
     # session can already be bound by the time it runs.
-    set_session_id("s-one")
+    first = set_session_id("s-one")
     set_session_id("s-two")
-    release_session_id("s-one")
+    release_session_id(first)
     assert get_session_id() == "s-two"
+
+
+def test_a_reused_session_id_survives_the_previous_release() -> None:
+    # Nothing stops a caller starting two sessions under one id, so a release
+    # matching on the value would unbind the session that reused it and leave the
+    # rest of its run unstamped.
+    first = set_session_id("s-same")
+    set_session_id("s-same")
+    release_session_id(first)
+    assert get_session_id() == "s-same"

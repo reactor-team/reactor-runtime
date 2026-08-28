@@ -763,6 +763,21 @@ async def test_a_late_release_cannot_strip_the_session_that_followed(
     assert log.get_session_id() == "22222222-2222-2222-2222-222222222222"
 
 
+async def test_a_session_reusing_the_previous_id_keeps_its_own_binding(
+    started_runner: Runner,
+) -> None:
+    # A caller may start two sessions under one id; the first session's deferred
+    # release must not unbind the second, which would leave its whole run
+    # unstamped.
+    reused = "11111111-1111-1111-1111-111111111111"
+    started_runner.start_session({"session_id": reused})
+    started_runner.stop_session()
+    await asyncio.sleep(0.01)
+    started_runner.start_session({"session_id": reused})
+    await started_runner._drain_teardown()
+    assert log.get_session_id() == reused
+
+
 async def test_a_second_session_stamps_its_own_id(started_runner: Runner) -> None:
     started_runner.start_session({"session_id": "11111111-1111-1111-1111-111111111111"})
     started_runner.stop_session()

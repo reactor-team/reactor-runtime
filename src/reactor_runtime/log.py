@@ -49,15 +49,26 @@ _QUOTE_TRIGGERS = (" ", "=", '"', "\n", "\r", "\t")
 # so a single value is unambiguous.
 _session_id: str | None = None
 
+# Counts bindings, so a release can name the one it retires. Two sessions may
+# carry the same id — nothing stops a caller reusing one — and a release that
+# matched on the id alone would unbind the session that reused it.
+_session_binding = 0
 
-def set_session_id(session_id: str | None) -> None:
+
+def set_session_id(session_id: str | None) -> int:
     """Stamp *session_id* on every record written from now on.
 
     Args:
         session_id: The live session's id, or ``None`` to stamp nothing.
+
+    Returns:
+        A token naming this binding, which :func:`release_session_id` takes to
+        retire it.
     """
-    global _session_id
+    global _session_id, _session_binding
     _session_id = session_id
+    _session_binding += 1
+    return _session_binding
 
 
 def clear_session_id() -> None:
@@ -65,19 +76,21 @@ def clear_session_id() -> None:
     set_session_id(None)
 
 
-def release_session_id(session_id: str) -> None:
-    """Stop stamping *session_id*, leaving any other session's id in place.
+def release_session_id(binding: int) -> None:
+    """Retire the binding *binding* names, leaving a later one in place.
 
     A session's teardown outlives the move that ends it, so the release that
     follows one is deferred until that work has finished. By then the next
-    session may already have bound its own id, and comparing before unbinding is
-    what stops a late release from stripping the session that followed.
+    session may already have bound its own id — the same id, even, since nothing
+    stops a caller reusing one — so a release names the binding it retires rather
+    than the value that binding held.
 
     Args:
-        session_id: The id to unbind, ignored once it is no longer the live one.
+        binding: The token :func:`set_session_id` returned, ignored once a later
+            binding has replaced the one it names.
     """
     global _session_id
-    if _session_id == session_id:
+    if _session_binding == binding:
         _session_id = None
 
 
