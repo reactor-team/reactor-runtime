@@ -215,6 +215,37 @@ async def test_start_resolves_loads_and_readies(monkeypatch: pytest.MonkeyPatch)
         await runner.stop()
 
 
+async def test_start_journals_initializing_before_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The loading phase is otherwise silent: a consumer subscribed from the
+    # start of the journal must see an INITIALIZING self-loop on CREATED before
+    # the INITIALIZATION_SUCCESS that leaves CREATED, so it can report a booting
+    # pod during the load window rather than nothing until READY.
+    created_models.clear()
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
+    runner = _runner()
+    stream = runner._events.subscribe(since=0)
+
+    await runner.start()
+    try:
+
+        async def first(n: int) -> list[Transition]:
+            out: list[Transition] = []
+            async for _seq, event in stream:
+                out.append(event.transition)
+                if len(out) >= n:
+                    break
+            return out
+
+        boot = await asyncio.wait_for(first(2), timeout=2)
+        assert boot[0].event is SessionEvent.INITIALIZING
+        assert boot[0].from_state is SessionState.CREATED
+        assert boot[0].to_state is SessionState.CREATED
+        assert boot[1].event is SessionEvent.INITIALIZATION_SUCCESS
+        assert boot[1].to_state is SessionState.READY
+    finally:
+        await runner.stop()
+
+
 async def test_start_binds_outbound_before_spawn(monkeypatch: pytest.MonkeyPatch) -> None:
     created_models.clear()
     monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)

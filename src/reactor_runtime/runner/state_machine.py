@@ -42,6 +42,11 @@ from reactor_runtime.core import JOURNAL_EVENTS, SessionEvent, SessionState, Tra
 _TRANSITIONS: dict[SessionEvent, dict[SessionState, SessionState]] = {
     SessionEvent.INITIALIZATION_SUCCESS: {SessionState.CREATED: SessionState.READY},
     SessionEvent.INITIALIZATION_FAIL: {SessionState.CREATED: SessionState.TERMINATED},
+    # INITIALIZING is the runtime's "still loading" fact: a self-loop legal only
+    # in CREATED, emitted once at boot so a journal consumer sees the loading
+    # phase that is otherwise silent until INITIALIZATION_SUCCESS leaves CREATED.
+    # It changes no state and leaves the connection count alone (see _update_count).
+    SessionEvent.INITIALIZING: {SessionState.CREATED: SessionState.CREATED},
     SessionEvent.START_SESSION: {SessionState.READY: SessionState.WAITING},
     SessionEvent.STOP_SESSION: {
         SessionState.STREAMING: SessionState.CLOSING,
