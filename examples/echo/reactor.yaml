@@ -29,4 +29,4 @@ runtime:
       bitrate_kbps: 128
 
 build:
-  runtime_version: "3.2.4"
+  runtime_version: "3.2.5"
