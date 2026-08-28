@@ -1,4 +1,5 @@
 import contextlib
+import logging
 import os
 import threading
 import time
@@ -179,6 +180,20 @@ def test_request_recording_covers_the_whole_session(tmp_path: Path) -> None:
         assert clip.start_marker == 0.0
     finally:
         recorder.stop()
+
+
+def test_recorder_stop_names_its_session(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    # The recorder's stop outlives the session's ambient log context, which the
+    # model retires at its own session-ended dispatch, so the final record
+    # attributes itself the way "recorder started" already does.
+    recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
+    recorder.start("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    with caplog.at_level(logging.INFO, logger="reactor_runtime.recording.recorder"):
+        recorder.stop()
+    stops = [r for r in caplog.records if r.message == "recorder stopped"]
+    assert stops
+    fields = getattr(stops[-1], "reactor_fields", {})
+    assert fields["session_id"] == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
 
 def test_request_clip_rejects_a_non_positive_duration(tmp_path: Path) -> None:

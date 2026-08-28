@@ -22,6 +22,8 @@ from reactor_runtime import (
     file_uploaded,
     log,
     protocol,
+    session_ended,
+    session_started,
 )
 from reactor_runtime.core import (
     ClientConnected,
@@ -712,6 +714,14 @@ async def test_sessions_without_a_session_id_get_distinct_recording_ids(
     assert minted[0] != minted[1]
 
 
+async def _await_log_release() -> None:
+    """Wait for the model thread to retire the log binding, which it does off-loop."""
+    deadline = time.monotonic() + 2.0
+    while log.get_session_id() is not None:
+        assert time.monotonic() < deadline, f"binding never released: {log.get_session_id()}"
+        await asyncio.sleep(0.01)
+
+
 async def test_a_live_session_stamps_its_id_on_the_logs(started_runner: Runner) -> None:
     supplied = "11111111-2222-3333-4444-555555555555"
     assert log.get_session_id() is None
@@ -726,56 +736,105 @@ async def test_closing_a_session_releases_the_stamped_id(started_runner: Runner)
     _expect_state(started_runner, SessionState.READY)
     # The process may host another session, so a stale id would misattribute it.
     await started_runner._drain_teardown()
-    assert log.get_session_id() is None
+    await _await_log_release()
 
 
-async def test_the_id_stays_bound_while_teardown_is_still_running(
-    started_runner: Runner,
-    monkeypatch: pytest.MonkeyPatch,
+async def _two_sessions_with_a_started_barrier(
+    monkeypatch: pytest.MonkeyPatch, first_sid: str, second_sid: str
 ) -> None:
-    # The recorder stops on a worker thread and the model's @session_ended hook
-    # runs from a queued event, both after the closing move lands. Their records
-    # belong to the session, so the release waits for that work rather than
-    # unbinding the moment the session reaches ready.
-    finish_teardown = threading.Event()
-    monkeypatch.setattr(started_runner._recorder, "stop", finish_teardown.wait)
-    sid = "11111111-2222-3333-4444-555555555555"
-    started_runner.start_session({"session_id": sid})
-    started_runner.stop_session()
-    await asyncio.sleep(0.01)
-    _expect_state(started_runner, SessionState.READY)
-    assert log.get_session_id() == sid
+    """Run two sessions back to back and prove the first's release spared the second.
 
-    finish_teardown.set()
-    await started_runner._drain_teardown()
-    assert log.get_session_id() is None
+    The reactor loop dispatches in order, so once the second session's
+    ``@session_started`` hook has run, the first session's ``SessionEnded`` — and
+    with it the release of its binding — has already been dispatched. Waiting on
+    the hook is the deterministic barrier that makes the assertion meaningful: it
+    asserts only after the late release has provably happened.
+    """
+    started = threading.Event()
+
+    class BarrierModel(FakeModel):
+        @session_started
+        def on_session_started(self) -> None:
+            started.set()
+
+    monkeypatch.setattr(
+        "reactor_runtime.runner.runner.import_model_class", lambda ref: BarrierModel
+    )
+    runner = _runner()
+    await runner.start()
+    try:
+        # The model thread creates its queues on its own loop, and an event
+        # enqueued before then is deliberately dropped. Production start_session
+        # calls arrive long after boot; this test's arrives instantly, so wait
+        # for the loop before opening the first session.
+        model = created_models[-1]
+        deadline = time.monotonic() + 2.0
+        while model._reactor_q is None:
+            assert time.monotonic() < deadline, "model loop never became ready"
+            await asyncio.sleep(0.01)
+        runner.start_session({"session_id": first_sid})
+        assert await asyncio.to_thread(started.wait, 2.0), "first session_started never ran"
+        started.clear()
+        runner.stop_session()
+        await asyncio.sleep(0.01)
+        _expect_state(runner, SessionState.READY)
+        runner.start_session({"session_id": second_sid})
+        assert await asyncio.to_thread(started.wait, 2.0), "second session_started never ran"
+        assert log.get_session_id() == second_sid
+    finally:
+        await runner.stop()
 
 
 async def test_a_late_release_cannot_strip_the_session_that_followed(
-    started_runner: Runner,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The release is deferred, so the next session can be live before it runs.
-    started_runner.start_session({"session_id": "11111111-1111-1111-1111-111111111111"})
-    started_runner.stop_session()
-    await asyncio.sleep(0.01)
-    started_runner.start_session({"session_id": "22222222-2222-2222-2222-222222222222"})
-    await started_runner._drain_teardown()
-    assert log.get_session_id() == "22222222-2222-2222-2222-222222222222"
+    # The release rides the first session's SessionEnded, so the next session is
+    # live before it runs; the binding token is what keeps it from unbinding her.
+    await _two_sessions_with_a_started_barrier(
+        monkeypatch,
+        "11111111-1111-1111-1111-111111111111",
+        "22222222-2222-2222-2222-222222222222",
+    )
 
 
 async def test_a_session_reusing_the_previous_id_keeps_its_own_binding(
-    started_runner: Runner,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A caller may start two sessions under one id; the first session's deferred
-    # release must not unbind the second, which would leave its whole run
-    # unstamped.
+    # A caller may start two sessions under one id; the first session's release
+    # must not unbind the second, which would leave its whole run unstamped.
     reused = "11111111-1111-1111-1111-111111111111"
-    started_runner.start_session({"session_id": reused})
-    started_runner.stop_session()
-    await asyncio.sleep(0.01)
-    started_runner.start_session({"session_id": reused})
-    await started_runner._drain_teardown()
-    assert log.get_session_id() == reused
+    await _two_sessions_with_a_started_barrier(monkeypatch, reused, reused)
+
+
+async def test_session_ended_hook_records_are_stamped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The release rides the reactor queue behind SessionEnded, so the hook has
+    # returned — its records stamped — before the binding is retired. Recording
+    # is off here, so teardown is immediate and only the queue order protects
+    # the hook; this is the case a teardown-only wait loses.
+    seen: list[str | None] = []
+
+    class HookedModel(FakeModel):
+        @session_ended
+        def on_session_ended(self) -> None:
+            seen.append(log.get_session_id())
+
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: HookedModel)
+    runner = _runner()
+    await runner.start()
+    try:
+        sid = "11111111-2222-3333-4444-555555555555"
+        runner.start_session({"session_id": sid})
+        runner.stop_session()
+        await asyncio.sleep(0.01)
+        _expect_state(runner, SessionState.READY)
+        await runner._drain_teardown()
+        # Released only after the hook, so the release doubles as its barrier.
+        await _await_log_release()
+        assert seen == [sid]
+    finally:
+        await runner.stop()
 
 
 async def test_a_second_session_stamps_its_own_id(started_runner: Runner) -> None:
@@ -786,13 +845,19 @@ async def test_a_second_session_stamps_its_own_id(started_runner: Runner) -> Non
     assert log.get_session_id() == "22222222-2222-2222-2222-222222222222"
 
 
-async def test_an_eviction_releases_the_stamped_id(started_runner: Runner) -> None:
-    started_runner.start_session({"session_id": "11111111-2222-3333-4444-555555555555"})
+async def test_an_eviction_leaves_the_binding_for_the_process_exit(
+    started_runner: Runner,
+) -> None:
+    # An eviction is the model loop's own death: no SessionEnded is dispatched,
+    # so nothing retires the binding — deliberately. The process is exiting, and
+    # its last records belong to the session that brought it down.
+    sid = "11111111-2222-3333-4444-555555555555"
+    started_runner.start_session({"session_id": sid})
     started_runner._on_model_failure(RuntimeError("gpu fell off"))
     await asyncio.sleep(0.05)  # let the loop run the scheduled eviction callback
     _expect_state(started_runner, SessionState.TERMINATED)
     await started_runner._drain_teardown()
-    assert log.get_session_id() is None
+    assert log.get_session_id() == sid
 
 
 async def test_the_transition_log_carries_no_id_of_its_own(

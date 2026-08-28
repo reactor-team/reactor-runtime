@@ -238,10 +238,16 @@ class SessionEnded(ReactorEvent):
     Attributes:
         session_id: Identifier for the session that ended.
         reason: Why the session ended.
+        _log_binding: The log session binding to retire once the
+            ``@session_ended`` hook has run. Internal plumbing between the
+            runner and the reactor loop, never surfaced to a hook: dispatch is
+            what proves the hook's records were written while the binding was
+            live, so dispatch is where it is released.
     """
 
     session_id: str
     reason: EndReason
+    _log_binding: int = 0
 
 
 @dataclass(frozen=True)

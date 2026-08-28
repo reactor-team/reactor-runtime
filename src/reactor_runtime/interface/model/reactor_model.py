@@ -43,7 +43,7 @@ from reactor_runtime.interface.internal.reactor_core import (
     RequestId,
 )
 from reactor_runtime.interface.model.contract import ModelContract
-from reactor_runtime.log import get_logger
+from reactor_runtime.log import get_logger, release_session_id
 
 logger = get_logger(__name__)
 
@@ -188,6 +188,10 @@ class ReactorModel(ReactorCore):
             self._set_connected(0)
             await self._invoke_hook(hooks.session_ended, None)
             self._clients.clear()
+            # The hook has returned, so its records were written while the
+            # session's log binding was live; the session's last ambient writer
+            # is done and the binding retires here, on the model thread.
+            release_session_id(event._log_binding)
         elif isinstance(event, FileUploaded):
             await self._invoke_hook(hooks.file_uploaded, event.conn_id, uploaded_file=event.file)
 

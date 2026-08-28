@@ -54,7 +54,7 @@ from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.bridge import ModelBridge
 from reactor_runtime.interface.internal.reactor_core import MediaOps
 from reactor_runtime.interface.model.contract import ModelContract
-from reactor_runtime.log import get_logger, release_session_id, set_session_id
+from reactor_runtime.log import get_logger, set_session_id
 from reactor_runtime.manifest import import_model_class
 from reactor_runtime.message_gateway import InboundCommand, MessageGateway
 from reactor_runtime.metrics import (
@@ -1092,10 +1092,13 @@ class Runner(ServiceComponent, ConnectionSink):
         self-loops log at debug so a per-segment ``chunk_ready`` does not flood
         the log.
 
-        The session boundary is also where the log's session context is bound and
-        released, so every record written while a session is live names it —
-        including the moves that open and close the session, which bind before
-        and release after their own line.
+        The session boundary is also where the log's session context binds, so
+        every record written while a session is live names it, the opening move
+        included. The release travels differently: it rides the ``SessionEnded``
+        event into the model, whose dispatch retires the binding once the
+        ``@session_ended`` hook has returned. A terminal move dispatches no
+        ``SessionEnded`` and releases nothing — the process is exiting, and its
+        last records belong to the session that brought it down.
         """
         if transition.is_session_start:
             self._log_binding = set_session_id(self._recording_id)
@@ -1135,56 +1138,6 @@ class Runner(ServiceComponent, ConnectionSink):
                 self._spawn_teardown(asyncio.to_thread(self._recorder.stop))
                 self._spawn_teardown(self._connections.close_all())
             self.request_shutdown()
-        # Release the log's session context on every move that leaves no session
-        # live, so a record written between sessions claims none. A close unwinds
-        # to ready and the process goes on to host another session, which a stale
-        # id would misattribute; a terminal move ends the session just as
-        # squarely, so both release here.
-        if transition.is_session_end or (
-            entered and transition.to_state is SessionState.TERMINATED
-        ):
-            self._release_log_session(self._log_binding)
-
-    def _release_log_session(self, binding: int) -> None:
-        """Retire the log's session context once the session's teardown has finished.
-
-        Teardown outlives the move that ends a session. The recorder stops on a
-        worker thread, and its records — how much the session dropped — belong to
-        the session that produced them, so unbinding the moment the move lands
-        would strip them. The release therefore waits for the teardown tasks
-        already in flight.
-
-        The model's ``@session_ended`` hook is not one of them: it runs from an
-        event queued onto the model's own loop, which the runner holds no handle
-        on and so cannot await. The hook does land first whenever the recorder is
-        running, whose thread joins outlast a loop turn by far, but that is the
-        timing rather than a guarantee — with recording disabled the release can
-        win, and the hook's records carry no session.
-
-        The move that ends a session is itself sent from a teardown task, so that
-        task is excluded from the wait rather than awaited by the release it
-        triggered. Waiting also means a later session may be live by the time the
-        release runs, which is why it retires a named binding rather than an id.
-        """
-        loop = self._loop
-        try:
-            on_loop = loop is not None and asyncio.get_running_loop() is loop
-        except RuntimeError:
-            on_loop = False
-        if not on_loop:
-            release_session_id(binding)
-            return
-        running = asyncio.current_task()
-        pending = tuple(task for task in self._teardown if task is not running)
-
-        async def release() -> None:
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
-            release_session_id(binding)
-
-        # Snapshotting `pending` above is what lets this ride the teardown set:
-        # tracked to completion like its siblings, without awaiting itself.
-        self._spawn_teardown(release())
 
     def _start_recorder(self) -> None:
         """Arm the recorder for the session, best-effort.
@@ -1210,7 +1163,12 @@ class Runner(ServiceComponent, ConnectionSink):
             bridge.dispatch_reactor_event(SessionStarted(self._session_id))
         if transition.is_session_end:
             reason = transition.detail.get("reason", EndReason.STOPPED)
-            bridge.dispatch_reactor_event(SessionEnded(self._session_id, reason))
+            bridge.dispatch_reactor_event(
+                # The event carries the log binding so its dispatch — the point
+                # where the @session_ended hook has provably returned — is what
+                # retires it, on the model thread.
+                SessionEnded(self._session_id, reason, self._log_binding)
+            )
         if transition.event is SessionEvent.CONNECTION_OPENED:
             bridge.dispatch_reactor_event(
                 ClientConnected(transition.detail["conn_id"], self._connections.count)
