@@ -13,20 +13,20 @@ them; the wire shape is the formatter's concern, not the call site's.
 ``configure`` installs the chosen formatter on the root logger, and
 ``get_logger`` returns a logger to write through.
 
-Two fields arrive without a call site naming them, stamped by
+Three fields arrive without a call site naming them, stamped by
 :class:`SessionContextFilter` on the handler ``configure`` installs. While a
-session is live, every record carries its ``session_id``; from the moment the
-runtime boots, every record carries ``state``, the lifecycle state the process
-was in when the record was written — so the model-load window is retrievable as
-``state="created"`` even though no session exists yet. The vocabulary is the
-session state machine's, the same words the session descriptor's ``state``
-field serves; the health route's coarse ``state`` (``loading`` / ``available``
-/ ``serving``) is a projection of it for outside observers and deliberately
-not what the records carry. Because the stamp happens where records are
-written rather than where they are made, it reaches a model's own
-``logging.getLogger(__name__)`` and any third-party library that propagates to
-root, so a line can be traced to the session and phase that produced it without
-model code threading either through its call sites.
+session is live, every record carries its ``session_id``. From the moment the
+runtime boots, every record carries the lifecycle it was written in, at both
+granularities: ``state``, the session state machine's word — the same words the
+session descriptor's ``state`` field serves — and ``runtime_state``, its coarse
+projection, the words the health route serves (``loading`` / ``available`` /
+``serving`` / ``terminated``). Carrying both means a reader can filter by
+whichever vocabulary they read off a surface: the model-load window is
+``state="created"`` and equally ``runtime_state="loading"``. Because the stamp
+happens where records are written rather than where they are made, it reaches a
+model's own ``logging.getLogger(__name__)`` and any third-party library that
+propagates to root, so a line can be traced to the session and phase that
+produced it without model code threading any of it through its call sites.
 """
 
 from __future__ import annotations
@@ -106,26 +106,37 @@ def get_session_id() -> str | None:
     return _session_id
 
 
-# The runtime's lifecycle state, stamped on every record while it is set. Unlike
-# the session id it needs no binding token: there is always exactly one current
-# state and the latest write is by definition the truth, so last-write-wins is
-# the correct semantics rather than a race to guard against.
+# The runtime's lifecycle, stamped on every record while set: the state
+# machine's own word and its coarse projection. One fact at two granularities,
+# so one setter binds both and they cannot drift apart. Unlike the session id
+# they need no binding token: there is always exactly one current state and the
+# latest write is by definition the truth, so last-write-wins is the correct
+# semantics rather than a race to guard against.
 _state: str | None = None
+_runtime_state: str | None = None
 
 
-def set_state(state: str | None) -> None:
-    """Stamp *state* on every record written from now on.
+def set_state(state: str | None, runtime_state: str | None) -> None:
+    """Stamp *state* and *runtime_state* on every record written from now on.
 
     Args:
-        state: The runtime's lifecycle state, or ``None`` to stamp nothing.
+        state: The session state machine's word, or ``None`` to stamp nothing.
+        runtime_state: Its coarse lifecycle projection, the health route's
+            vocabulary, or ``None`` to stamp nothing.
     """
-    global _state
+    global _state, _runtime_state
     _state = state
+    _runtime_state = runtime_state
 
 
 def get_state() -> str | None:
-    """Return the state currently being stamped, or ``None`` before boot."""
+    """Return the machine word currently being stamped, or ``None`` before boot."""
     return _state
+
+
+def get_runtime_state() -> str | None:
+    """Return the coarse word currently being stamped, or ``None`` before boot."""
+    return _runtime_state
 
 
 def _logfmt_value(value: Any) -> str:
@@ -161,15 +172,19 @@ class SessionContextFilter(logging.Filter):
     Sits on the handler rather than on one logger, so it sees every record a
     handler writes: the runtime's own, a model's ``logging.getLogger(__name__)``,
     and a third-party library's that propagates to root. A call site that names
-    ``session_id`` or ``state`` itself keeps its own value — a model logging its
-    own ``state`` claims that record's field, deliberately — and a field with
-    nothing bound, the session id between sessions or the state before boot, is
-    absent rather than empty.
+    ``session_id``, ``state``, or ``runtime_state`` itself keeps its own value —
+    a model logging its own ``state`` claims that record's field, deliberately —
+    and a field with nothing bound, the session id between sessions or the
+    states before boot, is absent rather than empty.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
         """Merge the ambient context into *record*'s structured fields."""
-        stamped = {"session_id": _session_id, "state": _state}
+        stamped = {
+            "session_id": _session_id,
+            "state": _state,
+            "runtime_state": _runtime_state,
+        }
         context = {key: value for key, value in stamped.items() if value is not None}
         if not context:
             return True
@@ -280,7 +295,7 @@ def configure(*, level: int = logging.INFO, stream: IO[str] | None = None) -> No
     Replaces any handlers already on the root logger so output has a single,
     predictable shape. The handler carries a :class:`SessionContextFilter`, so
     every record written through it is stamped with the live session's id and
-    the runtime's lifecycle state.
+    the runtime's lifecycle state at both granularities.
 
     Args:
         level: The level the root logger is set to.
@@ -308,6 +323,7 @@ __all__ = [
     "clear_session_id",
     "configure",
     "get_logger",
+    "get_runtime_state",
     "get_session_id",
     "get_state",
     "release_session_id",

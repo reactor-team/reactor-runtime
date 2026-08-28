@@ -732,28 +732,29 @@ async def test_a_live_session_stamps_its_id_on_the_logs(started_runner: Runner) 
 async def test_the_stamped_state_tracks_the_lifecycle(started_runner: Runner) -> None:
     # The runner stamps its starting state at construction — the model-load
     # window is what makes initialization logs retrievable — and re-stamps on
-    # every move, so a record always reads the phase it was written in.
-    assert log.get_state() == "ready"
+    # every move, so a record always reads the phase it was written in, in both
+    # the machine's words and the health route's coarse projection.
+    assert (log.get_state(), log.get_runtime_state()) == ("ready", "available")
     started_runner.start_session({})
-    assert log.get_state() == "waiting"
+    assert (log.get_state(), log.get_runtime_state()) == ("waiting", "serving")
     conn = FakeConnection(1)
     started_runner.connection_opened(conn)
     _expect_state(started_runner, SessionState.STREAMING)
-    assert log.get_state() == "streaming"
+    assert (log.get_state(), log.get_runtime_state()) == ("streaming", "serving")
     started_runner.stop_session()
     await asyncio.sleep(0.01)
     _expect_state(started_runner, SessionState.READY)
-    assert log.get_state() == "ready"
+    assert (log.get_state(), log.get_runtime_state()) == ("ready", "available")
 
 
 async def test_construction_stamps_the_created_state(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
     assert log.get_state() is None
     runner = _runner()
-    assert log.get_state() == "created"
+    assert (log.get_state(), log.get_runtime_state()) == ("created", "loading")
     await runner.start()
     try:
-        assert log.get_state() == "ready"
+        assert (log.get_state(), log.get_runtime_state()) == ("ready", "available")
     finally:
         await runner.stop()
 
@@ -763,7 +764,7 @@ async def test_an_eviction_stamps_the_terminated_state(started_runner: Runner) -
     started_runner._on_model_failure(RuntimeError("gpu fell off"))
     await asyncio.sleep(0.05)  # let the loop run the scheduled eviction callback
     _expect_state(started_runner, SessionState.TERMINATED)
-    assert log.get_state() == "terminated"
+    assert (log.get_state(), log.get_runtime_state()) == ("terminated", "terminated")
 
 
 async def test_a_record_written_in_session_carries_state_and_id(
@@ -781,6 +782,7 @@ async def test_a_record_written_in_session_carries_state_and_id(
     fields = getattr(record, "reactor_fields", {})
     assert fields["session_id"] == "11111111-2222-3333-4444-555555555555"
     assert fields["state"] == "waiting"
+    assert fields["runtime_state"] == "serving"
 
 
 async def test_closing_a_session_releases_the_stamped_id(started_runner: Runner) -> None:

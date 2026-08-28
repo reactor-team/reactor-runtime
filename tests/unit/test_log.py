@@ -11,6 +11,7 @@ from reactor_runtime.log import (
     clear_session_id,
     configure,
     get_logger,
+    get_runtime_state,
     get_session_id,
     get_state,
     release_session_id,
@@ -234,21 +235,23 @@ def test_a_reused_session_id_survives_the_previous_release() -> None:
 # --- the runtime state stamped on every record ----------------------------
 
 
-def test_no_state_field_before_boot(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_no_state_fields_before_boot(monkeypatch: pytest.MonkeyPatch) -> None:
     log, buffer = configured_logger(monkeypatch, "json")
     log.info("early")
     payload = json.loads(buffer.getvalue().strip())
     assert "state" not in payload
+    assert "runtime_state" not in payload
 
 
-def test_the_state_is_stamped_without_the_call_site_naming_it(
+def test_both_state_words_are_stamped_without_the_call_site_naming_them(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     log, buffer = configured_logger(monkeypatch, "json")
-    set_state("created")
+    set_state("created", "loading")
     log.info("loading weights")
     payload = json.loads(buffer.getvalue().strip())
     assert payload["state"] == "created"
+    assert payload["runtime_state"] == "loading"
     assert "session_id" not in payload
 
 
@@ -256,26 +259,30 @@ def test_text_mode_renders_the_stamped_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     log, buffer = configured_logger(monkeypatch, "text")
-    set_state("ready")
+    set_state("ready", "available")
     log.info("idle")
-    assert "state=ready" in buffer.getvalue()
+    line = buffer.getvalue()
+    assert "state=ready" in line
+    assert "runtime_state=available" in line
 
 
 def test_a_call_site_that_names_the_state_keeps_its_own(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     log, buffer = configured_logger(monkeypatch, "json")
-    set_state("streaming")
+    set_state("streaming", "serving")
     log.info("model status", state="explicit")
     payload = json.loads(buffer.getvalue().strip())
     assert payload["state"] == "explicit"
+    # Only the field the call site named is displaced; its sibling still stamps.
+    assert payload["runtime_state"] == "serving"
 
 
 def test_the_state_and_the_session_id_stamp_together(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     log, buffer = configured_logger(monkeypatch, "json")
-    set_state("streaming")
+    set_state("streaming", "serving")
     set_session_id("s-live")
     log.info("generating", chunk_idx=3)
     payload = json.loads(buffer.getvalue().strip())
@@ -286,7 +293,10 @@ def test_the_state_and_the_session_id_stamp_together(
 
 def test_get_state_reports_what_is_stamped() -> None:
     assert get_state() is None
-    set_state("created")
+    assert get_runtime_state() is None
+    set_state("created", "loading")
     assert get_state() == "created"
-    set_state(None)
+    assert get_runtime_state() == "loading"
+    set_state(None, None)
     assert get_state() is None
+    assert get_runtime_state() is None

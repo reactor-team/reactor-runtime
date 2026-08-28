@@ -48,7 +48,7 @@ def _clear_log_context() -> Iterator[None]:
         yield
     finally:
         log.clear_session_id()
-        log.set_state(None)
+        log.set_state(None, None)
 
 
 @pytest.fixture(autouse=True)
