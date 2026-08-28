@@ -54,7 +54,7 @@ from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.bridge import ModelBridge
 from reactor_runtime.interface.internal.reactor_core import MediaOps
 from reactor_runtime.interface.model.contract import ModelContract
-from reactor_runtime.log import get_logger, set_session_id
+from reactor_runtime.log import get_logger, set_session_id, set_state
 from reactor_runtime.manifest import import_model_class
 from reactor_runtime.message_gateway import InboundCommand, MessageGateway
 from reactor_runtime.metrics import (
@@ -97,6 +97,17 @@ _RUNTIME_STATES: dict[SessionState, RuntimeState] = {
     SessionState.CLOSING: RuntimeState.SERVING,
     SessionState.TERMINATED: RuntimeState.TERMINATED,
 }
+
+
+def _stamp_log_state(state: SessionState) -> None:
+    """Bind the log's state context to *state*, at both granularities.
+
+    Records carry the machine's own word and the coarse word the health route
+    serves, so a reader can filter by whichever vocabulary the surface they are
+    looking at showed them.
+    """
+    set_state(state.name.lower(), _RUNTIME_STATES[state].value)
+
 
 # How long to wait for an upload's bytes to arrive when a command or notification
 # references it before they are written. A client references an upload over the
@@ -169,6 +180,10 @@ class Runner(ServiceComponent, ConnectionSink):
         self._cfg = cfg
         self._metrics = metrics or RuntimeMetrics(version=_server_version(), model=cfg.model_ref)
         self._sm = SessionStateMachine()
+        # The log's state context starts at the machine's starting state, so the
+        # model-load window — records written before any transition — is already
+        # stamped; every later move re-stamps in _dispatch_transition.
+        _stamp_log_state(self._sm.current_state)
         self._sm.on_transition(self._dispatch_transition)
         # The session surface of the metrics is one listener over the same moves
         # the journal carries, so no session code below calls an instrument.
@@ -1098,10 +1113,14 @@ class Runner(ServiceComponent, ConnectionSink):
         event into the model, whose dispatch retires the binding once the
         ``@session_ended`` hook has returned. A terminal move dispatches no
         ``SessionEnded`` and releases nothing — the process is exiting, and its
-        last records belong to the session that brought it down.
+        last records belong to the session that brought it down. The log's state
+        context re-stamps here too, before the move's own line, so a record
+        reads the state the process was in when it was written.
         """
         if transition.is_session_start:
             self._log_binding = set_session_id(self._recording_id)
+        if transition.from_state is not transition.to_state:
+            _stamp_log_state(transition.to_state)
         log = logger.debug if transition.event in JOURNAL_EVENTS else logger.info
         # The fixed transport id (SESSION_ID) is deliberately not a field here:
         # one constant value per process carries nothing, and squatting on
