@@ -369,7 +369,10 @@ class Recorder:
             try:
                 (self._session_dir / _COMPLETE_MARKER).write_text("")
             except OSError:
-                logger.exception("failed to write recording completion marker")
+                logger.exception(
+                    "failed to write recording completion marker",
+                    session_id=self._session_id,
+                )
         self._fire_ready_chunks()
         self._fire_ready_clips()
         self._watch_stop.set()
@@ -380,7 +383,9 @@ class Recorder:
         self._started = False
         # session_id is named explicitly, like the start's: the recorder outlives
         # the session's ambient log context, which the model retires at its own
-        # session-ended dispatch, so the stop attributes itself.
+        # session-ended dispatch, so a record written on the way out — this one,
+        # the marker and callback failures, the feed thread's exit — attributes
+        # itself.
         logger.info(
             "recorder stopped",
             recording_id=self._session_id,
@@ -655,7 +660,10 @@ class Recorder:
                 if self._has_audio and audio is not None:
                     encoder.feed_audio(audio)
             except Exception:
-                logger.exception("recorder encoder feed failed; disabling recording")
+                logger.exception(
+                    "recorder encoder feed failed; disabling recording",
+                    session_id=self._session_id,
+                )
                 self._disabled = True
                 self._drain_feed_queue()
                 return
@@ -816,7 +824,7 @@ class Recorder:
             try:
                 callback(clip)
             except Exception:
-                logger.exception("clip-ready callback raised")
+                logger.exception("clip-ready callback raised", session_id=self._session_id)
 
     def _fire_ready_chunks(self) -> None:
         """Announce every recording segment that has closed since the last poll.
@@ -843,7 +851,7 @@ class Recorder:
             try:
                 callback(recording_id, idx)
             except Exception:
-                logger.exception("chunk-ready callback raised")
+                logger.exception("chunk-ready callback raised", session_id=recording_id)
 
     # -- HTTP serving ---------------------------------------------------------
 

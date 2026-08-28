@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -22,6 +23,7 @@ from reactor_runtime import (
     log,
     protocol,
     session_ended,
+    session_started,
 )
 from reactor_runtime.core import (
     ClientConnected,
@@ -737,35 +739,71 @@ async def test_closing_a_session_releases_the_stamped_id(started_runner: Runner)
     await _await_log_release()
 
 
-async def test_a_late_release_cannot_strip_the_session_that_followed(
-    started_runner: Runner,
+async def _two_sessions_with_a_started_barrier(
+    monkeypatch: pytest.MonkeyPatch, first_sid: str, second_sid: str
 ) -> None:
-    # The release is deferred, so the next session can be live before it runs.
-    started_runner.start_session({"session_id": "11111111-1111-1111-1111-111111111111"})
-    started_runner.stop_session()
-    await asyncio.sleep(0.01)
-    started_runner.start_session({"session_id": "22222222-2222-2222-2222-222222222222"})
-    await started_runner._drain_teardown()
-    # The first session's release retires its binding on the model thread; give
-    # it room to run and prove it left the live session alone.
-    await asyncio.sleep(0.1)
-    assert log.get_session_id() == "22222222-2222-2222-2222-222222222222"
+    """Run two sessions back to back and prove the first's release spared the second.
+
+    The reactor loop dispatches in order, so once the second session's
+    ``@session_started`` hook has run, the first session's ``SessionEnded`` — and
+    with it the release of its binding — has already been dispatched. Waiting on
+    the hook is the deterministic barrier that makes the assertion meaningful: it
+    asserts only after the late release has provably happened.
+    """
+    started = threading.Event()
+
+    class BarrierModel(FakeModel):
+        @session_started
+        def on_session_started(self) -> None:
+            started.set()
+
+    monkeypatch.setattr(
+        "reactor_runtime.runner.runner.import_model_class", lambda ref: BarrierModel
+    )
+    runner = _runner()
+    await runner.start()
+    try:
+        # The model thread creates its queues on its own loop, and an event
+        # enqueued before then is deliberately dropped. Production start_session
+        # calls arrive long after boot; this test's arrives instantly, so wait
+        # for the loop before opening the first session.
+        model = created_models[-1]
+        deadline = time.monotonic() + 2.0
+        while model._reactor_q is None:
+            assert time.monotonic() < deadline, "model loop never became ready"
+            await asyncio.sleep(0.01)
+        runner.start_session({"session_id": first_sid})
+        assert await asyncio.to_thread(started.wait, 2.0), "first session_started never ran"
+        started.clear()
+        runner.stop_session()
+        await asyncio.sleep(0.01)
+        _expect_state(runner, SessionState.READY)
+        runner.start_session({"session_id": second_sid})
+        assert await asyncio.to_thread(started.wait, 2.0), "second session_started never ran"
+        assert log.get_session_id() == second_sid
+    finally:
+        await runner.stop()
+
+
+async def test_a_late_release_cannot_strip_the_session_that_followed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The release rides the first session's SessionEnded, so the next session is
+    # live before it runs; the binding token is what keeps it from unbinding her.
+    await _two_sessions_with_a_started_barrier(
+        monkeypatch,
+        "11111111-1111-1111-1111-111111111111",
+        "22222222-2222-2222-2222-222222222222",
+    )
 
 
 async def test_a_session_reusing_the_previous_id_keeps_its_own_binding(
-    started_runner: Runner,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A caller may start two sessions under one id; the first session's deferred
-    # release must not unbind the second, which would leave its whole run
-    # unstamped.
+    # A caller may start two sessions under one id; the first session's release
+    # must not unbind the second, which would leave its whole run unstamped.
     reused = "11111111-1111-1111-1111-111111111111"
-    started_runner.start_session({"session_id": reused})
-    started_runner.stop_session()
-    await asyncio.sleep(0.01)
-    started_runner.start_session({"session_id": reused})
-    await started_runner._drain_teardown()
-    await asyncio.sleep(0.1)
-    assert log.get_session_id() == reused
+    await _two_sessions_with_a_started_barrier(monkeypatch, reused, reused)
 
 
 async def test_session_ended_hook_records_are_stamped(
