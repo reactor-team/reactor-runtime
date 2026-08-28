@@ -8,8 +8,12 @@ from reactor_runtime.log import (
     JsonFormatter,
     StructuredLogger,
     TextFormatter,
+    clear_session_id,
     configure,
     get_logger,
+    get_session_id,
+    release_session_id,
+    set_session_id,
 )
 
 
@@ -129,3 +133,97 @@ def test_json_formatter_without_fields_has_only_the_envelope() -> None:
     record = logging.LogRecord("n", logging.INFO, __file__, 1, "hello", (), None)
     payload = json.loads(formatter.format(record))
     assert set(payload) == {"ts", "level", "logger", "msg"}
+
+
+# --- the session id stamped on every record ------------------------------
+
+
+def test_no_session_id_field_between_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
+    log, buffer = configured_logger(monkeypatch, "json")
+    log.info("idle")
+    payload = json.loads(buffer.getvalue().strip())
+    assert "session_id" not in payload
+
+
+def test_the_live_session_id_is_stamped_without_the_call_site_naming_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log, buffer = configured_logger(monkeypatch, "json")
+    set_session_id("s-live")
+    log.info("generating", chunk_idx=7)
+    payload = json.loads(buffer.getvalue().strip())
+    assert payload["session_id"] == "s-live"
+    assert payload["chunk_idx"] == 7
+
+
+def test_text_mode_renders_the_stamped_session_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    log, buffer = configured_logger(monkeypatch, "text")
+    set_session_id("s-live")
+    log.info("generating")
+    assert "session_id=s-live" in buffer.getvalue()
+
+
+def test_a_call_site_that_names_the_session_id_keeps_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log, buffer = configured_logger(monkeypatch, "json")
+    set_session_id("s-live")
+    log.info("recorder started", session_id="s-explicit")
+    payload = json.loads(buffer.getvalue().strip())
+    assert payload["session_id"] == "s-explicit"
+
+
+def test_a_plain_stdlib_logger_is_stamped_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Model code that reaches for the standard library rather than get_logger
+    # still lands on the configured handler by propagation, which is where the
+    # stamp happens — so its records name the session without any model change.
+    _, buffer = configured_logger(monkeypatch, "json")
+    set_session_id("s-live")
+    logging.getLogger("some.model.module").info("loaded weights")
+    payload = json.loads(buffer.getvalue().strip())
+    assert payload["session_id"] == "s-live"
+    assert payload["logger"] == "some.model.module"
+
+
+def test_clearing_stops_the_stamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    log, buffer = configured_logger(monkeypatch, "json")
+    set_session_id("s-live")
+    log.info("in session")
+    clear_session_id()
+    log.info("after session")
+    first, second = (json.loads(line) for line in buffer.getvalue().splitlines() if line.strip())
+    assert first["session_id"] == "s-live"
+    assert "session_id" not in second
+
+
+def test_get_session_id_reports_what_is_stamped() -> None:
+    assert get_session_id() is None
+    set_session_id("s-live")
+    assert get_session_id() == "s-live"
+    clear_session_id()
+    assert get_session_id() is None
+
+
+def test_releasing_the_live_binding_unbinds_it() -> None:
+    binding = set_session_id("s-one")
+    release_session_id(binding)
+    assert get_session_id() is None
+
+
+def test_releasing_an_earlier_binding_leaves_the_live_one_bound() -> None:
+    # A release is deferred until the session's teardown finishes, so the next
+    # session can already be bound by the time it runs.
+    first = set_session_id("s-one")
+    set_session_id("s-two")
+    release_session_id(first)
+    assert get_session_id() == "s-two"
+
+
+def test_a_reused_session_id_survives_the_previous_release() -> None:
+    # Nothing stops a caller starting two sessions under one id, so a release
+    # matching on the value would unbind the session that reused it and leave the
+    # rest of its run unstamped.
+    first = set_session_id("s-same")
+    set_session_id("s-same")
+    release_session_id(first)
+    assert get_session_id() == "s-same"

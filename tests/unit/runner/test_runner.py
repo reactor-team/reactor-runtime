@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -19,6 +20,7 @@ from reactor_runtime import (
     Video,
     event,
     file_uploaded,
+    log,
     protocol,
 )
 from reactor_runtime.core import (
@@ -708,6 +710,106 @@ async def test_sessions_without_a_session_id_get_distinct_recording_ids(
         finally:
             await runner.stop()
     assert minted[0] != minted[1]
+
+
+async def test_a_live_session_stamps_its_id_on_the_logs(started_runner: Runner) -> None:
+    supplied = "11111111-2222-3333-4444-555555555555"
+    assert log.get_session_id() is None
+    started_runner.start_session({"session_id": supplied})
+    assert log.get_session_id() == supplied
+
+
+async def test_closing_a_session_releases_the_stamped_id(started_runner: Runner) -> None:
+    started_runner.start_session({"session_id": "11111111-2222-3333-4444-555555555555"})
+    started_runner.stop_session()
+    await asyncio.sleep(0.01)
+    _expect_state(started_runner, SessionState.READY)
+    # The process may host another session, so a stale id would misattribute it.
+    await started_runner._drain_teardown()
+    assert log.get_session_id() is None
+
+
+async def test_the_id_stays_bound_while_teardown_is_still_running(
+    started_runner: Runner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The recorder stops on a worker thread and the model's @session_ended hook
+    # runs from a queued event, both after the closing move lands. Their records
+    # belong to the session, so the release waits for that work rather than
+    # unbinding the moment the session reaches ready.
+    finish_teardown = threading.Event()
+    monkeypatch.setattr(started_runner._recorder, "stop", finish_teardown.wait)
+    sid = "11111111-2222-3333-4444-555555555555"
+    started_runner.start_session({"session_id": sid})
+    started_runner.stop_session()
+    await asyncio.sleep(0.01)
+    _expect_state(started_runner, SessionState.READY)
+    assert log.get_session_id() == sid
+
+    finish_teardown.set()
+    await started_runner._drain_teardown()
+    assert log.get_session_id() is None
+
+
+async def test_a_late_release_cannot_strip_the_session_that_followed(
+    started_runner: Runner,
+) -> None:
+    # The release is deferred, so the next session can be live before it runs.
+    started_runner.start_session({"session_id": "11111111-1111-1111-1111-111111111111"})
+    started_runner.stop_session()
+    await asyncio.sleep(0.01)
+    started_runner.start_session({"session_id": "22222222-2222-2222-2222-222222222222"})
+    await started_runner._drain_teardown()
+    assert log.get_session_id() == "22222222-2222-2222-2222-222222222222"
+
+
+async def test_a_session_reusing_the_previous_id_keeps_its_own_binding(
+    started_runner: Runner,
+) -> None:
+    # A caller may start two sessions under one id; the first session's deferred
+    # release must not unbind the second, which would leave its whole run
+    # unstamped.
+    reused = "11111111-1111-1111-1111-111111111111"
+    started_runner.start_session({"session_id": reused})
+    started_runner.stop_session()
+    await asyncio.sleep(0.01)
+    started_runner.start_session({"session_id": reused})
+    await started_runner._drain_teardown()
+    assert log.get_session_id() == reused
+
+
+async def test_a_second_session_stamps_its_own_id(started_runner: Runner) -> None:
+    started_runner.start_session({"session_id": "11111111-1111-1111-1111-111111111111"})
+    started_runner.stop_session()
+    await asyncio.sleep(0.01)
+    started_runner.start_session({"session_id": "22222222-2222-2222-2222-222222222222"})
+    assert log.get_session_id() == "22222222-2222-2222-2222-222222222222"
+
+
+async def test_an_eviction_releases_the_stamped_id(started_runner: Runner) -> None:
+    started_runner.start_session({"session_id": "11111111-2222-3333-4444-555555555555"})
+    started_runner._on_model_failure(RuntimeError("gpu fell off"))
+    await asyncio.sleep(0.05)  # let the loop run the scheduled eviction callback
+    _expect_state(started_runner, SessionState.TERMINATED)
+    await started_runner._drain_teardown()
+    assert log.get_session_id() is None
+
+
+async def test_the_transition_log_carries_no_id_of_its_own(
+    started_runner: Runner,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The fixed transport id is one constant per process and carries nothing,
+    # and a call-site session_id would beat the stamped one — so the transition
+    # log names neither, and the session it belongs to arrives via the stamp
+    # alone on exactly the records an operator reaches for first.
+    with caplog.at_level(logging.INFO, logger="reactor_runtime.runner.runner"):
+        started_runner.start_session({"session_id": "11111111-2222-3333-4444-555555555555"})
+    moves = [r for r in caplog.records if r.message == "session transition"]
+    assert moves
+    fields = getattr(moves[-1], "reactor_fields", {})
+    assert "session_id" not in fields
+    assert "transport_session_id" not in fields
 
 
 async def test_require_session_running_rejects_an_unknown_sid(started_runner: Runner) -> None:
