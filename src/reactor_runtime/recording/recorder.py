@@ -378,9 +378,13 @@ class Recorder:
         if watch_thread is not None:
             watch_thread.join(timeout=2.0)
         self._started = False
+        # session_id is named explicitly, like the start's: the recorder outlives
+        # the session's ambient log context, which the model retires at its own
+        # session-ended dispatch, so the stop attributes itself.
         logger.info(
             "recorder stopped",
             recording_id=self._session_id,
+            session_id=self._session_id,
             dropped=self._dropped_frames,
         )
 
