@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -724,7 +725,42 @@ async def test_closing_a_session_releases_the_stamped_id(started_runner: Runner)
     await asyncio.sleep(0.01)
     _expect_state(started_runner, SessionState.READY)
     # The process may host another session, so a stale id would misattribute it.
+    await started_runner._drain_teardown()
     assert log.get_session_id() is None
+
+
+async def test_the_id_stays_bound_while_teardown_is_still_running(
+    started_runner: Runner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The recorder stops on a worker thread and the model's @session_ended hook
+    # runs from a queued event, both after the closing move lands. Their records
+    # belong to the session, so the release waits for that work rather than
+    # unbinding the moment the session reaches ready.
+    finish_teardown = threading.Event()
+    monkeypatch.setattr(started_runner._recorder, "stop", finish_teardown.wait)
+    sid = "11111111-2222-3333-4444-555555555555"
+    started_runner.start_session({"session_id": sid})
+    started_runner.stop_session()
+    await asyncio.sleep(0.01)
+    _expect_state(started_runner, SessionState.READY)
+    assert log.get_session_id() == sid
+
+    finish_teardown.set()
+    await started_runner._drain_teardown()
+    assert log.get_session_id() is None
+
+
+async def test_a_late_release_cannot_strip_the_session_that_followed(
+    started_runner: Runner,
+) -> None:
+    # The release is deferred, so the next session can be live before it runs.
+    started_runner.start_session({"session_id": "11111111-1111-1111-1111-111111111111"})
+    started_runner.stop_session()
+    await asyncio.sleep(0.01)
+    started_runner.start_session({"session_id": "22222222-2222-2222-2222-222222222222"})
+    await started_runner._drain_teardown()
+    assert log.get_session_id() == "22222222-2222-2222-2222-222222222222"
 
 
 async def test_a_second_session_stamps_its_own_id(started_runner: Runner) -> None:

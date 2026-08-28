@@ -54,7 +54,7 @@ from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.bridge import ModelBridge
 from reactor_runtime.interface.internal.reactor_core import MediaOps
 from reactor_runtime.interface.model.contract import ModelContract
-from reactor_runtime.log import clear_session_id, get_logger, set_session_id
+from reactor_runtime.log import get_logger, release_session_id, set_session_id
 from reactor_runtime.manifest import import_model_class
 from reactor_runtime.message_gateway import InboundCommand, MessageGateway
 from reactor_runtime.metrics import (
@@ -1137,7 +1137,42 @@ class Runner(ServiceComponent, ConnectionSink):
         if transition.is_session_end or (
             entered and transition.to_state is SessionState.TERMINATED
         ):
-            clear_session_id()
+            self._release_log_session(self._recording_id)
+
+    def _release_log_session(self, session_id: str) -> None:
+        """Unbind the log's session context once the session's teardown has finished.
+
+        Teardown outlives the move that ends a session: the recorder stops on a
+        worker thread, and the model's ``@session_ended`` hook runs on the model's
+        own loop from a queued event. Both write records that belong to the
+        session, so unbinding the moment the move lands would strip the session
+        from exactly the lines that report how it ended. The release therefore
+        waits for the teardown already in flight.
+
+        The move that ends a session is itself sent from a teardown task, so that
+        task is excluded from the wait rather than awaited by the release it
+        triggered. Waiting also means the next session may be live by the time the
+        release runs, which is why it compares before unbinding.
+        """
+        loop = self._loop
+        try:
+            on_loop = loop is not None and asyncio.get_running_loop() is loop
+        except RuntimeError:
+            on_loop = False
+        if not on_loop:
+            release_session_id(session_id)
+            return
+        running = asyncio.current_task()
+        pending = tuple(task for task in self._teardown if task is not running)
+
+        async def release() -> None:
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            release_session_id(session_id)
+
+        # Snapshotting `pending` above is what lets this ride the teardown set:
+        # tracked to completion like its siblings, without awaiting itself.
+        self._spawn_teardown(release())
 
     def _start_recorder(self) -> None:
         """Arm the recorder for the session, best-effort.

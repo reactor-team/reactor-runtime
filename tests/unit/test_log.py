@@ -12,6 +12,7 @@ from reactor_runtime.log import (
     configure,
     get_logger,
     get_session_id,
+    release_session_id,
     set_session_id,
 )
 
@@ -201,3 +202,18 @@ def test_get_session_id_reports_what_is_stamped() -> None:
     assert get_session_id() == "s-live"
     clear_session_id()
     assert get_session_id() is None
+
+
+def test_releasing_the_live_session_unbinds_it() -> None:
+    set_session_id("s-one")
+    release_session_id("s-one")
+    assert get_session_id() is None
+
+
+def test_releasing_an_earlier_session_leaves_the_live_one_bound() -> None:
+    # A release is deferred until the session's teardown finishes, so the next
+    # session can already be bound by the time it runs.
+    set_session_id("s-one")
+    set_session_id("s-two")
+    release_session_id("s-one")
+    assert get_session_id() == "s-two"

@@ -65,6 +65,22 @@ def clear_session_id() -> None:
     set_session_id(None)
 
 
+def release_session_id(session_id: str) -> None:
+    """Stop stamping *session_id*, leaving any other session's id in place.
+
+    A session's teardown outlives the move that ends it, so the release that
+    follows one is deferred until that work has finished. By then the next
+    session may already have bound its own id, and comparing before unbinding is
+    what stops a late release from stripping the session that followed.
+
+    Args:
+        session_id: The id to unbind, ignored once it is no longer the live one.
+    """
+    global _session_id
+    if _session_id == session_id:
+        _session_id = None
+
+
 def get_session_id() -> str | None:
     """Return the id currently being stamped, or ``None`` between sessions."""
     return _session_id
@@ -246,5 +262,6 @@ __all__ = [
     "configure",
     "get_logger",
     "get_session_id",
+    "release_session_id",
     "set_session_id",
 ]
