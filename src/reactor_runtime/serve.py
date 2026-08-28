@@ -8,8 +8,9 @@ platform.
 
 This is also the runtime's one configuration boundary: the manifest names the
 model, and the surrounding deployment names everything else (bind address, the
-ICE servers and port range, the congestion-control bitrate limits, the video
-codec preference order, the lifecycle timeouts) through environment variables.
+ICE servers and port range, the congestion-control and per-sender bitrate
+limits, the video codec preference order, the lifecycle timeouts) through
+environment variables.
 The transport and lifecycle config objects stay free of environment reads; the
 small adapter here is the only place that translates the outside world into
 them.
@@ -200,6 +201,32 @@ def _bwe_limits_from_env() -> tuple[int, int, int]:
     return min_kbps, max_kbps, initial_kbps
 
 
+def _sender_limits_from_env() -> tuple[int, int]:
+    """Read the per-sender bitrate bounds, checked at boot like the BWE ones.
+
+    These bound one track's encoder, where the BWE limits bound the whole
+    connection's estimate. Both must allow a rate for a stream to reach it, and
+    the per-sender ceiling is the one that lifts libwebrtc's resolution-keyed
+    default of 2500 kbps.
+
+    ``0`` or less means "leave this bound at the libwebrtc default", matching how
+    the rest of this config spells an absent limit. A negative is not an error
+    here for that reason, but ``min`` above ``max`` is: libwebrtc refuses the
+    pair, and finding out at boot beats finding out on every negotiation.
+
+    Raises:
+        SystemExit: If the ordering does not hold.
+    """
+    max_kbps = _int_env("WEBRTC_SENDER_MAX_KBPS", WebRtcConfig.sender_max_kbps)
+    min_kbps = _int_env("WEBRTC_SENDER_MIN_KBPS", WebRtcConfig.sender_min_kbps)
+    if min_kbps > 0 < max_kbps and min_kbps > max_kbps:
+        raise SystemExit(
+            "WEBRTC_SENDER_MIN_KBPS must not exceed WEBRTC_SENDER_MAX_KBPS; "
+            f"got {min_kbps} > {max_kbps}"
+        )
+    return max_kbps, min_kbps
+
+
 def _webrtc_config_from_env() -> WebRtcConfig:
     """Build the WebRTC transport config from the environment.
 
@@ -207,6 +234,7 @@ def _webrtc_config_from_env() -> WebRtcConfig:
     single place the outside world is translated into it.
     """
     bwe_min_kbps, bwe_max_kbps, bwe_initial_kbps = _bwe_limits_from_env()
+    sender_max_kbps, sender_min_kbps = _sender_limits_from_env()
     return WebRtcConfig(
         ice_servers=_ice_servers_from_env(),
         port_range=_port_range_from_env(),
@@ -216,6 +244,8 @@ def _webrtc_config_from_env() -> WebRtcConfig:
         bwe_min_kbps=bwe_min_kbps,
         bwe_max_kbps=bwe_max_kbps,
         bwe_initial_kbps=bwe_initial_kbps,
+        sender_max_kbps=sender_max_kbps,
+        sender_min_kbps=sender_min_kbps,
     )
 
 

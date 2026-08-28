@@ -933,6 +933,7 @@ class _FakeTransceiver:
         self.codec_preference_calls: list[list[Any]] = []
         self.track_calls: list[Any] = []
         self.direction_calls: list[Any] = []
+        self.send_bitrate_calls: list[tuple[int | None, int | None]] = []
 
     def kind(self) -> Any:
         return self._kind
@@ -949,6 +950,9 @@ class _FakeTransceiver:
     async def set_direction(self, direction: Any) -> None:
         self.direction_calls.append(direction)
 
+    async def set_send_bitrate(self, min_bps: int | None, max_bps: int | None) -> None:
+        self.send_bitrate_calls.append((min_bps, max_bps))
+
 
 class _FakeTransceiverPeerConnection:
     def __init__(self, transceivers: list[_FakeTransceiver]) -> None:
@@ -962,7 +966,7 @@ class _FakeTrackFactory:
     def create_video_track(self, name: str) -> Any:
         return SimpleNamespace(name=name)
 
-    def create_audio_track_with_local_source(self, name: str) -> Any:
+    def create_audio_track_with_options(self, name: str, *, source: Any = None) -> Any:
         return SimpleNamespace(name=name)
 
 
@@ -985,6 +989,76 @@ async def test_attach_out_tracks_applies_codec_preferences_to_every_video_transc
     assert audio.codec_preference_calls == []
     assert out_video.track_calls  # the OUT mid still gets its sender track
     assert in_video.track_calls == []  # a receiving transceiver is untouched otherwise
+
+
+async def test_attach_out_tracks_bounds_only_the_sending_transceivers() -> None:
+    """The per-sender ceiling goes on senders, and only on senders.
+
+    A recvonly transceiver's sender is the far end's, so bounding it here would
+    be asking libwebrtc to cap a stream this process does not produce.
+    """
+    peer = WebRTCPeer()
+    peer._config = WebRtcConfig(sender_max_kbps=8000, sender_min_kbps=2000)
+    peer._track_by_mid = {
+        "0": TrackInfo(name="cam", kind=TrackKind.VIDEO, direction=TrackDirection.OUT),
+    }
+    out_video = _FakeTransceiver(rw.MediaKind.Video, "0")
+    in_video = _FakeTransceiver(rw.MediaKind.Video, "1")
+    pc: Any = _FakeTransceiverPeerConnection([out_video, in_video])
+
+    await peer._attach_out_tracks(pc, cast("Any", _FakeTrackFactory()))
+
+    # kbps in the config, bps at the binding — this is the one place that converts.
+    assert out_video.send_bitrate_calls == [(2_000_000, 8_000_000)]
+    assert in_video.send_bitrate_calls == []
+
+
+async def test_an_audio_sender_is_not_given_a_bitrate_bound() -> None:
+    """Audio senders are skipped, and libwebrtc makes that non-optional.
+
+    The default this config lifts is the resolution-keyed video one, so there is
+    no equivalent for an audio sender to clear — its bounds would apply, we just
+    have no reason to set them. And an audio sender materialised from a remote
+    offer has no encodings to write until the answer is applied,
+    where a video one has them as soon as the transceiver exists: calling it
+    here raised ``sender has no encodings`` and failed the whole negotiation,
+    which is how this was found.
+    """
+    peer = WebRTCPeer()
+    peer._config = WebRtcConfig(sender_max_kbps=8000)
+    peer._track_by_mid = {
+        "0": TrackInfo(name="cam", kind=TrackKind.VIDEO, direction=TrackDirection.OUT),
+        "1": TrackInfo(name="voice", kind=TrackKind.AUDIO, direction=TrackDirection.OUT),
+    }
+    video = _FakeTransceiver(rw.MediaKind.Video, "0")
+    audio = _FakeTransceiver(rw.MediaKind.Audio, "1")
+    pc: Any = _FakeTransceiverPeerConnection([video, audio])
+
+    await peer._attach_out_tracks(pc, cast("Any", _FakeTrackFactory()))
+
+    assert video.send_bitrate_calls == [(None, 8_000_000)]
+    assert audio.send_bitrate_calls == []
+    # The audio track is still created and attached — only the bound is skipped.
+    assert audio.track_calls
+
+
+async def test_an_unset_sender_bound_is_left_at_the_libwebrtc_default() -> None:
+    """``0`` means "leave this alone", and must reach the binding as ``None``.
+
+    Passing 0 through would ask for a hard cap of nothing — the one value that
+    reads as a number and behaves as a mute.
+    """
+    peer = WebRTCPeer()
+    peer._config = WebRtcConfig(sender_max_kbps=10000, sender_min_kbps=0)
+    peer._track_by_mid = {
+        "0": TrackInfo(name="cam", kind=TrackKind.VIDEO, direction=TrackDirection.OUT),
+    }
+    video = _FakeTransceiver(rw.MediaKind.Video, "0")
+    pc: Any = _FakeTransceiverPeerConnection([video])
+
+    await peer._attach_out_tracks(pc, cast("Any", _FakeTrackFactory()))
+
+    assert video.send_bitrate_calls == [(None, 10_000_000)]
 
 
 async def test_attach_out_tracks_skips_set_codec_preferences_when_none_configured() -> None:
@@ -1221,6 +1295,7 @@ class _RecordingTransceiver:
         self.tracks: list[Any] = []
         self.directions: list[Any] = []
         self.codec_preferences: list[Any] = []
+        self.send_bitrates: list[tuple[int | None, int | None]] = []
 
     def mid(self) -> str:
         return self._mid
@@ -1236,6 +1311,9 @@ class _RecordingTransceiver:
 
     async def set_direction(self, direction: Any) -> None:
         self.directions.append(direction)
+
+    async def set_send_bitrate(self, min_bps: int | None, max_bps: int | None) -> None:
+        self.send_bitrates.append((min_bps, max_bps))
 
 
 class _RecordingPc:
@@ -1404,7 +1482,7 @@ async def test_outbound_tracks_negotiate_as_sending() -> None:
         def create_video_track(self, name: str) -> Any:
             return _FakeTrack()
 
-        def create_audio_track_with_local_source(self, name: str) -> Any:
+        def create_audio_track_with_options(self, name: str, *, source: Any = None) -> Any:
             return _FakeAudioTrack()
 
     pc = _RecordingPc()
