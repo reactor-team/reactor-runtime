@@ -40,6 +40,30 @@ class IceServer:
     credential: str | None = None
 
 
+@dataclass(frozen=True)
+class IceCredentials:
+    """The ICE username fragment and password a connection answers with.
+
+    Normally the media engine generates these itself, and nothing needs to
+    supply them. They exist as a configurable value for deployments that front
+    the runtime with a relaying layer that has to recognise a connection from
+    its ICE credentials alone — the credentials are the only field an ICE agent
+    echoes on every connectivity check, so a fronting layer can route on them
+    without inspecting media.
+
+    Both values must satisfy RFC 8445's ``ice-char`` alphabet and length
+    ranges; :meth:`reactor_webrtc.SessionDescription.with_ice_credentials`
+    rejects anything outside them.
+
+    Attributes:
+        ufrag: The ``a=ice-ufrag`` value to answer with.
+        pwd: The ``a=ice-pwd`` value to answer with.
+    """
+
+    ufrag: str
+    pwd: str
+
+
 class CodecEntry(TypedDict):
     """A supported codec for SDP negotiation and encoder/decoder selection.
 
@@ -81,8 +105,14 @@ class WebRtcConfig:
 
     Attributes:
         ice_servers: The STUN/TURN servers offered for candidate gathering.
+        ice_credentials: The ICE credentials to answer with, or ``None`` — the
+            default — to let the media engine generate its own. Setting these
+            is only useful to a deployment whose fronting layer routes on them;
+            see :class:`IceCredentials`.
         port_range: An inclusive ``(min, max)`` UDP port range to confine ICE
-            to, or ``None`` to let the stack choose.
+            to, or ``None`` to let the stack choose. A single-port range pins
+            the connection to one port, which is what a fronting layer needs if
+            it must know the media address before the connection exists.
         transport_policy: Which candidate types to gather.
         ping_timeout: Seconds without a client ping before the connection's
             watchdog declares it lost. ``0`` or less disables the watchdog.
@@ -139,6 +169,7 @@ class WebRtcConfig:
     """
 
     ice_servers: tuple[IceServer, ...] = ()
+    ice_credentials: IceCredentials | None = None
     port_range: tuple[int, int] | None = None
     transport_policy: IceTransportPolicy = IceTransportPolicy.ALL
     ping_timeout: float = 20.0

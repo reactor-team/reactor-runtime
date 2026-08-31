@@ -180,6 +180,25 @@
         "title": "IceCandidatesRequest",
         "type": "object"
       },
+      "IceCredentialsEntry": {
+        "description": "The ICE credentials a connection should answer with.\n\nBoth values must satisfy RFC 8445's ``ice-char`` alphabet and length ranges;\nthe media engine rejects anything outside them.",
+        "properties": {
+          "pwd": {
+            "title": "Pwd",
+            "type": "string"
+          },
+          "ufrag": {
+            "title": "Ufrag",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ufrag",
+          "pwd"
+        ],
+        "title": "IceCredentialsEntry",
+        "type": "object"
+      },
       "IceServerEntry": {
         "description": "One STUN/TURN server offered for this connection's candidate gathering.\n\nMirrors the wire shape the platform already uses for ICE servers:\n``{uris, credentials: {username, password}}``, with ``credentials`` absent\nfor a STUN server.",
         "properties": {
@@ -272,8 +291,18 @@
         "type": "object"
       },
       "SdpParamsRequest": {
-        "description": "A client's SDP offer, the tracks it declares, and optional ICE servers.\n\n``ice_servers`` lets the caller supply the STUN/TURN servers this connection\ngathers against. Absent, the runtime uses its own configured servers; present\n(even empty), it is authoritative for the connection \u2014 so a reconnect can\ncarry fresh credentials.",
+        "description": "A client's SDP offer, the tracks it declares, and optional overrides.\n\n``ice_servers`` lets the caller supply the STUN/TURN servers this connection\ngathers against. Absent, the runtime uses its own configured servers; present\n(even empty), it is authoritative for the connection \u2014 so a reconnect can\ncarry fresh credentials.\n\n``ice_credentials`` and ``port_range`` follow the same rule and are likewise\noptional: absent \u2014 the usual case \u2014 the media engine generates its own\ncredentials and the configured port range applies. They exist for a\ndeployment that fronts the runtime with a relaying layer, which must know a\nconnection's ICE credentials and media address before the connection exists.\n``port_range`` is an inclusive ``[min, max]``; a single-port range pins the\nconnection to one port.",
         "properties": {
+          "ice_credentials": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IceCredentialsEntry"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "ice_servers": {
             "anyOf": [
               {
@@ -287,6 +316,27 @@
               }
             ],
             "title": "Ice Servers"
+          },
+          "port_range": {
+            "anyOf": [
+              {
+                "maxItems": 2,
+                "minItems": 2,
+                "prefixItems": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "integer"
+                  }
+                ],
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Port Range"
           },
           "sdp_offer": {
             "title": "Sdp Offer",

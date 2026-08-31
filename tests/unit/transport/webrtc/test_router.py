@@ -15,7 +15,7 @@ from reactor_runtime.transport import (
     UnknownSessionError,
 )
 from reactor_runtime.transport.webrtc import WebRtcConfig, WebRtcPeerFactory, WebRtcRouter
-from reactor_runtime.transport.webrtc.config import IceServer
+from reactor_runtime.transport.webrtc.config import IceCredentials, IceServer
 
 _SID = "s1"
 _PREFIX = f"/sessions/{_SID}/transport/webrtc"
@@ -197,6 +197,50 @@ def test_offer_without_ice_servers_uses_configured_servers(
         _poll_answer(client, 5001)
     assert fake_peer.last_config is not None
     assert fake_peer.last_config.ice_servers == (IceServer(urls=("stun:base:3478",)),)
+
+
+def test_offer_ice_credentials_and_port_range_reach_the_peer_config(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+) -> None:
+    with _client(FakeRunner(), fake_peer, factory_for) as client:
+        accepted = client.post(
+            f"{_PREFIX}/connections/5001/sdp_params",
+            json={
+                "sdp_offer": "the-offer",
+                "ice_credentials": {
+                    "ufrag": "suppliedUfrag01",
+                    "pwd": "aSuppliedPasswordOf22Chars",
+                },
+                "port_range": [51820, 51820],
+            },
+        )
+        assert accepted.status_code == 202
+        _poll_answer(client, 5001)
+    assert fake_peer.last_config is not None
+    assert fake_peer.last_config.ice_credentials == IceCredentials(
+        ufrag="suppliedUfrag01", pwd="aSuppliedPasswordOf22Chars"
+    )
+    assert fake_peer.last_config.port_range == (51820, 51820)
+
+
+def test_offer_without_ice_credentials_leaves_the_engine_to_generate_them(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+) -> None:
+    """The ordinary case: the field is absent and nothing is imposed."""
+    config = WebRtcConfig(ping_timeout=0.0, port_range=(40000, 40100))
+    with _client(FakeRunner(), fake_peer, factory_for, config=config) as client:
+        accepted = client.post(
+            f"{_PREFIX}/connections/5001/sdp_params",
+            json={"sdp_offer": "the-offer"},
+        )
+        assert accepted.status_code == 202
+        _poll_answer(client, 5001)
+    assert fake_peer.last_config is not None
+    assert fake_peer.last_config.ice_credentials is None
+    # The configured range is untouched by an offer that says nothing about it.
+    assert fake_peer.last_config.port_range == (40000, 40100)
 
 
 def test_offer_is_accepted_then_answer_is_polled(

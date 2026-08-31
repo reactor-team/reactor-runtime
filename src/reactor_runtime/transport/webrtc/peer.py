@@ -479,6 +479,14 @@ class WebRTCPeer:
         await self._attach_out_tracks(pc, factory)
 
         answer = await pc.create_answer()
+        # Substituting the ICE credentials has to happen HERE: setting the local
+        # description is what creates the transport and starts gathering, so a
+        # substitution after it has nothing left to act on. Nothing is
+        # substituted unless the configuration asks for it, which is the usual
+        # case -- the media engine's own credentials are used.
+        credentials = self._config.ice_credentials
+        if credentials is not None:
+            answer = answer.with_ice_credentials(credentials.ufrag, credentials.pwd)
         self._answer_sdp = answer.sdp
         await pc.set_local_description(answer)
         # The answer describes every outbound track as sending, which is the

@@ -28,7 +28,7 @@ from reactor_runtime.metrics import WebRtcMetrics
 from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.transport.acceptor import ConnectionAcceptor
 from reactor_runtime.transport.router import TooManyConnectionsError
-from reactor_runtime.transport.webrtc.config import IceServer, WebRtcConfig
+from reactor_runtime.transport.webrtc.config import IceCredentials, IceServer, WebRtcConfig
 from reactor_runtime.transport.webrtc.connection import WebRTCConnection
 from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpAnswer, SdpOffer, TrackMap
@@ -108,6 +108,8 @@ class WebRTCAcceptor(ConnectionAcceptor):
         tracks: TrackMap,
         version: ProtocolVersion,
         ice_servers: tuple[IceServer, ...] | None = None,
+        ice_credentials: IceCredentials | None = None,
+        port_range: tuple[int, int] | None = None,
     ) -> None:
         """Begin negotiating *sdp_offer* in the background.
 
@@ -122,6 +124,14 @@ class WebRTCAcceptor(ConnectionAcceptor):
         gathers against, overriding the configured ones for this connection only;
         ``None`` falls back to the acceptor's configuration. Supplied per offer,
         so a reconnect can carry fresh credentials.
+
+        *ice_credentials* and *port_range* override the same fields for this
+        connection only, on the same terms: ``None`` — the default for both —
+        uses the acceptor's configuration, which for credentials means the media
+        engine generates its own. They are here for a deployment that fronts the
+        runtime with a relaying layer and must know a connection's ICE
+        credentials and media port before the connection exists; a runtime
+        driven directly never sets them.
 
         Raises:
             TooManyConnectionsError: If *conn_id* is a new connection and the
@@ -138,7 +148,16 @@ class WebRTCAcceptor(ConnectionAcceptor):
         offered_at = time.monotonic()
         self._offered_at[conn_id] = offered_at
         self._negotiating[conn_id] = asyncio.create_task(
-            self._negotiate(conn_id, sdp_offer, tracks, version, ice_servers, offered_at=offered_at)
+            self._negotiate(
+                conn_id,
+                sdp_offer,
+                tracks,
+                version,
+                ice_servers,
+                ice_credentials,
+                port_range,
+                offered_at=offered_at,
+            )
         )
         self._arm_deadline(conn_id, offered_at)
 
@@ -238,6 +257,8 @@ class WebRTCAcceptor(ConnectionAcceptor):
         tracks: TrackMap,
         version: ProtocolVersion,
         ice_servers: tuple[IceServer, ...] | None = None,
+        ice_credentials: IceCredentials | None = None,
+        port_range: tuple[int, int] | None = None,
         *,
         offered_at: float,
     ) -> None:
@@ -250,14 +271,18 @@ class WebRTCAcceptor(ConnectionAcceptor):
         in the gap. A negotiation that fails is logged and dropped — the client's
         poll for the answer times out — rather than left as an unhandled task.
 
-        *ice_servers* override the configured STUN/TURN servers for this
-        connection when given; ``None`` uses the acceptor's configuration.
+        *ice_servers*, *ice_credentials* and *port_range* override the
+        corresponding configured values for this connection when given; ``None``
+        uses the acceptor's configuration for each independently.
         """
-        config = (
-            self._config
-            if ice_servers is None
-            else dataclasses.replace(self._config, ice_servers=ice_servers)
-        )
+        overrides: dict[str, object] = {}
+        if ice_servers is not None:
+            overrides["ice_servers"] = ice_servers
+        if ice_credentials is not None:
+            overrides["ice_credentials"] = ice_credentials
+        if port_range is not None:
+            overrides["port_range"] = port_range
+        config = self._config if not overrides else dataclasses.replace(self._config, **overrides)
         try:
             previous = self._conns.pop(conn_id, None)
             if previous is not None:

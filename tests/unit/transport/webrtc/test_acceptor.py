@@ -22,7 +22,7 @@ from reactor_runtime.transport.webrtc.acceptor import (
     _MAX_PENDING_ICE_CONNS,
     _MAX_PENDING_ICE_PER_CONN,
 )
-from reactor_runtime.transport.webrtc.config import IceServer
+from reactor_runtime.transport.webrtc.config import IceCredentials, IceServer
 from reactor_runtime.transport.webrtc.signaling import IceCandidate
 
 
@@ -165,6 +165,86 @@ async def test_offer_without_ice_servers_keeps_the_configured_ones(
     assert fake_peer.last_config is not None
     # The acceptor's configured servers (empty by default) are used untouched.
     assert fake_peer.last_config.ice_servers == ()
+
+
+async def test_offer_ice_credentials_override_the_configured_ones(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    sink = FakeSink()
+    acceptor = _acceptor(sink, fake_peer, factory_for)
+    credentials = IceCredentials(ufrag="suppliedUfrag01", pwd="aSuppliedPasswordOf22Chars")
+    acceptor.start_offer(
+        ConnId(7),
+        SdpOffer("offer"),
+        out_av_tracks,
+        ProtocolVersion.V0,
+        ice_credentials=credentials,
+    )
+    await acceptor._negotiating[ConnId(7)]
+
+    assert fake_peer.last_config is not None
+    assert fake_peer.last_config.ice_credentials == credentials
+
+
+async def test_offer_without_ice_credentials_leaves_the_engine_to_generate_them(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    sink = FakeSink()
+    acceptor = _acceptor(sink, fake_peer, factory_for)
+    acceptor.start_offer(ConnId(7), SdpOffer("offer"), out_av_tracks, ProtocolVersion.V0)
+    await acceptor._negotiating[ConnId(7)]
+
+    assert fake_peer.last_config is not None
+    # The ordinary case: nothing supplied, so the media engine generates its own.
+    assert fake_peer.last_config.ice_credentials is None
+
+
+async def test_offer_port_range_overrides_the_configured_one(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    sink = FakeSink()
+    acceptor = _acceptor(sink, fake_peer, factory_for)
+    acceptor.start_offer(
+        ConnId(7),
+        SdpOffer("offer"),
+        out_av_tracks,
+        ProtocolVersion.V0,
+        port_range=(51820, 51820),
+    )
+    await acceptor._negotiating[ConnId(7)]
+
+    assert fake_peer.last_config is not None
+    assert fake_peer.last_config.port_range == (51820, 51820)
+
+
+async def test_each_override_is_independent_of_the_others(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    """Supplying one override must not disturb the configuration of the rest."""
+    sink = FakeSink()
+    acceptor = _acceptor(sink, fake_peer, factory_for)
+    servers = (IceServer(urls=("stun:stun.example:3478",)),)
+    acceptor.start_offer(
+        ConnId(7),
+        SdpOffer("offer"),
+        out_av_tracks,
+        ProtocolVersion.V0,
+        ice_servers=servers,
+    )
+    await acceptor._negotiating[ConnId(7)]
+
+    assert fake_peer.last_config is not None
+    assert fake_peer.last_config.ice_servers == servers
+    assert fake_peer.last_config.ice_credentials is None
+    assert fake_peer.last_config.port_range is None
 
 
 async def test_take_answer_is_none_until_negotiation_completes(

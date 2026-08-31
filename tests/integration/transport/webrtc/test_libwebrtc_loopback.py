@@ -15,6 +15,8 @@ absent.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import re
 import threading
 from typing import Any
 
@@ -32,7 +34,10 @@ from reactor_runtime.core.values import (  # noqa: E402
     TrackKind,
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion  # noqa: E402
-from reactor_runtime.transport.webrtc.config import WebRtcConfig  # noqa: E402
+from reactor_runtime.transport.webrtc.config import (  # noqa: E402
+    IceCredentials,
+    WebRtcConfig,
+)
 from reactor_runtime.transport.webrtc.frames import rgb_to_bgra  # noqa: E402
 from reactor_runtime.transport.webrtc.peer import (  # noqa: E402
     WebRTCPeer,
@@ -229,6 +234,150 @@ async def test_add_ice_accepts_the_end_of_candidates_marker() -> None:
         await peer.add_ice(IceCandidate(""))
         await peer.add_ice(IceCandidate("", sdp_mid="0", sdp_mline_index=0))
     finally:
+        await peer.close()
+        client.pc = None  # type: ignore[assignment]
+
+
+async def test_supplied_ice_credentials_are_answered_with_and_used_end_to_end() -> None:
+    """Supplied credentials reach the answer and the peer connects using them.
+
+    The connection is the assertion that matters. A string comparison on the
+    answer alone would pass even if the media engine ignored the substitution
+    entirely, because ``with_ice_credentials`` rewrites the SDP either way; only
+    a client that completes connectivity checks against the advertised password
+    shows the transport is actually keyed with it.
+
+    That the check can fail is pinned separately by
+    ``test_the_loopback_validates_ice_credentials`` — without it this test would
+    be vacuous.
+    """
+    factory = _get_factory()
+    client = await _Client.create(factory)
+    offer_sdp = await client.create_offer()
+
+    credentials = IceCredentials(ufrag="suppliedUfrag01", pwd="aSuppliedPasswordOf22Chars")
+    connected = asyncio.Event()
+
+    peer, answer = await libwebrtc_peer_factory(
+        ConnId(2),
+        SdpOffer(sdp=offer_sdp),
+        client.track_map(),
+        WebRtcConfig(ice_gathering_timeout_ms=4000, ice_credentials=credentials),
+        ProtocolVersion.V0,
+    )
+    peer.on_message(lambda *_: None)
+    peer.on_media(lambda *_: None)
+    peer.on_ping(lambda: None)
+    peer.on_connected(connected.set)
+    peer.on_disconnect(lambda: None)
+
+    stop_trickle = asyncio.Event()
+    trickle_task = asyncio.create_task(_trickle_until(client, peer, stop_trickle))
+    try:
+        # Every bundled m-section carries the substituted pair, not just the
+        # first: they must agree or the answer is inconsistent rather than
+        # substituted.
+        ufrags = [
+            line.split(":", 1)[1]
+            for line in answer.sdp.splitlines()
+            if line.startswith("a=ice-ufrag:")
+        ]
+        assert ufrags, "the answer carries no ICE credentials at all"
+        assert set(ufrags) == {credentials.ufrag}, f"mixed ufrags in the answer: {ufrags}"
+        assert f"a=ice-pwd:{credentials.pwd}" in answer.sdp
+
+        await client.accept_answer(answer.sdp)
+        assert await _reached(connected), (
+            "the connection never came up, so the transport was not keyed with "
+            "the credentials the answer advertised"
+        )
+    finally:
+        stop_trickle.set()
+        trickle_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await trickle_task
+        await peer.close()
+        client.pc = None  # type: ignore[assignment]
+
+
+async def test_the_loopback_validates_ice_credentials() -> None:
+    """The control for the test above: a wrong password must NOT connect.
+
+    Without this, a loopback that connected regardless of credentials would make
+    the positive test meaningless — it would be asserting that two peers on
+    localhost can reach each other, which they can whatever the SDP says.
+    """
+    factory = _get_factory()
+    client = await _Client.create(factory)
+    offer_sdp = await client.create_offer()
+
+    credentials = IceCredentials(ufrag="suppliedUfrag01", pwd="aSuppliedPasswordOf22Chars")
+    connected = asyncio.Event()
+
+    peer, answer = await libwebrtc_peer_factory(
+        ConnId(4),
+        SdpOffer(sdp=offer_sdp),
+        client.track_map(),
+        WebRtcConfig(ice_gathering_timeout_ms=4000, ice_credentials=credentials),
+        ProtocolVersion.V0,
+    )
+    peer.on_message(lambda *_: None)
+    peer.on_media(lambda *_: None)
+    peer.on_ping(lambda: None)
+    peer.on_connected(connected.set)
+    peer.on_disconnect(lambda: None)
+
+    stop_trickle = asyncio.Event()
+    trickle_task = asyncio.create_task(_trickle_until(client, peer, stop_trickle))
+    try:
+        # Hand the client an answer whose password does not key what the peer
+        # will validate. Its connectivity checks must then be rejected.
+        tampered = re.sub(r"a=ice-pwd:.*", "a=ice-pwd:totallyWrongPasswordXY", answer.sdp)
+        await client.accept_answer(tampered)
+        assert not await _reached(connected), (
+            "the loopback connected with a mismatched ICE password, so it does "
+            "not validate credentials and the positive test proves nothing"
+        )
+    finally:
+        stop_trickle.set()
+        trickle_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await trickle_task
+        await peer.close()
+        client.pc = None  # type: ignore[assignment]
+
+
+async def test_a_connection_without_supplied_credentials_still_connects() -> None:
+    """The default path is untouched: nothing supplied, the engine generates."""
+    factory = _get_factory()
+    client = await _Client.create(factory)
+    offer_sdp = await client.create_offer()
+    connected = asyncio.Event()
+
+    peer, answer = await libwebrtc_peer_factory(
+        ConnId(3),
+        SdpOffer(sdp=offer_sdp),
+        client.track_map(),
+        WebRtcConfig(ice_gathering_timeout_ms=4000),
+        ProtocolVersion.V0,
+    )
+    peer.on_message(lambda *_: None)
+    peer.on_media(lambda *_: None)
+    peer.on_ping(lambda: None)
+    peer.on_connected(connected.set)
+    peer.on_disconnect(lambda: None)
+
+    stop_trickle = asyncio.Event()
+    trickle_task = asyncio.create_task(_trickle_until(client, peer, stop_trickle))
+    try:
+        assert "a=ice-ufrag:" in answer.sdp
+        await client.accept_answer(answer.sdp)
+        assert await _reached(connected), "the default path must still connect"
+    finally:
+        stop_trickle.set()
+        trickle_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await trickle_task
         await peer.close()
         client.pc = None  # type: ignore[assignment]
 

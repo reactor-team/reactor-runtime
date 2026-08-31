@@ -31,7 +31,7 @@ from reactor_runtime.transport.router import (
     UnknownSessionError,
 )
 from reactor_runtime.transport.webrtc.acceptor import WebRTCAcceptor
-from reactor_runtime.transport.webrtc.config import IceServer, WebRtcConfig
+from reactor_runtime.transport.webrtc.config import IceCredentials, IceServer, WebRtcConfig
 from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpOffer, TrackMap
 from reactor_runtime.transport.webrtc.version import protocol_for_transport
@@ -104,18 +104,39 @@ class IceServerEntry(BaseModel):
     credentials: TurnCredentials | None = None
 
 
+class IceCredentialsEntry(BaseModel):
+    """The ICE credentials a connection should answer with.
+
+    Both values must satisfy RFC 8445's ``ice-char`` alphabet and length ranges;
+    the media engine rejects anything outside them.
+    """
+
+    ufrag: str
+    pwd: str
+
+
 class SdpParamsRequest(BaseModel):
-    """A client's SDP offer, the tracks it declares, and optional ICE servers.
+    """A client's SDP offer, the tracks it declares, and optional overrides.
 
     ``ice_servers`` lets the caller supply the STUN/TURN servers this connection
     gathers against. Absent, the runtime uses its own configured servers; present
     (even empty), it is authoritative for the connection — so a reconnect can
     carry fresh credentials.
+
+    ``ice_credentials`` and ``port_range`` follow the same rule and are likewise
+    optional: absent — the usual case — the media engine generates its own
+    credentials and the configured port range applies. They exist for a
+    deployment that fronts the runtime with a relaying layer, which must know a
+    connection's ICE credentials and media address before the connection exists.
+    ``port_range`` is an inclusive ``[min, max]``; a single-port range pins the
+    connection to one port.
     """
 
     sdp_offer: str
     track_mapping: list[TrackMappingEntry] = Field(default_factory=list)
     ice_servers: list[IceServerEntry] | None = None
+    ice_credentials: IceCredentialsEntry | None = None
+    port_range: tuple[int, int] | None = None
 
 
 class IceCandidateEntry(BaseModel):
@@ -131,6 +152,19 @@ class IceCandidatesRequest(BaseModel):
 
     candidates: list[IceCandidateEntry] = Field(default_factory=list)
     is_final: bool = False
+
+
+def _ice_credentials_from_request(
+    entry: IceCredentialsEntry | None,
+) -> IceCredentials | None:
+    """Convert a connect request's ICE credentials to the transport's form.
+
+    ``None`` (the field absent) means the media engine generates its own, which
+    is the ordinary case.
+    """
+    if entry is None:
+        return None
+    return IceCredentials(ufrag=entry.ufrag, pwd=entry.pwd)
 
 
 def _ice_servers_from_request(
@@ -251,6 +285,8 @@ class WebRtcRouter(TransportRouter):
                 tracks,
                 protocol_for_transport(webrtc_version),
                 ice_servers=_ice_servers_from_request(req.ice_servers),
+                ice_credentials=_ice_credentials_from_request(req.ice_credentials),
+                port_range=req.port_range,
             )
             return OfferAccepted(connection_id=cid)
 

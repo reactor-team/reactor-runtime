@@ -8,7 +8,12 @@ during offer negotiation by a :data:`WebRtcPeerFactory`.
 """
 
 from reactor_runtime.transport.webrtc.acceptor import WebRTCAcceptor
-from reactor_runtime.transport.webrtc.config import IceServer, IceTransportPolicy, WebRtcConfig
+from reactor_runtime.transport.webrtc.config import (
+    IceCredentials,
+    IceServer,
+    IceTransportPolicy,
+    WebRtcConfig,
+)
 from reactor_runtime.transport.webrtc.connection import WebRTCConnection
 from reactor_runtime.transport.webrtc.peer import WebRTCPeer, WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.router import WebRtcRouter
@@ -23,6 +28,7 @@ from reactor_runtime.transport.webrtc.stats import OutboundMediaHealth, PeerStat
 
 __all__ = [
     "IceCandidate",
+    "IceCredentials",
     "IceServer",
     "IceTransportPolicy",
     "MappedTrack",
