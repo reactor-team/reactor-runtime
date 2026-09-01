@@ -4,7 +4,7 @@
 #
 # reactor-runtime is the runtime itself. Its version is pinned here; bump
 # this line to upgrade, and reactor.yaml's build.runtime_version to match.
-reactor-runtime==3.2.5
+reactor-runtime==3.2.7
 
 # Pillow draws the client-set caption over each frame. Must be >=10.1: the
 # scalable default font (ImageFont.load_default(size=...)) that keeps the caption
