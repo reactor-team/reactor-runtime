@@ -584,18 +584,33 @@ def test_a_recording_that_stops_mid_emission_reports_no_dropped_frames(
         recorder.stop()
 
 
-def test_a_multi_second_emission_records_all_of_its_audio(tmp_path: Path) -> None:
-    # A model that emits more than a second of audio at once is the ordinary case
-    # for a batching model, and every sample it hands over belongs in the
-    # recording. A jitter buffer bounded below the emission would keep only the
-    # tail, pair it with the head of the video and pad the rest with silence, so
-    # the download would be missing most of its audio and out of sync with what
-    # is left.
+@pytest.mark.parametrize(
+    "n_frames",
+    [1, RECORDING_FPS // 2, RECORDING_FPS - 1, RECORDING_FPS, RECORDING_FPS + 1, RECORDING_FPS * 4],
+    ids=[
+        "one-frame",
+        "half-second",
+        "just-under",
+        "exactly-one-second",
+        "just-over",
+        "four-second",
+    ],
+)
+def test_an_emission_of_any_size_records_all_of_its_audio(tmp_path: Path, n_frames: int) -> None:
+    # Every sample a model hands over belongs in the recording, whatever the size
+    # of the emission carrying it. A jitter buffer bounded below the emission
+    # would keep only the tail, pair it with the head of the video and pad the
+    # rest with silence, so the download would be missing most of its audio and
+    # out of sync with what was left.
+    #
+    # The sizes straddle one second because that is where such a bound starts
+    # biting: everything at or under it survives either way, and the loss above
+    # it grows with the emission, so a case on each side is what tells a real
+    # bound from one that merely looks generous.
     recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
     recorder.start(_SID)
     try:
         _park_feed_worker(recorder)
-        n_frames = RECORDING_FPS * 2
         bundle = _batched_av_bundle(n_frames)
 
         recorder.on_chunk(
