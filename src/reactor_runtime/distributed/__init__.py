@@ -1,5 +1,15 @@
 """Multi-GPU worker abstraction for real-time streaming models.
 
+.. warning:: **Experimental.** This package is the raw primitive layer:
+   the model constructs the group in ``load()`` and drives every
+   session itself. The planned direction is for the runtime to own that
+   wiring, so a model declares its per-rank code and its device count
+   and never touches the group. These primitives will remain available
+   as the escape hatch for parallelism layouts the managed path cannot
+   express, but their signatures may change between minor releases
+   until then. Import them from ``reactor_runtime.distributed``; they
+   are deliberately not re-exported from the package root.
+
 A model that needs several GPUs cannot simply run several copies of
 itself: it is a server, with one event loop, one session, and one output
 stream. So the process splits in two roles, vended here as two classes:

@@ -61,6 +61,9 @@ class WorkerGroup:
             layout decides the rank count — deriving it from
             ``device_count()`` is wrong the moment the two can differ,
             and the manifest's GPU count is not visible from here.
+            When passing it, source the value from the model's config
+            rather than a literal in ``load()``, so one setting decides
+            both the deployment shape and the group size.
         setup_kwargs: passed to every worker's ``setup()``. Must be
             picklable — prefer paths and scalars over live objects.
         init_process_group: create the NCCL/gloo process group during

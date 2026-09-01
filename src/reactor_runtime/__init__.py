@@ -11,13 +11,6 @@ from the top-level package is the preferred path.
 
 from importlib.metadata import version
 
-from reactor_runtime.distributed import (
-    DistributedWorker,
-    SharedFrameBuffer,
-    WorkerCrashed,
-    WorkerError,
-    WorkerGroup,
-)
 from reactor_runtime.interface import (
     EVENT_REGISTRY,
     INPUT_REGISTRY,
@@ -70,7 +63,6 @@ __all__ = [
     "ClientInfo",
     "Command",
     "CommandError",
-    "DistributedWorker",
     "FieldInfo",
     "Idle",
     "Input",
@@ -86,14 +78,10 @@ __all__ = [
     "ReactorModel",
     "ReactorPipeline",
     "ReadMode",
-    "SharedFrameBuffer",
     "Track",
     "TrackPayload",
     "UploadedFile",
     "Video",
-    "WorkerCrashed",
-    "WorkerError",
-    "WorkerGroup",
     "__version__",
     "all_input_tracks",
     "all_output_tracks",
