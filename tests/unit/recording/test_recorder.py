@@ -31,7 +31,7 @@ from reactor_runtime.recording import (
     RecorderDisabledError,
 )
 from reactor_runtime.recording.recorder import (
-    _AUDIO_BACKLOG_SECONDS,
+    _AUDIO_BACKLOG_FRAMES,
     _FEED_DEPTH,
     _FEED_WAIT_SECONDS,
     _RETENTION_SECONDS,
@@ -347,11 +347,15 @@ def _batched_bundle(n_frames: int, fps: float = float(RECORDING_FPS)) -> MediaBu
     return MediaBundle(tracks={"main_video": TrackData(info=info, data=data)})
 
 
-def _batched_av_bundle(n_frames: int, rate: int = 48_000) -> MediaBundle:
+def _batched_av_bundle(n_frames: int, rate: int = 48_000, first: int = 1) -> MediaBundle:
     """A batched emission carrying the audio that spans its frames.
 
-    The samples run 1, 2, 3, ... so a recorded slot names the position it came
-    from: a test can tell audio that was dropped from audio that merely moved.
+    The samples count up, so a recorded slot names the position it came from and
+    a failure prints where the audio it holds was taken from: a test can tell
+    audio that was dropped from audio that merely moved. The ramp is folded well
+    inside ``int16`` rather than run to its limit, so it stays a rising count
+    instead of wrapping into negatives partway through a long emission. *first*
+    starts the count elsewhere, so two emissions can be told apart by value.
     """
     video = TrackInfo(
         name="main_video",
@@ -363,7 +367,7 @@ def _batched_av_bundle(n_frames: int, rate: int = 48_000) -> MediaBundle:
         name="main_audio", kind=TrackKind.AUDIO, rate=float(rate), direction=TrackDirection.OUT
     )
     n_samples = n_frames * round(rate / RECORDING_FPS)
-    samples = np.arange(1, n_samples + 1, dtype=np.int16).reshape(1, -1)
+    samples = (np.arange(n_samples) % 30_000 + first).astype(np.int16).reshape(1, -1)
     return MediaBundle(
         tracks={
             "main_video": TrackData(
@@ -640,7 +644,7 @@ def test_audio_left_by_dropped_frames_stays_bounded(
             _saturate(recorder, n_frames + 1)
             rate = bundle.tracks["main_audio"].info.rate
             emitted = int(bundle.tracks["main_audio"].data.size)
-            cap = int(rate * _AUDIO_BACKLOG_SECONDS) + emitted
+            cap = emitted + _AUDIO_BACKLOG_FRAMES * round(rate / RECORDING_FPS)
 
             for _ in range(8):
                 recorder.on_chunk(
@@ -656,6 +660,47 @@ def test_audio_left_by_dropped_frames_stays_bounded(
                 np.concatenate(recorder._audio_jitter_buf)[-emitted:],
                 bundle.tracks["main_audio"].data.reshape(-1),
             )
+    finally:
+        recorder.stop()
+
+
+def test_a_drop_episode_does_not_leave_the_audio_standing_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Audio whose frames the encoder never took is audio whose video is not in
+    # the recording. The buffer drains oldest-first, so carrying that audio on
+    # would hand it to the next emission's slots ahead of the audio that belongs
+    # there, and every emission after a single drop episode would play the
+    # previous one's sound — a fixed lag the recording never works off.
+    recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
+    recorder.start(_SID)
+    try:
+        n_frames = RECORDING_FPS
+        stranded = _batched_av_bundle(n_frames)
+        with _wedged_encoder(recorder, monkeypatch, stranded):
+            _saturate(recorder, n_frames + 1)
+            recorder.on_chunk(
+                MediaChunk(bundle=stranded, fps=float(RECORDING_FPS), n_frames=n_frames, wait=False)
+            )
+            assert recorder._audio_buffered_samples > 0
+
+        # The encoder catches up and the queue empties, so the next emission is
+        # taken whole.
+        _park_feed_worker(recorder)
+        while not recorder._feed_queue.empty():
+            recorder._feed_queue.get_nowait()
+
+        fresh = _batched_av_bundle(n_frames, first=50_000)
+        recorder.on_chunk(
+            MediaChunk(bundle=fresh, fps=float(RECORDING_FPS), n_frames=n_frames, wait=True)
+        )
+
+        slack = _AUDIO_BACKLOG_FRAMES * round(48_000 / RECORDING_FPS)
+        paired = _queued_audio(recorder)
+        expected = fresh.tracks["main_audio"].data.reshape(-1)
+        # Everything past the slack is the emission's own audio, in order, so the
+        # displacement is bounded by the slack rather than by the drop episode.
+        assert np.array_equal(paired[slack:], expected[: len(paired) - slack])
     finally:
         recorder.stop()
 
