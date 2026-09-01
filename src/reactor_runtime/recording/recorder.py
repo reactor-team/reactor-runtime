@@ -59,6 +59,14 @@ _FEED_WAIT_SECONDS = 1.0
 # frames on every emission, so the count is carried on every recording's summary
 # and only the periodic warning is rate-limited.
 _DROP_LOG_INTERVAL_SECONDS = 5.0
+# How much audio may sit in the jitter buffer on top of the emission just handed
+# over, in grid slots. A model's audio is framed on its own boundaries rather
+# than the video's, so an emission carries a little more or less than its slots
+# drain; two slots absorb that wobble without the buffer running dry on the
+# short ones. Past that the audio belongs to frames the encoder was too far
+# behind to take — their video is not in the recording, so pairing it with later
+# video would hold the rest of the session that far out of sync.
+_AUDIO_BACKLOG_FRAMES = 2
 
 _INIT_FILENAME = "init.mp4"
 # Written into a recording's directory once it is finished, so its final segment
@@ -669,11 +677,20 @@ class Recorder:
                 return
 
     def _buffer_audio(self, bundle: MediaBundle) -> None:
-        """Append a chunk's audio to the jitter buffer, capped at one second.
+        """Append a chunk's audio to the jitter buffer, keeping the newest samples.
 
         The whole chunk's audio is buffered once; :meth:`_take_audio` then pulls a
         grid slot's worth per recorded frame, so the audio DTS tracks the video
         PTS regardless of how the chunk's frames map onto the grid.
+
+        The bound is one authoritative limit, never applied below the emission
+        just appended, so however much audio a model hands over at once, all of
+        it is kept and the grid slots that drain it find real samples rather than
+        silence. Above the emission sits :data:`_AUDIO_BACKLOG_FRAMES` of slack
+        and no more, which keeps each emission's video paired with its own audio:
+        trimming takes the oldest samples, so audio orphaned by frames the
+        encoder never took is discarded with them instead of displacing the
+        audio that belongs to the video still to be fed.
         """
         if self._audio_track is None:
             return
@@ -683,7 +700,8 @@ class Recorder:
         flat = np.ascontiguousarray(track.data, dtype=np.int16).reshape(-1)
         self._audio_jitter_buf.append(flat)
         self._audio_buffered_samples += int(flat.size)
-        cap = self._audio_sample_rate
+        slack = _AUDIO_BACKLOG_FRAMES * round(self._audio_sample_rate / RECORDING_FPS)
+        cap = int(flat.size) + slack
         while self._audio_buffered_samples > cap:
             head = self._audio_jitter_buf[0]
             drop = self._audio_buffered_samples - cap
