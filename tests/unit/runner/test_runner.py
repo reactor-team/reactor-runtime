@@ -974,6 +974,23 @@ async def test_start_session_rejects_a_double_start(started_runner: Runner) -> N
     assert rejected.value.state is SessionState.WAITING
 
 
+async def test_a_rejected_start_leaves_the_recording_id_untouched(
+    started_runner: Runner,
+) -> None:
+    supplied = "11111111-2222-3333-4444-555555555555"
+    started_runner.start_session({"session_id": supplied})
+    # A start is legal only from READY. A second one arriving while the session is
+    # live is rejected, and that rejection must not rebind the live session's
+    # recording id: neither to the rejected request's own id, nor to a freshly
+    # minted one when it carries none.
+    with pytest.raises(SessionTransitionError):
+        started_runner.start_session({"session_id": "99999999-9999-9999-9999-999999999999"})
+    assert started_runner._recording_id == supplied
+    with pytest.raises(SessionTransitionError):
+        started_runner.start_session({})
+    assert started_runner._recording_id == supplied
+
+
 def test_start_session_rejects_before_the_model_is_loaded() -> None:
     runner = _runner()  # constructed but not started: the session is CREATED
     with pytest.raises(SessionTransitionError) as rejected:

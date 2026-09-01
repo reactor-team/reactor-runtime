@@ -109,6 +109,17 @@ def _stamp_log_state(state: SessionState) -> None:
     set_state(state.name.lower(), _RUNTIME_STATES[state].value)
 
 
+def _recording_id_from(params: Mapping[str, Any]) -> str:
+    """Resolve a session's recording id from its start parameters.
+
+    A ``session_id`` in *params* is adopted as the recording id, so a caller can
+    align both clips and logs with the id it knows the session by. Absent one, a
+    fresh id is minted per session so sequential recordings in a reused process
+    never overwrite each other.
+    """
+    return str(params.get("session_id") or uuid.uuid4())
+
+
 # How long to wait for an upload's bytes to arrive when a command or notification
 # references it before they are written. A client references an upload over the
 # data channel while its bytes are still being delivered on a separate request,
@@ -611,8 +622,10 @@ class Runner(ServiceComponent, ConnectionSink):
         its recording is stored and addressed under, and the id stamped on every
         log record the session writes. A caller can therefore align both clips and
         logs with the id it knows the session by. Absent one, a fresh id is minted
-        per session so sequential recordings never overwrite each other. The
-        transport session id is unaffected — it is always :data:`SESSION_ID`.
+        per session so sequential recordings never overwrite each other. The id is
+        resolved as the machine accepts the start, so a rejected request leaves a
+        live session's id untouched. The transport session id is unaffected: it is
+        always :data:`SESSION_ID`.
 
         Args:
             params: The initial session parameters supplied by the caller.
@@ -620,7 +633,6 @@ class Runner(ServiceComponent, ConnectionSink):
         Raises:
             SessionTransitionError: If the session is not in a startable state.
         """
-        self._recording_id = str(params.get("session_id") or uuid.uuid4())
         if not self._sm.send(SessionEvent.START_SESSION, params=dict(params)):
             raise SessionTransitionError("start", self._sm.current_state)
         self._offer_epochs.session_started()
@@ -1118,6 +1130,7 @@ class Runner(ServiceComponent, ConnectionSink):
         reads the state the process was in when it was written.
         """
         if transition.is_session_start:
+            self._recording_id = _recording_id_from(transition.detail.get("params", {}))
             self._log_binding = set_session_id(self._recording_id)
         if transition.from_state is not transition.to_state:
             _stamp_log_state(transition.to_state)
