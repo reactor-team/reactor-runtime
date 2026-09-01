@@ -59,6 +59,12 @@ _FEED_WAIT_SECONDS = 1.0
 # frames on every emission, so the count is carried on every recording's summary
 # and only the periodic warning is rate-limited.
 _DROP_LOG_INTERVAL_SECONDS = 5.0
+# How much audio may sit in the jitter buffer on top of the emission just handed
+# over. Frames the encoder was too far behind to take leave their audio behind,
+# so the buffer needs a bound; this is the slack above the current emission, and
+# it absorbs the rounding between a chunk's sample count and the grid slots that
+# drain it.
+_AUDIO_BACKLOG_SECONDS = 1.0
 
 _INIT_FILENAME = "init.mp4"
 # Written into a recording's directory once it is finished, so its final segment
@@ -669,11 +675,19 @@ class Recorder:
                 return
 
     def _buffer_audio(self, bundle: MediaBundle) -> None:
-        """Append a chunk's audio to the jitter buffer, capped at one second.
+        """Append a chunk's audio to the jitter buffer, keeping the newest samples.
 
         The whole chunk's audio is buffered once; :meth:`_take_audio` then pulls a
         grid slot's worth per recorded frame, so the audio DTS tracks the video
         PTS regardless of how the chunk's frames map onto the grid.
+
+        The bound is one authoritative limit, never applied below the emission
+        just appended, so a model handing over more than
+        :data:`_AUDIO_BACKLOG_SECONDS` of audio at once keeps all of it and the
+        grid slots that drain it find real samples rather than silence. Only a
+        genuine backlog on top of the emission is trimmed, and trimming takes the
+        oldest samples so what survives is the audio nearest the video still to
+        be fed.
         """
         if self._audio_track is None:
             return
@@ -683,7 +697,7 @@ class Recorder:
         flat = np.ascontiguousarray(track.data, dtype=np.int16).reshape(-1)
         self._audio_jitter_buf.append(flat)
         self._audio_buffered_samples += int(flat.size)
-        cap = self._audio_sample_rate
+        cap = int(self._audio_sample_rate * _AUDIO_BACKLOG_SECONDS) + int(flat.size)
         while self._audio_buffered_samples > cap:
             head = self._audio_jitter_buf[0]
             drop = self._audio_buffered_samples - cap

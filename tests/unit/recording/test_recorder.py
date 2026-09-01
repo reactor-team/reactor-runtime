@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import pytest
 
 from reactor_runtime.core import (
@@ -30,6 +31,7 @@ from reactor_runtime.recording import (
     RecorderDisabledError,
 )
 from reactor_runtime.recording.recorder import (
+    _AUDIO_BACKLOG_SECONDS,
     _FEED_DEPTH,
     _FEED_WAIT_SECONDS,
     _RETENTION_SECONDS,
@@ -345,6 +347,41 @@ def _batched_bundle(n_frames: int, fps: float = float(RECORDING_FPS)) -> MediaBu
     return MediaBundle(tracks={"main_video": TrackData(info=info, data=data)})
 
 
+def _batched_av_bundle(n_frames: int, rate: int = 48_000) -> MediaBundle:
+    """A batched emission carrying the audio that spans its frames.
+
+    The samples run 1, 2, 3, ... so a recorded slot names the position it came
+    from: a test can tell audio that was dropped from audio that merely moved.
+    """
+    video = TrackInfo(
+        name="main_video",
+        kind=TrackKind.VIDEO,
+        rate=float(RECORDING_FPS),
+        direction=TrackDirection.OUT,
+    )
+    audio = TrackInfo(
+        name="main_audio", kind=TrackKind.AUDIO, rate=float(rate), direction=TrackDirection.OUT
+    )
+    n_samples = n_frames * round(rate / RECORDING_FPS)
+    samples = np.arange(1, n_samples + 1, dtype=np.int16).reshape(1, -1)
+    return MediaBundle(
+        tracks={
+            "main_video": TrackData(
+                info=video, data=np.zeros((n_frames, 64, 64, 3), dtype=np.uint8)
+            ),
+            "main_audio": TrackData(info=audio, data=samples),
+        }
+    )
+
+
+def _queued_audio(recorder: Recorder) -> npt.NDArray[Any]:
+    """Every audio sample sitting in the feed queue, in the order it was queued."""
+    slots = [audio for _, audio in list(recorder._feed_queue.queue) if audio is not None]
+    if not slots:
+        return np.zeros(0, dtype=np.int16)
+    return np.concatenate([slot.reshape(-1) for slot in slots])
+
+
 def _park_feed_worker(recorder: Recorder) -> None:
     """Stop the feed worker so nothing drains what `on_chunk` queues."""
     recorder._feed_stop.set()
@@ -360,7 +397,9 @@ def _saturate(recorder: Recorder, depth: int) -> None:
 
 
 @contextlib.contextmanager
-def _wedged_encoder(recorder: Recorder, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+def _wedged_encoder(
+    recorder: Recorder, monkeypatch: pytest.MonkeyPatch, bundle: MediaBundle | None = None
+) -> Iterator[None]:
     """Stall the encoder so the feed worker can never open room in the queue.
 
     ``_feed_stop`` is left clear, so a full queue is refused for the reason the
@@ -368,8 +407,12 @@ def _wedged_encoder(recorder: Recorder, monkeypatch: pytest.MonkeyPatch) -> Iter
     recording winding down. The worker takes one frame and stalls inside the
     encoder, so saturating one frame past the emission's capacity leaves the
     queue full for as long as this context is open.
+
+    *bundle* is the emission the encoder is built from, which decides whether the
+    recording has an audio track at all; pass one carrying audio to wedge a
+    recording that buffers it.
     """
-    recorder._build_encoder(_batched_bundle(1))
+    recorder._build_encoder(bundle if bundle is not None else _batched_bundle(1))
     encoder = recorder._encoder
     assert encoder is not None
     stalled = threading.Event()
@@ -537,6 +580,67 @@ def test_a_recording_that_stops_mid_emission_reports_no_dropped_frames(
 
             assert not emitting.is_alive()
             assert recorder._dropped_frames == 0
+    finally:
+        recorder.stop()
+
+
+def test_a_multi_second_emission_records_all_of_its_audio(tmp_path: Path) -> None:
+    # A model that emits more than a second of audio at once is the ordinary case
+    # for a batching model, and every sample it hands over belongs in the
+    # recording. A jitter buffer bounded below the emission would keep only the
+    # tail, pair it with the head of the video and pad the rest with silence, so
+    # the download would be missing most of its audio and out of sync with what
+    # is left.
+    recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
+    recorder.start(_SID)
+    try:
+        _park_feed_worker(recorder)
+        n_frames = RECORDING_FPS * 2
+        bundle = _batched_av_bundle(n_frames)
+
+        recorder.on_chunk(
+            MediaChunk(bundle=bundle, fps=float(RECORDING_FPS), n_frames=n_frames, wait=True)
+        )
+
+        emitted = bundle.tracks["main_audio"].data.reshape(-1)
+        assert np.array_equal(_queued_audio(recorder), emitted)
+        assert recorder._audio_buffered_samples == 0
+    finally:
+        recorder.stop()
+
+
+def test_audio_left_by_dropped_frames_stays_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Frames the encoder is too far behind to take never pull their audio out of
+    # the jitter buffer, so a recorder that only ever appended would grow for as
+    # long as the encoder stayed wedged. The bound holds at the emission plus its
+    # slack however many emissions pile up behind it.
+    recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
+    recorder.start(_SID)
+    try:
+        n_frames = RECORDING_FPS * 2
+        bundle = _batched_av_bundle(n_frames)
+        with _wedged_encoder(recorder, monkeypatch, bundle):
+            _saturate(recorder, n_frames + 1)
+            rate = bundle.tracks["main_audio"].info.rate
+            emitted = int(bundle.tracks["main_audio"].data.size)
+            cap = int(rate * _AUDIO_BACKLOG_SECONDS) + emitted
+
+            for _ in range(8):
+                recorder.on_chunk(
+                    MediaChunk(
+                        bundle=bundle, fps=float(RECORDING_FPS), n_frames=n_frames, wait=False
+                    )
+                )
+
+            assert recorder._audio_buffered_samples <= cap
+            # The newest emission survives whole, so the audio that resumes when
+            # the encoder catches up is the audio next to the video it will take.
+            assert np.array_equal(
+                np.concatenate(recorder._audio_jitter_buf)[-emitted:],
+                bundle.tracks["main_audio"].data.reshape(-1),
+            )
     finally:
         recorder.stop()
 
