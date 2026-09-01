@@ -4,7 +4,7 @@
 #
 # reactor-runtime is the runtime itself. Its version is pinned here; bump
 # this line to upgrade, and reactor.yaml's build.runtime_version to match.
-reactor-runtime==3.2.5
+reactor-runtime==3.2.7
 
 # OpenCV powers the video effects. Must be >=4.10: the runtime ships numpy 2.x,
 # and only opencv-python(-headless) 4.10+ is built against the numpy 2 ABI. The
