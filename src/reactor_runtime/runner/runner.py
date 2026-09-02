@@ -232,9 +232,10 @@ class Runner(ServiceComponent, ConnectionSink):
         self._teardown: set[asyncio.Task[None]] = set()
         self._orphan_task: asyncio.Task[None] | None = None
         self._session_id = SESSION_ID
-        # The session's own id, set per session in start_session: the id a
-        # recording is stored and addressed under, and the id stamped on the
-        # session's log records. Separate from the fixed transport session id so a
+        # The session's own id, resolved per session as the start transition is
+        # applied (see _dispatch_transition): the id a recording is stored and
+        # addressed under, and the id stamped on the session's log records.
+        # Separate from the fixed transport session id so a
         # caller can align both with the id it knows the session by; a session
         # started without one mints a fresh id, so sequential recordings in a
         # reused process never share a directory and the logs of one session are
@@ -1119,9 +1120,12 @@ class Runner(ServiceComponent, ConnectionSink):
         self-loops log at debug so a per-segment ``chunk_ready`` does not flood
         the log.
 
-        The session boundary is also where the log's session context binds, so
-        every record written while a session is live names it, the opening move
-        included. The release travels differently: it rides the ``SessionEnded``
+        The session boundary is where the session's recording id resolves, off
+        the start parameters, so a rejected start cannot touch it; both the log's
+        session context and the recorder's directory read it from there. Binding
+        the log context is also part of this boundary, so every record written
+        while a session is live names it, the opening move included. The release
+        travels differently: it rides the ``SessionEnded``
         event into the model, whose dispatch retires the binding once the
         ``@session_ended`` hook has returned. A terminal move dispatches no
         ``SessionEnded`` and releases nothing — the process is exiting, and its
