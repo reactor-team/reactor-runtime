@@ -181,13 +181,19 @@
         "type": "object"
       },
       "IceCredentialsEntry": {
-        "description": "The ICE credentials a connection should answer with.\n\nBoth values must satisfy RFC 8445's ``ice-char`` alphabet and length ranges;\nthe media engine rejects anything outside them.",
+        "description": "The ICE credentials a connection should answer with.\n\nThe constraints are RFC 8445 \u00a715.4: both values are ``ice-char``\n(ALPHA / DIGIT / \"+\" / \"/\"), a ufrag is 4..256 of them and a password\n22..256.\n\nThey are enforced here rather than left to the media engine because of where\neach failure surfaces. Registering an offer answers 202 and the negotiation\nruns in the background, so a malformed value rejected downstream reaches the\ncaller only as its answer poll timing out, with the reason in the runtime's\nlogs. Checked here it is a 422 naming the field.",
         "properties": {
           "pwd": {
+            "maxLength": 256,
+            "minLength": 22,
+            "pattern": "^[A-Za-z0-9+/]+$",
             "title": "Pwd",
             "type": "string"
           },
           "ufrag": {
+            "maxLength": 256,
+            "minLength": 4,
+            "pattern": "^[A-Za-z0-9+/]+$",
             "title": "Ufrag",
             "type": "string"
           }
@@ -324,9 +330,13 @@
                 "minItems": 2,
                 "prefixItems": [
                   {
+                    "maximum": 65535.0,
+                    "minimum": 1.0,
                     "type": "integer"
                   },
                   {
+                    "maximum": 65535.0,
+                    "minimum": 1.0,
                     "type": "integer"
                   }
                 ],

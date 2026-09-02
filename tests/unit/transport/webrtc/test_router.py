@@ -2,6 +2,7 @@ import time
 from collections.abc import Callable, Mapping
 from typing import Any
 
+import pytest
 from conftest import FakePeer
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -221,6 +222,64 @@ def test_offer_ice_credentials_and_port_range_reach_the_peer_config(
     assert fake_peer.last_config.ice_credentials == IceCredentials(
         ufrag="suppliedUfrag01", pwd="aSuppliedPasswordOf22Chars"
     )
+    assert fake_peer.last_config.port_range == (51820, 51820)
+
+
+# A well-formed pair, so each case below varies exactly one thing.
+_UFRAG = "suppliedUfrag01"
+_PWD = "aSuppliedPasswordOf22Chars"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "why"),
+    [
+        ("ice_credentials", {"ufrag": "abc", "pwd": _PWD}, "ufrag under 4"),
+        ("ice_credentials", {"ufrag": "a" * 257, "pwd": _PWD}, "ufrag over 256"),
+        ("ice_credentials", {"ufrag": "supplied Ufrag01", "pwd": _PWD}, "space is not ice-char"),
+        ("ice_credentials", {"ufrag": _UFRAG, "pwd": "tooShortPassword"}, "pwd under 22"),
+        ("ice_credentials", {"ufrag": _UFRAG, "pwd": "a=SuppliedPasswordOf22Ch"}, "= not ice-char"),
+        ("port_range", [50000, 40000], "inverted range"),
+        ("port_range", [0, 51820], "port 0 asks for an ephemeral port"),
+        ("port_range", [51820, 70000], "port above 65535"),
+    ],
+)
+def test_malformed_overrides_are_refused_at_request_time(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    field: str,
+    value: Any,
+    why: str,
+) -> None:
+    """A bad value must be a 422 naming the field, not a 202 and a stalled poll.
+
+    Registering an offer answers 202 and negotiates in the background, so a
+    value rejected downstream reaches the caller only as its answer poll timing
+    out, with the reason in the runtime's logs. Nothing about that says which
+    field was wrong.
+    """
+    with _client(FakeRunner(), fake_peer, factory_for) as client:
+        response = client.post(
+            f"{_PREFIX}/connections/5001/sdp_params",
+            json={"sdp_offer": "the-offer", field: value},
+        )
+    assert response.status_code == 422, f"{why} was accepted: {response.status_code}"
+    assert field in str(response.json()), f"the 422 does not name {field}: {response.json()}"
+    assert fake_peer.last_config is None, "a refused offer must not reach the peer"
+
+
+def test_a_single_port_range_is_allowed(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+) -> None:
+    """min == max pins the connection to one port, which is a documented use."""
+    with _client(FakeRunner(), fake_peer, factory_for) as client:
+        accepted = client.post(
+            f"{_PREFIX}/connections/5001/sdp_params",
+            json={"sdp_offer": "the-offer", "port_range": [51820, 51820]},
+        )
+        assert accepted.status_code == 202
+        _poll_answer(client, 5001)
+    assert fake_peer.last_config is not None
     assert fake_peer.last_config.port_range == (51820, 51820)
 
 

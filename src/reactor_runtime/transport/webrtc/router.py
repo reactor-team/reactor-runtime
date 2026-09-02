@@ -17,7 +17,7 @@ from typing import Annotated, Any
 
 from fastapi import FastAPI, Header, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from reactor_runtime.core import ConnId
 from reactor_runtime.metrics import RuntimeMetrics, WebRtcMetrics
@@ -104,15 +104,33 @@ class IceServerEntry(BaseModel):
     credentials: TurnCredentials | None = None
 
 
+# RFC 8445 \u00a715.4: ice-char = ALPHA / DIGIT / "+" / "/". Anchored, so a value
+# is rejected for containing anything else rather than for merely starting with
+# something valid.
+_ICE_CHAR = r"^[A-Za-z0-9+/]+$"
+
+
 class IceCredentialsEntry(BaseModel):
     """The ICE credentials a connection should answer with.
 
-    Both values must satisfy RFC 8445's ``ice-char`` alphabet and length ranges;
-    the media engine rejects anything outside them.
+    The constraints are RFC 8445 \u00a715.4: both values are ``ice-char``
+    (ALPHA / DIGIT / "+" / "/"), a ufrag is 4..256 of them and a password
+    22..256.
+
+    They are enforced here rather than left to the media engine because of where
+    each failure surfaces. Registering an offer answers 202 and the negotiation
+    runs in the background, so a malformed value rejected downstream reaches the
+    caller only as its answer poll timing out, with the reason in the runtime's
+    logs. Checked here it is a 422 naming the field.
     """
 
-    ufrag: str
-    pwd: str
+    ufrag: str = Field(min_length=4, max_length=256, pattern=_ICE_CHAR)
+    pwd: str = Field(min_length=22, max_length=256, pattern=_ICE_CHAR)
+
+
+# A UDP port. Zero is excluded: it asks the kernel for an ephemeral port, which
+# is the one thing a caller pinning a range cannot mean.
+_Port = Annotated[int, Field(ge=1, le=65535)]
 
 
 class SdpParamsRequest(BaseModel):
@@ -136,7 +154,22 @@ class SdpParamsRequest(BaseModel):
     track_mapping: list[TrackMappingEntry] = Field(default_factory=list)
     ice_servers: list[IceServerEntry] | None = None
     ice_credentials: IceCredentialsEntry | None = None
-    port_range: tuple[int, int] | None = None
+    port_range: tuple[_Port, _Port] | None = None
+
+    @model_validator(mode="after")
+    def _port_range_is_ordered(self) -> SdpParamsRequest:
+        """Reject an inverted range here rather than at gathering.
+
+        ``(50000, 40000)`` is accepted by the type and then fails when the
+        engine gathers, which reaches the caller as an answer poll that times
+        out. This makes it a 422 that names the field.
+        """
+        if self.port_range is not None:
+            low, high = self.port_range
+            if low > high:
+                msg = f"port_range min {low} is above max {high}"
+                raise ValueError(msg)
+        return self
 
 
 class IceCandidateEntry(BaseModel):

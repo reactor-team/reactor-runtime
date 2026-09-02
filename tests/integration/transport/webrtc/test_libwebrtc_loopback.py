@@ -57,13 +57,28 @@ _WIDTH, _HEIGHT = 320, 240
 _TIMEOUT_S = 25.0
 
 
-async def _reached(event: asyncio.Event) -> bool:
-    """Await an event up to the shared timeout, reporting whether it fired."""
+async def _reached(event: asyncio.Event, timeout_s: float = _TIMEOUT_S) -> bool:
+    """Await an event up to a timeout, reporting whether it fired.
+
+    A test asserting that an event does NOT fire pays the timeout in full, so it
+    passes a shorter one. The default is the generous window a positive result
+    may legitimately need.
+    """
     try:
-        await asyncio.wait_for(event.wait(), _TIMEOUT_S)
+        await asyncio.wait_for(event.wait(), timeout_s)
     except TimeoutError:
         return False
     return True
+
+
+# How long to wait before calling a connection failed.
+#
+# Only for the negative controls, which wait this out on every run. A loopback
+# connect that is going to succeed does so in well under a second -- the
+# positive tests show it -- so five seconds still separates "rejected" from
+# "slow" by a wide margin, and it keeps the suite from spending 25 seconds
+# proving a negative.
+_NOT_CONNECTED_S = 5.0
 
 
 def _solid_frame(value: int) -> np.ndarray:
@@ -334,7 +349,7 @@ async def test_the_loopback_validates_ice_credentials() -> None:
         # will validate. Its connectivity checks must then be rejected.
         tampered = re.sub(r"a=ice-pwd:.*", "a=ice-pwd:totallyWrongPasswordXY", answer.sdp)
         await client.accept_answer(tampered)
-        assert not await _reached(connected), (
+        assert not await _reached(connected, _NOT_CONNECTED_S), (
             "the loopback connected with a mismatched ICE password, so it does "
             "not validate credentials and the positive test proves nothing"
         )
