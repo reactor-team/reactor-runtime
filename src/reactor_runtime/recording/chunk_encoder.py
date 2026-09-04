@@ -232,15 +232,10 @@ class ChunkEncoder:
                 "hls_segment_filename": str(self._output_dir / _SEGMENT_PATTERN),
             },
         )
-        # ``add_stream`` is overloaded on a literal set of codec names, so the
-        # configured codec resolves to the catch-all return type.
-        video = cast(
-            "av.VideoStream",
-            container.add_stream(
-                "libx264" if config.video_codec == "h264" else "libx265",
-                rate=Fraction(self._frame_rate, 1),
-                options=_video_options(config, self._frame_rate * config.chunk_seconds),
-            ),
+        video = container.add_stream(
+            "libx264" if config.video_codec == "h264" else "libx265",
+            rate=Fraction(self._frame_rate, 1),
+            options=_video_options(config, self._frame_rate * config.chunk_seconds),
         )
         video.width = width
         video.height = height
@@ -248,6 +243,8 @@ class ChunkEncoder:
         video.profile = _PROFILE
         video.time_base = Fraction(1, self._frame_rate)
 
+        # ``add_stream`` is overloaded on a literal set of codec names, so the
+        # configured codec resolves to the catch-all return type.
         audio = cast(
             "av.AudioStream",
             container.add_stream(config.audio_codec, rate=self._audio_sample_rate, layout="mono"),
