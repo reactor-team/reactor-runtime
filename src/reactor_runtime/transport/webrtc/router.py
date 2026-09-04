@@ -15,9 +15,9 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import FastAPI, Header, Request, Response
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from reactor_runtime.core import ConnId
 from reactor_runtime.metrics import RuntimeMetrics, WebRtcMetrics
@@ -30,8 +30,8 @@ from reactor_runtime.transport.router import (
     TransportRouter,
     UnknownSessionError,
 )
-from reactor_runtime.transport.webrtc.acceptor import WebRTCAcceptor
-from reactor_runtime.transport.webrtc.config import IceServer, WebRtcConfig
+from reactor_runtime.transport.webrtc.acceptor import PortRangeUnavailableError, WebRTCAcceptor
+from reactor_runtime.transport.webrtc.config import IceCredentials, IceServer, WebRtcConfig
 from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpOffer, TrackMap
 from reactor_runtime.transport.webrtc.version import protocol_for_transport
@@ -53,6 +53,16 @@ _GUARD_RESPONSES: dict[int | str, dict[str, Any]] = {
 _CONNECT_RESPONSES: dict[int | str, dict[str, Any]] = {
     **_GUARD_RESPONSES,
     503: {"model": ErrorDetail},
+}
+
+# Offering adds a 409 on top: a ``port_range`` pinned to a single port another
+# connection already holds is refused, since a pinned caller has no second port
+# to fall back on. Unlike the 503s this is not transient — retrying the same
+# port changes nothing, so it is a distinct code the caller branches on to pin
+# another port.
+_OFFER_RESPONSES: dict[int | str, dict[str, Any]] = {
+    **_CONNECT_RESPONSES,
+    409: {"model": ErrorDetail},
 }
 
 
@@ -104,18 +114,78 @@ class IceServerEntry(BaseModel):
     credentials: TurnCredentials | None = None
 
 
+# RFC 8445 §15.4: ice-char = ALPHA / DIGIT / "+" / "/". Anchored, so a value
+# is rejected for containing anything else rather than for merely starting with
+# something valid.
+_ICE_CHAR = r"^[A-Za-z0-9+/]+$"
+
+
+class IceCredentialsEntry(BaseModel):
+    """The ICE credentials a connection should answer with.
+
+    The constraints are RFC 8445 §15.4: both values are ``ice-char``
+    (ALPHA / DIGIT / "+" / "/"), a ufrag is 4..256 of them and a password
+    22..256.
+
+    They are enforced here rather than left to the media engine because of where
+    each failure surfaces. Registering an offer answers 202 and the negotiation
+    runs in the background, so a malformed value rejected downstream reaches the
+    caller only as its answer poll timing out, with the reason in the runtime's
+    logs. Checked here it is a 422 naming the field.
+    """
+
+    ufrag: str = Field(min_length=4, max_length=256, pattern=_ICE_CHAR)
+    pwd: str = Field(min_length=22, max_length=256, pattern=_ICE_CHAR)
+
+
+# A UDP port. Zero is excluded: it asks the kernel for an ephemeral port, which
+# is the one thing a caller pinning a range cannot mean.
+_Port = Annotated[int, Field(ge=1, le=65535)]
+
+
 class SdpParamsRequest(BaseModel):
-    """A client's SDP offer, the tracks it declares, and optional ICE servers.
+    """A client's SDP offer, the tracks it declares, and optional overrides.
 
     ``ice_servers`` lets the caller supply the STUN/TURN servers this connection
     gathers against. Absent, the runtime uses its own configured servers; present
     (even empty), it is authoritative for the connection — so a reconnect can
     carry fresh credentials.
+
+    ``ice_credentials`` and ``port_range`` follow the same rule and are likewise
+    optional: absent — the usual case — the media engine generates its own
+    credentials and the configured port range applies. They exist for a
+    deployment that fronts the runtime with a relaying layer, which must know a
+    connection's ICE credentials and media address before the connection exists.
+    ``port_range`` is an inclusive ``[min, max]``; a single-port range pins the
+    connection to one port. It replaces the configured range rather than
+    narrowing it, so a caller can name a port outside what the runtime is
+    configured with — an operator who set a range for an environmental reason (a
+    firewall rule, a container's published ports) cannot rely on it to bound a
+    caller. A port pinned this way is reserved for the connection: pinning one
+    another live connection already holds is a 409 rather than a negotiation
+    that fails out of sight.
     """
 
     sdp_offer: str
     track_mapping: list[TrackMappingEntry] = Field(default_factory=list)
     ice_servers: list[IceServerEntry] | None = None
+    ice_credentials: IceCredentialsEntry | None = None
+    port_range: tuple[_Port, _Port] | None = None
+
+    @model_validator(mode="after")
+    def _port_range_is_ordered(self) -> SdpParamsRequest:
+        """Reject an inverted range here rather than at gathering.
+
+        ``(50000, 40000)`` is accepted by the type and then fails when the
+        engine gathers, which reaches the caller as an answer poll that times
+        out. This makes it a 422 that names the field.
+        """
+        if self.port_range is not None:
+            low, high = self.port_range
+            if low > high:
+                msg = f"port_range min {low} is above max {high}"
+                raise ValueError(msg)
+        return self
 
 
 class IceCandidateEntry(BaseModel):
@@ -131,6 +201,19 @@ class IceCandidatesRequest(BaseModel):
 
     candidates: list[IceCandidateEntry] = Field(default_factory=list)
     is_final: bool = False
+
+
+def _ice_credentials_from_request(
+    entry: IceCredentialsEntry | None,
+) -> IceCredentials | None:
+    """Convert a connect request's ICE credentials to the transport's form.
+
+    ``None`` (the field absent) means the media engine generates its own, which
+    is the ordinary case.
+    """
+    if entry is None:
+        return None
+    return IceCredentials(ufrag=entry.ufrag, pwd=entry.pwd)
 
 
 def _ice_servers_from_request(
@@ -245,18 +328,26 @@ class WebRtcRouter(TransportRouter):
             tracks = TrackMap.from_client(entry.model_dump() for entry in req.track_mapping)
             conn_id = ConnId(cid)
             runner.offer_admitted(conn_id)
-            acceptor.start_offer(
-                conn_id,
-                SdpOffer(req.sdp_offer),
-                tracks,
-                protocol_for_transport(webrtc_version),
-                ice_servers=_ice_servers_from_request(req.ice_servers),
-            )
+            try:
+                acceptor.start_offer(
+                    conn_id,
+                    SdpOffer(req.sdp_offer),
+                    tracks,
+                    protocol_for_transport(webrtc_version),
+                    ice_servers=_ice_servers_from_request(req.ice_servers),
+                    ice_credentials=_ice_credentials_from_request(req.ice_credentials),
+                    port_range=req.port_range,
+                )
+            except PortRangeUnavailableError as taken:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"port {taken.port} is already held by another connection",
+                ) from None
             return OfferAccepted(connection_id=cid)
 
         offer_path = f"{_PREFIX}/connections/{{cid}}/sdp_params"
-        app.post(offer_path, status_code=202, responses=_CONNECT_RESPONSES)(offer)
-        app.put(offer_path, status_code=202, responses=_CONNECT_RESPONSES)(offer)
+        app.post(offer_path, status_code=202, responses=_OFFER_RESPONSES)(offer)
+        app.put(offer_path, status_code=202, responses=_OFFER_RESPONSES)(offer)
 
         @app.get(
             f"{_PREFIX}/connections/{{cid}}/sdp_params",
