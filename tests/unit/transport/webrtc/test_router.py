@@ -283,6 +283,34 @@ def test_a_single_port_range_is_allowed(
     assert fake_peer.last_config.port_range == (51820, 51820)
 
 
+def test_a_pinned_port_another_connection_holds_is_refused(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+) -> None:
+    """A collision the caller can act on: a named 409, not a stalled poll.
+
+    A caller pinning a port has no second port to fall back on, so a second
+    connection on the same one gathers no host candidate and its negotiation is
+    dropped in the background. The refusal has to reach the caller, and with a
+    code distinct from the transient 503s — retrying the same port changes
+    nothing, pinning another does.
+    """
+    with _client(FakeRunner(), fake_peer, factory_for) as client:
+        accepted = client.post(
+            f"{_PREFIX}/connections/5001/sdp_params",
+            json={"sdp_offer": "the-offer", "port_range": [51820, 51820]},
+        )
+        assert accepted.status_code == 202
+        _poll_answer(client, 5001)
+
+        refused = client.post(
+            f"{_PREFIX}/connections/5002/sdp_params",
+            json={"sdp_offer": "the-offer", "port_range": [51820, 51820]},
+        )
+    assert refused.status_code == 409, refused.json()
+    assert "51820" in refused.json()["detail"], refused.json()
+
+
 def test_offer_without_ice_credentials_leaves_the_engine_to_generate_them(
     fake_peer: FakePeer,
     factory_for: Callable[..., WebRtcPeerFactory],

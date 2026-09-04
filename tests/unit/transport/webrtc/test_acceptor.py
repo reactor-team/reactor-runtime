@@ -10,6 +10,7 @@ from reactor_runtime.metrics import RuntimeMetrics, WebRtcMetrics
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.transport import TooManyConnectionsError
 from reactor_runtime.transport.webrtc import (
+    PortRangeUnavailableError,
     SdpAnswer,
     SdpOffer,
     TrackMap,
@@ -586,6 +587,216 @@ async def test_zero_ceiling_disables_the_cap(
         acceptor.start_offer(ConnId(cid), SdpOffer("offer"), out_av_tracks, ProtocolVersion.V0)
         tasks.append(acceptor._negotiating[ConnId(cid)])
     await asyncio.gather(*tasks)
+
+
+# A port_range that names one port, which is the only shape the acceptor
+# reserves: the pin a fronting layer needs, and the only one that can collide.
+_PINNED = (51820, 51820)
+
+
+async def test_a_second_connection_pinned_to_a_held_port_is_refused(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    """The one bad ``port_range`` the request boundary cannot judge.
+
+    Structurally valid, and in conflict only with what this acceptor is
+    currently negotiating. Left to gathering it is an answer poll that times
+    out; refused here it names the port.
+    """
+    acceptor = _acceptor(FakeSink(), fake_peer, factory_for)
+    acceptor.start_offer(
+        ConnId(7), SdpOffer("first"), out_av_tracks, ProtocolVersion.V0, port_range=_PINNED
+    )
+    await acceptor._negotiating[ConnId(7)]
+
+    with pytest.raises(PortRangeUnavailableError) as refused:
+        acceptor.start_offer(
+            ConnId(8), SdpOffer("second"), out_av_tracks, ProtocolVersion.V0, port_range=_PINNED
+        )
+
+    assert refused.value.port == 51820
+    assert refused.value.held_by == ConnId(7)
+    assert ConnId(8) not in acceptor._negotiating
+
+
+async def test_only_a_single_port_range_is_measured(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    """A range with room to choose is not a claim on any port inside it."""
+    acceptor = _acceptor(FakeSink(), fake_peer, factory_for)
+    acceptor.start_offer(
+        ConnId(7), SdpOffer("first"), out_av_tracks, ProtocolVersion.V0, port_range=_PINNED
+    )
+    await acceptor._negotiating[ConnId(7)]
+
+    # A wider range covering the pinned port still has other ports to gather on,
+    # so it is admitted rather than measured against the pin.
+    acceptor.start_offer(
+        ConnId(8),
+        SdpOffer("second"),
+        out_av_tracks,
+        ProtocolVersion.V0,
+        port_range=(51810, 51830),
+    )
+    await acceptor._negotiating[ConnId(8)]
+
+    # And the reverse: the acceptor knows the range a connection gathers in,
+    # never which port inside it the agent took, so a pin within it is not a
+    # collision it can claim to have found.
+    acceptor.start_offer(
+        ConnId(9),
+        SdpOffer("third"),
+        out_av_tracks,
+        ProtocolVersion.V0,
+        port_range=(51830, 51830),
+    )
+    await acceptor._negotiating[ConnId(9)]
+
+
+async def test_a_reconnect_keeps_its_own_pinned_port(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    """A re-offer closes its own peer before building the new one."""
+    acceptor = _acceptor(FakeSink(), fake_peer, factory_for)
+    acceptor.start_offer(
+        ConnId(7), SdpOffer("first"), out_av_tracks, ProtocolVersion.V0, port_range=_PINNED
+    )
+    await acceptor._negotiating[ConnId(7)]
+
+    acceptor.start_offer(
+        ConnId(7), SdpOffer("again"), out_av_tracks, ProtocolVersion.V0, port_range=_PINNED
+    )
+    await acceptor._negotiating[ConnId(7)]
+    assert acceptor.take_answer(ConnId(7)) is not None
+
+
+async def test_a_reconnect_that_stops_pinning_releases_the_port(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    """The new peer gathers where its own range allows, so the old claim is stale."""
+    acceptor = _acceptor(FakeSink(), fake_peer, factory_for)
+    acceptor.start_offer(
+        ConnId(7), SdpOffer("first"), out_av_tracks, ProtocolVersion.V0, port_range=_PINNED
+    )
+    await acceptor._negotiating[ConnId(7)]
+
+    acceptor.start_offer(ConnId(7), SdpOffer("again"), out_av_tracks, ProtocolVersion.V0)
+    await acceptor._negotiating[ConnId(7)]
+
+    acceptor.start_offer(
+        ConnId(8), SdpOffer("second"), out_av_tracks, ProtocolVersion.V0, port_range=_PINNED
+    )
+    await acceptor._negotiating[ConnId(8)]
+
+
+async def test_a_superseded_offer_releases_the_port_it_pinned(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    """An offer cancelled before it built anything leaves no claim behind.
+
+    The superseded offer never reached a connection, so no teardown runs for
+    it; the claim is released by the offer that replaced it. Without that, a
+    pin abandoned mid-negotiation would hold its port for the process's life.
+    """
+    acceptor = _acceptor(FakeSink(), fake_peer, factory_for)
+    acceptor.start_offer(
+        ConnId(7), SdpOffer("first"), out_av_tracks, ProtocolVersion.V0, port_range=_PINNED
+    )
+    superseded = acceptor._negotiating[ConnId(7)]
+
+    acceptor.start_offer(ConnId(7), SdpOffer("again"), out_av_tracks, ProtocolVersion.V0)
+    replacement = acceptor._negotiating[ConnId(7)]
+    with pytest.raises(asyncio.CancelledError):
+        await superseded
+    await replacement
+
+    acceptor.start_offer(
+        ConnId(8), SdpOffer("second"), out_av_tracks, ProtocolVersion.V0, port_range=_PINNED
+    )
+    await acceptor._negotiating[ConnId(8)]
+
+
+async def test_a_dropped_connection_frees_its_pinned_port(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    """The reservation lasts as long as the connection, not the session."""
+    acceptor = _acceptor(FakeSink(), fake_peer, factory_for)
+    acceptor.start_offer(
+        ConnId(7), SdpOffer("first"), out_av_tracks, ProtocolVersion.V0, port_range=_PINNED
+    )
+    await acceptor._negotiating[ConnId(7)]
+    fake_peer.fire_connected()
+    fake_peer.fire_disconnect()
+
+    acceptor.start_offer(
+        ConnId(8), SdpOffer("second"), out_av_tracks, ProtocolVersion.V0, port_range=_PINNED
+    )
+    await acceptor._negotiating[ConnId(8)]
+
+
+async def test_a_failed_negotiation_frees_its_pinned_port(
+    fake_peer: FakePeer,
+    out_av_tracks: TrackMap,
+) -> None:
+    """A negotiation that never produced a peer holds no port either."""
+
+    def refuses(*args: object, **kwargs: object) -> WebRtcPeerFactory:
+        async def factory(
+            conn_id: ConnId,
+            offer: SdpOffer,
+            tracks: TrackMap,
+            config: WebRtcConfig,
+            version: ProtocolVersion,
+            /,
+        ) -> tuple[WebRTCPeer, SdpAnswer]:
+            raise RuntimeError("no peer today")
+
+        return factory
+
+    acceptor = _acceptor(FakeSink(), fake_peer, refuses)
+    acceptor.start_offer(
+        ConnId(7), SdpOffer("first"), out_av_tracks, ProtocolVersion.V0, port_range=_PINNED
+    )
+    await acceptor._negotiating[ConnId(7)]
+    assert acceptor._pinned_ports == {}
+
+    acceptor.start_offer(
+        ConnId(8), SdpOffer("second"), out_av_tracks, ProtocolVersion.V0, port_range=_PINNED
+    )
+    await acceptor._negotiating[ConnId(8)]
+
+
+async def test_a_reaped_connection_frees_its_pinned_port(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    """A connection reaped for never going live releases its port with its slot."""
+    acceptor = _capped_acceptor(fake_peer, factory_for, limit=0, negotiation_timeout=0.05)
+    acceptor.start_offer(
+        ConnId(7), SdpOffer("first"), out_av_tracks, ProtocolVersion.V0, port_range=_PINNED
+    )
+    await acceptor._negotiating[ConnId(7)]
+
+    _, deadline = acceptor._deadlines[ConnId(7)]
+    await deadline
+
+    acceptor.start_offer(
+        ConnId(8), SdpOffer("second"), out_av_tracks, ProtocolVersion.V0, port_range=_PINNED
+    )
+    await acceptor._negotiating[ConnId(8)]
 
 
 async def test_pre_offer_ice_is_bounded_per_connection(

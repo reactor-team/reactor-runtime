@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import FastAPI, Header, Request, Response
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
@@ -30,7 +30,7 @@ from reactor_runtime.transport.router import (
     TransportRouter,
     UnknownSessionError,
 )
-from reactor_runtime.transport.webrtc.acceptor import WebRTCAcceptor
+from reactor_runtime.transport.webrtc.acceptor import PortRangeUnavailableError, WebRTCAcceptor
 from reactor_runtime.transport.webrtc.config import IceCredentials, IceServer, WebRtcConfig
 from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpOffer, TrackMap
@@ -53,6 +53,16 @@ _GUARD_RESPONSES: dict[int | str, dict[str, Any]] = {
 _CONNECT_RESPONSES: dict[int | str, dict[str, Any]] = {
     **_GUARD_RESPONSES,
     503: {"model": ErrorDetail},
+}
+
+# Offering adds a 409 on top: a ``port_range`` pinned to a single port another
+# connection already holds is refused, since a pinned caller has no second port
+# to fall back on. Unlike the 503s this is not transient — retrying the same
+# port changes nothing, so it is a distinct code the caller branches on to pin
+# another port.
+_OFFER_RESPONSES: dict[int | str, dict[str, Any]] = {
+    **_CONNECT_RESPONSES,
+    409: {"model": ErrorDetail},
 }
 
 
@@ -104,7 +114,7 @@ class IceServerEntry(BaseModel):
     credentials: TurnCredentials | None = None
 
 
-# RFC 8445 \u00a715.4: ice-char = ALPHA / DIGIT / "+" / "/". Anchored, so a value
+# RFC 8445 §15.4: ice-char = ALPHA / DIGIT / "+" / "/". Anchored, so a value
 # is rejected for containing anything else rather than for merely starting with
 # something valid.
 _ICE_CHAR = r"^[A-Za-z0-9+/]+$"
@@ -113,7 +123,7 @@ _ICE_CHAR = r"^[A-Za-z0-9+/]+$"
 class IceCredentialsEntry(BaseModel):
     """The ICE credentials a connection should answer with.
 
-    The constraints are RFC 8445 \u00a715.4: both values are ``ice-char``
+    The constraints are RFC 8445 §15.4: both values are ``ice-char``
     (ALPHA / DIGIT / "+" / "/"), a ufrag is 4..256 of them and a password
     22..256.
 
@@ -147,7 +157,13 @@ class SdpParamsRequest(BaseModel):
     deployment that fronts the runtime with a relaying layer, which must know a
     connection's ICE credentials and media address before the connection exists.
     ``port_range`` is an inclusive ``[min, max]``; a single-port range pins the
-    connection to one port.
+    connection to one port. It replaces the configured range rather than
+    narrowing it, so a caller can name a port outside what the runtime is
+    configured with — an operator who set a range for an environmental reason (a
+    firewall rule, a container's published ports) cannot rely on it to bound a
+    caller. A port pinned this way is reserved for the connection: pinning one
+    another live connection already holds is a 409 rather than a negotiation
+    that fails out of sight.
     """
 
     sdp_offer: str
@@ -312,20 +328,26 @@ class WebRtcRouter(TransportRouter):
             tracks = TrackMap.from_client(entry.model_dump() for entry in req.track_mapping)
             conn_id = ConnId(cid)
             runner.offer_admitted(conn_id)
-            acceptor.start_offer(
-                conn_id,
-                SdpOffer(req.sdp_offer),
-                tracks,
-                protocol_for_transport(webrtc_version),
-                ice_servers=_ice_servers_from_request(req.ice_servers),
-                ice_credentials=_ice_credentials_from_request(req.ice_credentials),
-                port_range=req.port_range,
-            )
+            try:
+                acceptor.start_offer(
+                    conn_id,
+                    SdpOffer(req.sdp_offer),
+                    tracks,
+                    protocol_for_transport(webrtc_version),
+                    ice_servers=_ice_servers_from_request(req.ice_servers),
+                    ice_credentials=_ice_credentials_from_request(req.ice_credentials),
+                    port_range=req.port_range,
+                )
+            except PortRangeUnavailableError as taken:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"port {taken.port} is already held by another connection",
+                ) from None
             return OfferAccepted(connection_id=cid)
 
         offer_path = f"{_PREFIX}/connections/{{cid}}/sdp_params"
-        app.post(offer_path, status_code=202, responses=_CONNECT_RESPONSES)(offer)
-        app.put(offer_path, status_code=202, responses=_CONNECT_RESPONSES)(offer)
+        app.post(offer_path, status_code=202, responses=_OFFER_RESPONSES)(offer)
+        app.put(offer_path, status_code=202, responses=_OFFER_RESPONSES)(offer)
 
         @app.get(
             f"{_PREFIX}/connections/{{cid}}/sdp_params",

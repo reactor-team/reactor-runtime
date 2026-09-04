@@ -297,7 +297,7 @@
         "type": "object"
       },
       "SdpParamsRequest": {
-        "description": "A client's SDP offer, the tracks it declares, and optional overrides.\n\n``ice_servers`` lets the caller supply the STUN/TURN servers this connection\ngathers against. Absent, the runtime uses its own configured servers; present\n(even empty), it is authoritative for the connection \u2014 so a reconnect can\ncarry fresh credentials.\n\n``ice_credentials`` and ``port_range`` follow the same rule and are likewise\noptional: absent \u2014 the usual case \u2014 the media engine generates its own\ncredentials and the configured port range applies. They exist for a\ndeployment that fronts the runtime with a relaying layer, which must know a\nconnection's ICE credentials and media address before the connection exists.\n``port_range`` is an inclusive ``[min, max]``; a single-port range pins the\nconnection to one port.",
+        "description": "A client's SDP offer, the tracks it declares, and optional overrides.\n\n``ice_servers`` lets the caller supply the STUN/TURN servers this connection\ngathers against. Absent, the runtime uses its own configured servers; present\n(even empty), it is authoritative for the connection \u2014 so a reconnect can\ncarry fresh credentials.\n\n``ice_credentials`` and ``port_range`` follow the same rule and are likewise\noptional: absent \u2014 the usual case \u2014 the media engine generates its own\ncredentials and the configured port range applies. They exist for a\ndeployment that fronts the runtime with a relaying layer, which must know a\nconnection's ICE credentials and media address before the connection exists.\n``port_range`` is an inclusive ``[min, max]``; a single-port range pins the\nconnection to one port. It replaces the configured range rather than\nnarrowing it, so a caller can name a port outside what the runtime is\nconfigured with \u2014 an operator who set a range for an environmental reason (a\nfirewall rule, a container's published ports) cannot rely on it to bound a\ncaller. A port pinned this way is reserved for the connection: pinning one\nanother live connection already holds is a 409 rather than a negotiation\nthat fails out of sight.",
         "properties": {
           "ice_credentials": {
             "anyOf": [
@@ -1070,6 +1070,16 @@
             },
             "description": "Not Found"
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1171,6 +1181,16 @@
               }
             },
             "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Conflict"
           },
           "422": {
             "content": {

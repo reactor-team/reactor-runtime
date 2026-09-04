@@ -47,6 +47,46 @@ _MAX_PENDING_ICE_CONNS = 128
 _MAX_PENDING_ICE_PER_CONN = 256
 
 
+class PortRangeUnavailableError(RuntimeError):
+    """Raised when a single-port ``port_range`` override names a port already held.
+
+    A caller pinning a connection to one port has no second port to fall back
+    on. Two connections pinned to the same one both try to bind it: the second
+    finds nothing free in its range, gathers no host candidate, and its
+    negotiation is logged and dropped — which reaches the caller only as its
+    answer poll timing out. Refused at the offer instead, it is an error the
+    caller can act on by pinning a different port.
+
+    Only a single-port range is measured. A wider range still has ports left to
+    pick, and two wide ranges overlapping is the ordinary case: the acceptor
+    knows which range a connection gathers in, never which port inside it the
+    ICE agent took.
+
+    Attributes:
+        port: The pinned port that is already held.
+        held_by: The connection holding it.
+    """
+
+    def __init__(self, port: int, held_by: ConnId) -> None:
+        """Record the pinned port and the connection already holding it."""
+        self.port = port
+        self.held_by = held_by
+        super().__init__(f"port {port} is already held by connection {held_by}")
+
+
+def _pinned_port(port_range: tuple[int, int] | None) -> int | None:
+    """Return the single port a range pins a connection to, or ``None``.
+
+    A range wider than one port leaves the ICE agent a choice, so there is
+    nothing to reserve; only ``min == max`` names a port the connection must
+    have.
+    """
+    if port_range is None:
+        return None
+    low, high = port_range
+    return low if low == high else None
+
+
 class WebRTCAcceptor(ConnectionAcceptor):
     """Negotiate WebRTC handshakes and register connections once they are live.
 
@@ -100,6 +140,12 @@ class WebRTCAcceptor(ConnectionAcceptor):
         # teardown of the superseded connection runs while the new offer's
         # deadline is already armed and must not carry it off.
         self._deadlines: dict[ConnId, tuple[float, asyncio.Task[None]]] = {}
+        # The port each connection offering a single-port range is pinned to,
+        # keyed with the offer generation that claimed it: a reconnect claims
+        # its port and only then tears the superseded connection down, so a
+        # release by id alone would carry the new claim off. Wider ranges are
+        # absent — there is nothing to reserve when the agent has a choice.
+        self._pinned_ports: dict[ConnId, tuple[float, int]] = {}
 
     def start_offer(
         self,
@@ -133,13 +179,22 @@ class WebRTCAcceptor(ConnectionAcceptor):
         credentials and media port before the connection exists; a runtime
         driven directly never sets them.
 
+        *port_range* replaces the configured range rather than narrowing it, so
+        a caller can name a port outside it. A single-port range is reserved for
+        the connection: a second connection pinned to the same port is refused
+        here rather than left to fail gathering in the background.
+
         Raises:
             TooManyConnectionsError: If *conn_id* is a new connection and the
                 acceptor already holds its configured maximum. A re-offer on a
                 connection already negotiating or live is a reconnect and is
                 admitted regardless of the ceiling.
+            PortRangeUnavailableError: If *port_range* pins a single port that
+                another connection is already pinned to. A re-offer on this same
+                connection keeps its own port.
         """
         self._guard_capacity(conn_id)
+        self._guard_pinned_port(conn_id, port_range)
         in_flight = self._negotiating.pop(conn_id, None)
         if in_flight is not None:
             in_flight.cancel()
@@ -147,6 +202,7 @@ class WebRTCAcceptor(ConnectionAcceptor):
         self._answers.pop(conn_id, None)
         offered_at = time.monotonic()
         self._offered_at[conn_id] = offered_at
+        self._claim_pinned_port(conn_id, port_range, offered_at)
         self._negotiating[conn_id] = asyncio.create_task(
             self._negotiate(
                 conn_id,
@@ -174,6 +230,48 @@ class WebRTCAcceptor(ConnectionAcceptor):
         known = conn_id in self._conns or conn_id in self._negotiating
         if not known and len(set(self._conns) | set(self._negotiating)) >= limit:
             raise TooManyConnectionsError(limit)
+
+    def _guard_pinned_port(self, conn_id: ConnId, port_range: tuple[int, int] | None) -> None:
+        """Refuse an offer pinned to a port another connection already holds.
+
+        The one bad ``port_range`` the request boundary cannot catch: it is
+        structurally valid and only conflicts with what this acceptor is
+        currently negotiating. A re-offer on the connection already holding the
+        port is a reconnect — its own peer is closed before the new one is
+        built, so the port is free for it.
+        """
+        port = _pinned_port(port_range)
+        if port is None:
+            return
+        for other, (_, held) in self._pinned_ports.items():
+            if other != conn_id and held == port:
+                raise PortRangeUnavailableError(port, other)
+
+    def _claim_pinned_port(
+        self, conn_id: ConnId, port_range: tuple[int, int] | None, offered_at: float
+    ) -> None:
+        """Record the port this offer pins the connection to, if it pins one.
+
+        A re-offer that supplies a wider range, or none at all, releases the
+        port its predecessor claimed: the new peer gathers wherever its range
+        allows, so the old claim describes nothing.
+        """
+        port = _pinned_port(port_range)
+        if port is None:
+            self._pinned_ports.pop(conn_id, None)
+            return
+        self._pinned_ports[conn_id] = (offered_at, port)
+
+    def _release_pinned_port(self, conn_id: ConnId, offered_at: float) -> None:
+        """Free a claimed port, unless a newer offer on the id already holds it.
+
+        The ordering :meth:`_drop_offer` guards against: a reconnect claims its
+        port and then tears the superseded connection down, and that teardown
+        must not release the claim the reconnect is negotiating with.
+        """
+        entry = self._pinned_ports.get(conn_id)
+        if entry is not None and entry[0] == offered_at:
+            del self._pinned_ports[conn_id]
 
     def _arm_deadline(self, conn_id: ConnId, offered_at: float) -> None:
         """Start the reaper that frees this connection's slot if it never goes live."""
@@ -241,6 +339,7 @@ class WebRTCAcceptor(ConnectionAcceptor):
             self._pending_ice.pop(conn_id, None)
             self._answers.pop(conn_id, None)
             self._drop_offer(conn_id, offered_at)
+            self._release_pinned_port(conn_id, offered_at)
         finally:
             entry = self._deadlines.get(conn_id)
             if entry is not None and entry[1] is asyncio.current_task():
@@ -320,6 +419,7 @@ class WebRTCAcceptor(ConnectionAcceptor):
             # its deadline has nothing left to guard either.
             self._drop_offer(conn_id, offered_at)
             self._cancel_deadline(conn_id, offered_at)
+            self._release_pinned_port(conn_id, offered_at)
             logger.exception("WebRTC negotiation failed for connection %s", conn_id)
         finally:
             # Only clear our own entry: a superseding offer may have already
@@ -386,6 +486,7 @@ class WebRTCAcceptor(ConnectionAcceptor):
         self._pending_ice.pop(conn_id, None)
         self._answers.pop(conn_id, None)
         self._drop_offer(conn_id, offered_at)
+        self._release_pinned_port(conn_id, offered_at)
         if conn_id in self._live:
             self._live.discard(conn_id)
             self._sink.connection_closed(conn_id)
@@ -404,6 +505,7 @@ class WebRTCAcceptor(ConnectionAcceptor):
         self._pending_ice.pop(conn_id, None)
         self._answers.pop(conn_id, None)
         self._drop_offer(conn_id, offered_at)
+        self._release_pinned_port(conn_id, offered_at)
         self._live.discard(conn_id)
 
     def _drop_offer(self, conn_id: ConnId, offered_at: float) -> None:

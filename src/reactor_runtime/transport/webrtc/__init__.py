@@ -7,7 +7,7 @@ WebRTC reshaped as a connection: :class:`WebRTCConnection` is the wire,
 during offer negotiation by a :data:`WebRtcPeerFactory`.
 """
 
-from reactor_runtime.transport.webrtc.acceptor import WebRTCAcceptor
+from reactor_runtime.transport.webrtc.acceptor import PortRangeUnavailableError, WebRTCAcceptor
 from reactor_runtime.transport.webrtc.config import (
     IceCredentials,
     IceServer,
@@ -34,6 +34,7 @@ __all__ = [
     "MappedTrack",
     "OutboundMediaHealth",
     "PeerStats",
+    "PortRangeUnavailableError",
     "SdpAnswer",
     "SdpOffer",
     "TrackMap",
