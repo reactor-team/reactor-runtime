@@ -545,7 +545,7 @@ wheels = [
 
 [[package]]
 name = "reactor-runtime"
-version = "3.2.7"
+version = "3.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "av" },
