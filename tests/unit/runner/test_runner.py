@@ -5,6 +5,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,7 @@ from reactor_runtime import (
     session_ended,
     session_started,
 )
+from reactor_runtime.codes import UNRESOLVED_UPLOAD
 from reactor_runtime.core import (
     ClientConnected,
     ClientDisconnected,
@@ -89,6 +91,12 @@ class FakeOut(Output):
     main: Video
 
 
+@dataclass
+class Page:
+    image: UploadedFile
+    caption: str = ""
+
+
 class FakeModel(ReactorModel):
     """A minimal model that records its bring-up order and then idles."""
 
@@ -105,6 +113,20 @@ class FakeModel(ReactorModel):
 
     @event(name="set_image")
     async def set_image(self, image: UploadedFile) -> None: ...
+
+    @event(name="set_images")
+    async def set_images(self, images: list[UploadedFile]) -> None: ...
+
+    @event(name="set_gallery")
+    async def set_gallery(
+        self,
+        cover: UploadedFile,
+        images: list[UploadedFile] | None = None,
+        labels: dict[str, str] | None = None,
+    ) -> None: ...
+
+    @event(name="set_book")
+    async def set_book(self, pages: dict[str, UploadedFile], cover: Page) -> None: ...
 
     @file_uploaded
     def on_file(self, uploaded_file: UploadedFile) -> None: ...
@@ -1771,6 +1793,222 @@ async def test_an_unresolved_upload_is_counted_with_no_ingress(
     assert (
         _metric(started_runner, "runtime_command_ingress_seconds_count", command="set_image")
         is None
+    )
+
+
+# --- inline upload references ---------------------------------------------
+
+
+def _seed_upload(runner: Runner, name: str, data: bytes) -> str:
+    upload_id = runner.uploads.create_slot(name, "image/png", len(data))
+    runner.uploads.put(upload_id, data)
+    return upload_id
+
+
+def _capture_submissions(
+    runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> list[tuple[str, dict[str, Any], CommandOutcome]]:
+    """Record what reaches the bridge while still validating it against the contract."""
+    assert runner._bridge is not None
+    original = runner._bridge.submit_command
+    submitted: list[tuple[str, dict[str, Any], CommandOutcome]] = []
+
+    async def capture(name: str, args: dict[str, Any], **kwargs: Any) -> CommandOutcome:
+        outcome = await original(name, args, **kwargs)
+        submitted.append((name, args, outcome))
+        return outcome
+
+    monkeypatch.setattr(runner._bridge, "submit_command", capture)
+    return submitted
+
+
+async def test_a_list_of_references_reaches_the_model_as_files_in_the_client_order(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started_runner.start_session({})
+    first = _seed_upload(started_runner, "first.png", b"1")
+    second = _seed_upload(started_runner, "second.png", b"2")
+    third = _seed_upload(started_runner, "third.png", b"3")
+    submitted = _capture_submissions(started_runner, monkeypatch)
+
+    await _submit(
+        started_runner,
+        "set_images",
+        {"images": [{"upload_id": third}, {"upload_id": first}, {"upload_id": second}]},
+    )
+
+    name, args, outcome = submitted[0]
+    assert (name, outcome.accepted) == ("set_images", True)
+    assert args["images"] == [
+        UploadedFile(name="third.png", mime_type="image/png", data=b"3"),
+        UploadedFile(name="first.png", mime_type="image/png", data=b"1"),
+        UploadedFile(name="second.png", mime_type="image/png", data=b"2"),
+    ]
+    # The typed command the handler is called with carries the same files.
+    assert started_runner._bridge is not None
+    command = started_runner._bridge.contract.validate("set_images", args)
+    assert all(isinstance(image, UploadedFile) for image in vars(command)["images"])
+
+
+async def test_a_single_file_resolves_through_either_channel(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started_runner.start_session({})
+    upload_id = _seed_upload(started_runner, "cat.png", b"cat")
+    submitted = _capture_submissions(started_runner, monkeypatch)
+    expected = UploadedFile(name="cat.png", mime_type="image/png", data=b"cat")
+
+    await _submit(started_runner, "set_image", {}, uploads={"image": upload_id})
+    await _submit(started_runner, "set_image", {"image": {"upload_id": upload_id}})
+
+    assert [(args["image"], outcome.accepted) for _name, args, outcome in submitted] == [
+        (expected, True),
+        (expected, True),
+    ]
+
+
+async def test_a_sidecar_file_and_an_inline_list_resolve_in_one_command(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started_runner.start_session({})
+    cover = _seed_upload(started_runner, "cover.png", b"c")
+    page = _seed_upload(started_runner, "page.png", b"p")
+    submitted = _capture_submissions(started_runner, monkeypatch)
+
+    await _submit(
+        started_runner,
+        "set_gallery",
+        {"images": [{"upload_id": page}], "labels": {"upload_id": "not a reference"}},
+        uploads={"cover": cover},
+    )
+
+    _name, args, outcome = submitted[0]
+    assert outcome.accepted
+    assert args["cover"] == UploadedFile(name="cover.png", mime_type="image/png", data=b"c")
+    assert args["images"] == [UploadedFile(name="page.png", mime_type="image/png", data=b"p")]
+    # A mapping the model declared as its own is not an upload, whatever its keys.
+    assert args["labels"] == {"upload_id": "not a reference"}
+
+
+async def test_references_nested_in_a_dict_and_a_dataclass_reach_the_model_as_files(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started_runner.start_session({})
+    left = _seed_upload(started_runner, "left.png", b"l")
+    right = _seed_upload(started_runner, "right.png", b"r")
+    cover = _seed_upload(started_runner, "cover.png", b"c")
+    submitted = _capture_submissions(started_runner, monkeypatch)
+
+    await _submit(
+        started_runner,
+        "set_book",
+        {
+            "pages": {"left": {"upload_id": left}, "right": {"upload_id": right}},
+            "cover": {"image": {"upload_id": cover}, "caption": "front"},
+        },
+    )
+
+    _name, args, outcome = submitted[0]
+    assert outcome.accepted
+    assert args["pages"] == {
+        "left": UploadedFile(name="left.png", mime_type="image/png", data=b"l"),
+        "right": UploadedFile(name="right.png", mime_type="image/png", data=b"r"),
+    }
+    assert args["cover"] == {
+        "image": UploadedFile(name="cover.png", mime_type="image/png", data=b"c"),
+        "caption": "front",
+    }
+
+
+async def test_an_absent_optional_list_needs_no_resolution(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started_runner.start_session({})
+    cover = _seed_upload(started_runner, "cover.png", b"c")
+    submitted = _capture_submissions(started_runner, monkeypatch)
+
+    await _submit(started_runner, "set_gallery", {"images": None}, uploads={"cover": cover})
+
+    _name, args, outcome = submitted[0]
+    assert outcome.accepted
+    assert args["images"] is None
+
+
+async def test_a_list_with_one_unresolved_entry_drops_the_whole_command(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started_runner.start_session({})
+    present = _seed_upload(started_runner, "cat.png", b"cat")
+    submitted = _capture_submissions(started_runner, monkeypatch)
+    rejected: list[tuple[ConnId, str, str, str]] = []
+    monkeypatch.setattr(
+        started_runner,
+        "_reject_command",
+        lambda conn_id, request_id, code, reason: rejected.append(
+            (conn_id, request_id, code, reason)
+        ),
+    )
+    original_fetch = started_runner._uploads.fetch
+
+    async def no_grace(upload_id: str, **kwargs: Any) -> UploadedFile:
+        # The store waits the upload grace for a missing id, which this outcome
+        # does not depend on, so a missing id fails at once here.
+        return await original_fetch(upload_id)
+
+    monkeypatch.setattr(started_runner._uploads, "fetch", no_grace)
+
+    await _submit(
+        started_runner,
+        "set_images",
+        {"images": [{"upload_id": present}, {"upload_id": "missing"}]},
+    )
+
+    assert submitted == []
+    assert rejected == [
+        (ConnId(1), "r1", UNRESOLVED_UPLOAD, "command 'set_images' references an unresolved upload")
+    ]
+    errors = _moves(started_runner, SessionEvent.ERROR)
+    assert len(errors) == 1
+    assert "set_images" in errors[0].detail["message"]
+    assert _metric(
+        started_runner, "runtime_commands_total", command="set_images", outcome="unresolved_upload"
+    )
+
+
+async def test_the_journal_carries_the_references_of_a_list_and_never_its_bytes(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    upload_id = _seed_upload(started_runner, "cat.png", b"cat")
+
+    await _submit(started_runner, "set_images", {"images": [{"upload_id": upload_id}]})
+
+    commands = _moves(started_runner, SessionEvent.COMMAND)
+    assert len(commands) == 1
+    assert commands[0].detail["args"] == {"images": [{"upload_id": upload_id}]}
+
+
+async def test_the_wait_for_a_list_of_uploads_is_left_out_of_the_ingress(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started_runner.start_session({})
+
+    async def arrives_late(upload_id: str, **kwargs: Any) -> UploadedFile:
+        await asyncio.sleep(0.3)
+        return UploadedFile(name=f"{upload_id}.png", mime_type="image/png", data=b"\x89PNG")
+
+    monkeypatch.setattr(started_runner._uploads, "fetch", arrives_late)
+    await _submit(
+        started_runner, "set_images", {"images": [{"upload_id": "a"}, {"upload_id": "b"}]}
+    )
+
+    # A list waits for its entries together, and the wait is the client's, so a
+    # command carrying a list is timed the same way one carrying a single file is.
+    total = _metric(started_runner, "runtime_command_ingress_seconds_sum", command="set_images")
+    assert total is not None
+    assert total < 0.3
+    assert _metric(
+        started_runner, "runtime_commands_total", command="set_images", outcome="accepted"
     )
 
 

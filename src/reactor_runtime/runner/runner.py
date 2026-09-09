@@ -48,6 +48,8 @@ from reactor_runtime.core import (
     TrackDirection,
     Transition,
     TransitionEvent,
+    TypeSpec,
+    UploadedFile,
 )
 from reactor_runtime.event_stream import EventStream
 from reactor_runtime.interface.events.messages import ModelMessage
@@ -69,6 +71,7 @@ from reactor_runtime.recording import ClipResult, Recorder, RecorderError
 from reactor_runtime.runner.connection_manager import ConnectionManager
 from reactor_runtime.runner.offer_epochs import OfferEpochs
 from reactor_runtime.runner.state_machine import SessionStateMachine
+from reactor_runtime.runner.upload_resolution import declares_upload, resolve_uploads
 from reactor_runtime.transport.router import (
     SessionNotRunningError,
     SessionTransitionError,
@@ -814,9 +817,17 @@ class Runner(ServiceComponent, ConnectionSink):
 
         Each upload the command references is resolved to its bytes through the
         store and merged into the arguments before validation, so the model
-        receives a file rather than a reference. A command that references an
-        upload the store cannot produce is journalled as an error and dropped
-        rather than submitted half-resolved. An accepted command is journalled on
+        receives a file rather than a reference. A reference arrives one of two
+        ways: beside the arguments, keyed by parameter name, which is how a
+        single top-level file travels; or inline in an argument as a mapping
+        with an ``upload_id``, which is the only way a file nested in a list,
+        dict, or dataclass can travel and is accepted for a single file too.
+        Inline references are found by
+        walking the command's declared types, never by inspecting values, so a
+        mapping of the model's own that carries an ``upload_id`` key is left
+        alone. A command that references an upload the store cannot produce,
+        in either form, is journalled as an error and dropped rather than
+        submitted half-resolved. An accepted command is journalled on
         the egress stream so a consumer can audit or moderate it; a command the
         contract rejects is journalled as an error instead and never reaches the
         model. The journalled argument record carries the scalar arguments, never
@@ -833,12 +844,13 @@ class Runner(ServiceComponent, ConnectionSink):
             return
         label = self._command_label(command.name)
         args = dict(command.args)
+        inline = self._inline_upload_fields(command.name, args)
         resolve_started = time.monotonic()
         try:
             for param, upload_id in command.uploads.items():
-                args[param] = await self._uploads.fetch(
-                    upload_id, wait_seconds=_UPLOAD_RESOLVE_TIMEOUT_SECONDS
-                )
+                args[param] = await self._fetch_upload(upload_id)
+            for param, spec in inline.items():
+                args[param] = await resolve_uploads(spec, args[param], self._fetch_upload)
         except UnknownUploadError:
             self._command_metrics.unresolved_upload(label)
             self._sm.send(
@@ -857,7 +869,7 @@ class Runner(ServiceComponent, ConnectionSink):
         # again where that wait ended. Counted whole, one command with a file
         # parameter reports the upload and hides the runtime's own cost.
         started_at = command.received_at
-        if command.uploads:
+        if command.uploads or inline:
             started_at += time.monotonic() - resolve_started
         outcome = await self._bridge.submit_command(
             command.name,
@@ -887,6 +899,29 @@ class Runner(ServiceComponent, ConnectionSink):
                     outcome.reason or "command rejected",
                 )
 
+    def _inline_upload_fields(self, name: str, args: Mapping[str, Any]) -> dict[str, TypeSpec]:
+        """Return the present arguments of command *name* whose type carries an upload.
+
+        The contract decides which fields to walk: a field typed as an upload,
+        or as a container holding one, may hold inline references and is
+        returned with its declared type; every other field is not. An unknown
+        command has no fields to walk and is left for the bridge to reject.
+        """
+        if self._bridge is None:
+            return {}
+        spec = self._bridge.contract.commands.get(name)
+        if spec is None:
+            return {}
+        return {
+            param: field.spec
+            for param, field in spec.command.__command_fields__.items()
+            if param in args and declares_upload(field.spec)
+        }
+
+    async def _fetch_upload(self, upload_id: str) -> UploadedFile:
+        """Read one upload from the store, waiting the standard grace for its bytes."""
+        return await self._uploads.fetch(upload_id, wait_seconds=_UPLOAD_RESOLVE_TIMEOUT_SECONDS)
+
     def _command_label(self, name: str) -> str:
         """Return a command name that is safe to label a metric with.
 
@@ -908,9 +943,7 @@ class Runner(ServiceComponent, ConnectionSink):
         if self._bridge is None:
             return
         try:
-            file = await self._uploads.fetch(
-                upload_id, wait_seconds=_UPLOAD_RESOLVE_TIMEOUT_SECONDS
-            )
+            file = await self._fetch_upload(upload_id)
         except UnknownUploadError:
             self._sm.send(
                 SessionEvent.ERROR, message=f"file upload {upload_id!r} could not be resolved"
