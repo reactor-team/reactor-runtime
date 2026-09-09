@@ -62,8 +62,19 @@ class Connection(Protocol):
 
         The chunk is unpaced — a batch of frames tagged with the rate they should
         play out at. The connection owns pacing it to a steady wire cadence; the
-        runner never sees a single frame.
+        runner never sees a single frame. A chunk that asks for backpressure
+        (``chunk.wait``) may make this call block until the wire has drained
+        room for it.
         """
+
+    def flush_media(self) -> None:
+        """Drop this connection's queued media and cut playout to black."""
+
+    def set_media_rate(self, fps: float) -> None:
+        """Re-pace this connection's queued media at *fps* immediately."""
+
+    def set_media_depth(self, depth: int) -> None:
+        """Bound how many frames may queue between the model and this wire."""
 
     def resume_track(self, name: str) -> None:
         """Resume the named outbound track (publisher arbitration)."""

@@ -23,6 +23,7 @@ import time
 from collections.abc import Callable, Coroutine
 from typing import Any, ClassVar
 
+from reactor_runtime.codes import INTERNAL_ERROR
 from reactor_runtime.core.model import (
     ClientConnected,
     ClientDisconnected,
@@ -31,9 +32,10 @@ from reactor_runtime.core.model import (
     SessionEnded,
     SessionStarted,
 )
-from reactor_runtime.core.values import ConnId
+from reactor_runtime.core.values import CommandFailure, ConnId
 from reactor_runtime.interface.client import ClientInfo
 from reactor_runtime.interface.events.decorators import RESERVED_PARAMS
+from reactor_runtime.interface.events.errors import CommandError
 from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.reactor_core import (
     CommandEnvelope,
@@ -41,7 +43,7 @@ from reactor_runtime.interface.internal.reactor_core import (
     RequestId,
 )
 from reactor_runtime.interface.model.contract import ModelContract
-from reactor_runtime.log import get_logger
+from reactor_runtime.log import get_logger, release_session_id
 
 logger = get_logger(__name__)
 
@@ -50,7 +52,8 @@ class ReactorModel(ReactorCore):
     """Base class an author subclasses to define a model.
 
     Decorate methods with ``@event`` to expose commands, and with the lifecycle
-    decorators to hook session and connection events. Declaring the subclass
+    decorators to hook session and connection events — ``@session_started`` is
+    the hook for once-per-session initialization. Declaring the subclass
     resolves the contract and caches it on the class, reachable through
     :meth:`ModelContract.of`.
 
@@ -104,10 +107,14 @@ class ReactorModel(ReactorCore):
         the handler returns a :class:`ModelMessage`, it is sent addressed to the
         connection that issued the command — never broadcast — correlated with
         the command's request id; a handler that returns nothing is answered
-        with a bodyless acknowledgement so an awaiting client still resolves. A
-        handler that raises is logged and swallowed — no reply is sent, and
-        surfacing the failure to the client is the model author's choice — so
-        one bad command cannot stop the loop.
+        with a bodyless acknowledgement so an awaiting client still resolves.
+
+        A handler that raises answers with a failure instead. A
+        :class:`CommandError` carries the author's own code and message to the
+        client unchanged. Any other exception answers with ``internal_error`` and
+        keeps its detail in the log, because the text of an unplanned exception
+        can name paths, queries, or credentials. Either way the loop survives,
+        and the client resolves rather than waits.
         """
         command = envelope.command
         spec = self.__reactor_contract__.commands.get(type(command).name)
@@ -123,8 +130,20 @@ class ReactorModel(ReactorCore):
                 result = await spec.handler(self, **kwargs)
             else:
                 result = spec.handler(self, **kwargs)
+        except CommandError as exc:
+            logger.warning(
+                "command handler reported a failure",
+                command=spec.name,
+                code=exc.code,
+            )
+            self._fail(envelope, CommandFailure(exc.code, exc.message))
+            return
         except Exception:
             logger.exception("error in command handler", command=spec.name)
+            self._fail(
+                envelope,
+                CommandFailure(INTERNAL_ERROR, "The handler raised an unexpected error."),
+            )
             return
         if envelope.conn_id is None:
             return
@@ -169,6 +188,10 @@ class ReactorModel(ReactorCore):
             self._set_connected(0)
             await self._invoke_hook(hooks.session_ended, None)
             self._clients.clear()
+            # The hook has returned, so its records were written while the
+            # session's log binding was live; the session's last ambient writer
+            # is done and the binding retires here, on the model thread.
+            release_session_id(event._log_binding)
         elif isinstance(event, FileUploaded):
             await self._invoke_hook(hooks.file_uploaded, event.conn_id, uploaded_file=event.file)
 
@@ -230,12 +253,27 @@ class ReactorModel(ReactorCore):
             _send=lambda message: self._reply(conn_id, message, None),
         )
 
+    def _fail(self, envelope: CommandEnvelope, failure: CommandFailure) -> None:
+        """Answer a command with a failure, when there is a client to answer.
+
+        A bodyless acknowledgement without a request id says nothing, so the
+        success path drops it. A failure carries a code and a message the client
+        can act on, so it goes out whether or not the command was correlated.
+        """
+        if envelope.conn_id is None:
+            return
+        self._reply(envelope.conn_id, failure, envelope.request_id)
+
     def _reply(
-        self, conn_id: ConnId, message: ModelMessage | None, request_id: RequestId | None
+        self,
+        conn_id: ConnId,
+        message: ModelMessage | CommandFailure | None,
+        request_id: RequestId | None,
     ) -> None:
         """Send a reply to one connection through the addressed sink, if bound.
 
-        A ``None`` message is the bodyless acknowledgement of a command whose
+        A :class:`CommandFailure` is the reason a handler could not answer. A
+        ``None`` message is the bodyless acknowledgement of a command whose
         handler returned nothing, correlated by *request_id*.
         """
         if self._out_addressed is not None:

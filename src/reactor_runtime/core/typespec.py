@@ -218,6 +218,11 @@ class ListSpec(TypeSpec):
     def __init__(self, item: TypeSpec) -> None:
         self._item = item
 
+    @property
+    def item(self) -> TypeSpec:
+        """The type every element must fit."""
+        return self._item
+
     def check(self, value: Any) -> str | None:  # noqa: D102 — contract on the base
         if not isinstance(value, list):
             return f"expected array, got {type(value).__name__}"
@@ -239,6 +244,11 @@ class DictSpec(TypeSpec):
 
     def __init__(self, value: TypeSpec) -> None:
         self._value = value
+
+    @property
+    def value(self) -> TypeSpec:
+        """The type every value must fit."""
+        return self._value
 
     def check(self, value: Any) -> str | None:  # noqa: D102 — contract on the base
         if not isinstance(value, Mapping):
@@ -265,6 +275,11 @@ class DataclassSpec(TypeSpec):
         self._cls = cls
         self._fields = fields
         self._required = required
+
+    @property
+    def fields(self) -> Mapping[str, TypeSpec]:
+        """Each field's type, by field name."""
+        return self._fields
 
     @classmethod
     def build(cls, dataclass_type: type) -> DataclassSpec:

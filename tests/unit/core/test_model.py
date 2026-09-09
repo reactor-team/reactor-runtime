@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 from reactor_runtime.core import (
     ClientConnected,
@@ -50,6 +50,17 @@ def test_file_uploaded_carries_the_fetched_bytes() -> None:
 def test_uploaded_file_does_not_carry_the_upload_id() -> None:
     file = UploadedFile(name="cat.png", mime_type="image/png", data=b"\x89PNG")
     assert not hasattr(file, "upload_id")
+
+
+def test_uploaded_file_size_is_measured_from_the_bytes() -> None:
+    file = UploadedFile(name="cat.png", mime_type="image/png", data=b"\x89PNG")
+    assert file.size == 4
+    assert UploadedFile(name="empty.bin", mime_type="application/octet-stream", data=b"").size == 0
+
+
+def test_uploaded_file_size_cannot_be_set_apart_from_the_bytes() -> None:
+    field_names = {field.name for field in fields(UploadedFile)}
+    assert "size" not in field_names
 
 
 def test_transition_event_wraps_the_move() -> None:

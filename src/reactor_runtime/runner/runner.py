@@ -17,17 +17,18 @@ declared ready.
 from __future__ import annotations
 
 import asyncio
-import importlib
 import importlib.metadata
 import time
 import uuid
 from collections.abc import Callable, Coroutine, Mapping
 from typing import Any
 
+from reactor_runtime.codes import INVALID_COMMAND, UNRESOLVED_UPLOAD
 from reactor_runtime.core import (
     JOURNAL_EVENTS,
     ClientConnected,
     ClientDisconnected,
+    CommandFailure,
     Connection,
     ConnectionSink,
     ConnId,
@@ -47,13 +48,16 @@ from reactor_runtime.core import (
     TrackDirection,
     Transition,
     TransitionEvent,
+    TypeSpec,
+    UploadedFile,
 )
 from reactor_runtime.event_stream import EventStream
 from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.bridge import ModelBridge
-from reactor_runtime.interface.internal.reactor_core import ReactorCore
+from reactor_runtime.interface.internal.reactor_core import MediaOps
 from reactor_runtime.interface.model.contract import ModelContract
-from reactor_runtime.log import get_logger
+from reactor_runtime.log import get_logger, set_session_id, set_state
+from reactor_runtime.manifest import import_model_class
 from reactor_runtime.message_gateway import InboundCommand, MessageGateway
 from reactor_runtime.metrics import (
     UNKNOWN_COMMAND,
@@ -65,7 +69,9 @@ from reactor_runtime.metrics import (
 from reactor_runtime.protocol import Channel, Codec, ProtocolVersion, select
 from reactor_runtime.recording import ClipResult, Recorder, RecorderError
 from reactor_runtime.runner.connection_manager import ConnectionManager
+from reactor_runtime.runner.offer_epochs import OfferEpochs
 from reactor_runtime.runner.state_machine import SessionStateMachine
+from reactor_runtime.runner.upload_resolution import declares_upload, resolve_uploads
 from reactor_runtime.transport.router import (
     SessionNotRunningError,
     SessionTransitionError,
@@ -74,6 +80,13 @@ from reactor_runtime.transport.router import (
 from reactor_runtime.upload_store import UnknownUploadError, UploadStore
 
 _RUNNING_STATES = frozenset({SessionState.WAITING, SessionState.STREAMING, SessionState.ORPHANED})
+
+# The states a stale wire can land in. An offer is only admitted while a
+# session runs, so a connection whose negotiation completes after the session
+# moved on arrives in one of these — and must not join the registry.
+_STALE_CONNECTION_STATES = frozenset(
+    {SessionState.READY, SessionState.CLOSING, SessionState.TERMINATED}
+)
 
 # The lifecycle word reported for each session state. Coarser than the session
 # machine on purpose: an outside observer cares whether the process is loading,
@@ -87,6 +100,28 @@ _RUNTIME_STATES: dict[SessionState, RuntimeState] = {
     SessionState.CLOSING: RuntimeState.SERVING,
     SessionState.TERMINATED: RuntimeState.TERMINATED,
 }
+
+
+def _stamp_log_state(state: SessionState) -> None:
+    """Bind the log's state context to *state*, at both granularities.
+
+    Records carry the machine's own word and the coarse word the health route
+    serves, so a reader can filter by whichever vocabulary the surface they are
+    looking at showed them.
+    """
+    set_state(state.name.lower(), _RUNTIME_STATES[state].value)
+
+
+def _recording_id_from(params: Mapping[str, Any]) -> str:
+    """Resolve a session's recording id from its start parameters.
+
+    A ``session_id`` in *params* is adopted as the recording id, so a caller can
+    align both clips and logs with the id it knows the session by. Absent one, a
+    fresh id is minted per session so sequential recordings in a reused process
+    never overwrite each other.
+    """
+    return str(params.get("session_id") or uuid.uuid4())
+
 
 # How long to wait for an upload's bytes to arrive when a command or notification
 # references it before they are written. A client references an upload over the
@@ -111,6 +146,11 @@ _V0_PROTOCOL = "v0"
 # client only sends.
 _CLIENT_DIRECTION = {"out": "recvonly", "in": "sendonly"}
 
+# The close reason a drain sends to clients. The runtime initiates this stop,
+# so the runtime words it; every other close reason arrives from the platform.
+# Kept within the 64-character bound the stop route enforces on the platform's.
+_DRAIN_CLOSE_REASON = "Session ended: the server is shutting down."
+
 logger = get_logger(__name__)
 
 
@@ -124,28 +164,6 @@ def _server_version() -> str:
 
 def _no_shutdown() -> None:
     """Default process-shutdown hook — a no-op until the service wires one in."""
-
-
-def import_model_class(model_ref: str) -> type[ReactorCore]:
-    """Resolve a ``"module:Class"`` reference into the model class it names.
-
-    Args:
-        model_ref: An import reference of the form ``"package.module:Class"``.
-
-    Returns:
-        The referenced model class.
-
-    Raises:
-        ValueError: If the reference is not of the form ``"module:Class"``.
-        TypeError: If the reference does not name a :class:`ReactorCore` subclass.
-    """
-    module_name, separator, class_name = model_ref.partition(":")
-    if not separator or not module_name or not class_name:
-        raise ValueError(f"model_ref must be 'module:Class', got {model_ref!r}")
-    model_cls = getattr(importlib.import_module(module_name), class_name)
-    if not isinstance(model_cls, type) or not issubclass(model_cls, ReactorCore):
-        raise TypeError(f"{model_ref} does not name a ReactorCore subclass")
-    return model_cls
 
 
 class Runner(ServiceComponent, ConnectionSink):
@@ -176,6 +194,10 @@ class Runner(ServiceComponent, ConnectionSink):
         self._cfg = cfg
         self._metrics = metrics or RuntimeMetrics(version=_server_version(), model=cfg.model_ref)
         self._sm = SessionStateMachine()
+        # The log's state context starts at the machine's starting state, so the
+        # model-load window — records written before any transition — is already
+        # stamped; every later move re-stamps in _dispatch_transition.
+        _stamp_log_state(self._sm.current_state)
         self._sm.on_transition(self._dispatch_transition)
         # The session surface of the metrics is one listener over the same moves
         # the journal carries, so no session code below calls an instrument.
@@ -191,6 +213,16 @@ class Runner(ServiceComponent, ConnectionSink):
             on_chunk_ready=self._on_chunk_ready,
         )
         self._connections = ConnectionManager(state_machine=self._sm)
+        self._offer_epochs = OfferEpochs()
+        # Playout settings the model set through its output handle, remembered
+        # so a connection that opens later starts with them.
+        self._media_rate: float | None = None
+        self._media_depth: int | None = None
+        # Bumped by every flush. A media fan-out captures it at entry and
+        # abandons the remaining connections when it moves, so a flush that
+        # lands mid-broadcast cuts every connection, not just the one whose
+        # pacer happened to be blocked.
+        self._media_generation = 0
         # One codec per wire version, built on first use. Inbound decode is
         # driven by the version a connection negotiated; outbound encode picks
         # the codec for each target connection, so a mixed-version session is
@@ -203,12 +235,19 @@ class Runner(ServiceComponent, ConnectionSink):
         self._teardown: set[asyncio.Task[None]] = set()
         self._orphan_task: asyncio.Task[None] | None = None
         self._session_id = SESSION_ID
-        # The id a recording is stored and addressed under, set per session in
-        # start_session. Separate from the fixed transport session id so a director
-        # can align a recording with the platform's session id; a session started
-        # without one mints a fresh id, so sequential recordings in a reused process
-        # never share a directory. The construction value is an unused placeholder.
+        # The session's own id, resolved per session as the start transition is
+        # applied (see _dispatch_transition): the id a recording is stored and
+        # addressed under, and the id stamped on the session's log records.
+        # Separate from the fixed transport session id so a
+        # caller can align both with the id it knows the session by; a session
+        # started without one mints a fresh id, so sequential recordings in a
+        # reused process never share a directory and the logs of one session are
+        # never read as another's. The construction value is an unused placeholder.
         self._recording_id = SESSION_ID
+        # Names the log's current session binding, so the release that follows a
+        # session retires that binding and not a later session's. Zero until the
+        # first session binds one.
+        self._log_binding = 0
         self._accepting = True
         # The process-shutdown hook, wired by the assembly so the runner can ask
         # the service to bring the process down when the session is terminated
@@ -234,11 +273,17 @@ class Runner(ServiceComponent, ConnectionSink):
 
         The model load runs off the event loop (it may block while it reads
         weights), so the HTTP surface — already up by the time this runs — stays
-        responsive throughout, and a client subscribed to ``/events`` observes
-        the ``initialization_success``/``initialization_fail`` transition live.
+        responsive throughout: a client subscribed to ``/events`` observes the
+        ``initializing`` self-loop journalled before the load, then the
+        ``initialization_success``/``initialization_fail`` transition when it ends.
         """
         self._loop = asyncio.get_running_loop()
         logger.info("loading model", model=self._cfg.model_ref)
+        # Journal the loading phase before the (blocking) load, so a consumer
+        # replaying /events sees the runtime is initializing during the load
+        # window rather than nothing until READY. A self-loop on CREATED: no
+        # state change, no side effect (the bridge is not built yet).
+        self._sm.send(SessionEvent.INITIALIZING)
         started_at = time.monotonic()
         try:
             model_cls = import_model_class(self._cfg.model_ref)
@@ -250,6 +295,11 @@ class Runner(ServiceComponent, ConnectionSink):
                 broadcast=self._broadcast_message,
                 addressed=self._send_addressed,
                 media=self._emit_media,
+                media_ops=MediaOps(
+                    flush=self._flush_media,
+                    set_rate=self._set_media_rate,
+                    set_depth=self._set_media_depth,
+                ),
                 failure=self._on_model_failure,
             )
             bridge.start()
@@ -276,11 +326,18 @@ class Runner(ServiceComponent, ConnectionSink):
         """Stop accepting new sessions and let an active one end on grace.
 
         A running session is asked to stop and given the grace period to unwind
-        to ready; the model itself stays up until :meth:`stop`.
+        to ready; the model itself stays up until :meth:`stop`. The stop carries
+        a close reason authored here — the runtime initiates this stop, so the
+        runtime words it — and the clients are told before their connections
+        close, the same notice a platform-reasoned stop sends.
         """
         self._accepting = False
         if self._sm.current_state in _RUNNING_STATES:
-            self._sm.send(SessionEvent.STOP_SESSION, reason=EndReason.STOPPED)
+            self._sm.send(
+                SessionEvent.STOP_SESSION,
+                reason=EndReason.STOPPED,
+                close_reason=_DRAIN_CLOSE_REASON,
+            )
             await self._await_ready(self._cfg.grace_period)
 
     async def stop(self) -> None:
@@ -292,6 +349,7 @@ class Runner(ServiceComponent, ConnectionSink):
         """
         self._cancel_orphan_timeout()
         await self._drain_teardown()
+        await asyncio.to_thread(self._recorder.close)
         if self._bridge is not None:
             await self._bridge.stop()
 
@@ -327,8 +385,35 @@ class Runner(ServiceComponent, ConnectionSink):
     # -- inbound (ConnectionSink) ---------------------------------------------
 
     def connection_opened(self, conn: Connection) -> None:
-        """Register a connection whose wire has reached its connected state."""
+        """Register a connection whose wire has reached its connected state.
+
+        The model's playout settings (rate, queue depth) apply to every
+        connection, so one that opens after they were set receives them here.
+
+        A wire that connects after its session moved on — its negotiation
+        finishing once teardown began, after the session unwound to ready, or
+        with a later session already running — is closed instead of registered.
+        Registered, it would sit outside its own session's teardown snapshot
+        and receive another session's traffic. The cross-session case is caught
+        by the epoch stamped on the offer at admission; a connection with no
+        stamp (a transport that does not stamp, or a directly driven test) is
+        gated on state alone.
+        """
+        stale_epoch = self._offer_epochs.consume(conn.id)
+        if self._sm.current_state in _STALE_CONNECTION_STATES or stale_epoch:
+            logger.warning(
+                "refusing a connection that does not belong to the live session",
+                conn_id=conn.id,
+                state=self._sm.current_state.name.lower(),
+            )
+            if self._loop is not None:
+                self._spawn_teardown(conn.close())
+            return
         self._connections.register(conn)
+        if self._media_depth is not None:
+            conn.set_media_depth(self._media_depth)
+        if self._media_rate is not None:
+            conn.set_media_rate(self._media_rate)
 
     def connection_closed(self, conn_id: ConnId) -> None:
         """Drop a previously opened connection that has gone away."""
@@ -435,7 +520,7 @@ class Runner(ServiceComponent, ConnectionSink):
         """
         if self._bridge is None:
             return
-        openapi = self._bridge.contract.render_schema().to_openapi()
+        openapi = self._render_schema()
         self._connections.send_response(
             conn_id,
             lambda version: self._codec_for(version).encode_schema_response(request_id, openapi),
@@ -537,11 +622,14 @@ class Runner(ServiceComponent, ConnectionSink):
         The rejection surfaces the current state so the caller can report the
         precise reason. The parameters seed the session's initial state.
 
-        A ``session_id`` in *params* is adopted as the id this session's recording
-        is stored and addressed under, so a director can align clips with the
-        platform's session id; absent one, a fresh id is minted per session so
-        sequential recordings never overwrite each other. The transport session id
-        is unaffected — it is always :data:`SESSION_ID`.
+        A ``session_id`` in *params* is adopted as this session's own id: the id
+        its recording is stored and addressed under, and the id stamped on every
+        log record the session writes. A caller can therefore align both clips and
+        logs with the id it knows the session by. Absent one, a fresh id is minted
+        per session so sequential recordings never overwrite each other. The id is
+        resolved as the machine accepts the start, so a rejected request leaves a
+        live session's id untouched. The transport session id is unaffected: it is
+        always :data:`SESSION_ID`.
 
         Args:
             params: The initial session parameters supplied by the caller.
@@ -549,12 +637,12 @@ class Runner(ServiceComponent, ConnectionSink):
         Raises:
             SessionTransitionError: If the session is not in a startable state.
         """
-        self._recording_id = str(params.get("session_id") or uuid.uuid4())
         if not self._sm.send(SessionEvent.START_SESSION, params=dict(params)):
             raise SessionTransitionError("start", self._sm.current_state)
+        self._offer_epochs.session_started()
         self._model_metrics.session_started()
 
-    def stop_session(self, *, moderated: bool = False) -> None:
+    def stop_session(self, *, moderated: bool = False, reason: str = "") -> None:
         """Close the active session, leaving the model loaded and ready again.
 
         Not idempotent, like :meth:`start_session`: a stop is legal only from a
@@ -566,14 +654,26 @@ class Runner(ServiceComponent, ConnectionSink):
         it ends with :attr:`~reactor_runtime.core.model.EndReason.MODERATED`
         and the clients are told why before their connections close.
 
+        *reason* is the platform's human-readable description of why the
+        session is ending (for example ``"Session ended: the model was
+        updated."``). When set, the clients receive a session-ended notice
+        carrying it verbatim before their connections close. A moderated stop
+        outranks it: a stop carrying both sends only the moderation notice.
+        Delivery is best-effort: a session with no live client, or a send that
+        fails, is logged and the stop runs regardless.
+
         Args:
             moderated: Whether the stop enforces a moderation verdict.
+            reason: The platform's close reason, empty for a plain stop.
 
         Raises:
             SessionTransitionError: If there is no running session to stop.
         """
-        reason = EndReason.MODERATED if moderated else EndReason.STOPPED
-        if not self._sm.send(SessionEvent.STOP_SESSION, reason=reason):
+        end_reason = EndReason.MODERATED if moderated else EndReason.STOPPED
+        detail: dict[str, Any] = {"reason": end_reason}
+        if reason:
+            detail["close_reason"] = reason
+        if not self._sm.send(SessionEvent.STOP_SESSION, **detail):
             raise SessionTransitionError("stop", self._sm.current_state)
 
     def new_conn_id(self) -> ConnId:
@@ -583,6 +683,17 @@ class Runner(ServiceComponent, ConnectionSink):
         runner forwards rather than keeping a second counter that could diverge.
         """
         return self._connections.new_conn_id()
+
+    def offer_admitted(self, conn_id: ConnId) -> None:
+        """Stamp an admitted offer with the session it was admitted into.
+
+        A transport calls this as it accepts a connection offer. The stamp is
+        compared when the wire connects: negotiation is asynchronous, so a wire
+        can reach its connected state after its session ended, and if the next
+        session is already running by then the state alone looks valid. A
+        re-offer on the same id restamps it.
+        """
+        self._offer_epochs.stamp(conn_id)
 
     def require_session_running(self, sid: str) -> None:
         """Admit a request only against the live, correctly-addressed session.
@@ -663,7 +774,7 @@ class Runner(ServiceComponent, ConnectionSink):
         if self._bridge is None:
             return descriptor
         contract = self._bridge.contract
-        descriptor["model"] = {"name": contract.model}
+        descriptor["model"] = {"name": self._cfg.model_name or contract.model}
         descriptor["capabilities"] = {
             "protocol_version": _V0_PROTOCOL,
             "tracks": [
@@ -686,18 +797,37 @@ class Runner(ServiceComponent, ConnectionSink):
         """
         if self._bridge is None:
             return {}
-        return self._bridge.contract.render_schema().to_openapi()
+        return self._render_schema()
 
     # -- internals ------------------------------------------------------------
+
+    def _render_schema(self) -> dict[str, Any]:
+        """Render the loaded model's contract as an OpenAPI document.
+
+        Titled with the name the manifest publishes the model under, so the
+        document a client reads over the wire is the one the schema command
+        renders from the same directory.
+        """
+        assert self._bridge is not None
+        contract = self._bridge.contract
+        return contract.render_schema(name=self._cfg.model_name).to_openapi()
 
     async def _submit_command(self, command: InboundCommand) -> None:
         """Submit a decoded client command to the model through the bridge.
 
         Each upload the command references is resolved to its bytes through the
         store and merged into the arguments before validation, so the model
-        receives a file rather than a reference. A command that references an
-        upload the store cannot produce is journalled as an error and dropped
-        rather than submitted half-resolved. An accepted command is journalled on
+        receives a file rather than a reference. A reference arrives one of two
+        ways: beside the arguments, keyed by parameter name, which is how a
+        single top-level file travels; or inline in an argument as a mapping
+        with an ``upload_id``, which is the only way a file nested in a list,
+        dict, or dataclass can travel and is accepted for a single file too.
+        Inline references are found by
+        walking the command's declared types, never by inspecting values, so a
+        mapping of the model's own that carries an ``upload_id`` key is left
+        alone. A command that references an upload the store cannot produce,
+        in either form, is journalled as an error and dropped rather than
+        submitted half-resolved. An accepted command is journalled on
         the egress stream so a consumer can audit or moderate it; a command the
         contract rejects is journalled as an error instead and never reaches the
         model. The journalled argument record carries the scalar arguments, never
@@ -714,12 +844,13 @@ class Runner(ServiceComponent, ConnectionSink):
             return
         label = self._command_label(command.name)
         args = dict(command.args)
+        inline = self._inline_upload_fields(command.name, args)
         resolve_started = time.monotonic()
         try:
             for param, upload_id in command.uploads.items():
-                args[param] = await self._uploads.fetch(
-                    upload_id, wait_seconds=_UPLOAD_RESOLVE_TIMEOUT_SECONDS
-                )
+                args[param] = await self._fetch_upload(upload_id)
+            for param, spec in inline.items():
+                args[param] = await resolve_uploads(spec, args[param], self._fetch_upload)
         except UnknownUploadError:
             self._command_metrics.unresolved_upload(label)
             self._sm.send(
@@ -730,7 +861,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 self._reject_command(
                     command.conn_id,
                     command.request_id,
-                    "unresolved_upload",
+                    UNRESOLVED_UPLOAD,
                     f"command {command.name!r} references an unresolved upload",
                 )
             return
@@ -738,7 +869,7 @@ class Runner(ServiceComponent, ConnectionSink):
         # again where that wait ended. Counted whole, one command with a file
         # parameter reports the upload and hides the runtime's own cost.
         started_at = command.received_at
-        if command.uploads:
+        if command.uploads or inline:
             started_at += time.monotonic() - resolve_started
         outcome = await self._bridge.submit_command(
             command.name,
@@ -764,9 +895,32 @@ class Runner(ServiceComponent, ConnectionSink):
                 self._reject_command(
                     command.conn_id,
                     command.request_id,
-                    "invalid_command",
+                    INVALID_COMMAND,
                     outcome.reason or "command rejected",
                 )
+
+    def _inline_upload_fields(self, name: str, args: Mapping[str, Any]) -> dict[str, TypeSpec]:
+        """Return the present arguments of command *name* whose type carries an upload.
+
+        The contract decides which fields to walk: a field typed as an upload,
+        or as a container holding one, may hold inline references and is
+        returned with its declared type; every other field is not. An unknown
+        command has no fields to walk and is left for the bridge to reject.
+        """
+        if self._bridge is None:
+            return {}
+        spec = self._bridge.contract.commands.get(name)
+        if spec is None:
+            return {}
+        return {
+            param: field.spec
+            for param, field in spec.command.__command_fields__.items()
+            if param in args and declares_upload(field.spec)
+        }
+
+    async def _fetch_upload(self, upload_id: str) -> UploadedFile:
+        """Read one upload from the store, waiting the standard grace for its bytes."""
+        return await self._uploads.fetch(upload_id, wait_seconds=_UPLOAD_RESOLVE_TIMEOUT_SECONDS)
 
     def _command_label(self, name: str) -> str:
         """Return a command name that is safe to label a metric with.
@@ -789,9 +943,7 @@ class Runner(ServiceComponent, ConnectionSink):
         if self._bridge is None:
             return
         try:
-            file = await self._uploads.fetch(
-                upload_id, wait_seconds=_UPLOAD_RESOLVE_TIMEOUT_SECONDS
-            )
+            file = await self._fetch_upload(upload_id)
         except UnknownUploadError:
             self._sm.send(
                 SessionEvent.ERROR, message=f"file upload {upload_id!r} could not be resolved"
@@ -808,18 +960,49 @@ class Runner(ServiceComponent, ConnectionSink):
         return codec
 
     def _emit_media(self, chunk: MediaChunk) -> None:
-        """Fan one emitted media chunk out to the connections and the recorder.
+        """Fan one emitted media chunk out to the recorder and the connections.
 
-        Called on the model thread. Both consumers are non-blocking — the
-        connections pace the chunk on their own threads, and the recorder queues
-        it — so a slow wire or a slow encoder never stalls the model. The
-        recorder tap is where recording reads the model's output now that it no
-        longer shares an emission buffer with the transport.
+        Called off the model loop (emit dispatches to a worker thread). Both
+        consumers bound their queue the same way — never below the emission
+        being handed over — so a whole chunk fits each of them and the fan-out
+        costs the producer nothing while they keep up. A consumer that falls
+        behind honours ``chunk.wait``, and a chunk emitted with ``drop=True``
+        leaves every consumer non-blocking.
+
+        The connections are served first so the archive is never in front of
+        the session. A pacer that makes the producer wait is throttling it to
+        the playout rate it asked for, and drains on its own thread meanwhile;
+        the recorder's wait is bounded instead, because an encoder can stall
+        outright. Feeding the recorder second keeps that bounded stall off the
+        live path, and leaves its queue the whole broadcast to drain into.
         """
         for track in chunk.bundle.tracks:
             self._model_metrics.emitted(track, chunk.n_frames)
-        self._connections.broadcast_media(chunk)
+        generation = self._media_generation
+        self._connections.broadcast_media(chunk, abort=lambda: self._media_generation != generation)
+        # The archive takes the whole chunk even when a flush cut the broadcast
+        # short: a playout cut is not an archive boundary.
         self._recorder.on_chunk(chunk)
+
+    def _flush_media(self) -> None:
+        """Drop queued media in every connection and cut playout to black.
+
+        The model's ``output.flush()`` lands here. The recorder is not
+        flushed: its stream is the session's archive, and a playout cut is
+        not an archive boundary.
+        """
+        self._media_generation += 1
+        self._connections.flush_media()
+
+    def _set_media_rate(self, fps: float) -> None:
+        """Re-pace every connection now and remember the rate for new ones."""
+        self._media_rate = fps
+        self._connections.set_media_rate(fps)
+
+    def _set_media_depth(self, depth: int) -> None:
+        """Bound every connection's queue now and remember it for new ones."""
+        self._media_depth = depth
+        self._connections.set_media_depth(depth)
 
     def _broadcast_message(self, message: ModelMessage) -> None:
         """Broadcast a model message, encoded for each connection's codec."""
@@ -829,15 +1012,26 @@ class Runner(ServiceComponent, ConnectionSink):
         )
 
     def _send_addressed(
-        self, conn_id: ConnId, message: ModelMessage | None, request_id: str | None
+        self,
+        conn_id: ConnId,
+        message: ModelMessage | CommandFailure | None,
+        request_id: str | None,
     ) -> None:
         """Send a model's reply to one connection, in its codec, correlated.
 
-        A ``None`` message is the bodyless acknowledgement of a command whose
-        handler returned nothing; it is sent only when there is a request id to
-        correlate, and withheld from legacy clients whose commands are
-        fire-and-forget.
+        A :class:`CommandFailure` is a handler's reported failure and travels as
+        an error frame. A ``None`` message is the bodyless acknowledgement of a
+        command whose handler returned nothing. Both are sent only when there is
+        a request id to correlate, so every response the client receives can be
+        matched to the command that caused it, and both are withheld from legacy
+        clients, whose commands are fire-and-forget. A failure is journalled
+        either way, so a reply the client cannot be told about is still auditable.
         """
+        if isinstance(message, CommandFailure):
+            self._on_handler_failure(message, conn_id, request_id)
+            if request_id is not None:
+                self._reject_command(conn_id, request_id, message.code, message.message)
+            return
         if message is None:
             if request_id is None:
                 return
@@ -854,15 +1048,41 @@ class Runner(ServiceComponent, ConnectionSink):
             )[1],
         )
 
-    def _reject_command(self, conn_id: ConnId, request_id: str, code: str, detail: str) -> None:
-        """Reject a command the model never saw, correlated by *request_id*.
+    def _on_handler_failure(
+        self, failure: CommandFailure, conn_id: ConnId, request_id: str | None
+    ) -> None:
+        """Journal a handler's failure, hopping onto the loop.
 
-        Covers failures upstream of the model — a payload the contract rejects
-        or an upload that cannot be resolved — where no handler runs and only
-        the runtime can tell the client why. A handler that raises sends
-        nothing: surfacing failures from model code is the model author's
-        choice. The reply is withheld from legacy clients, whose commands are
-        fire-and-forget.
+        The model reports the failure from its own thread, so the journal move is
+        scheduled on the runtime loop, where the state machine and the egress
+        journal are single-writer.
+        """
+        loop = self._loop
+        if loop is not None:
+            loop.call_soon_threadsafe(self._emit_handler_failure, failure, conn_id, request_id)
+
+    def _emit_handler_failure(
+        self, failure: CommandFailure, conn_id: ConnId, request_id: str | None
+    ) -> None:
+        """Journal a handler failure as a self-loop move on the session machine.
+
+        Carries the connection and the request id so the entry lines up with the
+        :attr:`SessionEvent.COMMAND` move that admitted the command, rather than
+        leaving an operator to match the two by timestamp.
+        """
+        self._sm.send(
+            SessionEvent.ERROR,
+            message=f"command handler failed ({failure.code}: {failure.message})",
+            conn_id=conn_id,
+            request_id=request_id,
+        )
+
+    def _reject_command(self, conn_id: ConnId, request_id: str, code: str, detail: str) -> None:
+        """Answer a command with an error, correlated by *request_id*.
+
+        Covers a payload the contract rejects, an upload that cannot be
+        resolved, and a handler that raised. The reply is withheld from legacy
+        clients, whose commands are fire-and-forget.
         """
         self._connections.send_command_ack(
             conn_id,
@@ -886,6 +1106,31 @@ class Runner(ServiceComponent, ConnectionSink):
             )
         )
 
+    def _broadcast_session_ended(self, reason: str) -> None:
+        """Tell every client why the platform is ending the session.
+
+        *reason* is the platform-authored, human-readable description and is
+        delivered verbatim. Broadcast synchronously as the session enters
+        ``CLOSING``, before the connection teardown is spawned, so the frame is
+        queued on each ordered channel ahead of its close and the client sees
+        the reason rather than a bare disconnect. Best-effort by contract: a
+        session with no live client or a broadcast that raises logs a warning,
+        and the stop proceeds either way.
+        """
+        if self._connections.count == 0:
+            logger.warning("no live client to notify of session end", reason=reason)
+            return
+        try:
+            self._connections.broadcast_response(
+                lambda version: self._codec_for(version).encode_session_ended(reason=reason)
+            )
+        except Exception:
+            logger.warning(
+                "failed to send session-ended notice; stopping anyway",
+                reason=reason,
+                exc_info=True,
+            )
+
     def _dispatch_transition(self, transition: Transition) -> None:
         """Run every side effect a session transition drives, in one place.
 
@@ -907,11 +1152,31 @@ class Runner(ServiceComponent, ConnectionSink):
         declare a dead model ready again. Real moves log at info; journal
         self-loops log at debug so a per-segment ``chunk_ready`` does not flood
         the log.
+
+        The session boundary is where the session's recording id resolves, off
+        the start parameters, so a rejected start cannot touch it; both the log's
+        session context and the recorder's directory read it from there. Binding
+        the log context is also part of this boundary, so every record written
+        while a session is live names it, the opening move included. The release
+        travels differently: it rides the ``SessionEnded``
+        event into the model, whose dispatch retires the binding once the
+        ``@session_ended`` hook has returned. A terminal move dispatches no
+        ``SessionEnded`` and releases nothing — the process is exiting, and its
+        last records belong to the session that brought it down. The log's state
+        context re-stamps here too, before the move's own line, so a record
+        reads the state the process was in when it was written.
         """
+        if transition.is_session_start:
+            self._recording_id = _recording_id_from(transition.detail.get("params", {}))
+            self._log_binding = set_session_id(self._recording_id)
+        if transition.from_state is not transition.to_state:
+            _stamp_log_state(transition.to_state)
         log = logger.debug if transition.event in JOURNAL_EVENTS else logger.info
+        # The fixed transport id (SESSION_ID) is deliberately not a field here:
+        # one constant value per process carries nothing, and squatting on
+        # session_id would mask the id the session is known by.
         log(
             "session transition",
-            session_id=self._session_id,
             event=transition.event.name.lower(),
             from_state=transition.from_state.name.lower(),
             to_state=transition.to_state.name.lower(),
@@ -926,8 +1191,13 @@ class Runner(ServiceComponent, ConnectionSink):
             self._reset_orphan_timeout(transition.to_state)
         if entered and transition.to_state is SessionState.CLOSING and self._loop is not None:
             reason = transition.detail.get("reason", EndReason.STOPPED)
+            close_reason = transition.detail.get("close_reason", "")
+            # One stop, one notice: a moderation verdict outranks a close-reason
+            # token, so a stop carrying both explains itself once.
             if reason is EndReason.MODERATED:
                 self._broadcast_moderation_notice()
+            elif close_reason:
+                self._broadcast_session_ended(close_reason)
             self._uploads.clear()
             self._spawn_teardown(asyncio.to_thread(self._recorder.stop))
             self._spawn_teardown(self._close_session(reason))
@@ -962,7 +1232,12 @@ class Runner(ServiceComponent, ConnectionSink):
             bridge.dispatch_reactor_event(SessionStarted(self._session_id))
         if transition.is_session_end:
             reason = transition.detail.get("reason", EndReason.STOPPED)
-            bridge.dispatch_reactor_event(SessionEnded(self._session_id, reason))
+            bridge.dispatch_reactor_event(
+                # The event carries the log binding so its dispatch — the point
+                # where the @session_ended hook has provably returned — is what
+                # retires it, on the model thread.
+                SessionEnded(self._session_id, reason, self._log_binding)
+            )
         if transition.event is SessionEvent.CONNECTION_OPENED:
             bridge.dispatch_reactor_event(
                 ClientConnected(transition.detail["conn_id"], self._connections.count)

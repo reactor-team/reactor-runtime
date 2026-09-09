@@ -1,9 +1,11 @@
 import asyncio
 import json
 import logging
+import threading
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -19,11 +21,16 @@ from reactor_runtime import (
     Video,
     event,
     file_uploaded,
+    log,
     protocol,
+    session_ended,
+    session_started,
 )
+from reactor_runtime.codes import UNRESOLVED_UPLOAD
 from reactor_runtime.core import (
     ClientConnected,
     ClientDisconnected,
+    CommandFailure,
     ConnectionCapabilities,
     ConnId,
     EndReason,
@@ -47,13 +54,19 @@ from reactor_runtime.interface.internal.bridge import CommandOutcome
 from reactor_runtime.interface.internal.reactor_core import (
     AddressedSink,
     BroadcastSink,
+    MediaOps,
     MediaSink,
 )
 from reactor_runtime.message_gateway import InboundCommand
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.protocol.common import dict_to_struct, struct_to_dict
 from reactor_runtime.recording import ClipResult
-from reactor_runtime.runner.runner import _RUNTIME_STATES, SESSION_ID, Runner
+from reactor_runtime.runner.runner import (
+    _DRAIN_CLOSE_REASON,
+    _RUNTIME_STATES,
+    SESSION_ID,
+    Runner,
+)
 from reactor_runtime.transport.router import (
     SessionControl,
     SessionNotRunningError,
@@ -78,6 +91,12 @@ class FakeOut(Output):
     main: Video
 
 
+@dataclass
+class Page:
+    image: UploadedFile
+    caption: str = ""
+
+
 class FakeModel(ReactorModel):
     """A minimal model that records its bring-up order and then idles."""
 
@@ -95,6 +114,20 @@ class FakeModel(ReactorModel):
     @event(name="set_image")
     async def set_image(self, image: UploadedFile) -> None: ...
 
+    @event(name="set_images")
+    async def set_images(self, images: list[UploadedFile]) -> None: ...
+
+    @event(name="set_gallery")
+    async def set_gallery(
+        self,
+        cover: UploadedFile,
+        images: list[UploadedFile] | None = None,
+        labels: dict[str, str] | None = None,
+    ) -> None: ...
+
+    @event(name="set_book")
+    async def set_book(self, pages: dict[str, UploadedFile], cover: Page) -> None: ...
+
     @file_uploaded
     def on_file(self, uploaded_file: UploadedFile) -> None: ...
 
@@ -103,10 +136,17 @@ class FakeModel(ReactorModel):
         self.loaded = config_path
 
     def bind_output(
-        self, *, broadcast: BroadcastSink, addressed: AddressedSink, media: MediaSink
+        self,
+        *,
+        broadcast: BroadcastSink,
+        addressed: AddressedSink,
+        media: MediaSink,
+        media_ops: MediaOps | None = None,
     ) -> None:
         self.events.append("bind")
-        super().bind_output(broadcast=broadcast, addressed=addressed, media=media)
+        super().bind_output(
+            broadcast=broadcast, addressed=addressed, media=media, media_ops=media_ops
+        )
 
     def start_thread(self) -> None:
         self.events.append("start")
@@ -132,6 +172,9 @@ class FakeConnection:
         self.sent: list[bytes | str] = []
         self.control: list[bytes | str] = []
         self.closed = False
+        self.media_rate: float | None = None
+        self.media_depth: int | None = None
+        self.flushed = False
 
     def send_message(self, payload: bytes | str) -> None:
         self.sent.append(payload)
@@ -140,6 +183,15 @@ class FakeConnection:
         self.control.append(payload)
 
     def send_media(self, chunk: MediaChunk) -> None: ...
+
+    def flush_media(self) -> None:
+        self.flushed = True
+
+    def set_media_rate(self, fps: float) -> None:
+        self.media_rate = fps
+
+    def set_media_depth(self, depth: int) -> None:
+        self.media_depth = depth
 
     def resume_track(self, name: str) -> None: ...
 
@@ -189,6 +241,37 @@ async def test_start_resolves_loads_and_readies(monkeypatch: pytest.MonkeyPatch)
         await runner.stop()
 
 
+async def test_start_journals_initializing_before_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The loading phase is otherwise silent: a consumer subscribed from the
+    # start of the journal must see an INITIALIZING self-loop on CREATED before
+    # the INITIALIZATION_SUCCESS that leaves CREATED, so it can report a booting
+    # pod during the load window rather than nothing until READY.
+    created_models.clear()
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
+    runner = _runner()
+    stream = runner._events.subscribe(since=0)
+
+    await runner.start()
+    try:
+
+        async def first(n: int) -> list[Transition]:
+            out: list[Transition] = []
+            async for _seq, event in stream:
+                out.append(event.transition)
+                if len(out) >= n:
+                    break
+            return out
+
+        boot = await asyncio.wait_for(first(2), timeout=2)
+        assert boot[0].event is SessionEvent.INITIALIZING
+        assert boot[0].from_state is SessionState.CREATED
+        assert boot[0].to_state is SessionState.CREATED
+        assert boot[1].event is SessionEvent.INITIALIZATION_SUCCESS
+        assert boot[1].to_state is SessionState.READY
+    finally:
+        await runner.stop()
+
+
 async def test_start_binds_outbound_before_spawn(monkeypatch: pytest.MonkeyPatch) -> None:
     created_models.clear()
     monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
@@ -233,6 +316,57 @@ def test_broadcast_encodes_a_model_message_and_fans_it_out() -> None:
     assert isinstance(decoded, data_pb2.DataServerMessage)
     assert decoded.message.type == "greeting"
     assert struct_to_dict(decoded.message.data) == {"text": "hello"}
+
+
+def test_playout_settings_fan_out_and_reach_a_late_joiner() -> None:
+    # The model's output-handle operations land on every live connection and
+    # are remembered, so a connection opening later starts with them.
+    runner = _runner()
+    early = FakeConnection(1)
+    runner.connection_opened(early)
+
+    runner._set_media_rate(24.0)
+    runner._set_media_depth(8)
+    late = FakeConnection(2)
+    runner.connection_opened(late)
+
+    assert (early.media_rate, early.media_depth) == (24.0, 8)
+    assert (late.media_rate, late.media_depth) == (24.0, 8)
+
+
+def test_flush_media_cuts_every_connection() -> None:
+    runner = _runner()
+    a, b = FakeConnection(1), FakeConnection(2)
+    runner.connection_opened(a)
+    runner.connection_opened(b)
+
+    runner._flush_media()
+
+    assert a.flushed
+    assert b.flushed
+
+
+def test_a_flush_during_fan_out_abandons_the_remaining_connections() -> None:
+    # A flush landing mid-broadcast must cut every connection: the chunk being
+    # fanned out belongs to the flushed run and may reach no further wire.
+    runner = _runner()
+    delivered: list[ConnId] = []
+
+    class Flushing(FakeConnection):
+        def send_media(self, chunk: MediaChunk) -> None:
+            delivered.append(self.id)
+            runner._flush_media()
+
+    class Recording(FakeConnection):
+        def send_media(self, chunk: MediaChunk) -> None:
+            delivered.append(self.id)
+
+    runner.connection_opened(Flushing(1))
+    runner.connection_opened(Recording(2))
+
+    runner._emit_media(MediaChunk(bundle=MediaBundle(), fps=30.0, n_frames=1))
+
+    assert delivered == [ConnId(1)]
 
 
 def test_addressed_send_reaches_only_the_target() -> None:
@@ -294,6 +428,7 @@ async def test_schema_request_v0_replies_on_the_data_channel(
 ) -> None:
     runner = await _started_runner(monkeypatch)
     try:
+        runner.start_session({})
         conn = FakeConnection(1)
         runner.connection_opened(conn)
         runner.schema_requested(ConnId(1), "ctrl_3")
@@ -309,6 +444,7 @@ async def test_schema_request_v1_replies_on_control_correlated_by_id(
 ) -> None:
     runner = await _started_runner(monkeypatch)
     try:
+        runner.start_session({})
         conn = FakeConnection(2)
         conn.protocol_version = V1
         runner.connection_opened(conn)
@@ -374,6 +510,69 @@ def test_bodyless_reply_without_a_request_id_sends_nothing() -> None:
     assert conn.sent == []
 
 
+def test_a_handler_failure_travels_as_an_error_on_v1() -> None:
+    runner = _runner()
+    conn = FakeConnection(1)
+    conn.protocol_version = V1
+    runner.connection_opened(conn)
+
+    runner._send_addressed(
+        ConnId(1), CommandFailure("quota_exceeded", "No credits remain."), "req-3"
+    )
+
+    decoded = protocol.select(V1).decode(conn.sent[0], DATA, SERVER)
+    assert isinstance(decoded, data_pb2.DataServerMessage)
+    assert decoded.request_id == "req-3"
+    assert decoded.WhichOneof("payload") == "error"
+    assert decoded.error.code == "quota_exceeded"
+    assert decoded.error.message == "No credits remain."
+
+
+def test_a_handler_failure_is_withheld_from_a_legacy_connection() -> None:
+    runner = _runner()
+    conn = FakeConnection(1)  # v0 by default: fire-and-forget commands, no acks
+    runner.connection_opened(conn)
+
+    runner._send_addressed(
+        ConnId(1), CommandFailure("quota_exceeded", "No credits remain."), "req-3"
+    )
+
+    assert conn.sent == []
+
+
+async def test_a_handler_failure_is_journalled_with_its_correlation(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    # The model reports the failure from its own thread; this is the half the hop
+    # schedules on the runtime loop, where the journal is single-writer.
+    started_runner._emit_handler_failure(
+        CommandFailure("quota_exceeded", "No credits remain."), ConnId(1), "req-3"
+    )
+
+    errors = _moves(started_runner, SessionEvent.ERROR)
+    assert len(errors) == 1
+    assert "quota_exceeded" in errors[0].detail["message"]
+    # The entry carries what the COMMAND move carries, so an operator lines the
+    # two up without matching timestamps.
+    assert errors[0].detail["conn_id"] == ConnId(1)
+    assert errors[0].detail["request_id"] == "req-3"
+
+
+def test_an_uncorrelated_handler_failure_is_journalled_but_not_sent() -> None:
+    runner = _runner()
+    conn = FakeConnection(1)
+    conn.protocol_version = V1
+    runner.connection_opened(conn)
+
+    # Every command a client sends carries a request id, minted by the gateway when
+    # absent, so this is only reachable internally. A RESPONSE with no request id
+    # is the one shape a client keyed on request ids cannot place.
+    runner._send_addressed(ConnId(1), CommandFailure("quota_exceeded", "No credits."), None)
+
+    assert conn.sent == []
+
+
 # --- the session-control face --------------------------------------------
 
 
@@ -401,6 +600,79 @@ def test_connection_opened_registers_the_connection() -> None:
     assert runner._connections.count == 1
     runner.connection_closed(ConnId(1))
     assert runner._connections.count == 0
+
+
+async def test_a_connection_opened_during_closing_is_refused_and_closed(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    started_runner.stop_session()
+    assert started_runner._sm.current_state is SessionState.CLOSING
+
+    late = FakeConnection(7)
+    started_runner.connection_opened(late)
+
+    await asyncio.sleep(0.01)
+    assert started_runner._sm.current_state is SessionState.READY
+    assert started_runner._connections.count == 0
+    assert late.closed
+
+
+async def test_a_connection_opened_with_no_session_open_is_refused_and_closed(
+    started_runner: Runner,
+) -> None:
+    late = FakeConnection(7)
+    started_runner.connection_opened(late)
+
+    await asyncio.sleep(0.01)
+    assert started_runner._connections.count == 0
+    assert late.closed
+
+
+async def test_a_connection_opened_after_termination_is_refused_and_closed(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    started_runner._on_model_failure(RuntimeError("gpu fell off"))
+    await asyncio.sleep(0.05)  # let the loop run the scheduled eviction callback
+    _expect_state(started_runner, SessionState.TERMINATED)
+
+    late = FakeConnection(7)
+    started_runner.connection_opened(late)
+
+    await asyncio.sleep(0.01)
+    assert started_runner._connections.count == 0
+    assert late.closed
+
+
+async def test_a_wire_admitted_in_an_earlier_session_cannot_join_the_next(
+    started_runner: Runner,
+) -> None:
+    # The offer is admitted in the first session, but its wire only connects
+    # once the next session is running — the state looks valid, so only the
+    # offer's epoch stamp can tell the sessions apart.
+    started_runner.start_session({})
+    stale_id = started_runner.new_conn_id()
+    started_runner.offer_admitted(stale_id)
+    started_runner.stop_session()
+    await asyncio.sleep(0.01)
+    _expect_state(started_runner, SessionState.READY)
+    started_runner.start_session({})
+
+    stale = FakeConnection(stale_id)
+    started_runner.connection_opened(stale)
+
+    await asyncio.sleep(0.01)
+    assert started_runner._connections.count == 0
+    assert stale.closed
+
+    # An offer admitted in the live session still registers.
+    fresh_id = started_runner.new_conn_id()
+    started_runner.offer_admitted(fresh_id)
+    fresh = FakeConnection(fresh_id)
+    started_runner.connection_opened(fresh)
+    assert started_runner._connections.count == 1
+    assert not fresh.closed
 
 
 async def test_connection_answered_rides_a_self_loop_transition(
@@ -464,6 +736,225 @@ async def test_sessions_without_a_session_id_get_distinct_recording_ids(
     assert minted[0] != minted[1]
 
 
+async def _await_log_release() -> None:
+    """Wait for the model thread to retire the log binding, which it does off-loop."""
+    deadline = time.monotonic() + 2.0
+    while log.get_session_id() is not None:
+        assert time.monotonic() < deadline, f"binding never released: {log.get_session_id()}"
+        await asyncio.sleep(0.01)
+
+
+async def test_a_live_session_stamps_its_id_on_the_logs(started_runner: Runner) -> None:
+    supplied = "11111111-2222-3333-4444-555555555555"
+    assert log.get_session_id() is None
+    started_runner.start_session({"session_id": supplied})
+    assert log.get_session_id() == supplied
+
+
+async def test_the_stamped_state_tracks_the_lifecycle(started_runner: Runner) -> None:
+    # The runner stamps its starting state at construction — the model-load
+    # window is what makes initialization logs retrievable — and re-stamps on
+    # every move, so a record always reads the phase it was written in, in both
+    # the machine's words and the health route's coarse projection.
+    assert (log.get_state(), log.get_runtime_state()) == ("ready", "available")
+    started_runner.start_session({})
+    assert (log.get_state(), log.get_runtime_state()) == ("waiting", "serving")
+    conn = FakeConnection(1)
+    started_runner.connection_opened(conn)
+    _expect_state(started_runner, SessionState.STREAMING)
+    assert (log.get_state(), log.get_runtime_state()) == ("streaming", "serving")
+    started_runner.stop_session()
+    await asyncio.sleep(0.01)
+    _expect_state(started_runner, SessionState.READY)
+    assert (log.get_state(), log.get_runtime_state()) == ("ready", "available")
+
+
+async def test_construction_stamps_the_created_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
+    assert log.get_state() is None
+    runner = _runner()
+    assert (log.get_state(), log.get_runtime_state()) == ("created", "loading")
+    await runner.start()
+    try:
+        assert (log.get_state(), log.get_runtime_state()) == ("ready", "available")
+    finally:
+        await runner.stop()
+
+
+async def test_an_eviction_stamps_the_terminated_state(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    started_runner._on_model_failure(RuntimeError("gpu fell off"))
+    await asyncio.sleep(0.05)  # let the loop run the scheduled eviction callback
+    _expect_state(started_runner, SessionState.TERMINATED)
+    assert (log.get_state(), log.get_runtime_state()) == ("terminated", "terminated")
+
+
+async def test_a_record_written_in_session_carries_state_and_id(
+    started_runner: Runner,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # caplog's handler bypasses the stamping filter, so run it explicitly over
+    # the captured record — this asserts the ambient context a real handler
+    # would stamp, on a record no call site enriched.
+    started_runner.start_session({"session_id": "11111111-2222-3333-4444-555555555555"})
+    with caplog.at_level(logging.INFO, logger="some.model.module"):
+        logging.getLogger("some.model.module").info("mid-session record")
+    record = caplog.records[-1]
+    assert log.SessionContextFilter().filter(record)
+    fields = getattr(record, "reactor_fields", {})
+    assert fields["session_id"] == "11111111-2222-3333-4444-555555555555"
+    assert fields["state"] == "waiting"
+    assert fields["runtime_state"] == "serving"
+
+
+async def test_closing_a_session_releases_the_stamped_id(started_runner: Runner) -> None:
+    started_runner.start_session({"session_id": "11111111-2222-3333-4444-555555555555"})
+    started_runner.stop_session()
+    await asyncio.sleep(0.01)
+    _expect_state(started_runner, SessionState.READY)
+    # The process may host another session, so a stale id would misattribute it.
+    await started_runner._drain_teardown()
+    await _await_log_release()
+
+
+async def _two_sessions_with_a_started_barrier(
+    monkeypatch: pytest.MonkeyPatch, first_sid: str, second_sid: str
+) -> None:
+    """Run two sessions back to back and prove the first's release spared the second.
+
+    The reactor loop dispatches in order, so once the second session's
+    ``@session_started`` hook has run, the first session's ``SessionEnded`` — and
+    with it the release of its binding — has already been dispatched. Waiting on
+    the hook is the deterministic barrier that makes the assertion meaningful: it
+    asserts only after the late release has provably happened.
+    """
+    started = threading.Event()
+
+    class BarrierModel(FakeModel):
+        @session_started
+        def on_session_started(self) -> None:
+            started.set()
+
+    monkeypatch.setattr(
+        "reactor_runtime.runner.runner.import_model_class", lambda ref: BarrierModel
+    )
+    runner = _runner()
+    await runner.start()
+    try:
+        # The model thread creates its queues on its own loop, and an event
+        # enqueued before then is deliberately dropped. Production start_session
+        # calls arrive long after boot; this test's arrives instantly, so wait
+        # for the loop before opening the first session.
+        model = created_models[-1]
+        deadline = time.monotonic() + 2.0
+        while model._reactor_q is None:
+            assert time.monotonic() < deadline, "model loop never became ready"
+            await asyncio.sleep(0.01)
+        runner.start_session({"session_id": first_sid})
+        assert await asyncio.to_thread(started.wait, 2.0), "first session_started never ran"
+        started.clear()
+        runner.stop_session()
+        await asyncio.sleep(0.01)
+        _expect_state(runner, SessionState.READY)
+        runner.start_session({"session_id": second_sid})
+        assert await asyncio.to_thread(started.wait, 2.0), "second session_started never ran"
+        assert log.get_session_id() == second_sid
+    finally:
+        await runner.stop()
+
+
+async def test_a_late_release_cannot_strip_the_session_that_followed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The release rides the first session's SessionEnded, so the next session is
+    # live before it runs; the binding token is what keeps it from unbinding her.
+    await _two_sessions_with_a_started_barrier(
+        monkeypatch,
+        "11111111-1111-1111-1111-111111111111",
+        "22222222-2222-2222-2222-222222222222",
+    )
+
+
+async def test_a_session_reusing_the_previous_id_keeps_its_own_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A caller may start two sessions under one id; the first session's release
+    # must not unbind the second, which would leave its whole run unstamped.
+    reused = "11111111-1111-1111-1111-111111111111"
+    await _two_sessions_with_a_started_barrier(monkeypatch, reused, reused)
+
+
+async def test_session_ended_hook_records_are_stamped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The release rides the reactor queue behind SessionEnded, so the hook has
+    # returned — its records stamped — before the binding is retired. Recording
+    # is off here, so teardown is immediate and only the queue order protects
+    # the hook; this is the case a teardown-only wait loses.
+    seen: list[str | None] = []
+
+    class HookedModel(FakeModel):
+        @session_ended
+        def on_session_ended(self) -> None:
+            seen.append(log.get_session_id())
+
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: HookedModel)
+    runner = _runner()
+    await runner.start()
+    try:
+        sid = "11111111-2222-3333-4444-555555555555"
+        runner.start_session({"session_id": sid})
+        runner.stop_session()
+        await asyncio.sleep(0.01)
+        _expect_state(runner, SessionState.READY)
+        await runner._drain_teardown()
+        # Released only after the hook, so the release doubles as its barrier.
+        await _await_log_release()
+        assert seen == [sid]
+    finally:
+        await runner.stop()
+
+
+async def test_a_second_session_stamps_its_own_id(started_runner: Runner) -> None:
+    started_runner.start_session({"session_id": "11111111-1111-1111-1111-111111111111"})
+    started_runner.stop_session()
+    await asyncio.sleep(0.01)
+    started_runner.start_session({"session_id": "22222222-2222-2222-2222-222222222222"})
+    assert log.get_session_id() == "22222222-2222-2222-2222-222222222222"
+
+
+async def test_an_eviction_leaves_the_binding_for_the_process_exit(
+    started_runner: Runner,
+) -> None:
+    # An eviction is the model loop's own death: no SessionEnded is dispatched,
+    # so nothing retires the binding — deliberately. The process is exiting, and
+    # its last records belong to the session that brought it down.
+    sid = "11111111-2222-3333-4444-555555555555"
+    started_runner.start_session({"session_id": sid})
+    started_runner._on_model_failure(RuntimeError("gpu fell off"))
+    await asyncio.sleep(0.05)  # let the loop run the scheduled eviction callback
+    _expect_state(started_runner, SessionState.TERMINATED)
+    await started_runner._drain_teardown()
+    assert log.get_session_id() == sid
+
+
+async def test_the_transition_log_carries_no_id_of_its_own(
+    started_runner: Runner,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The fixed transport id is one constant per process and carries nothing,
+    # and a call-site session_id would beat the stamped one — so the transition
+    # log names neither, and the session it belongs to arrives via the stamp
+    # alone on exactly the records an operator reaches for first.
+    with caplog.at_level(logging.INFO, logger="reactor_runtime.runner.runner"):
+        started_runner.start_session({"session_id": "11111111-2222-3333-4444-555555555555"})
+    moves = [r for r in caplog.records if r.message == "session transition"]
+    assert moves
+    fields = getattr(moves[-1], "reactor_fields", {})
+    assert "session_id" not in fields
+    assert "transport_session_id" not in fields
+
+
 async def test_require_session_running_rejects_an_unknown_sid(started_runner: Runner) -> None:
     started_runner.start_session({})
     with pytest.raises(UnknownSessionError):
@@ -503,6 +994,23 @@ async def test_start_session_rejects_a_double_start(started_runner: Runner) -> N
         started_runner.start_session({})
     assert rejected.value.action == "start"
     assert rejected.value.state is SessionState.WAITING
+
+
+async def test_a_rejected_start_leaves_the_recording_id_untouched(
+    started_runner: Runner,
+) -> None:
+    supplied = "11111111-2222-3333-4444-555555555555"
+    started_runner.start_session({"session_id": supplied})
+    # A start is legal only from READY. A second one arriving while the session is
+    # live is rejected, and that rejection must not rebind the live session's
+    # recording id: neither to the rejected request's own id, nor to a freshly
+    # minted one when it carries none.
+    with pytest.raises(SessionTransitionError):
+        started_runner.start_session({"session_id": "99999999-9999-9999-9999-999999999999"})
+    assert started_runner._recording_id == supplied
+    with pytest.raises(SessionTransitionError):
+        started_runner.start_session({})
+    assert started_runner._recording_id == supplied
 
 
 def test_start_session_rejects_before_the_model_is_loaded() -> None:
@@ -563,6 +1071,29 @@ async def test_schema_renders_the_model_contract(started_runner: Runner) -> None
     assert isinstance(schema, dict)
     assert schema
     assert "set_mode" in str(schema)
+
+
+async def test_the_published_name_titles_the_schema_and_the_descriptor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The served document has to agree with the one the schema command renders
+    # from the same manifest, and the descriptor has to name the same model, so
+    # all three read the published name.
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
+    runner = Runner(RuntimeConfig(model_ref="fake:Model", model_name="mage-vl"))
+    await runner.start()
+    try:
+        runner.start_session({})
+        assert runner.schema()["info"]["title"] == "mage-vl"
+        assert runner.descriptor()["model"]["name"] == "mage-vl"
+    finally:
+        await runner.stop()
+
+
+async def test_schema_falls_back_to_the_class_when_no_name_is_published(
+    started_runner: Runner,
+) -> None:
+    assert started_runner.schema()["info"]["title"] == "fake_model"
 
 
 # --- the dispatch brain ---------------------------------------------------
@@ -657,10 +1188,137 @@ async def test_plain_stop_sends_no_moderation_notice(started_runner: Runner) -> 
     assert not any(isinstance(f, str) and "moderation" in f for f in conn.sent)
 
 
+async def test_reasoned_stop_notifies_every_client_before_teardown(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    v0_conn = FakeConnection(1)
+    v1_conn = FakeConnection(2)
+    v1_conn.protocol_version = V1
+    started_runner.connection_opened(v0_conn)
+    started_runner.connection_opened(v1_conn)
+
+    started_runner.stop_session(reason="Session ended: the model was updated.")
+
+    # The notice is queued synchronously on entering CLOSING; the connections
+    # only close in the teardown task that has not run yet.
+    assert not v0_conn.closed
+    assert not v1_conn.closed
+    # The v0 client sees the legacy runtime-scope JSON on the data channel.
+    v0_frame = next(f for f in v0_conn.sent if isinstance(f, str) and "sessionEnded" in f)
+    body = json.loads(v0_frame)
+    assert body["scope"] == "runtime"
+    assert body["data"]["type"] == "sessionEnded"
+    assert body["data"]["data"]["reason"] == "Session ended: the model was updated."
+    # The v1 client sees the binary notification on the control channel.
+    raw = v1_conn.control[-1]
+    assert isinstance(raw, bytes)
+    decoded = protocol.select(V1).decode(raw, CONTROL, SERVER)
+    assert isinstance(decoded, control_pb2.ControlServerMessage)
+    assert decoded.WhichOneof("payload") == "session_ended"
+    assert decoded.session_ended.reason == "Session ended: the model was updated."
+
+    await asyncio.sleep(0.01)
+    assert v0_conn.closed
+    assert v1_conn.closed
+
+
+async def test_reasoned_stop_ends_the_session_as_stopped(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = _record_reactor_events(started_runner, monkeypatch)
+    started_runner.start_session({})
+    started_runner.stop_session(reason="deployment")
+    await asyncio.sleep(0.01)
+    ended = [e for e in events if isinstance(e, SessionEnded)]
+    assert len(ended) == 1
+    assert ended[0].reason is EndReason.STOPPED
+
+
+async def test_the_close_reason_reaches_the_client_verbatim(
+    started_runner: Runner,
+) -> None:
+    # The platform authors the wording; the runtime must not rewrite it.
+    started_runner.start_session({})
+    conn = FakeConnection(1)
+    started_runner.connection_opened(conn)
+
+    started_runner.stop_session(reason="cosmic rays flipped a bit")
+
+    frame = next(f for f in conn.sent if isinstance(f, str) and "sessionEnded" in f)
+    body = json.loads(frame)
+    assert body["data"]["data"]["reason"] == "cosmic rays flipped a bit"
+
+
+async def test_plain_stop_sends_no_session_ended_notice(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    conn = FakeConnection(1)
+    started_runner.connection_opened(conn)
+
+    started_runner.stop_session()
+
+    assert not any(isinstance(f, str) and "sessionEnded" in f for f in conn.sent)
+
+
+async def test_a_moderated_and_reasoned_stop_sends_only_the_moderation_notice(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    conn = FakeConnection(1)
+    started_runner.connection_opened(conn)
+
+    started_runner.stop_session(moderated=True, reason="deployment")
+
+    assert any(isinstance(f, str) and "moderation" in f for f in conn.sent)
+    assert not any(isinstance(f, str) and "sessionEnded" in f for f in conn.sent)
+
+
+async def test_reasoned_stop_without_a_client_still_stops(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    started_runner.stop_session(reason="deployment")
+    assert started_runner._sm.current_state is SessionState.CLOSING
+
+
+async def test_reasoned_stop_survives_a_failing_broadcast(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started_runner.start_session({})
+    started_runner.connection_opened(FakeConnection(1))
+
+    def explode(encode: Any) -> None:
+        raise RuntimeError("wire fell over")
+
+    monkeypatch.setattr(started_runner._connections, "broadcast_response", explode)
+
+    started_runner.stop_session(reason="deployment")
+
+    # The teardown still runs to completion: the session unwinds to READY
+    # rather than stranding in CLOSING behind the failed notice.
+    await asyncio.sleep(0.01)
+    assert started_runner._sm.current_state is SessionState.READY
+
+
 async def test_drain_ends_an_active_session_within_grace(started_runner: Runner) -> None:
     started_runner.start_session({})
     await started_runner.drain()
     assert started_runner._sm.current_state is SessionState.READY
+
+
+async def test_drain_tells_clients_the_server_is_stopping(started_runner: Runner) -> None:
+    # The runtime initiates a drain stop, so it authors the close reason; the
+    # notice must reach the client before the drain closes its connection.
+    started_runner.start_session({})
+    conn = FakeConnection(1)
+    started_runner.connection_opened(conn)
+
+    await started_runner.drain()
+
+    frame = next(f for f in conn.sent if isinstance(f, str) and "sessionEnded" in f)
+    body = json.loads(frame)
+    assert body["data"]["data"]["reason"] == _DRAIN_CLOSE_REASON
+    # The bound the stop route enforces on platform reasons; ours obeys it too.
+    assert len(_DRAIN_CLOSE_REASON) <= 64
+    assert conn.closed
 
 
 # --- orphan timeout, teardown, egress journal, fatal exit -----------------
@@ -1138,6 +1796,222 @@ async def test_an_unresolved_upload_is_counted_with_no_ingress(
     )
 
 
+# --- inline upload references ---------------------------------------------
+
+
+def _seed_upload(runner: Runner, name: str, data: bytes) -> str:
+    upload_id = runner.uploads.create_slot(name, "image/png", len(data))
+    runner.uploads.put(upload_id, data)
+    return upload_id
+
+
+def _capture_submissions(
+    runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> list[tuple[str, dict[str, Any], CommandOutcome]]:
+    """Record what reaches the bridge while still validating it against the contract."""
+    assert runner._bridge is not None
+    original = runner._bridge.submit_command
+    submitted: list[tuple[str, dict[str, Any], CommandOutcome]] = []
+
+    async def capture(name: str, args: dict[str, Any], **kwargs: Any) -> CommandOutcome:
+        outcome = await original(name, args, **kwargs)
+        submitted.append((name, args, outcome))
+        return outcome
+
+    monkeypatch.setattr(runner._bridge, "submit_command", capture)
+    return submitted
+
+
+async def test_a_list_of_references_reaches_the_model_as_files_in_the_client_order(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started_runner.start_session({})
+    first = _seed_upload(started_runner, "first.png", b"1")
+    second = _seed_upload(started_runner, "second.png", b"2")
+    third = _seed_upload(started_runner, "third.png", b"3")
+    submitted = _capture_submissions(started_runner, monkeypatch)
+
+    await _submit(
+        started_runner,
+        "set_images",
+        {"images": [{"upload_id": third}, {"upload_id": first}, {"upload_id": second}]},
+    )
+
+    name, args, outcome = submitted[0]
+    assert (name, outcome.accepted) == ("set_images", True)
+    assert args["images"] == [
+        UploadedFile(name="third.png", mime_type="image/png", data=b"3"),
+        UploadedFile(name="first.png", mime_type="image/png", data=b"1"),
+        UploadedFile(name="second.png", mime_type="image/png", data=b"2"),
+    ]
+    # The typed command the handler is called with carries the same files.
+    assert started_runner._bridge is not None
+    command = started_runner._bridge.contract.validate("set_images", args)
+    assert all(isinstance(image, UploadedFile) for image in vars(command)["images"])
+
+
+async def test_a_single_file_resolves_through_either_channel(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started_runner.start_session({})
+    upload_id = _seed_upload(started_runner, "cat.png", b"cat")
+    submitted = _capture_submissions(started_runner, monkeypatch)
+    expected = UploadedFile(name="cat.png", mime_type="image/png", data=b"cat")
+
+    await _submit(started_runner, "set_image", {}, uploads={"image": upload_id})
+    await _submit(started_runner, "set_image", {"image": {"upload_id": upload_id}})
+
+    assert [(args["image"], outcome.accepted) for _name, args, outcome in submitted] == [
+        (expected, True),
+        (expected, True),
+    ]
+
+
+async def test_a_sidecar_file_and_an_inline_list_resolve_in_one_command(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started_runner.start_session({})
+    cover = _seed_upload(started_runner, "cover.png", b"c")
+    page = _seed_upload(started_runner, "page.png", b"p")
+    submitted = _capture_submissions(started_runner, monkeypatch)
+
+    await _submit(
+        started_runner,
+        "set_gallery",
+        {"images": [{"upload_id": page}], "labels": {"upload_id": "not a reference"}},
+        uploads={"cover": cover},
+    )
+
+    _name, args, outcome = submitted[0]
+    assert outcome.accepted
+    assert args["cover"] == UploadedFile(name="cover.png", mime_type="image/png", data=b"c")
+    assert args["images"] == [UploadedFile(name="page.png", mime_type="image/png", data=b"p")]
+    # A mapping the model declared as its own is not an upload, whatever its keys.
+    assert args["labels"] == {"upload_id": "not a reference"}
+
+
+async def test_references_nested_in_a_dict_and_a_dataclass_reach_the_model_as_files(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started_runner.start_session({})
+    left = _seed_upload(started_runner, "left.png", b"l")
+    right = _seed_upload(started_runner, "right.png", b"r")
+    cover = _seed_upload(started_runner, "cover.png", b"c")
+    submitted = _capture_submissions(started_runner, monkeypatch)
+
+    await _submit(
+        started_runner,
+        "set_book",
+        {
+            "pages": {"left": {"upload_id": left}, "right": {"upload_id": right}},
+            "cover": {"image": {"upload_id": cover}, "caption": "front"},
+        },
+    )
+
+    _name, args, outcome = submitted[0]
+    assert outcome.accepted
+    assert args["pages"] == {
+        "left": UploadedFile(name="left.png", mime_type="image/png", data=b"l"),
+        "right": UploadedFile(name="right.png", mime_type="image/png", data=b"r"),
+    }
+    assert args["cover"] == {
+        "image": UploadedFile(name="cover.png", mime_type="image/png", data=b"c"),
+        "caption": "front",
+    }
+
+
+async def test_an_absent_optional_list_needs_no_resolution(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started_runner.start_session({})
+    cover = _seed_upload(started_runner, "cover.png", b"c")
+    submitted = _capture_submissions(started_runner, monkeypatch)
+
+    await _submit(started_runner, "set_gallery", {"images": None}, uploads={"cover": cover})
+
+    _name, args, outcome = submitted[0]
+    assert outcome.accepted
+    assert args["images"] is None
+
+
+async def test_a_list_with_one_unresolved_entry_drops_the_whole_command(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started_runner.start_session({})
+    present = _seed_upload(started_runner, "cat.png", b"cat")
+    submitted = _capture_submissions(started_runner, monkeypatch)
+    rejected: list[tuple[ConnId, str, str, str]] = []
+    monkeypatch.setattr(
+        started_runner,
+        "_reject_command",
+        lambda conn_id, request_id, code, reason: rejected.append(
+            (conn_id, request_id, code, reason)
+        ),
+    )
+    original_fetch = started_runner._uploads.fetch
+
+    async def no_grace(upload_id: str, **kwargs: Any) -> UploadedFile:
+        # The store waits the upload grace for a missing id, which this outcome
+        # does not depend on, so a missing id fails at once here.
+        return await original_fetch(upload_id)
+
+    monkeypatch.setattr(started_runner._uploads, "fetch", no_grace)
+
+    await _submit(
+        started_runner,
+        "set_images",
+        {"images": [{"upload_id": present}, {"upload_id": "missing"}]},
+    )
+
+    assert submitted == []
+    assert rejected == [
+        (ConnId(1), "r1", UNRESOLVED_UPLOAD, "command 'set_images' references an unresolved upload")
+    ]
+    errors = _moves(started_runner, SessionEvent.ERROR)
+    assert len(errors) == 1
+    assert "set_images" in errors[0].detail["message"]
+    assert _metric(
+        started_runner, "runtime_commands_total", command="set_images", outcome="unresolved_upload"
+    )
+
+
+async def test_the_journal_carries_the_references_of_a_list_and_never_its_bytes(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    upload_id = _seed_upload(started_runner, "cat.png", b"cat")
+
+    await _submit(started_runner, "set_images", {"images": [{"upload_id": upload_id}]})
+
+    commands = _moves(started_runner, SessionEvent.COMMAND)
+    assert len(commands) == 1
+    assert commands[0].detail["args"] == {"images": [{"upload_id": upload_id}]}
+
+
+async def test_the_wait_for_a_list_of_uploads_is_left_out_of_the_ingress(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started_runner.start_session({})
+
+    async def arrives_late(upload_id: str, **kwargs: Any) -> UploadedFile:
+        await asyncio.sleep(0.3)
+        return UploadedFile(name=f"{upload_id}.png", mime_type="image/png", data=b"\x89PNG")
+
+    monkeypatch.setattr(started_runner._uploads, "fetch", arrives_late)
+    await _submit(
+        started_runner, "set_images", {"images": [{"upload_id": "a"}, {"upload_id": "b"}]}
+    )
+
+    # A list waits for its entries together, and the wait is the client's, so a
+    # command carrying a list is timed the same way one carrying a single file is.
+    total = _metric(started_runner, "runtime_command_ingress_seconds_sum", command="set_images")
+    assert total is not None
+    assert total < 0.3
+    assert _metric(
+        started_runner, "runtime_commands_total", command="set_images", outcome="accepted"
+    )
+
+
 async def test_a_frame_off_the_wire_is_timed_from_the_moment_it_arrived(
     started_runner: Runner,
 ) -> None:
@@ -1220,6 +2094,48 @@ async def test_emitted_media_is_counted_in_frames_per_track(started_runner: Runn
     # chunk here, and a counter of chunks would report a quarter of the real rate.
     assert _metric(started_runner, "runtime_media_frames_total", track="main_video") == 4.0
     assert _metric(started_runner, "runtime_media_frames_total", track="main_audio") == 4.0
+
+
+async def test_media_reaches_the_connections_before_the_recorder(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Feeding the recorder can make the fan-out wait when the encoder is behind,
+    # bounded but real, while a pacer that waits is throttling to the playout
+    # rate it was asked for. Serving the connections first keeps a stalled
+    # archive off the live path.
+    started_runner.start_session({})
+    served: list[str] = []
+    monkeypatch.setattr(
+        started_runner._connections,
+        "broadcast_media",
+        lambda *_a, **_k: served.append("connections"),
+    )
+    monkeypatch.setattr(started_runner._recorder, "on_chunk", lambda _c: served.append("recorder"))
+
+    started_runner._emit_media(MediaChunk(bundle=_video_bundle(), fps=30.0, n_frames=1))
+
+    assert served == ["connections", "recorder"]
+
+
+async def test_a_flush_that_cuts_the_broadcast_short_still_records_the_chunk(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A playout cut is not an archive boundary. With the recorder served last,
+    # a flush landing mid-broadcast abandons the rest of the fan-out, and the
+    # archive still has to receive the whole chunk.
+    started_runner.start_session({})
+    recorded: list[MediaChunk] = []
+    monkeypatch.setattr(started_runner._recorder, "on_chunk", lambda c: recorded.append(c))
+    monkeypatch.setattr(
+        started_runner._connections,
+        "broadcast_media",
+        lambda *_a, **_k: started_runner._flush_media(),
+    )
+    chunk = MediaChunk(bundle=_video_bundle(), fps=30.0, n_frames=1)
+
+    started_runner._emit_media(chunk)
+
+    assert recorded == [chunk]
 
 
 async def test_every_output_track_the_model_declares_starts_at_zero(

@@ -1,4 +1,4 @@
-"""Per-test isolation for the process-global interface registries.
+"""Per-test isolation for the runtime's process-global state.
 
 The interface layer auto-registers every declared ``Output`` / ``Input`` /
 ``ModelMessage`` / ``@event`` command into a process-global registry, and the
@@ -12,16 +12,43 @@ scope.
 
 from __future__ import annotations
 
+import logging
+import sys
 from collections.abc import Callable, Iterator
-from typing import get_type_hints
 
 import pytest
 
+from reactor_runtime import log
 from reactor_runtime.interface.events.decorators import EVENT_REGISTRY
 from reactor_runtime.interface.events.messages import MESSAGE_REGISTRY, ModelMessage
 from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.interface.tracks.input import INPUT_REGISTRY, Input
 from reactor_runtime.interface.tracks.output import OUTPUT_REGISTRY, Output
+
+
+@pytest.fixture(autouse=True)
+def _restore_root_logging() -> Iterator[None]:
+    """Save and restore root handlers and level across each test."""
+    root = logging.getLogger()
+    saved_handlers = root.handlers[:]
+    saved_level = root.level
+    yield
+    root.handlers[:] = saved_handlers
+    root.setLevel(saved_level)
+
+
+@pytest.fixture(autouse=True)
+def _clear_log_context() -> Iterator[None]:
+    """Release the stamped session id and runtime state after each test.
+
+    Both are process-global, so a test that opens a session or builds a runner
+    would otherwise leave every later test's records claiming its context.
+    """
+    try:
+        yield
+    finally:
+        log.clear_session_id()
+        log.set_state(None, None)
 
 
 @pytest.fixture(autouse=True)
@@ -56,10 +83,19 @@ def _register(*classes: type) -> None:
 
 
 def _register_model(model_cls: type) -> None:
-    """Re-register a model's full client-facing surface into the registries."""
-    for hint in get_type_hints(model_cls).values():
-        if isinstance(hint, type) and issubclass(hint, (Output, Input)):
-            _register(hint)
+    """Re-register a model's full client-facing surface into the registries.
+
+    Track classes register when they are *defined*, so the replay walks the
+    model's module for every module-level ``Output`` / ``Input`` subclass —
+    the registrations that module's import made before the per-test clear.
+    Track classes defined inside test functions stay invisible, preserving
+    per-test isolation.
+    """
+    module = sys.modules.get(model_cls.__module__)
+    if module is not None:
+        for obj in vars(module).values():
+            if isinstance(obj, type) and issubclass(obj, (Output, Input)):
+                _register(obj)
     for name, spec in ModelContract.of(model_cls).commands.items():
         EVENT_REGISTRY[name] = spec.command
         if spec.response is not None:
@@ -81,8 +117,9 @@ def register() -> Callable[..., None]:
 def register_model() -> Callable[[type], None]:
     """Return a helper that re-registers a model's full surface after the clear.
 
-    Restores the track holders the model annotates, every command its handlers
-    declare, and the message types those commands reply with — the registrations
-    a class declaration makes at import, replayed after a per-test clear.
+    Restores the track classes the model's module declares, every command its
+    handlers declare, and the message types those commands reply with — the
+    registrations a class declaration makes at import, replayed after a
+    per-test clear.
     """
     return _register_model

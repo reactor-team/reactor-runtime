@@ -1,10 +1,10 @@
 """Neutral value vocabulary shared across the runtime.
 
-The plain data every component passes around: connection identifiers, inbound
-and outbound media, the capabilities a transport advertises, and the health a
-component reports. These carry no behaviour beyond small pure helpers and
-depend on nothing else in the package, so they sit at the root of the import
-graph.
+The plain data every component passes around: connection identifiers, command
+failures, inbound and outbound media, the capabilities a transport advertises,
+and the health a component reports. These carry no behaviour beyond small pure
+helpers and depend on nothing else in the package, so they sit at the root of
+the import graph.
 """
 
 from __future__ import annotations
@@ -26,6 +26,24 @@ indices, or other integers at the boundaries.
 """
 
 
+@dataclass(frozen=True)
+class CommandFailure:
+    """A command's failure, on its way back to the client that issued it.
+
+    What a handler's failure looks like once it leaves model code: the reason a
+    client can read, stripped of the exception that produced it. The runtime
+    carries it out the same path as a successful reply, correlated with the same
+    request id, so an awaiting client rejects rather than waits.
+
+    Attributes:
+        code: Short, stable token the client branches on.
+        message: Readable explanation for the client.
+    """
+
+    code: str
+    message: str
+
+
 @dataclass(frozen=True, eq=False)
 class InputFrame:
     """A single inbound media frame with its presentation timestamp.
@@ -43,10 +61,27 @@ class InputFrame:
             frame; audio is ``(1, M)`` ``int16`` mono samples.
         pts: Presentation timestamp in seconds, or ``None`` when the transport
             could not provide one.
+        metadata: What the sender attached to this frame, as the bytes it sent,
+            or ``None`` for a frame that carried nothing. Decoding them is the
+            model's business: the transport treats them as opaque.
+        capture_time_us: When the sender says this frame was captured, in
+            microseconds, or ``None`` for a frame that carried no stamp. The value
+            the sender declared, unrounded — a client that stamps several tracks
+            from one clock reading therefore delivers that one value on all of
+            them, which is what makes a multi-camera capture readable as a single
+            moment. A sender that declares nothing has its transport read a clock
+            for it, so a stamped frame is the normal case. It rides with the
+            metadata, so a sender or a transport that carries neither leaves both
+            unset. Unlike ``pts``, it is a reading of another machine's clock:
+            differences between stamps from one sender are that source's own
+            timing, while anything subtracted from a local clock is mostly the
+            offset between two clocks that drift independently.
     """
 
     data: npt.NDArray[Any]
     pts: float | None = None
+    metadata: bytes | None = None
+    capture_time_us: int | None = None
 
 
 class TrackKind(StrEnum):
@@ -95,10 +130,16 @@ class TrackData:
         data: Payload array. Video is ``(H, W, 3)`` ``uint8`` RGB for one frame
             (or ``(N, H, W, 3)`` for a batch); audio is ``(1, M)`` ``int16``
             mono samples.
+        metadata: Serialised application metadata the transport carries
+            alongside the payload, or ``None`` for none. Follows the shape of
+            :attr:`data`: one value for a single frame, or one value per frame
+            for a batch, which :func:`split_batch` resolves down to a single
+            value per frame.
     """
 
     info: TrackInfo
     data: npt.NDArray[Any]
+    metadata: bytes | list[bytes] | None = None
 
 
 @dataclass
@@ -158,6 +199,10 @@ def split_batch(bundle: MediaBundle) -> list[MediaBundle]:
     and is repeated into every frame. Audio is divided proportionally across the
     frames. All batched video tracks must agree on ``N``.
 
+    A track's metadata follows its payload: a list carries one entry per frame
+    and is distributed across them, while a single value is repeated onto every
+    frame, the same way an unbatched video payload is.
+
     Args:
         bundle: The bundle to split.
 
@@ -166,7 +211,8 @@ def split_batch(bundle: MediaBundle) -> list[MediaBundle]:
         there is nothing to split.
 
     Raises:
-        ValueError: If two batched video tracks disagree on the batch size.
+        ValueError: If two batched video tracks disagree on the batch size, or a
+            track's metadata list does not cover every frame.
     """
     video_tracks = bundle.get_tracks_by_kind(TrackKind.VIDEO)
     if not video_tracks:
@@ -177,13 +223,25 @@ def split_batch(bundle: MediaBundle) -> list[MediaBundle]:
         return [bundle]
 
     n_frames = batched[0][1]
+    for track in bundle.get_tracks():
+        if isinstance(track.metadata, list) and len(track.metadata) != n_frames:
+            raise ValueError(
+                f"Track '{track.info.name}' carries {len(track.metadata)} metadata "
+                f"entries for {n_frames} frames"
+            )
+
     if n_frames == 1:
         # Squeeze the batch dimension into a fresh bundle rather than editing the
         # caller's: the multi-frame path below also leaves the input untouched,
         # and a producer must be able to read back what it submitted.
-        squeezed = dict(bundle.tracks)
-        for track, _ in batched:
-            squeezed[track.info.name] = TrackData(info=track.info, data=track.data[0])
+        squeezed = {
+            name: TrackData(
+                info=track.info,
+                data=track.data[0] if track.data.ndim == 4 else track.data,
+                metadata=_frame_metadata(track, 0),
+            )
+            for name, track in bundle.tracks.items()
+        }
         return [MediaBundle(tracks=squeezed)]
 
     for track, size in batched:
@@ -207,16 +265,29 @@ def split_batch(bundle: MediaBundle) -> list[MediaBundle]:
             audio = audio.reshape(1, -1)
         audio_splits[track.info.name] = np.array_split(audio, n_frames, axis=1)
 
-    info_by_name = {track.info.name: track.info for track in bundle.get_tracks()}
+    by_name = {track.info.name: track for track in bundle.get_tracks()}
     result: list[MediaBundle] = []
     for index in range(n_frames):
         tracks: dict[str, TrackData] = {}
-        for name, frames in video_splits.items():
-            tracks[name] = TrackData(info=info_by_name[name], data=frames[index])
-        for name, chunks in audio_splits.items():
-            tracks[name] = TrackData(info=info_by_name[name], data=chunks[index])
+        for name, payloads in (*video_splits.items(), *audio_splits.items()):
+            source = by_name[name]
+            tracks[name] = TrackData(
+                info=source.info,
+                data=payloads[index],
+                metadata=_frame_metadata(source, index),
+            )
         result.append(MediaBundle(tracks=tracks))
     return result
+
+
+def _frame_metadata(track: TrackData, index: int) -> bytes | None:
+    """Return the metadata frame *index* of *track* carries, if any.
+
+    A list holds one entry per frame; a single value belongs to every frame.
+    """
+    if isinstance(track.metadata, list):
+        return track.metadata[index]
+    return track.metadata
 
 
 @dataclass(frozen=True)
@@ -235,11 +306,15 @@ class MediaChunk:
             should play out — the model's measured throughput when it emitted
             with a compute time, else its declared rate. Always positive.
         n_frames: How many frames the chunk carries (the batch size, or ``1``).
+        wait: Whether a consumer with a bounded queue should make the producer
+            wait for room (backpressure, throttling the model to the playout
+            rate) instead of dropping the overflow.
     """
 
     bundle: MediaBundle
     fps: float
     n_frames: int = 1
+    wait: bool = False
 
     def frames(self) -> list[MediaBundle]:
         """Split the chunk into one single-frame bundle per carried frame."""

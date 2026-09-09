@@ -10,16 +10,20 @@ WebRTC transport lives in :mod:`reactor_runtime.transport.webrtc`.
 
 from reactor_runtime.transport.acceptor import ConnectionAcceptor
 from reactor_runtime.transport.router import (
+    ConnectionsExhaustedError,
     SessionControl,
     SessionNotRunningError,
+    TooManyConnectionsError,
     TransportRouter,
     UnknownSessionError,
 )
 
 __all__ = [
     "ConnectionAcceptor",
+    "ConnectionsExhaustedError",
     "SessionControl",
     "SessionNotRunningError",
+    "TooManyConnectionsError",
     "TransportRouter",
     "UnknownSessionError",
 ]

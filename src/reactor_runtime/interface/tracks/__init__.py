@@ -17,15 +17,23 @@ on the class — out for an :class:`Output`, in for an :class:`Input`.
 
 from reactor_runtime.interface.tracks.descriptors import Audio, Track, Video
 from reactor_runtime.interface.tracks.input import INPUT_REGISTRY, Input, all_input_tracks
-from reactor_runtime.interface.tracks.output import OUTPUT_REGISTRY, Output, all_output_tracks
+from reactor_runtime.interface.tracks.output import (
+    OUTPUT_REGISTRY,
+    Metadata,
+    Output,
+    TrackPayload,
+    all_output_tracks,
+)
 
 __all__ = [
     "INPUT_REGISTRY",
     "OUTPUT_REGISTRY",
     "Audio",
     "Input",
+    "Metadata",
     "Output",
     "Track",
+    "TrackPayload",
     "Video",
     "all_input_tracks",
     "all_output_tracks",

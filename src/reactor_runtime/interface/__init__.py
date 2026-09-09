@@ -21,6 +21,7 @@ from reactor_runtime.interface.client import ClientInfo
 from reactor_runtime.interface.events import (
     EVENT_REGISTRY,
     MESSAGE_REGISTRY,
+    CommandError,
     MessageField,
     ModelMessage,
     connected,
@@ -35,6 +36,7 @@ from reactor_runtime.interface.internal.input_buffer import (
     InputBuffer,
     ReadMode,
 )
+from reactor_runtime.interface.internal.reactor_core import OutputStream
 from reactor_runtime.interface.model import ReactorModel
 from reactor_runtime.interface.pipeline import Idle, InputState, ReactorPipeline
 from reactor_runtime.interface.tracks import (
@@ -42,8 +44,10 @@ from reactor_runtime.interface.tracks import (
     OUTPUT_REGISTRY,
     Audio,
     Input,
+    Metadata,
     Output,
     Track,
+    TrackPayload,
     Video,
     all_input_tracks,
     all_output_tracks,
@@ -58,6 +62,7 @@ __all__ = [
     "BufferClosed",
     "ClientInfo",
     "Command",
+    "CommandError",
     "FieldInfo",
     "Idle",
     "Input",
@@ -66,12 +71,15 @@ __all__ = [
     "InputFrame",
     "InputState",
     "MessageField",
+    "Metadata",
     "ModelMessage",
     "Output",
+    "OutputStream",
     "ReactorModel",
     "ReactorPipeline",
     "ReadMode",
     "Track",
+    "TrackPayload",
     "UploadedFile",
     "Video",
     "all_input_tracks",

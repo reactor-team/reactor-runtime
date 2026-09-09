@@ -25,9 +25,9 @@ from examples.brightness.brightness import (
     BrightnessState,
     ImageSet,
 )
-from reactor_runtime import Idle, serve
+from reactor_runtime import Idle
 from reactor_runtime.interface.model.contract import ModelContract
-from reactor_runtime.runner.runner import import_model_class
+from reactor_runtime.manifest import import_model_class, load_config
 
 _RESOLUTIONS = ["480p", "720p", "1080p", "2160p"]
 _EXAMPLE_DIR = Path(__file__).parents[3] / "examples" / "brightness"
@@ -69,6 +69,17 @@ def test_set_text_bounds_its_length() -> None:
     assert fields["text"].info.max_length == 200
 
 
+def test_the_free_text_and_upload_fields_ask_for_moderation() -> None:
+    commands = ModelContract.of(Brightness).commands
+    text = commands["set_text"].command.__command_fields__
+    image = commands["set_image"].command.__command_fields__
+    assert text["text"].info.moderate is True
+    assert image["image"].info.moderate is True
+    # A bounded knob carries no free text, so it asks for nothing.
+    brightness = commands["set_brightness"].command.__command_fields__
+    assert brightness["brightness"].info.moderate is False
+
+
 def test_tracks_are_video_and_audio_out() -> None:
     tracks = ModelContract.of(Brightness).tracks
     assert {name: (t.kind.value, t.direction.value) for name, t in tracks.items()} == {
@@ -105,7 +116,7 @@ def test_schema_renders_the_full_surface() -> None:
 
 
 def test_manifest_resolves_to_the_model_class(monkeypatch: pytest.MonkeyPatch) -> None:
-    cfg = serve._load_config(_EXAMPLE_DIR / "reactor.yaml")
+    cfg = load_config(_EXAMPLE_DIR / "reactor.yaml")
     assert cfg.model_ref == "brightness:Brightness"
     monkeypatch.syspath_prepend(str(_EXAMPLE_DIR))
     assert import_model_class(cfg.model_ref).__qualname__ == "Brightness"

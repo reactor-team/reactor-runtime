@@ -16,12 +16,13 @@ from reactor_runtime import (
 )
 from reactor_runtime.core import SessionStarted
 from reactor_runtime.core.values import (
+    CommandFailure,
     ConnId,
     InputFrame,
     MediaChunk,
 )
 from reactor_runtime.interface.internal.bridge import ModelBridge
-from reactor_runtime.interface.internal.reactor_core import RequestId
+from reactor_runtime.interface.internal.reactor_core import MediaOps, RequestId
 from reactor_runtime.interface.model.contract import ModelContract
 
 
@@ -38,7 +39,6 @@ class In(Input):
 
 
 class EchoModel(ReactorModel):
-    output: Out
     input: In
 
     def __init__(self) -> None:
@@ -61,7 +61,9 @@ class EchoModel(ReactorModel):
 class Sinks:
     def __init__(self) -> None:
         self.broadcast: list[ModelMessage] = []
-        self.addressed: list[tuple[ConnId, ModelMessage | None, RequestId | None]] = []
+        self.addressed: list[
+            tuple[ConnId, ModelMessage | CommandFailure | None, RequestId | None]
+        ] = []
         self.media: list[MediaChunk] = []
 
     def bind(self, bridge: ModelBridge) -> None:
@@ -70,7 +72,10 @@ class Sinks:
         )
 
     def _addr(
-        self, conn: ConnId, message: ModelMessage | None, request_id: RequestId | None
+        self,
+        conn: ConnId,
+        message: ModelMessage | CommandFailure | None,
+        request_id: RequestId | None,
     ) -> None:
         self.addressed.append((conn, message, request_id))
 
@@ -175,6 +180,24 @@ def test_emit_reaches_the_media_sink_as_a_chunk() -> None:
     assert chunk.n_frames == 1
     assert chunk.fps == 20.0  # one frame in 0.05s
     assert chunk.bundle.tracks["main"].data.shape == (2, 2, 3)
+
+
+def test_bound_media_ops_reach_the_model_output_handle() -> None:
+    bridge, model = make_bridge()
+    calls: list[str] = []
+    bridge.bind_outbound(
+        broadcast=lambda msg: None,
+        addressed=lambda conn, msg, req: None,
+        media=lambda chunk: None,
+        media_ops=MediaOps(
+            flush=lambda: calls.append("flush"),
+            set_rate=lambda fps: calls.append(f"rate:{fps}"),
+            set_depth=lambda depth: calls.append(f"depth:{depth}"),
+        ),
+    )
+    model.output.flush()
+    model.output.fps = 24
+    assert calls == ["flush", "rate:24.0"]
 
 
 # --- lifecycle + surface -------------------------------------------------

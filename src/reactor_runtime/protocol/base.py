@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from enum import Enum
 from typing import Any
 
+from reactor_runtime.codes import PUBLISH_REFUSED
 from reactor_runtime.protocol.common import dict_to_struct
 from reactor_wire.v1 import common_pb2, control_pb2, data_pb2, model_pb2, platform_pb2, track_pb2
 
@@ -174,7 +175,7 @@ class Codec(ABC):
                 request_id=request_id,
                 kind=common_pb2.MessageKind.MESSAGE_KIND_RESPONSE,
                 error=common_pb2.Error(
-                    code="publish_refused", message=reason or "track already published"
+                    code=PUBLISH_REFUSED, message=reason or "track already published"
                 ),
             )
         return self.encode(message)
@@ -261,6 +262,21 @@ class Codec(ABC):
                 categories=categories or [],
                 message=message,
             ),
+        )
+        return self.encode(wire)
+
+    def encode_session_ended(self, *, reason: str) -> tuple[Channel, bytes | str]:
+        """Encode the platform's session-ended notice for the client.
+
+        Like a moderation verdict, the notice is unsolicited, so it rides a
+        ``ControlServerMessage`` notification with no ``request_id``. *reason*
+        is the platform-authored, human-readable description of the cause,
+        delivered verbatim. The physical channel is version-dependent and
+        returned alongside the frame.
+        """
+        wire = control_pb2.ControlServerMessage(
+            kind=common_pb2.MessageKind.MESSAGE_KIND_NOTIFICATION,
+            session_ended=platform_pb2.SessionEnded(reason=reason),
         )
         return self.encode(wire)
 

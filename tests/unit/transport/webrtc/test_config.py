@@ -14,7 +14,7 @@ def test_defaults_match_the_old_transport_settings() -> None:
     assert cfg.hw_codecs_enabled is False
     assert cfg.bwe_min_kbps == 500
     assert cfg.bwe_max_kbps == 10000
-    assert cfg.bwe_target_kbps == 4000
+    assert cfg.bwe_initial_kbps == 4000
     assert cfg.bwe_target_update_threshold == 0.05
     assert cfg.rtx_max_size_packets == 512
     assert cfg.rtx_max_size_time_ms == 200
@@ -38,10 +38,10 @@ def test_config_is_overridable() -> None:
         ice_servers=(IceServer(urls=("stun:stun.example:3478",)),),
         transport_policy=IceTransportPolicy.RELAY,
         hw_codecs_enabled=True,
-        bwe_target_kbps=2000,
+        bwe_initial_kbps=2000,
     )
 
     assert cfg.transport_policy is IceTransportPolicy.RELAY
     assert cfg.hw_codecs_enabled is True
-    assert cfg.bwe_target_kbps == 2000
+    assert cfg.bwe_initial_kbps == 2000
     assert cfg.ice_servers[0].urls == ("stun:stun.example:3478",)

@@ -102,6 +102,9 @@ class RuntimeConfig:
 
     Attributes:
         model_ref: Import reference to the model class, ``"module:Class"``.
+        model_name: The name the model is published under (from ``model.name``
+            in ``reactor.yaml``), which titles its schema. ``None`` when the
+            manifest states none, leaving the name to be derived from the class.
         config_path: Absolute path to the model's config file (from
             ``runtime.config`` in ``reactor.yaml``), or ``None`` when the
             manifest names none. Handed to the model's ``load`` to read however
@@ -114,6 +117,7 @@ class RuntimeConfig:
     """
 
     model_ref: str
+    model_name: str | None = None
     config_path: Path | None = None
     host: str = "0.0.0.0"
     port: int = 8080

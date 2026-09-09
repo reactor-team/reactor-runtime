@@ -75,7 +75,6 @@ class ContractInput(Input):
 class ContractModel(ReactorModel):
     """A bidirectional fixture model: one outbound and one inbound track."""
 
-    output: ContractOutput
     camera: ContractInput
 
     @event(name="set_mode")
@@ -90,8 +89,6 @@ class ContractModel(ReactorModel):
 class CrashingModel(ReactorModel):
     """A model whose run loop crashes as soon as it starts."""
 
-    output: ContractOutput
-
     def load(self, config_path: Path | None) -> None: ...
 
     async def run(self) -> None:
@@ -100,8 +97,6 @@ class CrashingModel(ReactorModel):
 
 class UnloadableModel(ReactorModel):
     """A model that fails to load, terminating the process's session."""
-
-    output: ContractOutput
 
     def load(self, config_path: Path | None) -> None:
         raise RuntimeError("weights missing")
@@ -334,6 +329,12 @@ class FakeConnection:
     def send_message(self, payload: bytes | str) -> None: ...
 
     def send_media(self, chunk: MediaChunk) -> None: ...
+
+    def flush_media(self) -> None: ...
+
+    def set_media_rate(self, fps: float) -> None: ...
+
+    def set_media_depth(self, depth: int) -> None: ...
 
     def resume_track(self, name: str) -> None: ...
 

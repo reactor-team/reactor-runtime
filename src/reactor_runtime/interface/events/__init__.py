@@ -16,6 +16,7 @@ from reactor_runtime.interface.events.decorators import (
     session_ended,
     session_started,
 )
+from reactor_runtime.interface.events.errors import CommandError
 from reactor_runtime.interface.events.messages import (
     MESSAGE_REGISTRY,
     MessageField,
@@ -27,6 +28,7 @@ from reactor_runtime.interface.events.messages import (
 __all__ = [
     "EVENT_REGISTRY",
     "MESSAGE_REGISTRY",
+    "CommandError",
     "EventHandler",
     "MessageField",
     "MessageFieldInfo",

@@ -46,7 +46,8 @@ class IceCandidate:
     """One trickle-ICE candidate from the client.
 
     Attributes:
-        candidate: The candidate string (SDP ``a=candidate`` form).
+        candidate: The candidate string (SDP ``a=candidate`` form); an empty
+            string is the end-of-candidates marker (RFC 8838).
         sdp_mid: The media-stream identifier the candidate belongs to, or
             ``None`` when addressed by m-line index instead.
         sdp_mline_index: The index of the m-line the candidate belongs to, or

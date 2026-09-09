@@ -8,10 +8,25 @@ of two shapes, chosen by the ``REACTOR_LOG_FORMAT`` environment variable:
 - ``json``: one JSON object per line, ready for a log pipeline to parse.
 
 Call sites pass structured context as keyword arguments —
-``log.info("session started", session_id=sid)`` — and the active formatter
-renders them; the wire shape is the formatter's concern, not the call site's.
+``log.info("chunk encoded", chunk_idx=idx)`` — and the active formatter renders
+them; the wire shape is the formatter's concern, not the call site's.
 ``configure`` installs the chosen formatter on the root logger, and
 ``get_logger`` returns a logger to write through.
+
+Three fields arrive without a call site naming them, stamped by
+:class:`SessionContextFilter` on the handler ``configure`` installs. While a
+session is live, every record carries its ``session_id``. From the moment the
+runtime boots, every record carries the lifecycle it was written in, at both
+granularities: ``state``, the session state machine's word — the same words the
+session descriptor's ``state`` field serves — and ``runtime_state``, its coarse
+projection, the words the health route serves (``loading`` / ``available`` /
+``serving`` / ``terminated``). Carrying both means a reader can filter by
+whichever vocabulary they read off a surface: the model-load window is
+``state="created"`` and equally ``runtime_state="loading"``. Because the stamp
+happens where records are written rather than where they are made, it reaches a
+model's own ``logging.getLogger(__name__)`` and any third-party library that
+propagates to root, so a line can be traced to the session and phase that
+produced it without model code threading any of it through its call sites.
 """
 
 from __future__ import annotations
@@ -34,6 +49,94 @@ _REACTOR_FIELDS_ATTR = "reactor_fields"
 _JSON_RESERVED = frozenset({"ts", "level", "logger", "msg", "exc_info"})
 
 _QUOTE_TRIGGERS = (" ", "=", '"', "\n", "\r", "\t")
+
+# The live session's id, stamped on every record while it is set. A module global
+# rather than a ContextVar because a session fans its work across plain worker
+# threads, which do not inherit context; the runtime hosts one session at a time,
+# so a single value is unambiguous.
+_session_id: str | None = None
+
+# Counts bindings, so a release can name the one it retires. Two sessions may
+# carry the same id — nothing stops a caller reusing one — and a release that
+# matched on the id alone would unbind the session that reused it.
+_session_binding = 0
+
+
+def set_session_id(session_id: str | None) -> int:
+    """Stamp *session_id* on every record written from now on.
+
+    Args:
+        session_id: The live session's id, or ``None`` to stamp nothing.
+
+    Returns:
+        A token naming this binding, which :func:`release_session_id` takes to
+        retire it.
+    """
+    global _session_id, _session_binding
+    _session_id = session_id
+    _session_binding += 1
+    return _session_binding
+
+
+def clear_session_id() -> None:
+    """Stop stamping a session id, for the window between sessions."""
+    set_session_id(None)
+
+
+def release_session_id(binding: int) -> None:
+    """Retire the binding *binding* names, leaving a later one in place.
+
+    A session's teardown outlives the move that ends it, so the release that
+    follows one is deferred until that work has finished. By then the next
+    session may already have bound its own id — the same id, even, since nothing
+    stops a caller reusing one — so a release names the binding it retires rather
+    than the value that binding held.
+
+    Args:
+        binding: The token :func:`set_session_id` returned, ignored once a later
+            binding has replaced the one it names.
+    """
+    global _session_id
+    if _session_binding == binding:
+        _session_id = None
+
+
+def get_session_id() -> str | None:
+    """Return the id currently being stamped, or ``None`` between sessions."""
+    return _session_id
+
+
+# The runtime's lifecycle, stamped on every record while set: the state
+# machine's own word and its coarse projection. One fact at two granularities,
+# so one setter binds both and they cannot drift apart. Unlike the session id
+# they need no binding token: there is always exactly one current state and the
+# latest write is by definition the truth, so last-write-wins is the correct
+# semantics rather than a race to guard against.
+_state: str | None = None
+_runtime_state: str | None = None
+
+
+def set_state(state: str | None, runtime_state: str | None) -> None:
+    """Stamp *state* and *runtime_state* on every record written from now on.
+
+    Args:
+        state: The session state machine's word, or ``None`` to stamp nothing.
+        runtime_state: Its coarse lifecycle projection, the health route's
+            vocabulary, or ``None`` to stamp nothing.
+    """
+    global _state, _runtime_state
+    _state = state
+    _runtime_state = runtime_state
+
+
+def get_state() -> str | None:
+    """Return the machine word currently being stamped, or ``None`` before boot."""
+    return _state
+
+
+def get_runtime_state() -> str | None:
+    """Return the coarse word currently being stamped, or ``None`` before boot."""
+    return _runtime_state
 
 
 def _logfmt_value(value: Any) -> str:
@@ -61,6 +164,37 @@ def _record_fields(record: logging.LogRecord) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {}
     return {key: value for key, value in raw.items() if value is not None}
+
+
+class SessionContextFilter(logging.Filter):
+    """Stamp the live session's id and the runtime's state on every record.
+
+    Sits on the handler rather than on one logger, so it sees every record a
+    handler writes: the runtime's own, a model's ``logging.getLogger(__name__)``,
+    and a third-party library's that propagates to root. A call site that names
+    ``session_id``, ``state``, or ``runtime_state`` itself keeps its own value —
+    a model logging its own ``state`` claims that record's field, deliberately —
+    and a field with nothing bound, the session id between sessions or the
+    states before boot, is absent rather than empty.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Merge the ambient context into *record*'s structured fields."""
+        stamped = {
+            "session_id": _session_id,
+            "state": _state,
+            "runtime_state": _runtime_state,
+        }
+        context = {key: value for key, value in stamped.items() if value is not None}
+        if not context:
+            return True
+        fields = getattr(record, _REACTOR_FIELDS_ATTR, None)
+        if not isinstance(fields, dict):
+            setattr(record, _REACTOR_FIELDS_ATTR, context)
+            return True
+        for key, value in context.items():
+            fields.setdefault(key, value)
+        return True
 
 
 class TextFormatter(logging.Formatter):
@@ -159,7 +293,9 @@ def configure(*, level: int = logging.INFO, stream: IO[str] | None = None) -> No
     The shape is chosen by ``REACTOR_LOG_FORMAT``: ``json`` for one JSON object
     per line, anything else (the default) for human-readable ``key=value`` text.
     Replaces any handlers already on the root logger so output has a single,
-    predictable shape.
+    predictable shape. The handler carries a :class:`SessionContextFilter`, so
+    every record written through it is stamped with the live session's id and
+    the runtime's lifecycle state at both granularities.
 
     Args:
         level: The level the root logger is set to.
@@ -171,6 +307,7 @@ def configure(*, level: int = logging.INFO, stream: IO[str] | None = None) -> No
     )
     handler = logging.StreamHandler(stream)
     handler.setFormatter(formatter)
+    handler.addFilter(SessionContextFilter())
     root = logging.getLogger()
     for existing in root.handlers[:]:
         root.removeHandler(existing)
@@ -180,8 +317,16 @@ def configure(*, level: int = logging.INFO, stream: IO[str] | None = None) -> No
 
 __all__ = [
     "JsonFormatter",
+    "SessionContextFilter",
     "StructuredLogger",
     "TextFormatter",
+    "clear_session_id",
     "configure",
     "get_logger",
+    "get_runtime_state",
+    "get_session_id",
+    "get_state",
+    "release_session_id",
+    "set_session_id",
+    "set_state",
 ]

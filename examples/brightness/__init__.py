@@ -1,7 +1,8 @@
 """The brightness example: a generated, client-controllable gradient with audio.
 
-Run it from this directory with ``python -m reactor_runtime.serve`` — the
-``reactor.yaml`` here points the runtime at the model.
+Run it from this directory with ``reactor build && reactor run`` — the CLI
+builds the image from the ``build:`` block in ``reactor.yaml`` and serves the
+model it names.
 """
 
 from examples.brightness.brightness import Brightness

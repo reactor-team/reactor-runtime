@@ -159,3 +159,83 @@ def deduplicate_bundle_pts(sdp: str) -> str:
         rebuilt.append(_strip_payload_types(section, conflicting))
 
     return "".join(session_lines) + "".join("".join(section) for section in rebuilt)
+
+
+_DIRECTIONS = ("sendrecv", "sendonly", "recvonly", "inactive")
+_MID_PREFIX = "a=mid:"
+
+
+def set_media_direction(sdp: str, mid: str, direction: str) -> str:
+    """Rewrite the direction of the m-section carrying *mid*.
+
+    Stopping one track's sender is a local renegotiation: the same descriptions
+    go back to libwebrtc with that section's direction flipped, and the engine
+    starts or stops the stream behind it. Nothing is signalled — the client's
+    view of the session does not change, and neither does anything else in the
+    SDP, so re-applying it is not an ICE restart or a codec change.
+
+    A section with no direction line is ``sendrecv`` by default; one is added
+    after its mid so the flip has something to act on.
+
+    Args:
+        sdp: The description to rewrite.
+        mid: The media id naming the section to change.
+        direction: One of ``sendrecv``, ``sendonly``, ``recvonly``, ``inactive``.
+
+    Returns:
+        The description with that one section's direction replaced.
+
+    Raises:
+        ValueError: If *direction* is not an SDP direction.
+    """
+    if direction not in _DIRECTIONS:
+        raise ValueError(f"not an SDP direction: {direction!r}")
+
+    lines = sdp.split("\r\n")
+    bounds = [i for i, line in enumerate(lines) if line.startswith("m=")]
+    for start, end in zip(bounds, [*bounds[1:], len(lines)], strict=True):
+        section = lines[start:end]
+        if f"{_MID_PREFIX}{mid}" not in section:
+            continue
+        for offset, line in enumerate(section):
+            if line.removeprefix("a=") in _DIRECTIONS:
+                lines[start + offset] = f"a={direction}"
+                break
+        else:
+            after_mid = next(i for i, line in enumerate(section) if line.startswith(_MID_PREFIX))
+            lines.insert(start + after_mid + 1, f"a={direction}")
+        break
+    return "\r\n".join(lines)
+
+
+def bump_session_version(sdp: str, by: int) -> str:
+    """Advance the session version in the ``o=`` line by *by*.
+
+    RFC 3264 §8 requires the version to increase on each offer or answer within
+    a session, so a description re-applied with the version it already carried
+    describes no change and is free to be treated as the duplicate it looks
+    like. A local renegotiation has to advance it for the same reason a
+    signalled one does.
+
+    The origin line is ``o=<user> <sess-id> <sess-version> <nettype> <addrtype>
+    <address>``, so only the third field moves.
+
+    Args:
+        sdp: The description to rewrite.
+        by: How far past the negotiated version to place this one.
+
+    Returns:
+        The description with its session version advanced, or unchanged when it
+        has no parsable origin line.
+    """
+    lines = sdp.split("\r\n")
+    for index, line in enumerate(lines):
+        if not line.startswith("o="):
+            continue
+        fields = line.split(" ")
+        if len(fields) < 3 or not fields[2].isdigit():
+            break
+        fields[2] = str(int(fields[2]) + by)
+        lines[index] = " ".join(fields)
+        break
+    return "\r\n".join(lines)

@@ -9,8 +9,10 @@ The lifecycle decorators tag a method as a hook for a reactor-authoritative fact
 split by scope. ``@session_started`` / ``@session_ended`` fire once for the
 session as a whole; ``@connected`` / ``@disconnected`` fire per client
 connection, so a model can tell a fresh viewer joining an existing session apart
-from the session itself beginning or ending. ``@file_uploaded`` fires when a
-client uploads a file. Each decorator only stamps metadata on the function; the
+from the session itself beginning or ending. The scopes do not compose into one
+another: a session ending is announced by ``@session_ended`` alone, never as one
+``@disconnected`` per remaining client. ``@file_uploaded`` fires when a client
+uploads a file. Each decorator only stamps metadata on the function; the
 model class reads it back when it assembles its contract.
 """
 
@@ -134,8 +136,10 @@ def session_started(func: Callable[..., Any]) -> Callable[..., Any]:
     """Mark a method as the handler run once when the session begins.
 
     Scoped to the whole session, not a single client: it fires when the session
-    starts, before any client has connected. Use ``@connected`` for per-client
-    setup.
+    starts, before any client has connected. This is the hook for
+    once-per-session initialization — it fires exactly once for every session
+    the process serves, which no per-connection bookkeeping can guarantee (see
+    ``@disconnected`` for why). Use ``@connected`` for per-client setup.
     """
     setattr(func, SESSION_STARTED_ATTR, True)
     return func
@@ -159,7 +163,16 @@ def connected(func: Callable[..., Any]) -> Callable[..., Any]:
 
 
 def disconnected(func: Callable[..., Any]) -> Callable[..., Any]:
-    """Mark a method as the handler run once when a client disconnects."""
+    """Mark a method as the handler run once when a client disconnects.
+
+    Fires only when a client's own connection drops while the session stays
+    live. When the session itself ends, its connections are torn down
+    wholesale and this hook does not fire for them — the model hears
+    ``@session_ended`` once instead. A counter incremented in ``@connected``
+    and decremented here therefore does not return to zero across sessions;
+    gate once-per-session work on ``@session_started``, and track
+    first-vs-later-client logic within a session on session-scoped state.
+    """
     setattr(func, DISCONNECTED_ATTR, True)
     return func
 

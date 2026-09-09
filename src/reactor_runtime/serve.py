@@ -8,10 +8,12 @@ platform.
 
 This is also the runtime's one configuration boundary: the manifest names the
 model, and the surrounding deployment names everything else (bind address, the
-ICE servers and port range, the lifecycle timeouts) through environment
-variables. The transport and lifecycle config objects stay free of environment
-reads; the small adapter here is the only place that translates the outside
-world into them.
+ICE servers and port range, the congestion-control and per-sender bitrate
+limits, the video codec preference order, the lifecycle timeouts) through
+environment variables.
+The transport and lifecycle config objects stay free of environment reads; the
+small adapter here is the only place that translates the outside world into
+them.
 """
 
 from __future__ import annotations
@@ -23,25 +25,22 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any
-
-import yaml
 
 from reactor_runtime import log
-from reactor_runtime.core import RecordingConfig, RuntimeConfig
+from reactor_runtime.core import RuntimeConfig, RuntimeState, SessionState
 from reactor_runtime.http import HttpServer
+from reactor_runtime.manifest import MANIFEST, load_config
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.runner import Runner
 from reactor_runtime.service import Service
 from reactor_runtime.transport.webrtc.config import (
+    CodecEntry,
     IceServer,
     IceTransportPolicy,
     WebRtcConfig,
 )
-from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
+from reactor_runtime.transport.webrtc.peer import _VIDEO_CODEC_BY_NAME, WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.router import WebRtcRouter
-
-_MANIFEST = "reactor.yaml"
 
 # Public STUN server used when no STUN/TURN is configured, so the SDP answer
 # carries a server-reflexive candidate. A same-host client still connects on
@@ -123,6 +122,34 @@ def _ice_policy_from_env() -> IceTransportPolicy:
         raise SystemExit(f"ICE_TRANSPORT_POLICY {raw!r} must be 'all' or 'relay'") from None
 
 
+def _video_codecs_from_env() -> tuple[CodecEntry, ...]:
+    """Read ``WEBRTC_VIDEO_CODECS`` (comma-separated names, most preferred first).
+
+    Defaults to ``WebRtcConfig.supported_video_codecs`` when unset. A name not
+    in ``_VIDEO_CODEC_BY_NAME`` (the names ``reactor_webrtc`` recognizes at
+    all) is a typo or an unsupported codec and fails fast at boot; a name it
+    recognizes but this build did not compile in (e.g. hardware H264 on a
+    software-only host) is accepted here and silently skipped at negotiation
+    time by ``Transceiver.set_codec_preferences`` instead.
+
+    Raises:
+        SystemExit: If an entry isn't a name reactor_webrtc recognizes.
+    """
+    names = _csv("WEBRTC_VIDEO_CODECS")
+    if not names:
+        return WebRtcConfig.supported_video_codecs
+    codecs: list[CodecEntry] = []
+    for name in names:
+        upper = name.upper()
+        if upper not in _VIDEO_CODEC_BY_NAME:
+            raise SystemExit(
+                f"WEBRTC_VIDEO_CODECS entry {name!r} must be one of "
+                f"{', '.join(sorted(_VIDEO_CODEC_BY_NAME))}"
+            )
+        codecs.append({"codec": upper})
+    return tuple(codecs)
+
+
 def _float_env(name: str, default: float) -> float:
     """Return env var *name* as a float, or *default* when unset/empty.
 
@@ -138,17 +165,87 @@ def _float_env(name: str, default: float) -> float:
         raise SystemExit(f"{name} {raw!r} must be a number") from None
 
 
+def _int_env(name: str, default: int) -> int:
+    """Return env var *name* as an int, or *default* when unset/empty.
+
+    Raises:
+        SystemExit: If the value is set but not an integer.
+    """
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise SystemExit(f"{name} {raw!r} must be an integer") from None
+
+
+def _bwe_limits_from_env() -> tuple[int, int, int]:
+    """Read the congestion-control bitrate limits, enforcing libwebrtc's own ordering.
+
+    ``set_bitrate`` requires ``0 <= min <= initial <= max``; checking it here, once at
+    boot, turns a misconfigured deployment into a startup failure instead of a
+    ``RuntimeError`` repeated on every connection's negotiation.
+
+    Raises:
+        SystemExit: If any value is negative or the ordering does not hold.
+    """
+    min_kbps = _int_env("WEBRTC_BWE_MIN_KBPS", WebRtcConfig.bwe_min_kbps)
+    max_kbps = _int_env("WEBRTC_BWE_MAX_KBPS", WebRtcConfig.bwe_max_kbps)
+    initial_kbps = _int_env("WEBRTC_BWE_INITIAL_KBPS", WebRtcConfig.bwe_initial_kbps)
+    if not 0 <= min_kbps <= initial_kbps <= max_kbps:
+        raise SystemExit(
+            "WEBRTC_BWE_MIN_KBPS, WEBRTC_BWE_INITIAL_KBPS, and WEBRTC_BWE_MAX_KBPS must "
+            f"satisfy 0 <= min <= initial <= max; got {min_kbps} <= {initial_kbps} <= {max_kbps}"
+        )
+    return min_kbps, max_kbps, initial_kbps
+
+
+def _sender_limits_from_env() -> tuple[int, int]:
+    """Read the per-sender bitrate bounds, checked at boot like the BWE ones.
+
+    These bound one track's encoder, where the BWE limits bound the whole
+    connection's estimate. Both must allow a rate for a stream to reach it, and
+    the per-sender ceiling is the one that lifts libwebrtc's resolution-keyed
+    default of 2500 kbps.
+
+    ``0`` or less means "leave this bound at the libwebrtc default", matching how
+    the rest of this config spells an absent limit. A negative is not an error
+    here for that reason, but ``min`` above ``max`` is: libwebrtc refuses the
+    pair, and finding out at boot beats finding out on every negotiation.
+
+    Raises:
+        SystemExit: If the ordering does not hold.
+    """
+    max_kbps = _int_env("WEBRTC_SENDER_MAX_KBPS", WebRtcConfig.sender_max_kbps)
+    min_kbps = _int_env("WEBRTC_SENDER_MIN_KBPS", WebRtcConfig.sender_min_kbps)
+    if min_kbps > 0 < max_kbps and min_kbps > max_kbps:
+        raise SystemExit(
+            "WEBRTC_SENDER_MIN_KBPS must not exceed WEBRTC_SENDER_MAX_KBPS; "
+            f"got {min_kbps} > {max_kbps}"
+        )
+    return max_kbps, min_kbps
+
+
 def _webrtc_config_from_env() -> WebRtcConfig:
     """Build the WebRTC transport config from the environment.
 
     The transport config object itself reads no environment; this adapter is the
     single place the outside world is translated into it.
     """
+    bwe_min_kbps, bwe_max_kbps, bwe_initial_kbps = _bwe_limits_from_env()
+    sender_max_kbps, sender_min_kbps = _sender_limits_from_env()
     return WebRtcConfig(
         ice_servers=_ice_servers_from_env(),
         port_range=_port_range_from_env(),
         transport_policy=_ice_policy_from_env(),
         ping_timeout=_float_env("WEBRTC_CLIENT_PING_TIMEOUT_SECONDS", 20.0),
+        supported_video_codecs=_video_codecs_from_env(),
+        bwe_min_kbps=bwe_min_kbps,
+        bwe_max_kbps=bwe_max_kbps,
+        bwe_initial_kbps=bwe_initial_kbps,
+        sender_max_kbps=sender_max_kbps,
+        sender_min_kbps=sender_min_kbps,
     )
 
 
@@ -259,109 +356,6 @@ async def serve(
     await _assemble(cfg, webrtc, peer_factory=peer_factory).run()
 
 
-def _load_config(manifest: Path) -> RuntimeConfig:
-    """Read a ``reactor.yaml`` manifest into a :class:`RuntimeConfig`.
-
-    ``runtime.import`` — the ``"module:Class"`` model reference — and
-    ``runtime.config`` — the path to the model's own config file — name the
-    model, and the top-level ``recording:`` block configures the recorder; the
-    rest of the manifest describes the model to the platform and is not the
-    runtime's concern. The config path is passed to the model verbatim (resolved
-    to an absolute path); the runtime never parses its contents.
-
-    Args:
-        manifest: Path to the ``reactor.yaml`` file.
-
-    Returns:
-        A configuration naming the model the manifest points at, the path to its
-        config file when present, and the recorder's settings.
-
-    Raises:
-        SystemExit: If the manifest is not valid YAML, is not a mapping, or
-            carries no ``runtime.import``.
-    """
-    try:
-        document = yaml.safe_load(manifest.read_text())
-    except yaml.YAMLError as error:
-        raise SystemExit(f"{manifest}: invalid YAML: {error}") from None
-    if not isinstance(document, dict):
-        raise SystemExit(f"{manifest}: not a valid {_MANIFEST}")
-    runtime = document.get("runtime")
-    runtime = runtime if isinstance(runtime, dict) else {}
-    model_ref = runtime.get("import")
-    if not isinstance(model_ref, str) or not model_ref:
-        raise SystemExit(f"{manifest}: missing runtime.import (the model reference)")
-    return RuntimeConfig(
-        model_ref=model_ref,
-        config_path=_resolve_config_path(runtime, manifest),
-        recording=_recording_from_manifest(document.get("recording")),
-    )
-
-
-def _recording_from_manifest(block: Any) -> RecordingConfig:
-    """Parse the manifest's ``recording:`` block into a :class:`RecordingConfig`.
-
-    A missing or non-mapping block leaves recording disabled at its defaults.
-    Unknown keys are ignored so a manifest can carry forward-looking settings
-    without breaking an older runtime.
-
-    Args:
-        block: The raw ``recording:`` value from the manifest, if any.
-
-    Returns:
-        The parsed recorder configuration.
-    """
-    if not isinstance(block, dict):
-        return RecordingConfig()
-    raw_video = block.get("video")
-    video: dict[str, Any] = raw_video if isinstance(raw_video, dict) else {}
-    raw_audio = block.get("audio")
-    audio: dict[str, Any] = raw_audio if isinstance(raw_audio, dict) else {}
-    defaults = RecordingConfig()
-    return RecordingConfig(
-        enabled=bool(block.get("enabled", defaults.enabled)),
-        chunk_seconds=int(block.get("chunk_seconds", defaults.chunk_seconds)),
-        clip_max_seconds=int(block.get("clip_max_seconds", defaults.clip_max_seconds)),
-        skip_leading_black=bool(block.get("skip_leading_black", defaults.skip_leading_black)),
-        video_track=block.get("video_track"),
-        audio_track=block.get("audio_track"),
-        video_codec=str(video.get("codec", defaults.video_codec)),
-        video_preset=str(video.get("preset", defaults.video_preset)),
-        video_crf=int(video.get("crf", defaults.video_crf)),
-        target_width=_optional_int(video.get("target_width")),
-        target_height=_optional_int(video.get("target_height")),
-        audio_codec=str(audio.get("codec", defaults.audio_codec)),
-        audio_bitrate_kbps=int(audio.get("bitrate_kbps", defaults.audio_bitrate_kbps)),
-    )
-
-
-def _optional_int(value: Any) -> int | None:
-    """Coerce an optional manifest value to ``int``, leaving ``None`` as is."""
-    return None if value is None else int(value)
-
-
-def _resolve_config_path(runtime: dict[str, Any], manifest: Path) -> Path | None:
-    """Resolve ``runtime.config`` to an absolute path, relative to the manifest.
-
-    A relative ``config`` is resolved against the manifest's directory so it
-    works regardless of the process's working directory. Returns ``None`` when
-    no config file is named.
-
-    Args:
-        runtime: The manifest's ``runtime`` section.
-        manifest: Path to the ``reactor.yaml`` file, whose parent anchors a
-            relative config path.
-
-    Returns:
-        The absolute config path, or ``None`` when none is configured.
-    """
-    config = runtime.get("config")
-    if not isinstance(config, str) or not config:
-        return None
-    candidate = Path(config)
-    return candidate if candidate.is_absolute() else manifest.parent / candidate
-
-
 def main() -> None:
     """Boot the runtime from the ``reactor.yaml`` in the working directory.
 
@@ -378,11 +372,17 @@ def main() -> None:
     from reactor_runtime.transport.webrtc.peer import libwebrtc_peer_factory
 
     log.configure(level=_log_level_from_env())
-    manifest = Path.cwd() / _MANIFEST
+    # The runner re-stamps this at construction and on every move; stamping here
+    # too covers the lines written before it exists — the process is up and the
+    # model is not loaded, which is exactly what CREATED names and what LOADING
+    # projects it to — so every record the process writes carries its lifecycle,
+    # the first one included.
+    log.set_state(SessionState.CREATED.name.lower(), RuntimeState.LOADING.value)
+    manifest = Path.cwd() / MANIFEST
     if not manifest.is_file():
-        raise SystemExit(f"no {_MANIFEST} found in {Path.cwd()}")
+        raise SystemExit(f"no {MANIFEST} found in {Path.cwd()}")
     sys.path.insert(0, str(manifest.parent))
-    cfg = _apply_env(_load_config(manifest))
+    cfg = _apply_env(load_config(manifest))
     webrtc = _webrtc_config_from_env()
     logger.info(
         "starting reactor runtime",

@@ -1,4 +1,3 @@
-# Copyright (c) 2026 Reactor Technologies, Inc. All rights reserved.
 """Media-time marker bookkeeping for the recorder.
 
 Markers are seconds on the recorded media timeline, not wall-clock: the timeline

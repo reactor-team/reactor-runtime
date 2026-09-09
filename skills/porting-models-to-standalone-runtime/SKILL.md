@@ -74,6 +74,57 @@ container at run time. The runtime resolves it to an absolute path and hands
 body that indexed a dict needs the parse line above prepended; the rest is
 unchanged.
 
+## Connection counting breaks — use `@session_started` for per-session init
+
+Two lifecycle semantics differ on this runtime, and together they silently
+break a pattern common in models written against older runtimes: gating
+"first client of a session" initialization on a connection counter.
+
+```python
+# broken here
+@connected
+async def on_connect(self) -> None:
+    if self._connected_count == 0:
+        self.state._prompt_schedule = {}
+    self._connected_count += 1
+
+@disconnected
+async def on_disconnect(self) -> None:
+    self._connected_count -= 1
+```
+
+Why it fails: when the session itself ends (for example, closed through the
+API while clients are attached), the runtime tears the connections down
+wholesale — the model hears `@session_ended` once, **not** one
+`@disconnected` per client. `@disconnected` fires only when a client itself
+drops mid-session. So after any server-side session end, the counter never
+returns to zero. Meanwhile `self.state` is rebuilt fresh for every session,
+its private fields back at their class defaults. From the second session
+onward the init branch never runs and the model works against default state —
+typically a `None` where the first session had a dict, surfacing as a
+`TypeError` in a handler or, worse, inside the inference loop. Single-session
+testing passes; only a second session on the same process exposes it.
+
+Hook the session, not the clients:
+
+```python
+@session_started
+async def on_session_started(self) -> None:
+    self.state._prompt_schedule = {}
+```
+
+`@session_started` fires exactly once per session, before any client
+connects, and for a `ReactorPipeline` it runs with the session's fresh
+`self.state` already built: the runtime constructs `state` when the session
+starts and clears it only after `@session_ended`, so a private field
+initialized here stays alive across client disconnects and rejoins within
+the session. If first-vs-later-client logic *within* one session is
+genuinely needed, keep the flag on `self.state`: it is session-scoped, so
+it cannot leak into the next session the way an attribute on the model
+instance does. Audit every use of a connection counter when porting —
+teardown logic hung off `@disconnected` (dropping caches, releasing a
+sub-session) has the same blind spot and belongs in `@session_ended`.
+
 ## Profiler imports are gone — strip them
 
 `get_profiler` and the whole `reactor_runtime.profiling` module
@@ -89,30 +140,97 @@ like) is not part of this runtime. Remove those imports — only the package-roo
 surface is supported, and reaching past it is exactly what breaks on the next
 change.
 
-## Recording and clips do nothing
+## `UploadedFile` is `name` / `mime_type` / `data`
 
-A `recording:` block in `reactor.yaml` is inert, `requestClip` /
-`requestRecording` are unanswered, and there is no clip endpoint. If the model
-or its client assumed any of these, drop that assumption — recording is not
-wired here.
+Uploads work as they did: a field or `@event` parameter typed `UploadedFile` is
+an upload slot, and the runtime fetches the bytes and hands the handler a file.
+What changed is the shape of that file. It carries the name, the mime type, and
+the bytes — the upload id the client addressed it by stays inside the runtime and
+never crosses the model boundary.
 
-## Uploads are gone
+`size` is a property derived from the bytes (`len(data)`), not a field the client
+fills in. The two agree by construction: an upload is admitted only when its
+bytes match the length the client announced, so a handler that read `file.size`
+before keeps reading the same number, and it is now measured rather than
+asserted. `len(file.data)` says the same thing if you prefer it explicit.
 
-There is no upload store, and an `@event` cannot take an uploaded-file argument.
-A command that consumed an upload must be reworked to take the data over an
-input track instead.
+## Drop the `output: MyOutput` class annotation — `self.output` is a handle
 
-## Pacing moved out of the model — `buffer_size` and `output_buffer` are gone
+Models written for earlier cuts of this runtime often carried an inert class
+annotation naming their `Output` subclass:
 
-The model no longer paces its own output. `emit()` hands the whole batch of
-frames straight downstream, tagged with the rate they should play out at
-(measured from `compute_time` when given, else the class `fps`); the transport
-paces each connection itself. There is no `buffer_size` class attribute and no
-`self.output_buffer` — drop any reference to either. A model that set
-`buffer_size` for latency simply removes it; a probe that read
-`self.output_buffer._q` / `_queue` has nothing to read and should be dropped. The
-model's only output concern is emitting media chunks at whatever rate it
-produces them.
+```python
+class MyModel(ReactorPipeline):
+    state: MyState
+    output: MyOutput   # remove this line
+```
+
+Outbound tracks register when the `Output` subclass is *defined*; the
+annotation was never read. On this runtime the name is taken: the base class
+declares `output: OutputStream` and binds the model's playout handle there
+(see the next section), so a subclass re-annotating it with an `Output` type
+contradicts the real attribute and fails a type check. Delete the line —
+track registration is unaffected.
+
+## Pacing: `emit()` backpressures, `self.output` controls playout
+
+`emit()` hands the whole batch of frames downstream, tagged with the rate
+they should play out at (measured from `compute_time` when given, else the
+class `fps`); each connection paces itself. By default **emit waits while
+downstream is full**, throttling the model to the playout rate — the same
+backpressure older runtimes applied through their blocking output buffer, so
+a fast model needs no rate limiter of its own. The wait runs off the model
+loop; commands and lifecycle events keep dispatching. A producer that would
+rather skip frames than wait (a camera-driven model) passes
+`emit(..., drop=True)` and the overflow is discarded downstream.
+
+Never tag a chunk with a doctored rate. Playout follows the tag, so a
+"debuffed" or pinned `compute_time` makes the model permanently outrun its
+own playout — pass the honest measured time, or none at all and let the
+declared `fps` stand.
+
+Two pieces of the older authoring surface are back, one renamed:
+
+- **`buffer_size`** (class attribute) declares how many frames may queue
+  between the model and each wire — the buffered-latency bound. It is never
+  applied below one emitted chunk, so a batching model always fits a whole
+  chunk. Leave it undeclared to accept the default.
+- **`self.output`** is the model's handle onto its outbound stream — the
+  successor of the old `output_buffer`, named for what it is: there is no
+  single buffer, and the operations fan out to every connection's own queue
+  (including connections that join later).
+
+```python
+self.output.fps = 24      # re-pace queued frames now; tag emits from here on
+self.output.flush()       # drop queued frames, cut playout to black
+await self.output.emit(x) # emit() on the model is an alias of this
+```
+
+One caveat on `self.output.fps`: the assignment holds only for a model
+that declares a class-level `fps` or emits without `compute_time`. A
+pipeline that declares no `fps` is driven with the measured throughput on
+every yield, and each chunk's own tag supersedes the assignment — so on an
+unpinned pipeline it lasts one chunk. A `set_target_fps`-style command
+therefore belongs on a model that pins `fps`.
+
+Call `flush()` when generation resets or restarts, so the client cuts to
+black instead of holding the last frame of the old content. The session
+recording is not flushed — a playout cut is not an archive boundary. A probe
+that read `self.output_buffer._q` / `_queue` still has nothing to read; the
+queues live per connection, downstream.
+
+## Inbound frames carry the sender's `capture_time_us`
+
+An `InputFrame` arrives with `capture_time_us` beside `pts` and `metadata`:
+the microsecond its sender stamped the frame, or `None` from a sender that
+stamps nothing. Nothing in the runtime reads it; it is there for a model
+that needs the source's own timing.
+
+Unlike `pts`, it is a reading of another machine's clock. Differences
+between stamps from one sender are that source's timing, which is the part
+worth having; a stamp minus a local clock reading is mostly the offset
+between two clocks that drift apart, so a latency computed that way
+measures the wrong thing.
 
 ## What did not change
 
@@ -124,6 +242,10 @@ produces them.
 `.reset()`. Weights are still located with `get_weights_path()` (now imported
 from `reactor_runtime`); it returns `$REACTOR_WEIGHTS_PATH` or
 `~/.cache/reactor_registry`.
+
+Recording needs nothing from the model either: the `recording:` block in
+`reactor.yaml` configures the recorder, and clip requests are answered off the
+runtime's own surface. Keep the block as it is.
 
 Once the breaks above are cleared the model should import, `load`, and run; a
 `reactor.yaml` naming the `ReactorModel` via `runtime.import` is all the runtime

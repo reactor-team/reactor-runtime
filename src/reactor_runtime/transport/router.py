@@ -57,6 +57,36 @@ class UnknownSessionError(RuntimeError):
     """
 
 
+class TooManyConnectionsError(RuntimeError):
+    """Raised when a new connection would exceed the session's concurrent limit.
+
+    The acceptor holds one media peer per live connection, so an unbounded
+    number of offers is an unbounded number of native peers. A fresh connection
+    offered past the configured ceiling is refused rather than negotiated; a
+    re-offer on an already-known connection is a reconnect and is always
+    admitted. A router maps this to a transient rejection so a client can retry
+    once a slot frees.
+
+    Attributes:
+        limit: The concurrent-connection ceiling that was reached.
+    """
+
+    def __init__(self, limit: int) -> None:
+        """Record the ceiling the offer was refused against."""
+        self.limit = limit
+        super().__init__(f"connection limit reached ({limit})")
+
+
+class ConnectionsExhaustedError(RuntimeError):
+    """Raised when the session's connection-id space is used up.
+
+    Ids are minted within a bounded per-session range and never reused within
+    the session, so a session that mints its whole allowance can mint no more.
+    Surfacing this rather than looping keeps id allocation from spinning the
+    event loop when the space is full.
+    """
+
+
 class SessionTransitionError(RuntimeError):
     """Raised when a session start or stop is rejected from the current state.
 
@@ -102,6 +132,14 @@ class SessionControl(ConnectionSink, Protocol):
 
     def new_conn_id(self) -> ConnId:
         """Mint a fresh connection id, unique within the session."""
+
+    def offer_admitted(self, conn_id: ConnId) -> None:
+        """Stamp an admitted connection offer with the live session.
+
+        Called as a transport accepts an offer, before negotiation begins. The
+        runner uses the stamp to refuse the wire if it only reaches its
+        connected state once a later session is running.
+        """
 
     def track_map(self) -> Mapping[str, Any]:
         """Return the model's declared track manifest for connection setup."""

@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Callable, Iterator
+from typing import Any
 
 import numpy as np
 import pytest
@@ -14,6 +15,7 @@ from reactor_runtime import (
     ReactorPipeline,
     Video,
     event,
+    session_started,
 )
 from reactor_runtime.core.model import (
     ClientConnected,
@@ -23,6 +25,7 @@ from reactor_runtime.core.model import (
     SessionStarted,
 )
 from reactor_runtime.core.values import ConnId
+from reactor_runtime.interface.internal.input_buffer import BufferClosed
 from reactor_runtime.interface.internal.reactor_core import CommandEnvelope
 from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.interface.pipeline.reactor_pipeline import _GeneratorEnded
@@ -40,7 +43,6 @@ class State(InputState):
 
 class Pipe(ReactorPipeline):
     state: State
-    output: Frame
     fps = 12
 
     def inference(self) -> Iterator[Frame]:
@@ -102,7 +104,6 @@ def test_auto_setters_render_though_they_never_enter_the_event_registry() -> Non
 
     class LocalPipe(ReactorPipeline):
         state: LocalState
-        output: Frame
 
         def inference(self) -> Iterator[Frame]:
             while True:
@@ -116,7 +117,6 @@ def test_auto_setters_render_though_they_never_enter_the_event_registry() -> Non
 def test_a_custom_event_shadows_the_generated_setter() -> None:
     class Custom(ReactorPipeline):
         state: State
-        output: Frame
 
         @event(name="set_speed", description="hand written")
         def set_speed(self, speed: float = InputField(default=2.0)) -> None:
@@ -133,8 +133,6 @@ def test_a_custom_event_shadows_the_generated_setter() -> None:
 
 def test_missing_state_annotation_raises_on_instantiation() -> None:
     class NoState(ReactorPipeline):
-        output: Frame
-
         def inference(self) -> Iterator[Frame]:
             yield _frame()
 
@@ -249,7 +247,6 @@ async def test_advance_rejects_a_non_output_yield() -> None:
 
 class FixedRecorder(ReactorPipeline):
     state: State
-    output: Frame
     fps = 12
 
     def __init__(self) -> None:
@@ -270,7 +267,6 @@ class FixedRecorder(ReactorPipeline):
 
 class DynamicRecorder(ReactorPipeline):
     state: State
-    output: Frame
 
     def __init__(self) -> None:
         super().__init__()
@@ -333,7 +329,6 @@ class _PinnedBase(ReactorPipeline):
 
 class InheritedFpsRecorder(_PinnedBase):
     state: State
-    output: Frame
 
     def __init__(self) -> None:
         super().__init__()
@@ -362,7 +357,6 @@ async def test_fps_pinned_on_an_intermediate_base_is_treated_as_fixed() -> None:
 
 class FatalInferencePipe(ReactorPipeline):
     state: State
-    output: Frame
     fps = 12
 
     def __init__(self) -> None:
@@ -385,6 +379,95 @@ async def test_an_inference_error_is_fatal_and_closes_the_generator() -> None:
     with pytest.raises(TypeError):
         await pipe.run()
     assert pipe.closed is True
+
+
+# -- teardown failures --------------------------------------------------------
+
+
+class FailingCleanupPipe(ReactorPipeline):
+    state: State
+    fps = 12
+
+    def inference(self) -> Iterator[Frame]:
+        try:
+            while True:
+                yield _frame()
+        finally:
+            raise RuntimeError("world reset failed")
+
+
+class UnwindingCleanupPipe(ReactorPipeline):
+    state: State
+    fps = 12
+
+    def inference(self) -> Iterator[object]:
+        try:
+            yield 123  # not an Output, Idle, or None
+        finally:
+            raise RuntimeError("world reset failed")
+
+
+class BufferClosedCleanupPipe(FailingCleanupPipe):
+    def __init__(self) -> None:
+        super().__init__()
+        self.advances = 0
+
+    async def _advance(self, gen: Any, is_async: bool) -> tuple[Output | None, float]:
+        # Produce one frame so the generator is running, then report the buffer as
+        # closed. A generator that never started skips its own cleanup on close.
+        self.advances += 1
+        if self.advances == 1:
+            return await super()._advance(gen, is_async)
+        raise BufferClosed
+
+
+async def test_a_cleanup_failure_after_a_clean_session_end_ends_the_model_loop() -> None:
+    pipe = FailingCleanupPipe()
+    _ready(pipe)
+    _open_session(pipe)
+    task = asyncio.create_task(pipe.run())
+    await asyncio.sleep(0.05)
+    # The client leaves, so the session loop finishes without an exception of its
+    # own and the cleanup failure is the only one to report.
+    pipe._runnable.clear()
+    with pytest.raises(RuntimeError, match="world reset failed"):
+        await task
+    assert pipe.state is None
+
+
+async def test_a_cleanup_failure_while_unwinding_keeps_the_original_exception() -> None:
+    pipe = UnwindingCleanupPipe()
+    _ready(pipe)
+    _open_session(pipe)
+    # The bad yield is the fault worth reporting; the cleanup failure on the way
+    # out must not replace it.
+    with pytest.raises(TypeError):
+        await pipe.run()
+    assert pipe.state is None
+
+
+async def test_a_cleanup_failure_after_a_closed_buffer_ends_the_model_loop() -> None:
+    pipe = BufferClosedCleanupPipe()
+    _ready(pipe)
+    _open_session(pipe)
+    # A closed input buffer breaks the loop without an exception, so it counts as
+    # a clean end and the cleanup failure propagates.
+    with pytest.raises(RuntimeError, match="world reset failed"):
+        await pipe.run()
+
+
+async def test_cancelling_the_loop_with_a_failing_cleanup_stays_cancelled() -> None:
+    pipe = FailingCleanupPipe()
+    _ready(pipe)
+    _open_session(pipe)
+    task = asyncio.create_task(pipe.run())
+    await asyncio.sleep(0.05)
+    # A shutdown cancels the loop. The cleanup failure is logged and dropped so a
+    # graceful stop does not look like a crash.
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert pipe.state is None
 
 
 # -- session-aware gating -----------------------------------------------------
@@ -416,9 +499,60 @@ async def test_the_last_client_leaving_clears_the_run_gate() -> None:
     assert not pipe._runnable.is_set()
 
 
+async def test_state_is_built_at_session_start_and_cleared_at_session_end() -> None:
+    pipe = Pipe()
+    _ready(pipe)
+    assert pipe.state is None
+    await pipe._dispatch_reactor_event(SessionStarted("s"))
+    assert isinstance(pipe.state, State)
+    await pipe._dispatch_reactor_event(SessionEnded("s", EndReason.STOPPED))
+    assert pipe.state is None
+
+
+async def test_state_survives_a_client_leaving_and_rejoining_mid_session() -> None:
+    pipe = Pipe()
+    _ready(pipe)
+    await pipe._dispatch_reactor_event(SessionStarted("s"))
+    await pipe._dispatch_reactor_event(ClientConnected(ConnId(1001), 1))
+    pipe.state.speed = 7.0
+    await pipe._dispatch_reactor_event(ClientDisconnected(ConnId(1001), 0))
+    await pipe._dispatch_reactor_event(ClientConnected(ConnId(1002), 1))
+    assert pipe.state.speed == 7.0
+
+
+class _ScheduleState(InputState):
+    speed: float = InputField(default=1.0)
+    _schedule: Any = None
+
+
+class _SessionInitPipe(ReactorPipeline):
+    state: _ScheduleState
+    fps = 12
+
+    def inference(self) -> Iterator[Frame]:
+        while True:
+            yield _frame()
+
+    @session_started
+    async def _init_schedule(self) -> None:
+        self.state._schedule = {}
+
+
+async def test_session_started_hook_runs_with_the_fresh_state_in_place() -> None:
+    pipe = _SessionInitPipe()
+    _ready(pipe)
+    await pipe._dispatch_reactor_event(SessionStarted("s"))
+    assert pipe.state._schedule == {}
+
+    # A mutation survives for the whole session and does not leak into the next.
+    pipe.state._schedule[3] = "prompt"
+    await pipe._dispatch_reactor_event(SessionEnded("s", EndReason.STOPPED))
+    await pipe._dispatch_reactor_event(SessionStarted("s2"))
+    assert pipe.state._schedule == {}
+
+
 class Streamer(ReactorPipeline):
     state: State
-    output: Frame
     fps = 12
 
     def __init__(self) -> None:

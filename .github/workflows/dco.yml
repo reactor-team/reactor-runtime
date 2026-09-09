@@ -50,6 +50,19 @@ jobs:
               continue
             fi
 
+            # Merge commits (e.g. from GitHub's "Update branch" button)
+            # carry no original authored content of their own; the DCO
+            # attests to the authorship of a commit's changes, which here
+            # belongs to the commits already checked on the branch being
+            # merged in. GitHub's UI also gives no way to add a trailer to
+            # these auto-generated commits, so exempt anything with more
+            # than one parent.
+            parent_count=$(git show -s --format='%P' "$sha" | wc -w)
+            if (( parent_count > 1 )); then
+              echo "Skipping DCO check for merge commit $sha."
+              continue
+            fi
+
             expected="Signed-off-by: ${author_name} <${author_email}>"
             body=$(git show -s --format='%B' "$sha")
 

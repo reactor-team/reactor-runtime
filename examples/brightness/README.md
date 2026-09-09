@@ -10,21 +10,37 @@ caption is drawn over every frame.
 
 ## Run
 
-The caption is drawn with Pillow, which is not a runtime dependency, so add it
-for the run. Run it as a layered dependency with `--with` rather than installing
-into the project venv — `uv run` re-syncs the project on every invocation, so a
-manually installed package gets dropped:
+This directory is a `reactor` workspace: `reactor.yaml` names the model and
+defines the image in its `build:` block, and `requirements.txt` lists the
+model's own dependencies (Pillow, which draws the caption). There is nothing
+to install on your host but the CLI and Docker.
 
 ```sh
 cd examples/brightness
-uv run --with 'pillow>=10.1' python -m reactor_runtime.serve
+reactor build --no-dockerfile
+reactor run
 ```
 
-Serves on `0.0.0.0:8080`. Point a client (e.g. the test-frontend) at it, or:
+`--no-dockerfile` renders the image from `reactor.yaml`'s `build:` block — no
+Dockerfile to write or maintain. `build.runtime_version` must match the
+`reactor-runtime==<version>` pin in `requirements.txt`; bump both together to
+upgrade.
+
+`reactor run` reuses the image `reactor build` produced (it builds one on first
+run if none exists, so pass `--no-dockerfile` there too), then serves WebRTC
+signaling on `http://localhost:8080`. Rebuild after editing anything baked
+into the image:
+
+```sh
+reactor build --no-dockerfile && reactor run
+```
+
+Connect a client from the [Reactor Sandbox](https://reactor-sandbox.vercel.app/)
+(pick **Local (Direct)**), or point the [JS SDK](https://docs.reactor.inc) at it
+with `local: true`. A quick liveness check:
 
 ```sh
 curl -s localhost:8080/health
-curl -s -X POST localhost:8080/start_session -H 'content-type: application/json' -d '{}'
 ```
 
 ## Commands
@@ -45,6 +61,6 @@ hand-written `@event` handlers:
 ## Recording
 
 `reactor.yaml` enables recording, so the runtime continuously encodes the output
-to local fMP4 segments and serves them under `/clips` (needs `ffmpeg` on `PATH`).
+to fMP4 segments in process and serves them under `/clips`.
 `requestClip(durationSeconds)` grabs the last N seconds and `requestRecording()`
 grabs the whole session.

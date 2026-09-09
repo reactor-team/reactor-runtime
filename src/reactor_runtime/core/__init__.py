@@ -30,6 +30,7 @@ from reactor_runtime.core.session import (
 from reactor_runtime.core.transport import Connection, ConnectionSink
 from reactor_runtime.core.typespec import TypeSpec
 from reactor_runtime.core.values import (
+    CommandFailure,
     ConnectionCapabilities,
     ConnId,
     Health,
@@ -49,6 +50,7 @@ __all__ = [
     "ClientConnected",
     "ClientDisconnected",
     "Command",
+    "CommandFailure",
     "CommandField",
     "ConnId",
     "Connection",

@@ -12,14 +12,14 @@ from reactor_runtime.runner import Runner
 from reactor_runtime.serve import (
     _apply_env,
     _assemble,
-    _load_config,
     _log_level_from_env,
     _port_range_from_env,
     _version,
+    _video_codecs_from_env,
     _webrtc_config_from_env,
     main,
 )
-from reactor_runtime.transport.webrtc.config import IceTransportPolicy, WebRtcConfig
+from reactor_runtime.transport.webrtc.config import CodecEntry, IceTransportPolicy, WebRtcConfig
 from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.signaling import SdpAnswer, SdpOffer, TrackMap
 
@@ -44,6 +44,12 @@ _WEBRTC_ENV = (
     "WEBRTC_PORT_RANGE",
     "ICE_TRANSPORT_POLICY",
     "WEBRTC_CLIENT_PING_TIMEOUT_SECONDS",
+    "WEBRTC_BWE_MIN_KBPS",
+    "WEBRTC_BWE_MAX_KBPS",
+    "WEBRTC_BWE_INITIAL_KBPS",
+    "WEBRTC_SENDER_MAX_KBPS",
+    "WEBRTC_SENDER_MIN_KBPS",
+    "WEBRTC_VIDEO_CODECS",
 )
 
 _RUNTIME_ENV = (
@@ -60,16 +66,6 @@ def _clear_adapter_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Run every test against a clean environment for the serve adapter."""
     for name in (*_WEBRTC_ENV, *_RUNTIME_ENV):
         monkeypatch.delenv(name, raising=False)
-
-
-_MANIFEST = """\
-model:
-  name: demo
-  version: 0.1.0
-runtime:
-  import: pipeline:Demo
-  config: config.yml
-"""
 
 
 def test_assemble_uses_libwebrtc_peer_factory_by_default() -> None:
@@ -133,50 +129,6 @@ def test_version_is_a_non_empty_string() -> None:
     assert _version()
 
 
-def test_load_config_reads_the_model_reference_from_runtime_import(tmp_path: Path) -> None:
-    manifest = tmp_path / "reactor.yaml"
-    manifest.write_text(_MANIFEST)
-
-    cfg = _load_config(manifest)
-
-    assert cfg.model_ref == "pipeline:Demo"
-
-
-def test_load_config_resolves_runtime_config_against_the_manifest_dir(tmp_path: Path) -> None:
-    manifest = tmp_path / "reactor.yaml"
-    manifest.write_text(_MANIFEST)
-
-    cfg = _load_config(manifest)
-
-    assert cfg.config_path == tmp_path / "config.yml"
-
-
-def test_load_config_leaves_config_path_none_when_unset(tmp_path: Path) -> None:
-    manifest = tmp_path / "reactor.yaml"
-    manifest.write_text("runtime:\n  import: pipeline:Demo\n")
-
-    cfg = _load_config(manifest)
-
-    assert cfg.config_path is None
-
-
-def test_load_config_refuses_a_manifest_without_runtime_import(tmp_path: Path) -> None:
-    manifest = tmp_path / "reactor.yaml"
-    manifest.write_text("model:\n  name: demo\n")
-
-    with pytest.raises(SystemExit):
-        _load_config(manifest)
-
-
-def test_load_config_rejects_malformed_yaml(tmp_path: Path) -> None:
-    manifest = tmp_path / "reactor.yaml"
-    # A tab where YAML expects spaces is a syntax error, not a mapping problem.
-    manifest.write_text("runtime:\n\timport: pipeline:Demo\n")
-
-    with pytest.raises(SystemExit, match="invalid YAML"):
-        _load_config(manifest)
-
-
 def test_main_refuses_when_no_manifest_in_the_working_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -195,6 +147,157 @@ def test_webrtc_config_falls_back_to_a_public_stun_when_unconfigured() -> None:
     assert config.transport_policy is IceTransportPolicy.ALL
     assert config.port_range is None
     assert config.ping_timeout == 20.0
+    assert config.bwe_min_kbps == WebRtcConfig.bwe_min_kbps
+    assert config.bwe_max_kbps == WebRtcConfig.bwe_max_kbps
+    assert config.bwe_initial_kbps == WebRtcConfig.bwe_initial_kbps
+    assert config.sender_max_kbps == WebRtcConfig.sender_max_kbps
+    assert config.sender_min_kbps == WebRtcConfig.sender_min_kbps
+
+
+def test_webrtc_config_reads_bwe_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WEBRTC_BWE_MIN_KBPS", "800")
+    monkeypatch.setenv("WEBRTC_BWE_MAX_KBPS", "8000")
+    monkeypatch.setenv("WEBRTC_BWE_INITIAL_KBPS", "3000")
+
+    config = _webrtc_config_from_env()
+
+    assert config.bwe_min_kbps == 800
+    assert config.bwe_max_kbps == 8000
+    assert config.bwe_initial_kbps == 3000
+
+
+def test_the_default_sender_ceiling_is_ten_megabits() -> None:
+    """The per-sender ceiling exists to clear libwebrtc's resolution-keyed
+    default of 2500 kbps, which is where every frame size above 960x540 lands.
+    A default that did not clear it would leave the limit in place and the
+    knob looking broken."""
+    assert WebRtcConfig.sender_max_kbps == 10000
+    assert WebRtcConfig.sender_max_kbps == WebRtcConfig.bwe_max_kbps
+
+
+def test_webrtc_config_reads_sender_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WEBRTC_SENDER_MAX_KBPS", "8000")
+    monkeypatch.setenv("WEBRTC_SENDER_MIN_KBPS", "2000")
+
+    config = _webrtc_config_from_env()
+
+    assert config.sender_max_kbps == 8000
+    assert config.sender_min_kbps == 2000
+
+
+def test_webrtc_config_rejects_a_sender_floor_above_its_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """libwebrtc refuses the pair, so the alternative to failing at boot is a
+    RuntimeError repeated on every negotiation for the process's life."""
+    monkeypatch.setenv("WEBRTC_SENDER_MAX_KBPS", "2000")
+    monkeypatch.setenv("WEBRTC_SENDER_MIN_KBPS", "8000")
+
+    with pytest.raises(SystemExit):
+        _webrtc_config_from_env()
+
+
+def test_an_unset_sender_bound_does_not_trip_the_ordering_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``0`` means "leave at the libwebrtc default", not "a ceiling of zero" —
+    so a floor above it is not an inversion and must not be refused."""
+    monkeypatch.setenv("WEBRTC_SENDER_MAX_KBPS", "0")
+    monkeypatch.setenv("WEBRTC_SENDER_MIN_KBPS", "2000")
+
+    config = _webrtc_config_from_env()
+
+    assert config.sender_max_kbps == 0
+    assert config.sender_min_kbps == 2000
+
+
+def test_webrtc_config_rejects_a_non_integer_bwe_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WEBRTC_BWE_MIN_KBPS", "not-a-number")
+
+    with pytest.raises(SystemExit):
+        _webrtc_config_from_env()
+
+
+def test_webrtc_config_rejects_bwe_max_below_the_default_initial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A partial override: only WEBRTC_BWE_MAX_KBPS is set, below the default initial
+    # value (4000). Left unchecked, this passes boot and fails every negotiation instead.
+    monkeypatch.setenv("WEBRTC_BWE_MAX_KBPS", "3000")
+
+    with pytest.raises(SystemExit):
+        _webrtc_config_from_env()
+
+
+def test_webrtc_config_rejects_bwe_min_above_initial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WEBRTC_BWE_MIN_KBPS", "5000")
+    monkeypatch.setenv("WEBRTC_BWE_INITIAL_KBPS", "4000")
+
+    with pytest.raises(SystemExit):
+        _webrtc_config_from_env()
+
+
+def test_webrtc_config_rejects_a_negative_bwe_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WEBRTC_BWE_MIN_KBPS", "-1")
+
+    with pytest.raises(SystemExit):
+        _webrtc_config_from_env()
+
+
+def test_webrtc_config_accepts_a_consistent_bwe_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WEBRTC_BWE_MIN_KBPS", "800")
+    monkeypatch.setenv("WEBRTC_BWE_INITIAL_KBPS", "3000")
+    monkeypatch.setenv("WEBRTC_BWE_MAX_KBPS", "3000")
+
+    config = _webrtc_config_from_env()
+
+    assert (config.bwe_min_kbps, config.bwe_initial_kbps, config.bwe_max_kbps) == (
+        800,
+        3000,
+        3000,
+    )
+
+
+def test_video_codecs_from_env_defaults_to_the_config_default() -> None:
+    assert _video_codecs_from_env() == WebRtcConfig.supported_video_codecs
+
+
+def test_video_codecs_from_env_reads_a_preference_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WEBRTC_VIDEO_CODECS", "vp8,VP9")
+
+    codecs = _video_codecs_from_env()
+
+    assert codecs == (cast(CodecEntry, {"codec": "VP8"}), cast(CodecEntry, {"codec": "VP9"}))
+
+
+def test_video_codecs_from_env_rejects_an_unknown_codec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WEBRTC_VIDEO_CODECS", "VP8,Theora")
+
+    with pytest.raises(SystemExit):
+        _video_codecs_from_env()
+
+
+def test_webrtc_config_reads_video_codecs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WEBRTC_VIDEO_CODECS", "H264,VP8")
+
+    config = _webrtc_config_from_env()
+
+    assert config.supported_video_codecs == (
+        cast(CodecEntry, {"codec": "H264"}),
+        cast(CodecEntry, {"codec": "VP8"}),
+    )
 
 
 def test_webrtc_config_reads_stun_turn_policy_and_ping(
