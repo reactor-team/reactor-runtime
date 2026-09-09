@@ -286,6 +286,7 @@ class Runner(ServiceComponent, ConnectionSink):
             model_cls = import_model_class(self._cfg.model_ref)
             contract = ModelContract.of(model_cls)
             model = model_cls()
+            model.world_size = self._cfg.world_size
             await asyncio.to_thread(model.load, self._cfg.config_path)
             bridge = ModelBridge(model, contract)
             bridge.bind_outbound(

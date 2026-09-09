@@ -20,7 +20,7 @@ Reactor Runtime turns an inference pipeline into a real-time, interactive media 
 - ✅ **Typed, validated commands.** Declare the commands your model accepts with standard Python types and constraints. The runtime validates every payload before your handler runs and compiles the surface into an OpenAPI schema that drives typed client SDKs.
 - 🔎 **Traceable logs.** `get_logger()` writes structured records — readable `key=value` in a terminal, JSON for a log pipeline. Every record a session writes carries that session's id automatically, so one filter recovers everything a single run logged.
 - 📦 **One container, anywhere.** The `reactor` CLI scaffolds a workspace, builds a small image, and runs it locally. The same image deploys to [Reactor](https://reactor.inc)'s GPU cloud unchanged.
-- 🧩 **Experimental multi-GPU primitives.** Define per-rank worker hooks and exchange uint8 video through bounded frame transport in `reactor_runtime.distributed`.
+- 🧩 **Experimental multi-GPU workers.** Coordinate local GPU ranks with `WorkerGroup`, using the GPU count declared in your model manifest.
 
 ## How it works
 
@@ -81,7 +81,7 @@ logger.info("scene changed", prompt=self.prompt)
 
 Records render as `key=value` text by default, or as one JSON object per line under `REACTOR_LOG_FORMAT=json`. While a session is live, its id is stamped on every record, so tracing one run's logs never requires threading an id through your call sites. Every record also carries the lifecycle phase it was written in, at both granularities: `state`, the session state machine's word, and `runtime_state`, the coarse word the health endpoint serves — so the logs of one phase — loading weights, a live session, teardown — are filterable by whichever vocabulary you are reading off another surface. The stamp is applied where records are written rather than where they are made, so a plain `logging.getLogger(__name__)` and the libraries your model imports are covered too.
 
-The experimental `reactor_runtime.distributed` package provides per-rank `DistributedWorker` hooks and bounded uint8 video transport for single-node GPU execution. These low-level primitives stay off the package root and may change between minor releases. They are not a generic action/tensor API or a multi-session scheduler.
+For single-node multi-GPU video, the experimental `reactor_runtime.distributed` package provides `DistributedWorker` rank hooks and `WorkerGroup` orchestration. Construct the group during model loading with the manifest-derived `self.world_size`; it owns spawning, frame transport, liveness checks, and teardown. These low-level primitives stay off the package root and may change between minor releases. They are not a generic action/tensor API or a multi-session scheduler.
 
 ## Install
 

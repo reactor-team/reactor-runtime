@@ -214,6 +214,12 @@ class ReactorCore:
     output: OutputStream
     """The model's handle onto its outbound media stream."""
 
+    world_size: int = 1
+    """Local worker count, injected before ``load()`` from the manifest's
+    ``model.resources.gpu.count``. Missing or zero GPU counts use one worker.
+    This describes the requested layout, not the host's visible device count;
+    it does not create workers or imply multi-session batching."""
+
     def __init__(self) -> None:
         self._loop = asyncio.new_event_loop()
         self._thread: threading.Thread | None = None
