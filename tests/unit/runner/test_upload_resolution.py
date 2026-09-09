@@ -29,6 +29,18 @@ def ref(upload_id: str) -> dict[str, str]:
 @dataclass
 class Holder:
     file: UploadedFile
+    caption: str = ""
+
+
+@dataclass
+class Album:
+    title: str
+    pages: list[UploadedFile] | None = None
+
+
+@dataclass
+class Plain:
+    text: str
 
 
 @pytest.mark.parametrize(
@@ -40,15 +52,20 @@ class Holder:
         (list[UploadedFile] | None, True),
         (list[UploadedFile | None], True),
         (list[list[UploadedFile]], True),
+        (dict[str, UploadedFile], True),
+        (dict[str, list[UploadedFile]], True),
+        (Holder, True),
+        (Album, True),
+        (list[Album], True),
         (str, False),
         (list[str], False),
         (dict[str, str], False),
-        (dict[str, UploadedFile], False),
-        (Holder, False),
+        (Plain, False),
+        (list[Plain], False),
         (Any, False),
     ],
 )
-def test_declares_upload_follows_optional_and_list_wrappers_only(
+def test_declares_upload_follows_every_container_the_contract_supports(
     annotation: Any, expected: bool
 ) -> None:
     assert declares_upload(TypeSpec.of(annotation)) is expected
@@ -103,6 +120,48 @@ async def test_an_entry_that_is_not_a_reference_is_left_for_validation() -> None
     resolved = await resolve_uploads(spec, value, fetch)
 
     assert resolved == [FILES["up_1"], "not-a-reference", {"upload_id": 7}, {"uploadId": "up_2"}]
+
+
+async def test_a_dict_resolves_every_value_under_its_key() -> None:
+    value = {"front": ref("up_1"), "back": ref("up_2")}
+
+    resolved = await resolve_uploads(TypeSpec.of(dict[str, UploadedFile]), value, fetch)
+
+    assert resolved == {"front": FILES["up_1"], "back": FILES["up_2"]}
+    assert list(resolved) == ["front", "back"]
+
+
+async def test_a_dataclass_resolves_its_upload_fields_and_keeps_the_rest() -> None:
+    value = {"file": ref("up_1"), "caption": "a cat", "extra": {"upload_id": "up_2"}}
+
+    resolved = await resolve_uploads(TypeSpec.of(Holder), value, fetch)
+
+    # Only the field the dataclass types as an upload is fetched; a key it does
+    # not declare is left for the contract, even when it looks like a reference.
+    assert resolved == {"file": FILES["up_1"], "caption": "a cat", "extra": {"upload_id": "up_2"}}
+
+
+async def test_containers_nest() -> None:
+    spec = TypeSpec.of(list[Album])
+    value = [
+        {"title": "one", "pages": [ref("up_1"), ref("up_2")]},
+        {"title": "two"},
+        {"title": "three", "pages": None},
+    ]
+
+    resolved = await resolve_uploads(spec, value, fetch)
+
+    assert resolved == [
+        {"title": "one", "pages": [FILES["up_1"], FILES["up_2"]]},
+        {"title": "two"},
+        {"title": "three", "pages": None},
+    ]
+
+
+async def test_a_dataclass_without_upload_fields_is_untouched() -> None:
+    value = {"text": "hi", "upload_id": "up_1"}
+
+    assert await resolve_uploads(TypeSpec.of(Plain), value, fetch) is value
 
 
 async def test_a_value_the_spec_does_not_type_as_an_upload_is_untouched() -> None:

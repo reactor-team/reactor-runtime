@@ -820,8 +820,9 @@ class Runner(ServiceComponent, ConnectionSink):
         receives a file rather than a reference. A reference arrives one of two
         ways: beside the arguments, keyed by parameter name, which is how a
         single top-level file travels; or inline in an argument as a mapping
-        with an ``upload_id``, which is the only way a list of files can travel
-        and is accepted for a single file too. Inline references are found by
+        with an ``upload_id``, which is the only way a file nested in a list,
+        dict, or dataclass can travel and is accepted for a single file too.
+        Inline references are found by
         walking the command's declared types, never by inspecting values, so a
         mapping of the model's own that carries an ``upload_id`` key is left
         alone. A command that references an upload the store cannot produce,
@@ -902,7 +903,7 @@ class Runner(ServiceComponent, ConnectionSink):
         """Return the present arguments of command *name* whose type carries an upload.
 
         The contract decides which fields to walk: a field typed as an upload,
-        or as an optional or list of one, may hold inline references and is
+        or as a container holding one, may hold inline references and is
         returned with its declared type; every other field is not. An unknown
         command has no fields to walk and is left for the bridge to reject.
         """
