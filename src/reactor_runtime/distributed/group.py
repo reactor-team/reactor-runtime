@@ -1,7 +1,7 @@
 """Controller-side handle for a fleet of :class:`DistributedWorker` ranks.
 
-Held by the model (created in ``load()``) in the runtime process, which
-does no GPU work itself. Any :class:`~reactor_runtime.ReactorModel` can
+Held by the model in the runtime process. For more than one worker this
+process does no GPU work itself. Any :class:`~reactor_runtime.ReactorModel` can
 hold one, including a :class:`~reactor_runtime.ReactorPipeline`.
 
 The protocol is uniform: every method broadcasts its verb to all ranks
@@ -9,14 +9,15 @@ The protocol is uniform: every method broadcasts its verb to all ranks
 rank — a command succeeds iff all ranks succeed. Collecting the full reply set
 is also the framework's only synchronization: a rank's reply
 happens-after its shared-memory writes, so the framework never issues
-collectives of its own — the process group belongs entirely to the
+compute-time collectives of its own — the process group belongs to the
 model. Every blocking wait polls worker liveness, so a dead rank
 surfaces as :class:`WorkerCrashed` within seconds instead of a hung
 collective.
 
-:meth:`generate` blocks deliberately: freezing the event loop for the
-chunk's compute time is how the runtime derives the stream's dynamic
-FPS today. Liveness is polled only while waiting on workers — an
+:meth:`generate` is synchronous. Use a single dedicated executor thread to
+keep an async model loop responsive; pass the measured compute time to
+``emit`` for adaptive FPS. Never overlap group calls. Liveness is polled
+only while waiting on workers — an
 idle-time rank death is detected at the next command; a standing
 watchdog is not implemented.
 """
@@ -34,9 +35,9 @@ from typing import Any
 import numpy as np
 
 from reactor_runtime.distributed.errors import WorkerCrashed, WorkerError
-from reactor_runtime.distributed.frames import SharedFrameBuffer
+from reactor_runtime.distributed.frames import SharedFrameBuffer, _FrameBuffer, _validate_shape
 from reactor_runtime.distributed.protocol import Reply, Verb
-from reactor_runtime.distributed.worker import DistributedWorker, worker_main
+from reactor_runtime.distributed.worker import DistributedWorker, _seed, _torch, worker_main
 from reactor_runtime.log import get_logger
 
 logger = get_logger(__name__)
@@ -49,21 +50,23 @@ def _find_free_port() -> int:
 
 
 class WorkerGroup:
-    """Spawn and drive one :class:`DistributedWorker` process per GPU.
+    """Drive one local worker or one :class:`DistributedWorker` process per GPU.
+
+    This experimental handle serves one session with one in-flight command.
+    All calls must be serialized on the same thread. One worker runs inline:
+    no child process, shared memory, environment changes, or process group.
+    Its hooks and RNG seeding affect this process and cannot be preempted by a
+    timeout. Multi-worker timeouts are terminal: shut down and replace the group.
 
     Args:
         worker_cls: the model's :class:`DistributedWorker` subclass.
             Must be importable in a fresh interpreter (module level).
         frame_shape: ``(max_frames_per_chunk, H, W, C)`` — sizes the
             shared uint8 frame buffer; size for the worst-case chunk.
-        world_size: worker count. Defaults to the visible CUDA device
-            count. Pass it explicitly whenever the model's own parallel
-            layout decides the rank count — deriving it from
-            ``device_count()`` is wrong the moment the two can differ,
-            and the manifest's GPU count is not visible from here.
-            When passing it, source the value from the model's config
-            rather than a literal in ``load()``, so one setting decides
-            both the deployment shape and the group size.
+        world_size: worker count, default one. Pass ``self.world_size`` from
+            the model to use ``model.resources.gpu.count`` in the manifest.
+            Never inferred from visible GPUs; a larger host must not change
+            the model's layout.
         setup_kwargs: passed to every worker's ``setup()``. Must be
             picklable — prefer paths and scalars over live objects.
         init_process_group: create the NCCL/gloo process group during
@@ -76,28 +79,26 @@ class WorkerGroup:
         worker_cls: type[DistributedWorker],
         *,
         frame_shape: tuple[int, ...],
-        world_size: int | None = None,
+        world_size: int = 1,
         setup_kwargs: dict[str, Any] | None = None,
         init_process_group: bool = True,
     ) -> None:
-        if world_size is None:
-            # Defaulting the rank count is the one place the controller needs
-            # torch. Pass world_size explicitly to keep this side torch-free.
-            import torch  # ty: ignore[unresolved-import]
-
-            world_size = torch.cuda.device_count()
-        if world_size < 1:
-            raise ValueError(f"world_size must be >= 1, got {world_size}")
+        if type(world_size) is not int or world_size < 1:
+            raise ValueError(f"world_size must be a positive integer, got {world_size!r}")
+        _validate_shape(frame_shape)
         self.world_size = world_size
         self._worker_cls = worker_cls
         self._frame_shape = tuple(frame_shape)
         self._setup_kwargs = setup_kwargs or {}
         self._init_process_group = init_process_group
-        self._ctx = multiprocessing.get_context("spawn")
-        self._cmd_queues = [self._ctx.Queue() for _ in range(world_size)]
-        self._result_queue = self._ctx.Queue()
+        self._ctx = multiprocessing.get_context("spawn") if world_size > 1 else None
+        self._cmd_queues = [self._ctx.Queue() for _ in range(world_size)] if self._ctx else []
+        self._result_queue: Any = self._ctx.Queue() if self._ctx else None
         self._procs: list[Any] = []
-        self._frames: SharedFrameBuffer | None = None
+        self._frames: _FrameBuffer | None = None
+        self._local_worker: DistributedWorker | None = None
+        self._started = False
+        self._session_open = False
         self._shutdown_done = False
         # Flipped False on any fail-fast failure (a rank died or is
         # dying). Once broken, shutdown() must not attempt the clean
@@ -110,13 +111,46 @@ class WorkerGroup:
     # ------------------------------------------------------------------
 
     def start(self, timeout: float = 3600.0) -> None:
+        """Set up and warm up all ranks, releasing resources if startup fails."""
+        if self._started or self._shutdown_done:
+            raise RuntimeError("WorkerGroup cannot be started more than once")
+        self._started = True
+        atexit.register(self.shutdown)
+        try:
+            if self.world_size == 1:
+                self._frames = _FrameBuffer(self._frame_shape)
+                worker = self._worker_cls()
+                self._local_worker = worker
+                worker.rank, worker.world_size = 0, 1
+                torch = _torch()
+                worker.device = (
+                    "cuda:0" if torch is not None and torch.cuda.is_available() else "cpu"
+                )
+                if worker.device.startswith("cuda"):
+                    torch.cuda.set_device(0)
+                worker.frames = self._frames
+                worker.setup(**self._setup_kwargs)
+                worker.warmup()
+            else:
+                self._start_processes(timeout)
+        except BaseException as exc:
+            self._healthy = False
+            self.shutdown()
+            if self.world_size == 1 and isinstance(exc, Exception):
+                raise WorkerError(f"worker startup failed: rank 0: {exc}") from exc
+            raise
+        logger.info("WorkerGroup ready", world_size=self.world_size)
+
+    def _start_processes(self, timeout: float) -> None:
         """Spawn all ranks and block until setup + warmup complete.
 
         Raises :class:`WorkerError` on a reported startup failure,
         :class:`WorkerCrashed` if a rank dies silently, and
         ``TimeoutError`` if warmup exceeds ``timeout``.
         """
-        self._frames = SharedFrameBuffer(self._frame_shape, create=True)
+        assert self._ctx is not None
+        frames = SharedFrameBuffer(self._frame_shape, create=True)
+        self._frames = frames
         master_port = _find_free_port()
         log_level = logging.getLogger().getEffectiveLevel()
         for rank in range(self.world_size):
@@ -132,27 +166,35 @@ class WorkerGroup:
                     self._result_queue,
                     log_level,
                     self._frame_shape,
-                    self._frames.name,
+                    frames.name,
                     self._init_process_group,
                 ),
                 daemon=True,
             )
             proc.start()
             self._procs.append(proc)
-        # Send the exit verb on interpreter shutdown so workers run the
-        # clean barrier+destroy teardown even if the pipeline forgets.
-        atexit.register(self.shutdown)
         self._collect(Reply.READY, what="worker startup", timeout=timeout)
-        logger.info("WorkerGroup ready", world_size=self.world_size)
 
     def start_session(self, params: dict[str, Any], *, seed: int, timeout: float = 300.0) -> None:
         """Seed all ranks identically, then open a session on each.
 
-        A :class:`WorkerError` raised from here is retryable — every rank
-        reports its own outcome and stays alive, so the controller may call
-        this again with different params.
+        A worker-reported initialization error is retryable after every rank
+        reports its outcome. A timeout, dead rank, or protocol failure instead
+        makes the group unusable. ``seed`` must fit NumPy's uint32 seed range.
         """
-        self._drain_stale_results()
+        self._require_ready()
+        if self._session_open:
+            raise RuntimeError("end the current session before starting another")
+        if type(seed) is not int or not 0 <= seed < 2**32:
+            raise ValueError("seed must be an integer in [0, 2**32)")
+        if self._local_worker is not None:
+            try:
+                _seed(int(seed))
+                self._local_worker.start_session(params)
+            except Exception as exc:
+                raise WorkerError(f"init_session failed: rank 0: {exc}") from exc
+            self._session_open = True
+            return
         self._send((Verb.SEED, int(seed)))
         self._send((Verb.INIT_SESSION, params))
         # collect_all: a failed init is retryable, so wait for EVERY
@@ -161,6 +203,7 @@ class WorkerGroup:
         # on its command queue), and no straggler reply is left behind
         # to be misread by a later wait.
         self._collect(Reply.OK, what="init_session", timeout=timeout, collect_all_errors=True)
+        self._session_open = True
 
     def generate(self, index: int, controls: dict[str, Any], timeout: float = 300.0) -> np.ndarray:
         """Run one lockstep ``generate_chunk`` on every rank and return its frames.
@@ -174,10 +217,32 @@ class WorkerGroup:
         bands. Collecting every rank's reply is also what guarantees all
         shared-memory writes have landed before the frames are read.
         """
-        self._send((Verb.CHUNK, index, controls))
-        end_rows = self._collect(Reply.FRAMES, what=f"chunk {index}", timeout=timeout)
+        self._require_ready()
+        if not self._session_open:
+            raise RuntimeError("start_session must succeed before generate")
         assert self._frames is not None
-        return self._frames.read(max(int(row or 0) for row in end_rows))
+        try:
+            if self._local_worker is not None:
+                result = self._local_worker.generate_chunk(index, controls)
+                end_row = result if isinstance(result, int) else 0
+                if result is not None and not isinstance(result, int):
+                    end_row = self._frames.write(result)
+                end_rows = [end_row]
+            else:
+                self._send((Verb.CHUNK, index, controls))
+                end_rows = self._collect(Reply.FRAMES, what=f"chunk {index}", timeout=timeout)
+            # Validate every rank, not only the max: a negative count is also
+            # a protocol violation when another rank returned valid frames.
+            for row in end_rows:
+                if type(row) is not int or not 0 <= row <= self._frame_shape[0]:
+                    raise ValueError(f"invalid frame end row: {row!r}")
+            return self._frames.read(max(end_rows))
+        except (WorkerError, WorkerCrashed, TimeoutError):
+            self._healthy = False
+            raise
+        except Exception as exc:
+            self._healthy = False
+            raise WorkerError(f"chunk {index} failed: {exc}") from exc
 
     def end_session(self, timeout: float = 300.0) -> None:
         """Drop per-session state on every rank.
@@ -185,8 +250,20 @@ class WorkerGroup:
         Process-lifetime resources are kept, which is what makes the next
         session on the same workers start fast.
         """
-        self._send((Verb.DROP_SESSION,))
-        self._collect(Reply.OK, what="drop_session", timeout=timeout)
+        self._require_ready()
+        try:
+            if self._local_worker is not None:
+                self._local_worker.end_session()
+            else:
+                self._send((Verb.DROP_SESSION,))
+                self._collect(Reply.OK, what="drop_session", timeout=timeout)
+        except Exception as exc:
+            self._healthy = False
+            if self._local_worker is not None:
+                raise WorkerError(f"drop_session failed: rank 0: {exc}") from exc
+            raise
+        finally:
+            self._session_open = False
 
     def shutdown(self, timeout: float = 60.0) -> None:
         """Stop the group deterministically.
@@ -206,7 +283,10 @@ class WorkerGroup:
         if self._shutdown_done:
             return
         self._shutdown_done = True
+        atexit.unregister(self.shutdown)
         try:
+            if self._local_worker is not None:
+                self._local_worker.shutdown()
             if self._healthy:
                 self._send((Verb.EXIT,))
                 deadline = time.monotonic() + timeout
@@ -231,6 +311,14 @@ class WorkerGroup:
         finally:
             if self._frames is not None:
                 self._frames.close()
+            self._local_worker = None
+            self._session_open = False
+            for channel in [*self._cmd_queues, self._result_queue]:
+                if channel is not None:
+                    # Broken ranks may never consume queued commands. Joining
+                    # a feeder that is still writing to them would hang exit.
+                    channel.cancel_join_thread()
+                    channel.close()
 
     # ------------------------------------------------------------------
     # Protocol internals
@@ -250,16 +338,6 @@ class WorkerGroup:
                     f"rank {rank} no longer alive (exitcode={proc.exitcode}); "
                     f"see that rank's stderr for faulthandler output"
                 )
-
-    def _drain_stale_results(self) -> None:
-        # A crashed or reset session can leave an unconsumed result that
-        # would otherwise be misread as the ack for the next command.
-        while True:
-            try:
-                stale = self._result_queue.get_nowait()
-                logger.warning("drained stale worker result", result=repr(stale))
-            except queue_mod.Empty:
-                return
 
     def _collect(
         self,
@@ -286,6 +364,7 @@ class WorkerGroup:
         while len(payloads) + len(errors) < self.world_size:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                self._healthy = False
                 raise TimeoutError(f"timed out waiting for {what}")
             self._check_alive()
             try:
@@ -302,7 +381,14 @@ class WorkerGroup:
                     raise WorkerError(f"{what} failed: {msg[1]}")
                 errors.append(str(msg[1]))
             else:
-                logger.warning("unexpected worker result", during=what, result=repr(msg))
+                self._healthy = False
+                raise WorkerError(f"unexpected worker result during {what}: {msg!r}")
         if errors:
             raise WorkerError(f"{what} failed: " + "; ".join(errors))
         return payloads
+
+    def _require_ready(self) -> None:
+        if self._shutdown_done or not self._healthy:
+            raise WorkerError("WorkerGroup is unusable; shut it down and create a new group")
+        if not self._started:
+            raise RuntimeError("start must complete before sending commands")

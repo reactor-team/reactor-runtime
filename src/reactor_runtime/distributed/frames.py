@@ -22,18 +22,66 @@ from reactor_runtime.log import get_logger
 logger = get_logger(__name__)
 
 
-class SharedFrameBuffer:
+class _FrameBuffer:
+    """An in-process uint8 frame buffer with the same write/read contract."""
+
+    def __init__(self, shape: tuple[int, ...]) -> None:
+        _validate_shape(shape)
+        self.shape = shape
+        self.array: np.ndarray = np.empty(shape, dtype=np.uint8)
+
+    def write(self, frames: Any, start_row: int = 0) -> int:
+        """Copy complete frames and return their exclusive end row."""
+        if not isinstance(frames, np.ndarray):
+            frames = frames.detach().cpu().numpy()
+        if frames.dtype != np.uint8:
+            raise ValueError(f"frames must be uint8, got {frames.dtype}; convert before returning")
+        if frames.ndim != len(self.shape) or frames.shape[1:] != self.shape[1:]:
+            dimensions = ", ".join(map(str, self.shape[1:]))
+            raise ValueError(
+                f"frames have shape {frames.shape}; expected (N, {dimensions}) "
+                f"for frame_shape={self.shape}"
+            )
+        if type(start_row) is not int or start_row < 0:
+            raise ValueError(f"frame start_row must be a non-negative integer, got {start_row!r}")
+        end_row = start_row + int(frames.shape[0])
+        if end_row > self.shape[0]:
+            raise ValueError(
+                f"frame write [{start_row}:{end_row}] exceeds capacity {self.shape[0]}; "
+                "increase frame_shape[0] or return a smaller chunk"
+            )
+        self.array[start_row:end_row] = frames
+        return end_row
+
+    def read(self, n: int) -> np.ndarray:
+        """Copy frames, rejecting counts that would silently truncate output."""
+        if type(n) is not int or not 0 <= n <= self.shape[0]:
+            raise ValueError("frame count is outside the buffer")
+        return self.array[:n].copy()
+
+    def close(self) -> None:
+        """Release the local array."""
+        self.array = np.empty((0,), dtype=np.uint8)
+
+
+def _validate_shape(shape: tuple[int, ...]) -> None:
+    if len(shape) != 4 or any(type(n) is not int or n < 1 for n in shape):
+        raise ValueError("frame_shape must contain four positive integers: (frames, H, W, C)")
+
+
+class SharedFrameBuffer(_FrameBuffer):
     """View over one POSIX shared-memory uint8 frame buffer.
 
     The controller creates it (``create=True``); each worker rank
-    attaches by name. Workers with CUDA available should call
-    :meth:`pin` once so per-chunk device-to-host copies into the buffer
-    take the pinned DMA fast path.
+    attaches by name. :meth:`pin` optionally registers the mapping for workers
+    that copy tensors directly into it. :meth:`write` stages tensors on CPU;
+    registration alone does not make that convenience path a direct DMA copy.
     """
 
     def __init__(
         self, shape: tuple[int, ...], *, name: str | None = None, create: bool = False
     ) -> None:
+        _validate_shape(shape)
         size = int(np.prod(shape))
         self._shm = shared_memory.SharedMemory(name=name, create=create, size=size)
         self._owner = create
@@ -58,11 +106,7 @@ class SharedFrameBuffer:
         frames-axis sharding alike. The controller reads the buffer only
         after every rank has replied, so all slices land first.
         """
-        if not isinstance(frames, np.ndarray):
-            frames = frames.detach().cpu().numpy()  # torch tensor
-        end_row = start_row + int(frames.shape[0])
-        self.array[start_row:end_row] = frames
-        return end_row
+        return super().write(frames, start_row)
 
     def read(self, n: int) -> np.ndarray:
         """Copy the first ``n`` frames out.
@@ -70,7 +114,7 @@ class SharedFrameBuffer:
         A copy, never a view: a view would let the next chunk overwrite frames
         the caller still holds, so copying is what releases the buffer.
         """
-        return self.array[:n].copy()
+        return super().read(n)
 
     def pin(self) -> bool:
         """Register the buffer as pinned host memory, best effort.

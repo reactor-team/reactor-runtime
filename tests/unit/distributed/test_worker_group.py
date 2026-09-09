@@ -92,12 +92,12 @@ class FrameShardWorker(BandWorker):
         return self.frames.write(shard, start_row=self.rank * k)
 
 
-@pytest.fixture
-def group():
+@pytest.fixture(params=[1, 2])
+def group(request):
     wg = WorkerGroup(
         BandWorker,
         frame_shape=FRAME_SHAPE,
-        world_size=2,
+        world_size=request.param,
         setup_kwargs={"base": 100},
         init_process_group=False,
     )
@@ -111,7 +111,7 @@ def test_session_roundtrip_with_per_rank_slice_writes(group: WorkerGroup) -> Non
     for index in range(2):
         frames = group.generate(index, {})
         assert frames.shape == FRAME_SHAPE
-        band_h = FRAME_SHAPE[1] // 2
+        band_h = FRAME_SHAPE[1] // group.world_size
         # rank 0 wrote the top band, rank 1 the bottom band.
         assert (frames[:, :band_h] == 100 + index).all()
         assert (frames[:, band_h:] == 110 + index).all()
@@ -146,7 +146,17 @@ def test_init_session_error_is_retryable(group: WorkerGroup) -> None:
     assert group.generate(0, {}).shape == FRAME_SHAPE
 
 
+def test_invalid_seeds_are_rejected_before_touching_workers(group: WorkerGroup) -> None:
+    for seed in (-1, 2**32, True):
+        with pytest.raises(ValueError, match="seed must be an integer"):
+            group.start_session({}, seed=seed)
+    group.start_session({}, seed=7)
+    assert group.generate(0, {}).shape == FRAME_SHAPE
+
+
 def test_partial_chunk_failure_posts_exactly_one_error(group: WorkerGroup) -> None:
+    if group.world_size == 1:
+        pytest.skip("requires two processes")
     # One rank fails a chunk while its peer succeeds. The failing rank
     # posts its ERROR once (in the chunk handler) and the re-raise must
     # NOT post a second one from the outer handler — a duplicate would
@@ -170,6 +180,8 @@ def test_partial_chunk_failure_posts_exactly_one_error(group: WorkerGroup) -> No
 def test_single_rank_init_failure_fails_group_then_retry_aligns(
     group: WorkerGroup,
 ) -> None:
+    if group.world_size == 1:
+        pytest.skip("requires two ranks")
     # Rank 1 fails its first attempt while rank 0 succeeds: the group
     # must report failure (one rank's OK is not group success), and the
     # immediate retry must find every rank parked and aligned.
@@ -256,9 +268,138 @@ def test_chunk_error_surfaces_and_fails_fast(group: WorkerGroup) -> None:
 
 
 def test_silent_rank_death_raises_worker_crashed(group: WorkerGroup) -> None:
+    if group.world_size == 1:
+        pytest.skip("requires a child process")
     group.start_session({}, seed=1)
     # Kill the leader: its ack can never arrive, so only liveness
     # polling can surface the failure (within seconds, not the timeout).
     os.kill(group._procs[0].pid, signal.SIGKILL)
     with pytest.raises(WorkerCrashed, match="rank 0"):
         group.generate(0, {})
+
+
+def test_one_worker_uses_no_processes_or_shared_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(*args, **kwargs):
+        pytest.fail("single-worker execution must not allocate process resources")
+
+    monkeypatch.setattr("reactor_runtime.distributed.group.multiprocessing.get_context", forbidden)
+    monkeypatch.setattr("reactor_runtime.distributed.group.SharedFrameBuffer", forbidden)
+    wg = WorkerGroup(LeaderReturnWorker, frame_shape=FRAME_SHAPE, setup_kwargs={"base": 0})
+    before = {key: os.environ.get(key) for key in ("RANK", "WORLD_SIZE", "MASTER_PORT")}
+    try:
+        wg.start()
+        assert wg.world_size == 1
+        assert wg._local_worker is not None
+        assert wg._local_worker.is_leader
+        assert not wg._procs
+        wg.start_session({}, seed=7)
+        first = wg.generate(0, {})
+        wg.generate(1, {})
+        assert (first == 1).all()  # The next chunk cannot overwrite returned frames.
+        assert before == {key: os.environ.get(key) for key in before}
+    finally:
+        wg.shutdown()
+        wg.shutdown()
+    assert wg._local_worker is None
+
+
+@pytest.mark.parametrize("count", [0, -1, True, 2.5, None])
+def test_worker_count_must_be_an_explicit_positive_integer(count) -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        WorkerGroup(BandWorker, frame_shape=FRAME_SHAPE, world_size=count)
+
+
+class SlowWorker(BandWorker):
+    def generate_chunk(self, index: int, controls: dict[str, Any]) -> int:
+        time.sleep(0.2)
+        return super().generate_chunk(index, controls)
+
+
+def test_a_timeout_cannot_leak_a_reply_into_another_command() -> None:
+    wg = WorkerGroup(
+        SlowWorker,
+        frame_shape=FRAME_SHAPE,
+        world_size=2,
+        setup_kwargs={"base": 0},
+        init_process_group=False,
+    )
+    wg.start(timeout=120)
+    try:
+        wg.start_session({}, seed=0)
+        with pytest.raises(TimeoutError):
+            wg.generate(0, {}, timeout=0.01)
+        time.sleep(0.3)  # Both old replies are now eligible to arrive.
+        with pytest.raises(WorkerError, match="unusable"):
+            wg.generate(1, {})
+        with pytest.raises(WorkerError, match="unusable"):
+            wg.start_session({}, seed=1)
+    finally:
+        wg.shutdown()
+    assert all(not proc.is_alive() for proc in wg._procs)
+
+
+def test_group_lifecycle_rejects_out_of_order_calls() -> None:
+    wg = WorkerGroup(BandWorker, frame_shape=FRAME_SHAPE, setup_kwargs={"base": 0})
+    with pytest.raises(RuntimeError, match="start must complete"):
+        wg.generate(0, {})
+    wg.start()
+    try:
+        with pytest.raises(RuntimeError, match="more than once"):
+            wg.start()
+        with pytest.raises(RuntimeError, match="start_session"):
+            wg.generate(0, {})
+        wg.start_session({}, seed=0)
+        with pytest.raises(RuntimeError, match="current session"):
+            wg.start_session({}, seed=1)
+    finally:
+        wg.shutdown()
+    with pytest.raises(WorkerError, match="unusable"):
+        wg.end_session()
+
+
+class StartupFailure(BandWorker):
+    def warmup(self) -> None:
+        raise RuntimeError("warmup failed")
+
+
+@pytest.mark.parametrize("world_size", [1, 2])
+def test_startup_failure_releases_every_process_and_buffer(world_size: int) -> None:
+    wg = WorkerGroup(
+        StartupFailure,
+        frame_shape=FRAME_SHAPE,
+        world_size=world_size,
+        setup_kwargs={"base": 0},
+        init_process_group=False,
+    )
+    with pytest.raises((WorkerError, WorkerCrashed)):
+        wg.start(timeout=120)
+    assert wg._shutdown_done
+    assert all(not proc.is_alive() for proc in wg._procs)
+    assert wg._frames is not None
+    assert wg._frames.array.size == 0
+
+
+class InvalidRowWorker(BandWorker):
+    def generate_chunk(self, index: int, controls: dict[str, Any]) -> int:
+        return controls["row"]
+
+
+@pytest.mark.parametrize("world_size", [1, 2])
+@pytest.mark.parametrize("row", [-1, 5, True])
+def test_invalid_end_rows_fail_the_group(world_size: int, row: int) -> None:
+    wg = WorkerGroup(
+        InvalidRowWorker,
+        frame_shape=FRAME_SHAPE,
+        world_size=world_size,
+        setup_kwargs={"base": 0},
+        init_process_group=False,
+    )
+    wg.start(timeout=120)
+    try:
+        wg.start_session({}, seed=0)
+        with pytest.raises((WorkerError, WorkerCrashed)):
+            wg.generate(0, {"row": row})
+        with pytest.raises(WorkerError, match="unusable"):
+            wg.generate(1, {"row": 1})
+    finally:
+        wg.shutdown()

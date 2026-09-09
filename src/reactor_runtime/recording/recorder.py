@@ -15,7 +15,6 @@ director learns a clip is genuinely fetchable rather than merely requested.
 
 from __future__ import annotations
 
-import contextlib
 import math
 import queue
 import re
@@ -25,6 +24,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -44,6 +44,29 @@ logger = get_logger(__name__)
 # from the model's declared cadence rather than the wall-clock arrival time — a
 # model that runs slower or faster than real time still records at true duration.
 RECORDING_FPS = 30
+
+# How many grid frames may sit queued between the model thread and the encoder.
+# Never applied below one emission's worth, so a model that batches always fits
+# a whole emission: the queue absorbs a burst and drains it between emissions,
+# rather than gating the burst at its own depth.
+_FEED_DEPTH = 4
+# How long one emission may wait, in total, for the encoder to make room. Bounds
+# the producer's exposure to a wedged encoder: past the deadline the rest of the
+# emission is counted and abandoned, so a stalled recording costs the recording
+# rather than the session.
+_FEED_WAIT_SECONDS = 1.0
+# How often the feed reports dropped frames. An encoder that stays behind loses
+# frames on every emission, so the count is carried on every recording's summary
+# and only the periodic warning is rate-limited.
+_DROP_LOG_INTERVAL_SECONDS = 5.0
+# How much audio may sit in the jitter buffer on top of the emission just handed
+# over, in grid slots. A model's audio is framed on its own boundaries rather
+# than the video's, so an emission carries a little more or less than its slots
+# drain; two slots absorb that wobble without the buffer running dry on the
+# short ones. Past that the audio belongs to frames the encoder was too far
+# behind to take — their video is not in the recording, so pairing it with later
+# video would hold the rest of the session that far out of sync.
+_AUDIO_BACKLOG_FRAMES = 2
 
 _INIT_FILENAME = "init.mp4"
 # Written into a recording's directory once it is finished, so its final segment
@@ -70,6 +93,23 @@ _CHUNK_FILENAME_RE = re.compile(r"^(init\.mp4|chunk_\d{5}\.m4s)$")
 
 _AudioArray = npt.NDArray[Any]
 _FeedItem = tuple[npt.NDArray[Any], _AudioArray | None]
+
+
+class _Slot(Enum):
+    """The answer to asking the feed queue for room for one grid frame.
+
+    Separates the two reasons room is refused, because only one of them is a
+    fact about the recording's health: frames abandoned because the encoder is
+    behind are the recording losing media, while frames abandoned because the
+    recording is stopping are teardown and say nothing about the encoder.
+    """
+
+    TAKEN = "taken"
+    """There is room; the frame can be queued."""
+    FULL = "full"
+    """The encoder is behind, and any wait the chunk asked for has run out."""
+    WINDING_DOWN = "winding_down"
+    """The recording is stopping, so the rest of the emission is moot."""
 
 
 class RecorderError(Exception):
@@ -205,7 +245,13 @@ class Recorder:
         self._started = False
         self._disabled = False
 
-        self._feed_queue: queue.Queue[_FeedItem | None] = queue.Queue(maxsize=4)
+        # The queue is unbounded in itself; the depth is the bound, checked as
+        # each frame is queued. The effective capacity never sits below one
+        # emission, so a batching model always fits a whole emission.
+        self._feed_queue: queue.Queue[_FeedItem | None] = queue.Queue()
+        # Signalled by the feed worker after each dequeue so a producer waiting
+        # for room sleeps until the encoder takes a frame instead of polling.
+        self._feed_room = threading.Condition()
         self._feed_thread: threading.Thread | None = None
         self._feed_stop = threading.Event()
         self._watch_thread: threading.Thread | None = None
@@ -227,6 +273,9 @@ class Recorder:
         self._chunk_lock = threading.Lock()
 
         self._dropped_frames = 0
+        # When the feed last warned about dropped frames. Zero until it has, so
+        # the first loss of a session is always reported.
+        self._dropped_logged_at = 0.0
         # Fractional grid frames carried between chunks so resampling a chunk's
         # own rate onto the fixed recording grid accumulates no rounding drift.
         self._grid_debt = 0.0
@@ -311,8 +360,11 @@ class Recorder:
             return
         self._disabled = True
         self._feed_stop.set()
-        with contextlib.suppress(queue.Full):
-            self._feed_queue.put_nowait(None)
+        self._feed_queue.put_nowait(None)
+        # Release a producer parked on a full queue, so teardown cannot wait
+        # behind an encoder that has already stopped draining.
+        with self._feed_room:
+            self._feed_room.notify_all()
         feed_thread = self._feed_thread
         self._feed_thread = None
         if self._encoder is not None:
@@ -325,7 +377,10 @@ class Recorder:
             try:
                 (self._session_dir / _COMPLETE_MARKER).write_text("")
             except OSError:
-                logger.exception("failed to write recording completion marker")
+                logger.exception(
+                    "failed to write recording completion marker",
+                    session_id=self._session_id,
+                )
         self._fire_ready_chunks()
         self._fire_ready_clips()
         self._watch_stop.set()
@@ -334,9 +389,15 @@ class Recorder:
         if watch_thread is not None:
             watch_thread.join(timeout=2.0)
         self._started = False
+        # session_id is named explicitly, like the start's: the recorder outlives
+        # the session's ambient log context, which the model retires at its own
+        # session-ended dispatch, so a record written on the way out — this one,
+        # the marker and callback failures, the feed thread's exit — attributes
+        # itself.
         logger.info(
             "recorder stopped",
             recording_id=self._session_id,
+            session_id=self._session_id,
             dropped=self._dropped_frames,
         )
 
@@ -410,6 +471,7 @@ class Recorder:
         self._audio_sample_rate = 48_000
         self._has_audio = False
         self._dropped_frames = 0
+        self._dropped_logged_at = 0.0
         self._grid_debt = 0.0
         self._audio_jitter_buf = []
         self._audio_buffered_samples = 0
@@ -423,7 +485,7 @@ class Recorder:
     # -- media fan-out tap ----------------------------------------------------
 
     def on_chunk(self, chunk: MediaChunk) -> None:
-        """Feed one emitted media chunk to the recording; non-blocking.
+        """Feed one emitted media chunk to the recording.
 
         Called on the model thread by the runner's media fan-out. The chunk's
         frames are resampled from the chunk's own rate onto the fixed recording
@@ -433,8 +495,17 @@ class Recorder:
         duration. Fractional grid frames carry across chunks so the resampling
         accumulates no drift. The timeline advances by the media actually fed,
         not by wall-clock, so a pause simply stops advancing rather than
-        recording dead air. A frame that does not fit the feed queue is dropped
-        to keep the model thread unblocked.
+        recording dead air.
+
+        The feed queue holds at least a whole emission, so handing a batch over
+        costs the model thread nothing while the encoder keeps up. Once the
+        queue is full the chunk decides, exactly as it does at the wire: a chunk
+        that asks for backpressure (``chunk.wait``) makes this call wait for
+        room, bounded by :data:`_FEED_WAIT_SECONDS` across the emission, and one
+        that prefers skipping has its overflow dropped and counted. Only the
+        encoder falling behind is counted: an emission cut short because the
+        recording is stopping is teardown, and reporting it would put phantom
+        losses on the summary :meth:`stop` logs.
         """
         if self.disabled:
             return
@@ -456,23 +527,68 @@ class Recorder:
         grid_frames = int(self._grid_debt)
         self._grid_debt -= grid_frames
         audio_target = round(self._audio_sample_rate / RECORDING_FPS) if self._has_audio else 0
+        # One authoritative bound, never below the emission being queued, so the
+        # burst a batching model hands over always fits.
+        capacity = max(_FEED_DEPTH, grid_frames)
+        deadline = time.monotonic() + _FEED_WAIT_SECONDS
         fed = 0
+        outcome = _Slot.TAKEN
         for i in range(grid_frames):
+            outcome = self._claim_slot(capacity, wait=chunk.wait, deadline=deadline)
+            if outcome is not _Slot.TAKEN:
+                break
             video_data = frames[i * len(frames) // grid_frames]
             audio_data = self._take_audio(audio_target) if self._has_audio else None
-            try:
-                self._feed_queue.put_nowait((video_data, audio_data))
-            except queue.Full:
-                self._dropped_frames += 1
-                if self._dropped_frames == 1 or self._dropped_frames % 300 == 0:
-                    logger.warning(
-                        "recorder feed queue full; dropping a frame to keep the model unblocked",
-                        dropped_total=self._dropped_frames,
-                    )
-                break
+            self._feed_queue.put_nowait((video_data, audio_data))
             fed += 1
+        if outcome is _Slot.FULL:
+            self._count_dropped(grid_frames - fed, grid_frames)
         if fed:
             markers.advance(fed / RECORDING_FPS)
+
+    def _claim_slot(self, capacity: int, *, wait: bool, deadline: float) -> _Slot:
+        """Ask the feed queue for room for one more grid frame.
+
+        A chunk that asks for backpressure waits for the encoder to take a
+        frame, until *deadline* passes; one that does not reports the full queue
+        immediately so its caller can drop. A recording that is stopping answers
+        :attr:`_Slot.WINDING_DOWN` on either path, so teardown is never counted
+        against the encoder.
+        """
+        if self._feed_queue.qsize() < capacity:
+            return _Slot.TAKEN
+        if self._feed_stop.is_set() or self._disabled:
+            return _Slot.WINDING_DOWN
+        if not wait:
+            return _Slot.FULL
+        with self._feed_room:
+            while self._feed_queue.qsize() >= capacity:
+                if self._feed_stop.is_set() or self._disabled:
+                    return _Slot.WINDING_DOWN
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return _Slot.FULL
+                self._feed_room.wait(timeout=min(remaining, 0.1))
+        return _Slot.TAKEN
+
+    def _count_dropped(self, dropped: int, offered: int) -> None:
+        """Record the frames an emission could not hand over, and say so.
+
+        Every dropped frame reaches the count, which the recording reports when
+        it stops; the warning itself is rate-limited so an encoder that stays
+        behind reports the loss periodically rather than once per emission.
+        """
+        self._dropped_frames += dropped
+        now = time.monotonic()
+        if now - self._dropped_logged_at < _DROP_LOG_INTERVAL_SECONDS:
+            return
+        self._dropped_logged_at = now
+        logger.warning(
+            "recorder feed queue full; dropping frames from an emission",
+            dropped=dropped,
+            offered=offered,
+            dropped_total=self._dropped_frames,
+        )
 
     def _video_frames(self, bundle: MediaBundle) -> list[npt.NDArray[Any]]:
         """Split the recorded video track into single ``(H, W, 3)`` frames.
@@ -537,6 +653,10 @@ class Recorder:
                 item = self._feed_queue.get(timeout=0.1)
             except queue.Empty:
                 continue
+            # Room opened the moment the frame left the queue, so a producer
+            # waiting on capacity is released before the encode, not after it.
+            with self._feed_room:
+                self._feed_room.notify_all()
             if item is None:
                 return
             encoder = self._encoder
@@ -548,17 +668,29 @@ class Recorder:
                 if self._has_audio and audio is not None:
                     encoder.feed_audio(audio)
             except Exception:
-                logger.exception("recorder encoder feed failed; disabling recording")
+                logger.exception(
+                    "recorder encoder feed failed; disabling recording",
+                    session_id=self._session_id,
+                )
                 self._disabled = True
                 self._drain_feed_queue()
                 return
 
     def _buffer_audio(self, bundle: MediaBundle) -> None:
-        """Append a chunk's audio to the jitter buffer, capped at one second.
+        """Append a chunk's audio to the jitter buffer, keeping the newest samples.
 
         The whole chunk's audio is buffered once; :meth:`_take_audio` then pulls a
         grid slot's worth per recorded frame, so the audio DTS tracks the video
         PTS regardless of how the chunk's frames map onto the grid.
+
+        The bound is one authoritative limit, never applied below the emission
+        just appended, so however much audio a model hands over at once, all of
+        it is kept and the grid slots that drain it find real samples rather than
+        silence. Above the emission sits :data:`_AUDIO_BACKLOG_FRAMES` of slack
+        and no more, which keeps each emission's video paired with its own audio:
+        trimming takes the oldest samples, so audio orphaned by frames the
+        encoder never took is discarded with them instead of displacing the
+        audio that belongs to the video still to be fed.
         """
         if self._audio_track is None:
             return
@@ -568,7 +700,8 @@ class Recorder:
         flat = np.ascontiguousarray(track.data, dtype=np.int16).reshape(-1)
         self._audio_jitter_buf.append(flat)
         self._audio_buffered_samples += int(flat.size)
-        cap = self._audio_sample_rate
+        slack = _AUDIO_BACKLOG_FRAMES * round(self._audio_sample_rate / RECORDING_FPS)
+        cap = int(flat.size) + slack
         while self._audio_buffered_samples > cap:
             head = self._audio_jitter_buf[0]
             drop = self._audio_buffered_samples - cap
@@ -598,12 +731,14 @@ class Recorder:
         return out.reshape(1, -1)
 
     def _drain_feed_queue(self) -> None:
-        """Discard every queued feed item."""
+        """Discard every queued feed item, releasing anyone waiting for room."""
         while True:
             try:
                 self._feed_queue.get_nowait()
             except queue.Empty:
-                return
+                break
+        with self._feed_room:
+            self._feed_room.notify_all()
 
     # -- clip / recording requests --------------------------------------------
 
@@ -707,7 +842,7 @@ class Recorder:
             try:
                 callback(clip)
             except Exception:
-                logger.exception("clip-ready callback raised")
+                logger.exception("clip-ready callback raised", session_id=self._session_id)
 
     def _fire_ready_chunks(self) -> None:
         """Announce every recording segment that has closed since the last poll.
@@ -734,7 +869,7 @@ class Recorder:
             try:
                 callback(recording_id, idx)
             except Exception:
-                logger.exception("chunk-ready callback raised")
+                logger.exception("chunk-ready callback raised", session_id=recording_id)
 
     # -- HTTP serving ---------------------------------------------------------
 

@@ -5,8 +5,8 @@ broadcasts each :class:`~reactor_runtime.distributed.protocol.Verb` to
 all ranks (a rank that missed one would desync the next collective) and
 every rank replies to every verb — the controller collects the full
 reply set, which is the framework's only synchronization mechanism.
-The framework issues no collectives of its own; the process group
-belongs entirely to the model.
+The framework issues no compute collectives of its own; clean shutdown uses
+a final barrier before destroying the process group.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from typing import Any
 
 import numpy as np
 
-from reactor_runtime.distributed.frames import SharedFrameBuffer
+from reactor_runtime.distributed.frames import SharedFrameBuffer, _FrameBuffer
 from reactor_runtime.distributed.protocol import Reply, Verb
 from reactor_runtime.log import configure as configure_logging
 from reactor_runtime.log import get_logger
@@ -31,35 +31,35 @@ class DistributedWorker:
     """Base class for one GPU's worth of a multi-GPU model.
 
     Subclass and override the hooks; the framework runs one instance
-    per GPU in its own process, with ``self.rank`` / ``self.world_size``
-    / ``self.device`` / ``self.frames`` populated and the process group
-    initialized before ``setup`` is called. All hooks run on the
+    per GPU (in-process for ``world_size=1``), with ``self.rank`` / ``self.world_size``
+    / ``self.device`` / ``self.frames`` populated before ``setup`` is called.
+    With multiple workers the framework also initializes the process group,
+    unless explicitly disabled. One worker has no process group: guard
+    distributed-only calls with ``self.world_size > 1``. All hooks run on the
     worker's single command loop — no locking needed. Exceptions from
     ``start_session`` are recoverable: all ranks rendezvous on the
     outcome, so every rank stays alive and aligned for the controller's
-    retry. Exceptions from ``generate_chunk`` tear all ranks down
-    together, never leaving a half-alive NCCL world.
+    retry. Exceptions from ``generate_chunk`` make the group unusable;
+    the controller must call ``shutdown()`` to terminate surviving ranks.
     """
 
     rank: int
     world_size: int
     #: ``"cuda:<rank>"`` when CUDA is available, else ``"cpu"``.
     device: str
-    frames: SharedFrameBuffer
+    frames: _FrameBuffer
 
     @property
     def is_leader(self) -> bool:
-        """True on rank 0 — the only rank whose acks the controller awaits."""
+        """True on rank 0; the controller still waits for every rank."""
         return self.rank == 0
 
     def setup(self, **setup_kwargs: Any) -> None:
         """Load models and process-lifetime resources. Called once.
 
         Receives whatever :class:`WorkerGroup` was given as ``setup_kwargs``, so
-        an override declares the arguments it actually wants
-        (``def setup(self, *, weights_path: str)``). That narrows this signature,
-        which a strict type checker reports as an incompatible override — suppress
-        it on the override, since the framework only ever calls this by keyword.
+        an override can validate these values into its own typed configuration.
+        Keep the ``**setup_kwargs`` signature so the override remains type-safe.
         """
         raise NotImplementedError
 
@@ -75,7 +75,9 @@ class DistributedWorker:
         """Initialize per-session state.
 
         The framework has already seeded ``random``, ``numpy`` and ``torch``
-        identically on every rank by the time this runs.
+        identically on every rank by the time this runs. Initialization must
+        replace prior session state and clean up a failed attempt before raising,
+        because another rank may have succeeded when the controller retries.
         """
         raise NotImplementedError
 
@@ -110,6 +112,15 @@ def _torch() -> Any:
         return torch
     except ImportError:
         return None
+
+
+def _seed(seed: int) -> None:
+    """Seed each supported RNG on the calling worker thread/process."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch = _torch()
+    if torch is not None:
+        torch.manual_seed(seed)
 
 
 def worker_main(
@@ -149,36 +160,43 @@ def worker_main(
     # Crash context: the controller detects death; this says where.
     faulthandler.enable()
 
-    torch = _torch()
-    device = "cpu"
-    if torch is not None and torch.cuda.is_available():
-        torch.cuda.set_device(rank)
-        device = f"cuda:{rank}"
-
     dist: Any = None
-    if init_process_group and world_size > 1 and torch is not None:
-        import torch.distributed as torch_dist  # ty: ignore[unresolved-import]
-
-        dist = torch_dist
-        backend = "nccl" if device.startswith("cuda") else "gloo"
-        dist.init_process_group(
-            backend=backend, init_method="env://", rank=rank, world_size=world_size
-        )
-
-    frames = SharedFrameBuffer(frame_shape, name=shm_name)
-    frames.pin()
-
-    worker = worker_cls()
-    worker.rank = rank
-    worker.world_size = world_size
-    worker.device = device
-    worker.frames = frames
-
+    frames: SharedFrameBuffer | None = None
     clean_exit = False
     reported = False  # this rank already posted ERROR for the unwinding failure
     try:
-        # Startup inside the try: a warmup OOM must become an
-        # ("error", ...) post, not an opaque controller timeout.
+        # Report failures across the whole startup, including device binding,
+        # rendezvous, shared-memory attachment, and the worker constructor.
+        torch = _torch()
+        device = "cpu"
+        if torch is not None and torch.cuda.is_available():
+            visible = torch.cuda.device_count()
+            if world_size > visible:
+                raise ValueError(
+                    f"requested {world_size} workers but only {visible} CUDA devices are visible; "
+                    "lower model.resources.gpu.count/world_size or expose the requested GPUs"
+                )
+            torch.cuda.set_device(rank)
+            device = f"cuda:{rank}"
+
+        if init_process_group and world_size > 1:
+            if torch is None:
+                raise RuntimeError("process-group initialization requires torch in the model image")
+            import torch.distributed as torch_dist  # ty: ignore[unresolved-import]
+
+            dist = torch_dist
+            backend = "nccl" if device.startswith("cuda") else "gloo"
+            dist.init_process_group(
+                backend=backend, init_method="env://", rank=rank, world_size=world_size
+            )
+
+        frames = SharedFrameBuffer(frame_shape, name=shm_name)
+        frames.pin()
+        worker = worker_cls()
+        worker.rank = rank
+        worker.world_size = world_size
+        worker.device = device
+        worker.frames = frames
         worker.setup(**setup_kwargs)
         worker.warmup()
         # Every rank reports ready; the controller collects all
@@ -195,11 +213,7 @@ def worker_main(
                 break
 
             if verb is Verb.SEED:
-                seed = int(cmd[1])
-                random.seed(seed)
-                np.random.seed(seed)
-                if torch is not None:
-                    torch.manual_seed(seed)
+                _seed(int(cmd[1]))
 
             elif verb is Verb.INIT_SESSION:
                 # Recoverable: this rank reports its own outcome and the
@@ -224,6 +238,8 @@ def worker_main(
                     end_row = result if isinstance(result, int) else 0
                     if result is not None and not isinstance(result, int):
                         end_row = frames.write(result)
+                    if type(end_row) is not int or not 0 <= end_row <= frame_shape[0]:
+                        raise ValueError(f"invalid frame end row: {end_row!r}")
                     # This reply happens-after this rank's buffer writes;
                     # the controller reads frames only once every rank
                     # has replied, so all slices have landed by then.
@@ -268,4 +284,5 @@ def worker_main(
             if clean_exit:
                 dist.barrier()
             dist.destroy_process_group()
-        frames.close()
+        if frames is not None:
+            frames.close()

@@ -13,7 +13,7 @@ from typing import Annotated, Any
 
 from fastapi import Body, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from reactor_runtime.core import Health, HealthStatus, RuntimeState, SessionState
 from reactor_runtime.http.events import format_sse
@@ -40,10 +40,15 @@ class StopSessionRequest(BaseModel):
 
     ``moderate`` marks the stop as a content-moderation verdict: the session
     ends as moderated and clients are notified before their connections close.
-    The body itself is optional — a bare ``POST /stop_session`` is a plain stop.
+    ``reason`` is the platform's human-readable description of why the session
+    is ending: when set, clients receive a session-ended notice carrying it
+    verbatim before their connections close. A moderated stop outranks it —
+    clients see only the moderation notice. The body itself is optional — a
+    bare ``POST /stop_session`` is a plain stop.
     """
 
     moderate: bool = False
+    reason: str = Field(default="", max_length=64)
 
 
 # The non-2xx statuses a route can answer, declared so the published contract
@@ -126,7 +131,10 @@ class SessionRoutes:
             req: Annotated[StopSessionRequest | None, Body()] = None,
         ) -> Response:
             try:
-                runner.stop_session(moderated=req.moderate if req else False)
+                runner.stop_session(
+                    moderated=req.moderate if req else False,
+                    reason=req.reason if req else "",
+                )
             except SessionTransitionError as rejected:
                 raise _transition_rejection(rejected) from None
             return Response(status_code=200)

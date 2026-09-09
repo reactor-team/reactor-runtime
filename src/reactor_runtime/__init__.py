@@ -49,6 +49,7 @@ from reactor_runtime.interface import (
     session_ended,
     session_started,
 )
+from reactor_runtime.log import get_logger
 from reactor_runtime.paths import get_weights_path
 
 __version__ = version("reactor-runtime")
@@ -89,6 +90,7 @@ __all__ = [
     "disconnected",
     "event",
     "file_uploaded",
+    "get_logger",
     "get_weights_path",
     "session_ended",
     "session_started",

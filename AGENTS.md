@@ -30,7 +30,8 @@ them.
 - Install is through the `reactor` CLI and Docker only. Never add a
   `pip install reactor-runtime` path or any other direct-package install;
   the package is consumed inside the image the CLI builds.
-- Documentation links point at https://deploy-docs.reactor.inc.
+- Documentation links point at the public docs site, https://docs.reactor.inc —
+  the model-authoring (runtime) pages under `https://docs.reactor.inc/deploy`.
 - The README must not fall behind the code. A PR that changes the authoring
   surface, the CLI workflow, or what the project does updates `README.md` in
   the same PR, and review flags a PR that changes behaviour the README

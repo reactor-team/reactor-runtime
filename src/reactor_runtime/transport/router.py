@@ -133,6 +133,14 @@ class SessionControl(ConnectionSink, Protocol):
     def new_conn_id(self) -> ConnId:
         """Mint a fresh connection id, unique within the session."""
 
+    def offer_admitted(self, conn_id: ConnId) -> None:
+        """Stamp an admitted connection offer with the live session.
+
+        Called as a transport accepts an offer, before negotiation begins. The
+        runner uses the stamp to refuse the wire if it only reaches its
+        connected state once a later session is running.
+        """
+
     def track_map(self) -> Mapping[str, Any]:
         """Return the model's declared track manifest for connection setup."""
 

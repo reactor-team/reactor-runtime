@@ -105,6 +105,16 @@ class MediaPacer:
         self._frame_dims: tuple[int, int, int] | None = None
         self._last_frame: MediaBundle | None = None
 
+        # Frames the queue bound has cost this pacer, for the life of the
+        # connection. A dropped frame takes its audio with it, so the count is
+        # part of how a session reports its outbound media health.
+        self._dropped_frames = 0
+
+    @property
+    def dropped_frames(self) -> int:
+        """How many frames the queue bound has discarded, cumulatively."""
+        return self._dropped_frames
+
     def submit(self, chunk: MediaChunk) -> int:
         """Split *chunk* into single frames, adopt its rate, and enqueue them.
 
@@ -157,9 +167,11 @@ class MediaPacer:
             self._queue.put_nowait(frame)
             enqueued += 1
         if enqueued < chunk.n_frames and not chunk.wait and not aborted:
+            dropped = chunk.n_frames - enqueued
+            self._dropped_frames += dropped
             logger.warning(
                 "Media pacer queue full; dropped %d of %d frames",
-                chunk.n_frames - enqueued,
+                dropped,
                 chunk.n_frames,
             )
         return enqueued

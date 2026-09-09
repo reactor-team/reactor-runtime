@@ -47,6 +47,8 @@ _WEBRTC_ENV = (
     "WEBRTC_BWE_MIN_KBPS",
     "WEBRTC_BWE_MAX_KBPS",
     "WEBRTC_BWE_INITIAL_KBPS",
+    "WEBRTC_SENDER_MAX_KBPS",
+    "WEBRTC_SENDER_MIN_KBPS",
     "WEBRTC_VIDEO_CODECS",
 )
 
@@ -148,6 +150,8 @@ def test_webrtc_config_falls_back_to_a_public_stun_when_unconfigured() -> None:
     assert config.bwe_min_kbps == WebRtcConfig.bwe_min_kbps
     assert config.bwe_max_kbps == WebRtcConfig.bwe_max_kbps
     assert config.bwe_initial_kbps == WebRtcConfig.bwe_initial_kbps
+    assert config.sender_max_kbps == WebRtcConfig.sender_max_kbps
+    assert config.sender_min_kbps == WebRtcConfig.sender_min_kbps
 
 
 def test_webrtc_config_reads_bwe_limits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -160,6 +164,51 @@ def test_webrtc_config_reads_bwe_limits(monkeypatch: pytest.MonkeyPatch) -> None
     assert config.bwe_min_kbps == 800
     assert config.bwe_max_kbps == 8000
     assert config.bwe_initial_kbps == 3000
+
+
+def test_the_default_sender_ceiling_is_ten_megabits() -> None:
+    """The per-sender ceiling exists to clear libwebrtc's resolution-keyed
+    default of 2500 kbps, which is where every frame size above 960x540 lands.
+    A default that did not clear it would leave the limit in place and the
+    knob looking broken."""
+    assert WebRtcConfig.sender_max_kbps == 10000
+    assert WebRtcConfig.sender_max_kbps == WebRtcConfig.bwe_max_kbps
+
+
+def test_webrtc_config_reads_sender_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WEBRTC_SENDER_MAX_KBPS", "8000")
+    monkeypatch.setenv("WEBRTC_SENDER_MIN_KBPS", "2000")
+
+    config = _webrtc_config_from_env()
+
+    assert config.sender_max_kbps == 8000
+    assert config.sender_min_kbps == 2000
+
+
+def test_webrtc_config_rejects_a_sender_floor_above_its_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """libwebrtc refuses the pair, so the alternative to failing at boot is a
+    RuntimeError repeated on every negotiation for the process's life."""
+    monkeypatch.setenv("WEBRTC_SENDER_MAX_KBPS", "2000")
+    monkeypatch.setenv("WEBRTC_SENDER_MIN_KBPS", "8000")
+
+    with pytest.raises(SystemExit):
+        _webrtc_config_from_env()
+
+
+def test_an_unset_sender_bound_does_not_trip_the_ordering_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``0`` means "leave at the libwebrtc default", not "a ceiling of zero" —
+    so a floor above it is not an inversion and must not be refused."""
+    monkeypatch.setenv("WEBRTC_SENDER_MAX_KBPS", "0")
+    monkeypatch.setenv("WEBRTC_SENDER_MIN_KBPS", "2000")
+
+    config = _webrtc_config_from_env()
+
+    assert config.sender_max_kbps == 0
+    assert config.sender_min_kbps == 2000
 
 
 def test_webrtc_config_rejects_a_non_integer_bwe_value(

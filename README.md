@@ -4,7 +4,7 @@
 
 **Build real-time AI models in Python.**
 
-[📖 Documentation](https://deploy-docs.reactor.inc) · [🚀 Quickstart](https://deploy-docs.reactor.inc/development/quickstart) · [🌐 Reactor](https://reactor.inc)
+[📖 Documentation](https://docs.reactor.inc/deploy/overview) · [🚀 Quickstart](https://docs.reactor.inc/deploy/development/overview) · [🌐 Reactor](https://reactor.inc)
 
 </div>
 
@@ -18,8 +18,9 @@ Reactor Runtime turns an inference pipeline into a real-time, interactive media 
 - 🎮 **Live interaction.** Clients send commands mid-generation: change a prompt, move a camera, adjust a parameter. The next frame reflects it.
 - 🔌 **No transport code.** You never import a WebRTC library, manage a WebSocket, or encode video. The runtime ships its own media engine as a wheel, so a plain Python container is all a model needs.
 - ✅ **Typed, validated commands.** Declare the commands your model accepts with standard Python types and constraints. The runtime validates every payload before your handler runs and compiles the surface into an OpenAPI schema that drives typed client SDKs.
+- 🔎 **Traceable logs.** `get_logger()` writes structured records — readable `key=value` in a terminal, JSON for a log pipeline. Every record a session writes carries that session's id automatically, so one filter recovers everything a single run logged.
 - 📦 **One container, anywhere.** The `reactor` CLI scaffolds a workspace, builds a small image, and runs it locally. The same image deploys to [Reactor](https://reactor.inc)'s GPU cloud unchanged.
-- 🧩 **More than one GPU, without giving up the server** *(experimental)*. A model that needs several devices keeps its single event loop, session, and output stream: subclass `DistributedWorker` for the per-GPU half and hold a `WorkerGroup` in the model, both imported from `reactor_runtime.distributed`. The framework spawns the ranks, gives them a process group, and then stays out of it — how you shard is yours.
+- 🧩 **Experimental multi-GPU video.** Split one session's video computation across local GPU workers while keeping one server and output stream. The [advanced example](examples/multi_gpu) documents the supported scope and lifecycle.
 
 ## How it works
 
@@ -43,7 +44,9 @@ class MyModel(ReactorModel):
         self.prompt = "a sunny meadow"
 
     @event(name="set_prompt", description="Scene the model renders")
-    async def set_prompt(self, prompt: str = InputField(default="a sunny meadow")) -> None:
+    async def set_prompt(
+        self, prompt: str = InputField(default="a sunny meadow", moderate=True)
+    ) -> None:
         self.prompt = prompt
 
     async def run(self) -> None:
@@ -64,27 +67,37 @@ cd my-model
 reactor run
 ```
 
-`reactor run` builds a container with the runtime inside and serves WebRTC signaling on port 8080. Point a browser at it with the [JS SDK](https://docs.reactor.inc), or connect from the [Reactor Sandbox](https://reactor-sandbox.vercel.app/) and watch frames stream immediately.
+`reactor run` builds a container with the runtime inside and serves WebRTC signaling on port 8080. Connect with the [JS SDK](https://docs.reactor.inc/deploy/overview) to stream frames in your application.
 
-A model too large for one GPU keeps that shape. Instead of running several copies of the server — which would contend for one port and race each other to the client — the process splits in two: the model above stays exactly as it is and touches no CUDA, while a `WorkerGroup` it builds in `load()` spawns one worker process per device, each an instance of your `DistributedWorker` subclass with its rank, device, and process group already set up. `workers.generate(...)` runs one chunk in lockstep on every rank and hands back the frames to `emit`, so `run()` reads the same as before. The framework issues no collectives of its own, which is what leaves you free to shard however your model wants — tensor-, sequence-, or context-parallel — including by carving sub-groups inside `setup()`.
+Log from the same import, passing context as keyword arguments:
 
-This surface is experimental and lives in `reactor_runtime.distributed`, deliberately off the package root. Today the model constructs the group and drives every session by hand; the planned direction is for the runtime to own that wiring, so a model declares its per-rank code and its device count and the group disappears into the framework. The primitives stay available afterward as the escape hatch for parallelism layouts the managed path cannot express, but until then their signatures may change between minor releases.
+```python
+from reactor_runtime import get_logger
+
+logger = get_logger(__name__)
+
+logger.info("scene changed", prompt=self.prompt)
+```
+
+Records render as `key=value` text by default, or as one JSON object per line under `REACTOR_LOG_FORMAT=json`. While a session is live, its id is stamped on every record, so tracing one run's logs never requires threading an id through your call sites. Every record also carries the lifecycle phase it was written in, at both granularities: `state`, the session state machine's word, and `runtime_state`, the coarse word the health endpoint serves — so the logs of one phase — loading weights, a live session, teardown — are filterable by whichever vocabulary you are reading off another surface. The stamp is applied where records are written rather than where they are made, so a plain `logging.getLogger(__name__)` and the libraries your model imports are covered too.
+
+For single-node multi-GPU video, the experimental `DistributedVideoModel` adapter keeps the same commands and typed output: declare a worker, snapshot controls, and map its frames to an `Output`. The runtime handles worker sessions, pause/restart, and cleanup using the manifest's GPU count. See the [complete example](examples/multi_gpu); raw `WorkerGroup` orchestration is reserved for advanced use. This video-only surface lives in `reactor_runtime.distributed`, stays off the package root, and may change between minor releases. It is not a generic action/tensor API or a multi-session scheduler.
 
 ## Install
 
-Everything runs through the [`reactor` CLI](https://deploy-docs.reactor.inc/platform/installation). There is nothing to install on your host but the CLI and Docker; the runtime ships inside the image the CLI builds for your workspace.
+Everything runs through the [`reactor` CLI](https://docs.reactor.inc/deploy/platform/installation). There is nothing to install on your host but the CLI and Docker; the runtime ships inside the image the CLI builds for your workspace.
 
 ```sh
 brew install reactor-team/tools/reactor-cli
 ```
 
-Not on macOS, or pinning a release in CI? See [Install the CLI](https://deploy-docs.reactor.inc/platform/installation).
+Not on macOS, or pinning a release in CI? See [Install the CLI](https://docs.reactor.inc/deploy/platform/installation).
 
 ## Learn more
 
-- [Quickstart](https://deploy-docs.reactor.inc/development/quickstart): from zero to a streaming model in 2 minutes
-- [Model anatomy](https://deploy-docs.reactor.inc/development/reactor-model/model-anatomy): every piece of a Reactor model, line by line
-- [The run loop](https://deploy-docs.reactor.inc/development/reactor-model/run-loop): emitting frames, batches, and frame rates
+- [Quickstart](https://docs.reactor.inc/deploy/development/overview): from zero to a streaming model in 2 minutes
+- [Model anatomy](https://docs.reactor.inc/deploy/development/reactor-model/model-anatomy): every piece of a Reactor model, line by line
+- [The run loop](https://docs.reactor.inc/deploy/development/reactor-model/run-loop): emitting frames, batches, and frame rates
 
 ## Development
 

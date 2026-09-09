@@ -120,6 +120,7 @@ class BrightnessState(InputState):
         default="",
         max_length=200,
         description="Caption drawn over every frame; empty draws nothing.",
+        moderate=True,
     )
 
 
@@ -168,12 +169,14 @@ class Brightness(ReactorPipeline):
         return BrightnessSet(brightness=brightness)
 
     @event(name="set_image", description="Set the reference image and acknowledge it.")
-    def set_image(self, image: UploadedFile) -> ImageSet:
+    def set_image(self, image: UploadedFile = InputField(moderate=True)) -> ImageSet:
         """Accept an uploaded image and reply with a typed acknowledgement.
 
         The ``UploadedFile`` parameter makes the command carry an upload reference
         in its request body; returning an :class:`ImageSet` gives the client a
-        confirmation carrying the accepted file's name.
+        confirmation carrying the accepted file's name. The file is
+        client-supplied content, so it asks for the moderation mark in the
+        rendered schema while staying required.
 
         A file this model cannot use raises :class:`CommandError`, so the caller
         rejects with a code it can branch on rather than waiting for a reply.

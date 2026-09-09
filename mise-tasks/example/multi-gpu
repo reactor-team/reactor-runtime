@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Copyright (c) 2026 Reactor Technologies, Inc. All rights reserved.
+#MISE description="[Examples] Build the multi-GPU example with this checkout's runtime"
+#MISE depends=["//:build"]
+set -euo pipefail
+
+if (( $# != 0 )); then
+  printf '%s\n' 'Usage: mise run example:multi-gpu (no arguments)' >&2
+  exit 2
+fi
+
+if ! command -v reactor >/dev/null; then
+  printf '%s\n' 'Install the reactor CLI first: https://docs.reactor.inc/deploy/platform/installation' >&2
+  exit 1
+fi
+
+cd "${REPO_ROOT:?mise supplies the repository root}"
+example_wheel="reactor_runtime-$(uv version --short)-py3-none-any.whl"
+example_dir="${REPO_ROOT}/examples/multi_gpu"
+mkdir -p "${example_dir}/runtime-wheel"
+cp "dist/${example_wheel}" "${example_dir}/runtime-wheel/${example_wheel}"
+# Select this build explicitly, even if older wheel versions are still staged.
+printf '/tmp/runtime-wheel/%s\n' "${example_wheel}" > "${example_dir}/runtime-wheel/requirements.txt"
+cd "${example_dir}"
+reactor build
+printf '\n%s\n' 'Ready. From examples/multi_gpu run: reactor run --gpus all'

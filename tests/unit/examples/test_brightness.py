@@ -69,6 +69,17 @@ def test_set_text_bounds_its_length() -> None:
     assert fields["text"].info.max_length == 200
 
 
+def test_the_free_text_and_upload_fields_ask_for_moderation() -> None:
+    commands = ModelContract.of(Brightness).commands
+    text = commands["set_text"].command.__command_fields__
+    image = commands["set_image"].command.__command_fields__
+    assert text["text"].info.moderate is True
+    assert image["image"].info.moderate is True
+    # A bounded knob carries no free text, so it asks for nothing.
+    brightness = commands["set_brightness"].command.__command_fields__
+    assert brightness["brightness"].info.moderate is False
+
+
 def test_tracks_are_video_and_audio_out() -> None:
     tracks = ModelContract.of(Brightness).tracks
     assert {name: (t.kind.value, t.direction.value) for name, t in tracks.items()} == {

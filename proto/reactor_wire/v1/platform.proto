@@ -57,3 +57,11 @@ message Moderation {
   repeated string categories = 4;
   string message = 5;
 }
+
+// The platform is ending the session, and this is why. Sent best-effort
+// before the connections close, so the client sees the reason rather than a
+// bare disconnect. `reason` is the platform-authored, human-readable
+// description of the cause, delivered verbatim for the client to display.
+message SessionEnded {
+  string reason = 1;
+}

@@ -40,6 +40,30 @@ class IceServer:
     credential: str | None = None
 
 
+@dataclass(frozen=True)
+class IceCredentials:
+    """The ICE username fragment and password a connection answers with.
+
+    Normally the media engine generates these itself, and nothing needs to
+    supply them. They exist as a configurable value for deployments that front
+    the runtime with a relaying layer that has to recognise a connection from
+    its ICE credentials alone — the credentials are the only field an ICE agent
+    echoes on every connectivity check, so a fronting layer can route on them
+    without inspecting media.
+
+    Both values must satisfy RFC 8445's ``ice-char`` alphabet and length
+    ranges; :meth:`reactor_webrtc.SessionDescription.with_ice_credentials`
+    rejects anything outside them.
+
+    Attributes:
+        ufrag: The ``a=ice-ufrag`` value to answer with.
+        pwd: The ``a=ice-pwd`` value to answer with.
+    """
+
+    ufrag: str
+    pwd: str
+
+
 class CodecEntry(TypedDict):
     """A supported codec for SDP negotiation and encoder/decoder selection.
 
@@ -81,8 +105,14 @@ class WebRtcConfig:
 
     Attributes:
         ice_servers: The STUN/TURN servers offered for candidate gathering.
+        ice_credentials: The ICE credentials to answer with, or ``None`` — the
+            default — to let the media engine generate its own. Setting these
+            is only useful to a deployment whose fronting layer routes on them;
+            see :class:`IceCredentials`.
         port_range: An inclusive ``(min, max)`` UDP port range to confine ICE
-            to, or ``None`` to let the stack choose.
+            to, or ``None`` to let the stack choose. A single-port range pins
+            the connection to one port, which is what a fronting layer needs if
+            it must know the media address before the connection exists.
         transport_policy: Which candidate types to gather.
         ping_timeout: Seconds without a client ping before the connection's
             watchdog declares it lost. ``0`` or less disables the watchdog.
@@ -97,6 +127,22 @@ class WebRtcConfig:
         bwe_initial_kbps: Starting bitrate before estimates arrive.
         bwe_target_update_threshold: Relative change below which a new bitrate
             estimate is ignored rather than re-applied to the encoders.
+        sender_max_kbps: Ceiling for each sendonly *video* track's own encoder,
+            which is
+            a different limit from ``bwe_max_kbps`` and the one that actually
+            caps a video stream. The two are conjunctive — the lower wins — and
+            without this a sender's maximum comes from libwebrtc's
+            resolution-keyed default, which is 2500 kbps for anything above
+            960x540. Every frame size we send at 720p or larger would cap at
+            2.5 Mbps no matter how much headroom the estimate had. Audio senders
+            are left alone: that default is keyed on frame size, so there is no
+            equivalent for them to clear. ``0`` or less leaves the libwebrtc
+            default in place.
+        sender_min_kbps: Floor for each sendonly video track's own encoder. ``0`` or
+            less leaves it unset, which is the default: a floor stops the
+            encoder degrading gracefully, so on a link that cannot sustain it
+            the trade is lower quality for packet loss. Useful mainly when
+            several tracks compete and one must be preserved.
         rtx_max_size_packets: Retransmission history depth, in packets.
         rtx_max_size_time_ms: Retransmission history depth, in milliseconds;
             ``0`` means no time limit.
@@ -123,6 +169,7 @@ class WebRtcConfig:
     """
 
     ice_servers: tuple[IceServer, ...] = ()
+    ice_credentials: IceCredentials | None = None
     port_range: tuple[int, int] | None = None
     transport_policy: IceTransportPolicy = IceTransportPolicy.ALL
     ping_timeout: float = 20.0
@@ -134,6 +181,8 @@ class WebRtcConfig:
     bwe_max_kbps: int = 10000
     bwe_initial_kbps: int = 4000
     bwe_target_update_threshold: float = 0.05
+    sender_max_kbps: int = 10000
+    sender_min_kbps: int = 0
     rtx_max_size_packets: int = 512
     rtx_max_size_time_ms: int = 200
     rtp_payload_mtu: int = 1200

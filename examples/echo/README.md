@@ -7,23 +7,29 @@ image blended over the output video).
 
 ## Run
 
-This directory is a `reactor` workspace: `reactor.yaml` names the model, the
-`Dockerfile` builds the image, and `requirements.txt` pins the runtime alongside
-OpenCV (which powers the effects). The CLI builds the image with the runtime
-inside and runs it — nothing to install on your host but the CLI and Docker.
+This directory is a `reactor` workspace: `reactor.yaml` names the model and
+defines the image in its `build:` block, and `requirements.txt` lists the
+model's own dependencies (OpenCV, which powers the effects). There is nothing
+to install on your host but the CLI and Docker.
 
 ```sh
 cd examples/echo
-reactor build
+reactor build --no-dockerfile
 reactor run
 ```
 
+`--no-dockerfile` renders the image from `reactor.yaml`'s `build:` block — no
+Dockerfile to write or maintain. `build.runtime_version` must match the
+`reactor-runtime==<version>` pin in `requirements.txt`; bump both together to
+upgrade.
+
 `reactor run` reuses the image `reactor build` produced (it builds one on first
-run if none exists), then serves WebRTC signaling on `http://localhost:8080`.
-Rebuild after editing anything baked into the image:
+run if none exists, so pass `--no-dockerfile` there too), then serves WebRTC
+signaling on `http://localhost:8080`. Rebuild after editing anything baked
+into the image:
 
 ```sh
-reactor build && reactor run
+reactor build --no-dockerfile && reactor run
 ```
 
 Connect a client from the [Reactor Sandbox](https://reactor-sandbox.vercel.app/)
@@ -39,6 +45,11 @@ curl -s localhost:8080/health
 - `set_effect` — `none | grayscale | sepia | edges | invert | blur | pixelate`
 - `set_intensity` — `0.0`–`1.0`
 - `set_caption` — draw a text caption over the output video (up to 200 chars).
+- `set_burst` — `1`–`120` frames per emit. `1` emits on every tick; higher holds
+  frames back and sends them together, which is how a batching model produces.
+  Useful for watching the transport smooth an uneven producer in a live session.
+  The ceiling is four seconds of media at 30 fps, and a burst holds every frame
+  in memory until it is emitted.
 - `set_overlay_image` — blend an uploaded image over the output video.
   `overlay_image` is a file reference (`UploadedFile`); `overlay_strength` is
   `0.0`–`1.0`. From the JS SDK: `const ref = await uploadFile(file); await

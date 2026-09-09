@@ -265,6 +265,21 @@ class Codec(ABC):
         )
         return self.encode(wire)
 
+    def encode_session_ended(self, *, reason: str) -> tuple[Channel, bytes | str]:
+        """Encode the platform's session-ended notice for the client.
+
+        Like a moderation verdict, the notice is unsolicited, so it rides a
+        ``ControlServerMessage`` notification with no ``request_id``. *reason*
+        is the platform-authored, human-readable description of the cause,
+        delivered verbatim. The physical channel is version-dependent and
+        returned alongside the frame.
+        """
+        wire = control_pb2.ControlServerMessage(
+            kind=common_pb2.MessageKind.MESSAGE_KIND_NOTIFICATION,
+            session_ended=platform_pb2.SessionEnded(reason=reason),
+        )
+        return self.encode(wire)
+
 
 def select(version: ProtocolVersion) -> Codec:
     """Return the codec for a negotiated wire version."""

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -19,7 +20,10 @@ from reactor_runtime import (
     Video,
     event,
     file_uploaded,
+    log,
     protocol,
+    session_ended,
+    session_started,
 )
 from reactor_runtime.core import (
     ClientConnected,
@@ -55,7 +59,12 @@ from reactor_runtime.message_gateway import InboundCommand
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.protocol.common import dict_to_struct, struct_to_dict
 from reactor_runtime.recording import ClipResult
-from reactor_runtime.runner.runner import _RUNTIME_STATES, SESSION_ID, Runner
+from reactor_runtime.runner.runner import (
+    _DRAIN_CLOSE_REASON,
+    _RUNTIME_STATES,
+    SESSION_ID,
+    Runner,
+)
 from reactor_runtime.transport.router import (
     SessionControl,
     SessionNotRunningError,
@@ -103,6 +112,7 @@ class FakeModel(ReactorModel):
     def load(self, config_path: Path | None) -> None:
         self.events.append("load")
         self.loaded = config_path
+        self.loaded_world_size = self.world_size
 
     def bind_output(
         self,
@@ -199,13 +209,47 @@ async def started_runner(monkeypatch: pytest.MonkeyPatch) -> Any:
 async def test_start_resolves_loads_and_readies(monkeypatch: pytest.MonkeyPatch) -> None:
     created_models.clear()
     monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
-    runner = Runner(RuntimeConfig(model_ref="fake:Model", config_path=Path("/cfg/config.yml")))
+    runner = Runner(
+        RuntimeConfig(model_ref="fake:Model", config_path=Path("/cfg/config.yml"), world_size=4)
+    )
 
     await runner.start()
     try:
         assert runner._sm.current_state is SessionState.READY
         model = created_models[-1]
         assert model.loaded == Path("/cfg/config.yml")
+        assert model.loaded_world_size == 4
+    finally:
+        await runner.stop()
+
+
+async def test_start_journals_initializing_before_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The loading phase is otherwise silent: a consumer subscribed from the
+    # start of the journal must see an INITIALIZING self-loop on CREATED before
+    # the INITIALIZATION_SUCCESS that leaves CREATED, so it can report a booting
+    # pod during the load window rather than nothing until READY.
+    created_models.clear()
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
+    runner = _runner()
+    stream = runner._events.subscribe(since=0)
+
+    await runner.start()
+    try:
+
+        async def first(n: int) -> list[Transition]:
+            out: list[Transition] = []
+            async for _seq, event in stream:
+                out.append(event.transition)
+                if len(out) >= n:
+                    break
+            return out
+
+        boot = await asyncio.wait_for(first(2), timeout=2)
+        assert boot[0].event is SessionEvent.INITIALIZING
+        assert boot[0].from_state is SessionState.CREATED
+        assert boot[0].to_state is SessionState.CREATED
+        assert boot[1].event is SessionEvent.INITIALIZATION_SUCCESS
+        assert boot[1].to_state is SessionState.READY
     finally:
         await runner.stop()
 
@@ -366,6 +410,7 @@ async def test_schema_request_v0_replies_on_the_data_channel(
 ) -> None:
     runner = await _started_runner(monkeypatch)
     try:
+        runner.start_session({})
         conn = FakeConnection(1)
         runner.connection_opened(conn)
         runner.schema_requested(ConnId(1), "ctrl_3")
@@ -381,6 +426,7 @@ async def test_schema_request_v1_replies_on_control_correlated_by_id(
 ) -> None:
     runner = await _started_runner(monkeypatch)
     try:
+        runner.start_session({})
         conn = FakeConnection(2)
         conn.protocol_version = V1
         runner.connection_opened(conn)
@@ -538,6 +584,79 @@ def test_connection_opened_registers_the_connection() -> None:
     assert runner._connections.count == 0
 
 
+async def test_a_connection_opened_during_closing_is_refused_and_closed(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    started_runner.stop_session()
+    assert started_runner._sm.current_state is SessionState.CLOSING
+
+    late = FakeConnection(7)
+    started_runner.connection_opened(late)
+
+    await asyncio.sleep(0.01)
+    assert started_runner._sm.current_state is SessionState.READY
+    assert started_runner._connections.count == 0
+    assert late.closed
+
+
+async def test_a_connection_opened_with_no_session_open_is_refused_and_closed(
+    started_runner: Runner,
+) -> None:
+    late = FakeConnection(7)
+    started_runner.connection_opened(late)
+
+    await asyncio.sleep(0.01)
+    assert started_runner._connections.count == 0
+    assert late.closed
+
+
+async def test_a_connection_opened_after_termination_is_refused_and_closed(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    started_runner._on_model_failure(RuntimeError("gpu fell off"))
+    await asyncio.sleep(0.05)  # let the loop run the scheduled eviction callback
+    _expect_state(started_runner, SessionState.TERMINATED)
+
+    late = FakeConnection(7)
+    started_runner.connection_opened(late)
+
+    await asyncio.sleep(0.01)
+    assert started_runner._connections.count == 0
+    assert late.closed
+
+
+async def test_a_wire_admitted_in_an_earlier_session_cannot_join_the_next(
+    started_runner: Runner,
+) -> None:
+    # The offer is admitted in the first session, but its wire only connects
+    # once the next session is running — the state looks valid, so only the
+    # offer's epoch stamp can tell the sessions apart.
+    started_runner.start_session({})
+    stale_id = started_runner.new_conn_id()
+    started_runner.offer_admitted(stale_id)
+    started_runner.stop_session()
+    await asyncio.sleep(0.01)
+    _expect_state(started_runner, SessionState.READY)
+    started_runner.start_session({})
+
+    stale = FakeConnection(stale_id)
+    started_runner.connection_opened(stale)
+
+    await asyncio.sleep(0.01)
+    assert started_runner._connections.count == 0
+    assert stale.closed
+
+    # An offer admitted in the live session still registers.
+    fresh_id = started_runner.new_conn_id()
+    started_runner.offer_admitted(fresh_id)
+    fresh = FakeConnection(fresh_id)
+    started_runner.connection_opened(fresh)
+    assert started_runner._connections.count == 1
+    assert not fresh.closed
+
+
 async def test_connection_answered_rides_a_self_loop_transition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -599,6 +718,225 @@ async def test_sessions_without_a_session_id_get_distinct_recording_ids(
     assert minted[0] != minted[1]
 
 
+async def _await_log_release() -> None:
+    """Wait for the model thread to retire the log binding, which it does off-loop."""
+    deadline = time.monotonic() + 2.0
+    while log.get_session_id() is not None:
+        assert time.monotonic() < deadline, f"binding never released: {log.get_session_id()}"
+        await asyncio.sleep(0.01)
+
+
+async def test_a_live_session_stamps_its_id_on_the_logs(started_runner: Runner) -> None:
+    supplied = "11111111-2222-3333-4444-555555555555"
+    assert log.get_session_id() is None
+    started_runner.start_session({"session_id": supplied})
+    assert log.get_session_id() == supplied
+
+
+async def test_the_stamped_state_tracks_the_lifecycle(started_runner: Runner) -> None:
+    # The runner stamps its starting state at construction — the model-load
+    # window is what makes initialization logs retrievable — and re-stamps on
+    # every move, so a record always reads the phase it was written in, in both
+    # the machine's words and the health route's coarse projection.
+    assert (log.get_state(), log.get_runtime_state()) == ("ready", "available")
+    started_runner.start_session({})
+    assert (log.get_state(), log.get_runtime_state()) == ("waiting", "serving")
+    conn = FakeConnection(1)
+    started_runner.connection_opened(conn)
+    _expect_state(started_runner, SessionState.STREAMING)
+    assert (log.get_state(), log.get_runtime_state()) == ("streaming", "serving")
+    started_runner.stop_session()
+    await asyncio.sleep(0.01)
+    _expect_state(started_runner, SessionState.READY)
+    assert (log.get_state(), log.get_runtime_state()) == ("ready", "available")
+
+
+async def test_construction_stamps_the_created_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
+    assert log.get_state() is None
+    runner = _runner()
+    assert (log.get_state(), log.get_runtime_state()) == ("created", "loading")
+    await runner.start()
+    try:
+        assert (log.get_state(), log.get_runtime_state()) == ("ready", "available")
+    finally:
+        await runner.stop()
+
+
+async def test_an_eviction_stamps_the_terminated_state(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    started_runner._on_model_failure(RuntimeError("gpu fell off"))
+    await asyncio.sleep(0.05)  # let the loop run the scheduled eviction callback
+    _expect_state(started_runner, SessionState.TERMINATED)
+    assert (log.get_state(), log.get_runtime_state()) == ("terminated", "terminated")
+
+
+async def test_a_record_written_in_session_carries_state_and_id(
+    started_runner: Runner,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # caplog's handler bypasses the stamping filter, so run it explicitly over
+    # the captured record — this asserts the ambient context a real handler
+    # would stamp, on a record no call site enriched.
+    started_runner.start_session({"session_id": "11111111-2222-3333-4444-555555555555"})
+    with caplog.at_level(logging.INFO, logger="some.model.module"):
+        logging.getLogger("some.model.module").info("mid-session record")
+    record = caplog.records[-1]
+    assert log.SessionContextFilter().filter(record)
+    fields = getattr(record, "reactor_fields", {})
+    assert fields["session_id"] == "11111111-2222-3333-4444-555555555555"
+    assert fields["state"] == "waiting"
+    assert fields["runtime_state"] == "serving"
+
+
+async def test_closing_a_session_releases_the_stamped_id(started_runner: Runner) -> None:
+    started_runner.start_session({"session_id": "11111111-2222-3333-4444-555555555555"})
+    started_runner.stop_session()
+    await asyncio.sleep(0.01)
+    _expect_state(started_runner, SessionState.READY)
+    # The process may host another session, so a stale id would misattribute it.
+    await started_runner._drain_teardown()
+    await _await_log_release()
+
+
+async def _two_sessions_with_a_started_barrier(
+    monkeypatch: pytest.MonkeyPatch, first_sid: str, second_sid: str
+) -> None:
+    """Run two sessions back to back and prove the first's release spared the second.
+
+    The reactor loop dispatches in order, so once the second session's
+    ``@session_started`` hook has run, the first session's ``SessionEnded`` — and
+    with it the release of its binding — has already been dispatched. Waiting on
+    the hook is the deterministic barrier that makes the assertion meaningful: it
+    asserts only after the late release has provably happened.
+    """
+    started = threading.Event()
+
+    class BarrierModel(FakeModel):
+        @session_started
+        def on_session_started(self) -> None:
+            started.set()
+
+    monkeypatch.setattr(
+        "reactor_runtime.runner.runner.import_model_class", lambda ref: BarrierModel
+    )
+    runner = _runner()
+    await runner.start()
+    try:
+        # The model thread creates its queues on its own loop, and an event
+        # enqueued before then is deliberately dropped. Production start_session
+        # calls arrive long after boot; this test's arrives instantly, so wait
+        # for the loop before opening the first session.
+        model = created_models[-1]
+        deadline = time.monotonic() + 2.0
+        while model._reactor_q is None:
+            assert time.monotonic() < deadline, "model loop never became ready"
+            await asyncio.sleep(0.01)
+        runner.start_session({"session_id": first_sid})
+        assert await asyncio.to_thread(started.wait, 2.0), "first session_started never ran"
+        started.clear()
+        runner.stop_session()
+        await asyncio.sleep(0.01)
+        _expect_state(runner, SessionState.READY)
+        runner.start_session({"session_id": second_sid})
+        assert await asyncio.to_thread(started.wait, 2.0), "second session_started never ran"
+        assert log.get_session_id() == second_sid
+    finally:
+        await runner.stop()
+
+
+async def test_a_late_release_cannot_strip_the_session_that_followed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The release rides the first session's SessionEnded, so the next session is
+    # live before it runs; the binding token is what keeps it from unbinding her.
+    await _two_sessions_with_a_started_barrier(
+        monkeypatch,
+        "11111111-1111-1111-1111-111111111111",
+        "22222222-2222-2222-2222-222222222222",
+    )
+
+
+async def test_a_session_reusing_the_previous_id_keeps_its_own_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A caller may start two sessions under one id; the first session's release
+    # must not unbind the second, which would leave its whole run unstamped.
+    reused = "11111111-1111-1111-1111-111111111111"
+    await _two_sessions_with_a_started_barrier(monkeypatch, reused, reused)
+
+
+async def test_session_ended_hook_records_are_stamped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The release rides the reactor queue behind SessionEnded, so the hook has
+    # returned — its records stamped — before the binding is retired. Recording
+    # is off here, so teardown is immediate and only the queue order protects
+    # the hook; this is the case a teardown-only wait loses.
+    seen: list[str | None] = []
+
+    class HookedModel(FakeModel):
+        @session_ended
+        def on_session_ended(self) -> None:
+            seen.append(log.get_session_id())
+
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: HookedModel)
+    runner = _runner()
+    await runner.start()
+    try:
+        sid = "11111111-2222-3333-4444-555555555555"
+        runner.start_session({"session_id": sid})
+        runner.stop_session()
+        await asyncio.sleep(0.01)
+        _expect_state(runner, SessionState.READY)
+        await runner._drain_teardown()
+        # Released only after the hook, so the release doubles as its barrier.
+        await _await_log_release()
+        assert seen == [sid]
+    finally:
+        await runner.stop()
+
+
+async def test_a_second_session_stamps_its_own_id(started_runner: Runner) -> None:
+    started_runner.start_session({"session_id": "11111111-1111-1111-1111-111111111111"})
+    started_runner.stop_session()
+    await asyncio.sleep(0.01)
+    started_runner.start_session({"session_id": "22222222-2222-2222-2222-222222222222"})
+    assert log.get_session_id() == "22222222-2222-2222-2222-222222222222"
+
+
+async def test_an_eviction_leaves_the_binding_for_the_process_exit(
+    started_runner: Runner,
+) -> None:
+    # An eviction is the model loop's own death: no SessionEnded is dispatched,
+    # so nothing retires the binding — deliberately. The process is exiting, and
+    # its last records belong to the session that brought it down.
+    sid = "11111111-2222-3333-4444-555555555555"
+    started_runner.start_session({"session_id": sid})
+    started_runner._on_model_failure(RuntimeError("gpu fell off"))
+    await asyncio.sleep(0.05)  # let the loop run the scheduled eviction callback
+    _expect_state(started_runner, SessionState.TERMINATED)
+    await started_runner._drain_teardown()
+    assert log.get_session_id() == sid
+
+
+async def test_the_transition_log_carries_no_id_of_its_own(
+    started_runner: Runner,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The fixed transport id is one constant per process and carries nothing,
+    # and a call-site session_id would beat the stamped one — so the transition
+    # log names neither, and the session it belongs to arrives via the stamp
+    # alone on exactly the records an operator reaches for first.
+    with caplog.at_level(logging.INFO, logger="reactor_runtime.runner.runner"):
+        started_runner.start_session({"session_id": "11111111-2222-3333-4444-555555555555"})
+    moves = [r for r in caplog.records if r.message == "session transition"]
+    assert moves
+    fields = getattr(moves[-1], "reactor_fields", {})
+    assert "session_id" not in fields
+    assert "transport_session_id" not in fields
+
+
 async def test_require_session_running_rejects_an_unknown_sid(started_runner: Runner) -> None:
     started_runner.start_session({})
     with pytest.raises(UnknownSessionError):
@@ -638,6 +976,23 @@ async def test_start_session_rejects_a_double_start(started_runner: Runner) -> N
         started_runner.start_session({})
     assert rejected.value.action == "start"
     assert rejected.value.state is SessionState.WAITING
+
+
+async def test_a_rejected_start_leaves_the_recording_id_untouched(
+    started_runner: Runner,
+) -> None:
+    supplied = "11111111-2222-3333-4444-555555555555"
+    started_runner.start_session({"session_id": supplied})
+    # A start is legal only from READY. A second one arriving while the session is
+    # live is rejected, and that rejection must not rebind the live session's
+    # recording id: neither to the rejected request's own id, nor to a freshly
+    # minted one when it carries none.
+    with pytest.raises(SessionTransitionError):
+        started_runner.start_session({"session_id": "99999999-9999-9999-9999-999999999999"})
+    assert started_runner._recording_id == supplied
+    with pytest.raises(SessionTransitionError):
+        started_runner.start_session({})
+    assert started_runner._recording_id == supplied
 
 
 def test_start_session_rejects_before_the_model_is_loaded() -> None:
@@ -815,10 +1170,137 @@ async def test_plain_stop_sends_no_moderation_notice(started_runner: Runner) -> 
     assert not any(isinstance(f, str) and "moderation" in f for f in conn.sent)
 
 
+async def test_reasoned_stop_notifies_every_client_before_teardown(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    v0_conn = FakeConnection(1)
+    v1_conn = FakeConnection(2)
+    v1_conn.protocol_version = V1
+    started_runner.connection_opened(v0_conn)
+    started_runner.connection_opened(v1_conn)
+
+    started_runner.stop_session(reason="Session ended: the model was updated.")
+
+    # The notice is queued synchronously on entering CLOSING; the connections
+    # only close in the teardown task that has not run yet.
+    assert not v0_conn.closed
+    assert not v1_conn.closed
+    # The v0 client sees the legacy runtime-scope JSON on the data channel.
+    v0_frame = next(f for f in v0_conn.sent if isinstance(f, str) and "sessionEnded" in f)
+    body = json.loads(v0_frame)
+    assert body["scope"] == "runtime"
+    assert body["data"]["type"] == "sessionEnded"
+    assert body["data"]["data"]["reason"] == "Session ended: the model was updated."
+    # The v1 client sees the binary notification on the control channel.
+    raw = v1_conn.control[-1]
+    assert isinstance(raw, bytes)
+    decoded = protocol.select(V1).decode(raw, CONTROL, SERVER)
+    assert isinstance(decoded, control_pb2.ControlServerMessage)
+    assert decoded.WhichOneof("payload") == "session_ended"
+    assert decoded.session_ended.reason == "Session ended: the model was updated."
+
+    await asyncio.sleep(0.01)
+    assert v0_conn.closed
+    assert v1_conn.closed
+
+
+async def test_reasoned_stop_ends_the_session_as_stopped(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = _record_reactor_events(started_runner, monkeypatch)
+    started_runner.start_session({})
+    started_runner.stop_session(reason="deployment")
+    await asyncio.sleep(0.01)
+    ended = [e for e in events if isinstance(e, SessionEnded)]
+    assert len(ended) == 1
+    assert ended[0].reason is EndReason.STOPPED
+
+
+async def test_the_close_reason_reaches_the_client_verbatim(
+    started_runner: Runner,
+) -> None:
+    # The platform authors the wording; the runtime must not rewrite it.
+    started_runner.start_session({})
+    conn = FakeConnection(1)
+    started_runner.connection_opened(conn)
+
+    started_runner.stop_session(reason="cosmic rays flipped a bit")
+
+    frame = next(f for f in conn.sent if isinstance(f, str) and "sessionEnded" in f)
+    body = json.loads(frame)
+    assert body["data"]["data"]["reason"] == "cosmic rays flipped a bit"
+
+
+async def test_plain_stop_sends_no_session_ended_notice(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    conn = FakeConnection(1)
+    started_runner.connection_opened(conn)
+
+    started_runner.stop_session()
+
+    assert not any(isinstance(f, str) and "sessionEnded" in f for f in conn.sent)
+
+
+async def test_a_moderated_and_reasoned_stop_sends_only_the_moderation_notice(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    conn = FakeConnection(1)
+    started_runner.connection_opened(conn)
+
+    started_runner.stop_session(moderated=True, reason="deployment")
+
+    assert any(isinstance(f, str) and "moderation" in f for f in conn.sent)
+    assert not any(isinstance(f, str) and "sessionEnded" in f for f in conn.sent)
+
+
+async def test_reasoned_stop_without_a_client_still_stops(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    started_runner.stop_session(reason="deployment")
+    assert started_runner._sm.current_state is SessionState.CLOSING
+
+
+async def test_reasoned_stop_survives_a_failing_broadcast(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started_runner.start_session({})
+    started_runner.connection_opened(FakeConnection(1))
+
+    def explode(encode: Any) -> None:
+        raise RuntimeError("wire fell over")
+
+    monkeypatch.setattr(started_runner._connections, "broadcast_response", explode)
+
+    started_runner.stop_session(reason="deployment")
+
+    # The teardown still runs to completion: the session unwinds to READY
+    # rather than stranding in CLOSING behind the failed notice.
+    await asyncio.sleep(0.01)
+    assert started_runner._sm.current_state is SessionState.READY
+
+
 async def test_drain_ends_an_active_session_within_grace(started_runner: Runner) -> None:
     started_runner.start_session({})
     await started_runner.drain()
     assert started_runner._sm.current_state is SessionState.READY
+
+
+async def test_drain_tells_clients_the_server_is_stopping(started_runner: Runner) -> None:
+    # The runtime initiates a drain stop, so it authors the close reason; the
+    # notice must reach the client before the drain closes its connection.
+    started_runner.start_session({})
+    conn = FakeConnection(1)
+    started_runner.connection_opened(conn)
+
+    await started_runner.drain()
+
+    frame = next(f for f in conn.sent if isinstance(f, str) and "sessionEnded" in f)
+    body = json.loads(frame)
+    assert body["data"]["data"]["reason"] == _DRAIN_CLOSE_REASON
+    # The bound the stop route enforces on platform reasons; ours obeys it too.
+    assert len(_DRAIN_CLOSE_REASON) <= 64
+    assert conn.closed
 
 
 # --- orphan timeout, teardown, egress journal, fatal exit -----------------
@@ -1378,6 +1860,48 @@ async def test_emitted_media_is_counted_in_frames_per_track(started_runner: Runn
     # chunk here, and a counter of chunks would report a quarter of the real rate.
     assert _metric(started_runner, "runtime_media_frames_total", track="main_video") == 4.0
     assert _metric(started_runner, "runtime_media_frames_total", track="main_audio") == 4.0
+
+
+async def test_media_reaches_the_connections_before_the_recorder(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Feeding the recorder can make the fan-out wait when the encoder is behind,
+    # bounded but real, while a pacer that waits is throttling to the playout
+    # rate it was asked for. Serving the connections first keeps a stalled
+    # archive off the live path.
+    started_runner.start_session({})
+    served: list[str] = []
+    monkeypatch.setattr(
+        started_runner._connections,
+        "broadcast_media",
+        lambda *_a, **_k: served.append("connections"),
+    )
+    monkeypatch.setattr(started_runner._recorder, "on_chunk", lambda _c: served.append("recorder"))
+
+    started_runner._emit_media(MediaChunk(bundle=_video_bundle(), fps=30.0, n_frames=1))
+
+    assert served == ["connections", "recorder"]
+
+
+async def test_a_flush_that_cuts_the_broadcast_short_still_records_the_chunk(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A playout cut is not an archive boundary. With the recorder served last,
+    # a flush landing mid-broadcast abandons the rest of the fan-out, and the
+    # archive still has to receive the whole chunk.
+    started_runner.start_session({})
+    recorded: list[MediaChunk] = []
+    monkeypatch.setattr(started_runner._recorder, "on_chunk", lambda c: recorded.append(c))
+    monkeypatch.setattr(
+        started_runner._connections,
+        "broadcast_media",
+        lambda *_a, **_k: started_runner._flush_media(),
+    )
+    chunk = MediaChunk(bundle=_video_bundle(), fps=30.0, n_frames=1)
+
+    started_runner._emit_media(chunk)
+
+    assert recorded == [chunk]
 
 
 async def test_every_output_track_the_model_declares_starts_at_zero(

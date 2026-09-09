@@ -1,4 +1,4 @@
-"""Per-test isolation for the process-global interface registries.
+"""Per-test isolation for the runtime's process-global state.
 
 The interface layer auto-registers every declared ``Output`` / ``Input`` /
 ``ModelMessage`` / ``@event`` command into a process-global registry, and the
@@ -12,16 +12,43 @@ scope.
 
 from __future__ import annotations
 
+import logging
 import sys
 from collections.abc import Callable, Iterator
 
 import pytest
 
+from reactor_runtime import log
 from reactor_runtime.interface.events.decorators import EVENT_REGISTRY
 from reactor_runtime.interface.events.messages import MESSAGE_REGISTRY, ModelMessage
 from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.interface.tracks.input import INPUT_REGISTRY, Input
 from reactor_runtime.interface.tracks.output import OUTPUT_REGISTRY, Output
+
+
+@pytest.fixture(autouse=True)
+def _restore_root_logging() -> Iterator[None]:
+    """Save and restore root handlers and level across each test."""
+    root = logging.getLogger()
+    saved_handlers = root.handlers[:]
+    saved_level = root.level
+    yield
+    root.handlers[:] = saved_handlers
+    root.setLevel(saved_level)
+
+
+@pytest.fixture(autouse=True)
+def _clear_log_context() -> Iterator[None]:
+    """Release the stamped session id and runtime state after each test.
+
+    Both are process-global, so a test that opens a session or builds a runner
+    would otherwise leave every later test's records claiming its context.
+    """
+    try:
+        yield
+    finally:
+        log.clear_session_id()
+        log.set_state(None, None)
 
 
 @pytest.fixture(autouse=True)

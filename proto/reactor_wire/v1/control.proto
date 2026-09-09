@@ -34,6 +34,7 @@ message ControlServerMessage {
     ClipFailed clip_failed = 12;
     Moderation moderation = 13;
     PublishTrackResponse publish_track = 14;
+    SessionEnded session_ended = 15;
     Error error = 40;
   }
 }

@@ -340,3 +340,23 @@ def test_a_batching_model_keeps_the_wire_in_fresh_frames() -> None:
         stamp for index, stamp in enumerate(stamps) if index == 0 or stamp != stamps[index - 1]
     ]
     assert distinct == list(range(1, frames_per_batch * batches + 1))
+
+
+def test_dropped_frames_stays_zero_while_whole_chunks_fit() -> None:
+    """The capacity floor takes a whole chunk, so nothing is charged as a drop."""
+    pacer, _ = make_pacer(queue_depth=2)
+    assert pacer.dropped_frames == 0
+
+    pacer.submit(chunk(video_bundle(batch(5)), n_frames=5))
+
+    assert pacer.dropped_frames == 0
+
+
+def test_dropped_frames_counts_what_the_queue_bound_rejects() -> None:
+    """A dropped frame takes its audio with it, so the pacer keeps the tally."""
+    pacer, _ = make_pacer(queue_depth=2)
+    for _ in range(3):
+        pacer.submit(chunk(video_bundle(batch(1)), n_frames=1))
+    pacer.submit(chunk(video_bundle(batch(1)), n_frames=1))
+
+    assert pacer.dropped_frames == 2
