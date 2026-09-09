@@ -218,6 +218,11 @@ class ListSpec(TypeSpec):
     def __init__(self, item: TypeSpec) -> None:
         self._item = item
 
+    @property
+    def item(self) -> TypeSpec:
+        """The type every element must fit."""
+        return self._item
+
     def check(self, value: Any) -> str | None:  # noqa: D102 — contract on the base
         if not isinstance(value, list):
             return f"expected array, got {type(value).__name__}"
