@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from reactor_runtime.core import RecordingConfig
+from reactor_runtime.core import RecordingConfig, RuntimeConfig
 from reactor_runtime.interface.model import ReactorModel
 from reactor_runtime.manifest import import_model_class, load_config
 
@@ -23,6 +23,37 @@ def test_load_config_reads_the_model_reference_from_runtime_import(tmp_path: Pat
     cfg = load_config(manifest)
 
     assert cfg.model_ref == "pipeline:Demo"
+
+
+@pytest.mark.parametrize(("count", "expected"), [(0, 1), (1, 1), (2, 2), (4, 4)])
+def test_gpu_count_is_the_worker_count(tmp_path: Path, count: int, expected: int) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(
+        f"model:\n  resources:\n    gpu:\n      count: {count}\nruntime:\n  import: demo:Model\n"
+    )
+    assert load_config(manifest).world_size == expected
+
+
+@pytest.mark.parametrize("count", ["-1", "true", "2.5", "'2'", "null"])
+def test_invalid_gpu_counts_fail_before_loading_a_model(tmp_path: Path, count: str) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(
+        f"model:\n  resources:\n    gpu:\n      count: {count}\nruntime:\n  import: demo:Model\n"
+    )
+    with pytest.raises(SystemExit, match=r"model\.resources\.gpu\.count"):
+        load_config(manifest)
+
+
+def test_missing_gpu_count_defaults_to_one(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_MANIFEST)
+    assert load_config(manifest).world_size == 1
+
+
+@pytest.mark.parametrize("count", [0, -1, True, 2.5, None])
+def test_runtime_config_rejects_invalid_worker_counts(count) -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        RuntimeConfig(model_ref="demo:Model", world_size=count)
 
 
 def test_load_config_reads_the_published_name_from_model_name(tmp_path: Path) -> None:

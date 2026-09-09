@@ -114,6 +114,8 @@ class RuntimeConfig:
         grace_period: Seconds a draining session is given to end before stop.
         orphan_timeout: Seconds a session may stay client-less before it closes.
         recording: The recorder's configuration; disabled by default.
+        world_size: Local worker count from ``model.resources.gpu.count``.
+            Defaults to one when the manifest does not request GPUs.
     """
 
     model_ref: str
@@ -124,3 +126,9 @@ class RuntimeConfig:
     grace_period: float = 30.0
     orphan_timeout: float = 60.0
     recording: RecordingConfig = field(default_factory=RecordingConfig)
+    world_size: int = 1
+
+    def __post_init__(self) -> None:
+        """Reject ambiguous or unusable worker counts before loading a model."""
+        if type(self.world_size) is not int or self.world_size < 1:
+            raise ValueError("world_size must be a positive integer")
