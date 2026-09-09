@@ -11,13 +11,11 @@ def test_version_is_exposed() -> None:
 
 
 def test_multi_gpu_surface_stays_off_the_package_root() -> None:
-    # Both the video adapter and its raw primitives remain experimental;
+    # The worker primitives remain experimental;
     # a package-root export would promise a stable authoring contract.
     import reactor_runtime.distributed as distributed
 
     for name in (
-        "DistributedVideoModel",
-        "WorkerGroup",
         "DistributedWorker",
         "SharedFrameBuffer",
         "WorkerError",

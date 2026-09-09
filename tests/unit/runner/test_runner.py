@@ -112,7 +112,6 @@ class FakeModel(ReactorModel):
     def load(self, config_path: Path | None) -> None:
         self.events.append("load")
         self.loaded = config_path
-        self.loaded_world_size = self.world_size
 
     def bind_output(
         self,
@@ -209,16 +208,13 @@ async def started_runner(monkeypatch: pytest.MonkeyPatch) -> Any:
 async def test_start_resolves_loads_and_readies(monkeypatch: pytest.MonkeyPatch) -> None:
     created_models.clear()
     monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
-    runner = Runner(
-        RuntimeConfig(model_ref="fake:Model", config_path=Path("/cfg/config.yml"), world_size=4)
-    )
+    runner = Runner(RuntimeConfig(model_ref="fake:Model", config_path=Path("/cfg/config.yml")))
 
     await runner.start()
     try:
         assert runner._sm.current_state is SessionState.READY
         model = created_models[-1]
         assert model.loaded == Path("/cfg/config.yml")
-        assert model.loaded_world_size == 4
     finally:
         await runner.stop()
 

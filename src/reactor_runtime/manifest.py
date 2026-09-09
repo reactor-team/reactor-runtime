@@ -33,9 +33,8 @@ def load_config(manifest: Path) -> RuntimeConfig:
     ``runtime.import`` — the ``"module:Class"`` model reference — and
     ``runtime.config`` — the path to the model's own config file — name the
     model, ``model.name`` is the name it is published under, and the
-    ``runtime.recording`` block configures the recorder, and
-    ``model.resources.gpu.count`` supplies the model's local worker count. The
-    rest of the manifest describes the model to the platform. The
+    ``runtime.recording`` block configures the recorder; the rest of the manifest
+    describes the model to the platform and is not the runtime's concern. The
     config path is passed to the model verbatim (resolved to an absolute path);
     the runtime never parses its contents.
 
@@ -67,24 +66,7 @@ def load_config(manifest: Path) -> RuntimeConfig:
         model_name=_model_name(document.get("model")),
         config_path=_resolve_config_path(runtime, manifest),
         recording=_recording_from_manifest(runtime, document),
-        world_size=_world_size(document, manifest),
     )
-
-
-def _world_size(document: dict[str, Any], manifest: Path) -> int:
-    """Read deployment sizing without importing torch or probing this host."""
-    block: Any = document
-    for key in ("model", "resources", "gpu"):
-        if not isinstance(block, dict) or key not in block:
-            return 1
-        block = block[key]
-    if not isinstance(block, dict) or "count" not in block:
-        return 1
-    count = block["count"]
-    # Zero describes a CPU deployment, which still has one local worker.
-    if type(count) is not int or count < 0:
-        raise SystemExit(f"{manifest}: model.resources.gpu.count must be a non-negative integer")
-    return max(1, count)
 
 
 def _model_name(block: Any) -> str | None:
