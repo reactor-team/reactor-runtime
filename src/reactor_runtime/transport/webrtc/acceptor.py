@@ -25,12 +25,12 @@ import time
 from collections.abc import Callable, Iterable
 
 from reactor_runtime.core import ConnectionSink, ConnId, TrackDirection
-from reactor_runtime.metrics import WebRtcMetrics
 from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.transport.acceptor import ConnectionAcceptor
 from reactor_runtime.transport.router import TooManyConnectionsError
 from reactor_runtime.transport.webrtc.config import IceCredentials, IceServer, WebRtcConfig
 from reactor_runtime.transport.webrtc.connection import WebRTCConnection
+from reactor_runtime.transport.webrtc.metrics import WebRtcMetrics
 from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpAnswer, SdpOffer, TrackMap
 
