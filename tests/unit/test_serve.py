@@ -116,6 +116,37 @@ def test_assemble_publishes_the_identity_of_the_process() -> None:
     assert f'runtime_info{{model="fake:Model",version="{_version()}"}} 1.0' in body
 
 
+def test_assemble_renders_the_transport_instruments_on_the_endpoint() -> None:
+    # Every other metrics test builds a holder by hand and reads the registry
+    # back directly, which passes whether or not the group that declared those
+    # instruments is the one `/metrics` renders. This goes through the assembly
+    # and the endpoint instead, so a component wired to a holder of its own —
+    # the failure that leaves a metric live in memory and absent from every
+    # scrape — is caught here rather than in production.
+    service = _assemble(RuntimeConfig(model_ref="fake:Model"), peer_factory=_UNUSED)
+    http = service._components["http"]
+    assert isinstance(http, HttpServer)
+
+    body = TestClient(http._app).get("/metrics").text
+
+    # A labelled instrument with no children yet renders its HELP and TYPE lines
+    # and no samples, so the name is what a scrape carries before a wire is live.
+    for family in (
+        "runtime_webrtc_rtt_seconds",
+        "runtime_webrtc_media_rtt_seconds",
+        "runtime_webrtc_loss_ratio",
+        "runtime_webrtc_bandwidth_estimate_bytes_per_second",
+        "runtime_webrtc_nacks_total",
+        "runtime_webrtc_keyframe_requests_total",
+        "runtime_webrtc_packets_lost_total",
+        "runtime_webrtc_packets_retransmitted_total",
+        "runtime_webrtc_bytes_sent_total",
+        "runtime_webrtc_frames_sent_total",
+        "runtime_media_dropped_frames_total",
+    ):
+        assert family in body, f"{family} never reached the endpoint"
+
+
 def test_assemble_wires_the_runner_shutdown_to_the_service() -> None:
     service = _assemble(RuntimeConfig(model_ref="fake:Model"), peer_factory=_UNUSED)
 
