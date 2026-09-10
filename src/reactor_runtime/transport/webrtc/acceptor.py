@@ -23,7 +23,7 @@ import dataclasses
 import logging
 import time
 
-from reactor_runtime.core import ConnectionSink, ConnId
+from reactor_runtime.core import ConnectionSink, ConnId, TrackDirection
 from reactor_runtime.metrics import WebRtcMetrics
 from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.transport.acceptor import ConnectionAcceptor
@@ -399,6 +399,15 @@ class WebRTCAcceptor(ConnectionAcceptor):
             conn.on_connected(lambda: self._opened(conn_id, conn, offered_at))
             conn.on_disconnect(lambda: self._closed(conn_id, offered_at))
             conn.on_closed(lambda: self._forget(conn_id, offered_at))
+            # One recorder per connection, because the peer's packet counts are
+            # totals and only a difference against the previous sample is a rate.
+            # It is held by the connection and released along with it.
+            conn.on_stats(
+                self._metrics.sampler(
+                    outbound=[t.name for t in tracks.by_direction(TrackDirection.OUT)],
+                    inbound=[t.name for t in tracks.by_direction(TrackDirection.IN)],
+                ).observe
+            )
             self._conns[conn_id] = conn
 
             for candidate in self._pending_ice.pop(conn_id, []):
