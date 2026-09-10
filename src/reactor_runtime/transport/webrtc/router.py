@@ -282,6 +282,7 @@ class WebRtcRouter(TransportRouter):
             config=self._config,
             peer_factory=self._peer_factory,
             metrics=self._metrics,
+            track_names=runner.track_map,
         )
 
         async def _session_not_running(request: Request, exc: Exception) -> Response:

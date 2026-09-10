@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from prometheus_client import Counter
 
 from reactor_runtime.core import EndReason, SessionEvent, SessionState, TrackDirection
@@ -301,7 +302,9 @@ class _Transport:
     def __init__(self, *, outbound: tuple[str, ...] = (), inbound: tuple[str, ...] = ()) -> None:
         self.metrics = RuntimeMetrics(version="0.0.0", model="pipeline:Echo")
         self.group = WebRtcMetrics(self.metrics)
-        self.recorder = self.group.sampler(outbound=outbound, inbound=inbound)
+        self.recorder = self.group.sampler(
+            outbound=outbound, inbound=inbound, allowed_tracks=(*outbound, *inbound)
+        )
 
     def observe(
         self,
@@ -608,7 +611,7 @@ def test_each_connection_differences_against_its_own_previous_sample() -> None:
     transport = _Transport(outbound=("main_video",))
     transport.observe(tracks=(_outbound("main_video", packets_sent=5000),))
 
-    second = transport.group.sampler(outbound=("main_video",))
+    second = transport.group.sampler(outbound=("main_video",), allowed_tracks=("main_video",))
     second.observe(PeerStats(tracks=(_outbound("main_video", packets_sent=300),)))
 
     assert transport.value("runtime_webrtc_packets_sent_total", track="main_video") == 5300.0
@@ -712,3 +715,50 @@ def test_counts_the_keyframes_a_decoder_had_to_ask_for() -> None:
         transport.value("runtime_webrtc_keyframe_requests_total", track="webcam", direction="in")
         == 1.0
     )
+
+
+@pytest.mark.parametrize("field", ["packets_lost", "nacks", "keyframe_requests"])
+def test_same_name_in_both_directions_has_independent_baselines(field: str) -> None:
+    transport = _Transport(outbound=("shared",), inbound=("shared",))
+    for sent, received in [(10, 30), (15, 37), (2, 40)]:
+        transport.observe(
+            tracks=(
+                TrackStat(name="shared", direction=TrackDirection.OUT, **{field: sent}),
+                TrackStat(name="shared", direction=TrackDirection.IN, **{field: received}),
+            )
+        )
+    metric = f"runtime_webrtc_{field}_total"
+    assert transport.value(metric, track="shared", direction="out") == 17
+    assert transport.value(metric, track="shared", direction="in") == 40
+
+
+def test_unknown_tracks_keep_registry_bounded_across_connections() -> None:
+    transport = _Transport()
+    counts = []
+    for index in range(20):
+        name = f"client_{index}"
+        recorder = transport.group.sampler(outbound=(name,), inbound=(name,))
+        recorder.observe(
+            PeerStats(
+                tracks=(
+                    _outbound(name, packets_sent=10, loss_ratio=0.1, rtt_seconds=0.1),
+                    _inbound(name, packets_received=20, jitter=0.1),
+                )
+            )
+        )
+        counts.append(sum(len(metric.samples) for metric in transport.metrics.registry.collect()))
+    assert len(set(counts)) == 1
+    assert transport.value("runtime_webrtc_packets_sent_total", track="unknown") == 200
+    assert transport.value("runtime_webrtc_packets_received_total", track="unknown") == 400
+
+
+def test_unknown_tracks_aggregate_with_independent_baselines() -> None:
+    transport = _Transport()
+    for first, second in [(10, 30), (15, 37)]:
+        transport.observe(
+            tracks=(
+                _outbound("first", packets_sent=first),
+                _outbound("second", packets_sent=second),
+            )
+        )
+    assert transport.value("runtime_webrtc_packets_sent_total", track="unknown") == 52

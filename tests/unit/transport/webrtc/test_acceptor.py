@@ -100,6 +100,7 @@ def _acceptor(
         config=WebRtcConfig(ping_timeout=0.0, negotiation_timeout=0.0),
         peer_factory=factory_for(peer),
         metrics=WebRtcMetrics(metrics or _metrics()),
+        track_names=lambda: ("main_video", "main_audio", "webcam"),
     )
 
 
@@ -1041,3 +1042,25 @@ async def test_the_samples_of_a_live_wire_reach_the_registry(
     # The pacer's own discards replace whatever the peer reported for frames, and
     # this pacer dropped none.
     assert _sample(metrics, "runtime_media_dropped_frames_total") == 0.0
+
+
+async def test_reoffers_with_unknown_track_names_keep_metrics_bounded(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+) -> None:
+    metrics = _metrics()
+    acceptor = _acceptor(FakeSink(), fake_peer, factory_for, metrics)
+    counts = []
+    try:
+        for index in range(10):
+            tracks = TrackMap.from_client(
+                [{"mid": "0", "name": f"client_{index}", "kind": "video", "direction": "recvonly"}]
+            )
+            assert await _negotiate(acceptor, ConnId(7), SdpOffer("offer"), tracks) is not None
+            counts.append(sum(len(metric.samples) for metric in metrics.registry.collect()))
+        assert len(set(counts)) == 1
+        assert _sample(metrics, "runtime_webrtc_packets_sent_total", track="unknown") == 0
+        assert _sample(metrics, "runtime_webrtc_packets_sent_total", track="client_0") is None
+    finally:
+        for conn in tuple(acceptor._conns.values()):
+            await conn.close()

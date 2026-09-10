@@ -708,7 +708,11 @@ class WebRtcMetrics:
         )
 
     def sampler(
-        self, *, outbound: Iterable[str] = (), inbound: Iterable[str] = ()
+        self,
+        *,
+        outbound: Iterable[str] = (),
+        inbound: Iterable[str] = (),
+        allowed_tracks: Iterable[str] = (),
     ) -> ConnectionStatsRecorder:
         """Return a recorder that folds one connection's samples in.
 
@@ -719,8 +723,12 @@ class WebRtcMetrics:
         Args:
             outbound: Names of the tracks flowing to the client.
             inbound: Names of the tracks flowing from the client.
+            allowed_tracks: Trusted model track names. All other names use the
+                fixed ``unknown`` label, during seeding and observation.
         """
-        for track in outbound:
+        recorder = ConnectionStatsRecorder(self, frozenset(allowed_tracks))
+        for name in outbound:
+            track = recorder.label(name)
             self._packets_sent.labels(track=track)
             self._packets_lost.labels(track=track, direction=TrackDirection.OUT.value)
             self._packets_retransmitted.labels(track=track)
@@ -730,7 +738,8 @@ class WebRtcMetrics:
             self._loss_ratio.labels(track=track)
             self._nacks.labels(track=track, direction=TrackDirection.OUT.value)
             self._keyframe_requests.labels(track=track, direction=TrackDirection.OUT.value)
-        for track in inbound:
+        for name in inbound:
+            track = recorder.label(name)
             self._packets_received.labels(track=track)
             self._packets_lost.labels(track=track, direction=TrackDirection.IN.value)
             self._bytes_received.labels(track=track)
@@ -739,7 +748,7 @@ class WebRtcMetrics:
             self._nacks.labels(track=track, direction=TrackDirection.IN.value)
             self._keyframe_requests.labels(track=track, direction=TrackDirection.IN.value)
             self._jitter.labels(track=track)
-        return ConnectionStatsRecorder(self)
+        return recorder
 
     def answered(self, *, since: float) -> None:
         """Measure an offer the runtime answered."""
@@ -777,18 +786,24 @@ class ConnectionStatsRecorder:
     own counters from rejecting the sample outright.
     """
 
-    def __init__(self, metrics: WebRtcMetrics) -> None:
+    def __init__(self, metrics: WebRtcMetrics, allowed_tracks: frozenset[str]) -> None:
         """Start the recorder with no previous sample to difference against.
 
         Args:
             metrics: The group whose instruments each sample is folded into.
+            allowed_tracks: Trusted model names permitted as metric labels.
         """
         self._metrics = metrics
-        self._totals: dict[tuple[str, str], int] = {}
+        self._allowed_tracks = allowed_tracks
+        self._totals: dict[tuple[str, str, tuple[tuple[str, str], ...]], int] = {}
         self._silence_frames = 0
         self._dropped_samples = 0
         self._dropped_bundles = 0
         self._dropped_frames = 0
+
+    def label(self, name: str) -> str:
+        """Return the bounded metric label for a peer's track name."""
+        return name if name in self._allowed_tracks else "unknown"
 
     def observe(self, stats: PeerStats) -> None:
         """Fold one sample of a live wire into the transport instruments.
@@ -846,13 +861,13 @@ class ConnectionStatsRecorder:
             direction=track.direction.value,
         )
         if track.jitter is not None:
-            group._jitter.labels(track=name).observe(track.jitter)
+            group._jitter.labels(track=self.label(name)).observe(track.jitter)
         # Both of these are the receiver's own measurements of what this side
         # sent, so they are absent until its first report arrives.
         if track.rtt_seconds is not None:
-            group._media_rtt.labels(track=name).observe(track.rtt_seconds)
+            group._media_rtt.labels(track=self.label(name)).observe(track.rtt_seconds)
         if track.loss_ratio is not None:
-            group._loss_ratio.labels(track=name).observe(track.loss_ratio)
+            group._loss_ratio.labels(track=self.label(name)).observe(track.loss_ratio)
 
     def _advance(
         self, counter: Counter, field: str, track: str, total: int | None, **labels: str
@@ -866,11 +881,11 @@ class ConnectionStatsRecorder:
         """
         if total is None:
             return
-        key = (field, track)
+        key = (field, track, tuple(sorted(labels.items())))
         previous = self._totals.get(key, 0)
         self._totals[key] = total
         moved = total - previous if total >= previous else total
-        counter.labels(track=track, **labels).inc(moved)
+        counter.labels(track=self.label(track), **labels).inc(moved)
 
     def _fold_media(self, stats: PeerStats) -> None:
         """Count the outbound media this window manufactured or discarded.
