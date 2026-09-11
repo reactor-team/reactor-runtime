@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
 from reactor_runtime.core import ConnId
-from reactor_runtime.runtime_metrics import RuntimeMetrics
+from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.transport.router import (
     ConnectionsExhaustedError,
     ErrorDetail,
@@ -283,7 +283,7 @@ class WebRtcRouter(TransportRouter):
             config=self._config,
             peer_factory=self._peer_factory,
             metrics=self._metrics,
-            track_names=runner.track_map,
+            track_names=lambda: runner.track_map().keys(),
         )
 
         async def _session_not_running(request: Request, exc: Exception) -> Response:

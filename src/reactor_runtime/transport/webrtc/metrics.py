@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 
 from prometheus_client import Counter, Histogram
 
 from reactor_runtime.core import TrackDirection
-from reactor_runtime.runtime_metrics import RuntimeMetrics
+from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.transport.webrtc.stats import PeerStats, TrackStat
 
 # Building the answer is local work and takes milliseconds. Reaching a connected
@@ -35,6 +36,32 @@ _BANDWIDTH_BUCKETS = (8e3, 32e3, 125e3, 375e3, 625e3, 1.25e6, 2.5e6, 5e6)
 # which is where the resolution sits; above a tenth the picture is breaking up
 # whatever the exact figure.
 _LOSS_RATIO_BUCKETS = (0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5)
+
+
+@dataclass(frozen=True)
+class _TransportInstruments:
+    """Hold the instruments shared by connection recorders."""
+
+    rtt: Histogram
+    media_rtt: Histogram
+    loss_ratio: Histogram
+    bandwidth: Histogram
+    jitter: Histogram
+    packets_sent: Counter
+    packets_received: Counter
+    packets_lost: Counter
+    packets_retransmitted: Counter
+    bytes_sent: Counter
+    bytes_received: Counter
+    frames_sent: Counter
+    frames_decoded: Counter
+    frames_dropped: Counter
+    nacks: Counter
+    keyframe_requests: Counter
+    dropped_frames: Counter
+    dropped_bundles: Counter
+    dropped_samples: Counter
+    silence_frames: Counter
 
 
 class WebRtcMetrics:
@@ -102,125 +129,127 @@ class WebRtcMetrics:
             buckets=_HANDSHAKE_BUCKETS,
             registry=metrics.registry,
         )
-        self._rtt = Histogram(
-            "runtime_webrtc_rtt_seconds",
-            "Round trip of the ICE connectivity checks on the nominated candidate pair.",
-            buckets=_RTT_BUCKETS,
-            registry=metrics.registry,
-        )
-        self._media_rtt = Histogram(
-            "runtime_webrtc_media_rtt_seconds",
-            "Round trip of an outbound track, as the receiver measured it, by track.",
-            ["track"],
-            buckets=_RTT_BUCKETS,
-            registry=metrics.registry,
-        )
-        self._loss_ratio = Histogram(
-            "runtime_webrtc_loss_ratio",
-            "Fraction of an outbound track the receiver reports as lost, by track.",
-            ["track"],
-            buckets=_LOSS_RATIO_BUCKETS,
-            registry=metrics.registry,
-        )
-        self._bandwidth = Histogram(
-            "runtime_webrtc_bandwidth_estimate_bytes_per_second",
-            "What congestion control believes the path to the client will carry.",
-            buckets=_BANDWIDTH_BUCKETS,
-            registry=metrics.registry,
-        )
-        self._jitter = Histogram(
-            "runtime_webrtc_jitter_seconds",
-            "Spread in arrival times of an inbound track, by track.",
-            ["track"],
-            buckets=_JITTER_BUCKETS,
-            registry=metrics.registry,
-        )
-        self._packets_sent = Counter(
-            "runtime_webrtc_packets_sent_total",
-            "Packets the runtime put on the wire for an outbound track, by track.",
-            ["track"],
-            registry=metrics.registry,
-        )
-        self._packets_received = Counter(
-            "runtime_webrtc_packets_received_total",
-            "Packets the runtime took off the wire for an inbound track, by track.",
-            ["track"],
-            registry=metrics.registry,
-        )
-        self._packets_lost = Counter(
-            "runtime_webrtc_packets_lost_total",
-            "Packets of a track that never arrived, by track and by which way it flowed.",
-            ["track", "direction"],
-            registry=metrics.registry,
-        )
-        self._packets_retransmitted = Counter(
-            "runtime_webrtc_packets_retransmitted_total",
-            "Packets sent again to repair a loss the receiver reported, by track.",
-            ["track"],
-            registry=metrics.registry,
-        )
-        self._bytes_sent = Counter(
-            "runtime_webrtc_bytes_sent_total",
-            "Payload bytes put on the wire for an outbound track, by track.",
-            ["track"],
-            registry=metrics.registry,
-        )
-        self._bytes_received = Counter(
-            "runtime_webrtc_bytes_received_total",
-            "Payload bytes taken off the wire for an inbound track, by track.",
-            ["track"],
-            registry=metrics.registry,
-        )
-        self._frames_sent = Counter(
-            "runtime_webrtc_frames_sent_total",
-            "Video frames encoded and sent for an outbound track, by track.",
-            ["track"],
-            registry=metrics.registry,
-        )
-        self._frames_decoded = Counter(
-            "runtime_webrtc_frames_decoded_total",
-            "Video frames decoded from an inbound track, by track.",
-            ["track"],
-            registry=metrics.registry,
-        )
-        self._frames_dropped = Counter(
-            "runtime_webrtc_frames_dropped_total",
-            "Video frames the decoder discarded from an inbound track, by track.",
-            ["track"],
-            registry=metrics.registry,
-        )
-        self._nacks = Counter(
-            "runtime_webrtc_nacks_total",
-            "Retransmissions asked for on a track, by track and by which way it flowed.",
-            ["track", "direction"],
-            registry=metrics.registry,
-        )
-        self._keyframe_requests = Counter(
-            "runtime_webrtc_keyframe_requests_total",
-            "Requests to restart a track from a fresh keyframe, by track and direction. "
-            "Picture Loss Indications and Full Intra Refresh requests together.",
-            ["track", "direction"],
-            registry=metrics.registry,
-        )
-        self._dropped_frames = Counter(
-            "runtime_media_dropped_frames_total",
-            "Outbound video frames the pacer discarded because its queue was full.",
-            registry=metrics.registry,
-        )
-        self._dropped_bundles = Counter(
-            "runtime_media_dropped_bundles_total",
-            "Outbound media bundles discarded because the peer's frame queue was full.",
-            registry=metrics.registry,
-        )
-        self._dropped_samples = Counter(
-            "runtime_media_dropped_samples_total",
-            "Outbound audio samples discarded to cap the send buffer.",
-            registry=metrics.registry,
-        )
-        self._silence_frames = Counter(
-            "runtime_media_silence_frames_total",
-            "Ten-millisecond audio frames sent as silence because the model produced none.",
-            registry=metrics.registry,
+        self._instruments = _TransportInstruments(
+            rtt=Histogram(
+                "runtime_webrtc_rtt_seconds",
+                "Round trip of the ICE connectivity checks on the nominated candidate pair.",
+                buckets=_RTT_BUCKETS,
+                registry=metrics.registry,
+            ),
+            media_rtt=Histogram(
+                "runtime_webrtc_media_rtt_seconds",
+                "Round trip of an outbound track, as the receiver measured it, by track.",
+                ["track"],
+                buckets=_RTT_BUCKETS,
+                registry=metrics.registry,
+            ),
+            loss_ratio=Histogram(
+                "runtime_webrtc_loss_ratio",
+                "Fraction of an outbound track the receiver reports as lost, by track.",
+                ["track"],
+                buckets=_LOSS_RATIO_BUCKETS,
+                registry=metrics.registry,
+            ),
+            bandwidth=Histogram(
+                "runtime_webrtc_bandwidth_estimate_bytes_per_second",
+                "What congestion control believes the path to the client will carry.",
+                buckets=_BANDWIDTH_BUCKETS,
+                registry=metrics.registry,
+            ),
+            jitter=Histogram(
+                "runtime_webrtc_jitter_seconds",
+                "Spread in arrival times of an inbound track, by track.",
+                ["track"],
+                buckets=_JITTER_BUCKETS,
+                registry=metrics.registry,
+            ),
+            packets_sent=Counter(
+                "runtime_webrtc_packets_sent_total",
+                "Packets the runtime put on the wire for an outbound track, by track.",
+                ["track"],
+                registry=metrics.registry,
+            ),
+            packets_received=Counter(
+                "runtime_webrtc_packets_received_total",
+                "Packets the runtime took off the wire for an inbound track, by track.",
+                ["track"],
+                registry=metrics.registry,
+            ),
+            packets_lost=Counter(
+                "runtime_webrtc_packets_lost_total",
+                "Packets of a track that never arrived, by track and by which way it flowed.",
+                ["track", "direction"],
+                registry=metrics.registry,
+            ),
+            packets_retransmitted=Counter(
+                "runtime_webrtc_packets_retransmitted_total",
+                "Packets sent again to repair a loss the receiver reported, by track.",
+                ["track"],
+                registry=metrics.registry,
+            ),
+            bytes_sent=Counter(
+                "runtime_webrtc_bytes_sent_total",
+                "Payload bytes put on the wire for an outbound track, by track.",
+                ["track"],
+                registry=metrics.registry,
+            ),
+            bytes_received=Counter(
+                "runtime_webrtc_bytes_received_total",
+                "Payload bytes taken off the wire for an inbound track, by track.",
+                ["track"],
+                registry=metrics.registry,
+            ),
+            frames_sent=Counter(
+                "runtime_webrtc_frames_sent_total",
+                "Video frames encoded and sent for an outbound track, by track.",
+                ["track"],
+                registry=metrics.registry,
+            ),
+            frames_decoded=Counter(
+                "runtime_webrtc_frames_decoded_total",
+                "Video frames decoded from an inbound track, by track.",
+                ["track"],
+                registry=metrics.registry,
+            ),
+            frames_dropped=Counter(
+                "runtime_webrtc_frames_dropped_total",
+                "Video frames the decoder discarded from an inbound track, by track.",
+                ["track"],
+                registry=metrics.registry,
+            ),
+            nacks=Counter(
+                "runtime_webrtc_nacks_total",
+                "Retransmissions asked for on a track, by track and by which way it flowed.",
+                ["track", "direction"],
+                registry=metrics.registry,
+            ),
+            keyframe_requests=Counter(
+                "runtime_webrtc_keyframe_requests_total",
+                "Requests to restart a track from a fresh keyframe, by track and direction. "
+                "Picture Loss Indications and Full Intra Refresh requests together.",
+                ["track", "direction"],
+                registry=metrics.registry,
+            ),
+            dropped_frames=Counter(
+                "runtime_media_dropped_frames_total",
+                "Outbound video frames the pacer discarded because its queue was full.",
+                registry=metrics.registry,
+            ),
+            dropped_bundles=Counter(
+                "runtime_media_dropped_bundles_total",
+                "Outbound media bundles discarded because the peer's frame queue was full.",
+                registry=metrics.registry,
+            ),
+            dropped_samples=Counter(
+                "runtime_media_dropped_samples_total",
+                "Outbound audio samples discarded to cap the send buffer.",
+                registry=metrics.registry,
+            ),
+            silence_frames=Counter(
+                "runtime_media_silence_frames_total",
+                "Ten-millisecond audio frames sent as silence because the model produced none.",
+                registry=metrics.registry,
+            ),
         )
 
     def sampler(
@@ -242,28 +271,32 @@ class WebRtcMetrics:
             allowed_tracks: Trusted model track names. All other names use the
                 fixed ``unknown`` label, during seeding and observation.
         """
-        recorder = ConnectionStatsRecorder(self, frozenset(allowed_tracks))
+        recorder = ConnectionStatsRecorder(self._instruments, frozenset(allowed_tracks))
         for name in outbound:
             track = recorder.label(name)
-            self._packets_sent.labels(track=track)
-            self._packets_lost.labels(track=track, direction=TrackDirection.OUT.value)
-            self._packets_retransmitted.labels(track=track)
-            self._bytes_sent.labels(track=track)
-            self._frames_sent.labels(track=track)
-            self._media_rtt.labels(track=track)
-            self._loss_ratio.labels(track=track)
-            self._nacks.labels(track=track, direction=TrackDirection.OUT.value)
-            self._keyframe_requests.labels(track=track, direction=TrackDirection.OUT.value)
+            self._instruments.packets_sent.labels(track=track)
+            self._instruments.packets_lost.labels(track=track, direction=TrackDirection.OUT.value)
+            self._instruments.packets_retransmitted.labels(track=track)
+            self._instruments.bytes_sent.labels(track=track)
+            self._instruments.frames_sent.labels(track=track)
+            self._instruments.media_rtt.labels(track=track)
+            self._instruments.loss_ratio.labels(track=track)
+            self._instruments.nacks.labels(track=track, direction=TrackDirection.OUT.value)
+            self._instruments.keyframe_requests.labels(
+                track=track, direction=TrackDirection.OUT.value
+            )
         for name in inbound:
             track = recorder.label(name)
-            self._packets_received.labels(track=track)
-            self._packets_lost.labels(track=track, direction=TrackDirection.IN.value)
-            self._bytes_received.labels(track=track)
-            self._frames_decoded.labels(track=track)
-            self._frames_dropped.labels(track=track)
-            self._nacks.labels(track=track, direction=TrackDirection.IN.value)
-            self._keyframe_requests.labels(track=track, direction=TrackDirection.IN.value)
-            self._jitter.labels(track=track)
+            self._instruments.packets_received.labels(track=track)
+            self._instruments.packets_lost.labels(track=track, direction=TrackDirection.IN.value)
+            self._instruments.bytes_received.labels(track=track)
+            self._instruments.frames_decoded.labels(track=track)
+            self._instruments.frames_dropped.labels(track=track)
+            self._instruments.nacks.labels(track=track, direction=TrackDirection.IN.value)
+            self._instruments.keyframe_requests.labels(
+                track=track, direction=TrackDirection.IN.value
+            )
+            self._instruments.jitter.labels(track=track)
         return recorder
 
     def answered(self, *, since: float) -> None:
@@ -302,14 +335,14 @@ class ConnectionStatsRecorder:
     own counters from rejecting the sample outright.
     """
 
-    def __init__(self, metrics: WebRtcMetrics, allowed_tracks: frozenset[str]) -> None:
+    def __init__(self, instruments: _TransportInstruments, allowed_tracks: frozenset[str]) -> None:
         """Start the recorder with no previous sample to difference against.
 
         Args:
-            metrics: The group whose instruments each sample is folded into.
+            instruments: Shared instruments that receive each sample.
             allowed_tracks: Trusted model names permitted as metric labels.
         """
-        self._metrics = metrics
+        self._instruments = instruments
         self._allowed_tracks = allowed_tracks
         self._totals: dict[tuple[str, str, tuple[tuple[str, str], ...]], int] = {}
         self._silence_frames = 0
@@ -329,11 +362,11 @@ class ConnectionStatsRecorder:
         absent reading is not a reading of zero.
         """
         if stats.rtt_seconds is not None:
-            self._metrics._rtt.observe(stats.rtt_seconds)
+            self._instruments.rtt.observe(stats.rtt_seconds)
         if stats.available_outgoing_bitrate_bps is not None:
             # Held in bytes per second, which is the base unit every other size
             # in this registry is reported in.
-            self._metrics._bandwidth.observe(stats.available_outgoing_bitrate_bps / 8.0)
+            self._instruments.bandwidth.observe(stats.available_outgoing_bitrate_bps / 8.0)
         for track in stats.tracks:
             self._fold_track(track)
         self._fold_media(stats)
@@ -345,23 +378,23 @@ class ConnectionStatsRecorder:
         the peer left unset is skipped rather than counted as no movement.
         """
         name = track.name
-        group = self._metrics
-        self._advance(group._packets_sent, "packets_sent", name, track.packets_sent)
-        self._advance(group._packets_received, "packets_received", name, track.packets_received)
+        group = self._instruments
+        self._advance(group.packets_sent, "packets_sent", name, track.packets_sent)
+        self._advance(group.packets_received, "packets_received", name, track.packets_received)
         self._advance(
-            group._packets_retransmitted,
+            group.packets_retransmitted,
             "packets_retransmitted",
             name,
             track.retransmitted_packets_sent,
         )
-        self._advance(group._bytes_sent, "bytes_sent", name, track.bytes_sent)
-        self._advance(group._bytes_received, "bytes_received", name, track.bytes_received)
-        self._advance(group._frames_sent, "frames_sent", name, track.frames_sent)
-        self._advance(group._frames_decoded, "frames_decoded", name, track.frames_decoded)
-        self._advance(group._frames_dropped, "frames_dropped", name, track.frames_dropped)
-        self._advance(group._nacks, "nacks", name, track.nacks, direction=track.direction.value)
+        self._advance(group.bytes_sent, "bytes_sent", name, track.bytes_sent)
+        self._advance(group.bytes_received, "bytes_received", name, track.bytes_received)
+        self._advance(group.frames_sent, "frames_sent", name, track.frames_sent)
+        self._advance(group.frames_decoded, "frames_decoded", name, track.frames_decoded)
+        self._advance(group.frames_dropped, "frames_dropped", name, track.frames_dropped)
+        self._advance(group.nacks, "nacks", name, track.nacks, direction=track.direction.value)
         self._advance(
-            group._keyframe_requests,
+            group.keyframe_requests,
             "keyframe_requests",
             name,
             track.keyframe_requests,
@@ -370,20 +403,20 @@ class ConnectionStatsRecorder:
         # Loss is reported for both directions and shares one instrument, so the
         # way the track flowed is what tells the two apart.
         self._advance(
-            group._packets_lost,
+            group.packets_lost,
             "packets_lost",
             name,
             track.packets_lost,
             direction=track.direction.value,
         )
         if track.jitter is not None:
-            group._jitter.labels(track=self.label(name)).observe(track.jitter)
+            group.jitter.labels(track=self.label(name)).observe(track.jitter)
         # Both of these are the receiver's own measurements of what this side
         # sent, so they are absent until its first report arrives.
         if track.rtt_seconds is not None:
-            group._media_rtt.labels(track=self.label(name)).observe(track.rtt_seconds)
+            group.media_rtt.labels(track=self.label(name)).observe(track.rtt_seconds)
         if track.loss_ratio is not None:
-            group._loss_ratio.labels(track=self.label(name)).observe(track.loss_ratio)
+            group.loss_ratio.labels(track=self.label(name)).observe(track.loss_ratio)
 
     def _advance(
         self, counter: Counter, field: str, track: str, total: int | None, **labels: str
@@ -420,7 +453,7 @@ class ConnectionStatsRecorder:
         self._dropped_samples = media.dropped_samples
         self._dropped_bundles = media.dropped_bundles
         self._dropped_frames = media.dropped_frames
-        self._metrics._silence_frames.inc(max(0, silence))
-        self._metrics._dropped_samples.inc(max(0, samples))
-        self._metrics._dropped_bundles.inc(max(0, bundles))
-        self._metrics._dropped_frames.inc(max(0, frames))
+        self._instruments.silence_frames.inc(max(0, silence))
+        self._instruments.dropped_samples.inc(max(0, samples))
+        self._instruments.dropped_bundles.inc(max(0, bundles))
+        self._instruments.dropped_frames.inc(max(0, frames))

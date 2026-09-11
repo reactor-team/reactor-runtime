@@ -6,7 +6,7 @@ import pytest
 from conftest import FakePeer
 
 from reactor_runtime.core import Connection, ConnId, InputFrame, TrackDirection
-from reactor_runtime.metrics import RuntimeMetrics, WebRtcMetrics
+from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.transport import TooManyConnectionsError
 from reactor_runtime.transport.webrtc import (
@@ -25,6 +25,7 @@ from reactor_runtime.transport.webrtc.acceptor import (
 )
 from reactor_runtime.transport.webrtc.config import IceCredentials, IceServer
 from reactor_runtime.transport.webrtc.connection import WebRTCConnection
+from reactor_runtime.transport.webrtc.metrics import WebRtcMetrics
 from reactor_runtime.transport.webrtc.signaling import IceCandidate
 from reactor_runtime.transport.webrtc.stats import OutboundMediaHealth, PeerStats, TrackStat
 

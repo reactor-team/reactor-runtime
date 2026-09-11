@@ -3,7 +3,8 @@ from __future__ import annotations
 import pytest
 
 from reactor_runtime.core import TrackDirection
-from reactor_runtime.metrics import RuntimeMetrics, WebRtcMetrics
+from reactor_runtime.metrics import RuntimeMetrics
+from reactor_runtime.transport.webrtc.metrics import WebRtcMetrics
 from reactor_runtime.transport.webrtc.stats import OutboundMediaHealth, PeerStats, TrackStat
 
 

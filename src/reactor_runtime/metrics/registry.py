@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Reactor Technologies, Inc. All rights reserved.
 """Own the shared Prometheus registry and process identity."""
 
 from prometheus_client import CollectorRegistry, Info, generate_latest
