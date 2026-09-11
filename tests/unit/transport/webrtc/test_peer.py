@@ -1118,25 +1118,101 @@ def test_stats_from_report_maps_tracks_and_rtt() -> None:
         )
     )
     report: Any = SimpleNamespace(
-        outbound_rtp=[SimpleNamespace(target_bitrate_bps=5000.0, packets_sent=417)],
-        inbound_rtp=[SimpleNamespace(packets_lost=3, jitter_s=0.02)],
+        outbound_rtp=[
+            SimpleNamespace(
+                packets_sent=417,
+                packets_lost=5,
+                retransmitted_packets_sent=9,
+                bytes_sent=120_000,
+                frames_sent=310,
+                round_trip_time_s=0.18,
+                fraction_lost=0.02,
+                nack_count=23,
+                pli_count=2,
+                fir_count=1,
+            )
+        ],
+        inbound_rtp=[
+            SimpleNamespace(
+                packets_received=200,
+                packets_lost=3,
+                bytes_received=48_000,
+                frames_decoded=150,
+                frames_dropped=2,
+                nack_count=7,
+                pli_count=4,
+                fir_count=0,
+                jitter_s=0.02,
+            )
+        ],
         candidate_pairs=[
             SimpleNamespace(
-                state=rw.IceCandidatePairState.Succeeded, current_round_trip_time_s=0.05
+                nominated=True,
+                current_round_trip_time_s=0.05,
+                available_outgoing_bitrate_bps=2_400_000.0,
             )
         ],
     )
     stats = peer._stats_from_report(report)
 
     assert stats.rtt_seconds == 0.05
+    assert stats.available_outgoing_bitrate_bps == 2_400_000.0
     out = next(t for t in stats.tracks if t.direction is TrackDirection.OUT)
     assert out.name == "out_v"
-    assert out.bitrate_bps == 5000
     assert out.packets_sent == 417
+    # Outbound loss comes from the receiver's report about us, which is the only
+    # place it exists: this side cannot see what the network dropped.
+    assert out.packets_lost == 5
+    assert out.retransmitted_packets_sent == 9
+    assert out.bytes_sent == 120_000
+    assert out.frames_sent == 310
+    # The round trip media took, measured by the receiver, is a different number
+    # from the round trip of the ICE checks on the pair.
+    assert out.rtt_seconds == 0.18
+    assert out.loss_ratio == 0.02
+    # What the receiver asked us for, which only the sender's own stats carry.
+    assert out.nacks == 23
+    # A PLI and a FIR are the same request in two codec dialects, so they are
+    # summed rather than left for every reader to add up.
+    assert out.keyframe_requests == 3
     inbound = next(t for t in stats.tracks if t.direction is TrackDirection.IN)
     assert inbound.name == "in_v"
-    assert inbound.packet_loss == 3
+    assert inbound.packets_received == 200
+    assert inbound.packets_lost == 3
+    assert inbound.bytes_received == 48_000
+    assert inbound.frames_decoded == 150
+    assert inbound.frames_dropped == 2
+    assert inbound.nacks == 7
+    assert inbound.keyframe_requests == 4
     assert inbound.jitter == 0.02
+
+
+def test_stats_from_report_reads_only_the_nominated_pair() -> None:
+    # ICE keeps every pair it ever checked. A pair that succeeded but was not
+    # selected describes a path no media is taking.
+    peer = WebRTCPeer()
+    peer._track_map = TrackMap(tracks=())
+    report: Any = SimpleNamespace(
+        outbound_rtp=[],
+        inbound_rtp=[],
+        candidate_pairs=[
+            SimpleNamespace(
+                nominated=False,
+                current_round_trip_time_s=0.9,
+                available_outgoing_bitrate_bps=100.0,
+            ),
+            SimpleNamespace(
+                nominated=True,
+                current_round_trip_time_s=0.04,
+                available_outgoing_bitrate_bps=3_000_000.0,
+            ),
+        ],
+    )
+
+    stats = peer._stats_from_report(report)
+
+    assert stats.rtt_seconds == 0.04
+    assert stats.available_outgoing_bitrate_bps == 3_000_000.0
 
 
 def test_stats_from_report_ignores_negative_packet_loss() -> None:
@@ -1151,12 +1227,65 @@ def test_stats_from_report_ignores_negative_packet_loss() -> None:
     )
     report: Any = SimpleNamespace(
         outbound_rtp=[],
-        inbound_rtp=[SimpleNamespace(packets_lost=-4, jitter_s=0.0)],
+        inbound_rtp=[
+            SimpleNamespace(
+                packets_received=10,
+                packets_lost=-4,
+                bytes_received=1_000,
+                frames_decoded=8,
+                frames_dropped=0,
+                nack_count=0,
+                pli_count=0,
+                fir_count=0,
+                jitter_s=0.0,
+            )
+        ],
         candidate_pairs=[],
     )
     stats = peer._stats_from_report(report)
     assert stats.rtt_seconds is None
-    assert stats.tracks[0].packet_loss == 0
+    assert stats.available_outgoing_bitrate_bps is None
+    assert stats.tracks[0].packets_lost == 0
+
+
+def test_stats_from_report_waits_for_the_receivers_first_report() -> None:
+    # libwebrtc holds the round trip at zero until the receiver has reported, and
+    # the loss fraction reads zero over the same gap. Reporting that zero would
+    # claim a clean path on a stream nobody has said anything about yet.
+    peer = WebRTCPeer()
+    peer._track_map = TrackMap(
+        tracks=(
+            MappedTrack(
+                mid="0",
+                info=TrackInfo(name="out_v", kind=TrackKind.VIDEO, direction=TrackDirection.OUT),
+            ),
+        )
+    )
+    report: Any = SimpleNamespace(
+        outbound_rtp=[
+            SimpleNamespace(
+                packets_sent=40,
+                packets_lost=0,
+                retransmitted_packets_sent=0,
+                bytes_sent=9_000,
+                frames_sent=12,
+                round_trip_time_s=0.0,
+                fraction_lost=0.0,
+                nack_count=0,
+                pli_count=0,
+                fir_count=0,
+            )
+        ],
+        inbound_rtp=[],
+        candidate_pairs=[],
+    )
+
+    out = peer._stats_from_report(report).tracks[0]
+
+    assert out.rtt_seconds is None
+    assert out.loss_ratio is None
+    # What this side counted itself is there regardless.
+    assert out.packets_sent == 40
 
 
 def test_stats_report_carries_the_outbound_media_counters() -> None:

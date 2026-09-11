@@ -22,14 +22,15 @@ import asyncio
 import dataclasses
 import logging
 import time
+from collections.abc import Callable, Iterable
 
-from reactor_runtime.core import ConnectionSink, ConnId
-from reactor_runtime.metrics import WebRtcMetrics
+from reactor_runtime.core import ConnectionSink, ConnId, TrackDirection
 from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.transport.acceptor import ConnectionAcceptor
 from reactor_runtime.transport.router import TooManyConnectionsError
 from reactor_runtime.transport.webrtc.config import IceCredentials, IceServer, WebRtcConfig
 from reactor_runtime.transport.webrtc.connection import WebRTCConnection
+from reactor_runtime.transport.webrtc.metrics import WebRtcMetrics
 from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpAnswer, SdpOffer, TrackMap
 
@@ -104,6 +105,7 @@ class WebRTCAcceptor(ConnectionAcceptor):
         config: WebRtcConfig,
         peer_factory: WebRtcPeerFactory,
         metrics: WebRtcMetrics,
+        track_names: Callable[[], Iterable[str]] | None = None,
     ) -> None:
         """Bind the acceptor to its sink, config, peer factory, and instruments.
 
@@ -112,11 +114,14 @@ class WebRTCAcceptor(ConnectionAcceptor):
             config: The configuration applied to every negotiated connection.
             peer_factory: Builds the media peer for each offer.
             metrics: Where the handshake timings are recorded.
+            track_names: Read the trusted model manifest names for metric labels.
+                Without a manifest, tracks use the fixed ``unknown`` label.
         """
         self._sink = sink
         self._config = config
         self._peer_factory = peer_factory
         self._metrics = metrics
+        self._track_names = track_names
         self._conns: dict[ConnId, WebRTCConnection] = {}
         self._live: set[ConnId] = set()
         # Candidates that arrived before their connection's offer was negotiated,
@@ -399,6 +404,16 @@ class WebRTCAcceptor(ConnectionAcceptor):
             conn.on_connected(lambda: self._opened(conn_id, conn, offered_at))
             conn.on_disconnect(lambda: self._closed(conn_id, offered_at))
             conn.on_closed(lambda: self._forget(conn_id, offered_at))
+            # One recorder per connection, because the peer's packet counts are
+            # totals and only a difference against the previous sample is a rate.
+            # It is held by the connection and released along with it.
+            conn.on_stats(
+                self._metrics.sampler(
+                    allowed_tracks=self._track_names() if self._track_names else (),
+                    outbound=[t.name for t in tracks.by_direction(TrackDirection.OUT)],
+                    inbound=[t.name for t in tracks.by_direction(TrackDirection.IN)],
+                ).observe
+            )
             self._conns[conn_id] = conn
 
             for candidate in self._pending_ice.pop(conn_id, []):

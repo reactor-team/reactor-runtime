@@ -1130,25 +1130,47 @@ class WebRTCPeer:
 
     def _stats_from_report(self, report: rw.StatsReport) -> PeerStats:
         rtt: float | None = None
+        available_outgoing: float | None = None
+        # ICE reports every pair it ever checked. The nominated one is the pair
+        # actually carrying media, so its round trip and its bandwidth estimate
+        # are the only ones that describe the live path.
         for pair in report.candidate_pairs:
-            if (
-                pair.state == rw.IceCandidatePairState.Succeeded
-                and pair.current_round_trip_time_s > 0.0
-            ):
+            if not pair.nominated:
+                continue
+            if pair.current_round_trip_time_s > 0.0:
                 rtt = pair.current_round_trip_time_s
-                break
+            if pair.available_outgoing_bitrate_bps > 0.0:
+                available_outgoing = pair.available_outgoing_bitrate_bps
+            break
 
         tracks: list[TrackStat] = []
         out_infos = self._track_map.by_direction(TrackDirection.OUT)
         for i, out in enumerate(report.outbound_rtp):
             if i >= len(out_infos):
                 break
+            # The round trip and the loss fraction both come from the receiver's
+            # RTCP report about this stream, and libwebrtc holds the round trip
+            # at zero until the first report lands. That zero is what says no
+            # report has arrived, so it gates the loss fraction too: a fraction
+            # of zero before any report is silence rather than a clean path.
+            reported = out.round_trip_time_s > 0.0
             tracks.append(
                 TrackStat(
                     name=out_infos[i].name,
                     direction=TrackDirection.OUT,
-                    bitrate_bps=int(out.target_bitrate_bps) if out.target_bitrate_bps else None,
                     packets_sent=int(out.packets_sent),
+                    # Signed per RFC 3550, and negative when duplicates arrive.
+                    packets_lost=max(0, out.packets_lost),
+                    retransmitted_packets_sent=int(out.retransmitted_packets_sent),
+                    bytes_sent=int(out.bytes_sent),
+                    frames_sent=int(out.frames_sent),
+                    # What the receiver asked this side for. A PLI and a FIR are
+                    # the same request in two codec dialects, so they are summed
+                    # here rather than left for every reader to add up.
+                    nacks=int(out.nack_count),
+                    keyframe_requests=int(out.pli_count) + int(out.fir_count),
+                    rtt_seconds=out.round_trip_time_s if reported else None,
+                    loss_ratio=out.fraction_lost if reported else None,
                 )
             )
 
@@ -1160,12 +1182,23 @@ class WebRTCPeer:
                 TrackStat(
                     name=in_infos[i].name,
                     direction=TrackDirection.IN,
-                    packet_loss=max(0, inbound.packets_lost),
+                    packets_received=int(inbound.packets_received),
+                    packets_lost=max(0, inbound.packets_lost),
+                    bytes_received=int(inbound.bytes_received),
+                    frames_decoded=int(inbound.frames_decoded),
+                    frames_dropped=int(inbound.frames_dropped),
+                    nacks=int(inbound.nack_count),
+                    keyframe_requests=int(inbound.pli_count) + int(inbound.fir_count),
                     jitter=inbound.jitter_s,
                 )
             )
 
-        return PeerStats(rtt_seconds=rtt, tracks=tuple(tracks), media=self._media_health())
+        return PeerStats(
+            rtt_seconds=rtt,
+            available_outgoing_bitrate_bps=available_outgoing,
+            tracks=tuple(tracks),
+            media=self._media_health(),
+        )
 
     async def close(self) -> None:
         """Tear the peer connection down, joining the pump threads off the loop."""

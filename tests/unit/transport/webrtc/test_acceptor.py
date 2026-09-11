@@ -5,8 +5,8 @@ import numpy as np
 import pytest
 from conftest import FakePeer
 
-from reactor_runtime.core import Connection, ConnId, InputFrame
-from reactor_runtime.metrics import RuntimeMetrics, WebRtcMetrics
+from reactor_runtime.core import Connection, ConnId, InputFrame, TrackDirection
+from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.transport import TooManyConnectionsError
 from reactor_runtime.transport.webrtc import (
@@ -24,7 +24,10 @@ from reactor_runtime.transport.webrtc.acceptor import (
     _MAX_PENDING_ICE_PER_CONN,
 )
 from reactor_runtime.transport.webrtc.config import IceCredentials, IceServer
+from reactor_runtime.transport.webrtc.connection import WebRTCConnection
+from reactor_runtime.transport.webrtc.metrics import WebRtcMetrics
 from reactor_runtime.transport.webrtc.signaling import IceCandidate
+from reactor_runtime.transport.webrtc.stats import OutboundMediaHealth, PeerStats, TrackStat
 
 
 class FakeSink:
@@ -98,6 +101,7 @@ def _acceptor(
         config=WebRtcConfig(ping_timeout=0.0, negotiation_timeout=0.0),
         peer_factory=factory_for(peer),
         metrics=WebRtcMetrics(metrics or _metrics()),
+        track_names=lambda: ("main_video", "main_audio", "webcam"),
     )
 
 
@@ -933,3 +937,131 @@ async def test_a_failed_negotiation_leaves_no_deadline_behind(
     # with it: repeated failing offers on distinct ids cannot grow the map.
     assert acceptor._deadlines == {}
     assert acceptor._offered_at == {}
+
+
+async def test_a_negotiated_connection_seeds_a_child_for_each_of_its_tracks(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    metrics = _metrics()
+    acceptor = _acceptor(FakeSink(), fake_peer, factory_for, metrics)
+
+    await _negotiate(acceptor, ConnId(7), SdpOffer("offer"), out_av_tracks)
+
+    # The tracks are seeded from the offer's own map, so a track that carries
+    # nothing reads zero instead of being absent from the scrape.
+    assert _sample(metrics, "runtime_webrtc_packets_sent_total", track="main_video") == 0.0
+    assert _sample(metrics, "runtime_webrtc_packets_sent_total", track="main_audio") == 0.0
+    assert _sample(metrics, "runtime_webrtc_packets_received_total", track="webcam") == 0.0
+    assert _sample(metrics, "runtime_webrtc_jitter_seconds_count", track="webcam") == 0.0
+    # Loss is seeded per direction, since one instrument carries both.
+    assert (
+        _sample(metrics, "runtime_webrtc_packets_lost_total", track="main_video", direction="out")
+        == 0.0
+    )
+    assert (
+        _sample(metrics, "runtime_webrtc_packets_lost_total", track="webcam", direction="in") == 0.0
+    )
+
+
+class _OpenedSink(FakeSink):
+    """A sink that keeps the connection itself, so a test can close it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.connections: list[Connection] = []
+
+    def connection_opened(self, conn: Connection) -> None:
+        super().connection_opened(conn)
+        self.connections.append(conn)
+
+
+async def test_the_samples_of_a_live_wire_reach_the_registry(
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(WebRTCConnection, "_STATS_INTERVAL_SECONDS", 0.01)
+    peer = FakePeer(
+        stats=PeerStats(
+            rtt_seconds=0.25,
+            available_outgoing_bitrate_bps=2_400_000.0,
+            tracks=(
+                TrackStat(
+                    name="main_video",
+                    direction=TrackDirection.OUT,
+                    packets_sent=900,
+                    packets_lost=11,
+                    bytes_sent=240_000,
+                    frames_sent=58,
+                ),
+                TrackStat(
+                    name="webcam",
+                    direction=TrackDirection.IN,
+                    packets_received=300,
+                    packets_lost=4,
+                    jitter=0.008,
+                ),
+            ),
+            media=OutboundMediaHealth(dropped_bundles=2),
+        )
+    )
+    metrics = _metrics()
+    sink = _OpenedSink()
+    acceptor = _acceptor(sink, peer, factory_for, metrics)
+
+    await _negotiate(acceptor, ConnId(7), SdpOffer("offer"), out_av_tracks)
+    peer.fire_connected()
+    await asyncio.sleep(0.05)
+    # The pacer runs a thread of its own that only closing the connection stops.
+    for conn in sink.connections:
+        await conn.close()
+
+    rtt_samples = _sample(metrics, "runtime_webrtc_rtt_seconds_count")
+    jitter_samples = _sample(metrics, "runtime_webrtc_jitter_seconds_count", track="webcam")
+    assert rtt_samples is not None
+    assert rtt_samples >= 1.0
+    assert jitter_samples is not None
+    assert jitter_samples >= 1.0
+    bandwidth_samples = _sample(metrics, "runtime_webrtc_bandwidth_estimate_bytes_per_second_count")
+    assert bandwidth_samples is not None
+    assert bandwidth_samples >= 1.0
+    # However many samples the loop took, the peer's totals were differenced
+    # rather than added up again on each one.
+    assert _sample(metrics, "runtime_webrtc_packets_sent_total", track="main_video") == 900.0
+    assert _sample(metrics, "runtime_webrtc_bytes_sent_total", track="main_video") == 240_000.0
+    assert _sample(metrics, "runtime_webrtc_frames_sent_total", track="main_video") == 58.0
+    assert (
+        _sample(metrics, "runtime_webrtc_packets_lost_total", track="main_video", direction="out")
+        == 11.0
+    )
+    assert (
+        _sample(metrics, "runtime_webrtc_packets_lost_total", track="webcam", direction="in") == 4.0
+    )
+    assert _sample(metrics, "runtime_media_dropped_bundles_total") == 2.0
+    # The pacer's own discards replace whatever the peer reported for frames, and
+    # this pacer dropped none.
+    assert _sample(metrics, "runtime_media_dropped_frames_total") == 0.0
+
+
+async def test_reoffers_with_unknown_track_names_keep_metrics_bounded(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+) -> None:
+    metrics = _metrics()
+    acceptor = _acceptor(FakeSink(), fake_peer, factory_for, metrics)
+    counts = []
+    try:
+        for index in range(10):
+            tracks = TrackMap.from_client(
+                [{"mid": "0", "name": f"client_{index}", "kind": "video", "direction": "recvonly"}]
+            )
+            assert await _negotiate(acceptor, ConnId(7), SdpOffer("offer"), tracks) is not None
+            counts.append(sum(len(metric.samples) for metric in metrics.registry.collect()))
+        assert len(set(counts)) == 1
+        assert _sample(metrics, "runtime_webrtc_packets_sent_total", track="unknown") == 0
+        assert _sample(metrics, "runtime_webrtc_packets_sent_total", track="client_0") is None
+    finally:
+        for conn in tuple(acceptor._conns.values()):
+            await conn.close()

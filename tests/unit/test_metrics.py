@@ -3,7 +3,11 @@ from __future__ import annotations
 from prometheus_client import Counter
 
 from reactor_runtime.core import EndReason, SessionEvent, SessionState
-from reactor_runtime.metrics import CONTENT_TYPE, MetricsRecorder, RuntimeMetrics
+from reactor_runtime.metrics import (
+    CONTENT_TYPE,
+    MetricsRecorder,
+    RuntimeMetrics,
+)
 from reactor_runtime.runner.state_machine import SessionStateMachine
 
 
