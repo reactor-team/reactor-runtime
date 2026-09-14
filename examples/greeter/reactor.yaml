@@ -1,0 +1,20 @@
+apiVersion: v1beta
+kind: VideoModel
+
+# A tiny command/message model used to exercise request/response over the
+# data channel: `greet` replies with a message, `set_volume` acknowledges with
+# no body, `boom` rejects. The video track only proves media still flows.
+model:
+  name: greeter
+  version: v0.0.1
+  description: |
+    A minimal command/message model for exercising awaited send_command.
+
+runtime:
+  import: model:Greeter
+
+build:
+  runtime_version: "3.1.2"
+
+recording:
+  enabled: false

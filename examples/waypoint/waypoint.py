@@ -8,9 +8,9 @@ The :class:`ReactorApp` the runtime drives. It declares the client contract
 :class:`WaypointStepResult` back.
 
 Every public field on :class:`WaypointState` is a command the client can send.
-The app writes two commands by hand: ``set_image`` overrides the generated
-setter so the upload is decoded and fitted before it becomes the seed, and
-``reset`` restarts the world from the seed it already has.
+The app writes two commands by hand: ``set_image`` takes the upload, decodes
+and fits it, and keeps only the fitted frame as the seed, and ``reset``
+restarts the world from the seed it already has.
 """
 
 from __future__ import annotations
@@ -71,10 +71,6 @@ class WaypointOutput(Output):
 class WaypointState(InputState):
     """What a client can set. Each public field is a ``set_<field>`` command."""
 
-    image: UploadedFile = InputField(
-        default=None,
-        description="The seed frame the world starts from. PNG or JPEG; fitted to 1280x720.",
-    )
     paused: bool = InputField(
         default=False, description="Hold generation. The stream freezes on the last frame."
     )
@@ -98,8 +94,9 @@ class WaypointState(InputState):
         default=0, ge=-1, le=1, description="Scroll tick: -1 down, 0 still, 1 up."
     )
 
-    # Session scratch the client never sees: the fitted seed and the id the
-    # model uses to tell one seed from the next.
+    # Session scratch the client never sees: the seed frame, already decoded
+    # and fitted, and the id the model uses to tell one seed from the next.
+    # The upload itself is not kept; nothing reads it after the fit.
     _seed: np.ndarray | None = None
     _seed_id: int = 0
 
@@ -148,6 +145,8 @@ class Waypoint(ReactorApp):
             raise ApplicationError("paused")
         if state._seed is None:
             raise ApplicationError("no seed image")
+        # The seed rides on every step input and the model reads it only when
+        # seed_id changes. In one process that is a reference, not a copy.
         return WaypointStepInput(
             buttons=state.button_set(),
             mouse=(state.mouse_x, state.mouse_y),
@@ -190,7 +189,6 @@ class Waypoint(ReactorApp):
             seed = await asyncio.to_thread(_fit, image.data)
         except Exception as exc:
             raise CommandError("undecodable_image", "The file is not a decodable image.") from exc
-        self.state.image = image
         self.state._seed = seed
         self.state._seed_id += 1
         self.output.flush()

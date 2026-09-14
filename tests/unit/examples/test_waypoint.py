@@ -112,7 +112,7 @@ def _loaded_model() -> tuple[WaypointModel, FakeEngine]:
 
 def test_commands_are_the_state_setters_plus_reset() -> None:
     assert set(ModelContract.of(Waypoint).commands) == {
-        "set_image",
+        "set_image",  # hand-written: the upload is decoded, not stored
         "set_paused",
         "set_action",
         "set_buttons",
@@ -276,7 +276,12 @@ async def test_prepare_step_builds_the_step_input_from_the_state() -> None:
 async def test_generate_forwards_to_the_model_half() -> None:
     app, model, _ = _app()
     result = app.generate(_step())
-    assert model.steps == [_step()]
+    (step,) = model.steps
+    assert step.buttons == frozenset({0x57})
+    assert step.mouse == (0.1, 0.2)
+    assert step.scroll_wheel == 1
+    assert step.seed is _SEED
+    assert step.seed_id == 1
     assert result.index == 0
 
 
@@ -316,7 +321,7 @@ async def test_set_image_stages_the_seed_and_bumps_the_seed_id() -> None:
     assert app.state._seed is not None
     assert app.state._seed.shape == (720, 1280, 3)
     assert app.state._seed_id == 1
-    assert app.state.image is upload
+    assert not hasattr(app.state, "image")
     assert status.has_image is True
 
 

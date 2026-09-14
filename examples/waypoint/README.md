@@ -50,8 +50,9 @@ are ready before the first client waits on them.
 
 ## Commands
 
-Every public field on `WaypointState` is a command. `set_image` and `reset`
-are written by hand; the rest are generated from the fields.
+Every public field on `WaypointState` is a generated `set_<field>` command.
+`set_image` and `reset` are written by hand: the upload is decoded and fitted
+into the seed frame rather than stored, and a reset needs no field.
 
 - `set_image` upload the seed frame (PNG or JPEG, fitted to 1280x720). The
   next step starts a new world from it.

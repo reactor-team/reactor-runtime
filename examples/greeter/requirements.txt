@@ -1,0 +1,6 @@
+# Installed into the model image in one pip pass. reactor-runtime is the
+# runtime itself; releases are immutable, so there is no `latest`.
+reactor-runtime==3.1.2
+
+# The run loop builds frames as plain numpy arrays.
+numpy
