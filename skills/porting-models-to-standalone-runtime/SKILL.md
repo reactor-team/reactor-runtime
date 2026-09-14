@@ -36,6 +36,12 @@ Two conveniences from older runtimes are deliberately absent: yielding a raw
 `np.ndarray` (yield a typed `Output` instead) and the headless `PipelineExecutor`
 step driver.
 
+A pipeline that runs here can then move onto `ReactorApp` and the step loop,
+which is a separate port with its own skill:
+[`porting-to-reactor-app`](../porting-to-reactor-app/SKILL.md). The rules the
+finished port must satisfy are in
+[`application-model-isolation`](../application-model-isolation/SKILL.md).
+
 ## Two classes have new names
 
 `ReactorModel` is now `ReactorApp`, and `Input` is now `MediaInput`. The old
