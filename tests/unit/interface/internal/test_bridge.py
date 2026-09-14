@@ -5,11 +5,11 @@ import numpy as np
 import pytest
 
 from reactor_runtime import (
-    Input,
     InputField,
+    MediaInput,
     ModelMessage,
     Output,
-    ReactorModel,
+    ReactorApp,
     Video,
     event,
     session_started,
@@ -34,11 +34,11 @@ class Out(Output):
     main: Video
 
 
-class In(Input):
+class In(MediaInput):
     camera: Video
 
 
-class EchoModel(ReactorModel):
+class EchoModel(ReactorApp):
     input: In
 
     def __init__(self) -> None:

@@ -144,7 +144,7 @@ def test_manifest_resolves_to_the_model_class(monkeypatch: pytest.MonkeyPatch) -
 def test_model_constructs_with_input_buffers_and_loads() -> None:
     model = Echo()
     model.load(None)
-    assert isinstance(model.input, EchoInput)
+    assert isinstance(model.media, EchoInput)
     assert model.effect == "none"
 
 

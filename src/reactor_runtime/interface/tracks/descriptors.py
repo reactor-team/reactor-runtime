@@ -42,7 +42,7 @@ def _resolve_tracks(cls: type, direction: TrackDirection) -> dict[str, TrackInfo
     """Resolve a track-holder's annotated fields into :class:`TrackInfo` records.
 
     Args:
-        cls: The :class:`Output` or :class:`Input` subclass to inspect.
+        cls: The :class:`Output` or :class:`MediaInput` subclass to inspect.
         direction: The flow direction for every track the class declares.
 
     Returns:

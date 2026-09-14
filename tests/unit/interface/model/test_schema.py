@@ -8,7 +8,7 @@ from reactor_runtime import (
     InputField,
     ModelMessage,
     Output,
-    ReactorModel,
+    ReactorApp,
     UploadedFile,
     Video,
     event,
@@ -31,7 +31,7 @@ class Out(Output):
     main_video: Video
 
 
-class DemoModel(ReactorModel):
+class DemoModel(ReactorApp):
     """A demo model."""
 
     @event(name="set_level", description="Set the level")

@@ -23,19 +23,19 @@ Reactor Runtime turns an inference pipeline into a real-time, interactive media 
 
 ## How it works
 
-A model is a `ReactorModel` subclass in `model.py`. Declare the media it sends, load your weights once, and write the loop that receives or produces frames, data, and more:
+You ship one `ReactorApp` subclass: the application the runtime drives and the client talks to. Declare the media it sends, load your weights once, and write the loop that receives or produces frames, data, and more:
 
 ```python
 from pathlib import Path
 
-from reactor_runtime import InputField, Output, ReactorModel, Video, event
+from reactor_runtime import InputField, Output, ReactorApp, Video, event
 
 
 class MyOutput(Output):
     main_video: Video
 
 
-class MyModel(ReactorModel):
+class MyModel(ReactorApp):
     fps = 24
 
     def load(self, config_path: Path | None) -> None:
@@ -56,7 +56,7 @@ class MyModel(ReactorModel):
                 await self.emit(MyOutput(main_video=frame))
 ```
 
-That is a complete model. `run()` produces frames for as long as someone is watching, and any client can send `set_prompt` at any time to change what the next frame renders.
+That is a complete application. `run()` produces frames for as long as someone is watching, and any client can send `set_prompt` at any time to change what the next frame renders.
 
 Scaffold, build, and run it with the CLI:
 

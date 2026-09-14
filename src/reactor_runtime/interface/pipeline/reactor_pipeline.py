@@ -1,12 +1,12 @@
 """Generator-driven authoring base — :class:`ReactorPipeline`.
 
-A higher-level model base built on :class:`ReactorModel`. Instead of writing a
+A higher-level model base built on :class:`ReactorApp`. Instead of writing a
 manual ``run()`` loop, an author implements an ``inference()`` generator and
 declares a typed :class:`InputState`; the base drives the generator across
 connection cycles, manages the per-connection state, and adapts the emission
 rate to the model's own pace.
 
-It owns three things on top of :class:`ReactorModel`:
+It owns three things on top of :class:`ReactorApp`:
 
 - The ``run()`` driver: a fresh ``self.state`` per connection, gate on a client
   being present, advance the generator one ``yield`` at a time, emit each
@@ -31,10 +31,10 @@ from typing import Any, ClassVar, get_type_hints
 
 from reactor_runtime.core.model import ReactorEvent, SessionEnded, SessionStarted
 from reactor_runtime.core.values import ConnId
+from reactor_runtime.interface.app.reactor_app import ReactorApp
 from reactor_runtime.interface.events.decorators import EVENT_ATTR, EventHandler, make_command
 from reactor_runtime.interface.internal.input_buffer import BufferClosed
 from reactor_runtime.interface.internal.reactor_core import CommandEnvelope, ReactorCore
-from reactor_runtime.interface.model.reactor_model import ReactorModel
 from reactor_runtime.interface.pipeline.idle import Idle
 from reactor_runtime.interface.pipeline.input_state import InputState
 from reactor_runtime.interface.tracks import Output
@@ -57,7 +57,7 @@ class _GeneratorEnded(Exception):  # noqa: N818 — a control-flow signal, not a
     """
 
 
-class ReactorPipeline(ReactorModel):
+class ReactorPipeline(ReactorApp):
     """Generator-driven model with typed, client-mutable state.
 
     Subclass and provide:
@@ -75,7 +75,7 @@ class ReactorPipeline(ReactorModel):
     the ``@session_ended`` hook. A client leaving and rejoining within one
     session sees the same state; the next session starts from field defaults.
     Public state fields become ``set_<field>`` commands automatically;
-    everything :class:`ReactorModel` offers — ``@event``, the lifecycle hooks,
+    everything :class:`ReactorApp` offers — ``@event``, the lifecycle hooks,
     ``emit``, ``send`` — still applies.
 
     Generation runs only while the session is live and a client is connected.
@@ -97,7 +97,7 @@ class ReactorPipeline(ReactorModel):
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         # Resolve the state class and stamp its auto-setters onto the subclass
-        # before ReactorModel builds the contract, so they are discovered as
+        # before ReactorApp builds the contract, so they are discovered as
         # ordinary commands. An abstract intermediate without a state annotation
         # is left alone; the requirement is enforced at instantiation.
         state_cls = _resolve_state_class(cls)

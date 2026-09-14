@@ -8,7 +8,7 @@ import httpx
 import pytest
 from fastapi import FastAPI, HTTPException, Request
 
-from reactor_runtime import InputField, Output, ReactorModel, Video, event
+from reactor_runtime import InputField, Output, ReactorApp, Video, event
 from reactor_runtime.core import Health, HealthStatus, RuntimeConfig
 from reactor_runtime.http import EgressRoutes, RecordingRoutes, SessionRoutes, UploadRoutes
 from reactor_runtime.http.routes import _read_capped, _resume_from, _stream_events
@@ -22,7 +22,7 @@ class FakeOut(Output):
     main: Video
 
 
-class FakeModel(ReactorModel):
+class FakeModel(ReactorApp):
     """A minimal model with one track and one command that idles when run."""
 
     output: FakeOut
