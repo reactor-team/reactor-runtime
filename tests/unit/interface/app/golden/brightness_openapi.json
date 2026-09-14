@@ -1,0 +1,353 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "brightness",
+    "version": "v1.0.0",
+    "description": "Generate an animated gradient and tone whose look and pitch track the state."
+  },
+  "x-reactor": {
+    "tracks": [
+      {
+        "name": "main_video",
+        "kind": "video",
+        "direction": "out"
+      },
+      {
+        "name": "main_audio",
+        "kind": "audio",
+        "direction": "out"
+      }
+    ]
+  },
+  "paths": {
+    "/events/get_state": {
+      "post": {
+        "operationId": "get_state",
+        "summary": "Return the current generation parameters.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {}
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "BrightnessSnapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrightnessSnapshot"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/events/set_brightness": {
+      "post": {
+        "operationId": "set_brightness",
+        "summary": "Set the brightness and confirm the value in effect.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "brightness": {
+                    "type": "number",
+                    "default": 1.0,
+                    "description": "Brightness multiplier (0=black, 1=half, 2=white).",
+                    "minimum": 0.0,
+                    "maximum": 2.0,
+                    "x-reactor-moderate": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "BrightnessSet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrightnessSet"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/events/set_image": {
+      "post": {
+        "operationId": "set_image",
+        "summary": "Set the reference image and acknowledge it.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "image": {
+                    "$ref": "#/components/schemas/ReactorUploadReference",
+                    "x-reactor-moderate": true
+                  }
+                },
+                "required": [
+                  "image"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ImageSet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImageSet"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/events/set_paused": {
+      "post": {
+        "operationId": "set_paused",
+        "summary": "Pause frame generation.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "paused": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Pause frame generation.",
+                    "x-reactor-moderate": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Command accepted"
+          }
+        }
+      }
+    },
+    "/events/set_resolution": {
+      "post": {
+        "operationId": "set_resolution",
+        "summary": "Output resolution (2160p is 4K UHD).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "resolution": {
+                    "type": "string",
+                    "default": "480p",
+                    "description": "Output resolution (2160p is 4K UHD).",
+                    "enum": [
+                      "480p",
+                      "720p",
+                      "1080p",
+                      "2160p"
+                    ],
+                    "x-reactor-moderate": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Command accepted"
+          }
+        }
+      }
+    },
+    "/events/set_text": {
+      "post": {
+        "operationId": "set_text",
+        "summary": "Caption drawn over every frame; empty draws nothing.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Caption drawn over every frame; empty draws nothing.",
+                    "maxLength": 200,
+                    "x-reactor-moderate": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Command accepted"
+          }
+        }
+      }
+    }
+  },
+  "webhooks": {
+    "brightness_snapshot": {
+      "post": {
+        "operationId": "brightness_snapshot",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BrightnessSnapshot"
+              }
+            }
+          }
+        },
+        "summary": "The live generation parameters, returned when a client asks for them."
+      }
+    },
+    "brightness_set": {
+      "post": {
+        "operationId": "brightness_set",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BrightnessSet"
+              }
+            }
+          }
+        },
+        "summary": "Confirmation that the brightness was applied, echoing the value in effect."
+      }
+    },
+    "image_set": {
+      "post": {
+        "operationId": "image_set",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImageSet"
+              }
+            }
+          }
+        },
+        "summary": "Acknowledgement that an uploaded reference image was accepted."
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ReactorUploadReference": {
+        "type": "object",
+        "format": "reactor-upload-reference",
+        "description": "Reference to a file uploaded via the Reactor upload protocol.",
+        "properties": {
+          "upload_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "mime_type": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "upload_id",
+          "name",
+          "mime_type",
+          "size"
+        ]
+      },
+      "BrightnessSnapshot": {
+        "type": "object",
+        "properties": {
+          "brightness": {
+            "type": "number",
+            "description": "Active brightness multiplier."
+          },
+          "paused": {
+            "type": "boolean",
+            "description": "Whether frame generation is paused."
+          },
+          "resolution": {
+            "type": "string",
+            "description": "Active output resolution."
+          },
+          "text": {
+            "type": "string",
+            "description": "Caption currently drawn over each frame."
+          }
+        },
+        "required": [
+          "brightness",
+          "paused",
+          "resolution",
+          "text"
+        ]
+      },
+      "BrightnessSet": {
+        "type": "object",
+        "properties": {
+          "brightness": {
+            "type": "number",
+            "description": "Brightness multiplier now in effect."
+          }
+        },
+        "required": [
+          "brightness"
+        ]
+      },
+      "ImageSet": {
+        "type": "object",
+        "properties": {
+          "filename": {
+            "type": "string",
+            "description": "Name of the image now in effect."
+          }
+        },
+        "required": [
+          "filename"
+        ]
+      }
+    }
+  }
+}
