@@ -10,7 +10,7 @@ import pytest
 from reactor_runtime.schema import main, render
 
 _MODEL_SOURCE = '''\
-from reactor_runtime import ModelMessage, Output, ReactorModel, Video, event
+from reactor_runtime import ModelMessage, Output, ReactorApp, Video, event
 
 
 class LevelSet(ModelMessage):
@@ -23,7 +23,7 @@ class Out(Output):
     video: Video
 
 
-class Demo(ReactorModel):
+class Demo(ReactorApp):
     """A demo model."""
 
     @event(name="set_level", description="Set the level.")

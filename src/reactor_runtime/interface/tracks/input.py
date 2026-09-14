@@ -1,6 +1,6 @@
-"""Inbound media topology — :class:`Input`.
+"""Inbound media topology — :class:`MediaInput`.
 
-Subclass :class:`Input` with fields annotated :class:`Video` or :class:`Audio`;
+Subclass :class:`MediaInput` with fields annotated :class:`Video` or :class:`Audio`;
 each field becomes an inbound track named after the field. The runtime binds a
 live readable buffer to each track, reachable as ``self.<handle>.<track>``.
 """
@@ -12,16 +12,16 @@ from typing import Any, ClassVar
 from reactor_runtime.core.values import TrackDirection, TrackInfo
 from reactor_runtime.interface.tracks.descriptors import _resolve_tracks
 
-INPUT_REGISTRY: dict[str, type[Input]] = {}
-"""Every :class:`Input` subclass that declared at least one track, by class name.
+INPUT_REGISTRY: dict[str, type[MediaInput]] = {}
+"""Every :class:`MediaInput` subclass that declared at least one track, by class name.
 
 Auto-populated when a track-bearing subclass is created. :func:`all_input_tracks`
 unions it for the schema; the readable buffers a model reads from stay bound to
-the model's annotated :class:`Input` holder, not the union.
+the model's annotated :class:`MediaInput` holder, not the union.
 """
 
 
-class Input:
+class MediaInput:
     """Base for a model's inbound media tracks.
 
     Subclass with fields annotated :class:`Video` or :class:`Audio`; each field
@@ -51,7 +51,7 @@ class Input:
 
 
 def all_input_tracks() -> dict[str, TrackInfo]:
-    """Return the union of inbound tracks across every registered :class:`Input`.
+    """Return the union of inbound tracks across every registered :class:`MediaInput`.
 
     Two subclasses that declare a track of the same name collapse to one entry
     (the later registration wins) rather than conflicting — an inheritance chain

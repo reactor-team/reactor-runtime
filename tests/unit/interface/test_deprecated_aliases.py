@@ -1,0 +1,47 @@
+"""The old names of renamed classes still import, warn, and resolve to the new class."""
+
+from __future__ import annotations
+
+import importlib
+
+import pytest
+
+from reactor_runtime import MediaInput, ReactorApp
+
+_ALIASES = [
+    ("reactor_runtime", "ReactorModel", ReactorApp),
+    ("reactor_runtime", "Input", MediaInput),
+    ("reactor_runtime.interface", "ReactorModel", ReactorApp),
+    ("reactor_runtime.interface", "Input", MediaInput),
+    ("reactor_runtime.interface.model", "ReactorModel", ReactorApp),
+    ("reactor_runtime.interface.tracks", "Input", MediaInput),
+]
+
+
+@pytest.mark.parametrize(("module", "old", "target"), _ALIASES)
+def test_old_name_warns_and_is_the_new_class(module: str, old: str, target: type) -> None:
+    with pytest.warns(DeprecationWarning, match=f"{old} is now {target.__name__}"):
+        resolved = getattr(importlib.import_module(module), old)
+    assert resolved is target
+
+
+@pytest.mark.parametrize("module", ["reactor_runtime", "reactor_runtime.interface"])
+def test_old_names_are_not_in_all(module: str) -> None:
+    exported = importlib.import_module(module).__all__
+    assert "ReactorModel" not in exported
+    assert "Input" not in exported
+
+
+def test_unknown_name_is_still_an_attribute_error() -> None:
+    with pytest.raises(AttributeError):
+        importlib.import_module("reactor_runtime").NoSuchName  # noqa: B018
+
+
+def test_a_subclass_of_the_old_name_is_a_reactor_app() -> None:
+    with pytest.warns(DeprecationWarning, match="ReactorModel is now ReactorApp"):
+        from reactor_runtime import ReactorModel
+
+    class Legacy(ReactorModel):
+        async def run(self) -> None: ...
+
+    assert issubclass(Legacy, ReactorApp)

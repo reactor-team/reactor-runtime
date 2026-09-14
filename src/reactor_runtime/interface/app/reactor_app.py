@@ -1,6 +1,6 @@
-"""The model authoring base — :class:`ReactorModel`.
+"""The application authoring base, :class:`ReactorApp`.
 
-What a model author subclasses. It joins the two halves of the model layer: the
+What an author subclasses. It joins the two halves of the model layer: the
 :class:`ReactorCore` engine it inherits (thread, loop, buffers, queues) and the
 :class:`ModelContract` it assembles. Declaring a subclass resolves the contract
 once, from a single traversal of the class, and caches it on the class — the
@@ -48,8 +48,8 @@ from reactor_runtime.log import get_logger, release_session_id
 logger = get_logger(__name__)
 
 
-class ReactorModel(ReactorCore):
-    """Base class an author subclasses to define a model.
+class ReactorApp(ReactorCore):
+    """Base class an author subclasses to define the application the runtime drives.
 
     Decorate methods with ``@event`` to expose commands, and with the lifecycle
     decorators to hook session and connection events — ``@session_started`` is
