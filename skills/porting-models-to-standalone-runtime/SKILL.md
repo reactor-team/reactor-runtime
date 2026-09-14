@@ -258,12 +258,15 @@ measures the wrong thing.
 
 ## What did not change
 
-`ReactorApp` itself is the same shape: `load()` + `async def run()` driving
-`await self.emit(...)`, `@event` / `@connected` / `@disconnected` handlers,
-`self.connected` to gate the loop, `fps` as a class attribute, typed
-`ModelMessage` returns/`self.send(...)`, and inbound media via
-`self.media.<track>.try_read(n, mode=ReadMode.LATEST)` / `.read(...)` /
-`.reset()`. Weights are still located with `get_weights_path()` (now imported
+A model that writes its own `async def run()` driving `await self.emit(...)`
+still works unchanged: `run()` is the escape hatch, and overriding it gives up
+only the runtime's default step loop. `@event` / `@connected` /
+`@disconnected` handlers, `self.connected` to gate a hand-written loop, `fps`
+as a class attribute, typed `ModelMessage` returns/`self.send(...)`, and
+inbound media via `self.media.<track>.try_read(n, mode=ReadMode.LATEST)` /
+`.read(...)` / `.reset()` are all the same. A model that does not override
+`run()` is driven by the runtime through `generate()`; the README shows that
+shape. Weights are still located with `get_weights_path()` (now imported
 from `reactor_runtime`); it returns `$REACTOR_WEIGHTS_PATH` or
 `~/.cache/reactor_registry`.
 

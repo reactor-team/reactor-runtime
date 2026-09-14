@@ -23,14 +23,10 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
-from collections.abc import Callable
 from typing import Any
 
-from reactor_runtime.core.model import ReactorEvent, SessionEnded, SessionStarted
-from reactor_runtime.core.values import ConnId
 from reactor_runtime.interface.app.reactor_app import ReactorApp
 from reactor_runtime.interface.internal.input_buffer import BufferClosed
-from reactor_runtime.interface.internal.reactor_core import CommandEnvelope, ReactorCore
 from reactor_runtime.interface.pipeline.idle import Idle
 from reactor_runtime.interface.tracks import Output
 from reactor_runtime.log import get_logger
@@ -81,10 +77,6 @@ class ReactorPipeline(ReactorApp):
     measured inference time; declaring ``fps`` pins it to a fixed rate.
     """
 
-    _gen_lock: asyncio.Lock | None
-    _session_active: bool
-    _runnable: asyncio.Event
-
     def __init__(self) -> None:
         super().__init__()
         # An abstract intermediate without a state annotation is left alone at
@@ -94,66 +86,6 @@ class ReactorPipeline(ReactorApp):
                 f"{type(self).__name__} must declare 'state: MyState' where MyState "
                 "is an InputState subclass."
             )
-        self._gen_lock = None
-
-    # -- engine hooks ---------------------------------------------------------
-
-    def _on_loop_ready(self) -> None:
-        super()._on_loop_ready()
-        self._gen_lock = asyncio.Lock()
-        self._session_active = False
-        self._runnable = asyncio.Event()
-
-    # -- session-aware gating -------------------------------------------------
-
-    async def _dispatch_reactor_event(self, event: ReactorEvent) -> None:
-        """Track session liveness so the driver stops when the session ends.
-
-        The session-boundary facts are authoritative: a session start permits
-        generation, a session end forbids it. Combined with the connection
-        count the base maintains, this is what gates :meth:`run` — so a
-        ``stop_session`` halts the generator even though its connections are
-        torn down without a per-client disconnect.
-        """
-        if isinstance(event, SessionStarted):
-            self._session_active = True
-        elif isinstance(event, SessionEnded):
-            # Forbid generation before the hook runs so the driver, which checks
-            # between turns without the lock, breaks at the next boundary rather
-            # than waiting on the @session_ended handler to acquire it.
-            self._session_active = False
-            self._update_runnable()
-        await super()._dispatch_reactor_event(event)
-        self._update_runnable()
-
-    def _update_runnable(self) -> None:
-        """Reconcile the run gate from session liveness and the client count."""
-        if self.connected.is_set() and self._session_active:
-            self._runnable.set()
-        else:
-            self._runnable.clear()
-
-    # -- handler serialisation ------------------------------------------------
-
-    async def _dispatch_command(self, envelope: CommandEnvelope) -> None:
-        """Dispatch a command under the generator lock, so it lands between yields."""
-        lock = self._gen_lock
-        if lock is None:
-            await super()._dispatch_command(envelope)
-            return
-        async with lock:
-            await super()._dispatch_command(envelope)
-
-    async def _invoke_hook(
-        self, hook: Callable[..., Any] | None, conn_id: ConnId | None, **extra: Any
-    ) -> None:
-        """Run a lifecycle hook under the generator lock, like a command handler."""
-        lock = self._gen_lock
-        if lock is None:
-            await super()._invoke_hook(hook, conn_id, **extra)
-            return
-        async with lock:
-            await super()._invoke_hook(hook, conn_id, **extra)
 
     # -- the driver -----------------------------------------------------------
 
@@ -182,21 +114,18 @@ class ReactorPipeline(ReactorApp):
         to defer to, so it propagates and ends the model loop too. The input
         buffers reset on every path out, including that one.
         """
-        lock = self._gen_lock
-        if lock is None:
-            raise RuntimeError("run() started before the model loop was ready")
-
+        lock = self._step_lock
         inference_fn = self.inference
         is_async = inspect.isasyncgenfunction(inference_fn)
-        dynamic_fps = not _fps_is_author_pinned(type(self))
+        dynamic_fps = not self._fps_pinned
 
         while True:
-            await self._runnable.wait()
+            await self._live.wait()
 
             gen = inference_fn()
             ended_cleanly = False
             try:
-                while self._runnable.is_set():
+                while self._live.is_set():
                     try:
                         async with lock:
                             output, compute_time = await self._advance(gen, is_async)
@@ -306,20 +235,3 @@ class ReactorPipeline(ReactorApp):
                     yield MyOutput(main_video=frame)
         """
         raise NotImplementedError(f"{type(self).__name__} must implement inference()")
-
-
-def _fps_is_author_pinned(cls: type) -> bool:
-    """Return whether the model (or an intermediate base) pins ``fps`` itself.
-
-    The emission rate is adaptive unless the author declares ``fps``. The walk
-    covers the model's own classes but stops at :class:`ReactorCore`, whose
-    ``fps`` is the framework default rather than an author's choice — so a
-    subclass that inherits a pinned rate from an intermediate
-    :class:`ReactorPipeline` base counts as pinned even without redeclaring it.
-    """
-    for klass in cls.__mro__:
-        if klass is ReactorCore:
-            break
-        if "fps" in vars(klass):
-            return True
-    return False
