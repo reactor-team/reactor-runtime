@@ -23,11 +23,12 @@ from reactor_runtime.core import (
     InputFrame,
     UploadedFile,
 )
-from reactor_runtime.interface.app import ReactorApp
+from reactor_runtime.interface.app import ReactorApp, StepOutcome
 from reactor_runtime.interface.client import ClientInfo
 from reactor_runtime.interface.events import (
     EVENT_REGISTRY,
     MESSAGE_REGISTRY,
+    ApplicationError,
     CommandError,
     MessageField,
     ModelMessage,
@@ -65,6 +66,7 @@ __all__ = [
     "INPUT_REGISTRY",
     "MESSAGE_REGISTRY",
     "OUTPUT_REGISTRY",
+    "ApplicationError",
     "Audio",
     "BufferClosed",
     "ClientInfo",
@@ -85,6 +87,7 @@ __all__ = [
     "ReactorApp",
     "ReactorPipeline",
     "ReadMode",
+    "StepOutcome",
     "Track",
     "TrackPayload",
     "UploadedFile",
