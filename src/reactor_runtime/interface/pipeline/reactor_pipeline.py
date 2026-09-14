@@ -25,7 +25,7 @@ import inspect
 import time
 from typing import Any
 
-from reactor_runtime.interface.app.reactor_app import ReactorApp
+from reactor_runtime.interface.app.reactor_app import ReactorApp, _fps_is_author_pinned
 from reactor_runtime.interface.internal.input_buffer import BufferClosed
 from reactor_runtime.interface.pipeline.idle import Idle
 from reactor_runtime.interface.tracks import Output
@@ -117,7 +117,7 @@ class ReactorPipeline(ReactorApp):
         lock = self._step_lock
         inference_fn = self.inference
         is_async = inspect.isasyncgenfunction(inference_fn)
-        dynamic_fps = not self._fps_pinned
+        dynamic_fps = not _fps_is_author_pinned(type(self))
 
         while True:
             await self._live.wait()

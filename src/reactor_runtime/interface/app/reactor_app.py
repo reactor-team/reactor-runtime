@@ -26,7 +26,9 @@ Its default ``run()`` is the step loop. Each turn calls ``prepare_step()``,
 ``generate()``, and ``collect_step()`` in that order under the step lock, which
 every handler also takes, so a handler runs between steps and never during
 one. An author who needs a different loop overrides ``run()`` and keeps
-everything else.
+everything else, the lock included: command handlers and lifecycle hooks run
+one at a time under it whether or not the default loop is in use, so a hook
+that awaits something only another handler can provide does not complete.
 """
 
 from __future__ import annotations
@@ -69,6 +71,11 @@ from reactor_runtime.log import get_logger, release_session_id
 
 logger = get_logger(__name__)
 
+# A refused step waits this long before the loop asks again. Refusing is one
+# call and one raise, so without the wait a paused application spins a core
+# on the model thread; with it, a refusal is noticed within a frame period.
+_REFUSED_SLEEP = 0.005
+
 
 class ReactorApp(ReactorCore):
     """Base class an author subclasses to define the application the runtime drives.
@@ -107,7 +114,6 @@ class ReactorApp(ReactorCore):
     state: Any = None
     connected: asyncio.Event
     _clients: dict[ConnId, ClientInfo]
-    _fps_pinned: bool
     _session_active: bool
     _live: asyncio.Event
     _step_lock: asyncio.Lock
@@ -130,7 +136,6 @@ class ReactorApp(ReactorCore):
         # class never touches it.
         if self.__app_state__ is not None:
             self.state = None
-        self._fps_pinned = _fps_is_author_pinned(type(self))
 
     # -- the step, three calls ------------------------------------------------
 
@@ -206,14 +211,21 @@ class ReactorApp(ReactorCore):
         connected. Each turn waits for a step request, takes the step lock,
         runs the three hooks, releases the lock, emits the media the step
         produced, yields once so handlers already waiting get their turn, and
-        requests the next step. Nothing here paces the step rate: a fast model
-        waits in :meth:`emit` on a full wire, and a refused step costs one call
-        and one yield.
+        requests the next step. A productive step is not paced here: a fast
+        model waits in :meth:`emit` on a full wire. A refused step sleeps for
+        a few milliseconds before the next request, so a paused application
+        does not spin a core.
+
+        Playout is paced from the wall-clock time of the whole step, from the
+        start of :meth:`prepare_step` to the return of :meth:`collect_step`,
+        unless the author declares ``fps``.
 
         Raises:
             Exception: Whatever :meth:`collect_step` raised, which by default is
                 the error :meth:`generate` raised. It ends the model loop.
         """
+        fps_pinned = _fps_is_author_pinned(type(self))
+        last_refusal: str | None = None
         self._step_requested.set()
         while True:
             await self._live.wait()
@@ -229,17 +241,22 @@ class ReactorApp(ReactorCore):
                 # to the return of collect_step(). Both hooks are async and may
                 # await; the lock is what stops a handler from landing in one
                 # of those gaps.
+                step_started = time.perf_counter()
                 async with self._step_lock:
                     # 2. The application gate.
                     try:
                         step_input = await self.prepare_step(self.state, self._media_holder)
                     except ApplicationError as refused:
-                        logger.debug(
-                            "step refused", reason=str(refused), kind=type(refused).__name__
-                        )
+                        # One record per change of reason, not one per turn.
+                        reason = f"{type(refused).__name__}: {refused}"
+                        if reason != last_refusal:
+                            logger.debug(
+                                "step refused", reason=str(refused), kind=type(refused).__name__
+                            )
+                            last_refusal = reason
                         media = None
-                        outcome = None
                     else:
+                        last_refusal = None
                         # 3. The model. Synchronous on purpose: nothing changes
                         #    under it. This is the one place a StepOutcome is built.
                         started = time.perf_counter()
@@ -257,16 +274,17 @@ class ReactorApp(ReactorCore):
                         # 4. The application collects the outcome into media,
                         #    sends its messages, or recovers. A raise ends the loop.
                         media = await self.collect_step(outcome)
+                step_time = time.perf_counter() - step_started
 
                 # 5. Emit outside the lock, so a handler can run while the wire
                 #    is full.
-                if media is not None and outcome is not None:
-                    pace = None if self._fps_pinned else outcome.elapsed
-                    await self.emit(media, compute_time=pace)
+                if media is not None:
+                    await self.emit(media, compute_time=None if fps_pinned else step_time)
 
-                # One yield, so handler tasks already runnable get their turn,
-                # then the next request right away.
-                await asyncio.sleep(0)
+                # A refused turn waits a little before asking again; a
+                # productive turn yields once so handler tasks already runnable
+                # get their turn, then asks again right away.
+                await asyncio.sleep(_REFUSED_SLEEP if last_refusal is not None else 0)
                 self._step_requested.set()
 
     # -- engine hooks ---------------------------------------------------------

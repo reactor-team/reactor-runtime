@@ -7,6 +7,7 @@ loop, with ``emit`` overridden to record what reached the wire and at what pace.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -405,11 +406,14 @@ async def test_a_lifecycle_hook_waits_for_the_step_lock() -> None:
 async def test_a_handler_cannot_land_inside_a_step() -> None:
     """A handler that arrives during an await inside prepare_step runs after collect_step."""
     trace: list[str] = []
+    inside_prepare = asyncio.Event()
+    release_prepare = asyncio.Event()
 
     class Slow(Recording):
         async def prepare_step(self, state: State, media: Any) -> State:
             trace.append("prepare")
-            await asyncio.sleep(0.005)
+            inside_prepare.set()
+            await release_prepare.wait()
             return state
 
         def generate(self, step: State) -> Frame:
@@ -428,14 +432,19 @@ async def test_a_handler_cannot_land_inside_a_step() -> None:
     _ready(app)
     await _go_live(app)
     task = asyncio.create_task(app.run())
-    await asyncio.sleep(0.001)  # inside the first prepare_step's await
+    await inside_prepare.wait()  # the loop is parked at the await inside prepare_step
     command = ModelContract.of(Slow).validate("poke", {})
-    await app._dispatch_command(CommandEnvelope(command, ConnId(1001), None))
+    handler = asyncio.create_task(
+        app._dispatch_command(CommandEnvelope(command, ConnId(1001), None))
+    )
+    await asyncio.sleep(0.005)
+    assert "handler" not in trace  # parked on the lock while the step is open
+    release_prepare.set()
+    await handler
     await _stop(task)
 
-    first_step = trace.index("collect")
-    assert trace[: first_step + 1] == ["prepare", "generate", "collect"]
-    assert trace.index("handler") > first_step
+    assert trace[:3] == ["prepare", "generate", "collect"]
+    assert trace.index("handler") > trace.index("collect")
 
 
 # -- the live gate ------------------------------------------------------------
@@ -514,3 +523,80 @@ async def test_a_session_end_resets_the_input_buffers() -> None:
     assert buffer.closed
     await app._dispatch_reactor_event(SessionEnded("s", EndReason.STOPPED))
     assert not buffer.closed
+
+
+# -- refusal cost and pacing --------------------------------------------------
+
+
+async def test_a_refused_step_waits_before_the_loop_asks_again() -> None:
+    refusals = 0
+
+    class Refusing(OnlyGenerate):
+        async def prepare_step(self, state: State, media: Any) -> State:
+            nonlocal refusals
+            refusals += 1
+            raise ApplicationError("paused")
+
+    app = Refusing()
+    _ready(app)
+    await _go_live(app)
+    task = await _run_for(app, seconds=0.05)
+    # Without the wait a refused turn is one call and one yield: thousands in 50 ms.
+    assert 1 <= refusals <= 40
+    await _stop(task)
+
+
+async def test_a_refusal_is_logged_once_per_change_of_reason(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from reactor_runtime.interface.app import reactor_app
+
+    class Refusing(OnlyGenerate):
+        async def prepare_step(self, state: State, media: Any) -> State:
+            raise ApplicationError("paused" if state.paused else "no prompt")
+
+    app = Refusing()
+    _ready(app)
+    await _go_live(app)
+    app.state.paused = True
+    with caplog.at_level(logging.DEBUG, logger=reactor_app.__name__):
+        task = await _run_for(app, seconds=0.03)
+        app.state.paused = False
+        await asyncio.sleep(0.03)
+    await _stop(task)
+    reasons = [
+        getattr(record, "reactor_fields", {}).get("reason")
+        for record in caplog.records
+        if "step refused" in record.getMessage()
+    ]
+    assert reasons == ["paused", "no prompt"]
+
+
+async def test_playout_paces_from_the_whole_step_not_only_generate() -> None:
+    class SlowPrepare(OnlyGenerate):
+        async def prepare_step(self, state: State, media: Any) -> State:
+            await asyncio.sleep(0.02)
+            return state
+
+    app = SlowPrepare()
+    _ready(app)
+    await _go_live(app)
+    task = await _run_for(app, seconds=0.05)
+    _, compute_time = app.emitted[0]
+    assert compute_time is not None
+    assert compute_time >= 0.02
+    await _stop(task)
+
+
+async def test_fps_pinned_in_load_is_honoured() -> None:
+    class PinsInLoad(OnlyGenerate):
+        def load(self, config_path: Any) -> None:
+            type(self).fps = 12
+
+    app = PinsInLoad()
+    app.load(None)
+    _ready(app)
+    await _go_live(app)
+    task = await _run_for(app)
+    assert app.emitted[0][1] is None
+    await _stop(task)
