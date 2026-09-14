@@ -24,13 +24,13 @@ import numpy as np
 
 from reactor_runtime import (
     Audio,
-    Input,
     InputBuffer,
     InputField,
     InputFrame,
+    MediaInput,
     ModelMessage,
     Output,
-    ReactorModel,
+    ReactorApp,
     ReadMode,
     TrackPayload,
     UploadedFile,
@@ -66,7 +66,7 @@ FPS = 30
 _MAX_BACKLOG_SAMPLES = int(2.0 / FPS * SAMPLE_RATE)
 
 
-class EchoInput(Input):
+class EchoInput(MediaInput):
     """The client's inbound webcam and microphone."""
 
     webcam: Video
@@ -87,10 +87,10 @@ class EffectChanged(ModelMessage):
     intensity: float
 
 
-class Echo(ReactorModel):
+class Echo(ReactorApp):
     """Echo the client's A/V back, optionally applying a real-time video effect."""
 
-    input: EchoInput
+    media: EchoInput
     fps = FPS
 
     def load(self, config_path: Path | None) -> None:
@@ -263,8 +263,8 @@ class Echo(ReactorModel):
         """
         # The runtime binds a live InputBuffer to each declared input track; the
         # track annotations (Video/Audio) only carry the kind for the contract.
-        webcam = cast(InputBuffer, self.input.webcam)
-        mic = cast(InputBuffer, self.input.mic)
+        webcam = cast(InputBuffer, self.media.webcam)
+        mic = cast(InputBuffer, self.media.mic)
 
         audio_backlog: list[InputFrame] = []
         # What a burst has accumulated so far: one entry per frame, in step.

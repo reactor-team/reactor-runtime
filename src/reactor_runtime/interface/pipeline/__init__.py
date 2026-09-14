@@ -3,7 +3,7 @@
 A simplified way to write a model: declare a typed :class:`InputState`,
 implement an ``inference()`` generator that yields outputs, and let the base
 handle the connection lifecycle, per-connection state, and emission pacing.
-Built on :class:`reactor_runtime.ReactorModel`; everything that base offers
+Built on :class:`reactor_runtime.ReactorApp`; everything that base offers
 still applies.
 """
 

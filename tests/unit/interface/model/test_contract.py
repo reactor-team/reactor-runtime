@@ -5,10 +5,10 @@ from typing import TYPE_CHECKING
 import pytest
 
 from reactor_runtime import (
-    Input,
+    MediaInput,
     ModelMessage,
     Output,
-    ReactorModel,
+    ReactorApp,
     Video,
     connected,
     event,
@@ -33,11 +33,11 @@ class OutTracks(Output):
     main_video: Video
 
 
-class InTracks(Input):
+class InTracks(MediaInput):
     camera: Video
 
 
-class EchoModel(ReactorModel):
+class EchoModel(ReactorApp):
     """A tiny echo model."""
 
     input: InTracks
@@ -70,7 +70,7 @@ class Speed(enum.IntEnum):
     FAST = 2
 
 
-class SpeedModel(ReactorModel):
+class SpeedModel(ReactorApp):
     @event(name="set_speed")
     async def set_speed(self, speed: Speed) -> None: ...
 
@@ -188,7 +188,7 @@ def test_validate_coerces_an_enum_value_to_its_member() -> None:
 
 
 def test_a_plain_override_keeps_the_inherited_command_and_base_handler() -> None:
-    class Base(ReactorModel):
+    class Base(ReactorApp):
         @event(name="go")
         async def go(self) -> None: ...
 
@@ -205,7 +205,7 @@ def test_a_plain_override_keeps_the_inherited_command_and_base_handler() -> None
 
 
 def test_redeclaring_with_event_overrides_the_inherited_command() -> None:
-    class Base(ReactorModel):
+    class Base(ReactorApp):
         @event(name="go", description="base")
         async def go(self, x: int = 0) -> None: ...
 
@@ -224,7 +224,7 @@ def test_redeclaring_with_event_overrides_the_inherited_command() -> None:
 def test_duplicate_command_name_is_rejected_at_build() -> None:
     with pytest.raises(ValueError, match="duplicate command name"):
 
-        class Bad(ReactorModel):
+        class Bad(ReactorApp):
             @event(name="go")
             async def first(self) -> None: ...
 
@@ -236,7 +236,7 @@ def test_duplicate_command_name_is_rejected_at_build() -> None:
 
 
 def test_a_message_return_annotation_becomes_the_response() -> None:
-    class Typed(ReactorModel):
+    class Typed(ReactorApp):
         @event(name="go")
         async def go(self) -> Reply:
             return Reply(image_url="x")
@@ -245,7 +245,7 @@ def test_a_message_return_annotation_becomes_the_response() -> None:
 
 
 def test_a_none_return_annotation_has_no_response() -> None:
-    class Void(ReactorModel):
+    class Void(ReactorApp):
         @event(name="go")
         async def go(self) -> None: ...
 
@@ -255,7 +255,7 @@ def test_a_none_return_annotation_has_no_response() -> None:
 def test_an_unannotated_handler_has_no_response() -> None:
     # An absent annotation claims no response shape, so there is nothing for the
     # schema and the wire to disagree about. Only a stated one is held to.
-    class Void(ReactorModel):
+    class Void(ReactorApp):
         @event(name="go")
         async def go(self): ...
 
@@ -266,7 +266,7 @@ def test_an_unresolvable_parameter_annotation_does_not_fail_the_model() -> None:
     # Only the return annotation is resolved here. A parameter is read where the
     # command is built, which falls back to Any, so adding a return annotation to a
     # handler that imports today cannot turn it into an import failure.
-    class Late(ReactorModel):
+    class Late(ReactorApp):
         @event(name="go")
         async def go(self, subject: "LateReply") -> None: ...
 
@@ -278,7 +278,7 @@ def test_a_plain_return_annotation_is_rejected_at_build() -> None:
     # and cannot deliver. The model fails to import rather than serve that contract.
     with pytest.raises(TypeError, match="which a client cannot receive"):
 
-        class Bad(ReactorModel):
+        class Bad(ReactorApp):
             @event(name="go")
             async def go(self) -> dict[str, int]:
                 return {"count": 1}
@@ -292,7 +292,7 @@ def test_a_union_return_annotation_is_rejected_at_build() -> None:
 
     with pytest.raises(TypeError, match="no single response shape"):
 
-        class Bad(ReactorModel):
+        class Bad(ReactorApp):
             @event(name="go")
             async def go(self) -> Reply | Other:
                 return Reply(image_url="x")
@@ -303,7 +303,7 @@ def test_an_optional_return_annotation_is_rejected_at_build() -> None:
     # the author picks one.
     with pytest.raises(TypeError, match="no single response shape"):
 
-        class Bad(ReactorModel):
+        class Bad(ReactorApp):
             @event(name="go")
             async def go(self) -> Reply | None:
                 return None
@@ -314,7 +314,7 @@ def test_a_return_annotation_that_does_not_resolve_is_rejected_at_build() -> Non
     # response type at import time and must not fall back to "no response".
     with pytest.raises(TypeError, match="Cannot resolve the return annotation"):
 
-        class Bad(ReactorModel):
+        class Bad(ReactorApp):
             @event(name="go")
             async def go(self) -> "LateReply":
                 raise NotImplementedError
@@ -324,7 +324,7 @@ def test_a_track_declared_as_both_directions_is_rejected() -> None:
     class Dupe(Output):
         shared: Video
 
-    class DupeIn(Input):
+    class DupeIn(MediaInput):
         shared: Video
 
     # Both directions register globally; the clash surfaces when the union is read.

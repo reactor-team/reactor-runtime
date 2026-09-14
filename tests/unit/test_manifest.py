@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 
+from reactor_runtime import ReactorApp
 from reactor_runtime.core import RecordingConfig
-from reactor_runtime.interface.model import ReactorModel
 from reactor_runtime.manifest import import_model_class, load_config
 
 _MANIFEST = """\
@@ -179,7 +179,7 @@ def test_load_config_ignores_unknown_recording_keys(tmp_path: Path) -> None:
 
 
 def test_import_model_class_resolves_a_model_reference() -> None:
-    assert import_model_class("reactor_runtime:ReactorModel") is ReactorModel
+    assert import_model_class("reactor_runtime:ReactorApp") is ReactorApp
 
 
 @pytest.mark.parametrize("ref", ["pipeline", ":Demo", "pipeline:", ""])
