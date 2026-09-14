@@ -62,3 +62,11 @@ def test_to_output_refuses_anything_else_by_name(result: object) -> None:
     message = str(excinfo.value)
     assert "return an Output subclass from generate()" in message
     assert "override collect_step()" in message
+
+
+def test_to_output_raises_the_error_the_outcome_holds() -> None:
+    class RolloutExhausted(Exception):  # noqa: N818 (the model's own error, named for the state)
+        pass
+
+    with pytest.raises(RolloutExhausted):
+        StepOutcome(error=RolloutExhausted()).to_output()

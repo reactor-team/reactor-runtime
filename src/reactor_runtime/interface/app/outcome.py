@@ -13,9 +13,10 @@ class StepOutcome:
     """What ``generate()`` did on one step.
 
     Built by the runtime from ``generate()``'s return value or from the
-    exception it raised, and passed to ``collect_step()``. Exactly one of
-    :attr:`result` and :attr:`error` is set. Author code reads it and never
-    creates it.
+    exception it raised, and passed to ``collect_step()``. When :attr:`error`
+    is set, :attr:`result` is ``None``. A ``None`` :attr:`result` with no
+    :attr:`error` is a step that ran and produced nothing. Author code reads it
+    and never creates it.
 
     Attributes:
         result: What ``generate()`` returned. The type is the author's own step
@@ -33,16 +34,22 @@ class StepOutcome:
 
         Only an :class:`Output` qualifies; nothing is wrapped or guessed. A bare
         array, a dataclass, or a tuple is not media until ``collect_step()``
-        says which track it goes on.
+        says which track it goes on. An outcome that holds an error has no
+        media to read, so the error is raised: a ``collect_step()`` that calls
+        this without checking :attr:`error` first does not swallow the model's
+        exception.
 
         Returns:
             The :class:`Output` the model returned, or ``None`` when the step
             produced nothing to show.
 
         Raises:
+            Exception: The :attr:`error` this outcome holds, when it holds one.
             NotImplementedError: The result is neither an :class:`Output` nor
                 ``None``. The message names the type and the two ways out.
         """
+        if self.error is not None:
+            raise self.error
         if self.result is None:
             return None
         if isinstance(self.result, Output):
