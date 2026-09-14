@@ -23,7 +23,7 @@ from reactor_runtime.core import (
     InputFrame,
     UploadedFile,
 )
-from reactor_runtime.interface.app import ReactorApp
+from reactor_runtime.interface.app import InputState, ReactorApp
 from reactor_runtime.interface.client import ClientInfo
 from reactor_runtime.interface.events import (
     EVENT_REGISTRY,
@@ -45,7 +45,7 @@ from reactor_runtime.interface.internal.input_buffer import (
     ReadMode,
 )
 from reactor_runtime.interface.internal.reactor_core import OutputStream
-from reactor_runtime.interface.pipeline import Idle, InputState, ReactorPipeline
+from reactor_runtime.interface.pipeline import Idle, ReactorPipeline
 from reactor_runtime.interface.tracks import (
     INPUT_REGISTRY,
     OUTPUT_REGISTRY,

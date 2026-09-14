@@ -1,0 +1,353 @@
+{
+  "components": {
+    "schemas": {
+      "BrightnessSet": {
+        "properties": {
+          "brightness": {
+            "description": "Brightness multiplier now in effect.",
+            "type": "number"
+          }
+        },
+        "required": [
+          "brightness"
+        ],
+        "type": "object"
+      },
+      "BrightnessSnapshot": {
+        "properties": {
+          "brightness": {
+            "description": "Active brightness multiplier.",
+            "type": "number"
+          },
+          "paused": {
+            "description": "Whether frame generation is paused.",
+            "type": "boolean"
+          },
+          "resolution": {
+            "description": "Active output resolution.",
+            "type": "string"
+          },
+          "text": {
+            "description": "Caption currently drawn over each frame.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "brightness",
+          "paused",
+          "resolution",
+          "text"
+        ],
+        "type": "object"
+      },
+      "ImageSet": {
+        "properties": {
+          "filename": {
+            "description": "Name of the image now in effect.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "filename"
+        ],
+        "type": "object"
+      },
+      "ReactorUploadReference": {
+        "description": "Reference to a file uploaded via the Reactor upload protocol.",
+        "format": "reactor-upload-reference",
+        "properties": {
+          "mime_type": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer"
+          },
+          "upload_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "upload_id",
+          "name",
+          "mime_type",
+          "size"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "Generate an animated gradient and tone whose look and pitch track the state.",
+    "title": "brightness",
+    "version": "v1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/events/get_state": {
+      "post": {
+        "operationId": "get_state",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {},
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrightnessSnapshot"
+                }
+              }
+            },
+            "description": "BrightnessSnapshot"
+          }
+        },
+        "summary": "Return the current generation parameters."
+      }
+    },
+    "/events/set_brightness": {
+      "post": {
+        "operationId": "set_brightness",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "brightness": {
+                    "default": 1.0,
+                    "description": "Brightness multiplier (0=black, 1=half, 2=white).",
+                    "maximum": 2.0,
+                    "minimum": 0.0,
+                    "type": "number",
+                    "x-reactor-moderate": false
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrightnessSet"
+                }
+              }
+            },
+            "description": "BrightnessSet"
+          }
+        },
+        "summary": "Set the brightness and confirm the value in effect."
+      }
+    },
+    "/events/set_image": {
+      "post": {
+        "operationId": "set_image",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "image": {
+                    "$ref": "#/components/schemas/ReactorUploadReference",
+                    "x-reactor-moderate": true
+                  }
+                },
+                "required": [
+                  "image"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImageSet"
+                }
+              }
+            },
+            "description": "ImageSet"
+          }
+        },
+        "summary": "Set the reference image and acknowledge it."
+      }
+    },
+    "/events/set_paused": {
+      "post": {
+        "operationId": "set_paused",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "paused": {
+                    "default": false,
+                    "description": "Pause frame generation.",
+                    "type": "boolean",
+                    "x-reactor-moderate": false
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Command accepted"
+          }
+        },
+        "summary": "Pause frame generation."
+      }
+    },
+    "/events/set_resolution": {
+      "post": {
+        "operationId": "set_resolution",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "resolution": {
+                    "default": "480p",
+                    "description": "Output resolution (2160p is 4K UHD).",
+                    "enum": [
+                      "480p",
+                      "720p",
+                      "1080p",
+                      "2160p"
+                    ],
+                    "type": "string",
+                    "x-reactor-moderate": false
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Command accepted"
+          }
+        },
+        "summary": "Output resolution (2160p is 4K UHD)."
+      }
+    },
+    "/events/set_text": {
+      "post": {
+        "operationId": "set_text",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "text": {
+                    "default": "",
+                    "description": "Caption drawn over every frame; empty draws nothing.",
+                    "maxLength": 200,
+                    "type": "string",
+                    "x-reactor-moderate": true
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Command accepted"
+          }
+        },
+        "summary": "Caption drawn over every frame; empty draws nothing."
+      }
+    }
+  },
+  "webhooks": {
+    "brightness_set": {
+      "post": {
+        "operationId": "brightness_set",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BrightnessSet"
+              }
+            }
+          },
+          "required": true
+        },
+        "summary": "Confirmation that the brightness was applied, echoing the value in effect."
+      }
+    },
+    "brightness_snapshot": {
+      "post": {
+        "operationId": "brightness_snapshot",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BrightnessSnapshot"
+              }
+            }
+          },
+          "required": true
+        },
+        "summary": "The live generation parameters, returned when a client asks for them."
+      }
+    },
+    "image_set": {
+      "post": {
+        "operationId": "image_set",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImageSet"
+              }
+            }
+          },
+          "required": true
+        },
+        "summary": "Acknowledgement that an uploaded reference image was accepted."
+      }
+    }
+  },
+  "x-reactor": {
+    "tracks": [
+      {
+        "direction": "out",
+        "kind": "video",
+        "name": "main_video"
+      },
+      {
+        "direction": "out",
+        "kind": "audio",
+        "name": "main_audio"
+      }
+    ]
+  }
+}

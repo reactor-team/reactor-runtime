@@ -3,22 +3,19 @@
 A higher-level model base built on :class:`ReactorApp`. Instead of writing a
 manual ``run()`` loop, an author implements an ``inference()`` generator and
 declares a typed :class:`InputState`; the base drives the generator across
-connection cycles, manages the per-connection state, and adapts the emission
-rate to the model's own pace.
+connection cycles and adapts the emission rate to the model's own pace.
 
-It owns three things on top of :class:`ReactorApp`:
+It owns two things on top of :class:`ReactorApp`:
 
-- The ``run()`` driver: a fresh ``self.state`` per connection, gate on a client
-  being present, advance the generator one ``yield`` at a time, emit each
-  :class:`Output`, skip a turn on :data:`Idle`, and tear the session down
-  cleanly when the client leaves.
-- Auto-generated commands: every public :class:`InputState` field becomes a
-  ``set_<field>`` command, stamped onto the subclass so the same eager
-  :class:`ModelContract` that powers ``@event`` handlers discovers, validates,
-  and documents it. A hand-written ``@event`` of the same name wins.
+- The ``run()`` driver: gate on a live session with a client present, advance
+  the generator one ``yield`` at a time, emit each :class:`Output`, skip a turn
+  on :data:`Idle`, and tear the generator down cleanly when the client leaves.
 - A generator lock: ``@event`` and lifecycle handlers run only between the
   generator's ``yield`` points, so ``self.state`` is consistent within a single
   inference turn rather than mutating mid-computation.
+
+The typed state and its ``set_<field>`` commands come from :class:`ReactorApp`.
+A pipeline must declare ``state: MyState``; the base leaves it optional.
 """
 
 from __future__ import annotations
@@ -27,16 +24,14 @@ import asyncio
 import inspect
 import time
 from collections.abc import Callable
-from typing import Any, ClassVar, get_type_hints
+from typing import Any
 
 from reactor_runtime.core.model import ReactorEvent, SessionEnded, SessionStarted
 from reactor_runtime.core.values import ConnId
 from reactor_runtime.interface.app.reactor_app import ReactorApp
-from reactor_runtime.interface.events.decorators import EVENT_ATTR, EventHandler, make_command
 from reactor_runtime.interface.internal.input_buffer import BufferClosed
 from reactor_runtime.interface.internal.reactor_core import CommandEnvelope, ReactorCore
 from reactor_runtime.interface.pipeline.idle import Idle
-from reactor_runtime.interface.pipeline.input_state import InputState
 from reactor_runtime.interface.tracks import Output
 from reactor_runtime.log import get_logger
 
@@ -63,7 +58,7 @@ class ReactorPipeline(ReactorApp):
     Subclass and provide:
 
     - ``state: MyState`` — a class annotation naming an :class:`InputState`
-      subclass. ``self.state`` holds the live instance during a connection.
+      subclass. ``self.state`` holds the live instance during a session.
     - ``inference()`` — a generator (``def`` or ``async def``) that reads
       ``self.state``, optionally consumes input tracks, and yields an
       :class:`Output` per produced frame. Yield :data:`Idle` (or ``None``) to
@@ -86,34 +81,19 @@ class ReactorPipeline(ReactorApp):
     measured inference time; declaring ``fps`` pins it to a fixed rate.
     """
 
-    __pipeline_state__: ClassVar[type[InputState]]
-
-    state: Any
-    """The session's :class:`InputState` instance, or ``None`` between sessions."""
-
     _gen_lock: asyncio.Lock | None
     _session_active: bool
     _runnable: asyncio.Event
 
-    def __init_subclass__(cls, **kwargs: object) -> None:
-        # Resolve the state class and stamp its auto-setters onto the subclass
-        # before ReactorApp builds the contract, so they are discovered as
-        # ordinary commands. An abstract intermediate without a state annotation
-        # is left alone; the requirement is enforced at instantiation.
-        state_cls = _resolve_state_class(cls)
-        if state_cls is not None:
-            cls.__pipeline_state__ = state_cls
-            _stamp_auto_setters(cls, state_cls)
-        super().__init_subclass__(**kwargs)
-
     def __init__(self) -> None:
         super().__init__()
-        if getattr(type(self), "__pipeline_state__", None) is None:
+        # An abstract intermediate without a state annotation is left alone at
+        # class creation; the requirement is enforced at instantiation.
+        if type(self).__app_state__ is None:
             raise TypeError(
                 f"{type(self).__name__} must declare 'state: MyState' where MyState "
                 "is an InputState subclass."
             )
-        self.state = None
         self._gen_lock = None
 
     # -- engine hooks ---------------------------------------------------------
@@ -136,11 +116,6 @@ class ReactorPipeline(ReactorApp):
         torn down without a per-client disconnect.
         """
         if isinstance(event, SessionStarted):
-            # Build the session's state before the @session_started hook runs,
-            # so once-per-session initialization can write to it. The instance
-            # lives until the session ends: a client leaving and rejoining
-            # mid-session keeps the same state.
-            self.state = self.__pipeline_state__()
             self._session_active = True
         elif isinstance(event, SessionEnded):
             # Forbid generation before the hook runs so the driver, which checks
@@ -150,10 +125,6 @@ class ReactorPipeline(ReactorApp):
             self._update_runnable()
         await super()._dispatch_reactor_event(event)
         self._update_runnable()
-        if isinstance(event, SessionEnded):
-            # Cleared only after the @session_ended hook, which may still read
-            # the ending session's values.
-            self.state = None
 
     def _update_runnable(self) -> None:
         """Reconcile the run gate from session liveness and the client count."""
@@ -352,72 +323,3 @@ def _fps_is_author_pinned(cls: type) -> bool:
         if "fps" in vars(klass):
             return True
     return False
-
-
-def _resolve_state_class(cls: type) -> type[InputState] | None:
-    """Return the :class:`InputState` subclass named by the ``state`` annotation."""
-    try:
-        hints = get_type_hints(cls)
-    except Exception:
-        return None
-    hint = hints.get("state")
-    if isinstance(hint, type) and issubclass(hint, InputState):
-        return hint
-    return None
-
-
-def _existing_command_names(cls: type) -> set[str]:
-    """Collect the command names already claimed by ``@event`` handlers on *cls*."""
-    names: set[str] = set()
-    for klass in cls.__mro__:
-        for attr in vars(klass).values():
-            handler = getattr(attr, EVENT_ATTR, None)
-            if isinstance(handler, EventHandler):
-                names.add(handler.name)
-    return names
-
-
-def _stamp_auto_setters(cls: type, state_cls: type[InputState]) -> None:
-    """Stamp a ``set_<field>`` command handler for each public state field.
-
-    Each handler carries the same :class:`EventHandler` metadata an ``@event``
-    decorator produces, so the contract treats it identically. A field whose
-    ``set_`` name is already claimed by a hand-written handler is skipped, so an
-    author can override the generated setter.
-    """
-    existing = _existing_command_names(cls)
-    try:
-        hints = get_type_hints(state_cls)
-    except Exception:
-        hints = dict(getattr(state_cls, "__annotations__", {}))
-
-    for field_name, info in state_cls._public_fields.items():
-        command_name = f"set_{field_name}"
-        if command_name in existing:
-            continue
-        field_type = hints.get(field_name, Any)
-        command = make_command(command_name, [(field_name, field_type, info)])
-        handler = _make_setter(field_name)
-        setattr(
-            handler,
-            EVENT_ATTR,
-            EventHandler(
-                name=command_name,
-                description=info.description or f"Set {field_name}.",
-                command=command,
-                is_async=False,
-                reserved=(),
-            ),
-        )
-        setattr(cls, command_name, handler)
-
-
-def _make_setter(field_name: str) -> Callable[..., None]:
-    """Build the handler that writes one field onto the live state."""
-
-    def handler(self: Any, **kwargs: Any) -> None:
-        if self.state is None:
-            return
-        setattr(self.state, field_name, kwargs[field_name])
-
-    return handler
