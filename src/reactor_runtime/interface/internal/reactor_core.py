@@ -230,6 +230,7 @@ class ReactorCore:
         self.output = OutputStream(self)
 
         self._input_buffers: dict[str, InputBuffer] = {}
+        self._media_holder: MediaInput | None = None
         self._wire_input_buffers()
 
     # -- author hooks ---------------------------------------------------------
@@ -431,7 +432,8 @@ class ReactorCore:
         attr_name, input_cls = holder
         buffers = {name: InputBuffer() for name in input_cls.__tracks__}
         self._input_buffers.update(buffers)
-        setattr(self, attr_name, input_cls(**buffers))
+        self._media_holder = input_cls(**buffers)
+        setattr(self, attr_name, self._media_holder)
 
     @classmethod
     def _find_holder(cls, base: type[_Holder]) -> tuple[str, type[_Holder]] | None:
