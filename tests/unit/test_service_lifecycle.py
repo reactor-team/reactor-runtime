@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from reactor_runtime import Output, ReactorModel, Video
+from reactor_runtime import Output, ReactorApp, Video
 from reactor_runtime.core import (
     Health,
     HealthStatus,
@@ -198,7 +198,7 @@ class _GatedOut(Output):
     main: Video
 
 
-class _GatedModel(ReactorModel):
+class _GatedModel(ReactorApp):
     """A model whose load blocks off the event loop until a test releases it."""
 
     output: _GatedOut

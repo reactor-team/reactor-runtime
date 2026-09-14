@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from reactor_runtime import Audio, Input, Output, TrackPayload, Video
+from reactor_runtime import Audio, MediaInput, Output, TrackPayload, Video
 from reactor_runtime.core.values import TrackDirection, TrackKind
 
 
@@ -10,7 +10,7 @@ class GameOutput(Output):
     narration: Audio
 
 
-class GameInput(Input):
+class GameInput(MediaInput):
     camera: Video
 
 
