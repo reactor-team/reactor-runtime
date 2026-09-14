@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import logging
 
 import pytest
 
@@ -45,3 +46,21 @@ def test_a_subclass_of_the_old_name_is_a_reactor_app() -> None:
         async def run(self) -> None: ...
 
     assert issubclass(Legacy, ReactorApp)
+
+
+def test_the_first_resolution_of_a_name_is_logged_once(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from reactor_runtime.interface.internal import aliases
+
+    monkeypatch.setattr(aliases, "_reported", set())
+    with caplog.at_level(logging.WARNING, logger=aliases.__name__):
+        with pytest.warns(DeprecationWarning, match="ReactorModel is now ReactorApp"):
+            first = importlib.import_module("reactor_runtime").ReactorModel
+        with pytest.warns(DeprecationWarning, match="ReactorModel is now ReactorApp"):
+            second = importlib.import_module("reactor_runtime.interface").ReactorModel
+    assert first is second is ReactorApp
+    records = [
+        record for record in caplog.records if "deprecated name imported" in record.getMessage()
+    ]
+    assert len(records) == 1
