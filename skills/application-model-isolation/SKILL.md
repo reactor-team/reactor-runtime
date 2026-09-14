@@ -45,8 +45,9 @@ class WaypointModel:
 ```
 
 The application constructs it in its own `load()` and holds it under an
-ordinary attribute name. The example uses `self.engine`. Pick any name; there
-is no reserved one.
+ordinary attribute name. The example uses `self.engine`. Do not name it
+`model` or `state`: `state` is the typed state the runtime owns, and `model`
+is set aside for the runtime as well.
 
 ```python
 # waypoint.py

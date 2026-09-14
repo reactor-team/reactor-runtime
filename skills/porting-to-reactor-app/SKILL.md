@@ -103,7 +103,8 @@ Two things change shape on the way:
 Take the engine calls out of the loop and put them in a plain class with
 `load()`, `generate()`, and `reset()`. It imports nothing from
 `reactor_runtime`. The app constructs it in `load()` and holds it under an
-ordinary attribute name.
+ordinary attribute name, `self.engine` in the example. Do not name it `model`
+or `state`; both are set aside for the runtime.
 
 Then ask what makes a step invalid for the model itself, with no client in
 the picture. A window that is full. A world that was never seeded. A cache
