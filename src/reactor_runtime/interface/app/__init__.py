@@ -7,6 +7,7 @@ What an author subclasses. Declaring the subclass assembles its
 """
 
 from reactor_runtime.interface.app.input_state import InputState
+from reactor_runtime.interface.app.outcome import StepOutcome
 from reactor_runtime.interface.app.reactor_app import ReactorApp
 
-__all__ = ["InputState", "ReactorApp"]
+__all__ = ["InputState", "ReactorApp", "StepOutcome"]
