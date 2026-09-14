@@ -2,7 +2,7 @@
 
 The machinery a model author never touches: the model's own thread and asyncio
 loop, its media buffers, the two typed inbound queues, and the outbound slots.
-``ReactorCore`` owns the *how*; :class:`ReactorModel` supplies the *what* —
+``ReactorCore`` owns the *how*; :class:`ReactorApp` supplies the *what* —
 handler semantics — by overriding the loop hooks. Everything that reaches the
 model from the outside arrives through a handful of thread-safe entrypoints,
 which is what keeps the bridge above it thin.
@@ -35,7 +35,7 @@ from reactor_runtime.core.values import (
 )
 from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.input_buffer import InputBuffer
-from reactor_runtime.interface.tracks import Input, Metadata, Output
+from reactor_runtime.interface.tracks import MediaInput, Metadata, Output
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +195,7 @@ class CommandEnvelope:
 class ReactorCore:
     """The model's loop, buffers, queues, and outbound slots.
 
-    Subclassed by :class:`ReactorModel`, which fills the loop hooks with the two
+    Subclassed by :class:`ReactorApp`, which fills the loop hooks with the two
     dispatchers. On its own, ``ReactorCore`` accepts inbound traffic onto the two
     queues and routes media into the input buffers; nothing drains the queues
     until a subclass supplies the drain loops via :meth:`_background_coros`.
@@ -245,7 +245,7 @@ class ReactorCore:
         """
 
     async def run(self) -> None:
-        """Drive the model. Overridden by :class:`ReactorModel`."""
+        """Drive the model. Overridden by :class:`ReactorApp`."""
         raise NotImplementedError(f"{type(self).__name__} must implement run()")
 
     async def emit(
@@ -425,7 +425,7 @@ class ReactorCore:
 
     def _wire_input_buffers(self) -> None:
         """Build a buffer per inbound track and bind the readable input handle."""
-        holder = self._find_holder(Input)
+        holder = self._find_holder(MediaInput)
         if holder is None:
             return
         attr_name, input_cls = holder

@@ -3,8 +3,8 @@
 The runtime pushes decoded frames in from its own thread; the model reads them
 out from the model loop. :class:`InputBuffer` is the hand-off between the two — a
 bounded, lock-guarded deque that wakes a blocked reader when a frame arrives or
-the track closes. Model authors reach it through the :class:`Input` track handle
-(``await self.input.camera.read()``), never directly.
+the track closes. Model authors reach it through the :class:`MediaInput` track handle
+(``await self.media.camera.read()``), never directly.
 """
 
 from __future__ import annotations

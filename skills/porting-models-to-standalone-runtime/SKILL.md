@@ -36,6 +36,35 @@ Two conveniences from older runtimes are deliberately absent: yielding a raw
 `np.ndarray` (yield a typed `Output` instead) and the headless `PipelineExecutor`
 step driver.
 
+## Two classes have new names
+
+`ReactorModel` is now `ReactorApp`, and `Input` is now `MediaInput`. The old
+names still import and resolve to the same classes, with a `DeprecationWarning`,
+and are removed in the next major. Rename at the import and at the subclass:
+
+```python
+# before
+from reactor_runtime import Input, ReactorModel
+
+class MyInput(Input): ...
+class MyModel(ReactorModel): ...
+
+# after
+from reactor_runtime import MediaInput, ReactorApp
+
+class MyInput(MediaInput): ...
+class MyModel(ReactorApp): ...
+```
+
+The runtime finds the inbound-track holder by the type of its annotation, not
+by the attribute name, so an existing `input: MyInput` keeps working. New code
+names it `media: MyInput` and reads `self.media.<track>`.
+
+The old module paths still import with the same warning:
+`reactor_runtime.interface.model.reactor_model` resolves `ReactorModel`, and
+`reactor_runtime.interface.tracks.input` resolves `Input`. Move to the package
+root while you rename.
+
 ## Imports move to the package root
 
 Update every authoring import to come from `reactor_runtime`, not
@@ -43,9 +72,9 @@ Update every authoring import to come from `reactor_runtime`, not
 
 ```python
 # before
-from reactor_runtime.interface import InputField, ReactorModel, ReadMode, event
+from reactor_runtime.interface import InputField, ReactorApp, ReadMode, event
 # after
-from reactor_runtime import InputField, ReactorModel, ReadMode, event
+from reactor_runtime import InputField, ReactorApp, ReadMode, event
 ```
 
 `reactor_runtime.interface` still resolves, so this is not a hard break — but the
@@ -234,11 +263,11 @@ measures the wrong thing.
 
 ## What did not change
 
-`ReactorModel` itself is the same shape: `load()` + `async def run()` driving
+`ReactorApp` itself is the same shape: `load()` + `async def run()` driving
 `await self.emit(...)`, `@event` / `@connected` / `@disconnected` handlers,
 `self.connected` to gate the loop, `fps` as a class attribute, typed
 `ModelMessage` returns/`self.send(...)`, and inbound media via
-`self.input.<track>.try_read(n, mode=ReadMode.LATEST)` / `.read(...)` /
+`self.media.<track>.try_read(n, mode=ReadMode.LATEST)` / `.read(...)` /
 `.reset()`. Weights are still located with `get_weights_path()` (now imported
 from `reactor_runtime`); it returns `$REACTOR_WEIGHTS_PATH` or
 `~/.cache/reactor_registry`.
@@ -248,5 +277,5 @@ Recording needs nothing from the model either: the `recording:` block in
 runtime's own surface. Keep the block as it is.
 
 Once the breaks above are cleared the model should import, `load`, and run; a
-`reactor.yaml` naming the `ReactorModel` via `runtime.import` is all the runtime
+`reactor.yaml` naming the `ReactorApp` via `runtime.import` is all the runtime
 needs to serve it.

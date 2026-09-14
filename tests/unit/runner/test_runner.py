@@ -16,7 +16,7 @@ from reactor_runtime import (
     InputField,
     ModelMessage,
     Output,
-    ReactorModel,
+    ReactorApp,
     UploadedFile,
     Video,
     event,
@@ -97,7 +97,7 @@ class Page:
     caption: str = ""
 
 
-class FakeModel(ReactorModel):
+class FakeModel(ReactorApp):
     """A minimal model that records its bring-up order and then idles."""
 
     output: FakeOut
@@ -1611,7 +1611,7 @@ async def test_model_crash_mid_session_tears_the_connections_down(
 # --- file uploads --------------------------------------------------------
 
 
-class PlainModel(ReactorModel):
+class PlainModel(ReactorApp):
     """A model with no upload hook, to prove file_uploaded is gated on one."""
 
     output: FakeOut

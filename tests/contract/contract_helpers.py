@@ -27,7 +27,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from reactor_runtime import Input, InputField, Output, ReactorModel, Video, event
+from reactor_runtime import InputField, MediaInput, Output, ReactorApp, Video, event
 from reactor_runtime.core import (
     ConnectionCapabilities,
     ConnId,
@@ -68,11 +68,11 @@ class ContractOutput(Output):
     main: Video
 
 
-class ContractInput(Input):
+class ContractInput(MediaInput):
     webcam: Video
 
 
-class ContractModel(ReactorModel):
+class ContractModel(ReactorApp):
     """A bidirectional fixture model: one outbound and one inbound track."""
 
     camera: ContractInput
@@ -86,7 +86,7 @@ class ContractModel(ReactorModel):
         await asyncio.sleep(60)
 
 
-class CrashingModel(ReactorModel):
+class CrashingModel(ReactorApp):
     """A model whose run loop crashes as soon as it starts."""
 
     def load(self, config_path: Path | None) -> None: ...
@@ -95,7 +95,7 @@ class CrashingModel(ReactorModel):
         raise RuntimeError("model exploded")
 
 
-class UnloadableModel(ReactorModel):
+class UnloadableModel(ReactorApp):
     """A model that fails to load, terminating the process's session."""
 
     def load(self, config_path: Path | None) -> None:
@@ -360,7 +360,7 @@ class Harness:
 
 @asynccontextmanager
 async def running_runtime(
-    model_cls: type[ReactorModel] | None = None,
+    model_cls: type[ReactorApp] | None = None,
     cfg: RuntimeConfig | None = None,
     *,
     start: bool = True,
