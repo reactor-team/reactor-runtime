@@ -1,0 +1,39 @@
+$schema: reactor/v1
+apiVersion: v1beta
+kind: VideoModel
+
+# `reactor build` / `reactor run` read this file: `model:` describes the model,
+# `runtime:` names the class to serve and the config file it reads, and
+# `build:` defines the image every build produces. There is no Dockerfile; the
+# image is generated from the `build:` block.
+model:
+  name: waypoint
+  version: v0.1.0
+  description: |
+    Waypoint 1.5: an explorable world seeded from an uploaded frame and driven
+    in real time by keyboard and mouse controls. Four frames per step at 1280x720.
+  resources:
+    gpu:
+      count: 1
+
+runtime:
+  import: waypoint:Waypoint
+  config: config.yml
+  recording:
+    enabled: true
+    chunk_seconds: 4
+    clip_max_seconds: 300
+    video_track: main_video
+    video:
+      codec: h264
+      preset: veryfast
+      crf: 23
+
+build:
+  # Must match the `reactor-runtime==<version>` pin in requirements.txt.
+  runtime_version: "3.4.0"
+  # The engine compiles kernels at load, so the image builds against the CUDA
+  # toolkit rather than the slim Python base.
+  cuda_version: "12.9.1"
+  # world_engine installs from its git tag.
+  system_packages: [git]
