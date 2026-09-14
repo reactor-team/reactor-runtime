@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -220,3 +221,36 @@ def test_the_same_model_on_reactor_app_renders_the_same_document(
 
 def test_frame_fixture_is_an_output() -> None:
     assert isinstance(Frame(main_video=np.zeros((2, 2, 3), dtype=np.uint8)), Output)
+
+
+# -- an app that declares no state owns the attribute -------------------------
+
+
+async def test_an_app_without_state_keeps_its_own_state_attribute_across_a_session() -> None:
+    class Legacy(ReactorApp):
+        def load(self, config_path: Any) -> None:
+            self.state = {"hp": 1}
+
+        async def run(self) -> None: ...
+
+    app = Legacy()
+    app.load(None)
+    _ready(app)
+    await app._dispatch_reactor_event(SessionStarted("s"))
+    assert app.state == {"hp": 1}
+    await app._dispatch_reactor_event(SessionEnded("s", EndReason.STOPPED))
+    assert app.state == {"hp": 1}
+
+
+def test_an_unresolvable_state_annotation_is_reported(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING):
+
+        class Dangling(ReactorApp):
+            state: "NoSuchStateClass"  # type: ignore[ty:unresolved-reference]  # noqa: F821, UP037  # the reference under test
+
+            async def run(self) -> None: ...
+
+    assert Dangling.__app_state__ is None
+    assert not any(name.startswith("set_") for name in ModelContract.of(Dangling).commands)
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("state annotation could not be resolved" in message for message in messages)

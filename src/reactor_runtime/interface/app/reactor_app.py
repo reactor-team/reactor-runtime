@@ -85,14 +85,16 @@ class ReactorApp(ReactorCore):
         connected: An :class:`asyncio.Event` set while at least one client is
             connected and cleared when the last one leaves, so a ``run`` loop can
             gate generation on having an audience.
-        state: The live :class:`InputState` instance while a session is live,
-            ``None`` between sessions and on a class that declares no state.
+        state: The live :class:`InputState` instance while a session is live
+            and ``None`` between sessions, on a class that declares ``state:``.
+            A class that declares no ``state:`` owns the attribute itself; the
+            base class never writes it.
     """
 
     __reactor_contract__: ClassVar[ModelContract]
     __app_state__: ClassVar[type[InputState] | None] = None
 
-    state: Any
+    state: Any = None
     connected: asyncio.Event
     _clients: dict[ConnId, ClientInfo]
 
@@ -108,7 +110,11 @@ class ReactorApp(ReactorCore):
 
     def __init__(self) -> None:
         super().__init__()
-        self.state = None
+        # Only an app that declared `state:` has its attribute owned here. One
+        # that did not may use the name for its own purposes, and the base
+        # class never touches it.
+        if self.__app_state__ is not None:
+            self.state = None
 
     # -- engine hooks ---------------------------------------------------------
 
@@ -228,7 +234,8 @@ class ReactorApp(ReactorCore):
             self._set_connected(0)
             await self._invoke_hook(hooks.session_ended, None)
             self._clients.clear()
-            self.state = None
+            if self.__app_state__ is not None:
+                self.state = None
             # The hook has returned, so its records were written while the
             # session's log binding was live; the session's last ambient writer
             # is done and the binding retires here, on the model thread.
@@ -339,12 +346,28 @@ def _qualname(hook: Callable[..., Any]) -> str:
 
 
 def _resolve_state_class(cls: type) -> type[InputState] | None:
-    """Return the :class:`InputState` subclass named by the ``state`` annotation."""
-    try:
-        hints = get_type_hints(cls)
-    except Exception:
-        return None
-    hint = hints.get("state")
+    """Return the :class:`InputState` subclass named by the ``state`` annotation.
+
+    A ``state`` annotation the class carries but that cannot be resolved, such
+    as a forward reference to a class defined later in the module, is reported
+    with a warning: the app would otherwise serve a schema with no ``set_``
+    commands and no signal as to why.
+    """
+    raw = cls.__dict__.get("__annotations__", {}).get("state")
+    if isinstance(raw, type):
+        hint: Any = raw
+    else:
+        try:
+            hint = get_type_hints(cls).get("state")
+        except Exception as exc:
+            if raw is not None:
+                logger.warning(
+                    "state annotation could not be resolved; no set_ commands generated",
+                    app=cls.__qualname__,
+                    annotation=str(raw),
+                    error=str(exc),
+                )
+            return None
     if isinstance(hint, type) and issubclass(hint, InputState):
         return hint
     return None
