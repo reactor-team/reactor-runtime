@@ -10,11 +10,11 @@
 
 ---
 
-Reactor Runtime turns an inference pipeline into a real-time, interactive media and data stream. You write `load()` and `run()`; the runtime handles the session lifecycle, the WebRTC media transport, and the wire protocol that connects clients to your model. Viewers watch frames as they are generated and change what the model is doing mid-stream, with no restart and no re-queue.
+Reactor Runtime turns an inference pipeline into a real-time, interactive media and data stream. You write `load()` and `generate()`; the runtime drives them one step at a time and handles the session lifecycle, the WebRTC media transport, and the wire protocol that connects clients to your model. Viewers watch frames as they are generated and change what the model is doing mid-stream, with no restart and no re-queue.
 
 ## Highlights
 
-- 📡 **Real-time streaming.** Frames reach clients over WebRTC as your model produces them, not after a whole video is done. `emit()` paces your loop to the rate clients play at, so a model needs no rate limiter of its own.
+- 📡 **Real-time streaming.** Frames reach clients over WebRTC as your model produces them, not after a whole video is done. The runtime paces playout from the time each step took, so a model needs no rate limiter of its own.
 - 🎮 **Live interaction.** Clients send commands mid-generation: change a prompt, move a camera, adjust a parameter. The next frame reflects it.
 - 🔌 **No transport code.** You never import a WebRTC library, manage a WebSocket, or encode video. The runtime ships its own media engine as a wheel, so a plain Python container is all a model needs.
 - ✅ **Typed, validated commands.** Declare the commands your model accepts with standard Python types and constraints. The runtime validates every payload before your handler runs and compiles the surface into an OpenAPI schema that drives typed client SDKs.
@@ -23,12 +23,17 @@ Reactor Runtime turns an inference pipeline into a real-time, interactive media 
 
 ## How it works
 
-You ship one `ReactorApp` subclass: the application the runtime drives and the client talks to. Declare the media it sends, load your weights once, and write the loop that receives or produces frames, data, and more:
+You ship one `ReactorApp` subclass: the application the runtime drives and the client talks to. Declare the media it sends and the state a client can set, load your weights once, and write what one step of generation does:
 
 ```python
 from pathlib import Path
 
-from reactor_runtime import InputField, Output, ReactorApp, Video, event
+from reactor_runtime import InputField, InputState, Output, ReactorApp, Video
+
+
+class MyState(InputState):
+    prompt: str = InputField(default="a sunny meadow", moderate=True, description="Scene to render.")
+    paused: bool = InputField(default=False, description="Hold generation on the last frame.")
 
 
 class MyOutput(Output):
@@ -36,27 +41,45 @@ class MyOutput(Output):
 
 
 class MyModel(ReactorApp):
-    fps = 24
+    state: MyState
 
     def load(self, config_path: Path | None) -> None:
         self.pipe = load_my_pipeline()
-        self.prompt = "a sunny meadow"
 
-    @event(name="set_prompt", description="Scene the model renders")
-    async def set_prompt(
-        self, prompt: str = InputField(default="a sunny meadow", moderate=True)
-    ) -> None:
-        self.prompt = prompt
-
-    async def run(self) -> None:
-        while True:
-            await self.connected.wait()
-            while self.connected.is_set():
-                frame = self.pipe.forward(prompt=self.prompt)
-                await self.emit(MyOutput(main_video=frame))
+    def generate(self, step: MyState) -> MyOutput:
+        return MyOutput(main_video=self.pipe.forward(prompt=step.prompt))
 ```
 
-That is a complete application. `run()` produces frames for as long as someone is watching, and any client can send `set_prompt` at any time to change what the next frame renders.
+That is a complete application. The runtime calls `generate()` in a loop for as long as someone is watching and emits what it returns. Every public field on `MyState` is a command the client can send: here `set_prompt` and `set_paused`, validated from the fields, and the next step reads the new values.
+
+A step is three calls, and `generate()` is the one you must write. `prepare_step(state, media)` runs before it and decides whether a step can happen: return the input `generate()` gets, or raise `ApplicationError("reason")` to skip the step without touching the model. `collect_step(outcome)` runs after it, with the result or the error, and returns the media to emit; send a message from there with `await self.send()` and it reaches the client before the step's frames. Both have defaults, so the model above writes neither.
+
+```python
+from reactor_runtime import ApplicationError, MessageField, ModelMessage, StepOutcome
+
+
+class FrameReady(ModelMessage):
+    prompt: str = MessageField(description="The prompt this frame was rendered from.")
+
+
+class MyModel(ReactorApp):
+    state: MyState
+
+    async def prepare_step(self, state: MyState, media: None) -> MyState:
+        if state.paused:
+            raise ApplicationError("paused")
+        return state
+
+    def generate(self, step: MyState) -> MyOutput: ...
+
+    async def collect_step(self, outcome: StepOutcome) -> Output | None:
+        if outcome.error is not None:
+            raise outcome.error
+        await self.send(FrameReady(prompt=self.state.prompt))
+        return outcome.to_output()
+```
+
+Command handlers and lifecycle hooks run between steps, never during one. The default `run()` is the loop that drives the three hooks. Override it to write your own loop against `emit()`, `send()`, `@event`, `self.connected`, and the tracks; `prepare_step()`, `generate()`, and `collect_step()` are then not called. Do that for a loop that is not one step per emit, such as a renderer that emits several times per step or a model that must block on an input.
 
 Scaffold, build, and run it with the CLI:
 
