@@ -13,6 +13,20 @@ nothing — that happened at the bridge — and turns each :class:`CommandEnvelo
 back into a handler call, replying with the handler's returned message to the
 one connection that sent the command. The reactor loop runs the lifecycle hooks
 and maintains :attr:`connected` from the live client count.
+
+It also owns the typed, client-settable state. An application that declares
+``state: MyState`` (an :class:`InputState` subclass) gets one ``set_<field>``
+command per public field, stamped onto the class before the contract is built
+so the same contract that powers ``@event`` handlers discovers, validates, and
+documents it. ``self.state`` is session-scoped: built from field defaults when
+a session starts, before ``@session_started`` runs, and cleared after
+``@session_ended`` returns.
+
+Two pieces of loop-bound state go with it. The step lock serializes every
+command handler and lifecycle hook, so a ``run()`` that takes the same lock
+around one unit of work never has a handler land inside it. The live gate is
+set while a session has started and at least one client is connected; a
+``run()`` waits on it and checks it between units of work.
 """
 
 from __future__ import annotations
@@ -21,7 +35,7 @@ import asyncio
 import inspect
 import time
 from collections.abc import Callable, Coroutine
-from typing import Any, ClassVar
+from typing import Any, ClassVar, get_type_hints
 
 from reactor_runtime.codes import INTERNAL_ERROR
 from reactor_runtime.core.model import (
@@ -33,8 +47,14 @@ from reactor_runtime.core.model import (
     SessionStarted,
 )
 from reactor_runtime.core.values import CommandFailure, ConnId
+from reactor_runtime.interface.app.input_state import InputState
 from reactor_runtime.interface.client import ClientInfo
-from reactor_runtime.interface.events.decorators import RESERVED_PARAMS
+from reactor_runtime.interface.events.decorators import (
+    EVENT_ATTR,
+    RESERVED_PARAMS,
+    EventHandler,
+    make_command,
+)
 from reactor_runtime.interface.events.errors import CommandError
 from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.reactor_core import (
@@ -62,28 +82,58 @@ class ReactorApp(ReactorCore):
             at when the model does not measure its own compute time (default 30).
             A model that passes ``compute_time`` to :meth:`emit` paces itself and
             this is only the fallback.
+        state: Optional. Annotate with an :class:`InputState` subclass to declare
+            the client-settable state. Every public field becomes a
+            ``set_<field>`` command; a hand-written ``@event`` of the same name
+            wins over the generated one.
 
     Lifecycle:
         connected: An :class:`asyncio.Event` set while at least one client is
             connected and cleared when the last one leaves, so a ``run`` loop can
             gate generation on having an audience.
+        state: The live :class:`InputState` instance while a session is live
+            and ``None`` between sessions, on a class that declares ``state:``.
+            A class that declares no ``state:`` owns the attribute itself; the
+            base class never writes it.
     """
 
     __reactor_contract__: ClassVar[ModelContract]
+    __app_state__: ClassVar[type[InputState] | None] = None
 
+    state: Any = None
     connected: asyncio.Event
     _clients: dict[ConnId, ClientInfo]
+    _session_active: bool
+    _live: asyncio.Event
+    _step_lock: asyncio.Lock
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
+        # Stamp the state's auto-setters before the contract is built, so they
+        # are discovered as ordinary commands.
+        state_cls = _resolve_state_class(cls)
+        if state_cls is not None:
+            cls.__app_state__ = state_cls
+            _stamp_auto_setters(cls, state_cls)
         cls.__reactor_contract__ = ModelContract.build(cls)
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Only an app that declared `state:` has its attribute owned here. One
+        # that did not may use the name for its own purposes, and the base
+        # class never touches it.
+        if self.__app_state__ is not None:
+            self.state = None
 
     # -- engine hooks ---------------------------------------------------------
 
     def _on_loop_ready(self) -> None:
-        """Create the loop-bound state the dispatchers need."""
+        """Create the loop-bound state the dispatchers and a ``run()`` loop share."""
         self.connected = asyncio.Event()
         self._clients = {}
+        self._session_active = False
+        self._live = asyncio.Event()
+        self._step_lock = asyncio.Lock()
 
     def _background_coros(self) -> list[Coroutine[Any, Any, None]]:
         """Run the two queue-drain loops alongside ``run()``."""
@@ -115,7 +165,15 @@ class ReactorApp(ReactorCore):
         keeps its detail in the log, because the text of an unplanned exception
         can name paths, queries, or credentials. Either way the loop survives,
         and the client resolves rather than waits.
+
+        The handler runs under the step lock, so it lands between two units of
+        a ``run()`` loop that holds the same lock, never inside one.
         """
+        async with self._step_lock:
+            await self._run_command(envelope)
+
+    async def _run_command(self, envelope: CommandEnvelope) -> None:
+        """Call the handler and answer the sender. Caller holds the step lock."""
         command = envelope.command
         spec = self.__reactor_contract__.commands.get(type(command).name)
         if spec is None:
@@ -172,6 +230,17 @@ class ReactorApp(ReactorCore):
         wholesale without a per-connection close — so :attr:`connected` reads
         false for a ``run`` loop gating on it and the client registry does not
         leak across sessions. Upload events run their hooks directly.
+
+        The session's :attr:`state` is built from field defaults before the
+        ``@session_started`` hook runs, so once-per-session initialization can
+        write to it, and cleared only after the ``@session_ended`` hook returns,
+        which may still read the ending session's values. A client leaving and
+        rejoining within one session sees the same instance.
+
+        The live gate, :attr:`_live`, is a session that has started and a client
+        that is connected. A session end drops the gate before its hook runs, so
+        a ``run()`` loop that checks the gate between units of work stops at the
+        next boundary instead of waiting for the hook to take the step lock.
         """
         hooks = self.__reactor_contract__.lifecycle
         if isinstance(event, ClientConnected):
@@ -183,11 +252,18 @@ class ReactorApp(ReactorCore):
             await self._invoke_hook(hooks.disconnected, event.conn_id)
             self._clients.pop(event.conn_id, None)
         elif isinstance(event, SessionStarted):
+            if self.__app_state__ is not None:
+                self.state = self.__app_state__()
+            self._session_active = True
+            self._update_live()
             await self._invoke_hook(hooks.session_started, None)
         elif isinstance(event, SessionEnded):
+            self._session_active = False
             self._set_connected(0)
             await self._invoke_hook(hooks.session_ended, None)
             self._clients.clear()
+            if self.__app_state__ is not None:
+                self.state = None
             # The hook has returned, so its records were written while the
             # session's log binding was live; the session's last ambient writer
             # is done and the binding retires here, on the model thread.
@@ -198,23 +274,25 @@ class ReactorApp(ReactorCore):
     async def _invoke_hook(
         self, hook: Callable[..., Any] | None, conn_id: ConnId | None, **extra: Any
     ) -> None:
-        """Call one lifecycle hook, injecting reserved parameters it declares.
+        """Call one lifecycle hook under the step lock, injecting reserved parameters.
 
         A hook that raises is logged and swallowed, so a faulty hook cannot tear
-        the reactor loop down.
+        the reactor loop down. The lock puts the hook between two units of a
+        ``run()`` loop, like a command handler.
         """
         if hook is None:
             return
         kwargs = dict(extra)
         for name in _hook_reserved(hook):
             kwargs[name] = self._reserved(name, conn_id)
-        try:
-            if inspect.iscoroutinefunction(hook):
-                await hook(self, **kwargs)
-            else:
-                hook(self, **kwargs)
-        except Exception:
-            logger.exception("error in lifecycle handler", handler=_qualname(hook))
+        async with self._step_lock:
+            try:
+                if inspect.iscoroutinefunction(hook):
+                    await hook(self, **kwargs)
+                else:
+                    hook(self, **kwargs)
+            except Exception:
+                logger.exception("error in lifecycle handler", handler=_qualname(hook))
 
     # -- internals ------------------------------------------------------------
 
@@ -224,6 +302,14 @@ class ReactorApp(ReactorCore):
             self.connected.set()
         else:
             self.connected.clear()
+        self._update_live()
+
+    def _update_live(self) -> None:
+        """Reconcile the live gate from session liveness and the client count."""
+        if self.connected.is_set() and self._session_active:
+            self._live.set()
+        else:
+            self._live.clear()
 
     def _reserved(self, name: str, conn_id: ConnId | None) -> Any:
         """Resolve a reserved handler parameter for the addressed connection."""
@@ -292,3 +378,108 @@ def _hook_reserved(hook: Callable[..., Any]) -> tuple[str, ...]:
 def _qualname(hook: Callable[..., Any]) -> str:
     """Best-effort readable name for a handler, for logging."""
     return getattr(hook, "__qualname__", repr(hook))
+
+
+def _fps_is_author_pinned(cls: type) -> bool:
+    """Return whether the application (or an intermediate base) pins ``fps`` itself.
+
+    A loop that measures its own compute time paces playout from it unless the
+    author declares ``fps``. The walk covers the author's own classes but stops
+    at :class:`ReactorCore`, whose ``fps`` is the framework default rather than
+    an author's choice, so a subclass that inherits a pinned rate from an
+    intermediate base counts as pinned even without redeclaring it.
+    """
+    for klass in cls.__mro__:
+        if klass is ReactorCore:
+            break
+        if "fps" in vars(klass):
+            return True
+    return False
+
+
+# -- typed state: the `state:` annotation and its generated setters -----------
+
+
+def _resolve_state_class(cls: type) -> type[InputState] | None:
+    """Return the :class:`InputState` subclass named by the ``state`` annotation.
+
+    A ``state`` annotation the class carries but that cannot be resolved, such
+    as a forward reference to a class defined later in the module, is reported
+    with a warning: the app would otherwise serve a schema with no ``set_``
+    commands and no signal as to why.
+    """
+    raw = cls.__dict__.get("__annotations__", {}).get("state")
+    if isinstance(raw, type):
+        hint: Any = raw
+    else:
+        try:
+            hint = get_type_hints(cls).get("state")
+        except Exception as exc:
+            if raw is not None:
+                logger.warning(
+                    "state annotation could not be resolved; no set_ commands generated",
+                    app=cls.__qualname__,
+                    annotation=str(raw),
+                    error=str(exc),
+                )
+            return None
+    if isinstance(hint, type) and issubclass(hint, InputState):
+        return hint
+    return None
+
+
+def _existing_command_names(cls: type) -> set[str]:
+    """Collect the command names already claimed by ``@event`` handlers on *cls*."""
+    names: set[str] = set()
+    for klass in cls.__mro__:
+        for attr in vars(klass).values():
+            handler = getattr(attr, EVENT_ATTR, None)
+            if isinstance(handler, EventHandler):
+                names.add(handler.name)
+    return names
+
+
+def _stamp_auto_setters(cls: type, state_cls: type[InputState]) -> None:
+    """Stamp a ``set_<field>`` command handler for each public state field.
+
+    Each handler carries the same :class:`EventHandler` metadata an ``@event``
+    decorator produces, so the contract treats it identically. A field whose
+    ``set_`` name is already claimed by a hand-written handler is skipped, so an
+    author can override the generated setter.
+    """
+    existing = _existing_command_names(cls)
+    try:
+        hints = get_type_hints(state_cls)
+    except Exception:
+        hints = dict(getattr(state_cls, "__annotations__", {}))
+
+    for field_name, info in state_cls._public_fields.items():
+        command_name = f"set_{field_name}"
+        if command_name in existing:
+            continue
+        field_type = hints.get(field_name, Any)
+        command = make_command(command_name, [(field_name, field_type, info)])
+        handler = _make_setter(field_name)
+        setattr(
+            handler,
+            EVENT_ATTR,
+            EventHandler(
+                name=command_name,
+                description=info.description or f"Set {field_name}.",
+                command=command,
+                is_async=False,
+                reserved=(),
+            ),
+        )
+        setattr(cls, command_name, handler)
+
+
+def _make_setter(field_name: str) -> Callable[..., None]:
+    """Build the handler that writes one field onto the live state."""
+
+    def handler(self: Any, **kwargs: Any) -> None:
+        if self.state is None:
+            return
+        setattr(self.state, field_name, kwargs[field_name])
+
+    return handler
