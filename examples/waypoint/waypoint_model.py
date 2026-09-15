@@ -28,8 +28,8 @@ class WaypointStepInput:
 
     Attributes:
         buttons: Pressed Owl-Control VK keycodes.
-        mouse: Mouse velocity since the last step, as ``(dx, dy)``.
-        scroll_wheel: Scroll tick: ``-1`` down, ``0`` still, ``1`` up.
+        mouse: Mouse velocity for this step, as ``(dx, dy)``.
+        scroll_wheel: Scroll direction for this step: ``-1`` down, ``0`` none, ``1`` up.
         seed: The frame the world starts from, uint8 ``(H, W, 3)``, or ``None``
             when the application has no new seed to offer.
         seed_id: Identifies the seed. A step whose ``seed_id`` differs from the

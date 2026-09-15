@@ -85,13 +85,18 @@ class WaypointState(InputState):
         description="Extra pressed keycodes as a comma-separated list, for example `32,16`.",
     )
     mouse_x: float = InputField(
-        default=0.0, description="Horizontal mouse velocity consumed on the next step."
+        default=0.0,
+        description="Horizontal mouse velocity, held until changed; 0 keeps the view still.",
     )
     mouse_y: float = InputField(
-        default=0.0, description="Vertical mouse velocity consumed on the next step."
+        default=0.0,
+        description="Vertical mouse velocity, held until changed; 0 keeps the view still.",
     )
     scroll_wheel: int = InputField(
-        default=0, ge=-1, le=1, description="Scroll tick: -1 down, 0 still, 1 up."
+        default=0,
+        ge=-1,
+        le=1,
+        description="Scroll direction, held until changed: -1 down, 0 none, 1 up.",
     )
 
     # Session scratch the client never sees: the seed frame, already decoded
