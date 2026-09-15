@@ -166,6 +166,11 @@ class Waypoint(ReactorApp):
     async def collect_step(self, outcome: StepOutcome) -> WaypointOutput | None:
         """Tag the frames with their step and report progress on a cadence."""
         if outcome.error is not None:
+            # No error the model raises is expected here: prepare_step() refuses
+            # before a step without a seed can reach it, so NotSeeded would be a
+            # bug in this file, and a CUDA failure is not something a reset
+            # repairs. Re-raising ends the model loop and the session with an
+            # error, which is better than serving a dead world in silence.
             raise outcome.error
         result: WaypointStepResult = outcome.result
         self.state._applied_seed_id = result.seed_id
