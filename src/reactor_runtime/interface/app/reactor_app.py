@@ -27,6 +27,12 @@ command handler and lifecycle hook, so a ``run()`` that takes the same lock
 around one unit of work never has a handler land inside it. The live gate is
 set while a session has started and at least one client is connected; a
 ``run()`` waits on it and checks it between units of work.
+
+The default ``run()`` is the step loop. Each turn takes the step lock and calls
+``prepare_step()``, ``generate()``, and ``collect_step()`` in that order, then
+emits the media the step produced. An author who needs a different loop
+overrides ``run()``. That replaces the loop and only the loop: the dispatch
+layer above stays, and the three hooks are never called for that class.
 """
 
 from __future__ import annotations
@@ -48,6 +54,7 @@ from reactor_runtime.core.model import (
 )
 from reactor_runtime.core.values import CommandFailure, ConnId
 from reactor_runtime.interface.app.input_state import InputState
+from reactor_runtime.interface.app.outcome import StepOutcome
 from reactor_runtime.interface.client import ClientInfo
 from reactor_runtime.interface.events.decorators import (
     EVENT_ATTR,
@@ -55,7 +62,7 @@ from reactor_runtime.interface.events.decorators import (
     EventHandler,
     make_command,
 )
-from reactor_runtime.interface.events.errors import CommandError
+from reactor_runtime.interface.events.errors import ApplicationError, CommandError
 from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.reactor_core import (
     CommandEnvelope,
@@ -63,25 +70,40 @@ from reactor_runtime.interface.internal.reactor_core import (
     RequestId,
 )
 from reactor_runtime.interface.model.contract import ModelContract
+from reactor_runtime.interface.tracks import Output
 from reactor_runtime.log import get_logger, release_session_id
 
 logger = get_logger(__name__)
+
+# A refused step waits this long before the loop asks again. Refusing is one
+# call and one raise, so without the wait a paused application spins a core
+# on the model thread; with it, a change of state is noticed within a frame
+# period. The same pause ReactorPipeline takes on an idle yield.
+_REFUSED_SLEEP = 0.005
 
 
 class ReactorApp(ReactorCore):
     """Base class an author subclasses to define the application the runtime drives.
 
+    Write ``generate()`` and the runtime drives it one step at a time. Override
+    ``prepare_step()`` to refuse a step or shape what the model gets, and
+    ``collect_step()`` to turn the model's result into media and messages.
     Decorate methods with ``@event`` to expose commands, and with the lifecycle
     decorators to hook session and connection events — ``@session_started`` is
     the hook for once-per-session initialization. Declaring the subclass
     resolves the contract and caches it on the class, reachable through
     :meth:`ModelContract.of`.
 
+    Override ``run()`` to write your own loop against ``emit()``, ``send()``,
+    ``@event``, :attr:`connected`, and the tracks. The three step hooks are then
+    not called.
+
     Class attributes:
         fps: The nominal rate, in frames per second, an emitted chunk plays out
-            at when the model does not measure its own compute time (default 30).
-            A model that passes ``compute_time`` to :meth:`emit` paces itself and
-            this is only the fallback.
+            at. Declare it to pin playout; leave it out and the step loop paces
+            playout from the measured ``generate()`` time. A hand-written
+            ``run()`` that passes ``compute_time`` to :meth:`emit` paces itself
+            and this is only the fallback.
         state: Optional. Annotate with an :class:`InputState` subclass to declare
             the client-settable state. Every public field becomes a
             ``set_<field>`` command; a hand-written ``@event`` of the same name
@@ -106,6 +128,8 @@ class ReactorApp(ReactorCore):
     _session_active: bool
     _live: asyncio.Event
     _step_lock: asyncio.Lock
+    _step_requested: asyncio.Event
+    _gate_drops: int
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
@@ -125,15 +149,200 @@ class ReactorApp(ReactorCore):
         if self.__app_state__ is not None:
             self.state = None
 
+    # -- the step, three calls ------------------------------------------------
+
+    async def prepare_step(self, state: Any, media: Any, /) -> Any:
+        """Decide whether a step can happen now and what the model gets.
+
+        The application half of a step. Read *state*, drain *media* with
+        ``try_read()``, and return the step input ``generate()`` receives. Raise
+        :class:`ApplicationError` with the reason to refuse the step; the model
+        is not called and the loop asks again.
+
+        Runs under the step lock. Does not call the model, ``emit()``,
+        ``send()``, or ``flush()``.
+
+        Args:
+            state: The live :class:`InputState`, or ``None`` when none is declared.
+            media: The :class:`MediaInput` holder, or ``None`` when none is declared.
+
+        Returns:
+            The step input. The type is the author's. The default returns *state*
+            and never refuses.
+        """
+        return state
+
+    def generate(self, step_input: Any, /) -> Any:
+        """Run one step of inference.
+
+        The model half of a step. Synchronous; blocking GPU work is expected.
+        Reads its argument and its own attributes, never ``self.state`` or the
+        media tracks. Returns the step result, an :class:`Output` when the
+        default ``collect_step()`` is used, or raises the model's own exception
+        when the step is invalid for the model. A raise is not a refusal;
+        refusing is :class:`ApplicationError` in :meth:`prepare_step`.
+
+        Args:
+            step_input: What :meth:`prepare_step` returned.
+
+        Returns:
+            The step result. The type is the author's.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} must define generate(), or override run() to drive "
+            "the model with its own loop."
+        )
+
+    async def collect_step(self, outcome: StepOutcome, /) -> Output | None:
+        """Turn what ``generate()`` did into what the client receives.
+
+        The application half again. Receives the :class:`StepOutcome` the
+        runtime built: ``outcome.result`` when ``generate()`` returned,
+        ``outcome.error`` when it raised. Run the step's effects here: ``await
+        self.send()`` for a message, which goes on the wire before the step's
+        media; ``self.output.flush()``; recovery from a model error. Return the
+        :class:`Output` to emit, or ``None`` to emit nothing.
+
+        Runs under the step lock.
+
+        This is the one place a model failure is decided. When ``outcome.error``
+        is set, either recover or re-raise:
+
+        * Recover an error the model is known to raise: reset the model half,
+          send a message, ``flush()`` if the picture must cut, and return
+          ``None`` or an :class:`Output`. The loop continues with the next step.
+        * Re-raise anything else. A raise out of this method is a crash of the
+          model, not of the step: the runtime logs the traceback, stops the
+          command and lifecycle dispatchers, and ends the session with an error
+          the client sees. The loop is not restarted; whatever runs the process
+          decides whether to restart it. This is the same outcome an uncaught
+          exception in a hand-written ``run()`` has.
+
+        The default re-raises, so a model whose ``generate()`` fails ends the
+        session loudly instead of serving a dead model in silence. A refusal is
+        not a failure: :class:`ApplicationError` from :meth:`prepare_step` never
+        reaches this method.
+
+        Args:
+            outcome: What ``generate()`` did.
+
+        Returns:
+            The media to emit on the declared tracks, or ``None``. The default
+            re-raises an error and otherwise returns ``outcome.to_output()``.
+        """
+        if outcome.error is not None:
+            raise outcome.error
+        return outcome.to_output()
+
+    async def run(self) -> None:
+        """Drive the model one step at a time. Override for a different loop.
+
+        Steps run while a session is live and at least one client is connected.
+        Each turn waits for a step request, takes the step lock, runs the three
+        hooks, releases the lock, emits the media the step produced, yields once
+        so handlers already waiting get their turn, and requests the next step.
+        A productive step is not paced here: a fast model waits in :meth:`emit`
+        on a full wire. A refused step waits a few milliseconds before the next
+        request, so a paused application does not spin a core.
+
+        Playout is paced from the measured ``generate()`` time unless the author
+        declares ``fps``. Whether ``fps`` is pinned is read when the loop starts,
+        so a ``load()`` that assigns it counts.
+
+        When the gate drops, the input buffers reset, so the next session or
+        client starts from empty tracks. A drop and a re-set that both land
+        while a step is blocked in :meth:`emit` still count as a drop: the loop
+        compares the number of drops, not the gate's current value.
+
+        Raises:
+            Exception: Whatever :meth:`collect_step` raised, which by default is
+                the error :meth:`generate` raised. It ends the model loop: the
+                runtime reports the crash, ends the session with an error, and
+                does not start the loop again. A model that expects an error
+                recovers from it in :meth:`collect_step` instead.
+        """
+        fps_pinned = _fps_is_author_pinned(type(self))
+        last_refusal: str | None = None
+        self._step_requested.set()
+        while True:
+            await self._live.wait()
+            drops = self._gate_drops
+            try:
+                while self._live.is_set() and self._gate_drops == drops:
+                    # 1. Wait for a step request. While this await is pending the
+                    #    event loop runs the handlers that arrived; each takes the
+                    #    step lock, so none can run once the lock below is held.
+                    await self._step_requested.wait()
+                    self._step_requested.clear()
+
+                    # The step lock is held from the first line of prepare_step()
+                    # to the return of collect_step(). Both hooks are async and
+                    # may await; the lock is what stops a handler from landing in
+                    # one of those gaps.
+                    async with self._step_lock:
+                        # 2. The application gate.
+                        try:
+                            step_input = await self.prepare_step(self.state, self._media_holder)
+                        except ApplicationError as refused:
+                            # One record per change of reason, not one per turn.
+                            reason = f"{type(refused).__name__}: {refused}"
+                            if reason != last_refusal:
+                                logger.debug(
+                                    "step refused",
+                                    reason=str(refused),
+                                    kind=type(refused).__name__,
+                                )
+                                last_refusal = reason
+                            media = None
+                            outcome = None
+                        else:
+                            last_refusal = None
+                            # 3. The model. Synchronous on purpose: nothing changes
+                            #    under it. This is the one place a StepOutcome is
+                            #    built.
+                            started = time.perf_counter()
+                            try:
+                                result = self.generate(step_input)
+                            except Exception as error:
+                                outcome = StepOutcome(
+                                    error=error, elapsed=time.perf_counter() - started
+                                )
+                            else:
+                                outcome = StepOutcome(
+                                    result=result, elapsed=time.perf_counter() - started
+                                )
+
+                            # 4. The application collects the outcome into media,
+                            #    sends its messages, or recovers. A raise ends the
+                            #    loop.
+                            media = await self.collect_step(outcome)
+
+                    # 5. Emit outside the lock, so a handler can run while the
+                    #    wire is full.
+                    if media is not None and outcome is not None:
+                        pace = None if fps_pinned else outcome.elapsed
+                        await self.emit(media, compute_time=pace)
+
+                    # A refused turn waits a little before asking again; a
+                    # productive turn yields once so handler tasks already
+                    # runnable get their turn, then asks again right away.
+                    await asyncio.sleep(_REFUSED_SLEEP if outcome is None else 0)
+                    self._step_requested.set()
+            finally:
+                for buffer in self._input_buffers.values():
+                    buffer.reset()
+
     # -- engine hooks ---------------------------------------------------------
 
     def _on_loop_ready(self) -> None:
-        """Create the loop-bound state the dispatchers and a ``run()`` loop share."""
+        """Create the loop-bound state the dispatchers and the step loop share."""
         self.connected = asyncio.Event()
         self._clients = {}
         self._session_active = False
         self._live = asyncio.Event()
         self._step_lock = asyncio.Lock()
+        self._step_requested = asyncio.Event()
+        self._gate_drops = 0
 
     def _background_coros(self) -> list[Coroutine[Any, Any, None]]:
         """Run the two queue-drain loops alongside ``run()``."""
@@ -305,11 +514,16 @@ class ReactorApp(ReactorCore):
         self._update_live()
 
     def _update_live(self) -> None:
-        """Reconcile the live gate from session liveness and the client count."""
+        """Reconcile the live gate from session liveness and the client count.
+
+        Every drop of the gate is counted, so a loop that was blocked while the
+        gate dropped and came back still sees that a boundary passed.
+        """
         if self.connected.is_set() and self._session_active:
             self._live.set()
-        else:
+        elif self._live.is_set():
             self._live.clear()
+            self._gate_drops += 1
 
     def _reserved(self, name: str, conn_id: ConnId | None) -> Any:
         """Resolve a reserved handler parameter for the addressed connection."""
