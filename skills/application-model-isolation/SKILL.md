@@ -360,7 +360,7 @@ as `outcome.error` (`outcome.result` is `None` then). Two choices:
   next step.
 
   ```python
-  async def collect_step(self, outcome: StepOutcome) -> HeliosOutput | None:
+  async def collect_step(self, outcome: StepOutcome) -> MyOutput | None:
       if isinstance(outcome.error, RolloutExhausted):
           self.engine.reset()
           self.output.flush()
@@ -374,10 +374,10 @@ as `outcome.error` (`outcome.result` is `None` then). Two choices:
 - **Re-raise** anything you did not expect. A raise out of `collect_step()`
   is a crash of the model, not of the step: the runtime logs the traceback,
   stops dispatching commands and lifecycle hooks, ends the session with an
-  error the client sees, and does not restart the loop. The process is left
-  for its supervisor to recycle. This is the same outcome an uncaught
-  exception in a hand-written `run()` has, and it is better than serving a
-  dead model in silence.
+  error the client sees, and does not restart the loop. Whatever runs the
+  process decides whether to restart it. This is the same outcome an
+  uncaught exception in a hand-written `run()` has, and it is better than
+  serving a dead model in silence.
 
 The default `collect_step()` re-raises. The example re-raises on purpose:
 `NotSeeded` cannot arrive because `prepare_step()` refuses before a step
