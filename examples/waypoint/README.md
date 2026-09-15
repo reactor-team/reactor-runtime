@@ -19,6 +19,14 @@ The two meet on two dataclasses, `WaypointStepInput` and `WaypointStepResult`.
 The application never reads the model's engine; what it needs to know about a
 step rides in the result.
 
+When `generate` raises, the exception reaches `collect_step` as
+`outcome.error`, and the application decides. This example re-raises: the
+model's only own error, `NotSeeded`, cannot happen because `prepare_step`
+refuses a step before it has a seed, so anything that does arrive is a bug or
+a GPU failure, and ending the session with an error beats serving a frozen
+world. A model with an error it expects recovers there instead: reset the
+engine, send a message, return `None`, and the loop continues.
+
 ## Run
 
 This directory is a `reactor` workspace: `reactor.yaml` names the model and
