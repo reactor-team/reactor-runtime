@@ -29,6 +29,18 @@ class StepOutcome:
     error: Exception | None = None
     elapsed: float = 0.0
 
+    def __post_init__(self) -> None:
+        """Reject an outcome that claims both a result and an error.
+
+        Raises:
+            ValueError: Both :attr:`result` and :attr:`error` are set.
+        """
+        if self.result is not None and self.error is not None:
+            raise ValueError(
+                "StepOutcome holds a result or an error, never both: "
+                f"result={type(self.result).__name__}, error={type(self.error).__name__}"
+            )
+
     def to_output(self) -> Output | None:
         """Read the result as track media.
 

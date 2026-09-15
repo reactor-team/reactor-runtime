@@ -36,6 +36,11 @@ def test_outcome_defaults_to_nothing_happened() -> None:
     assert outcome.elapsed == 0.0
 
 
+def test_outcome_refuses_a_result_and_an_error_together() -> None:
+    with pytest.raises(ValueError, match="never both"):
+        StepOutcome(result=1, error=RuntimeError("boom"))
+
+
 def test_outcome_is_frozen() -> None:
     outcome = StepOutcome(result=1, elapsed=0.5)
     with pytest.raises(dataclasses.FrozenInstanceError):
