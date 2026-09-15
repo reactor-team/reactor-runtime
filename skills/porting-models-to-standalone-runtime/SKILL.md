@@ -274,7 +274,11 @@ a class attribute, typed `ModelMessage` returns/`self.send(...)`, and inbound
 media via `self.media.<track>.try_read(n, mode=ReadMode.LATEST)` /
 `.read(...)` / `.reset()` are all the same. A model that does not override
 `run()` is driven by the runtime through `generate()`; the README shows that
-shape. Weights are still located with `get_weights_path()` (now imported
+shape. On that loop an exception from `generate()` reaches `collect_step()`
+as `outcome.error`, where the application recovers or re-raises; a re-raise
+ends the model loop the way an uncaught exception in a hand-written `run()`
+does (the runtime logs it, ends the session with an error, and does not
+restart the loop). Weights are still located with `get_weights_path()` (now imported
 from `reactor_runtime`); it returns `$REACTOR_WEIGHTS_PATH` or
 `~/.cache/reactor_registry`.
 
