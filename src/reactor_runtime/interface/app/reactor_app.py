@@ -202,7 +202,25 @@ class ReactorApp(ReactorCore):
         media; ``self.output.flush()``; recovery from a model error. Return the
         :class:`Output` to emit, or ``None`` to emit nothing.
 
-        Runs under the step lock. Raising ends the model loop.
+        Runs under the step lock.
+
+        This is the one place a model failure is decided. When ``outcome.error``
+        is set, either recover or re-raise:
+
+        * Recover an error the model is known to raise: reset the model half,
+          send a message, ``flush()`` if the picture must cut, and return
+          ``None`` or an :class:`Output`. The loop continues with the next step.
+        * Re-raise anything else. A raise out of this method is a crash of the
+          model, not of the step: the runtime logs the traceback, stops the
+          command and lifecycle dispatchers, and ends the session with an error
+          the client sees. The loop is not restarted; the process is left for
+          its supervisor to recycle. This is the same outcome an uncaught
+          exception in a hand-written ``run()`` has.
+
+        The default re-raises, so a model whose ``generate()`` fails ends the
+        session loudly instead of serving a dead model in silence. A refusal is
+        not a failure: :class:`ApplicationError` from :meth:`prepare_step` never
+        reaches this method.
 
         Args:
             outcome: What ``generate()`` did.
@@ -235,7 +253,10 @@ class ReactorApp(ReactorCore):
 
         Raises:
             Exception: Whatever :meth:`collect_step` raised, which by default is
-                the error :meth:`generate` raised. It ends the model loop.
+                the error :meth:`generate` raised. It ends the model loop: the
+                runtime reports the crash, ends the session with an error, and
+                does not start the loop again. A model that expects an error
+                recovers from it in :meth:`collect_step` instead.
         """
         fps_pinned = _fps_is_author_pinned(type(self))
         last_refusal: str | None = None

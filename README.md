@@ -79,6 +79,20 @@ class MyModel(ReactorApp):
         return outcome.to_output()
 ```
 
+`generate()` fails by raising, and the runtime hands the exception to `collect_step()` as `outcome.error` rather than letting it escape. That is where you decide. Recover an error you expect from your model: reset it, send a message, return `None`, and the loop goes on to the next step. Re-raise anything else, as the example does: a raise out of `collect_step()` is a crash of the model, not of the step. The runtime logs the traceback, stops dispatching commands, ends the session with an error the client sees, and does not restart the loop, which is what an uncaught exception in a hand-written `run()` does too. The default `collect_step()` re-raises, so a failing model ends loudly instead of serving nothing in silence. A refusal from `prepare_step()` is not a failure and never reaches `collect_step()`.
+
+```python
+    async def collect_step(self, outcome: StepOutcome) -> Output | None:
+        if isinstance(outcome.error, RolloutExhausted):   # an error the model is known to raise
+            self.engine.reset()
+            self.output.flush()
+            await self.send(WorldRestarted(reason="rollout window reached"))
+            return None                                   # nothing to show; the next step starts over
+        if outcome.error is not None:
+            raise outcome.error                           # anything else is a bug: end the loop
+        return outcome.to_output()
+```
+
 Command handlers and lifecycle hooks run between steps, never during one. The default `run()` is the loop that drives the three hooks. Override it to write your own loop against `emit()`, `send()`, `@event`, `self.connected`, and the tracks; `prepare_step()`, `generate()`, and `collect_step()` are then not called. Do that for a loop that is not one step per emit, such as a renderer that emits several times per step or a model that must block on an input.
 
 Scaffold, build, and run it with the CLI:
