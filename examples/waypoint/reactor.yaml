@@ -37,3 +37,9 @@ build:
   cuda_version: "12.9.1"
   # world_engine installs from its git tag.
   system_packages: [git]
+  # world_engine's build backend needs setuptools>=80. With cuda_version set,
+  # uv reads the PyTorch index first, which carries setuptools<=78.1.0, and by
+  # default takes a package only from the first index that has it. This lets
+  # the build-isolation resolve reach PyPI for the newer setuptools.
+  build_env:
+    UV_INDEX_STRATEGY: unsafe-best-match
