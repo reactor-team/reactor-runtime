@@ -137,6 +137,17 @@ ordinary attribute name, `self.engine` in the example. Do not name it `model`
 or `state`: `state` is the typed state the runtime owns, and a later release
 reserves `model`.
 
+If the old pipeline resolved its checkpoint paths under `get_weights_path()`,
+that call moves to the application's `load()` and its result becomes the
+model half's second argument: `self.engine.load(config_path,
+get_weights_path())`. Inside the model half, the old `_resolve()` helper
+becomes `weights_root / relative_path`. The constructor takes nothing. The
+model half imports `get_weights_path` no more than it imports anything else
+from `reactor_runtime`, and it resolves any other file the config names
+against `config_path.parent`, not the working directory. A model that fetches
+its weights from elsewhere leaves the parameter out. See rule 1 of
+[`application-model-isolation`](../application-model-isolation/SKILL.md).
+
 Then ask what makes a step invalid for the model itself, with no client in
 the picture. A window that is full. A world that was never seeded. A cache
 that was reset and needs a first frame. Each is a check inside `generate()`
