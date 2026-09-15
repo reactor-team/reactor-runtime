@@ -502,6 +502,38 @@ async def test_the_input_buffers_reset_when_the_gate_drops() -> None:
     await _stop(task)
 
 
+async def test_a_gate_drop_during_emit_still_resets_the_input_buffers() -> None:
+    """The last client leaves and another joins while emit() is blocked on the wire."""
+
+    class WithCamera(OnlyGenerate):
+        media: Camera
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.swapped = False
+
+        async def emit(
+            self, output: Output, *, compute_time: float | None = None, drop: bool = False
+        ) -> None:
+            await super().emit(output, compute_time=compute_time, drop=drop)
+            if not self.swapped:
+                self.swapped = True
+                # Both events land before the loop reads the gate again.
+                await self._dispatch_reactor_event(ClientDisconnected(ConnId(1001), 0))
+                await self._dispatch_reactor_event(ClientConnected(ConnId(1002), 1))
+
+    app = WithCamera()
+    _ready(app)
+    await _go_live(app)
+    buffer = app._input_buffers["webcam"]
+    buffer.close()
+    task = await _run_for(app)
+    assert app.swapped
+    assert not buffer.closed  # the boundary was seen, the finally ran
+    assert app.generated > 1  # and the loop went on with the new client
+    await _stop(task)
+
+
 async def test_a_hand_written_run_gets_no_buffer_reset_from_the_base() -> None:
     """The reset belongs to the default loop; a 3.3.2 loop owns its buffers."""
 
