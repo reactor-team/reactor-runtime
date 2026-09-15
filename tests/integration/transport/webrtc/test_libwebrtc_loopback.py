@@ -321,19 +321,27 @@ async def test_the_loopback_validates_ice_credentials() -> None:
     Without this, a loopback that connected regardless of credentials would make
     the positive test meaningless — it would be asserting that two peers on
     localhost can reach each other, which they can whatever the SDP says.
+
+    The offer carries the password the peer authenticates its own connectivity
+    checks with, so corrupting it is what denies the peer a remote: the client
+    rejects every check the peer sends, no pair ever validates, and nothing
+    reaches DTLS. Corrupting the answer instead would prove less than it looks
+    — that breaks the client's checks toward the peer, while the peer's own
+    checks still carry the offer's genuine credentials and still authenticate
+    the remote, which is the peer's half of RFC 8445's mutual check.
     """
     factory = _get_factory(WebRtcConfig())
     client = await _Client.create(factory)
     offer_sdp = await client.create_offer()
+    tampered = re.sub(r"a=ice-pwd:.*", "a=ice-pwd:totallyWrongPasswordXY", offer_sdp)
 
-    credentials = IceCredentials(ufrag="suppliedUfrag01", pwd="aSuppliedPasswordOf22Chars")
     connected = asyncio.Event()
 
     peer, answer = await libwebrtc_peer_factory(
         ConnId(4),
-        SdpOffer(sdp=offer_sdp),
+        SdpOffer(sdp=tampered),
         client.track_map(),
-        WebRtcConfig(ice_gathering_timeout_ms=4000, ice_credentials=credentials),
+        WebRtcConfig(ice_gathering_timeout_ms=4000),
         ProtocolVersion.V0,
     )
     peer.on_message(lambda *_: None)
@@ -345,10 +353,7 @@ async def test_the_loopback_validates_ice_credentials() -> None:
     stop_trickle = asyncio.Event()
     trickle_task = asyncio.create_task(_trickle_until(client, peer, stop_trickle))
     try:
-        # Hand the client an answer whose password does not key what the peer
-        # will validate. Its connectivity checks must then be rejected.
-        tampered = re.sub(r"a=ice-pwd:.*", "a=ice-pwd:totallyWrongPasswordXY", answer.sdp)
-        await client.accept_answer(tampered)
+        await client.accept_answer(answer.sdp)
         assert not await _reached(connected, _NOT_CONNECTED_S), (
             "the loopback connected with a mismatched ICE password, so it does "
             "not validate credentials and the positive test proves nothing"
