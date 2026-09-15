@@ -213,8 +213,8 @@ class ReactorApp(ReactorCore):
         * Re-raise anything else. A raise out of this method is a crash of the
           model, not of the step: the runtime logs the traceback, stops the
           command and lifecycle dispatchers, and ends the session with an error
-          the client sees. The loop is not restarted; the process is left for
-          its supervisor to recycle. This is the same outcome an uncaught
+          the client sees. The loop is not restarted; whatever runs the process
+          decides whether to restart it. This is the same outcome an uncaught
           exception in a hand-written ``run()`` has.
 
         The default re-raises, so a model whose ``generate()`` fails ends the
