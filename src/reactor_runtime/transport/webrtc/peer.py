@@ -202,20 +202,32 @@ _factory_lock = threading.Lock()
 _factory: rw.PeerConnectionFactory | None = None
 
 
-def _get_factory() -> rw.PeerConnectionFactory:
-    """Return the process-wide media engine, creating it on first use."""
+def _get_factory(config: WebRtcConfig) -> rw.PeerConnectionFactory:
+    """Return the process-wide media engine, creating it on first use.
+
+    The engine carries the SPED half of *config*'s WARP setting, which libwebrtc
+    reads from the engine's environment rather than per connection. The engine
+    outlives the connection that built it, so the first connection to arrive
+    fixes SPED for the process.
+    """
     global _factory
     if _factory is None:
         with _factory_lock:
             if _factory is None:
-                _factory = rw.PeerConnectionFactory()
+                builder = rw.PeerConnectionFactoryBuilder()
+                builder.with_dtls_in_stun(config.warp)
+                _factory = builder.build()
     return _factory
 
 
 def _build_rtc_config(config: WebRtcConfig) -> rw.RtcConfiguration:
-    """Translate the transport config's ICE servers and port range into a libwebrtc config."""
+    """Translate the transport config's ICE servers, port range, and WARP setting.
+
+    Returns the libwebrtc configuration the connection is created with.
+    """
     rtc = rw.RtcConfiguration()
     rtc.ice_transport_type = str(config.transport_policy)
+    rtc.sctp_snap = config.warp
     if config.ice_servers:
         rtc.ice_servers = [
             rw.IceServer(
@@ -458,7 +470,7 @@ class WebRTCPeer:
 
         loop = asyncio.get_running_loop()
         self._loop = loop
-        factory = _get_factory()
+        factory = _get_factory(self._config)
 
         observer = rw.PeerConnectionObserver()
         observer.on_connection_state_change = self._on_connection_state_change
