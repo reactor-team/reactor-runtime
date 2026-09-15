@@ -174,10 +174,39 @@ async def collect_step(self, outcome: StepOutcome) -> WaypointOutput | None:
 A message sent here goes on the wire before the step's media, so the
 ordering the old loop got by sending before yielding is kept without effort.
 
-Recovery from a model error lives here too. Where the old loop caught an
-engine exception, reset, and continued, `collect_step()` checks
-`outcome.error`, calls `self.engine.reset()`, sends a message, and returns
-`None`. Re-raise anything you did not expect.
+Recovery from a model error lives here too. In the old loop an engine
+exception either escaped `inference()` and killed the model loop, or was
+caught in a `try` around the forward pass. On the step loop the runtime
+catches it for you and hands it to `collect_step()` as `outcome.error`, so
+the `try` becomes an `if`:
+
+```python
+# before, inside inference()
+try:
+    frames = self.engine.step(...)
+except RolloutExhausted:
+    self.engine.reset()
+    await self.send(WorldRestarted(...))
+    continue
+
+# after
+async def collect_step(self, outcome: StepOutcome) -> MyOutput | None:
+    if isinstance(outcome.error, RolloutExhausted):
+        self.engine.reset()
+        self.output.flush()
+        await self.send(WorldRestarted(...))
+        return None
+    if outcome.error is not None:
+        raise outcome.error
+    ...
+```
+
+Port every `except` the old loop had into such an `if`, and re-raise the
+rest. A re-raise out of `collect_step()` has the same effect an escaped
+exception had in `inference()`: the runtime logs it, ends the session with
+an error, and does not restart the model loop. Do not turn that into a
+blanket recovery; a model that resets itself on every error hides the bug
+that caused it. Write the reason for a bare re-raise at the `raise`.
 
 ## Step 5: rewrite the handlers to act, not to flag
 
