@@ -251,10 +251,46 @@ async def collect_step(self, outcome: StepOutcome) -> WaypointOutput | None:
 ```
 
 A reader of `collect_step()` sees the whole client-facing effect of a step in
-one place, in order. Recovery from a model error lives here too: check
-`outcome.error`, call `self.engine.reset()`, send a message, return `None`.
-Re-raise anything you did not expect; that ends the loop, which is better
-than hiding a bug.
+one place, in order.
+
+A model failure is decided here too, and nowhere else. `generate()` fails by
+raising; the runtime catches the exception and hands it to `collect_step()`
+as `outcome.error` (`outcome.result` is `None` then). Two choices:
+
+- **Recover** an error the model is known to raise. Check its type, put the
+  model back into a valid state with `self.engine.reset()`, cut playout with
+  `self.output.flush()` if a stale frame must not follow, send the client a
+  message, and return `None` (or an `Output`). The loop continues with the
+  next step.
+
+  ```python
+  async def collect_step(self, outcome: StepOutcome) -> HeliosOutput | None:
+      if isinstance(outcome.error, RolloutExhausted):
+          self.engine.reset()
+          self.output.flush()
+          await self.send(WorldRestarted(reason="rollout window reached"))
+          return None
+      if outcome.error is not None:
+          raise outcome.error
+      ...
+  ```
+
+- **Re-raise** anything you did not expect. A raise out of `collect_step()`
+  is a crash of the model, not of the step: the runtime logs the traceback,
+  stops dispatching commands and lifecycle hooks, ends the session with an
+  error the client sees, and does not restart the loop. The process is left
+  for its supervisor to recycle. This is the same outcome an uncaught
+  exception in a hand-written `run()` has, and it is better than serving a
+  dead model in silence.
+
+The default `collect_step()` re-raises. The example re-raises on purpose:
+`NotSeeded` cannot arrive because `prepare_step()` refuses before a step
+without a seed reaches the model, so anything that does arrive is a bug or a
+GPU failure, and neither is repaired by a reset. Write the reason down at the
+`raise`, as the example does, so a reader knows the choice was made.
+
+A refusal is not a failure. `ApplicationError` from `prepare_step()` is
+caught by the loop before the model runs and never reaches `collect_step()`.
 
 ### 11. `generate()` never sees `StepOutcome`
 
@@ -318,8 +354,11 @@ Ask one question: could a client observe it?
 8. Every message the client receives is a `self.send()` in `collect_step()` or
    a handler; the mapping from result to `Output` is explicit.
 9. `generate()` does not build, return, or catch into a `StepOutcome`.
-10. The model half has a test with a fake engine, and the app half has tests
-    for each refusal and for `collect_step()`. See
+10. `collect_step()` recovers each error the model is known to raise by type
+    and re-raises the rest; a bare re-raise carries the reason in a comment.
+    No blanket `except` that resets and continues on every error.
+11. The model half has a test with a fake engine, and the app half has tests
+    for each refusal and for `collect_step()`, including its error branch. See
     [`tests/unit/examples/test_waypoint.py`](../../tests/unit/examples/test_waypoint.py).
 
 ## Prose
