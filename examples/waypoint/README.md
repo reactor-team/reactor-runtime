@@ -71,9 +71,14 @@ into the seed frame rather than stored, and a reset needs no field.
   `forward_left`, `forward_right`, `back_left`, `back_right`.
 - `set_buttons` extra pressed keycodes as a comma-separated list, for example
   `32,16`.
-- `set_mouse_x`, `set_mouse_y` mouse velocity consumed on the next step.
-- `set_scroll_wheel` `-1`, `0`, or `1`.
+- `set_mouse_x`, `set_mouse_y` mouse velocity, held until changed; send `0` to
+  keep the view still.
+- `set_scroll_wheel` `-1`, `0`, or `1`, held until changed.
 - `reset` restart the world from the current seed frame.
+
+Every control is held: the model reads the current value of each field on
+every step, so a client sends a value once and sends the rest value when the
+input stops, the way a held key or a joystick axis works.
 
 The model sends one message, `waypoint_status`, on connect, as the reply to
 `set_image` and `reset`, and every 50 steps: whether a seed is set, whether
