@@ -424,9 +424,8 @@ class OldModel:
 
     def generate(self, step: StepInput) -> StepResult:
         frame = self.pipe.step(step.prompt)
-        index = self.index
-        self.index += 1
-        return StepResult(frame=frame, index=index)
+        self.index += 1                     # the old loop counted this frame before it reported
+        return StepResult(frame=frame, index=self.index)
 
     def reset(self) -> None:
         self.pipe.reset()
@@ -476,9 +475,11 @@ class New(ReactorApp):
 What moved where: `_paused` became a public field and `pause` disappeared;
 `start` disappeared because a prompt being set is the start, and `reset`
 took over the one job `start` still had; the `Idle` loop became two
-refusals; the index moved into the model and rides on the result; the
-progress message moved to `collect_step()`. The client contract gained
-`set_paused` and `reset` and lost `start` and `pause`. Say so in the change.
+refusals; the index moved into the model and rides on the result, counted
+the way the old loop counted it, so `Progress` still goes out after frames
+50, 100, and so on; the progress message moved to `collect_step()`. The
+client contract gained `set_paused` and `reset` and lost `start` and
+`pause`. Say so in the change.
 
 ## Verify the port
 

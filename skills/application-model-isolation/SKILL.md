@@ -167,9 +167,10 @@ class WaypointStepInput:
 class WaypointStepResult:
     frames: np.ndarray
     index: int
+    seed_id: int
 ```
 
-Type them. Six lines give `prepare_step()` and `collect_step()` a signature a
+Type them. A few lines give `prepare_step()` and `collect_step()` a signature a
 reader can check without opening the model. A tuple works and says nothing.
 
 The result is also how the model tells the application what the **next** step
