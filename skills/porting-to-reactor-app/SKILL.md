@@ -1,9 +1,16 @@
 ---
 name: porting-to-reactor-app
-description: "Move a model from a hand-written ReactorModel run() loop or a ReactorPipeline inference() generator onto ReactorApp and the step loop. Use when porting an existing model, when a model still yields Idle or flips private flags the loop consumes, or when reviewing such a port. The method is a split, not a translation: find the application's bounds, find the model's real constraints, and write each half where it belongs so the loop's decisions become explicit."
+description: "Move a model that already runs on the standalone 3.x runtime (3.0 to 3.3: a ReactorModel with a hand-written run() loop, or a ReactorPipeline with an inference() generator) onto reactor-runtime 3.4's ReactorApp and the step loop. This is the 3.x to 3.4 port. Use when porting such a model, when a model still yields Idle or flips private flags the loop consumes, or when reviewing such a port. A 2.x model first goes through porting-models-to-standalone-runtime. The method is a split, not a translation: find the application's bounds, find the model's real constraints, and write each half where it belongs so the loop's decisions become explicit."
 ---
 
 # Porting a model onto `ReactorApp`
+
+This is the **3.x to 3.4** port. The model already runs on the standalone
+runtime installed as a package (reactor-runtime 3.0 to 3.3); what changes is
+its shape. A model still on 2.x (the pre-baked base image, imports from
+`reactor_runtime.interface`, `load(config: dict)`) goes through
+[`porting-models-to-standalone-runtime`](../porting-models-to-standalone-runtime/SKILL.md)
+first and arrives here running unchanged on 3.x.
 
 A model written before the step loop owns its own loop. On `ReactorModel` it
 is a `run()` with `while self.connected.is_set()`. On `ReactorPipeline` it is
@@ -15,7 +22,11 @@ in the hook that owns it.
 Read [`application-model-isolation`](../application-model-isolation/SKILL.md)
 first. It states the rules the finished port must satisfy; this skill is how
 to get there from existing code. The worked example is
-[`examples/waypoint/`](../../examples/waypoint/README.md).
+[`examples/waypoint/`](../../examples/waypoint/README.md), a small model with
+one loop. The steps below also carry what a larger port taught: a model with
+one loop per GPU topology, a pipelined chunk that lags the step that submitted
+it, encoders that ran inside command handlers, and a run whose first step
+consumes a different input than the rest.
 
 ## The method is a split, not a translation
 
@@ -55,6 +66,25 @@ exception.
 **Mechanics.** `yield Idle`, `yield None`, `asyncio.sleep`, `continue` after a
 flag check, the `finally:` that closes the generator, the outer
 `while True: await self.connected.wait()`. Delete all of it.
+
+Two more lists for a loop that is bigger than one function:
+
+**Generator locals that outlive one turn.** The conditioning snapshot, the
+caches, the counters, a first frame held back to prepend to the first chunk,
+whether a worker's streaming loop is open. These become fields of one run
+object the model half creates when a run starts and drops when it ends. List
+them now; the port is done when none is a local.
+
+**Phases.** Places where the loop consumed a different input in different
+turns: one webcam frame to make the first output frame, four per chunk after
+that. Each phase boundary becomes a fact the model reports on its result
+(`frames_wanted`) and the application reads for the next `prepare_step()`.
+The application never learns the phases; it reads the result.
+
+If `load()` assigns one of several `inference()` generators to
+`self.inference` (one per GPU topology), inventory each generator with the
+same lists. They share a preamble and differ in the chunk step; the port
+keeps one run bookkeeping and several chunk steps (step 3).
 
 ## Step 2: draw the application's bounds in `prepare_step()`
 
@@ -135,8 +165,44 @@ it.
 
 The step result is the second dataclass. Put in it whatever the application
 needs to know about the step: the frames, the model's own index, anything the
-old loop used to read off `self.engine.*` directly. After the port the
-application reads the result and never the engine.
+old loop used to read off `self.engine.*` directly, and anything the
+application needs to build the next input (`frames_wanted`) or to label a
+metric (`num_gpus`). After the port the application reads the result and
+never the engine.
+
+**Helpers written against the pipeline object move with the model.** A
+module of `helper(pipe, ...)` functions that read `pipe.generator`,
+`pipe.vae`, `pipe.executor`, `pipe.device` is model code. Give the model
+class the same attribute names and pass it where the pipeline went; the
+module needs no edit. Grep for every attribute those helpers read and make
+sure `load()` sets each on the model class.
+
+**Several loops become one `generate()` and several chunk steps.** Where the
+old class chose an `inference()` generator per GPU topology, the model half's
+`load()` chooses a chunk step (`self._step = self._chunk_step_2gpu`), and one
+`generate()` does the shared work around it: start a run on a new id, the
+first-frame step, the chunk step, the drain at the cap. The old generators'
+shared preamble (encode the reference, build caches, prefill, first frame)
+becomes `_start_run()` and `_first_frame_step()`; their bodies become the
+chunk steps; the block after each loop (stop the worker, collect the last
+result) becomes `_drain()`; the `finally:` that told a worker where the loop
+stopped becomes `_end_run()`, which `reset()` and a new id both call.
+
+**A pipelined chunk step returns the previous chunk.** On a topology where a
+worker denoises one step behind, the step that submits chunk `k` collects
+chunk `k-1`, so the first chunk step returns `None` and the run's last chunk
+is collected by the drain. Keep that on the result (`frames=None`); the
+application emits nothing for it. Keep the worker's stop index on the run
+object too: after a completed step the worker waits for `chunk_index + 1`,
+after a step that raised between submit and collect for `chunk_index + 2`.
+The old `finally:` knew this by a local flag; the run object carries it as
+`submitted`.
+
+**Encoders leave the handlers.** Where `set_prompt` ran the text encoder and
+`set_image` ran CLIP and the VAE, the handlers now store text and a
+letterboxed uint8 array and bump an id; `_start_run()` encodes them on the
+step that applies the id. The first step of a run pays what the handler used
+to pay, and the state object holds no tensors.
 
 The app's `generate()` is then one line:
 
@@ -231,6 +297,22 @@ Counters the old loop kept on the state (`_step_idx`, `_frames_generated`)
 usually belong to the model, which counts its own steps and exposes the count
 on the result. Delete the state fields.
 
+Two behaviours of the old driver need a home, because nothing restarts a
+generator any more:
+
+- **Natural completion.** When the old generator returned at its cap, the
+  pipeline driver restarted it, and with the conditions still met a new run
+  began at once. `collect_step()` does that on the step whose result says
+  `complete`: send the completion message, call `self.engine.reset()`, clear
+  the applied id so the next step carries the reference again, and
+  `self.output.flush()` as the restart used to. The model raises its own
+  `RunComplete` if stepped past the cap without a reset, so the application's
+  call is the only way forward.
+- **A new image during a run.** Where `set_image` set `_do_reset` and the
+  generator returned and restarted, the handler now bumps the id and flushes;
+  the model ends the live run and starts the next when the id reaches it on
+  the step input. No handler calls into the model for this.
+
 ## Step 6: what the port deletes
 
 If any of these survive, the port is not done:
@@ -244,6 +326,19 @@ If any of these survive, the port is not done:
   measured `generate()` time, and a declared `fps` pins it.
 - A `finally:` block that released what the session held; do it in
   `@session_ended`.
+- Private state fields that hold tensors (`_prompt_cond`, `_clip_fea`,
+  `_initial_latent`); the model half holds them on its run object.
+- Host-side timers around the chunk; `outcome.elapsed` is the runtime's
+  measurement of `generate()`, and the metrics line in `collect_step()` uses
+  it. Time-to-first-frame starts from the step whose result says
+  `run_started`.
+
+One thing a port on the step loop cannot keep: an overlap the old loop
+arranged across turns, such as encoding the next chunk's frames on one CUDA
+stream while decoding the current chunk on another. On the step loop the
+next chunk's frames arrive with the next step, so the two serialize. Measure
+the cost and write it in the port notes; on the topology that had the
+overlap it is one encode of a few frames per chunk.
 
 Keep `run()` overridden only when the loop is truly not one step per emit: a
 renderer that emits several times per step, or a model that must block on an
@@ -376,13 +471,28 @@ progress message moved to `collect_step()`. The client contract gained
 
 ## Verify the port
 
-1. Render the schema before and after (`python -m reactor_runtime.schema`).
-   Every command that changed did so on purpose, and the change is written in
-   the PR.
+1. Render the schema before and after (`python -m reactor_runtime.schema`)
+   and diff the two documents. Every command that changed did so on purpose,
+   and the change is written in the PR. When the model's imports need a GPU
+   image, render both with those modules stubbed: the schema is built from
+   the class, not from the weights. A class docstring on the app is
+   published as the document's description; if the old class had none, the
+   new one carries none.
 2. Run the review checklist in
    [`application-model-isolation`](../application-model-isolation/SKILL.md).
 3. The model half has a test with a fake engine; the app half has a test for
-   each refusal and for `collect_step()`.
+   each refusal and for `collect_step()`, including its error branch. Where
+   torch and the model's source tree are not installable in the test
+   environment, a `conftest.py` stubs them when absent, so the tests run
+   without a GPU and, inside the image, against the real imports. The model
+   half's run bookkeeping (new id starts a run, first-frame step, pipelined
+   lag, drain at the cap, worker stop indices on reset) is testable with the
+   chunk step and the encoders replaced.
 4. Serve it and drive it from a client: pause, resume, reset, and every
    command the old model had. Frames reach the client and the messages arrive
-   before the frames they describe.
+   before the frames they describe. Serve the model it replaces the same way
+   and compare the message sequence and the frame cadence.
+5. Write the port notes: every decision that was not a mechanical
+   translation (which phases the result reports, what moved out of handlers,
+   what the run object surfaced, what was lost), so the next port and this
+   skill can learn from them.

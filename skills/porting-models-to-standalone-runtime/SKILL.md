@@ -1,14 +1,28 @@
 ---
 name: porting-models-to-standalone-runtime
-description: "Port a model written against an older Reactor authoring API onto this runtime. Use when an existing model fails to import, load, or run here. This is a migration guide: it lists what changed or was removed and what to do about each break, not a from-scratch tutorial."
+description: "Port a model written for reactor-runtime 2.x (the pre-baked base image, imports from reactor_runtime.interface, load(config: dict), state_class = ...) onto the standalone 3.x runtime installed as a package. This is the 2.x to 3.x migration: a list of what broke and the fix for each. Use when a 2.x model fails to import, load, or run on 3.x. It does not move a model onto the 3.4 step loop; a model already on 3.x that should become a ReactorApp uses porting-to-reactor-app instead."
 ---
 
 # Port-over: what changed moving a model onto this runtime
 
-Use this when bringing a model that ran on an older Reactor authoring API onto
-`reactor_runtime` as shipped in this repository. It is a list of breaks and the
-fix for each, in rough order of how hard they bite. It is not a tutorial for
-writing a model from scratch.
+Use this when bringing a model that ran on reactor-runtime **2.x** onto the
+standalone **3.x** runtime as shipped in this repository. It is a list of
+breaks and the fix for each, in rough order of how hard they bite. It is not a
+tutorial for writing a model from scratch.
+
+Which port is this? Three skills cover three moves, and a model takes them in
+order:
+
+| Your model is on | You want | Skill |
+| --- | --- | --- |
+| 2.x: the pre-baked base image, `from reactor_runtime.interface import ...`, `load(config: dict)`, `state_class = ...` | 3.x: the runtime as a package, `from reactor_runtime import ...` | this one |
+| 3.0 to 3.3: a `ReactorModel` with a hand-written `run()`, or a `ReactorPipeline` with `inference()` | 3.4: `ReactorApp` and the step loop | [`porting-to-reactor-app`](../porting-to-reactor-app/SKILL.md) |
+| 3.4: writing or reviewing a `ReactorApp` | the two halves kept apart | [`application-model-isolation`](../application-model-isolation/SKILL.md) |
+
+A 2.x model that should end on the step loop does this port first, so that it
+runs on 3.x as it is, and the `ReactorApp` port second. Do not combine them:
+each has its own breaks, and a port that changes the wire and the shape at
+once cannot be checked against the model it replaces.
 
 Ground rule: the supported surface is what the **top-level package**
 re-exports. If a name is not importable from `reactor_runtime`, it is not part

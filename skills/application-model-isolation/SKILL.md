@@ -1,6 +1,6 @@
 ---
 name: application-model-isolation
-description: "Split a Reactor model into an application half and a model half and keep them apart. Use when writing a new ReactorApp, porting a model onto the step loop, reviewing one, or deciding which half a piece of code belongs to. Covers the three hooks, the inner contract between the halves, refusal versus failure, what the model must never do on its own, and how the application reads the model. Nothing enforces these rules; this skill is where they are written down."
+description: "Split a Reactor model into an application half and a model half and keep them apart. For reactor-runtime 3.4 and later, where ReactorApp and the step loop exist. Use when writing a new ReactorApp, finishing a port onto the step loop (porting-to-reactor-app is the how; this is the what), reviewing one, or deciding which half a piece of code belongs to. Covers the three hooks, the inner contract between the halves, refusal versus failure, what the model must never do on its own, how the application reads the model, and what a model failure does. Nothing enforces these rules; this skill is where they are written down."
 ---
 
 # Application and model, two halves of one class
@@ -57,6 +57,32 @@ def load(self, config_path: Path | None) -> None:
     self.engine.load(config_path)
 ```
 
+Four things a larger model adds to this rule:
+
+- **Helpers that read the pipeline object are model code.** A codebase often
+  has a module of functions written as `helper(pipe, ...)` that read
+  `pipe.generator`, `pipe.vae`, `pipe.device`, and so on off the old class.
+  Every one of those attributes is a model attribute, so the functions move
+  to the model half unchanged: the model class carries the same attribute
+  names, and `pipe` becomes the model instance. Nothing in such a module
+  needs a rewrite, and nothing in the application may call it.
+- **Both halves may read the config file, each its own keys.** `load()` on
+  both sides receives `config_path`. The application takes what a client can
+  observe (a default prompt, a message cadence); the model takes checkpoints,
+  optimization flags, GPU count, seed, caps. One file, two readers, no key
+  read by both.
+- **What the model half cannot import, the application passes in.**
+  `get_weights_path()` is a `reactor_runtime` name, so a model that resolves
+  checkpoints under the weights root takes the root as a constructor
+  argument: `MyModel(get_weights_path())`. The same goes for anything
+  else the runtime alone knows.
+- **A spawned worker is the one place the model side touches the runtime.**
+  A model that spawns processes (a multi-GPU pipeline) configures the
+  runtime's logger at the top of each worker, because a spawned interpreter
+  starts with no logging configured and its records would be lost. That
+  import lives in the worker module, never in the model class, and it is
+  the whole exception.
+
 ### 2. `generate()` on the app is one line, written by hand
 
 The app's `generate()` forwards to the model half and does nothing else. No
@@ -70,6 +96,42 @@ def generate(self, step: WaypointStepInput) -> WaypointStepResult:
 A `generate()` that reads `self.state`, calls `self.send()`, or decides
 whether to run has application code inside the model call. Move it to
 `prepare_step()` or `collect_step()`.
+
+**One `generate()` on the model half too, whatever the hardware.** A model
+that has one code path per GPU topology (one GPU denoising locally, two with
+a worker one denoising step behind, three over a shared channel) does not
+expose three entry points. Its `load()` looks at the devices and binds the
+chunk step it will use; its `generate()` does the run bookkeeping once, for
+every topology, and calls that step:
+
+```python
+def load(self, config_path):
+    ...
+    self._step = self._chunk_step_2gpu if self.num_gpus == 2 else self._chunk_step_1gpu
+
+def generate(self, step):
+    if step.reference_id != self.reference_id:   # a new run
+        self._end_run(); self._run = self._start_run(step); ...
+    if self._run.frames_wanted == 1:
+        self._first_frame_step(self._run, step.frames[0])   # the run's first output frame
+    else:
+        frames = self._step(self._run, step.frames)          # one chunk, topology-specific
+    ...
+```
+
+The application has one `generate()` and does not know how many GPUs there
+are. The old shape, `load()` assigning one of several `inference()`
+generators to `self.inference`, becomes `load()` assigning one of several
+chunk steps to a private attribute; the dispatch moved down, not out.
+
+**The run is an object, not generator locals.** Everything a step of a run
+shares (the conditioning, the caches, the counters, the frame held back to
+prepend to the first chunk, whether the worker's streaming loop is open, which
+index the worker waits on) lives on one object the model creates at run start
+and drops at run end. Making it explicit is what surfaces the rules a
+generator kept implicit: what to tell the worker when a run is interrupted
+after a submit and before a collect, and how to drain the chunk still in
+flight when the run reaches its cap.
 
 ### 3. The two halves meet on two dataclasses the author owns
 
@@ -93,6 +155,19 @@ class WaypointStepResult:
 
 Type them. Six lines give `prepare_step()` and `collect_step()` a signature a
 reader can check without opening the model. A tuple works and says nothing.
+
+The result is also how the model tells the application what the **next** step
+needs, so the application never has to know the model's phases. A model whose
+first step of a run consumes one webcam frame and every later step four does
+not make the application count: the result carries `frames_wanted`, the
+application stores it on a private state field, and the next `prepare_step()`
+reads that many frames. Anything the application must know to build the next
+input, or to label a metric (`num_gpus`), rides on the result the same way.
+
+A result may carry no media. On a pipelined model the chunk submitted on one
+step comes back on the next, so the first chunk step returns `frames=None`,
+and `collect_step()` emits nothing for it. A `None` where media is expected is
+a fact about the step, not an error.
 
 ### 4. New information reaches the model inside the step input
 
@@ -123,6 +198,27 @@ if step.seed_id != self.seed_id:
 
 If a handler needs the model to change, it calls a method the model wrote.
 `reset()` is that method. Handlers run between steps, so the call is safe.
+
+**Encoding is model work and happens on the step, not in the handler.** A
+handler that runs a text encoder on the prompt, or CLIP and a VAE on an
+uploaded image, has model code in the application. The handler decodes and
+stages: it letterboxes the upload to a uint8 array, stores the prompt text,
+bumps the id. The model encodes on the step that applies the new id, as part
+of starting the run, and caches what is worth caching (a prompt embedding by
+its text). GPU tensors never live on the state object; the state holds
+arrays, strings, and ids.
+
+**A run is one identity, and a new id during a run is a new run.** When the
+step input carries an id the model has not applied while a run is live, the
+model ends that run itself (stops a worker's streaming loop, clears its
+caches) and starts the next from the frame the step carries. That is not the
+"silent reset" rule 8 forbids: the step asked for it, and the result reports
+the id the new run holds.
+
+**What the model applies at run start stays fixed for the run.** A prompt
+the client changes mid-run takes effect on the next run, because the caches
+were prefilled with the old one. Say so in the field's description; do not
+try to re-encode inside a live run.
 
 ### 5. The model's state is read-only from the application
 
@@ -337,6 +433,13 @@ Ask one question: could a client observe it?
 | holding the decoded image | application | a private state field |
 | knowing which seed the model holds | application | a private state field, read off the result |
 | the frame counter within a world | model | an attribute, exposed on the result |
+| how many frames the next step needs | model decides, application reads | `frames_wanted` on the result, then a private state field |
+| running the text encoder or the VAE on a new prompt or image | model | the step that starts a run |
+| storing the prompt text and the letterboxed upload | application | a public field, a private field, a hand-written command |
+| how many GPUs, which pipelined path | model | `load()` |
+| telling a worker process where the run stopped | model | `reset()` / the run's end |
+| what happens when the run reaches its cap | application | `collect_step()`, on `result.complete` |
+| a metric label such as `num_gpus` | model reports, application logs | the result, then `collect_step()` |
 
 ## Review checklist
 
@@ -360,6 +463,20 @@ Ask one question: could a client observe it?
 11. The model half has a test with a fake engine, and the app half has tests
     for each refusal and for `collect_step()`, including its error branch. See
     [`tests/unit/examples/test_waypoint.py`](../../tests/unit/examples/test_waypoint.py).
+    When the model half's imports (torch, the model's own source tree) are
+    not installable where the tests run, a `conftest.py` stubs them only
+    when absent, so the same tests run without a GPU and, inside the image,
+    against the real imports. The app tests drive the hooks with a fake model
+    half that records steps and returns scripted results; the model tests
+    drive `generate()`'s bookkeeping with the encoders and the chunk step
+    replaced.
+12. No encoder runs inside a command handler; the state holds arrays,
+    strings, and ids, never GPU tensors.
+13. The rendered schema is compared with the model it replaces. Render both
+    (`python -m reactor_runtime.schema`, or `ModelContract.of(cls)` with the
+    heavy imports stubbed) and diff. A class docstring on the app is
+    published as the document's description, so an app that replaces one
+    without a docstring carries none, or the schema moves.
 
 ## Prose
 
