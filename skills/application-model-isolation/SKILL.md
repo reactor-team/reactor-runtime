@@ -71,11 +71,27 @@ Four things a larger model adds to this rule:
   observe (a default prompt, a message cadence); the model takes checkpoints,
   optimization flags, GPU count, seed, caps. One file, two readers, no key
   read by both.
-- **What the model half cannot import, the application passes in.**
-  `get_weights_path()` is a `reactor_runtime` name, so a model that resolves
-  checkpoints under the weights root takes the root as a constructor
-  argument: `MyModel(get_weights_path())`. The same goes for anything
-  else the runtime alone knows.
+- **The weights root arrives through `load()`.** `get_weights_path()` is a
+  `reactor_runtime` name, so a model half never calls it and never reads
+  `REACTOR_WEIGHTS_PATH`. A model whose checkpoints live under the
+  deployment's weights directory takes that directory as `load()`'s second
+  argument and joins the relative paths its config names onto it; the
+  application resolves it once and passes it:
+
+  ```python
+  def load(self, config_path: Path | None) -> None:
+      self.engine = MyModel()
+      self.engine.load(config_path, get_weights_path())
+  ```
+
+  The constructor takes nothing. A model that fetches its weights elsewhere,
+  as Waypoint does from Hugging Face, leaves the parameter out. Keep the
+  signature exactly `load(config_path)` or `load(config_path, weights_root)`:
+  a later release constructs the model half itself and makes this call,
+  passing `weights_root` to a `load()` that declares it. Any other file the
+  config names by a relative path resolves against `config_path.parent`, not
+  the working directory. The same rule covers anything else only the runtime
+  knows: it enters the model half as an argument, never as an import.
 - **A spawned worker is the one place the model side touches the runtime.**
   A model that spawns processes (a multi-GPU pipeline) configures the
   runtime's logger at the top of each worker, because a spawned interpreter
@@ -477,6 +493,10 @@ Ask one question: could a client observe it?
     heavy imports stubbed) and diff. A class docstring on the app is
     published as the document's description, so an app that replaces one
     without a docstring carries none, or the schema moves.
+14. The model half's constructor takes nothing and the class reads no
+    environment variable. A weights root arrives as `load()`'s second
+    argument from the application, and every relative path a config names
+    resolves against the config file, not the working directory.
 
 ## Prose
 
