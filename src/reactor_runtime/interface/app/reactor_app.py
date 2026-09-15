@@ -129,6 +129,7 @@ class ReactorApp(ReactorCore):
     _live: asyncio.Event
     _step_lock: asyncio.Lock
     _step_requested: asyncio.Event
+    _gate_drops: int
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
@@ -249,7 +250,9 @@ class ReactorApp(ReactorCore):
         so a ``load()`` that assigns it counts.
 
         When the gate drops, the input buffers reset, so the next session or
-        client starts from empty tracks.
+        client starts from empty tracks. A drop and a re-set that both land
+        while a step is blocked in :meth:`emit` still count as a drop: the loop
+        compares the number of drops, not the gate's current value.
 
         Raises:
             Exception: Whatever :meth:`collect_step` raised, which by default is
@@ -263,8 +266,9 @@ class ReactorApp(ReactorCore):
         self._step_requested.set()
         while True:
             await self._live.wait()
+            drops = self._gate_drops
             try:
-                while self._live.is_set():
+                while self._live.is_set() and self._gate_drops == drops:
                     # 1. Wait for a step request. While this await is pending the
                     #    event loop runs the handlers that arrived; each takes the
                     #    step lock, so none can run once the lock below is held.
@@ -338,6 +342,7 @@ class ReactorApp(ReactorCore):
         self._live = asyncio.Event()
         self._step_lock = asyncio.Lock()
         self._step_requested = asyncio.Event()
+        self._gate_drops = 0
 
     def _background_coros(self) -> list[Coroutine[Any, Any, None]]:
         """Run the two queue-drain loops alongside ``run()``."""
@@ -509,11 +514,16 @@ class ReactorApp(ReactorCore):
         self._update_live()
 
     def _update_live(self) -> None:
-        """Reconcile the live gate from session liveness and the client count."""
+        """Reconcile the live gate from session liveness and the client count.
+
+        Every drop of the gate is counted, so a loop that was blocked while the
+        gate dropped and came back still sees that a boundary passed.
+        """
         if self.connected.is_set() and self._session_active:
             self._live.set()
-        else:
+        elif self._live.is_set():
             self._live.clear()
+            self._gate_drops += 1
 
     def _reserved(self, name: str, conn_id: ConnId | None) -> Any:
         """Resolve a reserved handler parameter for the addressed connection."""
