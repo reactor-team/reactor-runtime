@@ -132,6 +132,7 @@ Not on macOS, or pinning a release in CI? See [Install the CLI](https://docs.rea
 - [Quickstart](https://docs.reactor.inc/deploy/development/overview): from zero to a streaming model in 2 minutes
 - [Model anatomy](https://docs.reactor.inc/deploy/development/reactor-model/model-anatomy): every piece of a Reactor model, line by line
 - [The run loop](https://docs.reactor.inc/deploy/development/reactor-model/run-loop): emitting frames, batches, and frame rates
+- [Waypoint example](./examples/waypoint/README.md): a world model split into an application half and a model half, on the step loop
 
 ## Development
 
