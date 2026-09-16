@@ -1,6 +1,6 @@
 ---
 name: application-model-isolation
-description: "Split a Reactor model into an application half and a model half and keep them apart. For reactor-runtime 3.4 and later, where ReactorApp and the step loop exist. Use when writing a new ReactorApp, finishing a port onto the step loop (porting-to-reactor-app is the how; this is the what), reviewing one, or deciding which half a piece of code belongs to. Covers the three hooks, the inner contract between the halves, refusal versus failure, what the model must never do on its own, how the application reads the model, and what a model failure does. Nothing enforces these rules; this skill is where they are written down."
+description: "Split a Reactor model into an application half and a model half and keep them apart. For reactor-runtime 3.5 and later, where ReactorApp and the step loop exist. Use when writing a new ReactorApp, finishing a port onto the step loop (porting-to-reactor-app is the how; this is the what), reviewing one, or deciding which half a piece of code belongs to. Covers the three hooks, the inner contract between the halves, refusal versus failure, what the model must never do on its own, how the application reads the model, and what a model failure does. Nothing enforces these rules; this skill is where they are written down."
 ---
 
 # Application and model, two halves of one class

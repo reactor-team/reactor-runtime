@@ -1,6 +1,6 @@
 ---
 name: porting-models-to-standalone-runtime
-description: "Port a model written for reactor-runtime 2.x (the pre-baked base image, imports from reactor_runtime.interface, load(config: dict), state_class = ...) onto the standalone 3.x runtime installed as a package. This is the 2.x to 3.x migration: a list of what broke and the fix for each. Use when a 2.x model fails to import, load, or run on 3.x. It does not move a model onto the 3.4 step loop; a model already on 3.x that should become a ReactorApp uses porting-to-reactor-app instead."
+description: "Port a model written for reactor-runtime 2.x (the pre-baked base image, imports from reactor_runtime.interface, load(config: dict), state_class = ...) onto the standalone 3.x runtime installed as a package. This is the 2.x to 3.x migration: a list of what broke and the fix for each. Use when a 2.x model fails to import, load, or run on 3.x. It does not move a model onto the 3.5 step loop; a model already on 3.x that should become a ReactorApp uses porting-to-reactor-app instead."
 ---
 
 # Port-over: what changed moving a model onto this runtime
@@ -16,8 +16,8 @@ order:
 | Your model is on | You want | Skill |
 | --- | --- | --- |
 | 2.x: the pre-baked base image, `from reactor_runtime.interface import ...`, `load(config: dict)`, `state_class = ...` | 3.x: the runtime as a package, `from reactor_runtime import ...` | this one |
-| 3.0 to 3.3: a `ReactorModel` with a hand-written `run()`, or a `ReactorPipeline` with `inference()` | 3.4: `ReactorApp` and the step loop | [`porting-to-reactor-app`](../porting-to-reactor-app/SKILL.md) |
-| 3.4: writing or reviewing a `ReactorApp` | the two halves kept apart | [`application-model-isolation`](../application-model-isolation/SKILL.md) |
+| 3.0 to 3.4: a `ReactorModel` with a hand-written `run()`, or a `ReactorPipeline` with `inference()` | 3.5: `ReactorApp` and the step loop | [`porting-to-reactor-app`](../porting-to-reactor-app/SKILL.md) |
+| 3.5: writing or reviewing a `ReactorApp` | the two halves kept apart | [`application-model-isolation`](../application-model-isolation/SKILL.md) |
 
 A 2.x model that should end on the step loop does this port first, so that it
 runs on 3.x as it is, and the `ReactorApp` port second. Do not combine them:
