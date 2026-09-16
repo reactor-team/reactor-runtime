@@ -1,12 +1,12 @@
 ---
 name: porting-to-reactor-app
-description: "Move a model that already runs on the standalone 3.x runtime (3.0 to 3.3: a ReactorModel with a hand-written run() loop, or a ReactorPipeline with an inference() generator) onto reactor-runtime 3.4's ReactorApp and the step loop. This is the 3.x to 3.4 port. Use when porting such a model, when a model still yields Idle or flips private flags the loop consumes, or when reviewing such a port. A 2.x model first goes through porting-models-to-standalone-runtime. The method is a split, not a translation: find the application's bounds, find the model's real constraints, and write each half where it belongs so the loop's decisions become explicit."
+description: "Move a model that already runs on the standalone 3.x runtime (3.0 to 3.4: a ReactorModel with a hand-written run() loop, or a ReactorPipeline with an inference() generator) onto reactor-runtime 3.5's ReactorApp and the step loop. This is the 3.x to 3.5 port. Use when porting such a model, when a model still yields Idle or flips private flags the loop consumes, or when reviewing such a port. A 2.x model first goes through porting-models-to-standalone-runtime. The method is a split, not a translation: find the application's bounds, find the model's real constraints, and write each half where it belongs so the loop's decisions become explicit."
 ---
 
 # Porting a model onto `ReactorApp`
 
-This is the **3.x to 3.4** port. The model already runs on the standalone
-runtime installed as a package (reactor-runtime 3.0 to 3.3); what changes is
+This is the **3.x to 3.5** port. The model already runs on the standalone
+runtime installed as a package (reactor-runtime 3.0 to 3.4); what changes is
 its shape. A model still on 2.x (the pre-baked base image, imports from
 `reactor_runtime.interface`, `load(config: dict)`) goes through
 [`porting-models-to-standalone-runtime`](../porting-models-to-standalone-runtime/SKILL.md)
@@ -361,7 +361,7 @@ handlers and hooks still run under the step lock, `emit()`, `send()`,
 no warning. A port that keeps `run()` does not declare `state:`: the setters
 would write it, but nothing reads it for the loop and nothing bounds when a
 write lands relative to the loop's reads. It keeps its own values in its own
-attributes and its own `@event` handlers, the way a 3.3.2 model did.
+attributes and its own `@event` handlers, the way a 3.4.0 model did.
 
 ## A port, start to finish
 
