@@ -2,7 +2,7 @@
 
 Drives :func:`libwebrtc_peer_factory` against a second libwebrtc peer standing in
 for a browser client: the stand-in offers one track the model sends on and one it
-receives on, plus a data channel, and the two negotiate a real connection over
+receives on, plus the data and control channels, and the two negotiate a real connection over
 loopback ICE. The test then asserts the seam actually carries traffic both ways —
 outbound video reaches the client carrying the metadata the model attached to it,
 inbound video surfaces through ``on_media`` carrying what the client attached, and
@@ -136,7 +136,8 @@ class _Client:
         self.pc = factory.create_peer_connection(rw.RtcConfiguration(), observer)
 
         # Two transceivers the model sends on (client receives) — video and audio —
-        # one the client sends on (model receives), plus the data channel.
+        # one the client sends on (model receives), plus the two data channels
+        # every client opens: ``data`` for messages and ``control`` for signals.
         self.recv = self.pc.add_transceiver(rw.MediaKind.Video, rw.TransceiverDirection.RecvOnly)
         self.recv_audio = self.pc.add_transceiver(
             rw.MediaKind.Audio, rw.TransceiverDirection.RecvOnly
@@ -147,6 +148,7 @@ class _Client:
         # advertises the capability in the offer, the runtime's answer mirrors it,
         # and both peers install their own embed/strip steps on negotiation.
         self.data = self.pc.create_data_channel("data")
+        self.control = self.pc.create_data_channel("control")
 
     @classmethod
     async def create(cls, factory: rw.PeerConnectionFactory) -> _Client:
@@ -393,6 +395,73 @@ async def test_a_connection_without_supplied_credentials_still_connects() -> Non
         assert "a=ice-ufrag:" in answer.sdp
         await client.accept_answer(answer.sdp)
         assert await _reached(connected), "the default path must still connect"
+    finally:
+        stop_trickle.set()
+        trickle_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await trickle_task
+        await peer.close()
+        client.pc = None  # type: ignore[assignment]
+
+
+async def test_a_frame_sent_from_the_connected_callback_reaches_the_client() -> None:
+    """The connected callback is where a model greets a joining client.
+
+    The peer connection reports itself connected a moment before the client's
+    data channels are handed over, and they arrive still connecting. A callback
+    fired on the connection state alone would send into a channel that is not
+    there yet, and the frame would be dropped on this side, silently. The
+    callback fires once both channels are open, so a frame sent from inside
+    it, with nothing awaited first, arrives.
+
+    Whether the dropped frame is noticed depends on how the loop interleaves
+    with the engine's threads, so the test also pins what the callback can see
+    when it runs: both channels present and open.
+    """
+    factory = _get_factory(WebRtcConfig())
+    client = await _Client.create(factory)
+    offer_sdp = await client.create_offer()
+
+    greeted = threading.Event()
+    received: list[bytes] = []
+
+    def _on_client_message(data: bytes, _binary: bool) -> None:
+        received.append(bytes(data))
+        greeted.set()
+
+    client.data.on_message(_on_client_message)
+
+    peer, answer = await libwebrtc_peer_factory(
+        ConnId(5),
+        SdpOffer(sdp=offer_sdp),
+        client.track_map(),
+        WebRtcConfig(ice_gathering_timeout_ms=4000),
+        ProtocolVersion.V0,
+    )
+    channel_states: list[Any] = []
+
+    def _greet() -> None:
+        channel_states.extend(
+            ch.state() if ch is not None else None
+            for ch in (peer._data_channel, peer._control_channel)
+        )
+        peer.send_message(b"welcome")
+
+    peer.on_message(lambda *_: None)
+    peer.on_media(lambda *_: None)
+    peer.on_ping(lambda: None)
+    peer.on_connected(_greet)
+    peer.on_disconnect(lambda: None)
+
+    stop_trickle = asyncio.Event()
+    trickle_task = asyncio.create_task(_trickle_until(client, peer, stop_trickle))
+    try:
+        await client.accept_answer(answer.sdp)
+        assert await asyncio.to_thread(greeted.wait, _TIMEOUT_S), (
+            "the frame sent from the connected callback never reached the client"
+        )
+        assert channel_states == [rw.DataChannelState.Open, rw.DataChannelState.Open]
+        assert received == [b"welcome"]
     finally:
         stop_trickle.set()
         trickle_task.cancel()

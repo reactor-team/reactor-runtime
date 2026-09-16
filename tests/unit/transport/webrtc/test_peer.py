@@ -10,6 +10,7 @@ import asyncio
 import logging
 import threading
 import time
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -99,11 +100,34 @@ class _FakeAudioTrack:
 
 
 class _FakeChannel:
-    def __init__(self) -> None:
+    """A data channel as the peer sees it: a label, a state, and its sinks."""
+
+    def __init__(self, label: str = "data", state: Any = None) -> None:
         self.sent: list[tuple[bytes, bool]] = []
+        self._label = label
+        self._state = state if state is not None else rw.DataChannelState.Open
+        self._on_state_change: Callable[[Any], None] | None = None
+
+    def label(self) -> str:
+        return self._label
+
+    def state(self) -> Any:
+        return self._state
 
     def send(self, data: bytes, binary: bool = True) -> None:
         self.sent.append((data, binary))
+
+    def on_message(self, callback: Callable[[bytes, bool], None]) -> None:
+        pass
+
+    def on_state_change(self, callback: Callable[[Any], None]) -> None:
+        self._on_state_change = callback
+
+    def open(self) -> None:
+        """Move the channel to Open through its transition callback."""
+        self._state = rw.DataChannelState.Open
+        assert self._on_state_change is not None
+        self._on_state_change(self._state)
 
 
 def _video_bundle(
@@ -1395,6 +1419,111 @@ def test_underrun_warning_stays_quiet_for_an_occasional_gap(
         peer._warn_on_audio_underrun()
 
     assert _warnings(caplog) == []
+
+
+# ── Connected: the peer and both channels ────────────────────────────────────
+
+
+def _connecting_peer() -> tuple[WebRTCPeer, list[int]]:
+    """A peer with a running loop whose connected callback counts its firings."""
+    peer = WebRTCPeer()
+    peer._loop = asyncio.get_running_loop()
+    fired: list[int] = []
+    peer.on_connected(lambda: fired.append(1))
+    return peer, fired
+
+
+async def _settle() -> None:
+    await asyncio.sleep(0.01)
+
+
+async def test_a_connected_peer_alone_is_not_connected() -> None:
+    """The channels open after the peer connection does; a frame sent then is lost."""
+    peer, fired = _connecting_peer()
+
+    peer._on_connection_state_change(rw.PeerConnectionState.Connected)
+    await _settle()
+
+    assert fired == []
+
+
+async def test_connected_fires_once_the_peer_and_both_channels_are_up() -> None:
+    peer, fired = _connecting_peer()
+    data: Any = _FakeChannel("data")
+    control: Any = _FakeChannel("control")
+
+    peer._on_connection_state_change(rw.PeerConnectionState.Connected)
+    peer._on_data_channel(data)
+    await _settle()
+    assert fired == [], "the data channel alone is not enough"
+
+    peer._on_data_channel(control)
+    await _settle()
+
+    assert fired == [1]
+    peer.send_message("hello")
+    peer.send_control(b"\x01")
+    assert data.sent == [(b"hello", False)]
+    assert control.sent == [(b"\x01", True)]
+
+
+async def test_channels_that_open_before_the_peer_connects_count() -> None:
+    peer, fired = _connecting_peer()
+
+    peer._on_data_channel(cast(Any, _FakeChannel("control")))
+    peer._on_data_channel(cast(Any, _FakeChannel("data")))
+    await _settle()
+    assert fired == []
+
+    peer._on_connection_state_change(rw.PeerConnectionState.Connected)
+    await _settle()
+
+    assert fired == [1]
+
+
+async def test_a_channel_handed_over_still_connecting_counts_when_it_opens() -> None:
+    peer, fired = _connecting_peer()
+    data = _FakeChannel("data", state=rw.DataChannelState.Connecting)
+
+    peer._on_connection_state_change(rw.PeerConnectionState.Connected)
+    peer._on_data_channel(cast(Any, _FakeChannel("control")))
+    peer._on_data_channel(cast(Any, data))
+    await _settle()
+    assert fired == []
+
+    data.open()
+    await _settle()
+
+    assert fired == [1]
+
+
+async def test_connected_fires_only_once() -> None:
+    peer, fired = _connecting_peer()
+    data = _FakeChannel("data")
+
+    peer._on_data_channel(cast(Any, data))
+    peer._on_data_channel(cast(Any, _FakeChannel("control")))
+    peer._on_connection_state_change(rw.PeerConnectionState.Connected)
+    peer._on_connection_state_change(rw.PeerConnectionState.Connected)
+    data.open()
+    await _settle()
+
+    assert fired == [1]
+
+
+async def test_a_channel_opening_after_the_wire_is_lost_does_not_connect() -> None:
+    peer, fired = _connecting_peer()
+    peer.on_disconnect(lambda: None)
+    data = _FakeChannel("data", state=rw.DataChannelState.Connecting)
+
+    peer._on_connection_state_change(rw.PeerConnectionState.Connected)
+    peer._on_data_channel(cast(Any, _FakeChannel("control")))
+    peer._on_data_channel(cast(Any, data))
+    peer._report_loss()
+    data.open()
+    await _settle()
+
+    assert fired == []
 
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────

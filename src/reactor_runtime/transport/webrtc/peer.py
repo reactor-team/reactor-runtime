@@ -424,6 +424,14 @@ class WebRTCPeer:
         # leave libwebrtc holding whichever description landed last.
         self._sdp_lock = asyncio.Lock()
         self._stop_event = threading.Event()
+        # The wire is connected once the peer connection is up and both data
+        # channels are open. The three facts arrive from different libwebrtc
+        # observers, on their own threads, in no fixed order; the lock makes
+        # the check that combines them fire the callback exactly once.
+        self._ready_lock = threading.Lock()
+        self._peer_connected = False
+        self._data_open = False
+        self._control_open = False
         self._connected = threading.Event()
 
         logger.info("WebRTCPeer initialized")
@@ -445,7 +453,13 @@ class WebRTCPeer:
         self._cb_ping = callback
 
     def on_connected(self, callback: Callable[[], None]) -> None:
-        """Register the sink for the wire reaching its connected state."""
+        """Register the sink for the wire becoming able to carry frames.
+
+        Fires once the peer connection is connected and both the data and the
+        control channel are open, so a frame sent from the callback reaches
+        the client. The peer connection reaches its connected state first; the
+        channels open after it, once the SCTP association is up.
+        """
         self._cb_connected = callback
 
     def on_disconnect(self, callback: Callable[[], None]) -> None:
@@ -588,9 +602,9 @@ class WebRTCPeer:
     def _on_connection_state_change(self, state: rw.PeerConnectionState) -> None:
         logger.debug("connection state changed to %r", state)
         if state == rw.PeerConnectionState.Connected:
-            if not self._connected.is_set():
-                self._connected.set()
-                self._fire(self._cb_connected)
+            with self._ready_lock:
+                self._peer_connected = True
+                self._fire_connected_if_ready()
         elif _is_terminal_state(state):
             loop = self._loop
             if loop is not None and not loop.is_closed():
@@ -673,12 +687,49 @@ class WebRTCPeer:
         return sink
 
     def _on_data_channel(self, channel: rw.DataChannel) -> None:
+        """Adopt a channel the client opened and watch for it to become open.
+
+        The channel is handed over while still connecting and opens shortly
+        after, so the transition callback is what usually reports it open. The
+        state is also read once the callback is in place, for a channel that
+        opened before this ran; either way the open is marked exactly once.
+        """
         if channel.label() == CONTROL_CHANNEL_LABEL:
             self._control_channel = channel
-            channel.on_message(self._make_message_sink(Channel.CONTROL))
+            wire_channel = Channel.CONTROL
         else:
             self._data_channel = channel
-            channel.on_message(self._make_message_sink(Channel.DATA))
+            wire_channel = Channel.DATA
+        channel.on_message(self._make_message_sink(wire_channel))
+        channel.on_state_change(self._make_channel_state_sink(wire_channel))
+        if channel.state() == rw.DataChannelState.Open:
+            self._mark_channel_open(wire_channel)
+
+    def _make_channel_state_sink(self, channel: Channel) -> Callable[[rw.DataChannelState], None]:
+        def sink(state: rw.DataChannelState) -> None:
+            if state == rw.DataChannelState.Open:
+                self._mark_channel_open(channel)
+
+        return sink
+
+    def _mark_channel_open(self, channel: Channel) -> None:
+        with self._ready_lock:
+            if channel is Channel.CONTROL:
+                self._control_open = True
+            else:
+                self._data_open = True
+            self._fire_connected_if_ready()
+
+    def _fire_connected_if_ready(self) -> None:
+        """Report the wire connected once, when every part of it is up.
+
+        Called with ``_ready_lock`` held.
+        """
+        if self._stop_event.is_set() or self._connected.is_set():
+            return
+        if self._peer_connected and self._data_open and self._control_open:
+            self._connected.set()
+            self._fire(self._cb_connected)
 
     def _make_message_sink(self, channel: Channel) -> Callable[[bytes, bool], None]:
         def sink(data: bytes, binary: bool) -> None:
@@ -704,7 +755,11 @@ class WebRTCPeer:
         if self._stop_event.is_set():
             return
         self._stop_event.set()
-        self._connected.clear()
+        with self._ready_lock:
+            self._connected.clear()
+            self._peer_connected = False
+            self._data_open = False
+            self._control_open = False
         self._release_wire()
         self._fire(self._cb_disconnect)
 

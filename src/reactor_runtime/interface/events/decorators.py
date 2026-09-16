@@ -157,7 +157,12 @@ def session_ended(func: Callable[..., Any]) -> Callable[..., Any]:
 
 
 def connected(func: Callable[..., Any]) -> Callable[..., Any]:
-    """Mark a method as the handler run once each time a client connects."""
+    """Mark a method as the handler run once each time a client connects.
+
+    The hook runs once the client's wire can carry frames, so a message sent
+    from it — a greeting, or a snapshot of the current state for a client that
+    joins a live session — reaches that client.
+    """
     setattr(func, CONNECTED_ATTR, True)
     return func
 

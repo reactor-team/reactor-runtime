@@ -385,7 +385,7 @@ class Runner(ServiceComponent, ConnectionSink):
     # -- inbound (ConnectionSink) ---------------------------------------------
 
     def connection_opened(self, conn: Connection) -> None:
-        """Register a connection whose wire has reached its connected state.
+        """Register a connection whose wire can carry frames to the client.
 
         The model's playout settings (rate, queue depth) apply to every
         connection, so one that opens after they were set receives them here.
