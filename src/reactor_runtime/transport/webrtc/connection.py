@@ -167,7 +167,11 @@ class WebRTCConnection:
         self._on_ping = callback
 
     def on_connected(self, callback: Callable[[], None]) -> None:
-        """Register the sink for the wire reaching its connected state."""
+        """Register the sink for the wire becoming able to carry frames.
+
+        Fires once the peer and both data channels are up, so a message sent
+        from the callback reaches the client.
+        """
         self._on_connected = callback
 
     def on_disconnect(self, callback: Callable[[], None]) -> None:

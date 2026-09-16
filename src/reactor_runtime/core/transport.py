@@ -105,13 +105,15 @@ class ConnectionSink(Protocol):
     """
 
     def connection_opened(self, conn: Connection) -> None:
-        """Register a connection whose wire has reached its connected state.
+        """Register a connection whose wire can carry frames to the client.
 
         Fired when the transport is actually connected — for WebRTC, when the
-        peer connection reaches its connected state — never at handshake or
-        offer time. A transport that builds a connection during signaling holds
-        it itself until then, so a client that offers but never connects never
-        advances the session.
+        peer connection is connected and both data channels are open — never at
+        handshake or offer time. A transport that builds a connection during
+        signaling holds it itself until then, so a client that offers but never
+        connects never advances the session. Because the wire is open by the
+        time this fires, a message the model sends from its ``@connected`` hook
+        reaches the joining client.
         """
 
     def connection_closed(self, conn_id: ConnId) -> None:
