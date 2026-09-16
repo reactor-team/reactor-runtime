@@ -702,22 +702,27 @@ class WebRTCPeer:
             wire_channel = Channel.DATA
         channel.on_message(self._make_message_sink(wire_channel))
         channel.on_state_change(self._make_channel_state_sink(wire_channel))
-        if channel.state() == rw.DataChannelState.Open:
-            self._mark_channel_open(wire_channel)
+        self._set_channel_open(wire_channel, channel.state() == rw.DataChannelState.Open)
 
     def _make_channel_state_sink(self, channel: Channel) -> Callable[[rw.DataChannelState], None]:
         def sink(state: rw.DataChannelState) -> None:
-            if state == rw.DataChannelState.Open:
-                self._mark_channel_open(channel)
+            self._set_channel_open(channel, state == rw.DataChannelState.Open)
 
         return sink
 
-    def _mark_channel_open(self, channel: Channel) -> None:
+    def _set_channel_open(self, channel: Channel, is_open: bool) -> None:
+        """Record whether *channel* is open right now.
+
+        Readiness follows the channel's current state rather than latching on
+        its first open, so a channel that opens and closes again before the
+        peer connection reports itself connected does not count toward a wire
+        that can no longer carry frames.
+        """
         with self._ready_lock:
             if channel is Channel.CONTROL:
-                self._control_open = True
+                self._control_open = is_open
             else:
-                self._data_open = True
+                self._data_open = is_open
             self._fire_connected_if_ready()
 
     def _fire_connected_if_ready(self) -> None:

@@ -125,9 +125,16 @@ class _FakeChannel:
 
     def open(self) -> None:
         """Move the channel to Open through its transition callback."""
-        self._state = rw.DataChannelState.Open
+        self._transition(rw.DataChannelState.Open)
+
+    def close(self) -> None:
+        """Move the channel to Closed through its transition callback."""
+        self._transition(rw.DataChannelState.Closed)
+
+    def _transition(self, state: Any) -> None:
+        self._state = state
         assert self._on_state_change is not None
-        self._on_state_change(self._state)
+        self._on_state_change(state)
 
 
 def _video_bundle(
@@ -1505,6 +1512,24 @@ async def test_connected_fires_only_once() -> None:
     peer._on_data_channel(cast(Any, _FakeChannel("control")))
     peer._on_connection_state_change(rw.PeerConnectionState.Connected)
     peer._on_connection_state_change(rw.PeerConnectionState.Connected)
+    data.open()
+    await _settle()
+
+    assert fired == [1]
+
+
+async def test_a_channel_that_closed_again_before_the_peer_connected_does_not_count() -> None:
+    """Readiness follows the channel's current state, not its first open."""
+    peer, fired = _connecting_peer()
+    data = _FakeChannel("data")
+
+    peer._on_data_channel(cast(Any, data))
+    peer._on_data_channel(cast(Any, _FakeChannel("control")))
+    data.close()
+    peer._on_connection_state_change(rw.PeerConnectionState.Connected)
+    await _settle()
+    assert fired == []
+
     data.open()
     await _settle()
 
