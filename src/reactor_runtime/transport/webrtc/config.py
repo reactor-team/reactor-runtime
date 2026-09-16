@@ -166,6 +166,18 @@ class WebRtcConfig:
             ICE is closed and its slot freed once this passes, so a stalled or
             hostile half-open offer cannot hold a slot against ``max_connections``
             for the process's life. ``0`` or less disables the deadline.
+        warp: Whether to accelerate connection setup with the WARP opt-ins,
+            SNAP (draft-hancke-tsvwg-snap) and SPED (draft-hancke-webrtc-sped).
+            SNAP mirrors the offer's SCTP INIT parameters so the data channel
+            skips the cookie exchange; SPED carries the DTLS handshake inside
+            the ICE binding requests. Both take effect only when the peer asks
+            for them, and a peer that does not gets the ordinary handshake, so
+            this is safe to leave on against any client.
+
+            SNAP is per connection. SPED is process-wide: libwebrtc reads it
+            from the media engine's environment, and the engine is built once
+            on the first connection, so the first connection's value is the
+            one the process keeps.
     """
 
     ice_servers: tuple[IceServer, ...] = ()
@@ -191,3 +203,4 @@ class WebRtcConfig:
     ice_gathering_timeout_ms: int = 3000
     max_connections: int = 64
     negotiation_timeout: float = 30.0
+    warp: bool = True

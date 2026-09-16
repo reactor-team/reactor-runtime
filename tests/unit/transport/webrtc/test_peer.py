@@ -27,6 +27,7 @@ from reactor_runtime.core.values import (  # noqa: E402
     TrackKind,
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion  # noqa: E402
+from reactor_runtime.transport.webrtc import peer as peer_module  # noqa: E402
 from reactor_runtime.transport.webrtc.config import (  # noqa: E402
     IceServer,
     IceTransportPolicy,
@@ -843,6 +844,49 @@ def test_build_rtc_config_maps_port_range() -> None:
 def test_build_rtc_config_leaves_port_range_at_default_when_unset() -> None:
     rtc = _build_rtc_config(WebRtcConfig())
     assert (rtc.min_port, rtc.max_port) == (0, 0)
+
+
+# ── WARP ─────────────────────────────────────────────────────────────────────
+
+
+def test_build_rtc_config_asks_for_snap_by_default() -> None:
+    assert _build_rtc_config(WebRtcConfig()).sctp_snap is True
+
+
+def test_build_rtc_config_leaves_snap_off_when_warp_is_off() -> None:
+    assert _build_rtc_config(WebRtcConfig(warp=False)).sctp_snap is False
+
+
+def _record_factory_builds(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+    """Point the peer at a recording builder, returning the SPED flags it is handed."""
+    recorded: list[bool] = []
+
+    class _Builder:
+        def with_dtls_in_stun(self, enabled: bool) -> None:
+            recorded.append(enabled)
+
+        def build(self) -> object:
+            return SimpleNamespace()
+
+    monkeypatch.setattr(peer_module, "_factory", None)
+    monkeypatch.setattr(peer_module.rw, "PeerConnectionFactoryBuilder", _Builder)
+    return recorded
+
+
+@pytest.mark.parametrize("warp", [True, False])
+def test_get_factory_carries_warp_into_sped(monkeypatch: pytest.MonkeyPatch, warp: bool) -> None:
+    recorded = _record_factory_builds(monkeypatch)
+    peer_module._get_factory(WebRtcConfig(warp=warp))
+    assert recorded == [warp]
+
+
+def test_get_factory_builds_the_engine_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The engine is process-wide, so the first connection's WARP setting is the one that sticks."""
+    recorded = _record_factory_builds(monkeypatch)
+    first = peer_module._get_factory(WebRtcConfig(warp=True))
+    second = peer_module._get_factory(WebRtcConfig(warp=False))
+    assert first is second
+    assert recorded == [True]
 
 
 # ── Trickle ICE ──────────────────────────────────────────────────────────────
