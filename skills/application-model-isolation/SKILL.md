@@ -9,9 +9,9 @@ A `ReactorApp` is driven by the runtime one step at a time. A step is three
 calls in a fixed order, and the middle one is a different kind of code from the
 other two.
 
-- `process_input(state, media)` is **application** code. It knows about the
-  client: the state a client set, the frames a client sent, whether a step
-  should happen at all.
+- `process_input()` is **application** code. It reads `self.state` and the
+  media tracks, and it knows about the client: the state a client set, the
+  frames a client sent, whether a step should happen at all.
 - `generate(input)` is **model** code. It knows about weights, a cache, a
   rollout, and nothing else.
 - `process_output(outcome)` is **application** code again. It knows what the
@@ -201,11 +201,11 @@ that applies it, and the id alone continues the world after that.
 
 ```python
 # waypoint.py
-new_seed = state._seed_id != state._applied_seed_id
+new_seed = self.state._seed_id != self.state._applied_seed_id
 return WaypointInput(
     ...,
-    seed=state._seed if new_seed else None,
-    seed_id=state._seed_id,
+    seed=self.state._seed if new_seed else None,
+    seed_id=self.state._seed_id,
 )
 
 # waypoint_model.py
@@ -259,10 +259,10 @@ The model is not called, the reason is logged, and the loop asks again. A
 refusal is a fact about the client: paused, no seed yet, waiting for frames.
 
 ```python
-async def process_input(self, state: WaypointState, media: None) -> WaypointInput:
-    if state.paused:
+async def process_input(self) -> WaypointInput:
+    if self.state.paused:
         raise ApplicationError("paused")
-    if state._seed is None:
+    if self.state._seed is None:
         raise ApplicationError("no seed image")
     ...
 ```
@@ -442,7 +442,7 @@ Ask one question: could a client observe it?
 
 | The line | Half | Where |
 | --- | --- | --- |
-| `if state.paused` | application | `process_input()` |
+| `if self.state.paused` | application | `process_input()` |
 | `if self.index >= self.WINDOW` | model | `generate()` |
 | reading four frames off a track | application | `process_input()` |
 | encoding those frames into latents | model | `generate()` |

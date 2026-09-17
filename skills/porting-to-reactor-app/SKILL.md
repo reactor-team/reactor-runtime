@@ -102,10 +102,10 @@ while self.state._paused:
     yield Idle
 
 # after
-async def process_input(self, state: WaypointState, media: None) -> WaypointInput:
-    if state.paused:
+async def process_input(self) -> WaypointInput:
+    if self.state.paused:
         raise ApplicationError("paused")
-    if state._seed is None:
+    if self.state._seed is None:
         raise ApplicationError("no seed image")
     return WaypointInput(...)
 ```
@@ -113,7 +113,7 @@ async def process_input(self, state: WaypointState, media: None) -> WaypointInpu
 Then build the step input. It is a dataclass you write, carrying exactly what
 one step needs: the controls, the prompt, the frames read off a track with
 `try_read()`, the seed. Reading a track belongs here and nowhere else: a
-`media.webcam.try_read(4)` that returns `None` is another refusal.
+`self.media.webcam.try_read(4)` that returns `None` is another refusal.
 
 Two things change shape on the way:
 
@@ -445,12 +445,12 @@ class New(ReactorApp):
         self.engine = OldModel()
         self.engine.load(config_path)
 
-    async def process_input(self, state: NewState, media: None) -> OldInput:
-        if state.paused:
+    async def process_input(self) -> OldInput:
+        if self.state.paused:
             raise ApplicationError("paused")
-        if not state.prompt:
+        if not self.state.prompt:
             raise ApplicationError("no prompt set")
-        return OldInput(prompt=state.prompt)
+        return OldInput(prompt=self.state.prompt)
 
     def generate(self, input: OldInput) -> OldResult:
         return self.engine.generate(input)
