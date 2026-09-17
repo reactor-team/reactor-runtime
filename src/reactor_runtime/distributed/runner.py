@@ -212,11 +212,10 @@ class DistributedRunner:
             if remaining <= 0:
                 self._healthy = False
                 raise WorkerTimeout(f"{what}: no answer from every rank within {timeout}s")
-            self._check_alive(what)
             try:
                 messages.append(self._outbox.get(timeout=min(remaining, _LIVENESS_POLL)))
             except queue.Empty:
-                continue
+                self._check_alive(what, messages)
         return messages
 
     def _decide(self, answers: list[Any], what: str) -> Answer:
@@ -225,23 +224,46 @@ class DistributedRunner:
         failed = [answer for answer in answers if answer.error is not None]
         if not failed:
             return answers[0]
-        if len(failed) == len(answers):
-            # Every rank raised on the same input: the model's own deterministic
-            # error. The group is intact and the caller may recover.
+        if len(failed) == len(answers) and len({_signature(a.error) for a in failed}) == 1:
+            # Every rank raised the same error on the same input: the model's
+            # own deterministic raise. The group is intact and the caller may
+            # recover.
             raise failed[0].error
         self._healthy = False
         first = failed[0]
+        others = len(answers) - len(failed)
+        reason = (
+            f"{others} rank(s) did not"
+            if others
+            else "other ranks raised something else: "
+            + ", ".join(f"rank {a.rank} {type(a.error).__name__}" for a in failed[1:])
+        )
         raise RankDesync(
-            f"{what}: rank {first.rank} raised {type(first.error).__name__} while "
-            f"{len(answers) - len(failed)} rank(s) did not; the group refuses further calls"
+            f"{what}: rank {first.rank} raised {type(first.error).__name__} while {reason}; "
+            "the group refuses further calls"
         ) from first.error
 
-    def _check_alive(self, what: str) -> None:
-        for rank, proc in enumerate(self._procs):
-            if not proc.is_alive():
+    def _check_alive(self, what: str, messages: list[Any]) -> None:
+        """Raise ``WorkerCrashed`` for a dead rank that has not answered this call.
+
+        A rank that answered and then exited (a ``load()`` that raised, say)
+        has its answer on the outbox, not a crash; that answer is drained here
+        first so the caller receives it instead of ``WorkerCrashed``.
+        """
+        dead = [rank for rank, proc in enumerate(self._procs) if not proc.is_alive()]
+        if not dead:
+            return
+        while True:
+            try:
+                messages.append(self._outbox.get_nowait())
+            except queue.Empty:
+                break
+        answered = {getattr(message, "rank", None) for message in messages}
+        for rank in dead:
+            if rank not in answered:
                 self._healthy = False
                 raise WorkerCrashed(
-                    f"{what}: rank {rank} exited with code {proc.exitcode}; "
+                    f"{what}: rank {rank} exited with code {self._procs[rank].exitcode}; "
                     "its stderr has the faulthandler trace"
                 )
 
@@ -250,6 +272,11 @@ class DistributedRunner:
             raise RuntimeError("start() has not run")
         if self._shutdown_done or not self._healthy:
             raise RuntimeError("the runner is unusable; shut it down and construct a new one")
+
+
+def _signature(error: Exception) -> tuple[type, str]:
+    """What makes two ranks' errors the same error: the type and the arguments."""
+    return type(error), repr(error.args)
 
 
 def _picklable(load_kwargs: dict[str, Any]) -> dict[str, Any]:
