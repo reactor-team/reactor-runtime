@@ -29,7 +29,7 @@ set while a session has started and at least one client is connected; a
 ``run()`` waits on it and checks it between units of work.
 
 The default ``run()`` is the step loop. Each turn takes the step lock and calls
-``prepare_step()``, ``generate()``, and ``collect_step()`` in that order, then
+``process_input()``, ``generate()``, and ``process_output()`` in that order, then
 emits the media the step produced. An author who needs a different loop
 overrides ``run()``. That replaces the loop and only the loop: the dispatch
 layer above stays, and the three hooks are never called for that class.
@@ -86,8 +86,8 @@ class ReactorApp(ReactorCore):
     """Base class an author subclasses to define the application the runtime drives.
 
     Write ``generate()`` and the runtime drives it one step at a time. Override
-    ``prepare_step()`` to refuse a step or shape what the model gets, and
-    ``collect_step()`` to turn the model's result into media and messages.
+    ``process_input()`` to refuse a step or shape what the model gets, and
+    ``process_output()`` to turn the model's result into media and messages.
     Decorate methods with ``@event`` to expose commands, and with the lifecycle
     decorators to hook session and connection events — ``@session_started`` is
     the hook for once-per-session initialization. Declaring the subclass
@@ -151,7 +151,7 @@ class ReactorApp(ReactorCore):
 
     # -- the step, three calls ------------------------------------------------
 
-    async def prepare_step(self, state: Any, media: Any, /) -> Any:
+    async def process_input(self, state: Any, media: Any, /) -> Any:
         """Decide whether a step can happen now and what the model gets.
 
         The application half of a step. Read *state*, drain *media* with
@@ -172,18 +172,18 @@ class ReactorApp(ReactorCore):
         """
         return state
 
-    def generate(self, step_input: Any, /) -> Any:
+    def generate(self, input: Any, /) -> Any:
         """Run one step of inference.
 
         The model half of a step. Synchronous; blocking GPU work is expected.
         Reads its argument and its own attributes, never ``self.state`` or the
         media tracks. Returns the step result, an :class:`Output` when the
-        default ``collect_step()`` is used, or raises the model's own exception
+        default ``process_output()`` is used, or raises the model's own exception
         when the step is invalid for the model. A raise is not a refusal;
-        refusing is :class:`ApplicationError` in :meth:`prepare_step`.
+        refusing is :class:`ApplicationError` in :meth:`process_input`.
 
         Args:
-            step_input: What :meth:`prepare_step` returned.
+            input: What :meth:`process_input` returned.
 
         Returns:
             The step result. The type is the author's.
@@ -193,7 +193,7 @@ class ReactorApp(ReactorCore):
             "the model with its own loop."
         )
 
-    async def collect_step(self, outcome: StepOutcome, /) -> Output | None:
+    async def process_output(self, outcome: StepOutcome, /) -> Output | None:
         """Turn what ``generate()`` did into what the client receives.
 
         The application half again. Receives the :class:`StepOutcome` the
@@ -220,7 +220,7 @@ class ReactorApp(ReactorCore):
 
         The default re-raises, so a model whose ``generate()`` fails ends the
         session loudly instead of serving a dead model in silence. A refusal is
-        not a failure: :class:`ApplicationError` from :meth:`prepare_step` never
+        not a failure: :class:`ApplicationError` from :meth:`process_input` never
         reaches this method.
 
         Args:
@@ -255,11 +255,11 @@ class ReactorApp(ReactorCore):
         compares the number of drops, not the gate's current value.
 
         Raises:
-            Exception: Whatever :meth:`collect_step` raised, which by default is
+            Exception: Whatever :meth:`process_output` raised, which by default is
                 the error :meth:`generate` raised. It ends the model loop: the
                 runtime reports the crash, ends the session with an error, and
                 does not start the loop again. A model that expects an error
-                recovers from it in :meth:`collect_step` instead.
+                recovers from it in :meth:`process_output` instead.
         """
         fps_pinned = _fps_is_author_pinned(type(self))
         last_refusal: str | None = None
@@ -275,14 +275,14 @@ class ReactorApp(ReactorCore):
                     await self._step_requested.wait()
                     self._step_requested.clear()
 
-                    # The step lock is held from the first line of prepare_step()
-                    # to the return of collect_step(). Both hooks are async and
+                    # The step lock is held from the first line of process_input()
+                    # to the return of process_output(). Both hooks are async and
                     # may await; the lock is what stops a handler from landing in
                     # one of those gaps.
                     async with self._step_lock:
                         # 2. The application gate.
                         try:
-                            step_input = await self.prepare_step(self.state, self._media_holder)
+                            input = await self.process_input(self.state, self._media_holder)
                         except ApplicationError as refused:
                             # One record per change of reason, not one per turn.
                             reason = f"{type(refused).__name__}: {refused}"
@@ -302,7 +302,7 @@ class ReactorApp(ReactorCore):
                             #    built.
                             started = time.perf_counter()
                             try:
-                                result = self.generate(step_input)
+                                result = self.generate(input)
                             except Exception as error:
                                 outcome = StepOutcome(
                                     error=error, elapsed=time.perf_counter() - started
@@ -315,7 +315,7 @@ class ReactorApp(ReactorCore):
                             # 4. The application collects the outcome into media,
                             #    sends its messages, or recovers. A raise ends the
                             #    loop.
-                            media = await self.collect_step(outcome)
+                            media = await self.process_output(outcome)
 
                     # 5. Emit outside the lock, so a handler can run while the
                     #    wire is full.
