@@ -38,6 +38,10 @@ _JOIN_GRACE = 5.0
 class DistributedRunner:
     """Start N ranks of one worker class and drive them in lockstep.
 
+    Every rank receives the same requests in the same order, so the
+    collectives inside a sharded model line up. Rank 0's result is the one
+    returned; ranks 1 to N-1 answer with success or an error and no payload.
+
     Args:
         worker_cls: A class with ``load()``, ``generate()``, and ``reset()``
             and a no-argument constructor. Constructed in each rank's process,
@@ -49,6 +53,9 @@ class DistributedRunner:
         call_timeout: Seconds a ``generate()`` or ``reset()`` may take before
             it is treated as a hang.
         start_timeout: Seconds ``start()`` waits for every rank to load.
+        init_process_group: Form the ``torch.distributed`` group in each rank
+            when ``world_size > 1``. Leave on; off is for protocol tests that
+            run ranks without torch.
     """
 
     def __init__(
@@ -59,6 +66,7 @@ class DistributedRunner:
         load_kwargs: dict[str, Any] | None = None,
         call_timeout: float = 30.0,
         start_timeout: float = 3600.0,
+        init_process_group: bool = True,
     ) -> None:
         check_shape(worker_cls)
         if type(world_size) is not int or world_size < 1:
@@ -68,6 +76,7 @@ class DistributedRunner:
         self._world_size = world_size
         self._call_timeout = call_timeout
         self._start_timeout = start_timeout
+        self._init_process_group = init_process_group
         self._ctx = multiprocessing.get_context("spawn")
         self._inboxes: list[Any] = []
         self._outbox: Any = None
@@ -119,6 +128,7 @@ class DistributedRunner:
                         self._inboxes[rank],
                         self._outbox,
                         level,
+                        self._init_process_group,
                     ),
                     daemon=True,
                 )

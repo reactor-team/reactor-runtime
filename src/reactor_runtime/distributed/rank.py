@@ -1,9 +1,10 @@
 """What one rank's process does: set up, construct the worker, answer requests.
 
 All of it belongs to the runner. The worker sees a configured process: the
-environment a ``torchrun`` launch would set, the current CUDA device, and the
-runtime logger. It then receives ``load(**load_kwargs)`` once and one call per
-request until :class:`~reactor_runtime.distributed.protocol.Shutdown`.
+environment a ``torchrun`` launch would set, the current CUDA device, the
+process group when there is more than one rank, and the runtime logger. It
+then receives ``load(**load_kwargs)`` once and one call per request until
+:class:`~reactor_runtime.distributed.protocol.Shutdown`.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ def rank_main(
     inbox: Any,
     outbox: Any,
     log_level: int,
+    init_process_group: bool,
 ) -> None:
     """Run one rank until it is told to shut down.
 
@@ -44,6 +46,8 @@ def rank_main(
         outbox: The queue every rank answers on.
         log_level: The parent's root log level. Ranks other than 0 log at
             WARNING or above, so N ranks do not write N copies of every line.
+        init_process_group: Form the ``torch.distributed`` group when
+            ``world_size > 1``. Off for protocol tests without torch.
     """
     configure_logging(
         level=log_level if rank == 0 else max(log_level, logging.WARNING), stream=sys.stderr
@@ -61,9 +65,13 @@ def rank_main(
 
     reader = SlotReader()
     result_slot: SharedSlot | None = None
+    group: Any = None
     loaded = False
+    clean_exit = False
     try:
         device = _bind_device(rank, world_size)
+        if init_process_group and world_size > 1:
+            group = _join_group(rank, world_size, device)
         worker = worker_cls()
         worker.rank = rank
         worker.world_size = world_size
@@ -86,6 +94,7 @@ def rank_main(
                 outbox.put(_reset(worker, rank, logger))
             else:
                 logger.warning("unknown request", rank=rank, request=repr(request))
+        clean_exit = True
     except Exception as exc:
         # A failure before Loaded is the parent's to raise. A failure after it
         # was answered on the request that caused it.
@@ -93,6 +102,13 @@ def rank_main(
             outbox.put(Answer(rank, error=portable(exc)))
         raise
     finally:
+        if group is not None and group.is_initialized():
+            # On a clean exit every rank is alive, so they meet at a barrier
+            # before the group is destroyed. On an error a peer may be dead and
+            # a barrier would wait forever, so the group is destroyed locally.
+            if clean_exit:
+                group.barrier()
+            group.destroy_process_group()
         if result_slot is not None:
             result_slot.close()
         reader.close()
@@ -135,6 +151,19 @@ def _reset(worker: Any, rank: int, logger: Any) -> Answer:
         logger.exception("reset failed", rank=rank)
         return Answer(rank, error=portable(exc))
     return Answer(rank)
+
+
+def _join_group(rank: int, world_size: int, device: str) -> Any:
+    """Form the process group over ``env://``, which reads the five variables set above."""
+    try:
+        import torch.distributed as group  # ty: ignore[unresolved-import]  # model image only
+    except ImportError as exc:
+        raise RuntimeError(
+            "world_size > 1 needs torch in the worker's environment to form the process group"
+        ) from exc
+    backend = "nccl" if device.startswith("cuda") else "gloo"
+    group.init_process_group(backend, init_method="env://", rank=rank, world_size=world_size)
+    return group
 
 
 def _bind_device(rank: int, world_size: int) -> str:
