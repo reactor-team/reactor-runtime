@@ -23,7 +23,7 @@ import yaml
 
 
 @dataclass(frozen=True)
-class WaypointStepInput:
+class WaypointInput:
     """What one step needs.
 
     Attributes:
@@ -46,7 +46,7 @@ class WaypointStepInput:
 
 
 @dataclass(frozen=True)
-class WaypointStepResult:
+class WaypointResult:
     """What one step produced.
 
     Attributes:
@@ -103,17 +103,17 @@ class WaypointModel:
         self.reset()
         self._warmup(int(config.get("warmup_steps", 0)))
 
-    def generate(self, step: WaypointStepInput) -> WaypointStepResult:
+    def generate(self, input: WaypointInput) -> WaypointResult:
         """Run one step of the world.
 
-        Applies ``step.seed`` first when ``step.seed_id`` is not the seed this
+        Applies ``input.seed`` first when ``input.seed_id`` is not the seed this
         model last applied: the cache is cleared and the seed frame becomes the
         world's first frame. Then generates four frames from the controls. The
         result reports the seed the world holds, so the application knows when
         to send the next one.
 
         Args:
-            step: The controls and the seed for this step.
+            input: The controls and the seed for this step.
 
         Returns:
             The four frames and the step's index within the current world.
@@ -126,23 +126,23 @@ class WaypointModel:
             raise RuntimeError("load() has not run")
         torch, _, ctrl_input = _backend()
 
-        if step.seed_id != self.seed_id:
-            if step.seed is None:
+        if input.seed_id != self.seed_id:
+            if input.seed is None:
                 raise NotSeeded("no seed frame to start a world from")
             self.engine.reset()
-            seed_x4 = torch.from_numpy(np.repeat(step.seed[None], 4, axis=0))
+            seed_x4 = torch.from_numpy(np.repeat(input.seed[None], 4, axis=0))
             self.engine.append_frame(seed_x4)
-            self.seed_id = step.seed_id
+            self.seed_id = input.seed_id
             self.index = 0
 
         ctrl = ctrl_input(
-            button=set(step.buttons), mouse=step.mouse, scroll_wheel=step.scroll_wheel
+            button=set(input.buttons), mouse=input.mouse, scroll_wheel=input.scroll_wheel
         )
         with torch.no_grad():
             frames = self.engine.gen_frame(ctrl=ctrl).cpu().numpy()
         index = self.index
         self.index += 1
-        return WaypointStepResult(frames=frames, index=index, seed_id=step.seed_id)
+        return WaypointResult(frames=frames, index=index, seed_id=input.seed_id)
 
     def reset(self) -> None:
         """Return to the default state: no world, no seed, index at zero."""
