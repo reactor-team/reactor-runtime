@@ -13,7 +13,7 @@ class StepOutcome:
     """What ``generate()`` did on one step.
 
     Built by the runtime from ``generate()``'s return value or from the
-    exception it raised, and passed to ``collect_step()``. When :attr:`error`
+    exception it raised, and passed to ``process_output()``. When :attr:`error`
     is set, :attr:`result` is ``None``. A ``None`` :attr:`result` with no
     :attr:`error` is a step that ran and produced nothing. Author code reads it
     and never creates it.
@@ -45,9 +45,9 @@ class StepOutcome:
         """Read the result as track media.
 
         Only an :class:`Output` qualifies; nothing is wrapped or guessed. A bare
-        array, a dataclass, or a tuple is not media until ``collect_step()``
+        array, a dataclass, or a tuple is not media until ``process_output()``
         says which track it goes on. An outcome that holds an error has no
-        media to read, so the error is raised: a ``collect_step()`` that calls
+        media to read, so the error is raised: a ``process_output()`` that calls
         this without checking :attr:`error` first does not swallow the model's
         exception.
 
@@ -69,5 +69,5 @@ class StepOutcome:
         raise NotImplementedError(
             f"generate() returned {type(self.result).__name__}, which is not a compatible "
             "output. Either return an Output subclass from generate(), or override "
-            "collect_step() and map outcome.result into one explicitly."
+            "process_output() and map outcome.result into one explicitly."
         )
