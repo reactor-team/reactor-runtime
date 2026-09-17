@@ -252,14 +252,14 @@ async def test_process_input_refuses_while_paused() -> None:
     app.state._seed = _SEED
     app.state.paused = True
     with pytest.raises(ApplicationError, match="paused"):
-        await app.process_input(app.state, None)
+        await app.process_input()
 
 
 async def test_process_input_refuses_before_a_seed() -> None:
     app, _, _ = _app()
     await app._dispatch_reactor_event(SessionStarted("s"))
     with pytest.raises(ApplicationError, match="no seed image"):
-        await app.process_input(app.state, None)
+        await app.process_input()
 
 
 async def test_process_input_builds_the_input_from_the_state() -> None:
@@ -270,7 +270,7 @@ async def test_process_input_builds_the_input_from_the_state() -> None:
     app.state.action = "back"
     app.state.mouse_x = 0.5
     app.state.scroll_wheel = -1
-    input = await app.process_input(app.state, None)
+    input = await app.process_input()
     assert input.buttons == frozenset({0x53})
     assert input.mouse == (0.5, 0.0)
     assert input.scroll_wheel == -1
@@ -284,22 +284,22 @@ async def test_the_seed_rides_on_the_input_only_until_the_model_holds_it() -> No
     app.state._seed = _SEED
     app.state._seed_id = 1
 
-    first = await app.process_input(app.state, None)
+    first = await app.process_input()
     assert first.seed is _SEED
     await app.process_output(StepOutcome(result=app.generate(first)))
     assert app.state._applied_seed_id == 1
 
-    second = await app.process_input(app.state, None)
+    second = await app.process_input()
     assert second.seed is None
     assert second.seed_id == 1
 
     # A new upload is a new id; a reset forgets what the model held.
     app.state._seed_id = 2
-    assert (await app.process_input(app.state, None)).seed is _SEED
+    assert (await app.process_input()).seed is _SEED
     app.state._applied_seed_id = 2
     app.reset()
     assert model.resets == 1
-    assert (await app.process_input(app.state, None)).seed is _SEED
+    assert (await app.process_input()).seed is _SEED
 
 
 async def test_generate_forwards_to_the_model_half() -> None:
