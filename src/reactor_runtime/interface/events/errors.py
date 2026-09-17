@@ -39,7 +39,7 @@ class CommandError(Exception):
 
 
 class ApplicationError(Exception):
-    """Raise from ``prepare_step()`` to refuse the step.
+    """Raise from ``process_input()`` to refuse the step.
 
     The application is not ready for a step: it is paused, a required input has
     not arrived, a prompt is not set. The model is not called, the reason is

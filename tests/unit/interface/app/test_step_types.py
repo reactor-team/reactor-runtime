@@ -66,7 +66,7 @@ def test_to_output_refuses_anything_else_by_name(result: object) -> None:
         StepOutcome(result=result).to_output()
     message = str(excinfo.value)
     assert "return an Output subclass from generate()" in message
-    assert "override collect_step()" in message
+    assert "override process_output()" in message
 
 
 def test_to_output_raises_the_error_the_outcome_holds() -> None:
