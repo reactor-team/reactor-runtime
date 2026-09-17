@@ -133,9 +133,10 @@ Two things change shape on the way:
 Take the engine calls out of the loop and put them in a plain class with
 `load()`, `generate()`, and `reset()`. It imports nothing from
 `reactor_runtime`. The app constructs it in `load()` and holds it under an
-ordinary attribute name, `self.engine` in the example. Do not name it `model`
-or `state`: `state` is the typed state the runtime owns, and a later release
-reserves `model`.
+ordinary attribute name, `self.engine` in the example. Do not name it
+`state`, which is the typed state the runtime owns. The same attribute later
+holds a `DistributedRunner` around the class when the model needs its own
+process, and nothing else on the app changes.
 
 If the old pipeline resolved its checkpoint paths under `get_weights_path()`,
 that call moves to the application's `load()` and its result becomes the

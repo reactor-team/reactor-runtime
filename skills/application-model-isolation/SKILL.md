@@ -47,8 +47,9 @@ class WaypointModel:
 
 The application constructs it in its own `load()` and holds it under an
 ordinary attribute name. The example uses `self.engine`. Do not name it
-`model` or `state`: `state` is the typed state the runtime owns, and a later
-release reserves `model`.
+`state`, which is the typed state the runtime owns. The same attribute holds
+a `DistributedRunner` around the class when the model needs its own process
+or one process per GPU; `generate()` does not change.
 
 ```python
 # waypoint.py
@@ -85,19 +86,22 @@ Four things a larger model adds to this rule:
   ```
 
   The constructor takes nothing. A model that fetches its weights elsewhere,
-  as Waypoint does from Hugging Face, leaves the parameter out. Keep the
-  signature exactly `load(config_path)` or `load(config_path, weights_root)`:
-  a later release constructs the model half itself and makes this call,
-  passing `weights_root` to a `load()` that declares it. Any other file the
-  config names by a relative path resolves against `config_path.parent`, not
-  the working directory. The same rule covers anything else only the runtime
-  knows: it enters the model half as an argument, never as an import.
-- **A spawned worker is the one place the model side touches the runtime.**
-  A model that spawns processes (a multi-GPU pipeline) configures the
-  runtime's logger at the top of each worker, because a spawned interpreter
-  starts with no logging configured and its records would be lost. That
-  import lives in the worker module, never in the model class, and it is
-  the whole exception.
+  as Waypoint does from Hugging Face, leaves the parameter out. Keep
+  `load()`'s arguments to values that pickle, paths and scalars: the
+  runtime's `DistributedRunner` constructs the model half in its own process
+  and calls `load(**load_kwargs)` with exactly what the application passed,
+  so `self.engine = DistributedRunner(MyModel, load_kwargs={"config_path":
+  config_path, "weights_root": get_weights_path()})` is the same call made
+  from another process. Any other file the config names by a relative path
+  resolves against `config_path.parent`, not the working directory. The same
+  rule covers anything else only the runtime knows: it enters the model half
+  as an argument, never as an import.
+- **The model half spawns nothing.** A model that needs its own process, or
+  one process per GPU, is handed to `DistributedRunner` by the application;
+  the runner owns the processes, the wire between them, and the logger in
+  each child. A model half that spawns its own workers has taken on the
+  runner's job, and the one runtime import that would need (the logger, at
+  the top of each worker) is the sign it has.
 
 ### 2. `generate()` on the app is one line, written by hand
 
