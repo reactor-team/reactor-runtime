@@ -129,9 +129,16 @@ python-version = "3.12"
 # pytest's pythonpath makes them importable; the WebRTC test directory, so
 # its tests can import their sibling `conftest` for the shared peer fakes; and
 # the contract suite, so its tests can import their sibling `contract_helpers`;
-# and the waypoint example, whose two modules import each other as top-level
+# and each example workspace, whose two modules import each other as top-level
 # names, the way the runtime imports a workspace.
-extra-paths = [".", "examples/waypoint", "tests/unit/transport/webrtc", "tests/contract"]
+extra-paths = [
+    ".",
+    "examples/starter",
+    "examples/echo",
+    "examples/waypoint",
+    "tests/unit/transport/webrtc",
+    "tests/contract",
+]
 
 [tool.ty.src]
 # Check the package, its tests, and the example models; scripts/ ships developer

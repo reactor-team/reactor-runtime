@@ -132,7 +132,9 @@ Not on macOS, or pinning a release in CI? See [Install the CLI](https://docs.rea
 - [Quickstart](https://docs.reactor.inc/deploy/development/overview): from zero to a streaming model in 2 minutes
 - [Model anatomy](https://docs.reactor.inc/deploy/development/reactor-app/model-anatomy): every member of a `ReactorApp`, line by line
 - [The step loop](https://docs.reactor.inc/deploy/development/reactor-app/step-loop): `process_input()`, `generate()`, `process_output()`, and the frame rate
-- [Waypoint example](./examples/waypoint/README.md): a world model split into an application half and a model half, on the step loop
+- [Starter example](./examples/starter/README.md): the model `reactor init` scaffolds: one class, `generate()` alone, the smallest complete `ReactorApp`
+- [Echo example](./examples/echo/README.md): the client's webcam and microphone in, an effect applied, both sent back, in batches
+- [Waypoint example](./examples/waypoint/README.md): a world model on a GPU, seeded from an upload and steered live
 
 ## Development
 

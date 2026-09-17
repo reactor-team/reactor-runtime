@@ -5,19 +5,23 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pytest
 
-from examples.brightness.brightness import Brightness, BrightnessState
 from reactor_runtime import (
+    Audio,
+    CommandError,
     InputField,
     InputState,
+    MessageField,
+    ModelMessage,
     Output,
     ReactorApp,
+    UploadedFile,
     Video,
     event,
     session_ended,
@@ -33,6 +37,7 @@ from reactor_runtime.core.model import (
 from reactor_runtime.core.values import ConnId
 from reactor_runtime.interface.internal.reactor_core import CommandEnvelope
 from reactor_runtime.interface.model.contract import ModelContract
+from reactor_runtime.interface.pipeline import Idle, ReactorPipeline
 
 _GOLDEN = Path(__file__).parent / "golden" / "brightness_openapi.json"
 
@@ -185,6 +190,106 @@ async def test_a_setter_with_no_live_state_is_a_no_op() -> None:
 
 
 # -- schema pin ---------------------------------------------------------------
+#
+# The golden file is the OpenAPI document this pipeline rendered on 3.3.2,
+# where the state feature lived on ReactorPipeline. The class is kept here,
+# verbatim, so the pin keeps its meaning: the same declarations render the
+# same bytes from ReactorPipeline and from ReactorApp.
+
+
+class BrightnessOutput(Output):
+    """The generated video and the matching audio tone."""
+
+    main_video: Video
+    main_audio: Audio
+
+
+class BrightnessSnapshot(ModelMessage):
+    """The live generation parameters, returned when a client asks for them."""
+
+    brightness: float = MessageField(description="Active brightness multiplier.")
+    paused: bool = MessageField(description="Whether frame generation is paused.")
+    resolution: str = MessageField(description="Active output resolution.")
+    text: str = MessageField(description="Caption currently drawn over each frame.")
+
+
+class BrightnessSet(ModelMessage):
+    """Confirmation that the brightness was applied, echoing the value in effect."""
+
+    brightness: float = MessageField(description="Brightness multiplier now in effect.")
+
+
+class ImageSet(ModelMessage):
+    """Acknowledgement that an uploaded reference image was accepted."""
+
+    filename: str = MessageField(description="Name of the image now in effect.")
+
+
+class BrightnessState(InputState):
+    """The generation parameters a client can change live.
+
+    Each public field becomes a ``set_<field>`` command automatically, so a
+    client drives the look and pitch without the model declaring any handler.
+    """
+
+    brightness: float = InputField(
+        default=1.0, ge=0.0, le=2.0, description="Brightness multiplier (0=black, 1=half, 2=white)."
+    )
+    paused: bool = InputField(default=False, description="Pause frame generation.")
+    resolution: str = InputField(
+        default="480p",
+        choices=["480p", "720p", "1080p", "2160p"],
+        description="Output resolution (2160p is 4K UHD).",
+    )
+    text: str = InputField(
+        default="",
+        max_length=200,
+        description="Caption drawn over every frame; empty draws nothing.",
+        moderate=True,
+    )
+
+
+class Brightness(ReactorPipeline):
+    """Generate an animated gradient and tone whose look and pitch track the state."""
+
+    state: BrightnessState
+    fps = 30
+    _reference: UploadedFile | None = None
+
+    def load(self, config_path: Path | None) -> None: ...
+
+    @event(name="get_state", description="Return the current generation parameters.")
+    def get_state(self) -> BrightnessSnapshot:
+        return BrightnessSnapshot(
+            brightness=self.state.brightness,
+            paused=self.state.paused,
+            resolution=self.state.resolution,
+            text=self.state.text,
+        )
+
+    @event(name="set_brightness", description="Set the brightness and confirm the value in effect.")
+    def set_brightness(
+        self,
+        brightness: float = InputField(
+            default=1.0,
+            ge=0.0,
+            le=2.0,
+            description="Brightness multiplier (0=black, 1=half, 2=white).",
+        ),
+    ) -> BrightnessSet:
+        self.state.brightness = brightness
+        return BrightnessSet(brightness=brightness)
+
+    @event(name="set_image", description="Set the reference image and acknowledge it.")
+    def set_image(self, image: UploadedFile = InputField(moderate=True)) -> ImageSet:
+        if not image.mime_type.startswith("image/"):
+            raise CommandError("unsupported_media", f"{image.name} is not an image.")
+        self._reference = image
+        return ImageSet(filename=image.name)
+
+    def inference(self) -> Iterator[Any]:
+        while True:
+            yield Idle
 
 
 def _openapi(model_cls: type) -> str:
@@ -198,9 +303,8 @@ def _openapi(model_cls: type) -> str:
 def test_the_brightness_pipeline_renders_the_pinned_document(
     register_model: Callable[[type], None],
 ) -> None:
-    # The golden file is the document examples/brightness rendered on 3.3.2,
-    # where the state feature lived on ReactorPipeline. Byte identity, not dict
-    # equality, so an ordering change in the render is caught too.
+    # Byte identity, not dict equality, so an ordering change in the render is
+    # caught too.
     register_model(Brightness)
     assert _openapi(Brightness) == _GOLDEN.read_text()
 

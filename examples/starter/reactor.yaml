@@ -1,0 +1,33 @@
+$schema: reactor/v1
+apiVersion: v1beta
+kind: VideoModel
+
+# `reactor build` / `reactor run` read this file: `model:` describes the model,
+# `runtime:` names the class to serve, the config file it reads, and the
+# weights it mounts, and `build:` defines the image every build produces.
+model:
+  name: starter
+  version: v0.1.0
+  description: |
+    The Reactor logo turning over coarse static. The image is the model's
+    weights; the spin speed, a pause, and the static's cadence are the client's.
+
+runtime:
+  import: starter:Starter
+  config: config.yaml
+  # The weights directory `get_weights_path()` resolves to on a local run. A
+  # deploy ships this directory with the release.
+  weights_path: ./weights
+  recording:
+    enabled: true
+    chunk_seconds: 4
+    clip_max_seconds: 300
+    video_track: main_video
+    video:
+      codec: h264
+      preset: veryfast
+      crf: 23
+
+build:
+  # Must match the `reactor-runtime==<version>` pin in requirements.txt.
+  runtime_version: "3.5.0"
