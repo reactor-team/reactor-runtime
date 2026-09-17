@@ -80,7 +80,7 @@ class Recording(ReactorApp):
 
 
 class OnlyGenerate(Recording):
-    def generate(self, step: State) -> Frame:
+    def generate(self, input: State) -> Frame:
         self.generated += 1
         return _frame()
 
@@ -163,20 +163,20 @@ async def test_the_default_generate_names_the_class_and_the_two_ways_out() -> No
         Empty().generate(None)
 
 
-# -- prepare_step -------------------------------------------------------------
+# -- process_input -------------------------------------------------------------
 
 
-async def test_prepare_step_receives_the_state_and_the_media_holder() -> None:
+async def test_process_input_receives_the_state_and_the_media_holder() -> None:
     seen: list[tuple[Any, Any]] = []
 
     class WithCamera(Recording):
         media: Camera
 
-        async def prepare_step(self, state: State, media: Camera) -> State:
+        async def process_input(self, state: State, media: Camera) -> State:
             seen.append((state, media))
             return state
 
-        def generate(self, step: State) -> Frame:
+        def generate(self, input: State) -> Frame:
             return _frame()
 
     app = WithCamera()
@@ -193,11 +193,11 @@ async def test_the_media_holder_is_none_when_no_tracks_are_declared() -> None:
     seen: list[Any] = []
 
     class NoCamera(Recording):
-        async def prepare_step(self, state: State, media: Any) -> State:
+        async def process_input(self, state: State, media: Any) -> State:
             seen.append(media)
             return state
 
-        def generate(self, step: State) -> Frame:
+        def generate(self, input: State) -> Frame:
             return _frame()
 
     app = NoCamera()
@@ -210,7 +210,7 @@ async def test_the_media_holder_is_none_when_no_tracks_are_declared() -> None:
 
 async def test_a_refused_step_never_reaches_generate_and_the_loop_asks_again() -> None:
     class Gated(OnlyGenerate):
-        async def prepare_step(self, state: State, media: Any) -> State:
+        async def process_input(self, state: State, media: Any) -> State:
             if state.paused:
                 raise ApplicationError("paused")
             return state
@@ -229,15 +229,15 @@ async def test_a_refused_step_never_reaches_generate_and_the_loop_asks_again() -
     await _stop(task)
 
 
-async def test_prepare_step_shapes_what_generate_gets() -> None:
+async def test_process_input_shapes_what_generate_gets() -> None:
     inputs: list[Any] = []
 
     class Mapped(Recording):
-        async def prepare_step(self, state: State, media: Any) -> str:
+        async def process_input(self, state: State, media: Any) -> str:
             return state.prompt.upper()
 
-        def generate(self, step: str) -> Frame:
-            inputs.append(step)
+        def generate(self, input: str) -> Frame:
+            inputs.append(input)
             return _frame()
 
     app = Mapped()
@@ -248,12 +248,12 @@ async def test_prepare_step_shapes_what_generate_gets() -> None:
     await _stop(task)
 
 
-# -- collect_step -------------------------------------------------------------
+# -- process_output -------------------------------------------------------------
 
 
 async def test_none_from_generate_runs_the_step_and_emits_nothing() -> None:
     class Quiet(Recording):
-        def generate(self, step: State) -> None:
+        def generate(self, input: State) -> None:
             self.generated += 1
             return
 
@@ -268,7 +268,7 @@ async def test_none_from_generate_runs_the_step_and_emits_nothing() -> None:
 
 async def test_an_error_from_generate_ends_the_loop_by_default() -> None:
     class Broken(Recording):
-        def generate(self, step: State) -> Frame:
+        def generate(self, input: State) -> Frame:
             raise RuntimeError("cannot step from here")
 
     app = Broken()
@@ -281,7 +281,7 @@ async def test_an_error_from_generate_ends_the_loop_by_default() -> None:
 
 async def test_a_result_that_is_not_an_output_ends_the_loop_by_name() -> None:
     class BareArray(Recording):
-        def generate(self, step: State) -> np.ndarray:
+        def generate(self, input: State) -> np.ndarray:
             return np.zeros((2, 2, 3), dtype=np.uint8)
 
     app = BareArray()
@@ -292,7 +292,7 @@ async def test_a_result_that_is_not_an_output_ends_the_loop_by_name() -> None:
         await asyncio.wait_for(task, timeout=1.0)
 
 
-async def test_collect_step_recovers_from_a_model_error_and_the_loop_goes_on() -> None:
+async def test_process_output_recovers_from_a_model_error_and_the_loop_goes_on() -> None:
     class RolloutExhausted(Exception):  # noqa: N818 (the model's own error, named for the state)
         pass
 
@@ -302,13 +302,13 @@ async def test_collect_step_recovers_from_a_model_error_and_the_loop_goes_on() -
             self.index = 0
             self.recoveries = 0
 
-        def generate(self, step: State) -> Frame:
+        def generate(self, input: State) -> Frame:
             if self.index >= 3:
                 raise RolloutExhausted(self.index)
             self.index += 1
             return _frame()
 
-        async def collect_step(self, outcome: StepOutcome) -> Output | None:
+        async def process_output(self, outcome: StepOutcome) -> Output | None:
             if isinstance(outcome.error, RolloutExhausted):
                 self.index = 0
                 self.recoveries += 1
@@ -327,12 +327,12 @@ async def test_collect_step_recovers_from_a_model_error_and_the_loop_goes_on() -
     await _stop(task)
 
 
-async def test_a_message_sent_in_collect_step_precedes_the_step_media() -> None:
+async def test_a_message_sent_in_process_output_precedes_the_step_media() -> None:
     class Announcing(Recording):
-        def generate(self, step: State) -> Frame:
+        def generate(self, input: State) -> Frame:
             return _frame()
 
-        async def collect_step(self, outcome: StepOutcome) -> Output | None:
+        async def process_output(self, outcome: StepOutcome) -> Output | None:
             await self.send(Restarted(reason="every step"))
             return outcome.to_output()
 
@@ -345,14 +345,14 @@ async def test_a_message_sent_in_collect_step_precedes_the_step_media() -> None:
     await _stop(task)
 
 
-async def test_collect_step_receives_the_elapsed_time_of_the_step() -> None:
+async def test_process_output_receives_the_elapsed_time_of_the_step() -> None:
     seen: list[StepOutcome] = []
 
     class Timed(Recording):
-        def generate(self, step: State) -> Frame:
+        def generate(self, input: State) -> Frame:
             return _frame()
 
-        async def collect_step(self, outcome: StepOutcome) -> Output | None:
+        async def process_output(self, outcome: StepOutcome) -> Output | None:
             seen.append(outcome)
             return outcome.to_output()
 
@@ -370,23 +370,23 @@ async def test_collect_step_receives_the_elapsed_time_of_the_step() -> None:
 
 
 async def test_a_handler_cannot_land_inside_a_step() -> None:
-    """A handler that arrives during an await inside prepare_step runs after collect_step."""
+    """A handler that arrives during an await inside process_input runs after process_output."""
     trace: list[str] = []
     inside_prepare = asyncio.Event()
     release_prepare = asyncio.Event()
 
     class Slow(Recording):
-        async def prepare_step(self, state: State, media: Any) -> State:
+        async def process_input(self, state: State, media: Any) -> State:
             trace.append("prepare")
             inside_prepare.set()
             await release_prepare.wait()
             return state
 
-        def generate(self, step: State) -> Frame:
+        def generate(self, input: State) -> Frame:
             trace.append("generate")
             return _frame()
 
-        async def collect_step(self, outcome: StepOutcome) -> Output | None:
+        async def process_output(self, outcome: StepOutcome) -> Output | None:
             trace.append("collect")
             return outcome.to_output()
 
@@ -398,7 +398,7 @@ async def test_a_handler_cannot_land_inside_a_step() -> None:
     _ready(app)
     await _go_live(app)
     task = asyncio.create_task(app.run())
-    await inside_prepare.wait()  # the loop is parked at the await inside prepare_step
+    await inside_prepare.wait()  # the loop is parked at the await inside process_input
     command = ModelContract.of(Slow).validate("poke", {})
     handler = asyncio.create_task(
         app._dispatch_command(CommandEnvelope(command, ConnId(1001), None))
@@ -465,7 +465,7 @@ async def test_state_is_in_place_before_the_first_step() -> None:
     seen: list[Any] = []
 
     class Peeking(OnlyGenerate):
-        async def prepare_step(self, state: State, media: Any) -> State:
+        async def process_input(self, state: State, media: Any) -> State:
             seen.append(state)
             return state
 
@@ -562,7 +562,7 @@ async def test_a_refused_step_waits_before_the_loop_asks_again() -> None:
     refusals = 0
 
     class Refusing(OnlyGenerate):
-        async def prepare_step(self, state: State, media: Any) -> State:
+        async def process_input(self, state: State, media: Any) -> State:
             nonlocal refusals
             refusals += 1
             raise ApplicationError("paused")
@@ -582,7 +582,7 @@ async def test_a_refusal_is_logged_once_per_change_of_reason(
     from reactor_runtime.interface.app import reactor_app
 
     class Refusing(OnlyGenerate):
-        async def prepare_step(self, state: State, media: Any) -> State:
+        async def process_input(self, state: State, media: Any) -> State:
             raise ApplicationError("paused" if state.paused else "no prompt")
 
     app = Refusing()
@@ -604,7 +604,7 @@ async def test_a_refusal_is_logged_once_per_change_of_reason(
 
 async def test_playout_paces_from_the_generate_time_not_the_whole_step() -> None:
     class SlowPrepare(OnlyGenerate):
-        async def prepare_step(self, state: State, media: Any) -> State:
+        async def process_input(self, state: State, media: Any) -> State:
             await asyncio.sleep(0.02)
             return state
 
@@ -614,7 +614,7 @@ async def test_playout_paces_from_the_generate_time_not_the_whole_step() -> None
     task = await _run_for(app, seconds=0.05)
     _, compute_time = app.emitted[0]
     assert compute_time is not None
-    # The 20 ms spent in prepare_step is application time, not model time.
+    # The 20 ms spent in process_input is application time, not model time.
     assert compute_time < 0.02
     await _stop(task)
 

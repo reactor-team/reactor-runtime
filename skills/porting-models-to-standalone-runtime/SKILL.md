@@ -267,7 +267,7 @@ measures the wrong thing.
 
 A model that writes its own `async def run()` driving `await self.emit(...)`
 still works unchanged. The default `run()` is the loop that drives
-`prepare_step()`, `generate()`, and `collect_step()`; overriding it replaces
+`process_input()`, `generate()`, and `process_output()`; overriding it replaces
 that loop and nothing else. You write against `emit()`, `send()`, `@event`,
 `self.connected`, and the tracks, and the three hooks are not called for your
 class. Command handlers and lifecycle hooks run one at a time under the step
@@ -276,7 +276,7 @@ a class attribute, typed `ModelMessage` returns/`self.send(...)`, and inbound
 media via `self.media.<track>.try_read(n, mode=ReadMode.LATEST)` /
 `.read(...)` / `.reset()` are all the same. A model that does not override
 `run()` is driven by the runtime through `generate()`; the README shows that
-shape. On that loop an exception from `generate()` reaches `collect_step()`
+shape. On that loop an exception from `generate()` reaches `process_output()`
 as `outcome.error`, where the application recovers or re-raises; a re-raise
 ends the model loop the way an uncaught exception in a hand-written `run()`
 does (the runtime logs it, ends the session with an error, and does not

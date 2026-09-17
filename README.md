@@ -46,13 +46,13 @@ class MyModel(ReactorApp):
     def load(self, config_path: Path | None) -> None:
         self.pipe = load_my_pipeline()
 
-    def generate(self, step: MyState) -> MyOutput:
-        return MyOutput(main_video=self.pipe.forward(prompt=step.prompt))
+    def generate(self, input: MyState) -> MyOutput:
+        return MyOutput(main_video=self.pipe.forward(prompt=input.prompt))
 ```
 
 That is a complete application. The runtime calls `generate()` in a loop for as long as someone is watching and emits what it returns. Every public field on `MyState` is a command the client can send: here `set_prompt` and `set_paused`, validated from the fields, and the next step reads the new values.
 
-A step is three calls, and `generate()` is the one you must write. `prepare_step(state, media)` runs before it and decides whether a step can happen: return the input `generate()` gets, or raise `ApplicationError("reason")` to skip the step without touching the model. `collect_step(outcome)` runs after it, with the result or the error, and returns the media to emit; send a message from there with `await self.send()` and it reaches the client before the step's frames. Both have defaults, so the model above writes neither.
+A step is three calls, and `generate()` is the one you must write. `process_input(state, media)` runs before it and decides whether a step can happen: return the input `generate()` gets, or raise `ApplicationError("reason")` to skip the step without touching the model. `process_output(outcome)` runs after it, with the result or the error, and returns the media to emit; send a message from there with `await self.send()` and it reaches the client before the step's frames. Both have defaults, so the model above writes neither.
 
 ```python
 from reactor_runtime import ApplicationError, MessageField, ModelMessage, StepOutcome
@@ -65,24 +65,24 @@ class FrameReady(ModelMessage):
 class MyModel(ReactorApp):
     state: MyState
 
-    async def prepare_step(self, state: MyState, media: None) -> MyState:
+    async def process_input(self, state: MyState, media: None) -> MyState:
         if state.paused:
             raise ApplicationError("paused")
         return state
 
-    def generate(self, step: MyState) -> MyOutput: ...
+    def generate(self, input: MyState) -> MyOutput: ...
 
-    async def collect_step(self, outcome: StepOutcome) -> Output | None:
+    async def process_output(self, outcome: StepOutcome) -> Output | None:
         if outcome.error is not None:
             raise outcome.error
         await self.send(FrameReady(prompt=self.state.prompt))
         return outcome.to_output()
 ```
 
-`generate()` fails by raising, and the runtime hands the exception to `collect_step()` as `outcome.error` rather than letting it escape. That is where you decide. Recover an error you expect from your model: reset it, send a message, return `None`, and the loop goes on to the next step. Re-raise anything else, as the example does: a raise out of `collect_step()` is a crash of the model, not of the step. The runtime logs the traceback, stops dispatching commands, ends the session with an error the client sees, and does not restart the loop, which is what an uncaught exception in a hand-written `run()` does too. The default `collect_step()` re-raises, so a failing model ends loudly instead of serving nothing in silence. A refusal from `prepare_step()` is not a failure and never reaches `collect_step()`.
+`generate()` fails by raising, and the runtime hands the exception to `process_output()` as `outcome.error` rather than letting it escape. That is where you decide. Recover an error you expect from your model: reset it, send a message, return `None`, and the loop goes on to the next step. Re-raise anything else, as the example does: a raise out of `process_output()` is a crash of the model, not of the step. The runtime logs the traceback, stops dispatching commands, ends the session with an error the client sees, and does not restart the loop, which is what an uncaught exception in a hand-written `run()` does too. The default `process_output()` re-raises, so a failing model ends loudly instead of serving nothing in silence. A refusal from `process_input()` is not a failure and never reaches `process_output()`.
 
 ```python
-    async def collect_step(self, outcome: StepOutcome) -> Output | None:
+    async def process_output(self, outcome: StepOutcome) -> Output | None:
         if isinstance(outcome.error, RolloutExhausted):   # an error the model is known to raise
             self.engine.reset()
             self.output.flush()
@@ -93,7 +93,7 @@ class MyModel(ReactorApp):
         return outcome.to_output()
 ```
 
-Command handlers and lifecycle hooks run between steps, never during one. The default `run()` is the loop that drives the three hooks. Override it to write your own loop against `emit()`, `send()`, `@event`, `self.connected`, and the tracks; `prepare_step()`, `generate()`, and `collect_step()` are then not called. Do that for a loop that is not one step per emit, such as a renderer that emits several times per step or a model that must block on an input.
+Command handlers and lifecycle hooks run between steps, never during one. The default `run()` is the loop that drives the three hooks. Override it to write your own loop against `emit()`, `send()`, `@event`, `self.connected`, and the tracks; `process_input()`, `generate()`, and `process_output()` are then not called. Do that for a loop that is not one step per emit, such as a renderer that emits several times per step or a model that must block on an input.
 
 Scaffold, build, and run it with the CLI:
 
