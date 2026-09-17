@@ -9,12 +9,12 @@ A `ReactorApp` is driven by the runtime one step at a time. A step is three
 calls in a fixed order, and the middle one is a different kind of code from the
 other two.
 
-- `prepare_step(state, media)` is **application** code. It knows about the
+- `process_input(state, media)` is **application** code. It knows about the
   client: the state a client set, the frames a client sent, whether a step
   should happen at all.
-- `generate(step_input)` is **model** code. It knows about weights, a cache, a
+- `generate(input)` is **model** code. It knows about weights, a cache, a
   rollout, and nothing else.
-- `collect_step(outcome)` is **application** code again. It knows what the
+- `process_output(outcome)` is **application** code again. It knows what the
   client should receive: which track the frames go on, which message to send,
   what to do when the model could not step.
 
@@ -33,7 +33,7 @@ notebook and the application half readable without opening the model.
 
 ### 1. The model half is a plain class with three methods
 
-`load(config_path)`, `generate(step_input)`, `reset()`. It imports nothing
+`load(config_path)`, `generate(input)`, `reset()`. It imports nothing
 from `reactor_runtime`. It does not know clients, tracks, commands, or the
 loop exist.
 
@@ -41,7 +41,7 @@ loop exist.
 # waypoint_model.py
 class WaypointModel:
     def load(self, config_path: Path | None) -> None: ...
-    def generate(self, step: WaypointStepInput) -> WaypointStepResult: ...
+    def generate(self, input: WaypointInput) -> WaypointResult: ...
     def reset(self) -> None: ...
 ```
 
@@ -109,13 +109,13 @@ The app's `generate()` forwards to the model half and does nothing else. No
 branch, no state read, no message.
 
 ```python
-def generate(self, step: WaypointStepInput) -> WaypointStepResult:
-    return self.engine.generate(step)
+def generate(self, input: WaypointInput) -> WaypointResult:
+    return self.engine.generate(input)
 ```
 
 A `generate()` that reads `self.state`, calls `self.send()`, or decides
 whether to run has application code inside the model call. Move it to
-`prepare_step()` or `collect_step()`.
+`process_input()` or `process_output()`.
 
 **One `generate()` on the model half too, whatever the hardware.** A model
 that has one code path per GPU topology (one GPU denoising locally, two with
@@ -129,13 +129,13 @@ def load(self, config_path):
     ...
     self._step = self._chunk_step_2gpu if self.num_gpus == 2 else self._chunk_step_1gpu
 
-def generate(self, step):
-    if step.reference_id != self.reference_id:   # a new run
-        self._end_run(); self._run = self._start_run(step); ...
+def generate(self, input):
+    if input.reference_id != self.reference_id:   # a new run
+        self._end_run(); self._run = self._start_run(input); ...
     if self._run.frames_wanted == 1:
-        self._first_frame_step(self._run, step.frames[0])   # the run's first output frame
+        self._first_frame_step(self._run, input.frames[0])   # the run's first output frame
     else:
-        frames = self._step(self._run, step.frames)          # one chunk, topology-specific
+        frames = self._step(self._run, input.frames)          # one chunk, topology-specific
     ...
 ```
 
@@ -160,7 +160,7 @@ produced. Both are plain dataclasses; the runtime never reads their fields.
 
 ```python
 @dataclass(frozen=True)
-class WaypointStepInput:
+class WaypointInput:
     buttons: frozenset[int]
     mouse: tuple[float, float]
     scroll_wheel: int
@@ -168,26 +168,26 @@ class WaypointStepInput:
     seed_id: int
 
 @dataclass(frozen=True)
-class WaypointStepResult:
+class WaypointResult:
     frames: np.ndarray
     index: int
     seed_id: int
 ```
 
-Type them. A few lines give `prepare_step()` and `collect_step()` a signature a
+Type them. A few lines give `process_input()` and `process_output()` a signature a
 reader can check without opening the model. A tuple works and says nothing.
 
 The result is also how the model tells the application what the **next** step
 needs, so the application never has to know the model's phases. A model whose
 first step of a run consumes one webcam frame and every later step four does
 not make the application count: the result carries `frames_wanted`, the
-application stores it on a private state field, and the next `prepare_step()`
+application stores it on a private state field, and the next `process_input()`
 reads that many frames. Anything the application must know to build the next
 input, or to label a metric (`num_gpus`), rides on the result the same way.
 
 A result may carry no media. On a pipelined model the chunk submitted on one
 step comes back on the next, so the first chunk step returns `frames=None`,
-and `collect_step()` emits nothing for it. A `None` where media is expected is
+and `process_output()` emits nothing for it. A `None` where media is expected is
 a fact about the step, not an error.
 
 ### 4. New information reaches the model inside the step input
@@ -202,19 +202,19 @@ that applies it, and the id alone continues the world after that.
 ```python
 # waypoint.py
 new_seed = state._seed_id != state._applied_seed_id
-return WaypointStepInput(
+return WaypointInput(
     ...,
     seed=state._seed if new_seed else None,
     seed_id=state._seed_id,
 )
 
 # waypoint_model.py
-if step.seed_id != self.seed_id:
-    if step.seed is None:
+if input.seed_id != self.seed_id:
+    if input.seed is None:
         raise NotSeeded("no seed frame to start a world from")
     self.engine.reset()
     self.engine.append_frame(seed_x4)
-    self.seed_id = step.seed_id
+    self.seed_id = input.seed_id
 ```
 
 If a handler needs the model to change, it calls a method the model wrote.
@@ -254,12 +254,12 @@ know about a step, the model puts in the result.
 
 ### 6. Refusing is the application's; failing is the model's
 
-`prepare_step()` refuses a step by raising `ApplicationError` with the reason.
+`process_input()` refuses a step by raising `ApplicationError` with the reason.
 The model is not called, the reason is logged, and the loop asks again. A
 refusal is a fact about the client: paused, no seed yet, waiting for frames.
 
 ```python
-async def prepare_step(self, state: WaypointState, media: None) -> WaypointStepInput:
+async def process_input(self, state: WaypointState, media: None) -> WaypointInput:
     if state.paused:
         raise ApplicationError("paused")
     if state._seed is None:
@@ -269,7 +269,7 @@ async def prepare_step(self, state: WaypointState, media: None) -> WaypointStepI
 
 `generate()` fails a step by raising the model's own exception. A failure is
 a fact about the model: it cannot step from the state it holds. The runtime
-wraps the exception into `outcome.error` and hands it to `collect_step()`.
+wraps the exception into `outcome.error` and hands it to `process_output()`.
 
 ```python
 # waypoint_model.py
@@ -292,7 +292,7 @@ class WaitingForCamera(ApplicationError):
 
 ### 7. Anything a client can set is a public `InputState` field
 
-Pause is `paused: bool` on the state, checked in `prepare_step()`. The client
+Pause is `paused: bool` on the state, checked in `process_input()`. The client
 gets `set_paused` for free, validated from the field. Do not write a `pause`
 command that flips a private flag; that is a second door into a fact the
 state already holds.
@@ -334,7 +334,7 @@ arrive in the first `generate()` after it, the same way they arrive in every
 other step. A `reset(seed=...)` is a second door into the model that the step
 input already is.
 
-The application calls `reset()`, from a handler or from `collect_step()`, and
+The application calls `reset()`, from a handler or from `process_output()`, and
 from `@session_ended` so the next session begins from a clean model. The
 runtime never resets a model.
 
@@ -348,18 +348,18 @@ def on_session_ended(self) -> None:
 `reset()` and `self.output.flush()` stay separate calls. Whether playout is
 cut is an application decision.
 
-### 10. What the client receives is written down in `collect_step()`
+### 10. What the client receives is written down in `process_output()`
 
 The return value is the media. Every message is an `await self.send()` the
 author typed, and it goes on the wire before the step's media. The runtime
 infers nothing from a step result: only an `Output` is media, and the mapping
-from any other result type to tracks is a line in `collect_step()`.
+from any other result type to tracks is a line in `process_output()`.
 
 ```python
-async def collect_step(self, outcome: StepOutcome) -> WaypointOutput | None:
+async def process_output(self, outcome: StepOutcome) -> WaypointOutput | None:
     if outcome.error is not None:
         raise outcome.error
-    result: WaypointStepResult = outcome.result
+    result: WaypointResult = outcome.result
     self.state._applied_seed_id = result.seed_id
     if result.index % self.progress_interval == 0:
         await self.send(WaypointStatus.of(self.state, result.index))
@@ -367,11 +367,11 @@ async def collect_step(self, outcome: StepOutcome) -> WaypointOutput | None:
     return WaypointOutput(main_video=TrackPayload(result.frames, metadata=metadata))
 ```
 
-A reader of `collect_step()` sees the whole client-facing effect of a step in
+A reader of `process_output()` sees the whole client-facing effect of a step in
 one place, in order.
 
 A model failure is decided here too, and nowhere else. `generate()` fails by
-raising; the runtime catches the exception and hands it to `collect_step()`
+raising; the runtime catches the exception and hands it to `process_output()`
 as `outcome.error` (`outcome.result` is `None` then). Two choices:
 
 - **Recover** an error the model is known to raise. Check its type, put the
@@ -381,7 +381,7 @@ as `outcome.error` (`outcome.result` is `None` then). Two choices:
   next step.
 
   ```python
-  async def collect_step(self, outcome: StepOutcome) -> MyOutput | None:
+  async def process_output(self, outcome: StepOutcome) -> MyOutput | None:
       if isinstance(outcome.error, RolloutExhausted):
           self.engine.reset()
           self.output.flush()
@@ -392,7 +392,7 @@ as `outcome.error` (`outcome.result` is `None` then). Two choices:
       ...
   ```
 
-- **Re-raise** anything you did not expect. A raise out of `collect_step()`
+- **Re-raise** anything you did not expect. A raise out of `process_output()`
   is a crash of the model, not of the step: the runtime logs the traceback,
   stops dispatching commands and lifecycle hooks, ends the session with an
   error the client sees, and does not restart the loop. Whatever runs the
@@ -400,14 +400,14 @@ as `outcome.error` (`outcome.result` is `None` then). Two choices:
   uncaught exception in a hand-written `run()` has, and it is better than
   serving a dead model in silence.
 
-The default `collect_step()` re-raises. The example re-raises on purpose:
-`NotSeeded` cannot arrive because `prepare_step()` refuses before a step
+The default `process_output()` re-raises. The example re-raises on purpose:
+`NotSeeded` cannot arrive because `process_input()` refuses before a step
 without a seed reaches the model, so anything that does arrive is a bug or a
 GPU failure, and neither is repaired by a reset. Write the reason down at the
 `raise`, as the example does, so a reader knows the choice was made.
 
-A refusal is not a failure. `ApplicationError` from `prepare_step()` is
-caught by the loop before the model runs and never reaches `collect_step()`.
+A refusal is not a failure. `ApplicationError` from `process_input()` is
+caught by the loop before the model runs and never reaches `process_output()`.
 
 ### 11. `generate()` never sees `StepOutcome`
 
@@ -426,7 +426,7 @@ unless the class declares `fps`.
 Override `run()` to write your own loop. That replaces the loop and only the
 loop: the typed state, the generated setters, the step lock on handlers and
 hooks, `emit()`, `send()`, `self.connected`, and the tracks are all still
-there, and `prepare_step()`, `generate()`, and `collect_step()` are never
+there, and `process_input()`, `generate()`, and `process_output()` are never
 called for that class. No error, no warning. Do that for a loop that is not
 one step per emit: a renderer that emits several times per step, or a model
 that must block on an input. Do not declare `state:` next to a hand-written
@@ -442,14 +442,14 @@ Ask one question: could a client observe it?
 
 | The line | Half | Where |
 | --- | --- | --- |
-| `if state.paused` | application | `prepare_step()` |
+| `if state.paused` | application | `process_input()` |
 | `if self.index >= self.WINDOW` | model | `generate()` |
-| reading four frames off a track | application | `prepare_step()` |
+| reading four frames off a track | application | `process_input()` |
 | encoding those frames into latents | model | `generate()` |
-| `await self.send(Status(...))` | application | `collect_step()` |
-| deciding which track a result goes on | application | `collect_step()` |
+| `await self.send(Status(...))` | application | `process_output()` |
+| deciding which track a result goes on | application | `process_output()` |
 | clearing the KV cache | model | `reset()` or `generate()` |
-| deciding to clear it after an error | application | `collect_step()` or a handler |
+| deciding to clear it after an error | application | `process_output()` or a handler |
 | decoding an uploaded image | application | a hand-written command |
 | holding the decoded image | application | a private state field |
 | knowing which seed the model holds | application | a private state field, read off the result |
@@ -459,8 +459,8 @@ Ask one question: could a client observe it?
 | storing the prompt text and the letterboxed upload | application | a public field, a private field, a hand-written command |
 | how many GPUs, which pipelined path | model | `load()` |
 | telling a worker process where the run stopped | model | `reset()` / the run's end |
-| what happens when the run reaches its cap | application | `collect_step()`, on `result.complete` |
-| a metric label such as `num_gpus` | model reports, application logs | the result, then `collect_step()` |
+| what happens when the run reaches its cap | application | `process_output()`, on `result.complete` |
+| a metric label such as `num_gpus` | model reports, application logs | the result, then `process_output()` |
 
 ## Review checklist
 
@@ -470,19 +470,19 @@ Ask one question: could a client observe it?
    model attribute.
 4. Every client-settable fact is a public `InputState` field; hand-written
    commands exist only for decisions the state cannot carry.
-5. `prepare_step()` refuses with `ApplicationError("reason")`; the model half
+5. `process_input()` refuses with `ApplicationError("reason")`; the model half
    raises its own exception type and never `ApplicationError`.
 6. The model invents no default input and never resets itself.
 7. `reset()` takes no arguments; the application calls it, from a handler,
-   from `collect_step()`, and from `@session_ended`.
-8. Every message the client receives is a `self.send()` in `collect_step()` or
+   from `process_output()`, and from `@session_ended`.
+8. Every message the client receives is a `self.send()` in `process_output()` or
    a handler; the mapping from result to `Output` is explicit.
 9. `generate()` does not build, return, or catch into a `StepOutcome`.
-10. `collect_step()` recovers each error the model is known to raise by type
+10. `process_output()` recovers each error the model is known to raise by type
     and re-raises the rest; a bare re-raise carries the reason in a comment.
     No blanket `except` that resets and continues on every error.
 11. The model half has a test with a fake engine, and the app half has tests
-    for each refusal and for `collect_step()`, including its error branch. See
+    for each refusal and for `process_output()`, including its error branch. See
     [`tests/unit/examples/test_waypoint.py`](../../tests/unit/examples/test_waypoint.py).
     When the model half's imports (torch, the model's own source tree) are
     not installable where the tests run, a `conftest.py` stubs them only

@@ -36,7 +36,7 @@ a progress message, and yields a frame is application code and model code
 braided together. Unbraid it. For every line, ask two questions:
 
 1. **Could a client observe or cause this?** Then it is application code. It
-   belongs in `prepare_step()`, `collect_step()`, a handler, or a state field.
+   belongs in `process_input()`, `process_output()`, a handler, or a state field.
 2. **Is this a fact about the weights, the cache, or the rollout?** Then it is
    model code. It belongs in the model class, behind `generate()` or `reset()`.
 
@@ -51,7 +51,7 @@ into four lists.
 
 **Client facts.** Conditions the loop checks that a client set or caused:
 `_paused`, `_start_requested`, `not self.state.prompt`, a buffer with too few
-frames. Each becomes a refusal in `prepare_step()`, and the value it reads
+frames. Each becomes a refusal in `process_input()`, and the value it reads
 becomes a public state field where a client sets it.
 
 **Model facts.** Conditions about the model's own state: a cache that is
@@ -61,7 +61,7 @@ exception.
 
 **Effects.** Everything the loop sends or cuts: `await self.send(...)`,
 `self.output.flush()`, a progress counter. Each becomes a line in
-`collect_step()`, or in the handler that owns the decision.
+`process_output()`, or in the handler that owns the decision.
 
 **Mechanics.** `yield Idle`, `yield None`, `asyncio.sleep`, `continue` after a
 flag check, the `finally:` that closes the generator, the outer
@@ -78,7 +78,7 @@ them now; the port is done when none is a local.
 **Phases.** Places where the loop consumed a different input in different
 turns: one webcam frame to make the first output frame, four per chunk after
 that. Each phase boundary becomes a fact the model reports on its result
-(`frames_wanted`) and the application reads for the next `prepare_step()`.
+(`frames_wanted`) and the application reads for the next `process_input()`.
 The application never learns the phases; it reads the result.
 
 If `load()` assigns one of several `inference()` generators to
@@ -86,10 +86,10 @@ If `load()` assigns one of several `inference()` generators to
 same lists. They share a preamble and differ in the chunk step; the port
 keeps one run bookkeeping and several chunk steps (step 3).
 
-## Step 2: draw the application's bounds in `prepare_step()`
+## Step 2: draw the application's bounds in `process_input()`
 
 Every client fact from the inventory is one `if` at the top of
-`prepare_step()`, refusing with `ApplicationError` and the reason as the
+`process_input()`, refusing with `ApplicationError` and the reason as the
 message. What the loop used to skip a turn on, the application now refuses a
 step on.
 
@@ -102,12 +102,12 @@ while self.state._paused:
     yield Idle
 
 # after
-async def prepare_step(self, state: WaypointState, media: None) -> WaypointStepInput:
+async def process_input(self, state: WaypointState, media: None) -> WaypointInput:
     if state.paused:
         raise ApplicationError("paused")
     if state._seed is None:
         raise ApplicationError("no seed image")
-    return WaypointStepInput(...)
+    return WaypointInput(...)
 ```
 
 Then build the step input. It is a dataclass you write, carrying exactly what
@@ -154,7 +154,7 @@ the picture. A window that is full. A world that was never seeded. A cache
 that was reset and needs a first frame. Each is a check inside `generate()`
 and its own exception type. This is the one place a raise is the right
 answer: the model says "I cannot step from where I am" and the application
-decides what to do about it in `collect_step()`.
+decides what to do about it in `process_output()`.
 
 ```python
 # waypoint_model.py
@@ -162,9 +162,9 @@ class NotSeeded(Exception):
     """The model holds no world to step and the step input carries no seed."""
 
 class WaypointModel:
-    def generate(self, step: WaypointStepInput) -> WaypointStepResult:
-        if step.seed_id != self.seed_id:
-            if step.seed is None:
+    def generate(self, input: WaypointInput) -> WaypointResult:
+        if input.seed_id != self.seed_id:
+            if input.seed is None:
                 raise NotSeeded("no seed frame to start a world from")
             ...
 ```
@@ -219,14 +219,14 @@ to pay, and the state object holds no tensors.
 The app's `generate()` is then one line:
 
 ```python
-def generate(self, step: WaypointStepInput) -> WaypointStepResult:
-    return self.engine.generate(step)
+def generate(self, input: WaypointInput) -> WaypointResult:
+    return self.engine.generate(input)
 ```
 
-## Step 4: put the effects in `collect_step()`
+## Step 4: put the effects in `process_output()`
 
 Every `send()` the loop made, every progress counter, every mapping from a
-result to an `Output`, lives in `collect_step()`. It receives the outcome,
+result to an `Output`, lives in `process_output()`. It receives the outcome,
 result or error, and returns the media to emit or `None`.
 
 ```python
@@ -238,10 +238,10 @@ if self.state._step_idx % self.progress_interval == 0:
 yield WaypointOutput(main_video=frames)
 
 # after
-async def collect_step(self, outcome: StepOutcome) -> WaypointOutput | None:
+async def process_output(self, outcome: StepOutcome) -> WaypointOutput | None:
     if outcome.error is not None:
         raise outcome.error
-    result: WaypointStepResult = outcome.result
+    result: WaypointResult = outcome.result
     self.state._applied_seed_id = result.seed_id
     if result.index % self.progress_interval == 0:
         await self.send(WaypointStatus.of(self.state, result.index))
@@ -255,7 +255,7 @@ ordering the old loop got by sending before yielding is kept without effort.
 Recovery from a model error lives here too. In the old loop an engine
 exception either escaped `inference()` and killed the model loop, or was
 caught in a `try` around the forward pass. On the step loop the runtime
-catches it for you and hands it to `collect_step()` as `outcome.error`, so
+catches it for you and hands it to `process_output()` as `outcome.error`, so
 the `try` becomes an `if`:
 
 ```python
@@ -268,7 +268,7 @@ except RolloutExhausted:
     continue
 
 # after
-async def collect_step(self, outcome: StepOutcome) -> MyOutput | None:
+async def process_output(self, outcome: StepOutcome) -> MyOutput | None:
     if isinstance(outcome.error, RolloutExhausted):
         self.engine.reset()
         self.output.flush()
@@ -280,7 +280,7 @@ async def collect_step(self, outcome: StepOutcome) -> MyOutput | None:
 ```
 
 Port every `except` the old loop had into such an `if`, and re-raise the
-rest. A re-raise out of `collect_step()` has the same effect an escaped
+rest. A re-raise out of `process_output()` has the same effect an escaped
 exception had in `inference()`: the runtime logs it, ends the session with
 an error, and does not restart the model loop. Do not turn that into a
 blanket recovery; a model that resets itself on every error hides the bug
@@ -314,7 +314,7 @@ generator any more:
 
 - **Natural completion.** When the old generator returned at its cap, the
   pipeline driver restarted it, and with the conditions still met a new run
-  began at once. `collect_step()` does that on the step whose result says
+  began at once. `process_output()` does that on the step whose result says
   `complete`: send the completion message, call `self.engine.reset()`, clear
   the applied id so the next step carries the reference again, and
   `self.output.flush()` as the restart used to. The model raises its own
@@ -341,7 +341,7 @@ If any of these survive, the port is not done:
 - Private state fields that hold tensors (`_prompt_cond`, `_clip_fea`,
   `_initial_latent`); the model half holds them on its run object.
 - Host-side timers around the chunk; `outcome.elapsed` is the runtime's
-  measurement of `generate()`, and the metrics line in `collect_step()` uses
+  measurement of `generate()`, and the metrics line in `process_output()` uses
   it. Time-to-first-frame starts from the step whose result says
   `run_started`.
 
@@ -357,8 +357,8 @@ renderer that emits several times per step, or a model that must block on an
 input. That is the escape hatch, not the target of a port. Overriding `run()`
 replaces the default loop and only the loop: the dispatch layer stays,
 handlers and hooks still run under the step lock, `emit()`, `send()`,
-`self.connected`, and the tracks are all there, and `prepare_step()`,
-`generate()`, and `collect_step()` are never called for that class. No error,
+`self.connected`, and the tracks are all there, and `process_input()`,
+`generate()`, and `process_output()` are never called for that class. No error,
 no warning. A port that keeps `run()` does not declare `state:`: the setters
 would write it, but nothing reads it for the loop and nothing bounds when a
 write lands relative to the loop's reads. It keeps its own values in its own
@@ -410,11 +410,11 @@ The same model on `ReactorApp`, split in two files:
 ```python
 # old_model.py: the model half, no reactor_runtime import
 @dataclass(frozen=True)
-class StepInput:
+class OldInput:
     prompt: str
 
 @dataclass(frozen=True)
-class StepResult:
+class OldResult:
     frame: np.ndarray
     index: int
 
@@ -423,10 +423,10 @@ class OldModel:
         self.pipe = load_pipe(config_path)
         self.reset()
 
-    def generate(self, step: StepInput) -> StepResult:
-        frame = self.pipe.step(step.prompt)
+    def generate(self, input: OldInput) -> OldResult:
+        frame = self.pipe.step(input.prompt)
         self.index += 1                     # the old loop counted this frame before it reported
-        return StepResult(frame=frame, index=self.index)
+        return OldResult(frame=frame, index=self.index)
 
     def reset(self) -> None:
         self.pipe.reset()
@@ -445,20 +445,20 @@ class New(ReactorApp):
         self.engine = OldModel()
         self.engine.load(config_path)
 
-    async def prepare_step(self, state: NewState, media: None) -> StepInput:
+    async def process_input(self, state: NewState, media: None) -> OldInput:
         if state.paused:
             raise ApplicationError("paused")
         if not state.prompt:
             raise ApplicationError("no prompt set")
-        return StepInput(prompt=state.prompt)
+        return OldInput(prompt=state.prompt)
 
-    def generate(self, step: StepInput) -> StepResult:
-        return self.engine.generate(step)
+    def generate(self, input: OldInput) -> OldResult:
+        return self.engine.generate(input)
 
-    async def collect_step(self, outcome: StepOutcome) -> Frame | None:
+    async def process_output(self, outcome: StepOutcome) -> Frame | None:
         if outcome.error is not None:
             raise outcome.error
-        result: StepResult = outcome.result
+        result: OldResult = outcome.result
         if result.index % 50 == 0:
             await self.send(Progress(index=result.index))
         return Frame(main_video=result.frame)
@@ -478,7 +478,7 @@ What moved where: `_paused` became a public field and `pause` disappeared;
 took over the one job `start` still had; the `Idle` loop became two
 refusals; the index moved into the model and rides on the result, counted
 the way the old loop counted it, so `Progress` still goes out after frames
-50, 100, and so on; the progress message moved to `collect_step()`. The
+50, 100, and so on; the progress message moved to `process_output()`. The
 client contract gained `set_paused` and `reset` and lost `start` and
 `pause`. Say so in the change.
 
@@ -494,7 +494,7 @@ client contract gained `set_paused` and `reset` and lost `start` and
 2. Run the review checklist in
    [`application-model-isolation`](../application-model-isolation/SKILL.md).
 3. The model half has a test with a fake engine; the app half has a test for
-   each refusal and for `collect_step()`, including its error branch. Where
+   each refusal and for `process_output()`, including its error branch. Where
    torch and the model's source tree are not installable in the test
    environment, a `conftest.py` stubs them when absent, so the tests run
    without a GPU and, inside the image, against the real imports. The model
