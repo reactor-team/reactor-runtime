@@ -70,6 +70,13 @@ class OneRankFails(Replica):
         return super().generate(input)
 
 
+class EachRankFailsDifferently(Replica):
+    def generate(self, input: StepInput, /) -> StepResult:
+        if input.step == 7:
+            raise ValueError("rank 0") if self.rank == 0 else TypeError("rank 1")
+        return super().generate(input)
+
+
 class OneRankDies(Replica):
     def generate(self, input: StepInput, /) -> StepResult:
         if input.step == 99 and self.rank == 1:
@@ -146,6 +153,17 @@ def test_when_one_rank_raises_the_call_is_a_desync_and_the_group_refuses_more(
         runner.shutdown()
     assert time.monotonic() - started < 30.0
     assert all(not proc.is_alive() for proc in procs)
+
+
+def test_every_rank_raising_a_different_error_is_a_desync(tmp_path: Path) -> None:
+    runner = _runner(EachRankFailsDifferently, tmp_path)
+    runner.start()
+    try:
+        with pytest.raises(RankDesync, match=r"rank 0 raised ValueError.*rank 1 TypeError"):
+            runner.generate(_input(7))
+        assert not runner.healthy
+    finally:
+        runner.shutdown()
 
 
 def test_a_dead_rank_is_named(tmp_path: Path) -> None:
