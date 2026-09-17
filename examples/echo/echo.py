@@ -1,72 +1,59 @@
-"""Echo — receive the client's webcam and mic, apply a video effect, send both back.
+"""Echo, the application half.
 
-A small but complete model: two inbound tracks (webcam + mic), two outbound
-tracks (the processed video + the echoed audio), live commands to pick a video
-effect and its intensity, and a typed message back when either changes. It
-exercises the whole spine — inbound media, commands, lifecycle hooks, and
-bidirectional A/V — with no model weights.
+Receive the client's webcam and microphone, apply a video effect, and send
+both back. The :class:`ReactorApp` the runtime drives: it declares the two
+inbound tracks, the two outbound tracks, and the settings a client can change,
+and holds the model half from ``echo_model.py`` under ``self.engine``. The two
+files meet on two dataclasses: the app builds an :class:`EchoInput` from the
+newest webcam frame and the state, and reads an :class:`EchoResult` back.
 
-Per-frame metadata round-trips too: whatever a client attaches to a webcam frame
-comes back on the processed frame it produced, so a client can correlate the two
-without a side channel. Frames the client sent untagged come back untagged.
+Two things this example shows that the others do not. Inbound media:
+``process_input`` refuses a step until a webcam frame has arrived, and drains
+the microphone into the audio that plays alongside the frame it pairs with.
+And batching: ``burst`` frames pile up before one emit, so ``process_output``
+returns ``None`` until a batch is full, which is how a model that produces in
+bursts drives the same loop.
 
-Effects use OpenCV (``opencv-python-headless``); see ``requirements.txt``.
+Per-frame metadata round-trips: whatever a client attaches to a webcam frame
+comes back on the frame it produced, so a client can correlate the two
+without a side channel.
 """
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, cast
 
-import cv2
 import numpy as np
+from echo_model import EFFECTS, EchoInput, EchoModel, EchoResult
 
 from reactor_runtime import (
+    ApplicationError,
     Audio,
     InputBuffer,
     InputField,
     InputFrame,
+    InputState,
     MediaInput,
-    ModelMessage,
     Output,
     ReactorApp,
     ReadMode,
+    StepOutcome,
     TrackPayload,
-    UploadedFile,
     Video,
-    connected,
-    disconnected,
-    event,
     session_ended,
-    session_started,
-)
-from reactor_runtime.log import get_logger
-
-logger = get_logger(__name__)
-
-Effect = Literal["none", "grayscale", "sepia", "edges", "invert", "blur", "pixelate"]
-_EFFECTS = ["none", "grayscale", "sepia", "edges", "invert", "blur", "pixelate"]
-
-_SEPIA_KERNEL = np.array(
-    [
-        [0.272, 0.534, 0.131],
-        [0.349, 0.686, 0.168],
-        [0.393, 0.769, 0.189],
-    ],
-    dtype=np.float32,
 )
 
 SAMPLE_RATE = 48_000
 FPS = 30
 
-# Max audio samples held between video ticks. Two frames' worth at FPS absorbs
-# normal jitter; a burst (e.g. after a client-side audio pause) is trimmed from
-# the head so playback stays in real-time sync.
-_MAX_BACKLOG_SAMPLES = int(2.0 / FPS * SAMPLE_RATE)
+# The most audio one step may carry: two video frames' worth at FPS. That
+# absorbs normal jitter; a burst after a client-side audio pause is trimmed
+# from the head so playback stays in real-time sync.
+_MAX_AUDIO_SAMPLES = int(2.0 / FPS * SAMPLE_RATE)
 
 
-class EchoInput(MediaInput):
+class EchoMedia(MediaInput):
     """The client's inbound webcam and microphone."""
 
     webcam: Video
@@ -80,346 +67,181 @@ class EchoOutput(Output):
     main_audio: Audio
 
 
-class EffectChanged(ModelMessage):
-    """Sent when the active effect or intensity changes."""
+class EchoState(InputState):
+    """What a client can set. Each public field is a ``set_<field>`` command."""
 
-    effect: str
-    intensity: float
+    effect: str = InputField(
+        default="none", choices=EFFECTS, description="Video effect applied to every frame."
+    )
+    intensity: float = InputField(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="Effect intensity: 0 leaves the frame as is, 1 is full.",
+    )
+    caption: str = InputField(
+        default="",
+        max_length=200,
+        moderate=True,
+        description="Text drawn over every frame; empty clears it.",
+    )
+    burst: int = InputField(
+        default=1,
+        ge=1,
+        le=120,
+        description=(
+            "Frames batched into one emit: 1 sends every frame; 120 is four seconds at 30 fps."
+        ),
+    )
+
+    # Session scratch the client never sees: what `process_input` read alongside
+    # the frame, for `process_output` to pair with the result.
+    _audio: np.ndarray | None = None
+    _metadata: bytes | None = None
 
 
 class Echo(ReactorApp):
-    """Echo the client's A/V back, optionally applying a real-time video effect."""
+    """Echo the client's A/V back, with a real-time video effect."""
 
-    media: EchoInput
+    media: EchoMedia
+    state: EchoState
     fps = FPS
 
     def load(self, config_path: Path | None) -> None:
-        """Set the starting effect state. Reads no config."""
-        self._reset_state()
+        """Construct the model half. There are no weights and no config to read."""
+        self.engine = EchoModel()
+        self.engine.load()
+        self.burst = _Burst()
 
-    def _reset_state(self) -> None:
-        """Return the shared effect controls to their session defaults.
+    # -- the step -------------------------------------------------------------
 
-        Called at load and again at the start of every session, so an effect,
-        caption, or overlay a previous session's clients set never carries into
-        the next session on the same instance.
+    async def process_input(self) -> EchoInput:
+        """Refuse until a webcam frame is here; otherwise say what the model gets.
+
+        The newest webcam frame is the step. The microphone is drained in
+        arrival order and kept on the state, with the frame's metadata, for
+        ``process_output`` to pair with the result.
         """
-        self.effect: Effect = "none"
-        self.intensity: float = 1.0
-        # How many frames pile up before an emit. One is a steady tick; more
-        # makes the model produce the way a batching one does, in bursts.
-        self.burst: int = 1
-        # An uploaded image blended over every output frame, set via
-        # ``set_overlay_image``; ``None`` until a client uploads one.
-        self._overlay: np.ndarray | None = None
-        self._overlay_strength: float = 0.5
-        # A free-text caption drawn over every output frame, set via
-        # ``set_caption``; empty means no caption.
-        self._caption: str = ""
-
-    @session_started
-    async def on_session_start(self) -> None:
-        """Reset the shared effect state for the session that is starting.
-
-        Fires once, before any client connects, and owns the state shared by
-        every client in the session. Per-client work belongs in ``on_connect``.
-        """
-        self._reset_state()
-        logger.info("model lifecycle: session_started")
-
-    @session_ended
-    async def on_session_end(self) -> None:
-        """Release the overlay the session held (fires once, after the last client leaves).
-
-        A server-side session close tears every client down at once, so this
-        runs even when no ``on_disconnect`` does.
-        """
-        self._overlay = None
-        logger.info("model lifecycle: session_ended")
-
-    @connected
-    async def on_connect(self) -> None:
-        """Note a client joining. Per client, and leaves shared state alone."""
-        logger.info("model lifecycle: connected")
-
-    @disconnected
-    async def on_disconnect(self) -> None:
-        """Note a client leaving. Per client, distinct from the session ending."""
-        logger.info("model lifecycle: disconnected")
-
-    @event(name="set_effect", description="Video effect to apply")
-    async def set_effect(
-        self, effect: str = InputField(default="none", choices=_EFFECTS)
-    ) -> EffectChanged:
-        """Pick the active video effect and acknowledge with the new state.
-
-        Returning the message makes it the command's correlated reply, so a
-        client awaiting the command resolves with the applied state.
-        """
-        # The contract bounds `effect` to _EFFECTS, so the widened str is one of
-        # the Effect literals by the time the handler runs.
-        self.effect = cast(Effect, effect)
-        return EffectChanged(effect=self.effect, intensity=self.intensity)
-
-    @event(name="set_intensity", description="Effect intensity (0=none, 1=full)")
-    async def set_intensity(
-        self, intensity: float = InputField(default=1.0, ge=0.0, le=1.0)
-    ) -> EffectChanged:
-        """Set the effect intensity and acknowledge with the new state."""
-        self.intensity = intensity
-        return EffectChanged(effect=self.effect, intensity=self.intensity)
-
-    @event(name="set_burst", description="Frames to batch into each emit")
-    async def set_burst(
-        self,
-        burst: int = InputField(
-            default=1,
-            ge=1,
-            le=120,
-            description="1 emits every frame; higher emits in bursts (120 is 4s at 30 fps)",
-        ),
-    ) -> None:
-        """Set how many frames pile up before an emit.
-
-        A model that batches produces in bursts rather than on a steady tick,
-        and the wire has to absorb the difference. Raising this turns the echo
-        into that shape on demand — the same media, delivered unevenly — which
-        is what makes the transport's pacing and gap-filling observable in a
-        live session instead of only under a synthetic load.
-
-        The ceiling is four seconds of media at the model's 30 fps, which is far
-        past what a batching model would hold and well into where the wire has
-        to work for it. A burst that large also holds every one of its frames in
-        memory until it is emitted, so the setting costs resolution times count.
-        """
-        self.burst = burst
-
-    @event(name="set_caption", description="Draw a text caption over the output video")
-    async def set_caption(
-        self,
-        caption: str = InputField(
-            default="",
-            max_length=200,
-            description="Caption text; empty clears it",
-            moderate=True,
-        ),
-    ) -> None:
-        """Set the free-text caption drawn over every output frame.
-
-        The one free-text command on this model: its value is user-authored
-        prose rather than a typed knob, so it asks for the moderation mark in
-        the rendered schema.
-        """
-        self._caption = caption
-
-    @event(name="set_overlay_image", description="Blend an uploaded image over the output video")
-    async def set_overlay_image(
-        self,
-        overlay_image: UploadedFile = InputField(moderate=True),
-        overlay_strength: float = InputField(
-            default=0.5, ge=0.0, le=1.0, description="Overlay opacity (0=hidden, 1=opaque)"
-        ),
-    ) -> None:
-        """Decode an uploaded image and blend it over every output frame.
-
-        The runtime resolves the upload reference to bytes before the handler
-        runs, so ``overlay_image`` arrives as a fetched file. A non-image upload
-        or one OpenCV cannot decode clears the overlay rather than failing.
-
-        The upload carries client-supplied content, so it asks for the
-        moderation mark; ``InputField`` supplies no default, so the file stays
-        required.
-        """
-        self._overlay_strength = overlay_strength
-        if not overlay_image.mime_type.startswith("image/"):
-            logger.info(
-                "ignoring non-image upload", name=overlay_image.name, mime=overlay_image.mime_type
-            )
-            self._overlay = None
-            return
-        decoded = cv2.imdecode(np.frombuffer(overlay_image.data, dtype=np.uint8), cv2.IMREAD_COLOR)
-        if decoded is None:
-            logger.warning("could not decode uploaded image", name=overlay_image.name)
-            self._overlay = None
-            return
-        self._overlay = cv2.cvtColor(decoded, cv2.COLOR_BGR2RGB)
-        logger.info("overlay image set", name=overlay_image.name, strength=overlay_strength)
-
-    async def run(self) -> None:
-        """Echo A/V in sync, applying the active effect to each video frame.
-
-        Each tick reads one video frame, drains every queued mic chunk into a
-        backlog, trims the backlog to ~2 video frames of audio (dropping bursts
-        from client-side pauses), and pairs the two. Rate-matching the streams
-        keeps playback in sync on the client.
-
-        Frames leave in groups of ``burst`` — one by default, so every tick
-        emits. A larger burst holds them back and sends them together, which is
-        how a batching model produces and what the wire has to smooth out.
-
-        The inbound frame's metadata rides back out on the frame produced from it.
-        It is echoed as the bytes it arrived as — this model does not interpret
-        it, so whatever the client encoded is what the client gets back.
-        """
-        # The runtime binds a live InputBuffer to each declared input track; the
-        # track annotations (Video/Audio) only carry the kind for the contract.
         webcam = cast(InputBuffer, self.media.webcam)
         mic = cast(InputBuffer, self.media.mic)
+        frames = webcam.try_read(1)
+        if frames is None:
+            raise ApplicationError("waiting for a webcam frame")
+        frame = frames[0]
+        self.state._audio = _drain(mic)
+        self.state._metadata = frame.metadata
+        return EchoInput(
+            frame=frame.data,
+            effect=self.state.effect,
+            intensity=self.state.intensity,
+            caption=self.state.caption,
+        )
 
-        audio_backlog: list[InputFrame] = []
-        # What a burst has accumulated so far: one entry per frame, in step.
-        pending_video: list[np.ndarray] = []
-        pending_audio: list[np.ndarray] = []
-        pending_metadata: list[bytes | None] = []
-        while True:
-            await self.connected.wait()
-            audio_backlog.clear()
-            pending_video.clear()
-            pending_audio.clear()
-            pending_metadata.clear()
+    def generate(self, input: EchoInput) -> EchoResult:
+        """One frame. The model half does the work."""
+        return self.engine.generate(input)
 
-            while self.connected.is_set():
-                frames = webcam.try_read(1)
-                if frames is None:
-                    await asyncio.sleep(0)
-                    continue
+    async def process_output(self, outcome: StepOutcome) -> EchoOutput | None:
+        """Pair the frame with its audio and metadata; emit once a batch is full.
 
-                # FIFO pops one chunk and leaves the rest; LATEST would clear the
-                # buffer and drop every chunk but the newest, producing
-                # sample-level discontinuities.
-                while True:
-                    next_chunks = mic.try_read(1, mode=ReadMode.FIFO)
-                    if next_chunks is None:
-                        break
-                    audio_backlog.extend(next_chunks)
-
-                _trim_backlog(audio_backlog, _MAX_BACKLOG_SAMPLES)
-                aligned = audio_backlog[:]
-                audio_backlog.clear()
-
-                if aligned:
-                    main_audio = np.concatenate(
-                        [np.ascontiguousarray(c.data, dtype=np.int16).ravel() for c in aligned]
-                    ).reshape(1, -1)
-                else:
-                    main_audio = np.zeros((1, 0), dtype=np.int16)
-
-                frame = frames[0]
-                processed = _apply_effect(frame.data, self.effect, self.intensity)
-                if self._overlay is not None:
-                    processed = _overlay_image(processed, self._overlay, self._overlay_strength)
-                if self._caption:
-                    processed = _draw_caption(processed, self._caption)
-                # A batch is one array, so every frame in it has to be the same
-                # size. WebRTC rescales an inbound track as bandwidth and CPU
-                # move, so a resolution change lands mid-burst; it ends the
-                # batch rather than being resized into it, and the new size
-                # opens the next one.
-                if pending_video and processed.shape != pending_video[0].shape:
-                    await self._emit_burst(pending_video, pending_audio, pending_metadata)
-
-                pending_video.append(processed)
-                pending_audio.append(main_audio)
-                pending_metadata.append(frame.metadata)
-                if len(pending_video) >= self.burst:
-                    await self._emit_burst(pending_video, pending_audio, pending_metadata)
-
-    async def _emit_burst(
-        self,
-        video_frames: list[np.ndarray],
-        audio_chunks: list[np.ndarray],
-        metadata_entries: list[bytes | None],
-    ) -> None:
-        """Emit what a burst has gathered and leave it empty for the next one.
-
-        One emit carries the whole burst: the video frames stacked into a batch
-        and the audio they span concatenated. The runtime splits both back apart
-        and paces them out, so the media is the same as a frame-at-a-time model
-        would send — only its arrival is lumpier.
-
-        The count comes from what was actually gathered, not from ``burst``: a
-        resolution change ends a batch early, and a batch of one is a plain
-        frame rather than a batch of length one.
+        A batch is one array, so every frame in it has the same size. WebRTC
+        rescales an inbound track as bandwidth and CPU move, so a resolution
+        change lands mid-burst; it ends the batch, and the new size opens the
+        next one.
         """
-        if not video_frames:
-            return
-        batched = np.stack(video_frames) if len(video_frames) > 1 else video_frames[0]
-        # A bare array when no frame in the burst carried anything, so "attached
-        # nothing" stays a single case on the client too.
+        if outcome.error is not None:
+            raise outcome.error
+        result: EchoResult = outcome.result
+        audio = self.state._audio if self.state._audio is not None else _silence()
+
+        if self.burst.frames and result.frame.shape != self.burst.frames[0].shape:
+            early = self.burst.take()
+            self.burst.add(result.frame, audio, self.state._metadata)
+            return early
+
+        self.burst.add(result.frame, audio, self.state._metadata)
+        if len(self.burst) >= self.state.burst:
+            return self.burst.take()
+        return None
+
+    # -- lifecycle ------------------------------------------------------------
+
+    @session_ended
+    def on_session_ended(self) -> None:
+        """Drop a half-gathered batch and reset the model half."""
+        self.burst.clear()
+        self.engine.reset()
+
+
+class _Burst:
+    """The frames gathered for one emit, with the audio and metadata they carry."""
+
+    def __init__(self) -> None:
+        self.frames: list[np.ndarray] = []
+        self.audio: list[np.ndarray] = []
+        self.metadata: list[bytes | None] = []
+
+    def __len__(self) -> int:
+        return len(self.frames)
+
+    def add(self, frame: np.ndarray, audio: np.ndarray, metadata: bytes | None) -> None:
+        """Gather one frame and what plays and rides with it."""
+        self.frames.append(frame)
+        self.audio.append(audio)
+        self.metadata.append(metadata)
+
+    def take(self) -> EchoOutput:
+        """Build the emit from what was gathered and leave the burst empty.
+
+        One frame goes out as a plain frame; more go out as one batch, the
+        video stacked and the audio concatenated. The runtime splits both back
+        apart and paces them out, so the media is the same as a frame-at-a-time
+        model would send; only its arrival is lumpier.
+        """
+        batched = np.stack(self.frames) if len(self.frames) > 1 else self.frames[0]
         video: np.ndarray | TrackPayload = batched
-        if any(m is not None for m in metadata_entries):
-            # A batch needs one entry per frame, so frames that carried nothing
-            # take an empty trailer — which is how the runtime already spells
-            # "attached nothing" on the way back out.
+        if any(entry is not None for entry in self.metadata):
+            # A batch needs one entry per frame, so a frame that carried nothing
+            # takes an empty trailer, which is how the runtime spells "attached
+            # nothing" on the way back out.
             metadata: bytes | list[dict[str, Any] | bytes] = (
-                [m or b"" for m in metadata_entries]
-                if len(video_frames) > 1
-                else metadata_entries[0] or b""
+                [entry or b"" for entry in self.metadata]
+                if len(self.frames) > 1
+                else self.metadata[0] or b""
             )
             video = TrackPayload(batched, metadata=metadata)
-        await self.emit(
-            EchoOutput(main_video=video, main_audio=np.concatenate(audio_chunks, axis=1))
-        )
-        video_frames.clear()
-        audio_chunks.clear()
-        metadata_entries.clear()
+        output = EchoOutput(main_video=video, main_audio=np.concatenate(self.audio, axis=1))
+        self.clear()
+        return output
+
+    def clear(self) -> None:
+        """Forget what was gathered."""
+        self.frames.clear()
+        self.audio.clear()
+        self.metadata.clear()
 
 
-def _trim_backlog(backlog: list[InputFrame], max_samples: int) -> None:
-    """Drop oldest chunks from *backlog* until total samples are within *max_samples*."""
-    total = sum(c.data.size for c in backlog)
-    while backlog and total > max_samples:
-        total -= backlog.pop(0).data.size
+def _drain(mic: InputBuffer) -> np.ndarray:
+    """Take every queued microphone chunk, in arrival order, as one ``(1, N)`` array.
+
+    FIFO pops chunks in order and keeps the samples continuous; LATEST would
+    drop every chunk but the newest and put a click at each seam. The head is
+    trimmed to :data:`_MAX_AUDIO_SAMPLES`, so a backlog after a client-side
+    pause does not play out late.
+    """
+    chunks: list[InputFrame] = []
+    while (more := mic.try_read(1, mode=ReadMode.FIFO)) is not None:
+        chunks.extend(more)
+    total = sum(chunk.data.size for chunk in chunks)
+    while chunks and total > _MAX_AUDIO_SAMPLES:
+        total -= chunks.pop(0).data.size
+    if not chunks:
+        return _silence()
+    return np.concatenate(
+        [np.ascontiguousarray(chunk.data, dtype=np.int16).ravel() for chunk in chunks]
+    ).reshape(1, -1)
 
 
-def _draw_caption(frame: np.ndarray, caption: str) -> np.ndarray:
-    """Draw *caption* near the bottom of the frame, outlined for legibility."""
-    out = frame.copy()
-    origin = (12, max(24, frame.shape[0] - 16))
-    for color, thickness in (((0, 0, 0), 4), ((255, 255, 255), 1)):
-        cv2.putText(
-            out, caption, origin, cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, thickness, cv2.LINE_AA
-        )
-    return out
-
-
-def _overlay_image(frame: np.ndarray, overlay: np.ndarray, strength: float) -> np.ndarray:
-    """Blend *overlay* over *frame* at *strength*, resized to the frame."""
-    resized = cv2.resize(overlay, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_LINEAR)
-    return cv2.addWeighted(frame, 1.0 - strength, resized, strength, 0).astype(np.uint8)
-
-
-def _apply_effect(frame: np.ndarray, effect: Effect, intensity: float) -> np.ndarray:
-    """Apply *effect* at *intensity* to an RGB frame, returning a new RGB frame."""
-    if effect == "none" or intensity == 0.0:
-        return frame
-
-    if effect == "grayscale":
-        gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-        processed = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
-    elif effect == "sepia":
-        processed = np.clip(cv2.transform(frame, _SEPIA_KERNEL), 0, 255).astype(np.uint8)
-    elif effect == "edges":
-        gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-        edges = cv2.Canny(gray, 50, 150)
-        processed = cv2.cvtColor(edges, cv2.COLOR_GRAY2RGB)
-    elif effect == "invert":
-        processed = np.subtract(255, frame)
-    elif effect == "blur":
-        kernel_size = max(1, int(21 * intensity) | 1)
-        if kernel_size <= 1:
-            return frame
-        return cv2.GaussianBlur(frame, (kernel_size, kernel_size), 0)
-    elif effect == "pixelate":
-        h, w = frame.shape[:2]
-        pixel_size = max(2, int(32 * intensity))
-        small = cv2.resize(
-            frame, (w // pixel_size, h // pixel_size), interpolation=cv2.INTER_LINEAR
-        )
-        return cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
-    else:
-        return frame
-
-    if intensity >= 1.0:
-        return processed
-    return cv2.addWeighted(frame, 1.0 - intensity, processed, intensity, 0).astype(np.uint8)
+def _silence() -> np.ndarray:
+    """No audio for this frame: an empty ``(1, 0)`` int16 array."""
+    return np.zeros((1, 0), dtype=np.int16)
