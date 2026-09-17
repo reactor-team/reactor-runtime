@@ -147,21 +147,21 @@ class Waypoint(ReactorApp):
 
     # -- the step -------------------------------------------------------------
 
-    async def process_input(self, state: WaypointState, media: None) -> WaypointInput:
+    async def process_input(self) -> WaypointInput:
         """Refuse while paused or before a seed; otherwise say what the model gets."""
-        if state.paused:
+        if self.state.paused:
             raise ApplicationError("paused")
-        if state._seed is None:
+        if self.state._seed is None:
             raise ApplicationError("no seed image")
         # The seed rides on the step input only when the model has not applied
         # this id yet; the step result reports which id the model holds.
-        new_seed = state._seed_id != state._applied_seed_id
+        new_seed = self.state._seed_id != self.state._applied_seed_id
         return WaypointInput(
-            buttons=state.button_set(),
-            mouse=(state.mouse_x, state.mouse_y),
-            scroll_wheel=state.scroll_wheel,
-            seed=state._seed if new_seed else None,
-            seed_id=state._seed_id,
+            buttons=self.state.button_set(),
+            mouse=(self.state.mouse_x, self.state.mouse_y),
+            scroll_wheel=self.state.scroll_wheel,
+            seed=self.state._seed if new_seed else None,
+            seed_id=self.state._seed_id,
         )
 
     def generate(self, input: WaypointInput) -> WaypointResult:
