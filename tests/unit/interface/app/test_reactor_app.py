@@ -7,7 +7,7 @@ from reactor_runtime import (
     CommandError,
     ModelMessage,
     Output,
-    ReactorModel,
+    ReactorApp,
     Video,
     connected,
     disconnected,
@@ -37,7 +37,7 @@ class BrightnessSet(ModelMessage):
     value: int
 
 
-class Model(ReactorModel):
+class Model(ReactorApp):
     def __init__(self) -> None:
         super().__init__()
         self.calls: list[tuple[Any, ...]] = []

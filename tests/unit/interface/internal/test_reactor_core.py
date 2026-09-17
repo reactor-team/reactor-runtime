@@ -5,7 +5,7 @@ from collections.abc import Callable
 import numpy as np
 import pytest
 
-from reactor_runtime import Audio, Input, ModelMessage, Output, TrackPayload, Video
+from reactor_runtime import Audio, MediaInput, ModelMessage, Output, TrackPayload, Video
 from reactor_runtime.core import Command, MediaChunk, SessionStarted
 from reactor_runtime.core.values import ConnId, InputFrame, TrackDirection
 from reactor_runtime.interface.internal.reactor_core import MediaOps, ReactorCore
@@ -20,7 +20,7 @@ class AvOut(Output):
     speech: Audio
 
 
-class In(Input):
+class In(MediaInput):
     camera: Video
 
 

@@ -1,6 +1,6 @@
 """Per-test isolation for the runtime's process-global state.
 
-The interface layer auto-registers every declared ``Output`` / ``Input`` /
+The interface layer auto-registers every declared ``Output`` / ``MediaInput`` /
 ``ModelMessage`` / ``@event`` command into a process-global registry, and the
 model schema is the union of those registries. That is correct for production —
 one model per process — but in a test suite the classes one module declares at
@@ -22,7 +22,7 @@ from reactor_runtime import log
 from reactor_runtime.interface.events.decorators import EVENT_REGISTRY
 from reactor_runtime.interface.events.messages import MESSAGE_REGISTRY, ModelMessage
 from reactor_runtime.interface.model.contract import ModelContract
-from reactor_runtime.interface.tracks.input import INPUT_REGISTRY, Input
+from reactor_runtime.interface.tracks.input import INPUT_REGISTRY, MediaInput
 from reactor_runtime.interface.tracks.output import OUTPUT_REGISTRY, Output
 
 
@@ -76,7 +76,7 @@ def _register(*classes: type) -> None:
     for cls in classes:
         if issubclass(cls, Output) and cls is not Output and cls.__tracks__:
             OUTPUT_REGISTRY[cls.__name__] = cls
-        elif issubclass(cls, Input) and cls is not Input and cls.__tracks__:
+        elif issubclass(cls, MediaInput) and cls is not MediaInput and cls.__tracks__:
             INPUT_REGISTRY[cls.__name__] = cls
         elif issubclass(cls, ModelMessage) and cls is not ModelMessage:
             MESSAGE_REGISTRY[cls.name] = cls
@@ -86,7 +86,7 @@ def _register_model(model_cls: type) -> None:
     """Re-register a model's full client-facing surface into the registries.
 
     Track classes register when they are *defined*, so the replay walks the
-    model's module for every module-level ``Output`` / ``Input`` subclass —
+    model's module for every module-level ``Output`` / ``MediaInput`` subclass —
     the registrations that module's import made before the per-test clear.
     Track classes defined inside test functions stay invisible, preserving
     per-test isolation.
@@ -94,7 +94,7 @@ def _register_model(model_cls: type) -> None:
     module = sys.modules.get(model_cls.__module__)
     if module is not None:
         for obj in vars(module).values():
-            if isinstance(obj, type) and issubclass(obj, (Output, Input)):
+            if isinstance(obj, type) and issubclass(obj, (Output, MediaInput)):
                 _register(obj)
     for name, spec in ModelContract.of(model_cls).commands.items():
         EVENT_REGISTRY[name] = spec.command
