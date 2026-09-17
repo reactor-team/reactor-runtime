@@ -101,12 +101,12 @@ def _ready(app: Recording) -> None:
     )
 
 
-async def _go_live(app: Recording) -> None:
+async def _go_live(app: ReactorApp) -> None:
     await app._dispatch_reactor_event(SessionStarted("s"))
     await app._dispatch_reactor_event(ClientConnected(ConnId(1001), 1))
 
 
-async def _run_for(app: Recording, seconds: float = 0.02) -> asyncio.Task[None]:
+async def _run_for(app: ReactorApp, seconds: float = 0.02) -> asyncio.Task[None]:
     task = asyncio.create_task(app.run())
     await asyncio.sleep(seconds)
     return task
@@ -166,15 +166,15 @@ async def test_the_default_generate_names_the_class_and_the_two_ways_out() -> No
 # -- process_input -------------------------------------------------------------
 
 
-async def test_process_input_receives_the_state_and_the_media_holder() -> None:
+async def test_process_input_reads_the_state_and_the_media_holder_off_self() -> None:
     seen: list[tuple[Any, Any]] = []
 
     class WithCamera(Recording):
         media: Camera
 
-        async def process_input(self, state: State, media: Camera) -> State:
-            seen.append((state, media))
-            return state
+        async def process_input(self) -> State:
+            seen.append((self.state, self.media))
+            return self.state
 
         def generate(self, input: State) -> Frame:
             return _frame()
@@ -189,31 +189,32 @@ async def test_process_input_receives_the_state_and_the_media_holder() -> None:
     await _stop(task)
 
 
-async def test_the_media_holder_is_none_when_no_tracks_are_declared() -> None:
-    seen: list[Any] = []
+async def test_the_default_process_input_hands_generate_none_without_a_state() -> None:
+    inputs: list[Any] = []
 
-    class NoCamera(Recording):
-        async def process_input(self, state: State, media: Any) -> State:
-            seen.append(media)
-            return state
-
-        def generate(self, input: State) -> Frame:
+    class Stateless(ReactorApp):
+        def generate(self, input: Any) -> Frame:
+            inputs.append(input)
             return _frame()
 
-    app = NoCamera()
-    _ready(app)
+    app = Stateless()
+    app._on_loop_ready()
+    app.bind_output(
+        broadcast=lambda message: None, addressed=lambda *args: None, media=lambda chunk: None
+    )
     await _go_live(app)
     task = await _run_for(app)
-    assert seen[0] is None
+    assert inputs
+    assert inputs[0] is None
     await _stop(task)
 
 
 async def test_a_refused_step_never_reaches_generate_and_the_loop_asks_again() -> None:
     class Gated(OnlyGenerate):
-        async def process_input(self, state: State, media: Any) -> State:
-            if state.paused:
+        async def process_input(self) -> State:
+            if self.state.paused:
                 raise ApplicationError("paused")
-            return state
+            return self.state
 
     app = Gated()
     _ready(app)
@@ -233,8 +234,8 @@ async def test_process_input_shapes_what_generate_gets() -> None:
     inputs: list[Any] = []
 
     class Mapped(Recording):
-        async def process_input(self, state: State, media: Any) -> str:
-            return state.prompt.upper()
+        async def process_input(self) -> str:
+            return self.state.prompt.upper()
 
         def generate(self, input: str) -> Frame:
             inputs.append(input)
@@ -376,11 +377,11 @@ async def test_a_handler_cannot_land_inside_a_step() -> None:
     release_prepare = asyncio.Event()
 
     class Slow(Recording):
-        async def process_input(self, state: State, media: Any) -> State:
+        async def process_input(self) -> State:
             trace.append("prepare")
             inside_prepare.set()
             await release_prepare.wait()
-            return state
+            return self.state
 
         def generate(self, input: State) -> Frame:
             trace.append("generate")
@@ -465,9 +466,9 @@ async def test_state_is_in_place_before_the_first_step() -> None:
     seen: list[Any] = []
 
     class Peeking(OnlyGenerate):
-        async def process_input(self, state: State, media: Any) -> State:
-            seen.append(state)
-            return state
+        async def process_input(self) -> State:
+            seen.append(self.state)
+            return self.state
 
     app = Peeking()
     _ready(app)
@@ -562,7 +563,7 @@ async def test_a_refused_step_waits_before_the_loop_asks_again() -> None:
     refusals = 0
 
     class Refusing(OnlyGenerate):
-        async def process_input(self, state: State, media: Any) -> State:
+        async def process_input(self) -> State:
             nonlocal refusals
             refusals += 1
             raise ApplicationError("paused")
@@ -582,8 +583,8 @@ async def test_a_refusal_is_logged_once_per_change_of_reason(
     from reactor_runtime.interface.app import reactor_app
 
     class Refusing(OnlyGenerate):
-        async def process_input(self, state: State, media: Any) -> State:
-            raise ApplicationError("paused" if state.paused else "no prompt")
+        async def process_input(self) -> State:
+            raise ApplicationError("paused" if self.state.paused else "no prompt")
 
     app = Refusing()
     _ready(app)
@@ -604,9 +605,9 @@ async def test_a_refusal_is_logged_once_per_change_of_reason(
 
 async def test_playout_paces_from_the_generate_time_not_the_whole_step() -> None:
     class SlowPrepare(OnlyGenerate):
-        async def process_input(self, state: State, media: Any) -> State:
+        async def process_input(self) -> State:
             await asyncio.sleep(0.02)
-            return state
+            return self.state
 
     app = SlowPrepare()
     _ready(app)

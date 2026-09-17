@@ -151,26 +151,23 @@ class ReactorApp(ReactorCore):
 
     # -- the step, three calls ------------------------------------------------
 
-    async def process_input(self, state: Any, media: Any, /) -> Any:
+    async def process_input(self) -> Any:
         """Decide whether a step can happen now and what the model gets.
 
-        The application half of a step. Read *state*, drain *media* with
-        ``try_read()``, and return the step input ``generate()`` receives. Raise
+        The application half of a step. Read ``self.state``, drain the
+        :class:`MediaInput` holder the class declared with ``try_read()``, and
+        return the step input ``generate()`` receives. Raise
         :class:`ApplicationError` with the reason to refuse the step; the model
         is not called and the loop asks again.
 
         Runs under the step lock. Does not call the model, ``emit()``,
         ``send()``, or ``flush()``.
 
-        Args:
-            state: The live :class:`InputState`, or ``None`` when none is declared.
-            media: The :class:`MediaInput` holder, or ``None`` when none is declared.
-
         Returns:
-            The step input. The type is the author's. The default returns *state*
-            and never refuses.
+            The step input. The type is the author's. The default returns
+            ``self.state``, ``None`` when no state is declared, and never refuses.
         """
-        return state
+        return getattr(self, "state", None)
 
     def generate(self, input: Any, /) -> Any:
         """Run one step of inference.
@@ -282,7 +279,7 @@ class ReactorApp(ReactorCore):
                     async with self._step_lock:
                         # 2. The application gate.
                         try:
-                            input = await self.process_input(self.state, self._media_holder)
+                            input = await self.process_input()
                         except ApplicationError as refused:
                             # One record per change of reason, not one per turn.
                             reason = f"{type(refused).__name__}: {refused}"

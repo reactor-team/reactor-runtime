@@ -52,7 +52,7 @@ class MyModel(ReactorApp):
 
 That is a complete application. The runtime calls `generate()` in a loop for as long as someone is watching and emits what it returns. Every public field on `MyState` is a command the client can send: here `set_prompt` and `set_paused`, validated from the fields, and the next step reads the new values.
 
-A step is three calls, and `generate()` is the one you must write. `process_input(state, media)` runs before it and decides whether a step can happen: return the input `generate()` gets, or raise `ApplicationError("reason")` to skip the step without touching the model. `process_output(outcome)` runs after it, with the result or the error, and returns the media to emit; send a message from there with `await self.send()` and it reaches the client before the step's frames. Both have defaults, so the model above writes neither.
+A step is three calls, and `generate()` is the one you must write. `process_input()` runs before it, reading `self.state` and the media tracks, and decides whether a step can happen: return the input `generate()` gets, or raise `ApplicationError("reason")` to skip the step without touching the model. `process_output(outcome)` runs after it, with the result or the error, and returns the media to emit; send a message from there with `await self.send()` and it reaches the client before the step's frames. Both have defaults, so the model above writes neither.
 
 ```python
 from reactor_runtime import ApplicationError, MessageField, ModelMessage, StepOutcome
@@ -65,10 +65,10 @@ class FrameReady(ModelMessage):
 class MyModel(ReactorApp):
     state: MyState
 
-    async def process_input(self, state: MyState, media: None) -> MyState:
-        if state.paused:
+    async def process_input(self) -> MyState:
+        if self.state.paused:
             raise ApplicationError("paused")
-        return state
+        return self.state
 
     def generate(self, input: MyState) -> MyOutput: ...
 
