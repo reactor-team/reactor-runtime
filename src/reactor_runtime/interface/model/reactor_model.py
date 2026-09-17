@@ -10,13 +10,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from reactor_runtime.interface.app.reactor_app import ReactorApp
 from reactor_runtime.interface.internal.aliases import deprecated_alias
 
 __all__: list[str] = []
 
 
 def __getattr__(name: str) -> Any:
+    # The import lives here so that the shim serves only the old name, with its
+    # warning, and loads reactor_app when the old name is asked for.
     if name == "ReactorModel":
+        from reactor_runtime.interface.app.reactor_app import ReactorApp
+
         return deprecated_alias("ReactorModel", "ReactorApp", ReactorApp)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
