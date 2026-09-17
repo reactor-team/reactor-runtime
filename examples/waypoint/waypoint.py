@@ -1,11 +1,11 @@
 """Waypoint 1.5, the application half.
 
 The :class:`ReactorApp` the runtime drives. It declares the client contract
-(the state, the output track, the status message), owns ``prepare_step`` and
-``collect_step``, and holds the model half from ``waypoint_model.py`` under
+(the state, the output track, the status message), owns ``process_input`` and
+``process_output``, and holds the model half from ``waypoint_model.py`` under
 ``self.engine``. The two files meet on two dataclasses: the app builds a
-:class:`WaypointStepInput` from the client's state, and reads a
-:class:`WaypointStepResult` back.
+:class:`WaypointInput` from the client's state, and reads a
+:class:`WaypointResult` back.
 
 Every public field on :class:`WaypointState` is a command the client can send.
 The app writes two commands by hand: ``set_image`` takes the upload, decodes
@@ -21,7 +21,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageOps
-from waypoint_model import WaypointModel, WaypointStepInput, WaypointStepResult
+from waypoint_model import WaypointInput, WaypointModel, WaypointResult
 
 from reactor_runtime import (
     ApplicationError,
@@ -147,7 +147,7 @@ class Waypoint(ReactorApp):
 
     # -- the step -------------------------------------------------------------
 
-    async def prepare_step(self, state: WaypointState, media: None) -> WaypointStepInput:
+    async def process_input(self, state: WaypointState, media: None) -> WaypointInput:
         """Refuse while paused or before a seed; otherwise say what the model gets."""
         if state.paused:
             raise ApplicationError("paused")
@@ -156,7 +156,7 @@ class Waypoint(ReactorApp):
         # The seed rides on the step input only when the model has not applied
         # this id yet; the step result reports which id the model holds.
         new_seed = state._seed_id != state._applied_seed_id
-        return WaypointStepInput(
+        return WaypointInput(
             buttons=state.button_set(),
             mouse=(state.mouse_x, state.mouse_y),
             scroll_wheel=state.scroll_wheel,
@@ -164,20 +164,20 @@ class Waypoint(ReactorApp):
             seed_id=state._seed_id,
         )
 
-    def generate(self, step: WaypointStepInput) -> WaypointStepResult:
+    def generate(self, input: WaypointInput) -> WaypointResult:
         """One step of the world. The model half does the work."""
-        return self.engine.generate(step)
+        return self.engine.generate(input)
 
-    async def collect_step(self, outcome: StepOutcome) -> WaypointOutput | None:
+    async def process_output(self, outcome: StepOutcome) -> WaypointOutput | None:
         """Tag the frames with their step and report progress on a cadence."""
         if outcome.error is not None:
-            # No error the model raises is expected here: prepare_step() refuses
+            # No error the model raises is expected here: process_input() refuses
             # before a step without a seed can reach it, so NotSeeded would be a
             # bug in this file, and a CUDA failure is not something a reset
             # repairs. Re-raising ends the model loop and the session with an
             # error, which is better than serving a dead world in silence.
             raise outcome.error
-        result: WaypointStepResult = outcome.result
+        result: WaypointResult = outcome.result
         self.state._applied_seed_id = result.seed_id
         self.last_index = result.index
         if result.index % self.progress_interval == 0:

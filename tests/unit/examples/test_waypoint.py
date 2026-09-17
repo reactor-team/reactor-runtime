@@ -17,7 +17,7 @@ from typing import Any
 import numpy as np
 import pytest
 from PIL import Image
-from waypoint_model import NotSeeded, WaypointModel, WaypointStepInput, WaypointStepResult
+from waypoint_model import NotSeeded, WaypointInput, WaypointModel, WaypointResult
 
 from reactor_runtime import ApplicationError, StepOutcome, UploadedFile
 from reactor_runtime.core.model import EndReason, SessionEnded, SessionStarted
@@ -94,8 +94,8 @@ def _seed_registries(
     register_model(Waypoint)
 
 
-def _step(seed_id: int = 1, seed: np.ndarray | None = _SEED) -> WaypointStepInput:
-    return WaypointStepInput(
+def _step(seed_id: int = 1, seed: np.ndarray | None = _SEED) -> WaypointInput:
+    return WaypointInput(
         buttons=frozenset({0x57}), mouse=(0.1, 0.2), scroll_wheel=1, seed=seed, seed_id=seed_id
     )
 
@@ -219,15 +219,15 @@ class RecordingModel:
     """A model half that records the steps it was asked for."""
 
     def __init__(self) -> None:
-        self.steps: list[WaypointStepInput] = []
+        self.steps: list[WaypointInput] = []
         self.resets = 0
 
-    def generate(self, step: WaypointStepInput) -> WaypointStepResult:
-        self.steps.append(step)
-        return WaypointStepResult(
+    def generate(self, input: WaypointInput) -> WaypointResult:
+        self.steps.append(input)
+        return WaypointResult(
             frames=np.zeros((4, 8, 8, 3), dtype=np.uint8),
             index=len(self.steps) - 1,
-            seed_id=step.seed_id,
+            seed_id=input.seed_id,
         )
 
     def reset(self) -> None:
@@ -246,23 +246,23 @@ def _app() -> tuple[Waypoint, RecordingModel, list[Any]]:
     return app, model, sent
 
 
-async def test_prepare_step_refuses_while_paused() -> None:
+async def test_process_input_refuses_while_paused() -> None:
     app, _, _ = _app()
     await app._dispatch_reactor_event(SessionStarted("s"))
     app.state._seed = _SEED
     app.state.paused = True
     with pytest.raises(ApplicationError, match="paused"):
-        await app.prepare_step(app.state, None)
+        await app.process_input(app.state, None)
 
 
-async def test_prepare_step_refuses_before_a_seed() -> None:
+async def test_process_input_refuses_before_a_seed() -> None:
     app, _, _ = _app()
     await app._dispatch_reactor_event(SessionStarted("s"))
     with pytest.raises(ApplicationError, match="no seed image"):
-        await app.prepare_step(app.state, None)
+        await app.process_input(app.state, None)
 
 
-async def test_prepare_step_builds_the_step_input_from_the_state() -> None:
+async def test_process_input_builds_the_input_from_the_state() -> None:
     app, _, _ = _app()
     await app._dispatch_reactor_event(SessionStarted("s"))
     app.state._seed = _SEED
@@ -270,77 +270,77 @@ async def test_prepare_step_builds_the_step_input_from_the_state() -> None:
     app.state.action = "back"
     app.state.mouse_x = 0.5
     app.state.scroll_wheel = -1
-    step = await app.prepare_step(app.state, None)
-    assert step.buttons == frozenset({0x53})
-    assert step.mouse == (0.5, 0.0)
-    assert step.scroll_wheel == -1
-    assert step.seed is _SEED
-    assert step.seed_id == 3
+    input = await app.process_input(app.state, None)
+    assert input.buttons == frozenset({0x53})
+    assert input.mouse == (0.5, 0.0)
+    assert input.scroll_wheel == -1
+    assert input.seed is _SEED
+    assert input.seed_id == 3
 
 
-async def test_the_seed_rides_on_the_step_input_only_until_the_model_holds_it() -> None:
+async def test_the_seed_rides_on_the_input_only_until_the_model_holds_it() -> None:
     app, model, _ = _app()
     await app._dispatch_reactor_event(SessionStarted("s"))
     app.state._seed = _SEED
     app.state._seed_id = 1
 
-    first = await app.prepare_step(app.state, None)
+    first = await app.process_input(app.state, None)
     assert first.seed is _SEED
-    await app.collect_step(StepOutcome(result=app.generate(first)))
+    await app.process_output(StepOutcome(result=app.generate(first)))
     assert app.state._applied_seed_id == 1
 
-    second = await app.prepare_step(app.state, None)
+    second = await app.process_input(app.state, None)
     assert second.seed is None
     assert second.seed_id == 1
 
     # A new upload is a new id; a reset forgets what the model held.
     app.state._seed_id = 2
-    assert (await app.prepare_step(app.state, None)).seed is _SEED
+    assert (await app.process_input(app.state, None)).seed is _SEED
     app.state._applied_seed_id = 2
     app.reset()
     assert model.resets == 1
-    assert (await app.prepare_step(app.state, None)).seed is _SEED
+    assert (await app.process_input(app.state, None)).seed is _SEED
 
 
 async def test_generate_forwards_to_the_model_half() -> None:
     app, model, _ = _app()
     result = app.generate(_step())
-    (step,) = model.steps
-    assert step.buttons == frozenset({0x57})
-    assert step.mouse == (0.1, 0.2)
-    assert step.scroll_wheel == 1
-    assert step.seed is _SEED
-    assert step.seed_id == 1
+    (input,) = model.steps
+    assert input.buttons == frozenset({0x57})
+    assert input.mouse == (0.1, 0.2)
+    assert input.scroll_wheel == 1
+    assert input.seed is _SEED
+    assert input.seed_id == 1
     assert result.index == 0
 
 
-async def test_collect_step_tags_every_frame_with_its_step() -> None:
+async def test_process_output_tags_every_frame_with_its_step() -> None:
     app, _, _ = _app()
     await app._dispatch_reactor_event(SessionStarted("s"))
-    result = WaypointStepResult(frames=np.zeros((4, 8, 8, 3), dtype=np.uint8), index=5, seed_id=2)
-    output = await app.collect_step(StepOutcome(result=result, elapsed=0.01))
+    result = WaypointResult(frames=np.zeros((4, 8, 8, 3), dtype=np.uint8), index=5, seed_id=2)
+    output = await app.process_output(StepOutcome(result=result, elapsed=0.01))
     assert isinstance(output, WaypointOutput)
     assert output.__metadata__["main_video"] == [{"step": 5}] * 4
     assert app.last_index == 5
     assert app.state._applied_seed_id == 2
 
 
-async def test_collect_step_sends_the_status_on_the_cadence() -> None:
+async def test_process_output_sends_the_status_on_the_cadence() -> None:
     app, _, sent = _app()
     await app._dispatch_reactor_event(SessionStarted("s"))
     for index in range(4):
-        result = WaypointStepResult(
+        result = WaypointResult(
             frames=np.zeros((4, 8, 8, 3), dtype=np.uint8), index=index, seed_id=1
         )
-        await app.collect_step(StepOutcome(result=result))
+        await app.process_output(StepOutcome(result=result))
     assert [message.step_index for message in sent] == [0, 2]
     assert all(isinstance(message, WaypointStatus) for message in sent)
 
 
-async def test_collect_step_reraises_a_model_error() -> None:
+async def test_process_output_reraises_a_model_error() -> None:
     app, _, _ = _app()
     with pytest.raises(NotSeeded):
-        await app.collect_step(StepOutcome(error=NotSeeded("no seed")))
+        await app.process_output(StepOutcome(error=NotSeeded("no seed")))
 
 
 async def test_set_image_stages_the_seed_and_bumps_the_seed_id() -> None:

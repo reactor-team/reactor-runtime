@@ -11,17 +11,17 @@ This example is the reference for splitting an application into two halves:
   step index behind three methods, `load`, `generate`, and `reset`. It imports
   nothing from `reactor_runtime` and runs in a notebook.
 - `waypoint.py` is the application. It declares what the client can set and
-  what it receives, decides when a step can happen in `prepare_step`, forwards
+  what it receives, decides when a step can happen in `process_input`, forwards
   the step to the model in `generate`, and turns the result into frames and
-  messages in `collect_step`.
+  messages in `process_output`.
 
-The two meet on two dataclasses, `WaypointStepInput` and `WaypointStepResult`.
+The two meet on two dataclasses, `WaypointInput` and `WaypointResult`.
 The application never reads the model's engine; what it needs to know about a
 step rides in the result.
 
-When `generate` raises, the exception reaches `collect_step` as
+When `generate` raises, the exception reaches `process_output` as
 `outcome.error`, and the application decides. This example re-raises: the
-model's only own error, `NotSeeded`, cannot happen because `prepare_step`
+model's only own error, `NotSeeded`, cannot happen because `process_input`
 refuses a step before it has a seed, so anything that does arrive is a bug or
 a GPU failure, and ending the session with an error beats serving a frozen
 world. A model with an error it expects recovers there instead: reset the
