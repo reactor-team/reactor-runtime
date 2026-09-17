@@ -52,6 +52,13 @@ def test_the_old_module_path_imports_the_same_class() -> None:
     assert ReactorModel is ReactorApp
 
 
+def test_the_old_module_path_does_not_serve_the_new_name() -> None:
+    # The shim exists for the old name only. The new class is reached through
+    # its own module, so the deprecated path never resolves it silently.
+    with pytest.raises(ImportError):
+        from reactor_runtime.interface.model.reactor_model import ReactorApp  # noqa: F401
+
+
 def test_unknown_name_is_still_an_attribute_error() -> None:
     with pytest.raises(AttributeError):
         importlib.import_module("reactor_runtime").NoSuchName  # noqa: B018
