@@ -20,7 +20,7 @@ version = "1.20260814.7"
 
 [project]
 name = "reactor-runtime"
-version = "3.4.0"
+version = "3.5.0"
 description = "A Python framework for building real-time, interactive video models"
 readme = "README.md"
 license = "Apache-2.0"
@@ -128,8 +128,17 @@ python-version = "3.12"
 # models (`examples`, first-party but outside the package) resolve the way
 # pytest's pythonpath makes them importable; the WebRTC test directory, so
 # its tests can import their sibling `conftest` for the shared peer fakes; and
-# the contract suite, so its tests can import their sibling `contract_helpers`.
-extra-paths = [".", "tests/unit/transport/webrtc", "tests/contract"]
+# the contract suite, so its tests can import their sibling `contract_helpers`;
+# and each example workspace, whose two modules import each other as top-level
+# names, the way the runtime imports a workspace.
+extra-paths = [
+    ".",
+    "examples/starter",
+    "examples/echo",
+    "examples/waypoint",
+    "tests/unit/transport/webrtc",
+    "tests/contract",
+]
 
 [tool.ty.src]
 # Check the package, its tests, and the example models; scripts/ ships developer

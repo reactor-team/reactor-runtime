@@ -1,0 +1,15 @@
+# Python dependencies installed into the model image in one pip pass, so a
+# version conflict between them fails the build instead of surfacing at
+# model load.
+#
+# reactor-runtime is the runtime itself. Its version is pinned here; bump
+# this line to upgrade, and reactor.yaml's build.runtime_version to match.
+reactor-runtime==3.5.0
+
+# The model half: Overworld's inference engine for Waypoint, pinned to a tag.
+# It brings torch and its CUDA stack with it.
+world_engine @ git+https://github.com/Overworldai/world_engine.git@1.5.6
+
+# Decoding and fitting the uploaded seed frame, and reading config.yml.
+pillow>=10.1
+pyyaml>=6.0
