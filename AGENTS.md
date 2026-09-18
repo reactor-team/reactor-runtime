@@ -37,6 +37,17 @@ them.
   the same PR, and review flags a PR that changes behaviour the README
   describes without touching it.
 
+## Examples
+
+`examples/` holds three workspaces, and each shows one shape on purpose.
+`starter` is the smallest complete model: one class that writes `generate()`
+alone, with the runtime's default `process_input()` and `process_output()`.
+It stays that way; a change that adds either hook, or splits it into two
+files, removes the example's reason to exist. `echo` and `waypoint` carry the
+application/model split, and they are where that pattern is taught. Its rules
+live in `skills/application-model-isolation`, which says the split is
+optional and when to make it.
+
 ## Toolchain
 
 `mise` is the task runner and pins the toolchain (uv, ruff, ty, lefthook, buf,

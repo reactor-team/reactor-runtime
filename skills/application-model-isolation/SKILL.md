@@ -19,7 +19,14 @@ other two.
   what to do when the model could not step.
 
 Both application hooks have defaults, so the simplest model writes only
-`generate()`. Keep the two kinds of code in two places. The worked example is
+`generate()`. [`examples/starter/`](../../examples/starter/README.md) is that
+model: one class, the model's own state beside the code that answers the
+client, and neither application hook written. That is the right shape for a
+first model and for anything that small, and it is the shape a reader meets
+first. The split below is optional, and nothing in the runtime enforces it.
+Make it once a model has weights worth loading in a notebook or inputs worth
+deciding on before the model runs; from there, keep the two kinds of code in
+two places. The worked example is
 [`examples/waypoint/`](../../examples/waypoint/README.md):
 [`waypoint_model.py`](../../examples/waypoint/waypoint_model.py) is the model
 half and [`waypoint.py`](../../examples/waypoint/waypoint.py) is the
