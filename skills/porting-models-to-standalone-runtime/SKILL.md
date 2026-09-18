@@ -265,12 +265,22 @@ measures the wrong thing.
 
 ## What did not change
 
-`ReactorApp` itself is the same shape: `load()` + `async def run()` driving
-`await self.emit(...)`, `@event` / `@connected` / `@disconnected` handlers,
-`self.connected` to gate the loop, `fps` as a class attribute, typed
-`ModelMessage` returns/`self.send(...)`, and inbound media via
-`self.media.<track>.try_read(n, mode=ReadMode.LATEST)` / `.read(...)` /
-`.reset()`. Weights are still located with `get_weights_path()` (now imported
+A model that writes its own `async def run()` driving `await self.emit(...)`
+still works unchanged. The default `run()` is the loop that drives
+`process_input()`, `generate()`, and `process_output()`; overriding it replaces
+that loop and nothing else. You write against `emit()`, `send()`, `@event`,
+`self.connected`, and the tracks, and the three hooks are not called for your
+class. Command handlers and lifecycle hooks run one at a time under the step
+lock either way. `@event` / `@connected` / `@disconnected` handlers, `fps` as
+a class attribute, typed `ModelMessage` returns/`self.send(...)`, and inbound
+media via `self.media.<track>.try_read(n, mode=ReadMode.LATEST)` /
+`.read(...)` / `.reset()` are all the same. A model that does not override
+`run()` is driven by the runtime through `generate()`; the README shows that
+shape. On that loop an exception from `generate()` reaches `process_output()`
+as `outcome.error`, where the application recovers or re-raises; a re-raise
+ends the model loop the way an uncaught exception in a hand-written `run()`
+does (the runtime logs it, ends the session with an error, and does not
+restart the loop). Weights are still located with `get_weights_path()` (now imported
 from `reactor_runtime`); it returns `$REACTOR_WEIGHTS_PATH` or
 `~/.cache/reactor_registry`.
 
