@@ -38,17 +38,16 @@ from PIL import Image, ImageDraw, ImageFont
 from reactor_runtime import (
     Audio,
     CommandError,
-    Idle,
     InputField,
     InputState,
     MessageField,
     ModelMessage,
     Output,
-    ReactorPipeline,
     UploadedFile,
     Video,
     event,
 )
+from reactor_runtime.interface.pipeline import Idle, ReactorPipeline
 from reactor_runtime.interface.pipeline.idle import _IdleType
 from reactor_runtime.log import get_logger
 

@@ -8,9 +8,12 @@ obvious place::
 The same names are available under :mod:`reactor_runtime.interface`; importing
 from the top-level package is the preferred path.
 
-Two names are deprecated aliases. ``ReactorModel`` is :class:`ReactorApp` and
-``Input`` is :class:`MediaInput`; both import with a :class:`DeprecationWarning`
-and are removed in the next major.
+Four names are deprecated and import with a :class:`DeprecationWarning`.
+``ReactorModel`` is :class:`ReactorApp` and ``Input`` is :class:`MediaInput`,
+renames that resolve to the new class. ``ReactorPipeline`` and ``Idle`` still
+resolve to themselves, so a model on the generator pattern keeps working, but
+the pattern is retired in favour of :class:`ReactorApp` and ``generate()``.
+All four are removed in the next major.
 """
 
 from importlib.metadata import version
@@ -28,7 +31,6 @@ from reactor_runtime.interface import (
     Command,
     CommandError,
     FieldInfo,
-    Idle,
     InputBuffer,
     InputField,
     InputFrame,
@@ -40,7 +42,6 @@ from reactor_runtime.interface import (
     Output,
     OutputStream,
     ReactorApp,
-    ReactorPipeline,
     ReadMode,
     StepOutcome,
     Track,
@@ -56,7 +57,16 @@ from reactor_runtime.interface import (
     session_ended,
     session_started,
 )
-from reactor_runtime.interface.internal.aliases import deprecated_alias
+from reactor_runtime.interface.internal.aliases import (
+    IDLE_DEPRECATION,
+    PIPELINE_DEPRECATION,
+    deprecated_alias,
+)
+
+# Bound under private names so the public ones stay out of the module's
+# namespace and resolve through __getattr__, which is where the warning lives.
+from reactor_runtime.interface.pipeline import Idle as _Idle
+from reactor_runtime.interface.pipeline import ReactorPipeline as _ReactorPipeline
 from reactor_runtime.log import get_logger
 from reactor_runtime.paths import get_weights_path
 
@@ -74,7 +84,6 @@ __all__ = [
     "Command",
     "CommandError",
     "FieldInfo",
-    "Idle",
     "InputBuffer",
     "InputField",
     "InputFrame",
@@ -86,7 +95,6 @@ __all__ = [
     "Output",
     "OutputStream",
     "ReactorApp",
-    "ReactorPipeline",
     "ReadMode",
     "StepOutcome",
     "Track",
@@ -106,14 +114,16 @@ __all__ = [
     "session_started",
 ]
 
-_DEPRECATED = {
-    "ReactorModel": ("ReactorApp", ReactorApp),
-    "Input": ("MediaInput", MediaInput),
+_DEPRECATED: dict[str, tuple[str, object, str | None]] = {
+    "ReactorModel": ("ReactorApp", ReactorApp, None),
+    "Input": ("MediaInput", MediaInput, None),
+    "ReactorPipeline": ("ReactorApp", _ReactorPipeline, PIPELINE_DEPRECATION),
+    "Idle": ("ApplicationError", _Idle, IDLE_DEPRECATION),
 }
 
 
 def __getattr__(name: str) -> Any:
     if name in _DEPRECATED:
-        new, target = _DEPRECATED[name]
-        return deprecated_alias(name, new, target)
+        new, target, message = _DEPRECATED[name]
+        return deprecated_alias(name, new, target, message)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

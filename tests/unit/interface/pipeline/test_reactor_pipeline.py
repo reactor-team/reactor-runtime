@@ -8,11 +8,9 @@ import pytest
 
 from reactor_runtime import (
     EVENT_REGISTRY,
-    Idle,
     InputField,
     InputState,
     Output,
-    ReactorPipeline,
     Video,
     event,
     session_started,
@@ -28,6 +26,7 @@ from reactor_runtime.core.values import ConnId
 from reactor_runtime.interface.internal.input_buffer import BufferClosed
 from reactor_runtime.interface.internal.reactor_core import CommandEnvelope
 from reactor_runtime.interface.model.contract import ModelContract
+from reactor_runtime.interface.pipeline import Idle, ReactorPipeline
 from reactor_runtime.interface.pipeline.reactor_pipeline import _GeneratorEnded
 
 
