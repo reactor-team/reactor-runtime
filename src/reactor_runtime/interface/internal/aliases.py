@@ -23,18 +23,32 @@ logger = get_logger(__name__)
 _reported: set[str] = set()
 
 
-def deprecated_alias(old: str, new: str, target: object) -> object:
-    """Return *target*, warn that *old* is now *new*, and log it once.
+PIPELINE_DEPRECATION = (
+    "ReactorPipeline is deprecated. Subclass ReactorApp and write generate(); "
+    "the class is removed in the next major."
+)
+IDLE_DEPRECATION = (
+    "Idle is deprecated. Refuse a step by raising ApplicationError from process_input(); "
+    "the name is removed in the next major."
+)
+
+
+def deprecated_alias(old: str, new: str, target: object, message: str | None = None) -> object:
+    """Return *target*, warn that *old* is deprecated in favour of *new*, and log it once.
 
     Args:
         old: The name the caller imported.
         new: The name that replaces it.
         target: The object the old name resolves to.
+        message: The warning text. The default says *old* is now *new* and
+            fits a rename; a surface whose replacement is a port rather than
+            an import edit passes its own.
 
     Returns:
         *target*, unchanged.
     """
-    message = f"{old} is now {new}. Update the import; the alias is removed in the next major."
+    if message is None:
+        message = f"{old} is now {new}. Update the import; the alias is removed in the next major."
     warnings.warn(message, DeprecationWarning, stacklevel=3)
     if old not in _reported:
         _reported.add(old)
