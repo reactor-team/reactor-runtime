@@ -4,7 +4,7 @@
 
 **Build real-time AI models in Python.**
 
-[📖 Documentation](https://docs.reactor.inc/deploy/overview) · [🚀 Quickstart](https://docs.reactor.inc/deploy/development/overview) · [🌐 Reactor](https://reactor.inc)
+[📖 Documentation](https://docs.reactor.inc/deploy/overview) · [🚀 Quickstart](https://docs.reactor.inc/deploy/development/quickstart) · [🌐 Reactor](https://reactor.inc)
 
 </div>
 
@@ -103,7 +103,7 @@ cd my-model
 reactor run
 ```
 
-`reactor run` builds a container with the runtime inside and serves WebRTC signaling on port 8080. Point a browser at it with the [JS SDK](https://docs.reactor.inc), or connect from the [Reactor Sandbox](https://reactor-sandbox.vercel.app/) and watch frames stream immediately.
+`reactor run` builds a container with the runtime inside and serves WebRTC signaling on port 8080. Point a browser at it with the [JS SDK](https://docs.reactor.inc/sdk-reference/using-the-sdk), or connect from the [Reactor Sandbox](https://reactor-sandbox.vercel.app/) and watch frames stream immediately.
 
 Log from the same import, passing context as keyword arguments:
 
@@ -129,7 +129,8 @@ Not on macOS, or pinning a release in CI? See [Install the CLI](https://docs.rea
 
 ## Learn more
 
-- [Quickstart](https://docs.reactor.inc/deploy/development/overview): from zero to a streaming model in 2 minutes
+- [Quickstart](https://docs.reactor.inc/deploy/development/quickstart): from zero to a model deployed on Reactor's GPUs
+- [Runtime overview](https://docs.reactor.inc/deploy/development/overview): what the runtime handles, and the outline of a model
 - [Model anatomy](https://docs.reactor.inc/deploy/development/reactor-app/model-anatomy): every member of a `ReactorApp`, line by line
 - [The step loop](https://docs.reactor.inc/deploy/development/reactor-app/step-loop): `process_input()`, `generate()`, `process_output()`, and the frame rate
 - [Starter example](./examples/starter/README.md): the model `reactor init` scaffolds: one class, `generate()` alone, the smallest complete `ReactorApp`
