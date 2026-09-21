@@ -1,6 +1,7 @@
 import contextlib
 import logging
 import os
+import shutil
 import threading
 import time
 from collections.abc import Iterator
@@ -759,6 +760,16 @@ def test_records_a_real_frame_size_with_audio(tmp_path: Path, attempt: int) -> N
 # -- retention -------------------------------------------------------------
 
 
+# How long a sweep about to delete a directory gives a concurrent start to
+# claim it. A start that is free to race wins this in microseconds; a start the
+# sweep holds off pays it in full, so it is short.
+_CLAIM_LEAD_SECONDS = 0.2
+# Ceiling on a sweep reaching its delete and finishing. Generous, so a slow
+# machine does not fail the test, but bounded so a regression that never gets
+# there fails instead of hanging the suite.
+_SWEEP_TIMEOUT_SECONDS = 10.0
+
+
 def _finished_recording(root: Path, name: str, *, finished_at: float) -> Path:
     """A recording directory carrying a completion marker aged to *finished_at*."""
     session_dir = root / name
@@ -833,6 +844,46 @@ def test_reap_skips_the_active_recording_even_with_a_stale_marker(tmp_path: Path
         os.utime(marker, (old, old))
         recorder._reap_expired(time.time())
         assert active.exists()
+    finally:
+        recorder.stop()
+        recorder.close()
+
+
+def test_reap_cannot_delete_a_directory_a_start_claims(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A sweep has judged a directory aged out and is about to delete it when a
+    # session starts under that same id. Whichever of the two goes first, the
+    # session's directory has to be on disk once both have finished.
+    recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
+    recorder._root = tmp_path
+
+    def no_reaper(self: Recorder) -> None:
+        """Leave the sweep to the test, so only one runs and it is observable."""
+
+    monkeypatch.setattr(Recorder, "_ensure_reaper", no_reaper)
+    _finished_recording(tmp_path, _SID, finished_at=time.time() - _RETENTION_SECONDS * 2)
+
+    at_delete = threading.Event()
+    start_returned = threading.Event()
+    real_rmtree = shutil.rmtree
+
+    def rmtree_after_offering_the_lead(path: Any, **kwargs: Any) -> None:
+        at_delete.set()
+        start_returned.wait(_CLAIM_LEAD_SECONDS)
+        real_rmtree(path, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", rmtree_after_offering_the_lead)
+    sweep = threading.Thread(target=recorder._reap_expired, args=(time.time(),))
+    sweep.start()
+    try:
+        assert at_delete.wait(_SWEEP_TIMEOUT_SECONDS)
+        recorder.start(_SID)
+        start_returned.set()
+        sweep.join(timeout=_SWEEP_TIMEOUT_SECONDS)
+        session_dir = recorder._session_dir
+        assert session_dir is not None
+        assert session_dir.exists()
     finally:
         recorder.stop()
         recorder.close()
