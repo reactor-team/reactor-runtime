@@ -261,6 +261,10 @@ class Recorder:
         # outlives any one session, so it is not reset between them.
         self._reaper_thread: threading.Thread | None = None
         self._reaper_stop = threading.Event()
+        # Orders a start's claim of the active directory against the reaper's
+        # decision to delete one, so a sweep already in flight when a session
+        # starts cannot remove the directory that session has just claimed.
+        self._reaper_lock = threading.Lock()
 
         self._pending: list[tuple[int, ClipResult]] = []
         self._pending_lock = threading.Lock()
@@ -324,12 +328,15 @@ class Recorder:
             self._root.mkdir(parents=True, exist_ok=True)
         self._ensure_reaper()
         self._session_id = session_id
-        self._session_dir = self._root / self._session_id
-        self._session_dir.mkdir(parents=True, exist_ok=True)
         # A session recorded under an id used before inherits that run's
-        # completion marker. Clear it before the workers start, so the reaper
-        # never reads a live recording as finished and deletes it mid-write.
-        (self._session_dir / _COMPLETE_MARKER).unlink(missing_ok=True)
+        # completion marker, which reads as finished. Claiming the directory and
+        # clearing the marker under the reaper's lock makes the pair atomic
+        # against a sweep, so neither a sweep in flight nor a later one can
+        # delete a live recording.
+        with self._reaper_lock:
+            self._session_dir = self._root / self._session_id
+            self._session_dir.mkdir(parents=True, exist_ok=True)
+            (self._session_dir / _COMPLETE_MARKER).unlink(missing_ok=True)
         self._markers = MarkerBookkeeper()
         self._feed_stop.clear()
         self._watch_stop.clear()
@@ -442,24 +449,30 @@ class Recorder:
         retention window. The live session's directory is skipped outright, and a
         recording still in progress carries no marker anyway, so an active
         recording is never removed no matter how long the session runs.
+
+        Each directory is judged and deleted under the same lock a start claims
+        the active directory with, and the active directory is read inside that
+        lock rather than once per sweep. A sweep that began before a session
+        started therefore sees the claim, and a directory is only ever deleted
+        while it is unclaimed.
         """
         root = self._root
         if root is None:
             return
-        active = self._session_dir
         for session_dir in root.iterdir():
             if not session_dir.is_dir():
                 continue
-            if active is not None and session_dir == active:
-                continue
-            marker = session_dir / _COMPLETE_MARKER
-            try:
-                finished_at = marker.stat().st_mtime
-            except OSError:
-                continue
-            if now - finished_at <= _RETENTION_SECONDS:
-                continue
-            shutil.rmtree(session_dir, ignore_errors=True)
+            with self._reaper_lock:
+                if session_dir == self._session_dir:
+                    continue
+                marker = session_dir / _COMPLETE_MARKER
+                try:
+                    finished_at = marker.stat().st_mtime
+                except OSError:
+                    continue
+                if now - finished_at <= _RETENTION_SECONDS:
+                    continue
+                shutil.rmtree(session_dir, ignore_errors=True)
             logger.info("reaped aged-out recording", recording_id=session_dir.name)
 
     def _reset_session_state(self) -> None:
