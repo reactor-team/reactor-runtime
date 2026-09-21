@@ -42,12 +42,15 @@ _EVENTS = frozenset(
         "eviction",
         "chunk_ready",
         "clip_ready",
+        "saved_clip_ready",
         "command",
         "error",
         "metric",
     }
 )
-_JOURNAL_FACTS = frozenset({"chunk_ready", "clip_ready", "command", "error", "metric"})
+_JOURNAL_FACTS = frozenset(
+    {"chunk_ready", "clip_ready", "saved_clip_ready", "command", "error", "metric"}
+)
 
 
 def _apply(

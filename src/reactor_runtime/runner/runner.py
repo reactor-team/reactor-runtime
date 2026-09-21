@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.metadata
+import threading
 import time
 import uuid
 from collections.abc import Callable, Coroutine, Mapping
@@ -211,6 +212,7 @@ class Runner(ServiceComponent, ConnectionSink):
             cfg.recording,
             on_clip_ready=self._on_clip_ready,
             on_chunk_ready=self._on_chunk_ready,
+            on_saved_clip_ready=self._on_saved_clip_ready,
         )
         self._connections = ConnectionManager(state_machine=self._sm)
         self._offer_epochs = OfferEpochs()
@@ -248,6 +250,8 @@ class Runner(ServiceComponent, ConnectionSink):
         # session retires that binding and not a later session's. Zero until the
         # first session binds one.
         self._log_binding = 0
+        self._clip_cancelled = threading.Event()
+        self._clip_cancelled.set()
         self._accepting = True
         # The process-shutdown hook, wired by the assembly so the runner can ask
         # the service to bring the process down when the session is terminated
@@ -301,6 +305,7 @@ class Runner(ServiceComponent, ConnectionSink):
                     set_depth=self._set_media_depth,
                 ),
                 failure=self._on_model_failure,
+                save_clip=self._prepare_clip_save,
             )
             bridge.start()
         except Exception:
@@ -566,6 +571,20 @@ class Runner(ServiceComponent, ConnectionSink):
         loop = self._loop
         if loop is not None:
             loop.call_soon_threadsafe(self._emit_clip_ready, clip)
+
+    def _on_saved_clip_ready(self, clip: ClipResult, recording_id: str) -> None:
+        loop = self._loop
+        if loop is not None:
+            loop.call_soon_threadsafe(self._emit_saved_clip_ready, clip, recording_id)
+
+    def _emit_saved_clip_ready(self, clip: ClipResult, recording_id: str) -> None:
+        self._sm.send(
+            SessionEvent.SAVED_CLIP_READY,
+            session_id=clip.session_id,
+            clip_id=clip.clip_id,
+            recording_id=recording_id,
+            playlist_url=clip.playlist_url,
+        )
 
     def _emit_clip_ready(self, clip: ClipResult) -> None:
         """Journal a clip-ready fact as a self-loop move on the session machine."""
@@ -959,6 +978,22 @@ class Runner(ServiceComponent, ConnectionSink):
             self._codecs[version] = codec
         return codec
 
+    def _prepare_clip_save(
+        self, chunk: MediaChunk, cancelled: threading.Event, clip_id: str | None = None
+    ) -> Callable[[], ClipResult]:
+        session_cancelled = self._clip_cancelled
+        session_id = self._recording_id
+
+        def save() -> ClipResult:
+            return self._recorder.save_clip(
+                chunk,
+                session_id=session_id,
+                clip_id=clip_id,
+                cancelled=lambda: cancelled.is_set() or session_cancelled.is_set(),
+            )
+
+        return save
+
     def _emit_media(self, chunk: MediaChunk) -> None:
         """Fan one emitted media chunk out to the recorder and the connections.
 
@@ -1169,6 +1204,9 @@ class Runner(ServiceComponent, ConnectionSink):
         if transition.is_session_start:
             self._recording_id = _recording_id_from(transition.detail.get("params", {}))
             self._log_binding = set_session_id(self._recording_id)
+            self._clip_cancelled = threading.Event()
+        elif transition.to_state in (SessionState.CLOSING, SessionState.TERMINATED):
+            self._clip_cancelled.set()
         if transition.from_state is not transition.to_state:
             _stamp_log_state(transition.to_state)
         log = logger.debug if transition.event in JOURNAL_EVENTS else logger.info

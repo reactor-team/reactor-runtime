@@ -22,6 +22,7 @@ import shutil
 import tempfile
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
@@ -69,6 +70,7 @@ _DROP_LOG_INTERVAL_SECONDS = 5.0
 _AUDIO_BACKLOG_FRAMES = 2
 
 _INIT_FILENAME = "init.mp4"
+_SAVED_PLAYLIST = "saved.m3u8"
 # Written into a recording's directory once it is finished, so its final segment
 # (which has no successor to prove it closed) is recognised as fetchable.
 _COMPLETE_MARKER = ".complete"
@@ -145,6 +147,7 @@ class ClipResult:
         predicted_ready_at_ms: Unix epoch in milliseconds when the boundary
             segment is expected to be servable.
         playlist_url: A path-only ``/clips?...`` URL the client absolutises.
+        clip_id: The model-assigned saved clip UUID, absent for live recordings.
     """
 
     session_id: str
@@ -154,10 +157,11 @@ class ClipResult:
     now_marker: float
     predicted_ready_at_ms: int
     playlist_url: str
+    clip_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return the clip as a plain dict for wire encoding and journalling."""
-        return {
+        result = {
             "session_id": self.session_id,
             "kind": self.kind,
             "start_marker": self.start_marker,
@@ -166,6 +170,9 @@ class ClipResult:
             "predicted_ready_at_ms": self.predicted_ready_at_ms,
             "playlist_url": self.playlist_url,
         }
+        if self.clip_id is not None:
+            result["clip_id"] = self.clip_id
+        return result
 
 
 @dataclass(frozen=True)
@@ -189,6 +196,7 @@ class Gone:
 
 
 ClipReadyCallback = Callable[[ClipResult], None]
+SavedClipReadyCallback = Callable[[ClipResult, str], None]
 """Notified once a requested clip's boundary segment is on disk."""
 
 ChunkReadyCallback = Callable[[str, int], None]
@@ -215,6 +223,7 @@ class Recorder:
         *,
         on_clip_ready: ClipReadyCallback | None = None,
         on_chunk_ready: ChunkReadyCallback | None = None,
+        on_saved_clip_ready: SavedClipReadyCallback | None = None,
     ) -> None:
         """Bind the recorder to its config and the readiness notifications.
 
@@ -226,13 +235,19 @@ class Recorder:
             on_chunk_ready: Called with ``(recording_id, idx)`` when a recording
                 segment has closed, on a recorder-owned thread, so the recording
                 can be mirrored as it is produced.
+            on_saved_clip_ready: Called with the saved clip and local recording
+                UUID after the entire clip is published, on the saving thread.
         """
         self._config = config
         self._on_clip_ready = on_clip_ready
         self._on_chunk_ready = on_chunk_ready
+        self._on_saved_clip_ready = on_saved_clip_ready
         # The recordings root is materialised on the first start, so a disabled
         # recorder (the common case) never creates a directory.
         self._root: Path | None = None
+        self._storage_lock = threading.Lock()
+        self._save_lock = threading.Lock()
+        self._closed = threading.Event()
 
         self._session_id: str | None = None
         self._session_dir: Path | None = None
@@ -319,14 +334,8 @@ class Recorder:
         if not self._config.enabled or self._started:
             return
         self._reset_session_state()
-        if self._root is None:
-            self._root = (
-                Path(self._config.recording_dir)
-                if self._config.recording_dir
-                else Path(tempfile.mkdtemp(prefix="reactor-recordings-"))
-            )
-            self._root.mkdir(parents=True, exist_ok=True)
-        self._ensure_reaper()
+        self._ensure_root()
+        assert self._root is not None
         self._session_id = session_id
         # A session recorded under an id used before inherits that run's
         # completion marker, which reads as finished. Claiming the directory and
@@ -415,6 +424,10 @@ class Recorder:
         process teardown rather than on each session's stop. Blocks briefly while
         the reaper thread joins, so the runner runs it off the event loop.
         """
+        self._closed.set()
+        # A cancelled save owns its staging files until the encoder closes.
+        with self._save_lock:
+            pass
         self._reaper_stop.set()
         reaper = self._reaper_thread
         self._reaper_thread = None
@@ -422,6 +435,18 @@ class Recorder:
             reaper.join(timeout=2.0)
 
     # -- retention ------------------------------------------------------------
+
+    def _ensure_root(self) -> Path:
+        with self._storage_lock:
+            if self._root is None:
+                self._root = (
+                    Path(self._config.recording_dir)
+                    if self._config.recording_dir
+                    else Path(tempfile.mkdtemp(prefix="reactor-recordings-"))
+                )
+                self._root.mkdir(parents=True, exist_ok=True)
+            self._ensure_reaper()
+            return self._root
 
     def _ensure_reaper(self) -> None:
         """Start the retention reaper once the root exists, at most once."""
@@ -755,6 +780,149 @@ class Recorder:
 
     # -- clip / recording requests --------------------------------------------
 
+    def save_clip(
+        self,
+        chunk: MediaChunk,
+        *,
+        cancelled: Callable[[], bool],
+        session_id: str | None = None,
+        clip_id: str | None = None,
+    ) -> ClipResult:
+        """Write a completed video/audio batch and return a ready clip.
+
+        Encode every frame at the batch's rate, independently of live recording
+        and playback. The result uses its own recording UUID and the existing
+        clip routes and retention window. Caller-owned arrays must remain valid
+        and unmodified until this call finishes.
+
+        Args:
+            chunk: One video track and optionally one mono audio track.
+            cancelled: Whether the caller or owning session has stopped.
+            session_id: The owning session UUID. Defaults to the live recording
+                session, or a fresh UUID when used without a live recording.
+            clip_id: The model-assigned UUID, or None to create one.
+
+        Returns:
+            A clip whose entire playlist is already downloadable.
+
+        Raises:
+            ValueError: If the batch has invalid tracks, data, or frame rate.
+            RecorderError: If the save is cancelled or the recorder is closed.
+            RuntimeError: If encoding or finalization fails.
+            OSError: If the clip cannot be written.
+        """
+        session_id = session_id or self._session_id or str(uuid.uuid4())
+        clip_id = clip_id or str(uuid.uuid4())
+        recording_id = _saved_recording_id(session_id, clip_id)
+        videos = chunk.bundle.get_tracks_by_kind(TrackKind.VIDEO)
+        audios = chunk.bundle.get_tracks_by_kind(TrackKind.AUDIO)
+        if len(videos) != 1 or len(audios) > 1:
+            raise ValueError("save_clip requires one video track and at most one audio track")
+        if not math.isfinite(chunk.fps) or chunk.fps <= 0:
+            raise ValueError("clip fps must be finite and positive")
+        video = videos[0].data
+        if video.ndim == 3:
+            video = video[np.newaxis, ...]
+        if (
+            video.ndim != 4
+            or video.shape[-1] != 3
+            or not all(video.shape)
+            or video.dtype != np.uint8
+        ):
+            raise ValueError("clip video must be nonempty uint8 RGB frames")
+        audio = audios[0] if audios else None
+        sample_rate = 48_000
+        samples = np.empty(0, dtype=np.int16)
+        if audio is not None:
+            if (
+                audio.data.ndim != 2
+                or audio.data.shape[0] != 1
+                or audio.data.dtype != np.int16
+                or not math.isfinite(audio.info.rate)
+                or audio.info.rate <= 0
+                or not float(audio.info.rate).is_integer()
+            ):
+                raise ValueError("clip audio must be mono int16 PCM with a positive sample rate")
+            sample_rate = int(audio.info.rate)
+            samples = audio.data.reshape(-1)
+
+        def check_cancelled() -> None:
+            if self._closed.is_set() or cancelled():
+                raise RecorderError("clip save cancelled")
+
+        with self._save_lock:
+            check_cancelled()
+            root = self._ensure_root()
+            destination = root / recording_id
+            if destination.exists():
+                raise FileExistsError("a saved clip with this ID already exists in the session")
+            staging = Path(tempfile.mkdtemp(prefix=".save-", dir=root))
+            encoder: ChunkEncoder | None = None
+            try:
+                encoder = ChunkEncoder(
+                    staging, self._config, True, sample_rate, frame_rate=chunk.fps
+                )
+                for index, frame in enumerate(video):
+                    check_cancelled()
+                    encoder.feed_video(frame)
+                    lo = round(index * sample_rate / chunk.fps)
+                    hi = round((index + 1) * sample_rate / chunk.fps)
+                    block = np.zeros(hi - lo, dtype=np.int16)
+                    available = samples[lo:hi]
+                    block[: available.size] = available
+                    if block.size:
+                        encoder.feed_audio(block)
+                encoder.stop(strict=True)
+                (staging / "manifest.m3u8").rename(staging / _SAVED_PLAYLIST)
+                segments = _saved_segments(staging)
+                if not segments or not (staging / _INIT_FILENAME).stat().st_size:
+                    raise RuntimeError("clip encoder produced no media")
+                for _, filename in segments:
+                    if not (staging / filename).stat().st_size:
+                        raise RuntimeError("clip encoder produced an empty segment")
+                check_cancelled()
+                (staging / _COMPLETE_MARKER).touch()
+                staging.rename(destination)
+            finally:
+                try:
+                    if encoder is not None:
+                        encoder.stop()
+                finally:
+                    shutil.rmtree(staging, ignore_errors=True)
+
+            duration = len(video) / chunk.fps
+            query = urlencode({"session_id": session_id, "clip_id": clip_id})
+            clip = ClipResult(
+                session_id=session_id,
+                kind="recording",
+                start_marker=0.0,
+                end_marker=duration,
+                now_marker=duration,
+                predicted_ready_at_ms=round(time.time() * 1000),
+                playlist_url=f"/clips?{query}",
+                clip_id=clip_id,
+            )
+            try:
+                if self._on_saved_clip_ready is not None:
+                    self._on_saved_clip_ready(clip, recording_id)
+            except Exception:
+                logger.exception("saved clip notification failed", recording_id=recording_id)
+            return clip
+
+    def saved_manifest(self, session_id: str, clip_id: str) -> ClipManifest | Pending:
+        """Return a whole saved clip by its owning session and model-assigned ID.
+
+        A missing clip is pending: a client may start polling before generation
+        finishes. Callers must bound their polling by a collection deadline.
+        """
+        recording_id = _saved_recording_id(session_id, clip_id)
+        if self._root is None:
+            return Pending()
+        directory = self._root / recording_id
+        if not (directory / _SAVED_PLAYLIST).is_file():
+            return Pending()
+        return _saved_manifest(directory, recording_id)
+
     def request_clip(self, duration_seconds: float) -> ClipResult:
         """Resolve a snap-clip of the last *duration_seconds* of output.
 
@@ -914,6 +1082,8 @@ class Recorder:
         session_dir = self._root / session_id
         if not session_dir.is_dir():
             return Gone()
+        if (session_dir / _SAVED_PLAYLIST).is_file():
+            return _saved_manifest(session_dir, session_id, start=start, end=end)
         chunk_start_idx = max(0, math.floor(start / cs))
         chunk_end_idx = max(chunk_start_idx, math.ceil(end / cs) - 1)
         if not self._boundary_ready(session_dir, chunk_end_idx):
@@ -981,6 +1151,53 @@ class Recorder:
         # ffmpeg creates init empty and flushes its headers with the first
         # segment, so the first chunk appearing is the signal init is usable.
         return (session_dir / "chunk_00000.m4s").is_file()
+
+
+def _saved_recording_id(session_id: str, clip_id: str) -> str:
+    if not _SESSION_ID_RE.fullmatch(session_id) or not _SESSION_ID_RE.fullmatch(clip_id):
+        raise ValueError("session_id and clip_id must be canonical lowercase UUIDs")
+    return str(uuid.uuid5(uuid.UUID(session_id), clip_id))
+
+
+def _saved_manifest(
+    directory: Path, recording_id: str, *, start: float = 0, end: float = math.inf
+) -> ClipManifest:
+    segments = _saved_segments(directory)
+    target = max(1, math.ceil(max(duration for duration, _ in segments)))
+    lines = [
+        "#EXTM3U",
+        "#EXT-X-VERSION:7",
+        f"#EXT-X-TARGETDURATION:{target}",
+        "#EXT-X-PLAYLIST-TYPE:VOD",
+        f'#EXT-X-MAP:URI="/clips/chunks/{recording_id}/{_INIT_FILENAME}"',
+    ]
+    offset = 0.0
+    for duration, filename in segments:
+        if offset < end and offset + duration > start:
+            lines.extend((f"#EXTINF:{duration:.6f},", f"/clips/chunks/{recording_id}/{filename}"))
+        offset += duration
+    lines.append("#EXT-X-ENDLIST")
+    return ClipManifest(body="\n".join(lines) + "\n")
+
+
+def _saved_segments(directory: Path) -> list[tuple[float, str]]:
+    lines = (directory / _SAVED_PLAYLIST).read_text().splitlines()
+    if "#EXT-X-ENDLIST" not in lines:
+        raise RuntimeError("clip playlist is not finalized")
+    segments = []
+    for index, line in enumerate(lines):
+        if line.startswith("#EXTINF:"):
+            duration = float(line.removeprefix("#EXTINF:").split(",", 1)[0])
+            filename = lines[index + 1] if index + 1 < len(lines) else ""
+            if (
+                not math.isfinite(duration)
+                or duration <= 0
+                or not filename.startswith("chunk_")
+                or not _CHUNK_FILENAME_RE.fullmatch(filename)
+            ):
+                raise RuntimeError("clip encoder produced an invalid playlist")
+            segments.append((duration, filename))
+    return segments
 
 
 def _boundary_index(end: float, chunk_seconds: int) -> int:

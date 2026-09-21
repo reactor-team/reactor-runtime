@@ -10,10 +10,14 @@ under a caller-chosen ``upload_id`` and writes the bytes with a ``PUT``; a
 
 from __future__ import annotations
 
+import uuid
+from io import BytesIO
 from pathlib import Path
 
+import av
 import httpx
-from contract_helpers import FIXED_SESSION_ID, Harness
+import numpy as np
+from contract_helpers import FIXED_SESSION_ID, ContractOutput, Harness, JournalReader
 
 from reactor_runtime.runner.runner import Runner
 
@@ -36,6 +40,93 @@ def _seed_recording(runner: Runner, root: Path, *segments: str) -> None:
 
 
 # -- clips ----------------------------------------------------------------------
+
+
+async def test_completed_batch_downloads_before_playback_or_session_end(
+    harness: Harness, tmp_path: Path
+) -> None:
+    harness.runner.recorder._root = tmp_path
+    response = await harness.client.post("/start_session", json={})
+    assert response.status_code == 200
+    assert response.json()["recording"]["enabled"] is False
+    bridge = harness.runner._bridge
+    assert bridge is not None
+
+    clip = await bridge._model.output.save_clip(
+        ContractOutput(main=np.zeros((101, 16, 16, 3), dtype=np.uint8)), fps=24
+    )
+
+    response = await harness.client.get(clip.playlist_url)
+    assert response.status_code == 200
+    playlist = response.text
+    assert "#EXTINF:0.208333," in playlist
+    assert playlist.endswith("#EXT-X-ENDLIST\n")
+    assert (await harness.client.get("/session")).json()["state"] == "waiting"
+    assert harness.runner.recorder._markers is None
+    paths = [
+        line.split('"')[1] if line.startswith("#EXT-X-MAP:") else line
+        for line in playlist.splitlines()
+        if line.startswith("#EXT-X-MAP:") or line.startswith("/clips/chunks/")
+    ]
+    media = bytearray()
+    for path in paths:
+        response = await harness.client.get(path)
+        assert response.status_code == 200
+        media.extend(response.content)
+    with av.open(BytesIO(media), mode="r") as container:
+        assert sum(1 for _ in container.decode(video=0)) == 101
+
+    assert (await harness.client.post("/stop_session")).status_code == 200
+    assert (await harness.client.get(clip.playlist_url)).status_code == 200
+
+
+async def test_saved_clip_ids_keep_the_owner_and_journal_a_complete_artifact(
+    harness: Harness, tmp_path: Path
+) -> None:
+    harness.runner.recorder._root = tmp_path
+    harness.runner.start_session({"session_id": _RECORDING_ID})
+    journal = JournalReader(harness.runner)
+    bridge = harness.runner._bridge
+    assert bridge is not None
+    ids = [str(uuid.uuid4()), str(uuid.uuid4())]
+    urls = []
+    recordings = []
+    try:
+        for clip_id, frame_count in zip(ids, (4, 9), strict=True):
+            url = f"/clips?session_id={_RECORDING_ID}&clip_id={clip_id}"
+            assert (await harness.client.get(url)).status_code == 202
+            clip = await bridge._model.output.save_clip(
+                ContractOutput(main=np.zeros((frame_count, 16, 16, 3), dtype=np.uint8)),
+                fps=24,
+                clip_id=clip_id,
+            )
+            assert clip.session_id == _RECORDING_ID
+            assert clip.clip_id == clip_id
+            assert clip.playlist_url == url
+            detail = (await journal.expect("saved_clip_ready"))["detail"]
+            assert detail == {
+                "session_id": _RECORDING_ID,
+                "clip_id": clip_id,
+                "recording_id": detail["recording_id"],
+                "playlist_url": url,
+            }
+            recordings.append(detail["recording_id"])
+            response = await harness.client.get(url)
+            assert response.status_code == 200
+            assert response.text.endswith("#EXT-X-ENDLIST\n")
+            assert f"/clips/chunks/{detail['recording_id']}/init.mp4" in response.text
+            urls.append(url)
+        assert len(set(recordings)) == 2
+        assert (await harness.client.get(urls[0] + "&start=0")).status_code == 400
+        assert (await harness.client.get(urls[0] + "&end=1")).status_code == 400
+        assert (
+            await harness.client.get(f"/clips?session_id={_RECORDING_ID}&clip_id=bad")
+        ).status_code == 400
+        harness.runner.stop_session()
+        for url in urls:
+            assert (await harness.client.get(url)).status_code == 200
+    finally:
+        await journal.aclose()
 
 
 async def test_the_init_segment_is_served_at_init_mp4(harness: Harness, tmp_path: Path) -> None:
