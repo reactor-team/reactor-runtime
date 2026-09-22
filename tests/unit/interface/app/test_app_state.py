@@ -270,6 +270,37 @@ async def test_a_lifecycle_hook_waits_for_the_step_lock() -> None:
     assert entered.is_set()
 
 
+async def test_a_session_end_waits_for_the_step_lock_before_clearing_the_state() -> None:
+    # No @session_ended hook: the clear must still queue behind the lock a
+    # run() loop holds around a step, or a process_input() suspended on an
+    # await resumes to a None state.
+    app = App()
+    _ready(app)
+    await app._dispatch_reactor_event(SessionStarted("s"))
+    ended = SessionEnded("s", EndReason.STOPPED)
+    async with app._step_lock:
+        task = asyncio.create_task(app._dispatch_reactor_event(ended))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not app._live.is_set()  # the gate drops at once, so the loop stops next
+        assert isinstance(app.state, State)  # but the state outlives the step
+    await task
+    assert app.state is None
+
+
+async def test_a_session_start_waits_for_the_step_lock_before_building_the_state() -> None:
+    # No @session_started hook: the build must still queue behind the lock.
+    app = App()
+    _ready(app)
+    async with app._step_lock:
+        task = asyncio.create_task(app._dispatch_reactor_event(SessionStarted("s")))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert app.state is None
+    await task
+    assert isinstance(app.state, State)
+
+
 async def test_the_live_gate_needs_a_started_session_and_a_client() -> None:
     app = Bare()
     _ready(app)

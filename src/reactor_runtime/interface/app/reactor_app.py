@@ -23,8 +23,10 @@ a session starts, before ``@session_started`` runs, and cleared after
 ``@session_ended`` returns.
 
 Two pieces of loop-bound state go with it. The step lock serializes every
-command handler and lifecycle hook, so a ``run()`` that takes the same lock
-around one unit of work never has a handler land inside it. The live gate is
+command handler, every lifecycle hook, and the build and clear of ``self.state``
+at the session boundaries, so a ``run()`` that takes the same lock around one
+unit of work never has a handler land inside it and never sees its state
+replaced or cleared under it. The live gate is
 set while a session has started and at least one client is connected; a
 ``run()`` waits on it and checks it between units of work.
 
@@ -274,8 +276,9 @@ class ReactorApp(ReactorCore):
 
                     # The step lock is held from the first line of process_input()
                     # to the return of process_output(). Both hooks are async and
-                    # may await; the lock is what stops a handler from landing in
-                    # one of those gaps.
+                    # may await; the lock is what stops a handler, a lifecycle
+                    # hook, or the session boundary's write to self.state from
+                    # landing in one of those gaps.
                     async with self._step_lock:
                         # 2. The application gate.
                         try:
@@ -441,7 +444,10 @@ class ReactorApp(ReactorCore):
         ``@session_started`` hook runs, so once-per-session initialization can
         write to it, and cleared only after the ``@session_ended`` hook returns,
         which may still read the ending session's values. A client leaving and
-        rejoining within one session sees the same instance.
+        rejoining within one session sees the same instance. Both writes share
+        the hook's step-lock acquisition, and take it even when no hook is
+        registered, so a step suspended in ``process_input()`` or
+        ``process_output()`` finishes on the state it started with.
 
         The live gate, :attr:`_live`, is a session that has started and a client
         that is connected. A session end drops the gate before its hook runs, so
@@ -458,18 +464,23 @@ class ReactorApp(ReactorCore):
             await self._invoke_hook(hooks.disconnected, event.conn_id)
             self._clients.pop(event.conn_id, None)
         elif isinstance(event, SessionStarted):
-            if self.__app_state__ is not None:
-                self.state = self.__app_state__()
             self._session_active = True
             self._update_live()
-            await self._invoke_hook(hooks.session_started, None)
+            # The state is written under the step lock, hook or no hook: a step
+            # suspended in one of its hooks holds the lock and must not see the
+            # attribute change under it.
+            async with self._step_lock:
+                if self.__app_state__ is not None:
+                    self.state = self.__app_state__()
+                await self._call_hook(hooks.session_started, None)
         elif isinstance(event, SessionEnded):
             self._session_active = False
             self._set_connected(0)
-            await self._invoke_hook(hooks.session_ended, None)
-            self._clients.clear()
-            if self.__app_state__ is not None:
-                self.state = None
+            async with self._step_lock:
+                await self._call_hook(hooks.session_ended, None)
+                self._clients.clear()
+                if self.__app_state__ is not None:
+                    self.state = None
             # The hook has returned, so its records were written while the
             # session's log binding was live; the session's last ambient writer
             # is done and the binding retires here, on the model thread.
@@ -482,23 +493,35 @@ class ReactorApp(ReactorCore):
     ) -> None:
         """Call one lifecycle hook under the step lock, injecting reserved parameters.
 
+        The lock puts the hook between two units of a ``run()`` loop, like a
+        command handler. A missing hook takes no lock: there is nothing to put
+        between two units.
+        """
+        if hook is None:
+            return
+        async with self._step_lock:
+            await self._call_hook(hook, conn_id, **extra)
+
+    async def _call_hook(
+        self, hook: Callable[..., Any] | None, conn_id: ConnId | None, **extra: Any
+    ) -> None:
+        """Call one lifecycle hook. The caller holds the step lock.
+
         A hook that raises is logged and swallowed, so a faulty hook cannot tear
-        the reactor loop down. The lock puts the hook between two units of a
-        ``run()`` loop, like a command handler.
+        the reactor loop down.
         """
         if hook is None:
             return
         kwargs = dict(extra)
         for name in _hook_reserved(hook):
             kwargs[name] = self._reserved(name, conn_id)
-        async with self._step_lock:
-            try:
-                if inspect.iscoroutinefunction(hook):
-                    await hook(self, **kwargs)
-                else:
-                    hook(self, **kwargs)
-            except Exception:
-                logger.exception("error in lifecycle handler", handler=_qualname(hook))
+        try:
+            if inspect.iscoroutinefunction(hook):
+                await hook(self, **kwargs)
+            else:
+                hook(self, **kwargs)
+        except Exception:
+            logger.exception("error in lifecycle handler", handler=_qualname(hook))
 
     # -- internals ------------------------------------------------------------
 
