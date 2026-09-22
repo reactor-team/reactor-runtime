@@ -13,10 +13,10 @@ from reactor_runtime import (
     INPUT_REGISTRY,
     MESSAGE_REGISTRY,
     OUTPUT_REGISTRY,
-    Input,
+    MediaInput,
     ModelMessage,
     Output,
-    ReactorModel,
+    ReactorApp,
     Video,
     all_input_tracks,
     all_output_tracks,
@@ -29,7 +29,7 @@ def test_declaring_a_subclass_registers_it() -> None:
     class Out(Output):
         main: Video
 
-    class In(Input):
+    class In(MediaInput):
         camera: Video
 
     class Note(ModelMessage):
@@ -43,7 +43,7 @@ def test_declaring_a_subclass_registers_it() -> None:
 
 
 def test_an_event_handler_registers_its_command() -> None:
-    class Model(ReactorModel):
+    class Model(ReactorApp):
         @event(name="go")
         async def go(self) -> None: ...
 
@@ -74,7 +74,7 @@ def test_a_payload_less_message_is_published_as_a_webhook() -> None:
     class Out(Output):
         main: Video
 
-    class Model(ReactorModel):
+    class Model(ReactorApp):
         @event(name="go")
         async def go(self) -> None: ...
 
@@ -96,7 +96,7 @@ def test_a_broadcast_only_message_is_published_in_the_schema() -> None:
 
         level: str
 
-    class Model(ReactorModel):
+    class Model(ReactorApp):
         @event(name="go")
         async def go(self) -> None:
             # Never returns Alert — the model would self.send() it instead.
@@ -135,10 +135,10 @@ def test_a_track_declared_in_both_directions_is_rejected_on_read() -> None:
     class Out(Output):
         shared: Video
 
-    class In(Input):
+    class In(MediaInput):
         shared: Video
 
-    class Model(ReactorModel):
+    class Model(ReactorApp):
         input: In
 
     with pytest.raises(ValueError, match="both input and output"):
@@ -146,7 +146,7 @@ def test_a_track_declared_in_both_directions_is_rejected_on_read() -> None:
 
 
 def test_an_inherited_command_is_published_without_redeclaration() -> None:
-    class Base(ReactorModel):
+    class Base(ReactorApp):
         @event(name="go")
         async def go(self) -> None: ...
 
@@ -165,7 +165,7 @@ def test_isolation_first_model_sees_only_its_own_surface() -> None:
     class OnlyFirst(ModelMessage):
         a: str
 
-    class Model(ReactorModel):
+    class Model(ReactorApp):
         @event(name="only_first")
         async def first(self) -> None: ...
 
@@ -177,7 +177,7 @@ def test_isolation_second_model_does_not_see_the_first() -> None:
     class OnlySecond(ModelMessage):
         b: str
 
-    class Model(ReactorModel):
+    class Model(ReactorApp):
         @event(name="only_second")
         async def second(self) -> None: ...
 

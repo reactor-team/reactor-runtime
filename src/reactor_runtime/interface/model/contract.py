@@ -132,7 +132,7 @@ class ModelContract:
     def tracks(self) -> dict[str, TrackInfo]:
         """The model's media tracks, inbound first, from the track registries.
 
-        Reads the union of every declared :class:`Output` and :class:`Input`.
+        Reads the union of every declared :class:`Output` and :class:`MediaInput`.
         Inbound tracks come first so their m-line indices precede the outbound
         ones during transport negotiation.
 
