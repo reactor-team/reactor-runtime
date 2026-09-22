@@ -111,6 +111,15 @@ enum TrackDirection {
 // "jitter_ms", "round_trip_time_ms", "frames_decoded", "frames_dropped",
 // "frame_width", "frame_height", "nack_count", "keyframe_requests") — that
 // set grows as new stats become worth reporting, without a schema change.
+//
+// `codec`'s oneof only keeps `video_codec`/`audio_codec` from being set at
+// the same time — it does not, and structurally cannot, tie either one to
+// `kind`. A conforming sender always sets the arm matching `kind`
+// (`video_codec` for TRACK_KIND_VIDEO, `audio_codec` for TRACK_KIND_AUDIO),
+// but nothing on the wire rejects a message that doesn't. A consumer must
+// treat a codec arm that doesn't match `kind` as absent (the same as an
+// unrecognized or *_UNSPECIFIED value) rather than decode it — never trust
+// `kind` and the codec arm to agree without checking.
 message ClientTrackStat {
   // Epoch milliseconds, the client's own clock.
   int64 timestamp = 1;
