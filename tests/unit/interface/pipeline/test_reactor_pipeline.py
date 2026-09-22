@@ -8,11 +8,9 @@ import pytest
 
 from reactor_runtime import (
     EVENT_REGISTRY,
-    Idle,
     InputField,
     InputState,
     Output,
-    ReactorPipeline,
     Video,
     event,
     session_started,
@@ -28,6 +26,7 @@ from reactor_runtime.core.values import ConnId
 from reactor_runtime.interface.internal.input_buffer import BufferClosed
 from reactor_runtime.interface.internal.reactor_core import CommandEnvelope
 from reactor_runtime.interface.model.contract import ModelContract
+from reactor_runtime.interface.pipeline import Idle, ReactorPipeline
 from reactor_runtime.interface.pipeline.reactor_pipeline import _GeneratorEnded
 
 
@@ -166,8 +165,8 @@ async def test_handlers_wait_for_the_generator_lock() -> None:
     _ready(pipe)
     pipe.state = State()
     command = ModelContract.of(Pipe).validate("set_speed", {"speed": 9.0})
-    assert pipe._gen_lock is not None
-    async with pipe._gen_lock:
+    assert pipe._step_lock is not None
+    async with pipe._step_lock:
         task = asyncio.create_task(
             pipe._dispatch_command(CommandEnvelope(command, ConnId(1001), None))
         )
@@ -262,7 +261,7 @@ class FixedRecorder(ReactorPipeline):
     ) -> None:
         self.emitted.append((output, compute_time))
         if len(self.emitted) >= 3:
-            self._runnable.clear()
+            self._live.clear()
 
 
 class DynamicRecorder(ReactorPipeline):
@@ -281,14 +280,14 @@ class DynamicRecorder(ReactorPipeline):
     ) -> None:
         self.emitted.append((output, compute_time))
         if len(self.emitted) >= 3:
-            self._runnable.clear()
+            self._live.clear()
 
 
 def _open_session(pipe: ReactorPipeline) -> None:
     """Make a readied pipeline runnable, as a live session with a client would."""
     pipe._session_active = True
     pipe.connected.set()
-    pipe._runnable.set()
+    pipe._live.set()
 
 
 async def _drive(pipe: ReactorPipeline) -> None:
@@ -343,7 +342,7 @@ class InheritedFpsRecorder(_PinnedBase):
     ) -> None:
         self.emitted.append((output, compute_time))
         if len(self.emitted) >= 3:
-            self._runnable.clear()
+            self._live.clear()
 
 
 async def test_fps_pinned_on_an_intermediate_base_is_treated_as_fixed() -> None:
@@ -429,7 +428,7 @@ async def test_a_cleanup_failure_after_a_clean_session_end_ends_the_model_loop()
     await asyncio.sleep(0.05)
     # The client leaves, so the session loop finishes without an exception of its
     # own and the cleanup failure is the only one to report.
-    pipe._runnable.clear()
+    pipe._live.clear()
     with pytest.raises(RuntimeError, match="world reset failed"):
         await task
     assert pipe.state is None
@@ -478,7 +477,7 @@ async def test_a_started_session_with_a_client_is_runnable() -> None:
     _ready(pipe)
     await pipe._dispatch_reactor_event(SessionStarted("s"))
     await pipe._dispatch_reactor_event(ClientConnected(ConnId(1001), 1))
-    assert pipe._runnable.is_set()
+    assert pipe._live.is_set()
 
 
 async def test_session_ended_clears_the_run_gate() -> None:
@@ -487,7 +486,7 @@ async def test_session_ended_clears_the_run_gate() -> None:
     await pipe._dispatch_reactor_event(SessionStarted("s"))
     await pipe._dispatch_reactor_event(ClientConnected(ConnId(1001), 1))
     await pipe._dispatch_reactor_event(SessionEnded("s", EndReason.STOPPED))
-    assert not pipe._runnable.is_set()
+    assert not pipe._live.is_set()
 
 
 async def test_the_last_client_leaving_clears_the_run_gate() -> None:
@@ -496,7 +495,7 @@ async def test_the_last_client_leaving_clears_the_run_gate() -> None:
     await pipe._dispatch_reactor_event(SessionStarted("s"))
     await pipe._dispatch_reactor_event(ClientConnected(ConnId(1001), 1))
     await pipe._dispatch_reactor_event(ClientDisconnected(ConnId(1001), 0))
-    assert not pipe._runnable.is_set()
+    assert not pipe._live.is_set()
 
 
 async def test_state_is_built_at_session_start_and_cleared_at_session_end() -> None:

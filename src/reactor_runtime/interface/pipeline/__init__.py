@@ -7,8 +7,8 @@ Built on :class:`reactor_runtime.ReactorApp`; everything that base offers
 still applies.
 """
 
+from reactor_runtime.interface.app.input_state import InputState
 from reactor_runtime.interface.pipeline.idle import Idle
-from reactor_runtime.interface.pipeline.input_state import InputState
 from reactor_runtime.interface.pipeline.reactor_pipeline import ReactorPipeline
 
 __all__ = [

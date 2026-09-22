@@ -1,4 +1,8 @@
-"""The old names of renamed classes still import, warn, and resolve to the new class."""
+"""Deprecated names still import and warn.
+
+A renamed class resolves to its new class. A retired surface resolves to itself,
+so a model written on it keeps working, and the warning names the replacement.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +12,7 @@ import logging
 import pytest
 
 from reactor_runtime import MediaInput, ReactorApp
+from reactor_runtime.interface.pipeline import Idle, ReactorPipeline
 
 _ALIASES = [
     ("reactor_runtime", "ReactorModel", ReactorApp),
@@ -42,6 +47,31 @@ def test_old_names_are_not_in_all(module: str) -> None:
     exported = importlib.import_module(module).__all__
     assert "ReactorModel" not in exported
     assert "Input" not in exported
+
+
+@pytest.mark.parametrize("module", ["reactor_runtime", "reactor_runtime.interface"])
+def test_the_generator_pattern_is_retired_but_still_resolves(module: str) -> None:
+    exported = importlib.import_module(module).__all__
+    assert "ReactorPipeline" not in exported
+    assert "Idle" not in exported
+    with pytest.warns(DeprecationWarning, match="ReactorPipeline is deprecated.*ReactorApp"):
+        pipeline = importlib.import_module(module).ReactorPipeline
+    with pytest.warns(DeprecationWarning, match="Idle is deprecated.*ApplicationError"):
+        idle = importlib.import_module(module).Idle
+    assert pipeline is ReactorPipeline
+    assert idle is Idle
+
+
+def test_a_pipeline_imported_under_the_deprecated_name_still_runs_as_one() -> None:
+    with pytest.warns(DeprecationWarning, match="ReactorPipeline is deprecated"):
+        from reactor_runtime import ReactorPipeline as Deprecated
+
+    class Legacy(Deprecated):
+        def inference(self):
+            yield None
+
+    assert issubclass(Legacy, ReactorPipeline)
+    assert issubclass(Legacy, ReactorApp)
 
 
 def test_the_old_module_path_imports_the_same_class() -> None:

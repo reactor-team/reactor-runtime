@@ -25,8 +25,8 @@ from examples.brightness.brightness import (
     BrightnessState,
     ImageSet,
 )
-from reactor_runtime import Idle
 from reactor_runtime.interface.model.contract import ModelContract
+from reactor_runtime.interface.pipeline import Idle
 from reactor_runtime.manifest import import_model_class, load_config
 
 _RESOLUTIONS = ["480p", "720p", "1080p", "2160p"]

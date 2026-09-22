@@ -16,8 +16,10 @@ of the surface here — do not reach into submodules to find a replacement.
 
 ## Your model is a `ReactorPipeline`
 
-`ReactorPipeline`, `InputState`, and `Idle` are supported and re-exported from
-`reactor_runtime`. A pipeline ports as-is in shape: declare `state: MyState`
+`InputState` is supported and re-exported from `reactor_runtime`.
+`ReactorPipeline` and `Idle` still import from there, with a `DeprecationWarning`
+that names `ReactorApp` and `ApplicationError` as their replacements; both are
+removed in the next major. A pipeline ports as-is in shape: declare `state: MyState`
 (an `InputState` subclass), implement `load()` + an `inference()` generator
 (sync or async) that reads `self.state`, yields an `Output` per frame, and
 yields `Idle` (or `None`) to skip a turn. Public `InputState` fields still
