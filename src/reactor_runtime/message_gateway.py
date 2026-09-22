@@ -222,14 +222,19 @@ _AUDIO_CODEC_NAMES = {
 def _decode_codec(stat: platform_pb2.ClientTrackStat) -> str:
     """Read whichever codec arm *stat* set, as a plain name.
 
-    Empty for ``*_UNSPECIFIED`` (the browser hasn't reported a codec yet) and
-    for a value this runtime doesn't recognize yet (an older runtime reading
-    a newer client's codec) — never raises on either.
+    Empty for ``*_UNSPECIFIED`` (the browser hasn't reported a codec yet), for
+    a value this runtime doesn't recognize yet (an older runtime reading a
+    newer client's codec), and for a codec arm that doesn't match ``kind`` (a
+    video reading naming an audio codec or vice versa) — the oneof only
+    keeps ``video_codec``/``audio_codec`` from being set at the same time, it
+    doesn't tie either one to ``kind``, so a malformed batch can still name
+    the wrong one. Never raises on any of these; an unreadable codec is
+    reported the same as an unreported one.
     """
     which = stat.WhichOneof("codec")
-    if which == "video_codec":
+    if which == "video_codec" and stat.kind == platform_pb2.TrackKind.TRACK_KIND_VIDEO:
         return _VIDEO_CODEC_NAMES.get(stat.video_codec, "")
-    if which == "audio_codec":
+    if which == "audio_codec" and stat.kind == platform_pb2.TrackKind.TRACK_KIND_AUDIO:
         return _AUDIO_CODEC_NAMES.get(stat.audio_codec, "")
     return ""
 
