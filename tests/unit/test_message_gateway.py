@@ -3,7 +3,14 @@ from collections.abc import Mapping
 
 import pytest
 
-from reactor_runtime.core import Connection, ConnId, InputFrame
+from reactor_runtime.core import (
+    ClientConnectionStat,
+    ClientStatsBatch,
+    ClientTrackStat,
+    Connection,
+    ConnId,
+    InputFrame,
+)
 from reactor_runtime.message_gateway import InboundCommand, MessageGateway
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.protocol.common import dict_to_struct
@@ -23,6 +30,7 @@ class FakeSink:
         self.uploads: list[tuple[ConnId, str]] = []
         self.clips: list[tuple[ConnId, float, str]] = []
         self.recordings: list[tuple[ConnId, str]] = []
+        self.client_stats: list[tuple[ConnId, ClientStatsBatch]] = []
 
     def connection_opened(self, conn: Connection) -> None:
         pass
@@ -64,6 +72,9 @@ class FakeSink:
 
     def recording_requested(self, conn_id: ConnId, request_id: str) -> None:
         self.recordings.append((conn_id, request_id))
+
+    def client_stats_received(self, conn_id: ConnId, batch: ClientStatsBatch) -> None:
+        self.client_stats.append((conn_id, batch))
 
     def connection_answered(self, conn_id: ConnId, answer: Mapping[str, str]) -> None:
         pass
@@ -170,6 +181,193 @@ async def test_request_recording_routes_with_its_correlation_id() -> None:
         ConnId(8), frame, Channel.CONTROL, ProtocolVersion.V1, received_at=_ARRIVED
     )
     assert sink.recordings == [(ConnId(8), "ctrl_rec")]
+
+
+async def test_client_stats_batch_routes_as_decoded_track_stats() -> None:
+    gateway, sink, _ = _gateway()
+    _, frame = V1Codec().encode(
+        control_pb2.ControlClientMessage(
+            client_stats=platform_pb2.ClientStats(
+                track_stats=[
+                    platform_pb2.ClientTrackStat(
+                        timestamp=1_700_000_000_000,
+                        track_name="main_video",
+                        kind=platform_pb2.TrackKind.TRACK_KIND_VIDEO,
+                        direction=platform_pb2.TrackDirection.TRACK_DIRECTION_RECVONLY,
+                        video_codec=platform_pb2.VideoCodec.VIDEO_CODEC_VP9,
+                        paused=True,
+                        metrics={
+                            "bitrate_bps": 950_000,
+                            "frames_per_second": 29.5,
+                            "packets_lost": 4,
+                            "packets_received": 996,
+                            "jitter_ms": 12.0,
+                            "round_trip_time_ms": 48.0,
+                            "frames_decoded": 900,
+                            "frames_dropped": 2,
+                            "frame_width": 1280,
+                            "frame_height": 720,
+                            "nack_count": 3,
+                            "keyframe_requests": 1,
+                        },
+                    )
+                ],
+                connection_stat=platform_pb2.ClientConnectionStat(
+                    timestamp=1_700_000_000_000,
+                    metrics={
+                        "available_outgoing_bitrate_bps": 2_000_000,
+                        "time_to_connect_ms": 850,
+                    },
+                ),
+            )
+        )
+    )
+    await gateway.handle(
+        ConnId(4), frame, Channel.CONTROL, ProtocolVersion.V1, received_at=_ARRIVED
+    )
+    assert sink.client_stats == [
+        (
+            ConnId(4),
+            ClientStatsBatch(
+                track_stats=[
+                    ClientTrackStat(
+                        timestamp=1_700_000_000_000,
+                        track_name="main_video",
+                        kind="video",
+                        direction="recvonly",
+                        codec="VP9",
+                        paused=True,
+                        metrics={
+                            "bitrate_bps": 950_000,
+                            "frames_per_second": 29.5,
+                            "packets_lost": 4,
+                            "packets_received": 996,
+                            "jitter_ms": 12.0,
+                            "round_trip_time_ms": 48.0,
+                            "frames_decoded": 900,
+                            "frames_dropped": 2,
+                            "frame_width": 1280,
+                            "frame_height": 720,
+                            "nack_count": 3,
+                            "keyframe_requests": 1,
+                        },
+                    )
+                ],
+                connection_stat=ClientConnectionStat(
+                    timestamp=1_700_000_000_000,
+                    metrics={
+                        "available_outgoing_bitrate_bps": 2_000_000,
+                        "time_to_connect_ms": 850,
+                    },
+                ),
+            ),
+        )
+    ]
+
+
+async def test_client_stats_batch_with_no_connection_stat_decodes_to_none() -> None:
+    gateway, sink, _ = _gateway()
+    _, frame = V1Codec().encode(
+        control_pb2.ControlClientMessage(
+            client_stats=platform_pb2.ClientStats(
+                track_stats=[platform_pb2.ClientTrackStat(timestamp=1_700_000_000_000)]
+            )
+        )
+    )
+    await gateway.handle(
+        ConnId(4), frame, Channel.CONTROL, ProtocolVersion.V1, received_at=_ARRIVED
+    )
+    assert sink.client_stats[0][1].connection_stat is None
+
+
+async def test_client_stats_audio_track_decodes_its_own_codec_arm() -> None:
+    gateway, sink, _ = _gateway()
+    _, frame = V1Codec().encode(
+        control_pb2.ControlClientMessage(
+            client_stats=platform_pb2.ClientStats(
+                track_stats=[
+                    platform_pb2.ClientTrackStat(
+                        timestamp=1_700_000_000_000,
+                        track_name="main_audio",
+                        kind=platform_pb2.TrackKind.TRACK_KIND_AUDIO,
+                        direction=platform_pb2.TrackDirection.TRACK_DIRECTION_RECVONLY,
+                        audio_codec=platform_pb2.AudioCodec.AUDIO_CODEC_OPUS,
+                    )
+                ]
+            )
+        )
+    )
+    await gateway.handle(
+        ConnId(4), frame, Channel.CONTROL, ProtocolVersion.V1, received_at=_ARRIVED
+    )
+    assert sink.client_stats[0][1].track_stats[0].kind == "audio"
+    assert sink.client_stats[0][1].track_stats[0].codec == "opus"
+
+
+async def test_client_stats_unspecified_codec_decodes_to_empty_string() -> None:
+    gateway, sink, _ = _gateway()
+    _, frame = V1Codec().encode(
+        control_pb2.ControlClientMessage(
+            client_stats=platform_pb2.ClientStats(
+                track_stats=[
+                    platform_pb2.ClientTrackStat(
+                        timestamp=1_700_000_000_000,
+                        track_name="main_video",
+                        kind=platform_pb2.TrackKind.TRACK_KIND_VIDEO,
+                        direction=platform_pb2.TrackDirection.TRACK_DIRECTION_RECVONLY,
+                    )
+                ]
+            )
+        )
+    )
+    await gateway.handle(
+        ConnId(4), frame, Channel.CONTROL, ProtocolVersion.V1, received_at=_ARRIVED
+    )
+    assert sink.client_stats[0][1].track_stats[0].codec == ""
+
+
+async def test_client_stats_codec_arm_contradicting_kind_decodes_to_empty_string() -> None:
+    gateway, sink, _ = _gateway()
+    _, frame = V1Codec().encode(
+        control_pb2.ControlClientMessage(
+            client_stats=platform_pb2.ClientStats(
+                track_stats=[
+                    # A malformed batch: kind says audio, but the codec arm
+                    # set is video_codec. The oneof only keeps the two codec
+                    # arms from both being set at once — it doesn't tie
+                    # either one to kind — so this is a schema-legal message
+                    # decode must still not crash on.
+                    platform_pb2.ClientTrackStat(
+                        timestamp=1_700_000_000_000,
+                        track_name="main_audio",
+                        kind=platform_pb2.TrackKind.TRACK_KIND_AUDIO,
+                        video_codec=platform_pb2.VideoCodec.VIDEO_CODEC_VP9,
+                    )
+                ]
+            )
+        )
+    )
+    await gateway.handle(
+        ConnId(4), frame, Channel.CONTROL, ProtocolVersion.V1, received_at=_ARRIVED
+    )
+    assert sink.client_stats[0][1].track_stats[0].codec == ""
+
+
+async def test_client_stats_unspecified_kind_and_direction_decode_to_empty_strings() -> None:
+    gateway, sink, _ = _gateway()
+    _, frame = V1Codec().encode(
+        control_pb2.ControlClientMessage(
+            client_stats=platform_pb2.ClientStats(
+                track_stats=[platform_pb2.ClientTrackStat(timestamp=1_700_000_000_000)]
+            )
+        )
+    )
+    await gateway.handle(
+        ConnId(4), frame, Channel.CONTROL, ProtocolVersion.V1, received_at=_ARRIVED
+    )
+    stat = sink.client_stats[0][1].track_stats[0]
+    assert stat.kind == ""
+    assert stat.direction == ""
 
 
 async def test_v0_clip_request_mints_a_correlation_id_off_the_data_channel() -> None:

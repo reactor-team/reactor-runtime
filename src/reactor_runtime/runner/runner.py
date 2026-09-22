@@ -28,6 +28,7 @@ from reactor_runtime.core import (
     JOURNAL_EVENTS,
     ClientConnected,
     ClientDisconnected,
+    ClientStatsBatch,
     CommandFailure,
     Connection,
     ConnectionSink,
@@ -86,6 +87,27 @@ _RUNNING_STATES = frozenset({SessionState.WAITING, SessionState.STREAMING, Sessi
 # moved on arrives in one of these — and must not join the registry.
 _STALE_CONNECTION_STATES = frozenset(
     {SessionState.READY, SessionState.CLOSING, SessionState.TERMINATED}
+)
+
+# The field names client_stats_received always logs itself, alongside a
+# stat's own metrics map. A client-supplied metric under one of these names
+# is dropped rather than clobbering the real value — metrics is client
+# content, and this identity is the runtime's own, never the client's to set.
+# "msg" is here for a different reason: it's not a field this method logs
+# itself, but StructuredLogger.info's own positional parameter name — passing
+# it back as a keyword via **metrics raises TypeError, not a silent clobber.
+_RESERVED_STAT_FIELDS = frozenset(
+    {
+        "session_id",
+        "conn_id",
+        "track_name",
+        "kind",
+        "direction",
+        "codec",
+        "paused",
+        "timestamp",
+        "msg",
+    }
 )
 
 # The lifecycle word reported for each session state. Coarser than the session
@@ -538,6 +560,53 @@ class Runner(ServiceComponent, ConnectionSink):
     def recording_requested(self, conn_id: ConnId, request_id: str) -> None:
         """Resolve a full-session recording request and reply, correlated by *request_id*."""
         self._reply_clip(conn_id, request_id, lambda: self._recorder.request_recording())
+
+    def client_stats_received(self, conn_id: ConnId, batch: ClientStatsBatch) -> None:
+        """Log a client-reported quality batch, tagged with this session and connection.
+
+        The client is the only vantage point onto its own receive-side
+        quality, so each fact is logged as reported. ``session_id`` and
+        *conn_id* are the runtime's own identity for this session and
+        connection — never anything the payload claims, because the payload
+        carries neither.
+
+        A connection-wide fact set logs once per batch, separately from the
+        per-track readings, so it isn't repeated once per track on a
+        multi-track connection — and only when this batch actually carries
+        one: a client sends it once, on its first batch after connecting,
+        and omits it on every batch after, so most batches have none to log.
+        """
+        if batch.connection_stat is not None:
+            metrics = {
+                key: value
+                for key, value in batch.connection_stat.metrics.items()
+                if key not in _RESERVED_STAT_FIELDS
+            }
+            logger.info(
+                "client connection stats",
+                session_id=self._session_id,
+                conn_id=conn_id,
+                timestamp=batch.connection_stat.timestamp,
+                **metrics,
+            )
+        for stat in batch.track_stats:
+            metrics = {
+                key: value
+                for key, value in stat.metrics.items()
+                if key not in _RESERVED_STAT_FIELDS
+            }
+            logger.info(
+                "client stats",
+                session_id=self._session_id,
+                conn_id=conn_id,
+                track_name=stat.track_name,
+                kind=stat.kind,
+                direction=stat.direction,
+                codec=stat.codec,
+                paused=stat.paused,
+                timestamp=stat.timestamp,
+                **metrics,
+            )
 
     def _reply_clip(
         self, conn_id: ConnId, request_id: str, resolve: Callable[[], ClipResult]
