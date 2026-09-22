@@ -1,0 +1,8 @@
+# Read by StarterModel.load(). The runtime passes this file's path through and
+# does not parse it.
+
+width: 800
+height: 500
+
+# The image the model spins, relative to the weights directory.
+logo: logo.png

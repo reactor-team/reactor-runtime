@@ -1,0 +1,15 @@
+# Read by WaypointModel.load(). The runtime passes this file's path through and
+# does not parse it.
+
+# A Hugging Face repository or a local directory with the weights.
+model_uri: Overworld/Waypoint-1.5-1B
+
+# Inference quantization: null, intw8a8, fp8w8a8, or nvfp4. See the world_engine
+# README for the GPUs each one supports.
+quant: null
+
+device: cuda
+
+# Idle steps run once at load so the compiled kernels are ready before the
+# first client waits on them. 0 skips the warmup.
+warmup_steps: 50

@@ -10,7 +10,8 @@ model:
   name: echo
   version: v0.0.1
   description: |
-    Loop the client's webcam and mic back with a real-time video effect.
+    Loop the client's webcam and microphone back with a real-time video
+    effect. Seven effects, a caption, and a burst size are the client's.
 
 runtime:
   import: echo:Echo
@@ -29,4 +30,4 @@ runtime:
       bitrate_kbps: 128
 
 build:
-  runtime_version: "3.3.0"
+  runtime_version: "3.5.0"

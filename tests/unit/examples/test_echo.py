@@ -1,27 +1,26 @@
-"""Surface checks for the echo example.
+"""Surface and behaviour checks for the echo example.
 
-Guards the client-facing contract of ``examples/echo`` — its commands, their
-constraints, the media tracks, command/reply wiring, the rendered schema, and
-that the manifest still resolves to the model class. The runtime's own suites
-cover the loopback behaviour; these tests fail if a rename or a signature change
-would break a client or the generated SDK.
+The model half is pure OpenCV, so it is tested as it is. The application half
+is driven through its hooks the way the runtime's loop drives them, with frames
+pushed into its input buffers the way the transport pushes them.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import numpy as np
 import pytest
+from echo_model import EFFECTS, EchoInput, EchoModel, EchoResult
 
-from examples.echo.echo import Echo, EchoInput, EchoOutput, EffectChanged
-from reactor_runtime import Output, TrackPayload
+from echo import Echo, EchoMedia, EchoOutput
+from reactor_runtime import ApplicationError, InputFrame, StepOutcome, TrackPayload
+from reactor_runtime.core.model import EndReason, SessionEnded, SessionStarted
 from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.manifest import import_model_class, load_config
 
-_EFFECTS = ["none", "grayscale", "sepia", "edges", "invert", "blur", "pixelate"]
 _EXAMPLE_DIR = Path(__file__).parents[3] / "examples" / "echo"
 
 
@@ -29,69 +28,48 @@ _EXAMPLE_DIR = Path(__file__).parents[3] / "examples" / "echo"
 def _seed_registries(
     isolate_interface_registries: None, register_model: Callable[[type], None]
 ) -> None:
-    """Re-seed only echo's surface after the per-test registry clear."""
     register_model(Echo)
 
 
-def test_commands_are_exactly_the_declared_set() -> None:
-    commands = ModelContract.of(Echo).commands
-    assert set(commands) == {
+def _frame(value: int = 0, size: tuple[int, int] = (8, 8)) -> np.ndarray:
+    return np.full((*size, 3), value, dtype=np.uint8)
+
+
+def _audio(samples: int) -> np.ndarray:
+    return np.arange(samples, dtype=np.int16).reshape(1, -1)
+
+
+# -- the client contract ------------------------------------------------------
+
+
+def test_commands_are_exactly_the_state_setters() -> None:
+    assert set(ModelContract.of(Echo).commands) == {
         "set_effect",
         "set_intensity",
-        "set_burst",
         "set_caption",
-        "set_overlay_image",
+        "set_burst",
     }
 
 
 def test_set_effect_offers_every_effect() -> None:
-    spec = ModelContract.of(Echo).commands["set_effect"]
-    assert spec.command.__command_fields__["effect"].info.choices == _EFFECTS
+    info = ModelContract.of(Echo).commands["set_effect"].command.__command_fields__["effect"]
+    assert info.info.choices == EFFECTS
 
 
-def test_set_intensity_is_bounded_zero_to_one() -> None:
-    info = ModelContract.of(Echo).commands["set_intensity"].command.__command_fields__["intensity"]
-    assert info.info.ge == 0.0
-    assert info.info.le == 1.0
-
-
-def test_set_caption_bounds_its_length() -> None:
-    info = ModelContract.of(Echo).commands["set_caption"].command.__command_fields__["caption"]
-    assert info.info.max_length == 200
-
-
-def test_set_overlay_image_bounds_its_strength() -> None:
-    fields = ModelContract.of(Echo).commands["set_overlay_image"].command.__command_fields__
-    assert fields["overlay_strength"].info.ge == 0.0
-    assert fields["overlay_strength"].info.le == 1.0
-
-
-def test_the_free_text_and_upload_fields_ask_for_moderation() -> None:
+def test_the_setters_carry_the_field_bounds() -> None:
     commands = ModelContract.of(Echo).commands
-    caption = commands["set_caption"].command.__command_fields__
-    overlay = commands["set_overlay_image"].command.__command_fields__
-    assert caption["caption"].info.moderate is True
-    assert overlay["overlay_image"].info.moderate is True
-    # A bounded knob carries no free text, so it asks for nothing.
-    assert overlay["overlay_strength"].info.moderate is False
+    intensity = commands["set_intensity"].command.__command_fields__["intensity"].info
+    caption = commands["set_caption"].command.__command_fields__["caption"].info
+    burst = commands["set_burst"].command.__command_fields__["burst"].info
+    assert (intensity.ge, intensity.le) == (0.0, 1.0)
+    assert caption.max_length == 200
+    assert (burst.ge, burst.le) == (1, 120)  # four seconds at the model's 30 fps
 
 
-def test_the_rendered_schema_states_each_field_s_moderation_preference() -> None:
-    doc = ModelContract.of(Echo).render_schema().to_openapi()
-
-    def properties(command: str) -> dict[str, Any]:
-        body = doc["paths"][f"/events/{command}"]["post"]["requestBody"]["content"][
-            "application/json"
-        ]["schema"]
-        return body["properties"]
-
-    assert properties("set_caption")["caption"]["x-reactor-moderate"] is True
-    overlay = properties("set_overlay_image")
-    assert overlay["overlay_image"] == {
-        "$ref": "#/components/schemas/ReactorUploadReference",
-        "x-reactor-moderate": True,
-    }
-    assert overlay["overlay_strength"]["x-reactor-moderate"] is False
+def test_only_the_free_text_field_asks_for_moderation() -> None:
+    commands = ModelContract.of(Echo).commands
+    assert commands["set_caption"].command.__command_fields__["caption"].info.moderate is True
+    assert commands["set_effect"].command.__command_fields__["effect"].info.moderate is False
 
 
 def test_tracks_are_bidirectional_audio_and_video() -> None:
@@ -104,191 +82,213 @@ def test_tracks_are_bidirectional_audio_and_video() -> None:
     }
 
 
-def test_effect_commands_reply_with_effect_changed() -> None:
-    commands = ModelContract.of(Echo).commands
-    assert commands["set_effect"].response is EffectChanged
-    assert commands["set_intensity"].response is EffectChanged
-    assert commands["set_caption"].response is None
-    assert commands["set_overlay_image"].response is None
-
-
-def test_schema_renders_the_full_surface() -> None:
-    doc = ModelContract.of(Echo).render_schema().to_openapi()
-    assert set(doc["paths"]) == {
-        "/events/set_effect",
-        "/events/set_intensity",
-        "/events/set_burst",
-        "/events/set_caption",
-        "/events/set_overlay_image",
-    }
-    assert "effect_changed" in doc["webhooks"]
-    assert "EffectChanged" in doc["components"]["schemas"]
-    tracks = {t["name"]: (t["kind"], t["direction"]) for t in doc["x-reactor"]["tracks"]}
-    assert tracks == {
-        "webcam": ("video", "in"),
-        "mic": ("audio", "in"),
-        "main_video": ("video", "out"),
-        "main_audio": ("audio", "out"),
-    }
-
-
-def test_manifest_resolves_to_the_model_class(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_manifest_resolves_to_the_app_class() -> None:
     cfg = load_config(_EXAMPLE_DIR / "reactor.yaml")
-    assert cfg.model_ref == "echo:Echo"
-    # The example runs from its own directory, so its module is a top-level
-    # `echo`, imported under a second name here — compare by qualname, not identity.
-    monkeypatch.syspath_prepend(str(_EXAMPLE_DIR))
-    assert import_model_class(cfg.model_ref).__qualname__ == "Echo"
+    assert import_model_class(cfg.model_ref) is Echo
+    assert cfg.config_path is None
 
 
-def test_model_constructs_with_input_buffers_and_loads() -> None:
-    model = Echo()
-    model.load(None)
-    assert isinstance(model.media, EchoInput)
-    assert model.effect == "none"
+# -- the model half -----------------------------------------------------------
 
 
-async def test_session_start_resets_shared_state() -> None:
-    """The session hook owns the shared state, so each session starts clean.
-
-    A previous session's clients can leave the effect, caption, and overlay
-    changed; ``on_session_start`` fires once at the top of the next session and
-    restores the defaults, which no per-connection counter could guarantee
-    across a server-side close.
-    """
-    model = Echo()
-    model.load(None)
-    model.effect = "sepia"
-    model.intensity = 0.25
-    model._caption = "left over"
-    model._overlay = np.zeros((2, 2, 3), np.uint8)
-
-    await model.on_session_start()
-
-    assert model.effect == "none"
-    assert model.intensity == 1.0
-    assert model._caption == ""
-    assert model._overlay is None
+@pytest.mark.parametrize("effect", EFFECTS)
+def test_every_effect_returns_a_frame_of_the_same_shape(effect: str) -> None:
+    model = EchoModel()
+    model.load()
+    frame = np.random.default_rng(0).integers(0, 255, (16, 24, 3), dtype=np.uint8)
+    result = model.generate(EchoInput(frame=frame, effect=effect, intensity=1.0, caption=""))
+    assert result.frame.shape == frame.shape
+    assert result.frame.dtype == np.uint8
 
 
-async def test_connect_leaves_shared_state_alone() -> None:
-    """Connecting is per-client, so a later client never resets what a peer set."""
-    model = Echo()
-    model.load(None)
-    await model.on_session_start()
-    model.effect = "invert"
-
-    await model.on_connect()
-
-    assert model.effect == "invert"
+def test_no_effect_and_zero_intensity_leave_the_frame_alone() -> None:
+    model = EchoModel()
+    frame = _frame(77)
+    untouched = model.generate(EchoInput(frame=frame, effect="none", intensity=1.0, caption=""))
+    dry = model.generate(EchoInput(frame=frame, effect="invert", intensity=0.0, caption=""))
+    assert untouched.frame is frame
+    assert dry.frame is frame
 
 
-def test_output_carries_both_tracks() -> None:
-    assert set(EchoOutput.__tracks__) == {"main_video", "main_audio"}
-
-
-def test_output_carries_the_metadata_a_frame_arrived_with() -> None:
-    """A tagged inbound frame's metadata rides back out on what it produced."""
-    output = EchoOutput(
-        main_video=TrackPayload(np.zeros((2, 2, 3), np.uint8), metadata=b'{"seq":3}'),
-        main_audio=np.zeros((1, 4), np.int16),
+def test_invert_at_full_intensity_inverts() -> None:
+    result = EchoModel().generate(
+        EchoInput(frame=_frame(10), effect="invert", intensity=1.0, caption="")
     )
-    assert output.__metadata__["main_video"] == b'{"seq":3}'
+    assert int(result.frame[0, 0, 0]) == 245
 
 
-def test_output_carries_no_metadata_for_an_untagged_frame() -> None:
-    """A frame the client sent untagged goes back out untagged."""
-    output = EchoOutput(
-        main_video=np.zeros((2, 2, 3), np.uint8),
-        main_audio=np.zeros((1, 4), np.int16),
+def test_a_caption_changes_the_frame() -> None:
+    frame = _frame(0, size=(64, 128))
+    result = EchoModel().generate(
+        EchoInput(frame=frame, effect="none", intensity=1.0, caption="hi")
     )
+    assert result.frame.any()
+
+
+# -- the application half -----------------------------------------------------
+
+
+class RecordingModel:
+    """A model half that records its inputs and hands each frame straight back."""
+
+    def __init__(self) -> None:
+        self.inputs: list[EchoInput] = []
+        self.resets = 0
+
+    def generate(self, input: EchoInput) -> EchoResult:
+        self.inputs.append(input)
+        return EchoResult(frame=input.frame)
+
+    def reset(self) -> None:
+        self.resets += 1
+
+
+async def _app() -> tuple[Echo, RecordingModel]:
+    app = Echo()
+    app.load(None)
+    model = RecordingModel()
+    app.engine = model  # type: ignore[ty:invalid-assignment]  # the model half by shape
+    app._on_loop_ready()
+    app.bind_output(
+        broadcast=lambda *args: None, addressed=lambda *args: None, media=lambda c: None
+    )
+    await app._dispatch_reactor_event(SessionStarted("s"))
+    return app, model
+
+
+def _push_webcam(app: Echo, frame: np.ndarray, metadata: bytes | None = None) -> None:
+    app._input_buffers["webcam"].push(InputFrame(data=frame, pts=0.0, metadata=metadata))
+
+
+def _push_mic(app: Echo, *chunks: np.ndarray) -> None:
+    for chunk in chunks:
+        app._input_buffers["mic"].push(InputFrame(data=chunk, pts=0.0))
+
+
+async def _step(app: Echo, frame: np.ndarray, metadata: bytes | None = None) -> EchoOutput | None:
+    """Drive one step the way the loop does: input, generate, output."""
+    _push_webcam(app, frame, metadata)
+    input = await app.process_input()
+    return await app.process_output(StepOutcome(result=app.generate(input)))
+
+
+def test_the_media_holder_is_bound_to_the_declared_tracks() -> None:
+    app = Echo()
+    assert isinstance(app.media, EchoMedia)
+    assert set(app._input_buffers) == {"webcam", "mic"}
+
+
+async def test_process_input_refuses_until_a_webcam_frame_arrives() -> None:
+    app, _ = await _app()
+    with pytest.raises(ApplicationError, match="webcam"):
+        await app.process_input()
+
+
+async def test_process_input_takes_the_newest_frame_and_the_settings() -> None:
+    app, _ = await _app()
+    app.state.effect = "sepia"
+    app.state.intensity = 0.5
+    app.state.caption = "hello"
+    _push_webcam(app, _frame(1))
+    _push_webcam(app, _frame(2), metadata=b'{"seq":2}')
+    input = await app.process_input()
+    assert int(input.frame[0, 0, 0]) == 2  # LATEST: the backlog is dropped
+    assert (input.effect, input.intensity, input.caption) == ("sepia", 0.5, "hello")
+    assert app.state._metadata == b'{"seq":2}'
+
+
+async def test_process_input_drains_the_microphone_in_arrival_order() -> None:
+    app, _ = await _app()
+    _push_webcam(app, _frame())
+    _push_mic(app, _audio(3), _audio(2))
+    await app.process_input()
+    assert app.state._audio is not None
+    assert app.state._audio.tolist() == [[0, 1, 2, 0, 1]]
+
+
+async def test_process_input_trims_an_audio_backlog_from_the_head() -> None:
+    app, _ = await _app()
+    _push_webcam(app, _frame())
+    head = np.full((1, 2000), 1, dtype=np.int16)
+    kept = np.full((1, 1000), 7, dtype=np.int16)
+    _push_mic(app, head, kept, kept)  # 4000 samples, over two frames' worth at 48 kHz
+    await app.process_input()
+    assert app.state._audio is not None
+    assert app.state._audio.shape == (1, 2000)
+    assert int(app.state._audio[0, 0]) == 7  # the oldest chunk went, the rest stayed in order
+
+
+async def test_a_frame_without_audio_pairs_with_silence() -> None:
+    app, _ = await _app()
+    output = await _step(app, _frame())
+    assert output is not None
+    assert cast(np.ndarray, output.main_audio).shape == (1, 0)
+
+
+async def test_generate_forwards_to_the_model_half() -> None:
+    app, model = await _app()
+    input = EchoInput(frame=_frame(), effect="blur", intensity=1.0, caption="")
+    app.generate(input)
+    assert model.inputs == [input]
+
+
+async def test_a_burst_of_one_emits_every_frame_with_its_metadata() -> None:
+    app, _ = await _app()
+    output = await _step(app, _frame(5), metadata=b'{"seq":9}')
+    assert isinstance(output, EchoOutput)
+    assert cast(np.ndarray, output.main_video).shape == (8, 8, 3)
+    assert output.__metadata__["main_video"] == b'{"seq":9}'
+
+
+async def test_an_untagged_frame_goes_back_untagged() -> None:
+    app, _ = await _app()
+    output = await _step(app, _frame())
+    assert output is not None
     assert "main_video" not in output.__metadata__
 
 
-async def test_set_burst_records_the_batch_size() -> None:
-    model = Echo()
-    model.load(None)
-    assert model.burst == 1  # a steady tick by default
-
-    await model.set_burst(12)
-
-    assert model.burst == 12
-
-
-def test_set_burst_reaches_four_seconds_of_media() -> None:
-    """The ceiling has to be past where a batching model would ever sit."""
-    info = ModelContract.of(Echo).commands["set_burst"].command.__command_fields__["burst"]
-    assert info.info.ge == 1
-    assert info.info.le == 120  # 4s at the model's 30 fps
+async def test_a_burst_gathers_frames_and_emits_them_as_one_batch() -> None:
+    app, _ = await _app()
+    app.state.burst = 3
+    assert await _step(app, _frame(1), metadata=b"a") is None
+    assert await _step(app, _frame(2)) is None
+    output = await _step(app, _frame(3), metadata=b"c")
+    assert output is not None
+    assert cast(np.ndarray, output.main_video).shape == (3, 8, 8, 3)
+    # One entry per frame; a frame that carried nothing takes an empty trailer.
+    assert output.__metadata__["main_video"] == [b"a", b"", b"c"]
+    assert len(app.burst) == 0
 
 
-async def test_session_start_returns_the_burst_to_a_steady_tick() -> None:
-    model = Echo()
-    model.load(None)
-    await model.set_burst(12)
+async def test_a_resolution_change_ends_the_batch_and_opens_the_next() -> None:
+    app, _ = await _app()
+    app.state.burst = 4
+    await _step(app, _frame(1))
+    await _step(app, _frame(2))
+    early = await _step(app, _frame(3, size=(4, 4)))
+    assert early is not None
+    assert cast(np.ndarray, early.main_video).shape == (2, 8, 8, 3)
+    assert [f.shape for f in app.burst.frames] == [(4, 4, 3)]
 
-    await model.on_session_start()
 
-    assert model.burst == 1
+async def test_process_output_reraises_a_model_error() -> None:
+    app, _ = await _app()
+    with pytest.raises(RuntimeError, match="boom"):
+        await app.process_output(StepOutcome(error=RuntimeError("boom")))
 
 
-def test_a_burst_pads_untagged_frames_with_an_empty_trailer() -> None:
-    """A batch needs one metadata entry per frame, tagged or not."""
-    out = EchoOutput(
-        main_video=TrackPayload(
-            np.zeros((3, 2, 2, 3), np.uint8),
-            metadata=[b'{"seq":0}', b"", b'{"seq":2}'],
-        ),
-        main_audio=np.zeros((1, 1440), np.int16),
+async def test_a_session_end_drops_the_batch_and_resets_the_model_half() -> None:
+    app, model = await _app()
+    app.state.burst = 4
+    await _step(app, _frame())
+    await app._dispatch_reactor_event(SessionEnded("s", EndReason.STOPPED))
+    assert len(app.burst) == 0
+    assert model.resets == 1
+
+
+def test_output_carries_the_metadata_a_frame_arrived_with() -> None:
+    output = EchoOutput(
+        main_video=TrackPayload(_frame(), metadata=b'{"seq":3}'),
+        main_audio=np.zeros((1, 4), np.int16),
     )
-
-    assert out.__metadata__["main_video"] == [b'{"seq":0}', b"", b'{"seq":2}']
-
-
-def _gather(model: Echo, monkeypatch: pytest.MonkeyPatch) -> list[EchoOutput]:
-    """Capture what a model emits instead of sending it downstream."""
-    emitted: list[EchoOutput] = []
-
-    async def _capture(output: Output, **_: object) -> None:
-        emitted.append(cast(EchoOutput, output))
-
-    monkeypatch.setattr(model, "emit", _capture)
-    return emitted
-
-
-async def test_a_resolution_change_ends_the_batch_instead_of_breaking_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """WebRTC rescales inbound video mid-stream; a batch is one array."""
-    model = Echo()
-    model.load(None)
-    emitted = _gather(model, monkeypatch)
-    small = [np.zeros((2, 2, 3), np.uint8), np.zeros((2, 2, 3), np.uint8)]
-    audio = [np.zeros((1, 480), np.int16) for _ in small]
-
-    await model._emit_burst(small, audio, [None, None])
-
-    assert len(emitted) == 1
-    assert cast(np.ndarray, emitted[0].main_video).shape == (2, 2, 2, 3)
-    assert small == []  # the burst is left empty for the next one
-
-
-async def test_a_burst_of_one_emits_a_plain_frame(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A batch of length one is a frame, not a batch."""
-    model = Echo()
-    model.load(None)
-    emitted = _gather(model, monkeypatch)
-
-    await model._emit_burst([np.zeros((2, 2, 3), np.uint8)], [np.zeros((1, 480), np.int16)], [None])
-
-    assert cast(np.ndarray, emitted[0].main_video).shape == (2, 2, 3)
-
-
-async def test_an_empty_burst_emits_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    model = Echo()
-    model.load(None)
-    emitted = _gather(model, monkeypatch)
-
-    await model._emit_burst([], [], [])
-
-    assert emitted == []
+    assert output.__metadata__["main_video"] == b'{"seq":3}'
