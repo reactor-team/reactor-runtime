@@ -1,4 +1,8 @@
-"""Failure reporting for command handlers — :class:`CommandError`."""
+"""The errors an author raises: :class:`CommandError` and :class:`ApplicationError`.
+
+A :class:`CommandError` answers one client's command with a failure. An
+:class:`ApplicationError` refuses one step of the loop.
+"""
 
 from __future__ import annotations
 
@@ -32,3 +36,21 @@ class CommandError(Exception):
         self.code = code
         self.message = message
         super().__init__(f"{code}: {message}")
+
+
+class ApplicationError(Exception):
+    """Raise from ``process_input()`` to refuse the step.
+
+    The application is not ready for a step: it is paused, a required input has
+    not arrived, a prompt is not set. The model is not called, the reason is
+    logged, and the loop asks again.
+
+    Subclass it when a reason should be told apart in code or in a log filter,
+    and give the subclass its own message::
+
+        class WaitingForCamera(ApplicationError):
+            def __init__(self) -> None:
+                super().__init__("waiting for 4 webcam frames")
+
+    The loop catches the base class, so every subclass refuses the same way.
+    """
