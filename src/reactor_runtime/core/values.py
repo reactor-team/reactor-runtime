@@ -9,7 +9,7 @@ the import graph.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum, StrEnum
 from typing import Any, NewType
@@ -42,6 +42,95 @@ class CommandFailure:
 
     code: str
     message: str
+
+
+@dataclass(frozen=True)
+class ClientTrackStat:
+    """One WebRTC quality reading a client took for one of its tracks.
+
+    Carries the client's own view of its receive-side quality — bitrate, frame
+    rate, packet loss, jitter, round-trip time — sourced from the browser's own
+    ``getStats()``, which is the only vantage point onto that side of the
+    connection. Values are taken as reported; the runtime attaches the
+    connection identity itself rather than trusting anything the payload might
+    claim, because the payload carries none.
+
+    ``kind``/``direction``/``codec`` are fixed, structural facts about the
+    track — never a new value at runtime — so they stay their own fields;
+    :attr:`metrics` is where the actual measurements live, because that set
+    grows as new stats become worth reporting, without a schema change.
+
+    Attributes:
+        timestamp: When the client took this reading, on its own clock, in
+            epoch milliseconds.
+        track_name: The track the reading is for.
+        kind: ``"video"`` or ``"audio"``.
+        direction: ``"recvonly"`` or ``"sendonly"``, from the client's own
+            perspective.
+        codec: The negotiated codec, e.g. ``"VP9"``, ``"opus"`` — empty when
+            the browser hasn't reported it yet.
+        paused: Whether the client has this track paused right now.
+        metrics: The reading's measurements, by name — e.g.
+            ``"bitrate_bps"``, ``"frames_per_second"``, ``"packets_lost"``,
+            ``"packets_received"``, ``"jitter_ms"``, ``"round_trip_time_ms"``,
+            ``"frames_decoded"``, ``"frames_dropped"``, ``"frame_width"``,
+            ``"frame_height"``, ``"nack_count"``, ``"keyframe_requests"``.
+            A cumulative counter (e.g. ``packets_lost``) rides here as a raw
+            count, not a ratio computed once elsewhere — a ratio from two
+            readings with different totals cannot be re-aggregated correctly
+            afterward; a raw count can always be summed and divided once, at
+            query time.
+    """
+
+    timestamp: int
+    track_name: str
+    kind: str
+    direction: str
+    codec: str
+    paused: bool
+    metrics: Mapping[str, float]
+
+
+@dataclass(frozen=True)
+class ClientConnectionStat:
+    """A connection-wide reading, not tied to any one track.
+
+    e.g. ``"available_outgoing_bitrate_bps"`` (the client engine's own
+    estimate of outgoing headroom — the encoder's own belief, not a
+    measurement of the user's internet) or ``"time_to_connect_ms"`` (how long
+    this connection waited to establish, start to "ready") — the latter a
+    one-time fact a client reports once rather than repeating on every batch,
+    which is why :class:`ClientStatsBatch` carries this as optional.
+
+    Attributes:
+        timestamp: When the client took this reading, on its own clock, in
+            epoch milliseconds.
+        metrics: The reading's measurements, by name.
+    """
+
+    timestamp: int
+    metrics: Mapping[str, float]
+
+
+@dataclass(frozen=True)
+class ClientStatsBatch:
+    """A batch of client-observed quality readings, plus connection-wide facts.
+
+    Mirrors the wire's ``ClientStats`` message: per-track readings alongside
+    a fact set that applies to the whole connection rather than any one
+    track. A client typically sends ``connection_stat`` once, on its first
+    batch after connecting, and omits it on every batch after — most batches
+    therefore carry ``track_stats`` only.
+
+    Attributes:
+        track_stats: One reading per track this batch reports on. Empty on a
+            batch that carries only ``connection_stat``.
+        connection_stat: This batch's connection-wide reading, or ``None`` on
+            a batch that doesn't carry one — the common case.
+    """
+
+    track_stats: Sequence[ClientTrackStat]
+    connection_stat: ClientConnectionStat | None
 
 
 @dataclass(frozen=True, eq=False)
