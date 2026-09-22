@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from typing import Protocol, runtime_checkable
 
 from reactor_runtime.core.values import (
+    ClientStatsBatch,
     ConnectionCapabilities,
     ConnId,
     InputFrame,
@@ -191,6 +192,16 @@ class ConnectionSink(Protocol):
 
         Resolves the same way as :meth:`clip_requested` but over the full session
         timeline, correlated by *request_id*.
+        """
+
+    def client_stats_received(self, conn_id: ConnId, batch: ClientStatsBatch) -> None:
+        """Hand up a batch of client-observed quality samples for one connection.
+
+        The client is the only vantage point onto its own receive-side
+        quality, so a transport reports the batch as decoded rather than
+        validating it. The connection identity comes from *conn_id*, which the
+        transport already holds — never from anything the payload itself
+        might claim, because the payload carries none.
         """
 
     def connection_answered(self, conn_id: ConnId, answer: Mapping[str, str]) -> None:

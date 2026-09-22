@@ -3,6 +3,7 @@ from collections.abc import Mapping
 import numpy as np
 
 from reactor_runtime.core import (
+    ClientStatsBatch,
     Connection,
     ConnectionCapabilities,
     ConnectionSink,
@@ -96,6 +97,9 @@ class FakeSink:
         pass
 
     def recording_requested(self, conn_id: ConnId, request_id: str) -> None:
+        pass
+
+    def client_stats_received(self, conn_id: ConnId, batch: ClientStatsBatch) -> None:
         pass
 
     def connection_answered(self, conn_id: ConnId, answer: Mapping[str, str]) -> None:

@@ -22,10 +22,16 @@ from typing import Any
 
 from google.protobuf.message import DecodeError
 
-from reactor_runtime.core import ConnectionSink, ConnId
+from reactor_runtime.core import (
+    ClientConnectionStat,
+    ClientStatsBatch,
+    ClientTrackStat,
+    ConnectionSink,
+    ConnId,
+)
 from reactor_runtime.protocol import Channel, Codec, ProtocolVersion, select
 from reactor_runtime.protocol.common import struct_to_dict
-from reactor_wire.v1 import control_pb2, data_pb2
+from reactor_wire.v1 import control_pb2, data_pb2, platform_pb2
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +165,10 @@ class MessageGateway:
         the runner to resolve. A clip or recording request crosses with a
         correlation id — the client's when present, minted here when absent (the
         shipped client correlates by receipt order) — so the reply can be
-        addressed back. Anything else decodes cleanly but has no handler here yet.
+        addressed back. A client-stats batch crosses as decoded sample values,
+        stripped of the wire types, for the sink to log with the connection's
+        identity attached. Anything else decodes cleanly but has no handler
+        here yet.
         """
         which = message.WhichOneof("payload")
         if which == "ping":
@@ -184,8 +193,68 @@ class MessageGateway:
             )
         elif which == "request_recording":
             self._sink.recording_requested(conn_id, message.request_id or _new_request_id())
+        elif which == "client_stats":
+            self._sink.client_stats_received(conn_id, _decode_client_stats(message.client_stats))
         else:
             logger.debug("MessageGateway received an unrouted control message: %s", which)
+
+
+_TRACK_KIND_NAMES = {
+    platform_pb2.TrackKind.TRACK_KIND_VIDEO: "video",
+    platform_pb2.TrackKind.TRACK_KIND_AUDIO: "audio",
+}
+_TRACK_DIRECTION_NAMES = {
+    platform_pb2.TrackDirection.TRACK_DIRECTION_RECVONLY: "recvonly",
+    platform_pb2.TrackDirection.TRACK_DIRECTION_SENDONLY: "sendonly",
+}
+_VIDEO_CODEC_NAMES = {
+    platform_pb2.VideoCodec.VIDEO_CODEC_VP8: "VP8",
+    platform_pb2.VideoCodec.VIDEO_CODEC_VP9: "VP9",
+    platform_pb2.VideoCodec.VIDEO_CODEC_AV1: "AV1",
+    platform_pb2.VideoCodec.VIDEO_CODEC_H264: "H264",
+    platform_pb2.VideoCodec.VIDEO_CODEC_H265: "H265",
+}
+_AUDIO_CODEC_NAMES = {
+    platform_pb2.AudioCodec.AUDIO_CODEC_OPUS: "opus",
+}
+
+
+def _decode_codec(stat: platform_pb2.ClientTrackStat) -> str:
+    """Read whichever codec arm *stat* set, as a plain name.
+
+    Empty for ``*_UNSPECIFIED`` (the browser hasn't reported a codec yet) and
+    for a value this runtime doesn't recognize yet (an older runtime reading
+    a newer client's codec) — never raises on either.
+    """
+    which = stat.WhichOneof("codec")
+    if which == "video_codec":
+        return _VIDEO_CODEC_NAMES.get(stat.video_codec, "")
+    if which == "audio_codec":
+        return _AUDIO_CODEC_NAMES.get(stat.audio_codec, "")
+    return ""
+
+
+def _decode_client_stats(message: platform_pb2.ClientStats) -> ClientStatsBatch:
+    """Convert a decoded ``ClientStats`` batch into plain values."""
+    track_stats = [
+        ClientTrackStat(
+            timestamp=stat.timestamp,
+            track_name=stat.track_name,
+            kind=_TRACK_KIND_NAMES.get(stat.kind, ""),
+            direction=_TRACK_DIRECTION_NAMES.get(stat.direction, ""),
+            codec=_decode_codec(stat),
+            paused=stat.paused,
+            metrics=dict(stat.metrics),
+        )
+        for stat in message.track_stats
+    ]
+    connection_stat = None
+    if message.HasField("connection_stat"):
+        connection_stat = ClientConnectionStat(
+            timestamp=message.connection_stat.timestamp,
+            metrics=dict(message.connection_stat.metrics),
+        )
+    return ClientStatsBatch(track_stats=track_stats, connection_stat=connection_stat)
 
 
 def _new_request_id() -> str:
