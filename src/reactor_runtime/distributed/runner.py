@@ -23,7 +23,14 @@ import time
 from typing import Any
 
 from reactor_runtime.distributed.errors import RankDesync, WorkerCrashed, WorkerTimeout
-from reactor_runtime.distributed.ipc import SharedSlot, SlotReader, pack, unpack
+from reactor_runtime.distributed.ipc import (
+    SharedSlot,
+    SlotReader,
+    new_prefix,
+    pack,
+    unlink_blocks,
+    unpack,
+)
 from reactor_runtime.distributed.protocol import Answer, Generate, Loaded, Reset, Shutdown
 from reactor_runtime.distributed.rank import rank_main
 from reactor_runtime.distributed.worker import check_shape
@@ -73,6 +80,7 @@ class DistributedRunner:
         self._outbox: Any = None
         self._procs: list[Any] = []
         self._input_slot: SharedSlot | None = None
+        self._result_prefix = new_prefix()
         self._reader = SlotReader()
         self._started = False
         self._healthy = True
@@ -104,7 +112,6 @@ class DistributedRunner:
             self._inboxes = [self._ctx.Queue() for _ in range(self._world_size)]
             self._outbox = self._ctx.Queue()
             self._input_slot = SharedSlot()
-            self._input_slot.pin()
             port = _free_port()
             level = logging.getLogger().getEffectiveLevel()
             for rank in range(self._world_size):
@@ -118,9 +125,12 @@ class DistributedRunner:
                         self._load_kwargs,
                         self._inboxes[rank],
                         self._outbox,
+                        self._result_prefix,
                         level,
                     ),
-                    daemon=True,
+                    # A daemonic process may not start children, which a DataLoader
+                    # with workers needs. shutdown() is registered with atexit instead.
+                    daemon=False,
                 )
                 proc.start()
                 self._procs.append(proc)
@@ -150,15 +160,14 @@ class DistributedRunner:
         """
         self._require_ready()
         assert self._input_slot is not None
-        self._broadcast(Generate(pack(input, self._input_slot)))
-        leader = self._decide(self._collect("generate", self._call_timeout), "generate")
+        request = Generate(pack(input, self._input_slot))
+        leader = self._decide(self._round_trip(request, "generate"), "generate")
         return unpack(leader.header, self._reader) if leader.header is not None else None
 
     def reset(self) -> None:
         """Call ``reset()`` on every rank and return when each has answered."""
         self._require_ready()
-        self._broadcast(Reset())
-        self._decide(self._collect("reset", self._call_timeout), "reset")
+        self._decide(self._round_trip(Reset(), "reset"), "reset")
 
     def shutdown(self) -> None:
         """End every rank. Idempotent, and registered with ``atexit``.
@@ -166,7 +175,9 @@ class DistributedRunner:
         A healthy group is sent ``Shutdown`` and joined. An unhealthy group is
         not: a survivor that received it would wait in the exit barrier for a
         dead peer. Any rank alive after its grace period is terminated, then
-        killed. Either way this ends with dead processes and an unlinked block.
+        killed. Either way this ends with dead processes and every shared
+        block unlinked, including the result blocks of a rank that was killed
+        before it could close them.
         """
         if self._shutdown_done:
             return
@@ -193,11 +204,27 @@ class DistributedRunner:
                 self._input_slot.close()
                 self._input_slot = None
             self._reader.close()
+            if self._procs:
+                unlink_blocks(self._result_prefix)
             for channel in [*self._inboxes, self._outbox]:
                 if channel is not None:
                     # A dead rank never drains its queue; joining the feeder would hang.
                     channel.cancel_join_thread()
                     channel.close()
+
+    def _round_trip(self, request: Generate | Reset, what: str) -> list[Any]:
+        """Broadcast one request and collect every rank's answer to it.
+
+        Anything that interrupts this, a ``KeyboardInterrupt`` above all, leaves
+        requests in flight whose answers the next call would take for its own.
+        The group is marked unusable instead.
+        """
+        try:
+            self._broadcast(request)
+            return self._collect(what, self._call_timeout)
+        except BaseException:
+            self._healthy = False
+            raise
 
     def _broadcast(self, request: Generate | Reset | Shutdown) -> None:
         for inbox in self._inboxes:

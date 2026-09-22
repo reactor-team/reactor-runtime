@@ -7,6 +7,10 @@ stays small and travels on a queue; the bytes sit in shared memory. The
 header names the block, so the reader attaches to whatever it is told and
 the block can grow without a protocol of its own.
 
+Every block a slot creates is named from the slot's prefix and a generation
+number. A process that knows the prefix can unlink what a writer left behind
+when the writer was terminated before it could close its slot.
+
 A torch tensor and a non-contiguous array do not expose a flat buffer and
 pickle inline. That still works, only slower, and is reported once per
 process when the header passes about one megabyte.
@@ -16,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import pickle
+import secrets
 import shutil
 from multiprocessing import shared_memory
 from pathlib import Path
@@ -29,8 +34,15 @@ logger = get_logger(__name__)
 _INITIAL_BYTES = 1 << 20
 _INLINE_WARN_BYTES = 1 << 20
 _SHM_DIR = Path("/dev/shm")
+# Growth at least doubles a block, so no slot reaches this many generations.
+_MAX_GENERATIONS = 64
 
 _inline_reported = False
+
+
+def new_prefix() -> str:
+    """Return a block-name prefix for one slot. Short enough for macOS's 31-character limit."""
+    return f"rr{secrets.token_hex(4)}_"
 
 
 class SharedSlot:
@@ -41,12 +53,20 @@ class SharedSlot:
     buffers do not fit, the block is replaced by a larger one and the bytes
     already written move with it. Steady state is one block at the writer's
     high-water mark.
+
+    Args:
+        prefix: Names every block this slot creates, as ``<prefix><generation>``.
+            A process that holds the prefix can reclaim the blocks with
+            :func:`unlink_blocks` if the writer dies without :meth:`close`.
+            A fresh one from :func:`new_prefix` when omitted.
+        initial_bytes: The size of the first block.
     """
 
-    def __init__(self, *, initial_bytes: int = _INITIAL_BYTES) -> None:
-        self._shm = _allocate(initial_bytes)
+    def __init__(self, *, prefix: str | None = None, initial_bytes: int = _INITIAL_BYTES) -> None:
+        self._prefix = prefix or new_prefix()
+        self._generation = 0
+        self._shm = _allocate(f"{self._prefix}0", initial_bytes)
         self._cursor = 0
-        self._pinned = False
 
     @property
     def name(self) -> str:
@@ -81,61 +101,20 @@ class SharedSlot:
         self._cursor = end
         return span
 
-    def pin(self) -> bool:
-        """Register the block as pinned host memory so GPU copies take the DMA path.
-
-        Best effort. Without torch, without CUDA, or with a ``ulimit -l`` too
-        low to lock the pages, the copy stays pageable and one warning says so.
-
-        Returns:
-            Whether the block is pinned.
-        """
-        try:
-            import torch  # ty: ignore[unresolved-import]  # installed in the model image only
-
-            if not torch.cuda.is_available():
-                return False
-            address = _address(self._buf)
-            code = int(torch.cuda.cudart().cudaHostRegister(address, self._shm.size, 0))
-        except Exception as exc:
-            logger.warning("host-memory pinning unavailable; copies stay pageable", error=str(exc))
-            return False
-        if code != 0:
-            logger.warning(
-                "cudaHostRegister failed; copies stay pageable. The usual cause is a low ulimit -l",
-                error_code=code,
-                bytes=self._shm.size,
-            )
-            return False
-        self._pinned = True
-        return True
-
     def close(self) -> None:
-        """Unpin, detach, and unlink the block."""
-        self._unpin()
+        """Detach and unlink the block."""
         with contextlib.suppress(Exception):
             self._shm.close()
         with contextlib.suppress(Exception):
             self._shm.unlink()
 
     def _grow(self, needed: int) -> None:
-        replacement = _allocate(max(needed, 2 * self.capacity))
+        self._generation += 1
+        replacement = _allocate(f"{self._prefix}{self._generation}", max(needed, 2 * self.capacity))
         _buffer_of(replacement)[: self._cursor] = self._buf[: self._cursor]
-        was_pinned = self._pinned
         logger.info("shared block grown", from_bytes=self.capacity, to_bytes=replacement.size)
         self.close()
         self._shm = replacement
-        if was_pinned:
-            self.pin()
-
-    def _unpin(self) -> None:
-        if not self._pinned:
-            return
-        with contextlib.suppress(Exception):
-            import torch  # ty: ignore[unresolved-import]  # same as in pin()
-
-            torch.cuda.cudart().cudaHostUnregister(_address(self._buf))
-        self._pinned = False
 
 
 class SlotReader:
@@ -191,7 +170,26 @@ def unpack(header: bytes, reader: SlotReader) -> Any:
     return pickle.loads(blob, buffers=[reader.copy(offset, length) for offset, length in spans])
 
 
-def _allocate(size: int) -> shared_memory.SharedMemory:
+def unlink_blocks(prefix: str) -> None:
+    """Unlink every block a :class:`SharedSlot` with *prefix* left behind.
+
+    For a writer that ended without closing its slot, such as a terminated or
+    killed process. Every generation the slot could have reached is tried, so
+    a block that grew after its last header was read is reclaimed too. Call it
+    only once the writer is dead: a live writer's block would go with the rest.
+    """
+    for generation in range(_MAX_GENERATIONS):
+        try:
+            shm = shared_memory.SharedMemory(name=f"{prefix}{generation}")
+        except FileNotFoundError:
+            continue
+        with contextlib.suppress(Exception):
+            shm.close()
+        with contextlib.suppress(Exception):
+            shm.unlink()
+
+
+def _allocate(name: str, size: int) -> shared_memory.SharedMemory:
     if _SHM_DIR.exists():
         usage = shutil.disk_usage(_SHM_DIR)
         if size > usage.free:
@@ -201,7 +199,7 @@ def _allocate(size: int) -> shared_memory.SharedMemory:
                 "Run with a larger --shm-size, or size /dev/shm in the deployment."
             )
     try:
-        return shared_memory.SharedMemory(create=True, size=size)
+        return shared_memory.SharedMemory(name=name, create=True, size=size)
     except OSError as exc:
         raise SharedSlotAllocationFailed(
             f"could not allocate a shared buffer of {size / 2**20:.1f} MB: {exc}. "
@@ -214,12 +212,6 @@ def _buffer_of(shm: shared_memory.SharedMemory) -> memoryview:
     if buf is None:
         raise RuntimeError(f"shared block {shm.name} is closed")
     return buf
-
-
-def _address(buf: memoryview) -> int:
-    import ctypes
-
-    return ctypes.addressof(ctypes.c_char.from_buffer(buf))
 
 
 def _report_inline(size: int) -> None:

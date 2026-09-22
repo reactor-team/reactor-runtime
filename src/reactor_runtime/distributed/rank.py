@@ -29,6 +29,7 @@ def rank_main(
     load_kwargs: dict[str, Any],
     inbox: Any,
     outbox: Any,
+    result_prefix: str,
     log_level: int,
 ) -> None:
     """Run one rank until it is told to shut down.
@@ -42,6 +43,8 @@ def rank_main(
         load_kwargs: Passed to ``worker.load()`` as keyword arguments.
         inbox: This rank's request queue.
         outbox: The queue every rank answers on.
+        result_prefix: Names rank 0's result blocks, so the parent can
+            reclaim them if this process is killed before it closes them.
         log_level: The parent's root log level. Ranks other than 0 log at
             WARNING or above, so N ranks do not write N copies of every line.
     """
@@ -70,8 +73,7 @@ def rank_main(
         worker.device = device
         worker.load(**load_kwargs)
         if rank == 0:
-            result_slot = SharedSlot()
-            result_slot.pin()
+            result_slot = SharedSlot(prefix=result_prefix)
         outbox.put(Loaded(rank))
         loaded = True
         logger.info("rank ready", rank=rank, device=device)

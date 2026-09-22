@@ -7,11 +7,13 @@ the model, not the model.
 
 from __future__ import annotations
 
+import multiprocessing
 import os
 import signal
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from multiprocessing import shared_memory
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,7 @@ from reactor_runtime.distributed import (
     DistributedWorker,
     WorkerCrashed,
     WorkerTimeout,
+    ipc,
 )
 
 
@@ -105,9 +108,77 @@ class Sleeper(Counter):
         return super().generate(input)
 
 
+class HangsOnSecondStep(Counter):
+    """Answers the first step, then never answers in time."""
+
+    def generate(self, input: CounterInput, /) -> CounterResult:
+        if input.step == 2:
+            time.sleep(60.0)
+        return super().generate(input)
+
+
+class SlowToPickle:
+    """Holds up the pickling of a result, after the arrays before it are written."""
+
+    def __reduce__(self) -> tuple[type, tuple[()]]:
+        time.sleep(60.0)
+        return (SlowToPickle, ())
+
+
+class GrowsThenHangs(Counter):
+    """Grows the result block, then never finishes sending the reply."""
+
+    def generate(self, input: CounterInput, /) -> Any:
+        return (np.ones(4 << 20, dtype=np.uint8), SlowToPickle())
+
+
+def _exit_cleanly() -> None:
+    pass
+
+
+class StartsAChild(Counter):
+    """Starts a process of its own, the way a DataLoader with workers does."""
+
+    def generate(self, input: CounterInput, /) -> Any:
+        child = multiprocessing.get_context("spawn").Process(target=_exit_cleanly)
+        child.start()
+        child.join(timeout=60.0)
+        return child.exitcode
+
+
 class RefusesToLoad(Counter):
     def load(self, **kwargs: Any) -> None:
         raise FileNotFoundError("weights.safetensors")
+
+
+class InterruptOnce:
+    """The runner's outbox, with the first wait on it interrupted by Ctrl-C."""
+
+    def __init__(self, outbox: Any) -> None:
+        self._outbox = outbox
+        self._armed = True
+
+    def get(self, *args: Any, **kwargs: Any) -> Any:
+        if self._armed:
+            self._armed = False
+            raise KeyboardInterrupt
+        return self._outbox.get(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._outbox, name)
+
+
+def _blocks_left(prefix: str) -> list[str]:
+    """The names under *prefix* that still have a shared block behind them."""
+    left = []
+    for generation in range(ipc._MAX_GENERATIONS):
+        name = f"{prefix}{generation}"
+        try:
+            shared_memory.SharedMemory(name=name).close()
+        except FileNotFoundError:
+            continue
+        left.append(name)
+    return left
 
 
 class NoReset:
@@ -209,6 +280,63 @@ def test_a_wedged_rank_hits_the_call_timeout_and_is_killed_on_shutdown() -> None
     finally:
         runner.shutdown()
     assert all(not proc.is_alive() for proc in procs)
+
+
+def test_a_killed_rank_leaves_no_result_block_behind() -> None:
+    runner = DistributedRunner(
+        HangsOnSecondStep, load_kwargs={"base": 0}, call_timeout=3.0, start_timeout=60.0
+    )
+    runner.start()
+    try:
+        assert runner.generate(_input(1)).value == 1
+        with pytest.raises(WorkerTimeout):
+            runner.generate(_input(2))
+    finally:
+        runner.shutdown()  # terminates rank 0, so it never closes its own block
+    assert _blocks_left(runner._result_prefix) == []
+
+
+def test_a_result_block_grown_before_the_reply_is_reclaimed() -> None:
+    runner = DistributedRunner(
+        GrowsThenHangs, load_kwargs={"base": 0}, call_timeout=3.0, start_timeout=60.0
+    )
+    runner.start()
+    try:
+        with pytest.raises(WorkerTimeout):
+            runner.generate(_input(1))
+        # Rank 0 grew its block for this reply; no header ever named the new one.
+        assert _blocks_left(runner._result_prefix) == [f"{runner._result_prefix}1"]
+    finally:
+        runner.shutdown()
+    assert _blocks_left(runner._result_prefix) == []
+
+
+@pytest.mark.parametrize(
+    "call",
+    [lambda runner: runner.generate(_input(1)), lambda runner: runner.reset()],
+    ids=["generate", "reset"],
+)
+def test_an_interrupted_call_leaves_the_runner_unusable(
+    runner: DistributedRunner, call: Callable[[DistributedRunner], Any]
+) -> None:
+    runner._outbox = InterruptOnce(runner._outbox)
+    with pytest.raises(KeyboardInterrupt):
+        call(runner)
+
+    # The interrupted call's answer is still on its way. Taking it as the
+    # answer to the next call would return the wrong result.
+    assert not runner.healthy
+    with pytest.raises(RuntimeError, match="unusable"):
+        runner.generate(_input(2))
+
+
+def test_a_worker_may_start_processes_of_its_own() -> None:
+    runner = DistributedRunner(StartsAChild, load_kwargs={"base": 0}, start_timeout=60.0)
+    runner.start()
+    try:
+        assert runner.generate(_input(0)) == 0
+    finally:
+        runner.shutdown()
 
 
 def test_a_load_failure_is_raised_from_start_and_leaves_no_process() -> None:
