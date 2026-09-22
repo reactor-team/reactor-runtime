@@ -326,6 +326,33 @@ async def test_client_stats_unspecified_codec_decodes_to_empty_string() -> None:
     assert sink.client_stats[0][1].track_stats[0].codec == ""
 
 
+async def test_client_stats_codec_arm_contradicting_kind_decodes_to_empty_string() -> None:
+    gateway, sink, _ = _gateway()
+    _, frame = V1Codec().encode(
+        control_pb2.ControlClientMessage(
+            client_stats=platform_pb2.ClientStats(
+                track_stats=[
+                    # A malformed batch: kind says audio, but the codec arm
+                    # set is video_codec. The oneof only keeps the two codec
+                    # arms from both being set at once — it doesn't tie
+                    # either one to kind — so this is a schema-legal message
+                    # decode must still not crash on.
+                    platform_pb2.ClientTrackStat(
+                        timestamp=1_700_000_000_000,
+                        track_name="main_audio",
+                        kind=platform_pb2.TrackKind.TRACK_KIND_AUDIO,
+                        video_codec=platform_pb2.VideoCodec.VIDEO_CODEC_VP9,
+                    )
+                ]
+            )
+        )
+    )
+    await gateway.handle(
+        ConnId(4), frame, Channel.CONTROL, ProtocolVersion.V1, received_at=_ARRIVED
+    )
+    assert sink.client_stats[0][1].track_stats[0].codec == ""
+
+
 async def test_client_stats_unspecified_kind_and_direction_decode_to_empty_strings() -> None:
     gateway, sink, _ = _gateway()
     _, frame = V1Codec().encode(
