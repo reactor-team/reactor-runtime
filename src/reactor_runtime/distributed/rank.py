@@ -72,6 +72,8 @@ def rank_main(
         worker.world_size = world_size
         worker.device = device
         worker.load(**load_kwargs)
+        # Only rank 0's result crosses back. The other ranks answer without a
+        # payload, so a model with a piece on each rank gathers onto rank 0 first.
         if rank == 0:
             result_slot = SharedSlot(prefix=result_prefix)
         outbox.put(Loaded(rank))
