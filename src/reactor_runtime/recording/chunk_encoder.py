@@ -35,6 +35,13 @@ _PIXEL_FORMAT = "yuv420p"
 _PROFILE = "Main"
 
 
+class EncoderStoppedError(RuntimeError):
+    """A feed arrived after :meth:`ChunkEncoder.stop` closed the output.
+
+    This is teardown, not a failure: the recording is complete up to the stop.
+    """
+
+
 def _video_options(config: RecordingConfig, keyframe_interval: int) -> dict[str, str]:
     """Build the private encoder options for the configured video codec.
 
@@ -136,14 +143,15 @@ class ChunkEncoder:
 
         Raises:
             ValueError: If *frame* is not a three-channel image.
-            RuntimeError: If the encoder is stopped or in a failed state, or if
-                libav rejected the frame.
+            EncoderStoppedError: If :meth:`stop` has already closed the output.
+            RuntimeError: If the encoder is in a failed state, or if libav
+                rejected the frame.
         """
         if frame.ndim != 3 or frame.shape[2] != 3:
             raise ValueError(f"feed_video expects (H, W, 3); got shape {frame.shape}")
         with self._lock:
             if self._stopped:
-                raise RuntimeError("ChunkEncoder is stopped")
+                raise EncoderStoppedError("ChunkEncoder is stopped")
             if self._failed:
                 raise RuntimeError("ChunkEncoder is in a failed state")
             if self._container is None:

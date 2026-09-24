@@ -33,6 +33,7 @@ from reactor_runtime.recording import (
 )
 from reactor_runtime.recording.recorder import (
     _AUDIO_BACKLOG_FRAMES,
+    _DRAIN_SECONDS,
     _FEED_DEPTH,
     _FEED_WAIT_SECONDS,
     _RETENTION_SECONDS,
@@ -587,6 +588,61 @@ def test_a_recording_that_stops_mid_emission_reports_no_dropped_frames(
             assert recorder._dropped_frames == 0
     finally:
         recorder.stop()
+
+
+def test_a_stop_encodes_the_frames_still_queued(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A session that closes while media is flowing has frames queued but not yet
+    # encoded. They are the end of the session, so stop() gets them into the
+    # recording before it closes the encoder, and reports no failure for it.
+    recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
+    recorder.start(_SID)
+    recorder._build_encoder(_batched_bundle(1))
+    encoder = recorder._encoder
+    assert encoder is not None
+    feed_video = encoder.feed_video
+    encoded: list[npt.NDArray[Any]] = []
+
+    def slow_feed(frame: npt.NDArray[Any]) -> None:
+        time.sleep(0.005)
+        feed_video(frame)
+        encoded.append(frame)
+
+    monkeypatch.setattr(encoder, "feed_video", slow_feed)
+    n_frames = RECORDING_FPS
+    recorder.on_chunk(
+        MediaChunk(
+            bundle=_batched_bundle(n_frames),
+            fps=float(RECORDING_FPS),
+            n_frames=n_frames,
+            wait=True,
+        )
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="reactor_runtime.recording.recorder"):
+        recorder.stop()
+
+    assert len(encoded) == n_frames
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_a_stop_does_not_wait_out_an_encoder_that_fell_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The drain is bounded: an encoder that cannot take the queued frames costs
+    # the end of the recording rather than a teardown that hangs, and says so.
+    recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
+    recorder.start(_SID)
+    with _wedged_encoder(recorder, monkeypatch):
+        _saturate(recorder, _FEED_DEPTH)
+        started = time.monotonic()
+        with caplog.at_level(logging.WARNING, logger="reactor_runtime.recording.recorder"):
+            recorder.stop()
+        elapsed = time.monotonic() - started
+
+    assert _DRAIN_SECONDS <= elapsed < _WEDGE_TIMEOUT_SECONDS
+    assert any(r.message.startswith("recorder encoder fell behind") for r in caplog.records)
 
 
 @pytest.mark.parametrize(

@@ -34,7 +34,7 @@ import numpy.typing as npt
 
 from reactor_runtime.core import MediaBundle, MediaChunk, RecordingConfig, TrackKind
 from reactor_runtime.log import get_logger
-from reactor_runtime.recording.chunk_encoder import ChunkEncoder
+from reactor_runtime.recording.chunk_encoder import ChunkEncoder, EncoderStoppedError
 from reactor_runtime.recording.markers import MarkerBookkeeper
 
 logger = get_logger(__name__)
@@ -55,6 +55,10 @@ _FEED_DEPTH = 4
 # emission is counted and abandoned, so a stalled recording costs the recording
 # rather than the session.
 _FEED_WAIT_SECONDS = 1.0
+# How long stop() waits for the frames already queued to reach the encoder
+# before it closes the encoder anyway. Past it, the rest of the queue is lost
+# rather than teardown waiting on an encoder that has fallen behind.
+_DRAIN_SECONDS = 1.0
 # How often the feed reports dropped frames. An encoder that stays behind loses
 # frames on every emission, so the count is carried on every recording's summary
 # and only the periodic warning is rate-limited.
@@ -374,6 +378,17 @@ class Recorder:
             self._feed_room.notify_all()
         feed_thread = self._feed_thread
         self._feed_thread = None
+        # The stop sentinel sits behind every queued frame, so the feed worker
+        # encodes them all before it exits. Closing the encoder only after that
+        # keeps the end of the session in the recording.
+        if feed_thread is not None:
+            feed_thread.join(timeout=_DRAIN_SECONDS)
+            if feed_thread.is_alive():
+                logger.warning(
+                    "recorder encoder fell behind at stop; closing it with frames still queued",
+                    session_id=self._session_id,
+                    queued=self._feed_queue.qsize(),
+                )
         if self._encoder is not None:
             self._encoder.stop()
         if feed_thread is not None:
@@ -680,6 +695,11 @@ class Recorder:
                 encoder.feed_video(video)
                 if self._has_audio and audio is not None:
                     encoder.feed_audio(audio)
+            except EncoderStoppedError:
+                # stop() closed the encoder past its drain deadline. The
+                # recording is already finalised, so this is not a failure.
+                self._drain_feed_queue()
+                return
             except Exception:
                 logger.exception(
                     "recorder encoder feed failed; disabling recording",

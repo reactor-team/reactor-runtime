@@ -7,7 +7,11 @@ import numpy as np
 import pytest
 
 from reactor_runtime.core import RecordingConfig
-from reactor_runtime.recording.chunk_encoder import ChunkEncoder, _video_options
+from reactor_runtime.recording.chunk_encoder import (
+    ChunkEncoder,
+    EncoderStoppedError,
+    _video_options,
+)
 
 _FRAME_RATE = 30
 
@@ -171,9 +175,11 @@ def test_a_feed_after_stop_is_refused(tmp_path: Path) -> None:
     encoder.stop()
 
     # Encoding into a closed container would crash, so the latch has to hold even
-    # against a feed worker that has not wound down yet.
-    with pytest.raises(RuntimeError, match="stopped"):
+    # against a feed worker that has not wound down yet. The refusal has its own
+    # type so the recorder can tell teardown apart from an encoder failure.
+    with pytest.raises(EncoderStoppedError):
         encoder.feed_video(_frame())
+    assert not encoder.failed
 
 
 def test_feed_audio_is_inert_for_a_video_only_recording(tmp_path: Path) -> None:
