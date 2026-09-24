@@ -10,6 +10,8 @@ from __future__ import annotations
 import multiprocessing
 import os
 import signal
+import subprocess
+import sys
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -375,17 +377,70 @@ def test_world_size_must_be_a_positive_integer(count: Any) -> None:
         DistributedRunner(Counter, world_size=count)
 
 
+def test_a_worker_class_that_cannot_reach_the_ranks_is_refused_up_front() -> None:
+    class Local(Counter):
+        pass
+
+    with pytest.raises(TypeError, match=r"Local does not pickle.*top level"):
+        DistributedRunner(Local, load_kwargs={"base": 0})
+
+
+_ORPHAN_PARENT = """
+import os, sys
+from tests.unit.distributed.test_distributed_runner import Counter
+from reactor_runtime.distributed import DistributedRunner
+
+if __name__ == "__main__":
+    runner = DistributedRunner(Counter, load_kwargs={"base": 0}, start_timeout=60.0)
+    runner.start()
+    print(" ".join(str(proc.pid) for proc in runner._procs), flush=True)
+    os._exit(0)  # no atexit, so shutdown() never runs
+"""
+
+
+def test_ranks_exit_when_the_runners_process_dies_without_shutting_them_down() -> None:
+    root = Path(__file__).resolve().parents[3]
+    parent = subprocess.run(
+        [sys.executable, "-c", _ORPHAN_PARENT],
+        cwd=root,
+        env={**os.environ, "PYTHONPATH": str(root)},
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=True,
+    )
+    pids = [int(pid) for pid in parent.stdout.split()]
+    assert pids
+
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline and any(_alive(pid) for pid in pids):
+        time.sleep(0.5)
+    left = [pid for pid in pids if _alive(pid)]
+    for pid in left:
+        os.kill(pid, signal.SIGKILL)
+    assert left == []
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
 def test_a_class_without_the_three_methods_is_refused_by_name() -> None:
     with pytest.raises(TypeError, match="reset"):
         DistributedRunner(NoReset)
 
 
+class Plain:
+    def load(self, **kwargs: Any) -> None: ...
+
+    def generate(self, input: Any, /) -> Any: ...
+
+    def reset(self) -> None: ...
+
+
 def test_a_plain_class_with_the_three_methods_is_accepted() -> None:
-    class Plain:
-        def load(self, **kwargs: Any) -> None: ...
-
-        def generate(self, input: Any, /) -> Any: ...
-
-        def reset(self) -> None: ...
-
     DistributedRunner(Plain)  # no base class needed; the shape is what counts

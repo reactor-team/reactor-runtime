@@ -3,15 +3,18 @@
 All of it belongs to the runner. The worker sees a configured process: the
 environment a ``torchrun`` launch would set, the current CUDA device, and the
 runtime logger. It then receives ``load(**load_kwargs)`` once and one call per
-request until :class:`~reactor_runtime.distributed.protocol.Shutdown`.
+request until :class:`~reactor_runtime.distributed.protocol.Shutdown`, or until
+the runner's process is gone.
 """
 
 from __future__ import annotations
 
 import faulthandler
 import logging
+import multiprocessing
 import os
 import pickle
+import queue
 import sys
 from typing import Any
 
@@ -19,6 +22,8 @@ from reactor_runtime.distributed.ipc import SharedSlot, SlotReader, pack, unpack
 from reactor_runtime.distributed.protocol import Answer, Generate, Loaded, Reset, Shutdown
 from reactor_runtime.log import configure as configure_logging
 from reactor_runtime.log import get_logger
+
+_PARENT_POLL = 5.0
 
 
 def rank_main(
@@ -80,8 +85,17 @@ def rank_main(
         loaded = True
         logger.info("rank ready", rank=rank, device=device)
 
+        parent = multiprocessing.parent_process()
         while True:
-            request = inbox.get()
+            try:
+                request = inbox.get(timeout=_PARENT_POLL)
+            except queue.Empty:
+                if parent is not None and not parent.is_alive():
+                    # The runner's process ended without shutting the ranks
+                    # down: killed, or exited past its atexit handlers.
+                    logger.warning("the runner's process is gone; exiting", rank=rank)
+                    return
+                continue
             if isinstance(request, Shutdown):
                 break
             if isinstance(request, Generate):

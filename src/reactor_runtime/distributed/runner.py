@@ -40,6 +40,9 @@ logger = get_logger(__name__)
 
 _LIVENESS_POLL = 5.0
 _JOIN_GRACE = 5.0
+# Ranks leave on Shutdown together, so this is how long the slowest one may take
+# to release its GPU memory before it is terminated.
+_SHUTDOWN_GRACE = 30.0
 
 
 class DistributedRunner:
@@ -68,6 +71,7 @@ class DistributedRunner:
         start_timeout: float = 3600.0,
     ) -> None:
         check_shape(worker_cls)
+        _crosses_spawn(worker_cls)
         if type(world_size) is not int or world_size < 1:
             raise ValueError(f"world_size must be a positive integer, got {world_size!r}")
         self._load_kwargs = _picklable(load_kwargs or {})
@@ -186,7 +190,7 @@ class DistributedRunner:
         try:
             if self._healthy and self._procs:
                 self._broadcast(Shutdown())
-                deadline = time.monotonic() + _LIVENESS_POLL
+                deadline = time.monotonic() + _SHUTDOWN_GRACE
                 for proc in self._procs:
                     proc.join(timeout=max(0.0, deadline - time.monotonic()))
             for proc in self._procs:
@@ -251,10 +255,11 @@ class DistributedRunner:
         failed = [answer for answer in answers if answer.error is not None]
         if not failed:
             return answers[0]
-        if len(failed) == len(answers) and len({_signature(a.error) for a in failed}) == 1:
-            # Every rank raised the same error on the same input: the model's
-            # own deterministic raise. The group is intact and the caller may
-            # recover.
+        if len(failed) == len(answers) and len({type(a.error) for a in failed}) == 1:
+            # Every rank raised the same type of error on the same input: the
+            # model's own deterministic raise. The group is intact and the
+            # caller may recover. The messages are not compared, because a
+            # model may name its rank in them.
             raise failed[0].error
         self._healthy = False
         first = failed[0]
@@ -301,9 +306,16 @@ class DistributedRunner:
             raise RuntimeError("the runner is unusable; shut it down and construct a new one")
 
 
-def _signature(error: Exception) -> tuple[type, str]:
-    """What makes two ranks' errors the same error: the type and the arguments."""
-    return type(error), repr(error.args)
+def _crosses_spawn(worker_cls: type) -> None:
+    """Raise ``TypeError`` if *worker_cls* cannot be pickled by reference into a rank."""
+    try:
+        pickle.dumps(worker_cls)
+    except Exception as exc:
+        raise TypeError(
+            f"{worker_cls.__qualname__} does not pickle, so it cannot reach the worker "
+            "processes. Define it at the top level of an importable module, not inside "
+            f"a function or a notebook cell: {exc}"
+        ) from exc
 
 
 def _picklable(load_kwargs: dict[str, Any]) -> dict[str, Any]:
