@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from reactor_runtime.distributed import SharedSlotAllocationFailed, ipc
-from reactor_runtime.distributed.ipc import SharedSlot, SlotReader, pack, unpack
+from reactor_runtime.distributed.ipc import SharedSlot, SlotReader, pack, unlink_blocks, unpack
 
 
 class Mode(enum.Enum):
@@ -112,6 +112,20 @@ def test_the_block_grows_and_the_header_names_the_new_block(
     np.testing.assert_array_equal(unpack(header, reader), big)
     with pytest.raises(FileNotFoundError):
         shared_memory.SharedMemory(name=small_name)
+
+
+def test_the_blocks_a_dead_writer_left_are_reclaimed_by_its_prefix() -> None:
+    prefix = ipc.new_prefix()
+    writer = SharedSlot(prefix=prefix, initial_bytes=4096)
+    pack(np.ones(64 * 1024, dtype=np.uint8), writer)
+    left = writer.name
+    assert left != f"{prefix}0"  # grown, so the name is one only the prefix can predict
+    writer._shm.close()  # the writer dies: its mapping goes, its block stays
+
+    unlink_blocks(prefix)
+
+    with pytest.raises(FileNotFoundError):
+        shared_memory.SharedMemory(name=left)
 
 
 def test_growth_keeps_buffers_already_written(slot: SharedSlot, reader: SlotReader) -> None:
