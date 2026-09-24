@@ -161,9 +161,11 @@ class DistributedRunner:
                 )
                 proc.start()
                 self._procs.append(proc)
+            deadline = time.monotonic() + self._start_timeout
             if forms_group:
-                self._rendezvous()
-            for message in self._collect("start", self._start_timeout):
+                self._rendezvous(self._start_timeout)
+            remaining = max(0.0, deadline - time.monotonic())
+            for message in self._collect("start", remaining):
                 if isinstance(message, Answer) and message.error is not None:
                     raise message.error
                 if not isinstance(message, Loaded):
@@ -247,10 +249,10 @@ class DistributedRunner:
                     channel.cancel_join_thread()
                     channel.close()
 
-    def _rendezvous(self) -> None:
+    def _rendezvous(self, timeout: float) -> None:
         """Wait for the port rank 0 bound for the process group, and send it to the others."""
         port = None
-        for message in self._collect("start", self._start_timeout, count=1):
+        for message in self._collect("start", timeout, count=1):
             if isinstance(message, Answer) and message.error is not None:
                 raise message.error
             if isinstance(message, Rendezvous):
