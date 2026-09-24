@@ -77,6 +77,13 @@ class EachRankFailsDifferently(Replica):
         return super().generate(input)
 
 
+class EachRankNamesItself(Replica):
+    def generate(self, input: StepInput, /) -> StepResult:
+        if input.step == 7:
+            raise Exhausted(f"rank {self.rank}: out of budget")
+        return super().generate(input)
+
+
 class OneRankDies(Replica):
     def generate(self, input: StepInput, /) -> StepResult:
         if input.step == 99 and self.rank == 1:
@@ -153,6 +160,19 @@ def test_when_one_rank_raises_the_call_is_a_desync_and_the_group_refuses_more(
         runner.shutdown()
     assert time.monotonic() - started < 30.0
     assert all(not proc.is_alive() for proc in procs)
+
+
+def test_the_same_error_naming_each_rank_leaves_the_group_usable(tmp_path: Path) -> None:
+    runner = _runner(EachRankNamesItself, tmp_path)
+    runner.start()
+    try:
+        with pytest.raises(Exhausted, match="rank 0: out of budget"):
+            runner.generate(_input(7))
+        assert runner.healthy
+        runner.reset()
+        assert runner.generate(_input(1)).rank == 0
+    finally:
+        runner.shutdown()
 
 
 def test_every_rank_raising_a_different_error_is_a_desync(tmp_path: Path) -> None:
