@@ -9,7 +9,6 @@ whatever the model emits.
 
 from __future__ import annotations
 
-import contextlib
 import threading
 from fractions import Fraction
 from pathlib import Path
@@ -90,7 +89,7 @@ class ChunkEncoder:
         config: RecordingConfig,
         has_audio: bool,
         audio_sample_rate: int,
-        frame_rate: int = 30,
+        frame_rate: float = 30,
     ) -> None:
         """Record the output directory and encode settings; open the output lazily."""
         self._output_dir = Path(output_dir)
@@ -98,7 +97,9 @@ class ChunkEncoder:
         self._config = config
         self._has_audio = has_audio
         self._audio_sample_rate = audio_sample_rate
-        self._frame_rate = frame_rate
+        self._frame_rate = Fraction(str(frame_rate))
+        if self._frame_rate <= 0:
+            raise ValueError("frame_rate must be positive")
         # One grid slot of audio: what the recorder pairs with each frame, and
         # what a video-only recording gets as silence in its place.
         self._samples_per_frame = round(audio_sample_rate / frame_rate)
@@ -182,11 +183,18 @@ class ChunkEncoder:
                 self._failed = True
                 raise RuntimeError("the encoder stopped accepting audio") from exc
 
-    def stop(self) -> None:
+    def stop(self, *, strict: bool = False) -> None:
         """Drain the encoders and write the trailer, closing the final segment.
 
         Always safe to call, and a no-op when the output never opened or has
         already been closed.
+
+        Args:
+            strict: Raise on encoding or finalization failure. Use this when
+                successful completion promises a downloadable file.
+
+        Raises:
+            RuntimeError: If strict finalization fails.
         """
         with self._lock:
             # Latch first so a concurrent feed bails out instead of encoding into
@@ -198,6 +206,7 @@ class ChunkEncoder:
             self._audio = None
         if container is None:
             return
+        failure = self._failed
         try:
             # A failed encoder has no coherent state left to drain; closing the
             # container still writes what already reached the muxer.
@@ -206,10 +215,16 @@ class ChunkEncoder:
                     if stream is not None:
                         container.mux(stream.encode(None))
         except av.FFmpegError:
+            failure = True
             logger.exception("recorder failed to drain the encoder")
         finally:
-            with contextlib.suppress(av.FFmpegError):
+            try:
                 container.close()
+            except av.FFmpegError:
+                failure = True
+                logger.exception("recorder failed to close the container")
+        if strict and failure:
+            raise RuntimeError("the encoder failed to finalize the clip")
 
     def _open(self, width: int, height: int) -> None:
         """Open the HLS output and add the video and audio streams.
@@ -234,14 +249,14 @@ class ChunkEncoder:
         )
         video = container.add_stream(
             "libx264" if config.video_codec == "h264" else "libx265",
-            rate=Fraction(self._frame_rate, 1),
-            options=_video_options(config, self._frame_rate * config.chunk_seconds),
+            rate=self._frame_rate,
+            options=_video_options(config, round(self._frame_rate * config.chunk_seconds)),
         )
         video.width = width
         video.height = height
         video.pix_fmt = _PIXEL_FORMAT
         video.profile = _PROFILE
-        video.time_base = Fraction(1, self._frame_rate)
+        video.time_base = 1 / self._frame_rate
 
         # ``add_stream`` is overloaded on a literal set of codec names, so the
         # configured codec resolves to the catch-all return type.
@@ -258,7 +273,7 @@ class ChunkEncoder:
             "recorder encoder opened",
             width=width,
             height=height,
-            frame_rate=self._frame_rate,
+            frame_rate=float(self._frame_rate),
             audio=self._has_audio,
         )
 
@@ -268,7 +283,7 @@ class ChunkEncoder:
         assert self._video is not None
         picture = av.VideoFrame.from_ndarray(np.ascontiguousarray(frame), format="rgb24")
         picture.pts = self._video_pts
-        picture.time_base = Fraction(1, self._frame_rate)
+        picture.time_base = 1 / self._frame_rate
         self._video_pts += 1
         self._container.mux(self._video.encode(picture))
 

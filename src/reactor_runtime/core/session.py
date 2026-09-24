@@ -75,7 +75,8 @@ class SessionEvent(Enum):
     one phase otherwise silent, since the runner emits nothing until it leaves
     ``CREATED`` on ``INITIALIZATION_SUCCESS``.
 
-    ``CHUNK_READY``, ``CLIP_READY``, ``COMMAND``, ``ERROR``, and ``METRIC`` are
+    ``CHUNK_READY``, ``CLIP_READY``, ``SAVED_CLIP_READY``, ``COMMAND``, ``ERROR``,
+    and ``METRIC`` are
     the journal-only events (:data:`JOURNAL_EVENTS`): facts recorded for an
     external consumer rather than moves of the lifecycle. Each is a pure
     self-loop legal in **every** state — a journal fact must never be silently
@@ -98,6 +99,7 @@ class SessionEvent(Enum):
     EVICTION = auto()
     CHUNK_READY = auto()
     CLIP_READY = auto()
+    SAVED_CLIP_READY = auto()
     COMMAND = auto()
     ERROR = auto()
     METRIC = auto()
@@ -107,6 +109,7 @@ JOURNAL_EVENTS: frozenset[SessionEvent] = frozenset(
     {
         SessionEvent.CHUNK_READY,
         SessionEvent.CLIP_READY,
+        SessionEvent.SAVED_CLIP_READY,
         SessionEvent.COMMAND,
         SessionEvent.ERROR,
         SessionEvent.METRIC,

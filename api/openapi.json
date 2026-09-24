@@ -496,19 +496,49 @@
           {
             "in": "query",
             "name": "start",
-            "required": true,
+            "required": false,
             "schema": {
-              "title": "Start",
-              "type": "number"
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start"
             }
           },
           {
             "in": "query",
             "name": "end",
-            "required": true,
+            "required": false,
             "schema": {
-              "title": "End",
-              "type": "number"
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End"
+            }
+          },
+          {
+            "in": "query",
+            "name": "clip_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Clip Id"
             }
           }
         ],

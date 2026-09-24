@@ -300,9 +300,21 @@ class RecordingRoutes:
                 410: {"model": ErrorDetail},
             },
         )
-        async def get_clip_manifest(session_id: str, start: float, end: float) -> Response:
+        async def get_clip_manifest(
+            session_id: str,
+            start: float | None = None,
+            end: float | None = None,
+            clip_id: str | None = None,
+        ) -> Response:
             try:
-                result = runner.recorder.manifest(session_id, start, end)
+                if clip_id is not None:
+                    if start is not None or end is not None:
+                        raise ValueError("clip_id cannot be combined with start or end")
+                    result = runner.recorder.saved_manifest(session_id, clip_id)
+                elif start is None or end is None:
+                    raise HTTPException(status_code=422, detail="start and end are required")
+                else:
+                    result = runner.recorder.manifest(session_id, start, end)
             except ValueError as error:
                 raise HTTPException(status_code=400, detail=str(error)) from None
             if isinstance(result, ClipManifest):

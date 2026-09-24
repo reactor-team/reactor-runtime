@@ -1,4 +1,5 @@
 import asyncio
+import threading
 import time
 from collections.abc import Callable
 
@@ -9,6 +10,7 @@ from reactor_runtime import Audio, MediaInput, ModelMessage, Output, TrackPayloa
 from reactor_runtime.core import Command, MediaChunk, SessionStarted
 from reactor_runtime.core.values import ConnId, InputFrame, TrackDirection
 from reactor_runtime.interface.internal.reactor_core import MediaOps, ReactorCore
+from reactor_runtime.recording import ClipResult
 
 
 class Out(Output):
@@ -62,6 +64,72 @@ def _capture_media(core: ReactorCore) -> list[MediaChunk]:
         media=chunks.append,
     )
     return chunks
+
+
+async def test_save_clip_saves_without_emitting_or_blocking_the_model_loop() -> None:
+    core = OutputOnlyCore()
+    media = _capture_media(core)
+    core.output.fps = 24
+    entered = threading.Event()
+    release = threading.Event()
+    captured: list[MediaChunk] = []
+    clip = ClipResult("recording-id", "recording", 0, 1, 1, 0, "/clips?example")
+
+    def save(chunk: MediaChunk, cancelled: threading.Event, clip_id: str | None) -> ClipResult:
+        captured.append(chunk)
+        entered.set()
+        assert release.wait(5)
+        return clip
+
+    core.bind_output(
+        broadcast=lambda msg: None,
+        addressed=lambda conn, msg, req: None,
+        media=media.append,
+        save_clip=lambda chunk, cancelled, clip_id: lambda: save(chunk, cancelled, clip_id),
+    )
+    frames = np.zeros((24, 2, 2, 3), dtype=np.uint8)
+    pending = asyncio.create_task(core.output.save_clip(Out(main=frames)))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        assert not pending.done()
+        assert not media
+    finally:
+        release.set()
+    assert await pending is clip
+    assert captured[0].fps == 24
+    assert captured[0].n_frames == 24
+    assert captured[0].bundle.tracks["main"].data is frames
+
+
+async def test_save_clip_cancellation_waits_for_worker_cleanup() -> None:
+    core = OutputOnlyCore()
+    entered = threading.Event()
+    cleaned = threading.Event()
+
+    def save(chunk: MediaChunk, cancelled: threading.Event, clip_id: str | None) -> ClipResult:
+        entered.set()
+        assert cancelled.wait(5)
+        cleaned.set()
+        raise RuntimeError("cancelled")
+
+    core.bind_output(
+        broadcast=lambda msg: None,
+        addressed=lambda conn, msg, req: None,
+        media=lambda chunk: pytest.fail("save must not stream"),
+        save_clip=lambda chunk, cancelled, clip_id: lambda: save(chunk, cancelled, clip_id),
+    )
+    pending = asyncio.create_task(core.output.save_clip(Out(main=np.zeros((2, 2, 3)))))
+    assert await asyncio.to_thread(entered.wait, 5)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert cleaned.is_set()
+
+
+async def test_save_clip_requires_a_bound_runtime() -> None:
+    core = OutputOnlyCore()
+    with pytest.raises(RuntimeError, match="not bound"):
+        await core.output.save_clip(Out(main=np.zeros((2, 2, 3))))
 
 
 def test_input_buffers_are_wired_from_annotations() -> None:

@@ -28,10 +28,11 @@ def test_transition_is_stamped_with_epoch_milliseconds() -> None:
     assert before <= t.ts_ms <= after
 
 
-def test_journal_events_are_the_five_feature_signals() -> None:
+def test_journal_events_are_the_feature_signals() -> None:
     expected = {
         SessionEvent.CHUNK_READY,
         SessionEvent.CLIP_READY,
+        SessionEvent.SAVED_CLIP_READY,
         SessionEvent.COMMAND,
         SessionEvent.ERROR,
         SessionEvent.METRIC,

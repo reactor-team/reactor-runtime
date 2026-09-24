@@ -56,11 +56,12 @@ from reactor_runtime.interface.internal.reactor_core import (
     BroadcastSink,
     MediaOps,
     MediaSink,
+    SaveClipSink,
 )
 from reactor_runtime.message_gateway import InboundCommand
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.protocol.common import dict_to_struct, struct_to_dict
-from reactor_runtime.recording import ClipResult
+from reactor_runtime.recording import ClipResult, RecorderError
 from reactor_runtime.runner.runner import (
     _DRAIN_CLOSE_REASON,
     _RUNTIME_STATES,
@@ -142,10 +143,15 @@ class FakeModel(ReactorApp):
         addressed: AddressedSink,
         media: MediaSink,
         media_ops: MediaOps | None = None,
+        save_clip: SaveClipSink | None = None,
     ) -> None:
         self.events.append("bind")
         super().bind_output(
-            broadcast=broadcast, addressed=addressed, media=media, media_ops=media_ops
+            broadcast=broadcast,
+            addressed=addressed,
+            media=media,
+            media_ops=media_ops,
+            save_clip=save_clip,
         )
 
     def start_thread(self) -> None:
@@ -702,10 +708,82 @@ async def test_start_session_opens_the_session(started_runner: Runner) -> None:
     started_runner.require_session_running(SESSION_ID)
 
 
+async def test_save_clip_requires_an_open_session(started_runner: Runner) -> None:
+    with pytest.raises(RecorderError, match="cancelled"):
+        await asyncio.to_thread(
+            started_runner._prepare_clip_save(
+                MediaChunk(bundle=_video_bundle(), fps=24), threading.Event()
+            ),
+        )
+
+
+async def test_session_restart_does_not_revive_an_old_clip_save(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    def save(
+        chunk: MediaChunk, *, cancelled: Callable[[], bool], session_id: str, clip_id: str | None
+    ) -> ClipResult:
+        entered.set()
+        assert release.wait(5)
+        if cancelled():
+            raise RecorderError("clip save cancelled")
+        pytest.fail("an ended session must cancel its pending save")
+
+    monkeypatch.setattr(started_runner.recorder, "save_clip", save)
+    started_runner.start_session({})
+    pending = asyncio.create_task(
+        asyncio.to_thread(
+            started_runner._prepare_clip_save(
+                MediaChunk(bundle=_video_bundle(), fps=24), threading.Event()
+            ),
+        )
+    )
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        started_runner.stop_session()
+        async with asyncio.timeout(5):
+            await started_runner._drain_teardown()
+        assert started_runner._sm.current_state is SessionState.READY
+        started_runner.start_session({})
+    finally:
+        release.set()
+    with pytest.raises(RecorderError, match="cancelled"):
+        await pending
+
+
 async def test_start_session_adopts_a_supplied_recording_id(started_runner: Runner) -> None:
     supplied = "11111111-2222-3333-4444-555555555555"
     started_runner.start_session({"session_id": supplied})
     assert started_runner._recording_id == supplied
+
+
+async def test_a_queued_save_keeps_its_cancelled_owner_after_session_restart(
+    started_runner: Runner,
+) -> None:
+    first = "11111111-2222-3333-4444-555555555555"
+    second = "22222222-2222-3333-4444-555555555555"
+    started_runner.start_session({"session_id": first})
+    operation = started_runner._prepare_clip_save(
+        MediaChunk(bundle=_video_bundle(), fps=24), threading.Event()
+    )
+    started_runner.stop_session()
+    async with asyncio.timeout(5):
+        await started_runner._drain_teardown()
+    started_runner.start_session({"session_id": second})
+    with pytest.raises(RecorderError, match="cancelled"):
+        await asyncio.to_thread(operation)
+    assert started_runner._recording_id == second
+
+
+async def test_rejected_start_does_not_change_saved_clip_ownership(started_runner: Runner) -> None:
+    first = "11111111-2222-3333-4444-555555555555"
+    started_runner.start_session({"session_id": first})
+    with pytest.raises(SessionTransitionError):
+        started_runner.start_session({"session_id": "22222222-2222-3333-4444-555555555555"})
+    assert started_runner._recording_id == first
 
 
 async def test_start_session_without_a_session_id_mints_a_recording_id(

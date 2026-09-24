@@ -161,6 +161,39 @@ def test_stop_is_safe_before_a_frame_and_when_repeated(tmp_path: Path) -> None:
     encoder.stop()
     encoder.stop()
 
+
+@pytest.mark.parametrize("failure", ["drain", "close"])
+@pytest.mark.parametrize("strict", [False, True])
+def test_strict_finalization_reports_encoder_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str, strict: bool
+) -> None:
+    closed = []
+
+    class Stream:
+        def encode(self, frame: None) -> list[object]:
+            if failure == "drain":
+                raise av.error.UnknownError(1, "injected drain failure")
+            return []
+
+    class Container:
+        def mux(self, packets: list[object]) -> None:
+            pass
+
+        def close(self) -> None:
+            closed.append(True)
+            if failure == "close":
+                raise av.error.UnknownError(1, "injected close failure")
+
+    encoder = _encoder(tmp_path)
+    monkeypatch.setattr(encoder, "_container", Container())
+    monkeypatch.setattr(encoder, "_video", Stream())
+    if strict:
+        with pytest.raises(RuntimeError, match="finalize"):
+            encoder.stop(strict=True)
+    else:
+        encoder.stop()
+    assert closed == [True]
+
     assert not encoder.failed
     assert not list(tmp_path.glob("chunk_*.m4s"))
 

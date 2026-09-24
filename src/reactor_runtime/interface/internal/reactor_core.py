@@ -18,7 +18,7 @@ import threading
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, TypeVar, get_type_hints
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, get_type_hints
 
 import numpy.typing as npt
 
@@ -36,6 +36,9 @@ from reactor_runtime.core.values import (
 from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.input_buffer import InputBuffer
 from reactor_runtime.interface.tracks import MediaInput, Metadata, Output
+
+if TYPE_CHECKING:
+    from reactor_runtime.recording import ClipResult
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +61,9 @@ does not come.
 
 MediaSink = Callable[[MediaChunk], None]
 """Receives each finished media chunk the model emits, unpaced, on the model thread."""
+
+SaveClipSink = Callable[[MediaChunk, threading.Event, str | None], Callable[[], "ClipResult"]]
+"""Capture a save's session context and return its blocking encoder operation."""
 
 FailureSink = Callable[[BaseException], None]
 """Receives the exception that ended :meth:`ReactorCore.run`, on the model thread."""
@@ -176,6 +182,63 @@ class OutputStream:
         if ops is not None:
             ops.flush()
 
+    async def save_clip(
+        self, output: Output, *, fps: float | None = None, clip_id: str | None = None
+    ) -> ClipResult:
+        """Save completed frames and audio as a ready HLS clip without playback.
+
+        Models may expose a ``save_clip_immediately=False`` command parameter
+        and call this method when it is enabled. Automatic session recording
+        can be disabled. Playback remains a separate call to :meth:`emit`.
+
+        Args:
+            output: A completed batch with one RGB video track and optionally
+                one mono int16 audio track. Keep its arrays unchanged until
+                this call finishes. Audio is trimmed or padded to video length.
+            fps: Clip frame rate, defaulting to the current output rate.
+            clip_id: A UUID assigned by the model, or None to create one.
+
+        Returns:
+            A ready clip with its owning session and clip UUID and a path-only playlist
+            URL served by the existing clip routes. Use ``clip.to_dict()`` to
+            include the reference in a model message.
+
+        Raises:
+            ValueError: If the batch or frame rate is invalid.
+            RuntimeError: If the runtime is unbound or encoding fails.
+            RecorderError: If the session ends or the runtime shuts down.
+            OSError: If the clip files cannot be written.
+        """
+        core = self._core
+        sink = core._out_clip
+        if sink is None:
+            raise RuntimeError("clip output is not bound")
+        bundle = core._to_bundle(output)
+        chunk = MediaChunk(
+            bundle=bundle,
+            fps=self.fps if fps is None else fps,
+            n_frames=bundle.frame_count,
+        )
+        cancelled = threading.Event()
+        operation = sink(chunk, cancelled, clip_id)
+        task = asyncio.create_task(asyncio.to_thread(operation))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled.set()
+            # The worker must release the arrays and staging files before the
+            # cancelled model task can dispose of its generation result.
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if not task.cancelled():
+                task.exception()
+            raise
+
 
 @dataclass(frozen=True)
 class CommandEnvelope:
@@ -225,6 +288,7 @@ class ReactorCore:
         self._out_broadcast: BroadcastSink | None = None
         self._out_addressed: AddressedSink | None = None
         self._out_media: MediaSink | None = None
+        self._out_clip: SaveClipSink | None = None
         self._media_ops: MediaOps | None = None
         self._on_failure: FailureSink | None = None
         self.output = OutputStream(self)
@@ -290,6 +354,7 @@ class ReactorCore:
         addressed: AddressedSink,
         media: MediaSink,
         media_ops: MediaOps | None = None,
+        save_clip: SaveClipSink | None = None,
     ) -> None:
         """Bind the outbound sinks. Called once before the loop starts.
 
@@ -307,6 +372,7 @@ class ReactorCore:
         self._out_broadcast = broadcast
         self._out_addressed = addressed
         self._out_media = media
+        self._out_clip = save_clip
         self._media_ops = media_ops
         if media_ops is not None:
             if self.buffer_size is not None:
