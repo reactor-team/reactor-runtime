@@ -190,13 +190,20 @@ class ChunkEncoder:
                 self._failed = True
                 raise RuntimeError("the encoder stopped accepting audio") from exc
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 2.0) -> None:
         """Drain the encoders and write the trailer, closing the final segment.
 
         Always safe to call, and a no-op when the output never opened or has
-        already been closed.
+        already been closed. Waits at most *timeout* for a feed in progress to
+        return. A feed stuck inside libav past that still owns the output, so
+        the output is left open with its final segment unclosed, and the feed
+        is refused once it returns.
         """
-        with self._lock:
+        if not self._lock.acquire(timeout=timeout):
+            self._stopped = True
+            logger.error("recorder encoder is stuck in a feed; leaving its final segment unclosed")
+            return
+        try:
             # Latch first so a concurrent feed bails out instead of encoding into
             # the container about to be closed.
             self._stopped = True
@@ -204,6 +211,8 @@ class ChunkEncoder:
             self._container = None
             self._video = None
             self._audio = None
+        finally:
+            self._lock.release()
         if container is None:
             return
         try:

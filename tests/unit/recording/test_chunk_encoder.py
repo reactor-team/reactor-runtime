@@ -1,3 +1,4 @@
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -180,6 +181,36 @@ def test_a_feed_after_stop_is_refused(tmp_path: Path) -> None:
     with pytest.raises(EncoderStoppedError):
         encoder.feed_video(_frame())
     assert not encoder.failed
+
+
+def test_stop_gives_up_on_a_feed_stuck_inside_libav(tmp_path: Path) -> None:
+    # A feed holds the encoder's lock across the libav call, so one that never
+    # returns would block stop() on that lock forever. stop() gives up after its
+    # timeout instead, and the stuck feed is refused once it does return.
+    encoder = _encoder(tmp_path)
+    encoder.feed_video(_frame())
+    held = threading.Event()
+    release = threading.Event()
+
+    def stuck_feed() -> None:
+        with encoder._lock:
+            held.set()
+            release.wait(10.0)
+
+    feeder = threading.Thread(target=stuck_feed, daemon=True)
+    feeder.start()
+    assert held.wait(5.0)
+    try:
+        started = time.monotonic()
+        encoder.stop(timeout=0.2)
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+        feeder.join(5.0)
+
+    assert elapsed < 1.0
+    with pytest.raises(EncoderStoppedError):
+        encoder.feed_video(_frame())
 
 
 def test_feed_audio_is_inert_for_a_video_only_recording(tmp_path: Path) -> None:
