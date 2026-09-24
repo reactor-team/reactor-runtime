@@ -433,10 +433,13 @@ def test_v1_roundtrips_error_variants(
 def test_every_payload_variant_is_covered() -> None:
     # Guard against adding a message to the schema without a v0 mapping + test.
     # Correlated-error payloads have no legacy representation; v0 rejects them.
+    # client_stats is a v1-only capability no legacy client ever sent; v0 stays
+    # frozen and gets no mapping for it.
     unsupported = {
         ("DataClientMessage", "error"),
         ("DataServerMessage", "error"),
         ("ControlClientMessage", "error"),
+        ("ControlClientMessage", "client_stats"),
     }
     message_types: list[Any] = [
         data_pb2.DataClientMessage,

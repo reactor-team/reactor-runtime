@@ -65,3 +65,93 @@ message Moderation {
 message SessionEnded {
   string reason = 1;
 }
+
+// A negotiated video codec. New values need a schema change, so this covers
+// only the codecs currently in use — extend it as new ones are adopted.
+enum VideoCodec {
+  VIDEO_CODEC_UNSPECIFIED = 0;
+  VIDEO_CODEC_VP8 = 1;
+  VIDEO_CODEC_VP9 = 2;
+  VIDEO_CODEC_AV1 = 3;
+  VIDEO_CODEC_H264 = 4;
+  VIDEO_CODEC_H265 = 5;
+}
+
+// A negotiated audio codec. Same extend-as-adopted rule as VideoCodec.
+enum AudioCodec {
+  AUDIO_CODEC_UNSPECIFIED = 0;
+  AUDIO_CODEC_OPUS = 1;
+}
+
+// A track's media kind. Unlike a codec, this set never grows — every WebRTC
+// track is video or audio, permanently.
+enum TrackKind {
+  TRACK_KIND_UNSPECIFIED = 0;
+  TRACK_KIND_VIDEO = 1;
+  TRACK_KIND_AUDIO = 2;
+}
+
+// A track's direction, from the client's own perspective. The opposite
+// polarity of reactor_runtime's own (model-perspective) TrackDirection
+// (IN/OUT) — this one is client-perspective (RECVONLY/SENDONLY) — different
+// types in different packages, kept distinctly named so the two are never
+// confused reading wire and runtime code side by side.
+enum TrackDirection {
+  TRACK_DIRECTION_UNSPECIFIED = 0;
+  TRACK_DIRECTION_RECVONLY = 1;
+  TRACK_DIRECTION_SENDONLY = 2;
+}
+
+// One WebRTC quality reading the client took for one of its tracks, from the
+// browser's own getStats() — the runtime has no other vantage point onto a
+// client's receive-side experience. `kind`/`direction`/`codec` are fixed,
+// structural facts about the track (never a new value at runtime), so they
+// stay typed; `metrics` is where the actual measurements live (e.g.
+// "bitrate_bps", "frames_per_second", "packets_lost", "packets_received",
+// "jitter_ms", "round_trip_time_ms", "frames_decoded", "frames_dropped",
+// "frame_width", "frame_height", "nack_count", "keyframe_requests") — that
+// set grows as new stats become worth reporting, without a schema change.
+//
+// `codec`'s oneof only keeps `video_codec`/`audio_codec` from being set at
+// the same time — it does not, and structurally cannot, tie either one to
+// `kind`. A conforming sender always sets the arm matching `kind`
+// (`video_codec` for TRACK_KIND_VIDEO, `audio_codec` for TRACK_KIND_AUDIO),
+// but nothing on the wire rejects a message that doesn't. A consumer must
+// treat a codec arm that doesn't match `kind` as absent (the same as an
+// unrecognized or *_UNSPECIFIED value) rather than decode it — never trust
+// `kind` and the codec arm to agree without checking.
+message ClientTrackStat {
+  // Epoch milliseconds, the client's own clock.
+  int64 timestamp = 1;
+  string track_name = 2;
+  TrackKind kind = 3;
+  TrackDirection direction = 4;
+  oneof codec {
+    VideoCodec video_codec = 5;
+    AudioCodec audio_codec = 6;
+  }
+  // Whether the client has this track paused right now.
+  bool paused = 7;
+  map<string, double> metrics = 8;
+}
+
+// A connection-wide fact, not tied to any one track — e.g.
+// "available_outgoing_bitrate_bps" (the encoder's own belief about outgoing
+// headroom, not a measurement of the user's internet) or
+// "time_to_connect_ms" (how long this connection waited to establish, start
+// to "ready"). The latter is a one-time fact, not a per-batch reading, so a
+// client sends this once (its first batch after connecting) rather than
+// repeating it — see ClientStats.connection_stat.
+message ClientConnectionStat {
+  // Epoch milliseconds, the client's own clock.
+  int64 timestamp = 1;
+  map<string, double> metrics = 2;
+}
+
+// A batch of client-observed quality readings for this connection, sent
+// periodically rather than one message per reading.
+message ClientStats {
+  repeated ClientTrackStat track_stats = 1;
+  // Absent on most batches — see ClientConnectionStat's own doc for why.
+  ClientConnectionStat connection_stat = 2;
+}
