@@ -202,15 +202,24 @@ def test_stop_gives_up_on_a_feed_stuck_inside_libav(tmp_path: Path) -> None:
     assert held.wait(5.0)
     try:
         started = time.monotonic()
-        encoder.stop(timeout=0.2)
+        closed = encoder.stop(timeout=0.2)
         elapsed = time.monotonic() - started
     finally:
         release.set()
         feeder.join(5.0)
 
     assert elapsed < 1.0
+    assert closed is False  # the final segment was left unclosed, and stop() says so
     with pytest.raises(EncoderStoppedError):
         encoder.feed_video(_frame())
+
+
+def test_stop_reports_that_it_closed_the_output(tmp_path: Path) -> None:
+    encoder = _encoder(tmp_path)
+    encoder.feed_video(_frame())
+    assert encoder.stop() is True
+    assert encoder.stop() is True  # already closed
+    assert _encoder(tmp_path / "unopened").stop() is True  # never opened
 
 
 def test_feed_audio_is_inert_for_a_video_only_recording(tmp_path: Path) -> None:

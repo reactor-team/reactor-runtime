@@ -88,6 +88,18 @@ def test_manifest_serves_a_finished_recordings_final_segment(tmp_path: Path) -> 
     assert isinstance(recorder.manifest(_SID, 0.0, 4.0), ClipManifest)
 
 
+def test_manifest_never_serves_the_final_segment_of_an_incomplete_recording(
+    tmp_path: Path,
+) -> None:
+    # The encoder could not close the output, so the last segment is unfinished.
+    # A range ending there is gone, not pending forever; earlier ranges, closed
+    # by their successor, are still served.
+    recorder = _serving_recorder(tmp_path)
+    _write_segments(tmp_path, "init.mp4", "chunk_00000.m4s", "chunk_00001.m4s", ".incomplete")
+    assert isinstance(recorder.manifest(_SID, 0.0, 4.0), ClipManifest)
+    assert isinstance(recorder.manifest(_SID, 0.0, 8.0), Gone)
+
+
 def test_manifest_is_gone_for_an_unknown_recording(tmp_path: Path) -> None:
     recorder = _serving_recorder(tmp_path)
     assert isinstance(recorder.manifest(_SID, 0.0, 4.0), Gone)
@@ -627,6 +639,40 @@ def test_a_stop_encodes_the_frames_still_queued(
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
+def test_a_stop_that_cannot_close_the_output_marks_the_recording_incomplete(
+    tmp_path: Path,
+) -> None:
+    # A feed stuck inside libav holds the encoder's lock, so the encoder gives up
+    # on closing the output. The recording must not claim its final segment is
+    # closed: it is marked incomplete, and no clip or chunk is served from it.
+    recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
+    recorder.start(_SID)
+    recorder._build_encoder(_batched_bundle(1))
+    encoder = recorder._encoder
+    assert encoder is not None
+    held = threading.Event()
+    release = threading.Event()
+
+    def stuck_feed() -> None:
+        with encoder._lock:
+            held.set()
+            release.wait(10.0)
+
+    feeder = threading.Thread(target=stuck_feed, daemon=True)
+    feeder.start()
+    assert held.wait(5.0)
+    try:
+        recorder.stop()
+    finally:
+        release.set()
+        feeder.join(5.0)
+        recorder.close()
+
+    session_dir = tmp_path / _SID
+    assert (session_dir / ".incomplete").is_file()
+    assert not (session_dir / ".complete").exists()
+
+
 def test_a_stop_does_not_wait_out_an_encoder_that_fell_behind(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -826,21 +872,26 @@ _CLAIM_LEAD_SECONDS = 0.2
 _SWEEP_TIMEOUT_SECONDS = 10.0
 
 
-def _finished_recording(root: Path, name: str, *, finished_at: float) -> Path:
-    """A recording directory carrying a completion marker aged to *finished_at*."""
+def _finished_recording(
+    root: Path, name: str, *, finished_at: float, marker: str = ".complete"
+) -> Path:
+    """A recording directory carrying an end marker aged to *finished_at*."""
     session_dir = root / name
     session_dir.mkdir(parents=True, exist_ok=True)
     (session_dir / "init.mp4").write_bytes(b"data")
-    marker = session_dir / ".complete"
-    marker.write_text("")
-    os.utime(marker, (finished_at, finished_at))
+    path = session_dir / marker
+    path.write_text("")
+    os.utime(path, (finished_at, finished_at))
     return session_dir
 
 
-def test_reap_deletes_a_recording_past_its_retention_window(tmp_path: Path) -> None:
+@pytest.mark.parametrize("marker", [".complete", ".incomplete"])
+def test_reap_deletes_a_recording_past_its_retention_window(tmp_path: Path, marker: str) -> None:
     recorder = _serving_recorder(tmp_path)
     now = time.time()
-    aged = _finished_recording(tmp_path, _SID, finished_at=now - _RETENTION_SECONDS - 60)
+    aged = _finished_recording(
+        tmp_path, _SID, finished_at=now - _RETENTION_SECONDS - 60, marker=marker
+    )
     recorder._reap_expired(now)
     assert not aged.exists()
 
@@ -872,17 +923,20 @@ def test_close_is_idempotent_when_the_reaper_never_started(tmp_path: Path) -> No
     recorder.close()
 
 
-def test_start_clears_a_stale_completion_marker_from_a_reused_id(tmp_path: Path) -> None:
+@pytest.mark.parametrize("marker", [".complete", ".incomplete"])
+def test_start_clears_a_stale_completion_marker_from_a_reused_id(
+    tmp_path: Path, marker: str
+) -> None:
     # A recording started under an id used before must not inherit the earlier
-    # run's completion marker, or the reaper would read the live recording as
+    # run's end marker, or the reaper would read the live recording as
     # finished and delete it mid-write.
     session_dir = tmp_path / _SID
     session_dir.mkdir(parents=True)
-    (session_dir / ".complete").write_text("")
+    (session_dir / marker).write_text("")
     recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
     recorder.start(_SID)
     try:
-        assert not (session_dir / ".complete").exists()
+        assert not (session_dir / marker).exists()
     finally:
         recorder.stop()
         recorder.close()

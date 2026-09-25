@@ -9,7 +9,6 @@ whatever the model emits.
 
 from __future__ import annotations
 
-import contextlib
 import threading
 from fractions import Fraction
 from pathlib import Path
@@ -190,7 +189,7 @@ class ChunkEncoder:
                 self._failed = True
                 raise RuntimeError("the encoder stopped accepting audio") from exc
 
-    def stop(self, timeout: float = 2.0) -> None:
+    def stop(self, timeout: float = 2.0) -> bool:
         """Drain the encoders and write the trailer, closing the final segment.
 
         Always safe to call, and a no-op when the output never opened or has
@@ -198,11 +197,15 @@ class ChunkEncoder:
         return. A feed stuck inside libav past that still owns the output, so
         the output is left open with its final segment unclosed, and the feed
         is refused once it returns.
+
+        Returns:
+            Whether the output is closed, which it also is when it never opened.
+            ``False`` means the final segment was left unclosed.
         """
         if not self._lock.acquire(timeout=timeout):
             self._stopped = True
             logger.error("recorder encoder is stuck in a feed; leaving its final segment unclosed")
-            return
+            return False
         try:
             # Latch first so a concurrent feed bails out instead of encoding into
             # the container about to be closed.
@@ -214,7 +217,7 @@ class ChunkEncoder:
         finally:
             self._lock.release()
         if container is None:
-            return
+            return True
         try:
             # A failed encoder has no coherent state left to drain; closing the
             # container still writes what already reached the muxer.
@@ -224,9 +227,12 @@ class ChunkEncoder:
                         container.mux(stream.encode(None))
         except av.FFmpegError:
             logger.exception("recorder failed to drain the encoder")
-        finally:
-            with contextlib.suppress(av.FFmpegError):
-                container.close()
+        try:
+            container.close()
+        except av.FFmpegError:
+            logger.exception("recorder failed to close its output")
+            return False
+        return True
 
     def _open(self, width: int, height: int) -> None:
         """Open the HLS output and add the video and audio streams.
