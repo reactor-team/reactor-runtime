@@ -30,6 +30,20 @@ class Shutdown:
 
 
 @dataclass(frozen=True)
+class Rendezvous:
+    """Rank 0 listens for the process group on this port, which it bound itself."""
+
+    port: int
+
+
+@dataclass(frozen=True)
+class Join:
+    """Join the process group on the port rank 0 reported. Sent to every other rank."""
+
+    port: int
+
+
+@dataclass(frozen=True)
 class Loaded:
     """A rank finished ``load()`` and is ready for requests."""
 

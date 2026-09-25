@@ -148,6 +148,16 @@ class StartsAChild(Counter):
         return child.exitcode
 
 
+class LeavesAProcessBehind(Counter):
+    """Starts a process that outlives the step, and on step 2 never answers in time."""
+
+    def generate(self, input: CounterInput, /) -> Any:
+        if input.step == 2:
+            time.sleep(60.0)
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+        return child.pid
+
+
 class RefusesToLoad(Counter):
     def load(self, **kwargs: Any) -> None:
         raise FileNotFoundError("weights.safetensors")
@@ -330,6 +340,33 @@ def test_an_interrupted_call_leaves_the_runner_unusable(
     assert not runner.healthy
     with pytest.raises(RuntimeError, match="unusable"):
         runner.generate(_input(2))
+
+
+@pytest.mark.parametrize("hang", [False, True], ids=["healthy", "terminated"])
+def test_the_processes_a_worker_started_end_with_the_runner(hang: bool) -> None:
+    runner = DistributedRunner(
+        LeavesAProcessBehind, load_kwargs={"base": 0}, call_timeout=3.0, start_timeout=60.0
+    )
+    runner.start()
+    try:
+        child = runner.generate(_input(1))
+        assert _alive(child)
+        if hang:
+            with pytest.raises(WorkerTimeout):
+                runner.generate(_input(2))
+    finally:
+        runner.shutdown()
+    assert _gone_within(child, 10.0)
+
+
+def _gone_within(pid: int, seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while _alive(pid):
+        if time.monotonic() > deadline:
+            os.kill(pid, signal.SIGKILL)
+            return False
+        time.sleep(0.2)
+    return True
 
 
 def test_a_worker_may_start_processes_of_its_own() -> None:

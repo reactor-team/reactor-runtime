@@ -14,10 +14,13 @@ seconds, and it has a timeout, so a wedged rank surfaces as
 from __future__ import annotations
 
 import atexit
+import contextlib
 import logging
 import multiprocessing
+import os
 import pickle
 import queue
+import signal
 import socket
 import time
 from typing import Any
@@ -31,7 +34,15 @@ from reactor_runtime.distributed.ipc import (
     unlink_blocks,
     unpack,
 )
-from reactor_runtime.distributed.protocol import Answer, Generate, Loaded, Reset, Shutdown
+from reactor_runtime.distributed.protocol import (
+    Answer,
+    Generate,
+    Join,
+    Loaded,
+    Rendezvous,
+    Reset,
+    Shutdown,
+)
 from reactor_runtime.distributed.rank import rank_main
 from reactor_runtime.distributed.worker import check_shape
 from reactor_runtime.log import get_logger
@@ -125,7 +136,9 @@ class DistributedRunner:
             self._inboxes = [self._ctx.Queue() for _ in range(self._world_size)]
             self._outbox = self._ctx.Queue()
             self._input_slot = SharedSlot()
-            port = _free_port()
+            forms_group = self._init_process_group and self._world_size > 1
+            # When the runner forms the group, rank 0 binds its own port instead.
+            port = None if forms_group else _free_port()
             level = logging.getLogger().getEffectiveLevel()
             for rank in range(self._world_size):
                 proc = self._ctx.Process(
@@ -148,7 +161,11 @@ class DistributedRunner:
                 )
                 proc.start()
                 self._procs.append(proc)
-            for message in self._collect("start", self._start_timeout):
+            deadline = time.monotonic() + self._start_timeout
+            if forms_group:
+                self._rendezvous(self._start_timeout)
+            remaining = max(0.0, deadline - time.monotonic())
+            for message in self._collect("start", remaining):
                 if isinstance(message, Answer) and message.error is not None:
                     raise message.error
                 if not isinstance(message, Loaded):
@@ -189,9 +206,11 @@ class DistributedRunner:
         A healthy group is sent ``Shutdown`` and joined. An unhealthy group is
         not: a survivor that received it would wait in the exit barrier for a
         dead peer. Any rank alive after its grace period is terminated, then
-        killed. Either way this ends with dead processes and every shared
-        block unlinked, including the result blocks of a rank that was killed
-        before it could close them.
+        killed. Each rank leads its own process group and is signalled as a
+        group, so the processes its worker started end with it, and anything
+        still in a rank's group afterwards is killed. Either way this ends with
+        dead processes and every shared block unlinked, including the result
+        blocks of a rank that was killed before it could close them.
         """
         if self._shutdown_done:
             return
@@ -206,11 +225,15 @@ class DistributedRunner:
             for proc in self._procs:
                 if proc.is_alive():
                     logger.warning("terminating a rank that outlived shutdown", pid=proc.pid)
+                    _signal_group(proc, signal.SIGTERM)
                     proc.terminate()
                     proc.join(timeout=_JOIN_GRACE)
                 if proc.is_alive():
+                    _signal_group(proc, signal.SIGKILL)
                     proc.kill()
                     proc.join(timeout=_JOIN_GRACE)
+            for proc in self._procs:
+                _signal_group(proc, signal.SIGKILL)
         except Exception as exc:
             logger.error("rank teardown failed", error=str(exc))
         finally:
@@ -225,6 +248,19 @@ class DistributedRunner:
                     # A dead rank never drains its queue; joining the feeder would hang.
                     channel.cancel_join_thread()
                     channel.close()
+
+    def _rendezvous(self, timeout: float) -> None:
+        """Wait for the port rank 0 bound for the process group, and send it to the others."""
+        port = None
+        for message in self._collect("start", timeout, count=1):
+            if isinstance(message, Answer) and message.error is not None:
+                raise message.error
+            if isinstance(message, Rendezvous):
+                port = message.port
+        if port is None:
+            raise RuntimeError("start: a rank answered before rank 0 reported its port")
+        for inbox in self._inboxes[1:]:
+            inbox.put(Join(port))
 
     def _round_trip(self, request: Generate | Reset, what: str) -> list[Any]:
         """Broadcast one request and collect every rank's answer to it.
@@ -244,11 +280,11 @@ class DistributedRunner:
         for inbox in self._inboxes:
             inbox.put(request)
 
-    def _collect(self, what: str, timeout: float) -> list[Any]:
-        """Wait for one message from every rank, polling liveness while waiting."""
+    def _collect(self, what: str, timeout: float, count: int | None = None) -> list[Any]:
+        """Wait for *count* messages, one from every rank by default, polling liveness."""
         deadline = time.monotonic() + timeout
         messages: list[Any] = []
-        while len(messages) < self._world_size:
+        while len(messages) < (count or self._world_size):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 self._healthy = False
@@ -337,6 +373,12 @@ def _picklable(load_kwargs: dict[str, Any]) -> dict[str, Any]:
                 f"load_kwargs[{key!r}] does not pickle, so it cannot reach the worker: {exc}"
             ) from exc
     return dict(load_kwargs)
+
+
+def _signal_group(proc: Any, sig: int) -> None:
+    """Send *sig* to the process group *proc* leads: the rank and what its worker started."""
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(proc.pid, sig)
 
 
 def _free_port() -> int:

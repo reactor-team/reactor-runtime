@@ -84,6 +84,18 @@ class EachRankNamesItself(Replica):
         return super().generate(input)
 
 
+class Reduces(Replica):
+    """Sums one value per rank over the process group the runner formed."""
+
+    def generate(self, input: StepInput, /) -> tuple[float, int]:  # ty: ignore[invalid-method-override]
+        import torch  # ty: ignore[unresolved-import]  # the test skips without it
+        import torch.distributed as dist  # ty: ignore[unresolved-import]
+
+        value = torch.tensor([float(self.rank + 1)])
+        dist.all_reduce(value)
+        return float(value), int(os.environ["MASTER_PORT"])
+
+
 class OneRankDies(Replica):
     def generate(self, input: StepInput, /) -> StepResult:
         if input.step == 99 and self.rank == 1:
@@ -184,6 +196,25 @@ def test_every_rank_raising_a_different_error_is_a_desync(tmp_path: Path) -> Non
         assert not runner.healthy
     finally:
         runner.shutdown()
+
+
+def test_ranks_form_the_process_group_on_the_port_rank_0_bound(tmp_path: Path) -> None:
+    pytest.importorskip("torch")
+    runner = DistributedRunner(
+        Reduces,
+        world_size=2,
+        load_kwargs={"log_dir": tmp_path},
+        start_timeout=120.0,
+        call_timeout=60.0,
+    )
+    runner.start()
+    try:
+        total, port = runner.generate(_input(1))
+    finally:
+        runner.shutdown()
+    assert total == 3.0  # 1 + 2: both ranks reduced over one group
+    assert port > 0
+    assert "MASTER_PORT" not in os.environ  # chosen in the ranks, never in the caller
 
 
 def test_a_dead_rank_is_named(tmp_path: Path) -> None:
