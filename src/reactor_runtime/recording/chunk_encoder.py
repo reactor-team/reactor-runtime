@@ -9,7 +9,6 @@ whatever the model emits.
 
 from __future__ import annotations
 
-import contextlib
 import threading
 from fractions import Fraction
 from pathlib import Path
@@ -33,6 +32,13 @@ _MANIFEST_FILENAME = "manifest.m3u8"
 # yuv420p with the Main profile is the universally-compatible sub-profile.
 _PIXEL_FORMAT = "yuv420p"
 _PROFILE = "Main"
+
+
+class EncoderStoppedError(RuntimeError):
+    """A feed arrived after :meth:`ChunkEncoder.stop` closed the output.
+
+    This is teardown, not a failure: the recording is complete up to the stop.
+    """
 
 
 def _video_options(config: RecordingConfig, keyframe_interval: int) -> dict[str, str]:
@@ -136,14 +142,15 @@ class ChunkEncoder:
 
         Raises:
             ValueError: If *frame* is not a three-channel image.
-            RuntimeError: If the encoder is stopped or in a failed state, or if
-                libav rejected the frame.
+            EncoderStoppedError: If :meth:`stop` has already closed the output.
+            RuntimeError: If the encoder is in a failed state, or if libav
+                rejected the frame.
         """
         if frame.ndim != 3 or frame.shape[2] != 3:
             raise ValueError(f"feed_video expects (H, W, 3); got shape {frame.shape}")
         with self._lock:
             if self._stopped:
-                raise RuntimeError("ChunkEncoder is stopped")
+                raise EncoderStoppedError("ChunkEncoder is stopped")
             if self._failed:
                 raise RuntimeError("ChunkEncoder is in a failed state")
             if self._container is None:
@@ -182,13 +189,24 @@ class ChunkEncoder:
                 self._failed = True
                 raise RuntimeError("the encoder stopped accepting audio") from exc
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 2.0) -> bool:
         """Drain the encoders and write the trailer, closing the final segment.
 
         Always safe to call, and a no-op when the output never opened or has
-        already been closed.
+        already been closed. Waits at most *timeout* for a feed in progress to
+        return. A feed stuck inside libav past that still owns the output, so
+        the output is left open with its final segment unclosed, and the feed
+        is refused once it returns.
+
+        Returns:
+            Whether the output is closed, which it also is when it never opened.
+            ``False`` means the final segment was left unclosed.
         """
-        with self._lock:
+        if not self._lock.acquire(timeout=timeout):
+            self._stopped = True
+            logger.error("recorder encoder is stuck in a feed; leaving its final segment unclosed")
+            return False
+        try:
             # Latch first so a concurrent feed bails out instead of encoding into
             # the container about to be closed.
             self._stopped = True
@@ -196,8 +214,10 @@ class ChunkEncoder:
             self._container = None
             self._video = None
             self._audio = None
+        finally:
+            self._lock.release()
         if container is None:
-            return
+            return True
         try:
             # A failed encoder has no coherent state left to drain; closing the
             # container still writes what already reached the muxer.
@@ -207,9 +227,12 @@ class ChunkEncoder:
                         container.mux(stream.encode(None))
         except av.FFmpegError:
             logger.exception("recorder failed to drain the encoder")
-        finally:
-            with contextlib.suppress(av.FFmpegError):
-                container.close()
+        try:
+            container.close()
+        except av.FFmpegError:
+            logger.exception("recorder failed to close its output")
+            return False
+        return True
 
     def _open(self, width: int, height: int) -> None:
         """Open the HLS output and add the video and audio streams.

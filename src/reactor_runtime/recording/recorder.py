@@ -34,7 +34,7 @@ import numpy.typing as npt
 
 from reactor_runtime.core import MediaBundle, MediaChunk, RecordingConfig, TrackKind
 from reactor_runtime.log import get_logger
-from reactor_runtime.recording.chunk_encoder import ChunkEncoder
+from reactor_runtime.recording.chunk_encoder import ChunkEncoder, EncoderStoppedError
 from reactor_runtime.recording.markers import MarkerBookkeeper
 
 logger = get_logger(__name__)
@@ -55,6 +55,10 @@ _FEED_DEPTH = 4
 # emission is counted and abandoned, so a stalled recording costs the recording
 # rather than the session.
 _FEED_WAIT_SECONDS = 1.0
+# How long stop() waits for the frames already queued to reach the encoder
+# before it closes the encoder anyway. Past it, the rest of the queue is lost
+# rather than teardown waiting on an encoder that has fallen behind.
+_DRAIN_SECONDS = 1.0
 # How often the feed reports dropped frames. An encoder that stays behind loses
 # frames on every emission, so the count is carried on every recording's summary
 # and only the periodic warning is rate-limited.
@@ -72,6 +76,11 @@ _INIT_FILENAME = "init.mp4"
 # Written into a recording's directory once it is finished, so its final segment
 # (which has no successor to prove it closed) is recognised as fetchable.
 _COMPLETE_MARKER = ".complete"
+# Written instead when the recording ended with its final segment unclosed. It
+# ages the recording out like a finished one, but never makes that segment
+# fetchable.
+_INCOMPLETE_MARKER = ".incomplete"
+_END_MARKERS = (_COMPLETE_MARKER, _INCOMPLETE_MARKER)
 _HLS_MEDIA_TYPE = "application/vnd.apple.mpegurl"
 
 # How long a finished recording is kept on disk before it is reaped. Clips stay
@@ -185,7 +194,7 @@ class Pending:
 
 @dataclass(frozen=True)
 class Gone:
-    """The addressed recording is unknown or has aged out (an HTTP 410)."""
+    """The addressed recording is unknown, has aged out, or never closed the range (an HTTP 410)."""
 
 
 ClipReadyCallback = Callable[[ClipResult], None]
@@ -336,7 +345,8 @@ class Recorder:
         with self._reaper_lock:
             self._session_dir = self._root / self._session_id
             self._session_dir.mkdir(parents=True, exist_ok=True)
-            (self._session_dir / _COMPLETE_MARKER).unlink(missing_ok=True)
+            for name in _END_MARKERS:
+                (self._session_dir / name).unlink(missing_ok=True)
         self._markers = MarkerBookkeeper()
         self._feed_stop.clear()
         self._watch_stop.clear()
@@ -374,15 +384,28 @@ class Recorder:
             self._feed_room.notify_all()
         feed_thread = self._feed_thread
         self._feed_thread = None
-        if self._encoder is not None:
-            self._encoder.stop()
+        # The stop sentinel sits behind every queued frame, so the feed worker
+        # encodes them all before it exits. Closing the encoder only after that
+        # keeps the end of the session in the recording.
+        if feed_thread is not None:
+            feed_thread.join(timeout=_DRAIN_SECONDS)
+            if feed_thread.is_alive():
+                logger.warning(
+                    "recorder encoder fell behind at stop; closing it with frames still queued",
+                    session_id=self._session_id,
+                    queued=self._feed_queue.qsize(),
+                )
+        closed = self._encoder.stop() if self._encoder is not None else True
         if feed_thread is not None:
             feed_thread.join(timeout=2.0)
         # Mark the recording finished so its final segment is servable, then fire
-        # any clip whose boundary has now landed before the watcher winds down.
+        # any clip whose boundary has now landed before the watcher winds down. An
+        # output the encoder could not close is marked incomplete instead: its
+        # final segment is never announced or served.
         if self._session_dir is not None:
             try:
-                (self._session_dir / _COMPLETE_MARKER).write_text("")
+                marker = _COMPLETE_MARKER if closed else _INCOMPLETE_MARKER
+                (self._session_dir / marker).write_text("")
             except OSError:
                 logger.exception(
                     "failed to write recording completion marker",
@@ -445,8 +468,8 @@ class Recorder:
     def _reap_expired(self, now: float) -> None:
         """Delete every finished recording whose retention window has passed.
 
-        A recording ages out once its completion marker is older than the
-        retention window. The live session's directory is skipped outright, and a
+        A recording ages out once its end marker, complete or incomplete, is
+        older than the retention window. The live session's directory is skipped outright, and a
         recording still in progress carries no marker anyway, so an active
         recording is never removed no matter how long the session runs.
 
@@ -465,10 +488,8 @@ class Recorder:
             with self._reaper_lock:
                 if session_dir == self._session_dir:
                     continue
-                marker = session_dir / _COMPLETE_MARKER
-                try:
-                    finished_at = marker.stat().st_mtime
-                except OSError:
+                finished_at = _ended_at(session_dir)
+                if finished_at is None:
                     continue
                 if now - finished_at <= _RETENTION_SECONDS:
                     continue
@@ -680,6 +701,11 @@ class Recorder:
                 encoder.feed_video(video)
                 if self._has_audio and audio is not None:
                     encoder.feed_audio(audio)
+            except EncoderStoppedError:
+                # stop() closed the encoder past its drain deadline. The
+                # recording is already finalised, so this is not a failure.
+                self._drain_feed_queue()
+                return
             except Exception:
                 logger.exception(
                     "recorder encoder feed failed; disabling recording",
@@ -897,7 +923,8 @@ class Recorder:
         Returns:
             A :class:`ClipManifest` once the boundary segment is on disk, a
             :class:`Pending` while it is still in flight, or :class:`Gone` when
-            the recording is unknown or aged out.
+            the recording is unknown or aged out, or ended without closing the
+            boundary segment.
 
         Raises:
             ValueError: If the marker range is malformed.
@@ -917,6 +944,9 @@ class Recorder:
         chunk_start_idx = max(0, math.floor(start / cs))
         chunk_end_idx = max(chunk_start_idx, math.ceil(end / cs) - 1)
         if not self._boundary_ready(session_dir, chunk_end_idx):
+            # A recording that ended incomplete will never close this boundary.
+            if (session_dir / _INCOMPLETE_MARKER).is_file():
+                return Gone()
             return Pending()
         lines = [
             "#EXTM3U",
@@ -981,6 +1011,16 @@ class Recorder:
         # ffmpeg creates init empty and flushes its headers with the first
         # segment, so the first chunk appearing is the signal init is usable.
         return (session_dir / "chunk_00000.m4s").is_file()
+
+
+def _ended_at(session_dir: Path) -> float | None:
+    """Return when the recording in *session_dir* ended, or ``None`` if it has not."""
+    for name in _END_MARKERS:
+        try:
+            return (session_dir / name).stat().st_mtime
+        except OSError:
+            continue
+    return None
 
 
 def _boundary_index(end: float, chunk_seconds: int) -> int:

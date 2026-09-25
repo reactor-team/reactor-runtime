@@ -1,3 +1,4 @@
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -7,7 +8,11 @@ import numpy as np
 import pytest
 
 from reactor_runtime.core import RecordingConfig
-from reactor_runtime.recording.chunk_encoder import ChunkEncoder, _video_options
+from reactor_runtime.recording.chunk_encoder import (
+    ChunkEncoder,
+    EncoderStoppedError,
+    _video_options,
+)
 
 _FRAME_RATE = 30
 
@@ -171,9 +176,50 @@ def test_a_feed_after_stop_is_refused(tmp_path: Path) -> None:
     encoder.stop()
 
     # Encoding into a closed container would crash, so the latch has to hold even
-    # against a feed worker that has not wound down yet.
-    with pytest.raises(RuntimeError, match="stopped"):
+    # against a feed worker that has not wound down yet. The refusal has its own
+    # type so the recorder can tell teardown apart from an encoder failure.
+    with pytest.raises(EncoderStoppedError):
         encoder.feed_video(_frame())
+    assert not encoder.failed
+
+
+def test_stop_gives_up_on_a_feed_stuck_inside_libav(tmp_path: Path) -> None:
+    # A feed holds the encoder's lock across the libav call, so one that never
+    # returns would block stop() on that lock forever. stop() gives up after its
+    # timeout instead, and the stuck feed is refused once it does return.
+    encoder = _encoder(tmp_path)
+    encoder.feed_video(_frame())
+    held = threading.Event()
+    release = threading.Event()
+
+    def stuck_feed() -> None:
+        with encoder._lock:
+            held.set()
+            release.wait(10.0)
+
+    feeder = threading.Thread(target=stuck_feed, daemon=True)
+    feeder.start()
+    assert held.wait(5.0)
+    try:
+        started = time.monotonic()
+        closed = encoder.stop(timeout=0.2)
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+        feeder.join(5.0)
+
+    assert elapsed < 1.0
+    assert closed is False  # the final segment was left unclosed, and stop() says so
+    with pytest.raises(EncoderStoppedError):
+        encoder.feed_video(_frame())
+
+
+def test_stop_reports_that_it_closed_the_output(tmp_path: Path) -> None:
+    encoder = _encoder(tmp_path)
+    encoder.feed_video(_frame())
+    assert encoder.stop() is True
+    assert encoder.stop() is True  # already closed
+    assert _encoder(tmp_path / "unopened").stop() is True  # never opened
 
 
 def test_feed_audio_is_inert_for_a_video_only_recording(tmp_path: Path) -> None:
