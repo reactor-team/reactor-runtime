@@ -280,6 +280,20 @@ def test_a_hook_of_the_same_kind_under_another_name_is_rejected() -> None:
             def log_stats(self) -> None: ...
 
 
+def test_shadowing_a_hook_with_a_non_method_is_rejected() -> None:
+    with pytest.raises(TypeError, match=r"reset_model is NoneType, not a method"):
+
+        class Disabled(HookedBase):
+            reset_model = None  # the shadow under test
+
+    with pytest.raises(TypeError, match=r"reset_model is property, not a method"):
+
+        class Shadowed(HookedBase):
+            @property
+            def reset_model(self) -> None:  # the shadow under test
+                return None
+
+
 def test_two_hooks_of_one_kind_in_one_class_are_rejected() -> None:
     with pytest.raises(TypeError, match=r"first.*second.*session_started"):
 

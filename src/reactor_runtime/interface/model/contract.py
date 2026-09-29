@@ -250,7 +250,16 @@ class ModelContract:
                     owner = hook_owner.get(key)
                     if owner is None:
                         hook_owner[key] = (klass, attr_name)
-                        hooks[key] = getattr(model_cls, attr_name)
+                        hook = inspect.getattr_static(model_cls, attr_name)
+                        if not callable(hook):
+                            raise TypeError(
+                                f"{model_cls.__qualname__}.{attr_name} is "
+                                f"{type(hook).__name__}, not a method, but "
+                                f"{klass.__qualname__}.{attr_name} is marked @{key}. "
+                                f"A subclass may override a lifecycle hook only with "
+                                f"a method."
+                            )
+                        hooks[key] = hook
                     elif owner[1] != attr_name:
                         owner_cls, owner_name = owner
                         raise TypeError(
