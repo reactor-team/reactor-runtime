@@ -192,10 +192,42 @@ def test_load_resolves_the_slug_and_builds_the_pipeline_on_the_device(
     assert model.app is fake_flashdreams["app"]
     assert model.pipeline is fake_flashdreams["pipeline"]
     assert fake_flashdreams["app"].pipeline_config.device == "cuda:1"
+    assert model.device == "cuda:1"
     assert model.max_blocks == 10_000
     assert model.desc.frames_per_second_for_step == 60
     assert model.cache is None
     assert model.rollout_id is None
+
+
+def test_load_builds_on_cuda_when_nothing_names_a_device(
+    fake_flashdreams: dict[str, Any], tmp_path: Any
+) -> None:
+    model = SeededModel()
+    model.load("action2v-fake", weights_root=str(tmp_path))
+    assert fake_flashdreams["app"].pipeline_config.device == "cuda"
+    assert model.device == "cuda"
+
+
+def test_load_builds_on_the_device_a_runner_set_for_the_rank(
+    fake_flashdreams: dict[str, Any], tmp_path: Any
+) -> None:
+    # A DistributedRunner sets rank, world_size, and device on the instance
+    # between construction and load(), with the same load_kwargs on every rank.
+    model = SeededModel()
+    model.rank, model.world_size, model.device = 2, 4, "cuda:2"  # type: ignore[ty:unresolved-attribute]
+    model.load("action2v-fake", weights_root=str(tmp_path))
+    assert fake_flashdreams["app"].pipeline_config.device == "cuda:2"
+    assert model.device == "cuda:2"
+
+
+def test_an_explicit_device_overrides_the_one_a_runner_set(
+    fake_flashdreams: dict[str, Any], tmp_path: Any
+) -> None:
+    model = SeededModel()
+    model.device = "cuda:2"
+    model.load("action2v-fake", weights_root=str(tmp_path), device="cpu")
+    assert fake_flashdreams["app"].pipeline_config.device == "cpu"
+    assert model.device == "cpu"
 
 
 def test_load_points_both_caches_at_the_weights_root(

@@ -59,7 +59,11 @@ class FlashDreamsModel:
     Attributes:
         app: The FlashDreams application the slug resolved to, after ``load()``.
         desc: Its session description: frame size, rate, and layout.
-        pipeline: The built pipeline, on the device ``load()`` was given.
+        pipeline: The built pipeline, on :attr:`device`.
+        device: The device the pipeline is built on. A
+            :class:`~reactor_runtime.distributed.DistributedRunner` sets it to
+            this rank's GPU before ``load()`` runs; ``load()`` resolves it
+            otherwise.
         max_blocks: The adapter's ``total_blocks``; a rollout ends there.
         cache: The pipeline's cache for the rollout the model holds, else ``None``.
         rollout_id: The id of that rollout, else ``None``.
@@ -70,6 +74,7 @@ class FlashDreamsModel:
         self.app: Any = None
         self.desc: Any = None
         self.pipeline: Any = None
+        self.device: str | None = None
         self.max_blocks = 0
         self.cache: Any = None
         self.rollout_id: int | None = None
@@ -79,7 +84,7 @@ class FlashDreamsModel:
         self,
         application: str,
         weights_root: str,
-        device: str = "cuda",
+        device: str | None = None,
         warmup_steps: int = 0,
     ) -> None:
         """Resolve the slug and build its pipeline on the device.
@@ -96,7 +101,10 @@ class FlashDreamsModel:
                 is set to it and ``HF_HUB_CACHE`` to its ``huggingface`` subdirectory.
                 ``HF_HUB_OFFLINE`` is set to ``1`` unless the environment already
                 sets it, so a run that fills an empty bundle can allow downloads.
-            device: The device the pipeline is built on.
+            device: The device the pipeline is built on. ``None`` takes the
+                :attr:`device` a ``DistributedRunner`` set for this rank, and
+                ``"cuda"`` when nothing set one. Pass a device to override
+                either.
             warmup_steps: Pipeline steps to run before the first client waits.
                 The generic class cannot build a step input, so a value above
                 zero requires a model class that overrides ``_warmup()``.
@@ -119,7 +127,8 @@ class FlashDreamsModel:
         self.app = app
         self.desc = app.session_desc()
         self.max_blocks = int(app.defaults.total_blocks)
-        self.pipeline = app.pipeline_config.setup().to(device).eval()
+        self.device = device if device is not None else self.device or "cuda"
+        self.pipeline = app.pipeline_config.setup().to(self.device).eval()
         self.reset()
         self._warmup(int(warmup_steps))
 
