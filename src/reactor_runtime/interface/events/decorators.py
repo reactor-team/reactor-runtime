@@ -207,6 +207,18 @@ def file_uploaded(func: Callable[..., Any]) -> Callable[..., Any]:
     Raises:
         TypeError: If the handler's parameters are not exactly ``uploaded_file``.
     """
+    check_file_uploaded_signature(func)
+    setattr(func, FILE_UPLOADED_ATTR, True)
+    return func
+
+
+def check_file_uploaded_signature(func: Callable[..., Any]) -> None:
+    """Raise ``TypeError`` unless *func* takes exactly ``uploaded_file``.
+
+    Applied by ``@file_uploaded`` and again to a subclass method that overrides
+    the hook without repeating the decorator, so the override is held to the
+    same shape.
+    """
     sig = inspect.signature(func)
     params = [name for name in sig.parameters if name != "self"]
     required = [name for name in params if name not in RESERVED_PARAMS]
@@ -215,8 +227,6 @@ def file_uploaded(func: Callable[..., Any]) -> Callable[..., Any]:
             "@file_uploaded handler must take exactly one parameter named "
             f"'uploaded_file' (plus optional reserved parameters), got: {params}"
         )
-    setattr(func, FILE_UPLOADED_ATTR, True)
-    return func
 
 
 def make_command(name: str, fields: list[tuple[str, Any] | tuple[str, Any, Any]]) -> type[Command]:

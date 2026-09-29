@@ -294,6 +294,23 @@ def test_shadowing_a_hook_with_a_non_method_is_rejected() -> None:
                 return None
 
 
+def test_an_upload_hook_override_keeps_the_required_signature() -> None:
+    class Uploads(ReactorApp):
+        @file_uploaded
+        def on_file(self, uploaded_file: UploadedFile) -> None: ...
+
+    class Fine(Uploads):
+        def on_file(self, uploaded_file: UploadedFile) -> None:
+            super().on_file(uploaded_file)
+
+    assert ModelContract.of(Fine).lifecycle.file_uploaded is Fine.__dict__["on_file"]
+
+    with pytest.raises(TypeError, match="uploaded_file"):
+
+        class Broken(Uploads):
+            def on_file(self) -> None: ...  # the shape under test
+
+
 def test_two_hooks_of_one_kind_in_one_class_are_rejected() -> None:
     with pytest.raises(TypeError, match=r"first.*second.*session_started"):
 

@@ -38,6 +38,7 @@ from reactor_runtime.interface.events.decorators import (
     SESSION_ENDED_ATTR,
     SESSION_STARTED_ATTR,
     EventHandler,
+    check_file_uploaded_signature,
 )
 from reactor_runtime.interface.events.messages import MESSAGE_REGISTRY, ModelMessage
 from reactor_runtime.interface.model.schema import (
@@ -259,6 +260,8 @@ class ModelContract:
                                 f"A subclass may override a lifecycle hook only with "
                                 f"a method."
                             )
+                        if key == "file_uploaded" and hook is not attr:
+                            check_file_uploaded_signature(hook)
                         hooks[key] = hook
                     elif owner[1] != attr_name:
                         owner_cls, owner_name = owner
