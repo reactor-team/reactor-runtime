@@ -20,6 +20,7 @@ message ControlClientMessage {
     PauseTrack pause_track = 16;
     ResumeTrack resume_track = 17;
     UnpublishTrack unpublish_track = 18;
+    ClientStats client_stats = 19;
     Error error = 40;
   }
 }
