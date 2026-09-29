@@ -173,3 +173,17 @@ def test_an_upload_field_redeclared_as_plain_leaves_the_upload_set() -> None:
         channel: str = "main"
 
     assert Plain.__upload_fields__ == frozenset()
+
+
+def test_the_nearer_base_decides_whether_a_shared_name_is_an_upload() -> None:
+    class AsText(Command):
+        channel: str = "main"
+
+    class TextWins(AsText, SetBrightnessOn):
+        pass
+
+    class UploadWins(SetBrightnessOn, AsText):
+        pass
+
+    assert TextWins.__upload_fields__ == frozenset()
+    assert UploadWins.__upload_fields__ == frozenset({"channel"})

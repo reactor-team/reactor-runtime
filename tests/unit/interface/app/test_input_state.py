@@ -160,6 +160,22 @@ def test_two_declared_parents_both_contribute() -> None:
     assert Both().speed == 1.0
 
 
+def test_the_nearer_base_decides_whether_a_shared_name_is_an_upload() -> None:
+    class AsText(InputState):
+        image: str = "none"
+
+    class TextWins(AsText, BaseState):
+        pass
+
+    class UploadWins(BaseState, AsText):
+        pass
+
+    assert TextWins._upload_fields == set()
+    assert TextWins().image == "none"
+    assert UploadWins._upload_fields == {"image"}
+    assert UploadWins().image is None
+
+
 def test_a_plain_mixin_contributes_no_fields() -> None:
     class Mixin:
         helper: int = 1

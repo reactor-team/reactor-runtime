@@ -107,16 +107,17 @@ def _build_command(cls: type[Command]) -> None:
     # deferring the import until a command is actually declared.
     from reactor_runtime.core.typespec import OptionalSpec, TypeSpec, UploadSpec
 
+    def is_upload(spec: TypeSpec) -> bool:
+        resolved = spec.inner if isinstance(spec, OptionalSpec) else spec
+        return isinstance(resolved, UploadSpec)
+
     fields = inherited_record(cls, "__command_fields__")
     inherits = bool(fields)
-    uploads: set[str] = set()
-    for base in cls.__mro__[1:]:
-        uploads |= base.__dict__.get("__upload_fields__", frozenset())
 
     annotations: dict[str, Any] = cls.__dict__.get("__annotations__", {})
     if not annotations:
         cls.__command_fields__ = fields
-        cls.__upload_fields__ = frozenset(uploads)
+        cls.__upload_fields__ = frozenset(n for n, f in fields.items() if is_upload(f.spec))
         apply_dataclass(cls, required=[], inherits=inherits)
         return
 
@@ -142,7 +143,6 @@ def _build_command(cls: type[Command]) -> None:
             )
 
         spec = TypeSpec.of(annotation)
-        uploads.discard(name)
 
         if isinstance(raw, FieldInfo):
             info = raw
@@ -168,15 +168,15 @@ def _build_command(cls: type[Command]) -> None:
                 )
 
         fields[name] = CommandField(spec=spec, info=info)
-        resolved = spec.inner if isinstance(spec, OptionalSpec) else spec
-        if isinstance(resolved, UploadSpec):
-            uploads.add(name)
 
     if no_default and has_default:
         cls.__annotations__ = {key: annotations[key] for key in no_default + has_default}
 
     cls.__command_fields__ = fields
-    cls.__upload_fields__ = frozenset(uploads)
+    # Read off the winning definition of every field, so a name one base
+    # declares as an upload and a nearer base as something else follows the
+    # nearer base.
+    cls.__upload_fields__ = frozenset(n for n, f in fields.items() if is_upload(f.spec))
     apply_dataclass(cls, required=no_default, inherits=inherits)
 
 

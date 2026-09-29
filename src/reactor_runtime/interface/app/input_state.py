@@ -75,9 +75,17 @@ class InputState:
         public = inherited_record(cls, "_public_fields")
         private: set[str] = set()
         uploads: set[str] = set()
-        for base in cls.__mro__[1:]:
+        for base in reversed(cls.__mro__[1:]):
             private |= base.__dict__.get("_private_fields", set())
-            uploads |= base.__dict__.get("_upload_fields", set())
+            # Upload membership follows the same base that wins the field, so a
+            # name one base declares as an upload and a nearer base as something
+            # else is not an upload.
+            base_uploads = base.__dict__.get("_upload_fields", set())
+            for name in base.__dict__.get("_public_fields", {}):
+                if name in base_uploads:
+                    uploads.add(name)
+                else:
+                    uploads.discard(name)
         inherits_fields = bool(public or private)
 
         annotations = cls.__dict__.get("__annotations__", {})
