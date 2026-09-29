@@ -1,6 +1,7 @@
 import enum
+import functools
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -230,6 +231,91 @@ def test_duplicate_command_name_is_rejected_at_build() -> None:
 
             @event(name="go")
             async def second(self) -> None: ...
+
+
+# -- lifecycle hooks across a hierarchy --------------------------------------
+
+
+class HookedBase(ReactorApp):
+    @session_ended
+    def reset_model(self) -> None: ...
+
+    @connected
+    async def greet(self) -> None: ...
+
+
+def test_an_inherited_hook_runs_the_base_method() -> None:
+    class Derived(HookedBase):
+        pass
+
+    lifecycle = ModelContract.of(Derived).lifecycle
+    assert lifecycle.session_ended is HookedBase.__dict__["reset_model"]
+    assert lifecycle.connected is HookedBase.__dict__["greet"]
+
+
+def test_an_override_of_the_same_name_runs_without_repeating_the_decorator() -> None:
+    class Derived(HookedBase):
+        def reset_model(self) -> None:
+            super().reset_model()
+
+    assert ModelContract.of(Derived).lifecycle.session_ended is Derived.__dict__["reset_model"]
+    base = ModelContract.of(HookedBase).lifecycle
+    assert base.session_ended is HookedBase.__dict__["reset_model"]
+
+
+def test_an_override_of_the_same_name_may_repeat_the_decorator() -> None:
+    class Derived(HookedBase):
+        @session_ended
+        def reset_model(self) -> None: ...
+
+    assert ModelContract.of(Derived).lifecycle.session_ended is Derived.__dict__["reset_model"]
+
+
+def test_a_hook_of_the_same_kind_under_another_name_is_rejected() -> None:
+    expected = r"Bad.log_stats and HookedBase.reset_model.*session_ended.*super\(\).reset_model\(\)"
+    with pytest.raises(TypeError, match=expected):
+
+        class Bad(HookedBase):
+            @session_ended
+            def log_stats(self) -> None: ...
+
+
+def test_two_hooks_of_one_kind_in_one_class_are_rejected() -> None:
+    with pytest.raises(TypeError, match=r"first.*second.*session_started"):
+
+        class Bad(ReactorApp):
+            @session_started
+            def first(self) -> None: ...
+
+            @session_started
+            def second(self) -> None: ...
+
+
+def test_one_method_may_carry_two_hook_kinds() -> None:
+    class Both(ReactorApp):
+        @connected
+        @session_started
+        def begin(self) -> None: ...
+
+    lifecycle = ModelContract.of(Both).lifecycle
+    assert lifecycle.session_started is Both.__dict__["begin"]
+    assert lifecycle.connected is Both.__dict__["begin"]
+
+
+def test_a_wrapped_hook_keeps_its_mark() -> None:
+    def logged(func: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(func)
+        def wrapper(self: Any) -> None:
+            func(self)
+
+        return wrapper
+
+    class Wrapped(ReactorApp):
+        @logged
+        @session_ended
+        def end(self) -> None: ...
+
+    assert ModelContract.of(Wrapped).lifecycle.session_ended is Wrapped.__dict__["end"]
 
 
 # -- return annotations -------------------------------------------------------

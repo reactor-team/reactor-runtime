@@ -14,6 +14,12 @@ another: a session ending is announced by ``@session_ended`` alone, never as one
 ``@disconnected`` per remaining client. ``@file_uploaded`` fires when a client
 uploads a file. Each decorator only stamps metadata on the function; the
 model class reads it back when it assembles its contract.
+
+A model has one method per hook kind. A subclass extends an inherited hook by
+overriding that method and calling ``super()``; the override runs whether or
+not it repeats the decorator. Marking a second method with the same kind, in
+the same class or in a subclass, fails when the class is defined, so a hook is
+never dropped without a word.
 """
 
 from __future__ import annotations
