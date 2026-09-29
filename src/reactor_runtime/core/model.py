@@ -20,6 +20,8 @@ from reactor_runtime.core.fields import (
     NO_DEFAULT,
     FieldInfo,
     InputField,
+    apply_dataclass,
+    inherited_record,
     raise_if_default_invalid,
     raise_if_default_not_static,
 )
@@ -62,6 +64,10 @@ class Command:
     invalid defaults at import), turns the class into a dataclass, and caches the
     resolved fields on the class. There is no global registry — each command
     carries its own contract.
+
+    A subclass of a command inherits every field of its parents, and a field it
+    declares again replaces the parent's. The fields a subclass adds are
+    keyword-only in its constructor.
     """
 
     name: ClassVar[str]
@@ -71,8 +77,6 @@ class Command:
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
         _build_command(cls)
-        if not dataclasses.is_dataclass(cls):
-            dataclasses.dataclass(cls)
         if "name" not in cls.__dict__:
             cls.name = pascal_to_snake(cls.__name__)
 
@@ -83,9 +87,9 @@ def _is_classvar(annotation: Any) -> bool:
 
 
 def _build_command(cls: type[Command]) -> None:
-    """Resolve a command class's fields and cache them on it.
+    """Resolve a command class's fields, cache them on it, and make it a dataclass.
 
-    Runs once per subclass, before ``@dataclass`` is applied. Unwraps
+    Runs once per subclass. Starts from the fields the parents declared, unwraps
     ``InputField`` defaults so the dataclass sees plain values, resolves each
     field's :class:`TypeSpec` (the support check), records which fields are
     uploads, and reorders so fields without a default come first — the order a
@@ -103,10 +107,17 @@ def _build_command(cls: type[Command]) -> None:
     # deferring the import until a command is actually declared.
     from reactor_runtime.core.typespec import OptionalSpec, TypeSpec, UploadSpec
 
-    annotations: dict[str, Any] = getattr(cls, "__annotations__", {})
+    fields = inherited_record(cls, "__command_fields__")
+    inherits = bool(fields)
+    uploads: set[str] = set()
+    for base in cls.__mro__[1:]:
+        uploads |= base.__dict__.get("__upload_fields__", frozenset())
+
+    annotations: dict[str, Any] = cls.__dict__.get("__annotations__", {})
     if not annotations:
-        cls.__command_fields__ = {}
-        cls.__upload_fields__ = frozenset()
+        cls.__command_fields__ = fields
+        cls.__upload_fields__ = frozenset(uploads)
+        apply_dataclass(cls, required=[], inherits=inherits)
         return
 
     try:
@@ -115,8 +126,6 @@ def _build_command(cls: type[Command]) -> None:
         hints = {}
 
     owner = cls.__qualname__
-    fields: dict[str, CommandField] = {}
-    uploads: set[str] = set()
     no_default: list[str] = []
     has_default: list[str] = []
 
@@ -133,13 +142,12 @@ def _build_command(cls: type[Command]) -> None:
             )
 
         spec = TypeSpec.of(annotation)
+        uploads.discard(name)
 
         if isinstance(raw, FieldInfo):
             info = raw
             raise_if_default_invalid(owner, name, info.default, info)
             if info.default is NO_DEFAULT:
-                if hasattr(cls, name):
-                    delattr(cls, name)
                 no_default.append(name)
             else:
                 setattr(cls, name, info.default)
@@ -169,6 +177,7 @@ def _build_command(cls: type[Command]) -> None:
 
     cls.__command_fields__ = fields
     cls.__upload_fields__ = frozenset(uploads)
+    apply_dataclass(cls, required=no_default, inherits=inherits)
 
 
 class EndReason(StrEnum):

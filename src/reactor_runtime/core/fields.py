@@ -13,6 +13,7 @@ graph alongside the neutral value vocabulary.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from typing import Any, Final
 
@@ -119,6 +120,58 @@ def InputField(  # noqa: N802 — a capitalised factory reads as a type in field
         choices=choices,
         moderate=moderate,
     )
+
+
+def inherited_record(cls: type, attribute: str) -> dict[str, Any]:
+    """Merge the field records the bases of *cls* store on themselves.
+
+    A declaration base (``InputState``, ``ModelMessage``, ``Command``) caches
+    the fields each subclass declares in a class-level dict. A subclass starts
+    from this merge, so the fields it inherits are part of its own record. Bases
+    are read from the most distant to the closest, so a nearer base wins a name
+    both declare, and a re-declared name keeps the position the first base gave
+    it, which is the order a dataclass lays inherited fields out in.
+
+    Args:
+        cls: The class being declared.
+        attribute: The name of the record attribute on each base.
+
+    Returns:
+        A new dict; the bases' records are not modified.
+    """
+    merged: dict[str, Any] = {}
+    for base in reversed(cls.__mro__[1:]):
+        merged.update(base.__dict__.get(attribute, {}))
+    return merged
+
+
+def apply_dataclass(cls: type, *, required: list[str], inherits: bool) -> None:
+    """Turn a freshly declared subclass into a dataclass, once.
+
+    A class whose parent is already a dataclass is still converted, so the
+    fields it declares become fields of its own. Its fields are keyword-only
+    when it inherits any, because a dataclass refuses a required field placed
+    after an inherited field with a default, and keyword-only fields have no
+    such order.
+
+    A required field hides any class attribute a parent holds under the same
+    name for the duration of the conversion. The dataclass reads a field's
+    default with ``getattr``, so without this a field declared required again
+    would silently inherit the parent's default.
+
+    Args:
+        cls: The class to convert. A class that already carries its own
+            ``__dataclass_fields__`` is left alone.
+        required: The names of the fields *cls* declares without a default.
+        inherits: Whether *cls* inherits fields from a declared base.
+    """
+    if "__dataclass_fields__" in cls.__dict__:
+        return
+    for name in required:
+        setattr(cls, name, dataclasses.MISSING)
+    dataclasses.dataclass(cls, kw_only=inherits)
+    for name in required:
+        delattr(cls, name)
 
 
 def raise_if_default_not_static(owner: str, field_name: str, default: Any) -> None:

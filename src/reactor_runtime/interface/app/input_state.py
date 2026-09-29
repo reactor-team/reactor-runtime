@@ -19,7 +19,6 @@ Field visibility is by name:
 
 from __future__ import annotations
 
-import dataclasses
 from types import UnionType
 from typing import Any, ClassVar, Union, dataclass_transform, get_args, get_origin, get_type_hints
 
@@ -27,6 +26,8 @@ from reactor_runtime.core.fields import (
     NO_DEFAULT,
     FieldInfo,
     InputField,
+    apply_dataclass,
+    inherited_record,
     raise_if_default_invalid,
     raise_if_default_not_static,
 )
@@ -57,6 +58,11 @@ class InputState:
     A field declared without a default is a required field; a client must set it
     before its value is read. Mutable defaults (``list`` / ``dict`` / ``set``)
     are rejected at declaration, since one would be shared across sessions.
+
+    A subclass of a state class inherits every field of its parents. A field it
+    declares again replaces the parent's, default and constraints included. The
+    fields a subclass adds are keyword-only in its constructor, so a required
+    field can follow an inherited one that has a default.
     """
 
     _public_fields: ClassVar[dict[str, FieldInfo]]
@@ -66,11 +72,15 @@ class InputState:
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
 
-        public: dict[str, FieldInfo] = {}
+        public = inherited_record(cls, "_public_fields")
         private: set[str] = set()
         uploads: set[str] = set()
+        for base in cls.__mro__[1:]:
+            private |= base.__dict__.get("_private_fields", set())
+            uploads |= base.__dict__.get("_upload_fields", set())
+        inherits_fields = bool(public or private)
 
-        annotations = getattr(cls, "__annotations__", {})
+        annotations = cls.__dict__.get("__annotations__", {})
         try:
             hints = get_type_hints(cls)
         except Exception:
@@ -85,6 +95,7 @@ class InputState:
             raw = cls.__dict__.get(name, _MISSING)
             annotation = hints.get(name, annotations[name])
             is_upload = annotation is UploadedFile or _unwrap_optional(annotation) is UploadedFile
+            uploads.discard(name)
 
             if name.startswith("_"):
                 private.add(name)
@@ -99,8 +110,6 @@ class InputState:
             elif isinstance(raw, FieldInfo):
                 public[name] = raw
                 if raw.default is NO_DEFAULT:
-                    if hasattr(cls, name):
-                        delattr(cls, name)
                     no_default.append(name)
                 else:
                     raise_if_default_invalid(cls.__qualname__, name, raw.default, raw)
@@ -119,5 +128,4 @@ class InputState:
         cls._private_fields = private
         cls._upload_fields = uploads
 
-        if not dataclasses.is_dataclass(cls):
-            dataclasses.dataclass(cls)
+        apply_dataclass(cls, required=no_default, inherits=inherits_fields)

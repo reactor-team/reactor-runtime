@@ -17,7 +17,12 @@ import dataclasses
 from dataclasses import dataclass
 from typing import Any, ClassVar, dataclass_transform, get_origin, get_type_hints
 
-from reactor_runtime.core.fields import NO_DEFAULT, raise_if_default_not_static
+from reactor_runtime.core.fields import (
+    NO_DEFAULT,
+    apply_dataclass,
+    inherited_record,
+    raise_if_default_not_static,
+)
 from reactor_runtime.core.naming import pascal_to_snake
 from reactor_runtime.core.typespec import TypeSpec
 
@@ -107,6 +112,12 @@ class ModelMessage:
 
     The client receives ``{"type": "current_mode", "data": {"mode": "turbo"}}``.
     Use :func:`MessageField` to attach a description to a field.
+
+    A subclass of a message inherits every field of its parents, and a field it
+    declares again replaces the parent's. The fields a subclass adds are
+    keyword-only in its constructor. The parent is a message in its own right
+    and stays in the registry; a shared base that should not be published is a
+    plain mixin, not a :class:`ModelMessage` subclass.
     """
 
     name: ClassVar[str]
@@ -116,8 +127,6 @@ class ModelMessage:
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
         _build_message(cls)
-        if not dataclasses.is_dataclass(cls):
-            dataclasses.dataclass(cls)
         if "name" not in cls.__dict__:
             cls.name = pascal_to_snake(cls.__name__)
         MESSAGE_REGISTRY[cls.name] = cls
@@ -137,12 +146,13 @@ def _is_classvar(annotation: Any) -> bool:
 
 
 def _build_message(cls: type[ModelMessage]) -> None:
-    """Resolve a message class's fields and cache them on it.
+    """Resolve a message class's fields, cache them on it, and make it a dataclass.
 
-    Runs once per subclass, before ``@dataclass`` is applied. Snapshots the
-    author's docstring (before ``@dataclass`` overwrites a missing one with a
-    generated signature), unwraps ``MessageField`` defaults, resolves each
-    field's type, and reorders so fields without a default come first.
+    Runs once per subclass. Snapshots the author's docstring (before
+    ``@dataclass`` overwrites a missing one with a generated signature), starts
+    from the fields the parents declared, unwraps ``MessageField`` defaults,
+    resolves each field's type, and reorders so fields without a default come
+    first.
 
     Args:
         cls: The freshly created message subclass.
@@ -153,9 +163,12 @@ def _build_message(cls: type[ModelMessage]) -> None:
     """
     cls.user_doc = cls.__dict__.get("__doc__")
 
-    annotations: dict[str, Any] = getattr(cls, "__annotations__", {})
+    fields = inherited_record(cls, "__message_fields__")
+    inherits = bool(fields)
+    annotations: dict[str, Any] = cls.__dict__.get("__annotations__", {})
     if not annotations:
-        cls.__message_fields__ = {}
+        cls.__message_fields__ = fields
+        apply_dataclass(cls, required=[], inherits=inherits)
         return
 
     try:
@@ -164,7 +177,6 @@ def _build_message(cls: type[ModelMessage]) -> None:
         hints = {}
 
     owner = cls.__qualname__
-    fields: dict[str, MessageFieldSpec] = {}
     no_default: list[str] = []
     has_default: list[str] = []
 
@@ -188,8 +200,6 @@ def _build_message(cls: type[ModelMessage]) -> None:
             description = raw.description
             default = raw.default
             if raw.default is NO_DEFAULT:
-                if hasattr(cls, name):
-                    delattr(cls, name)
                 no_default.append(name)
             else:
                 raise_if_default_not_static(owner, name, raw.default)
@@ -215,3 +225,4 @@ def _build_message(cls: type[ModelMessage]) -> None:
         cls.__annotations__ = {key: annotations[key] for key in no_default + has_default}
 
     cls.__message_fields__ = fields
+    apply_dataclass(cls, required=no_default, inherits=inherits)
