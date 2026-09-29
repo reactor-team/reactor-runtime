@@ -139,9 +139,9 @@ message ClientTrackStat {
 // "available_outgoing_bitrate_bps" (the encoder's own belief about outgoing
 // headroom, not a measurement of the user's internet) or
 // "time_to_connect_ms" (how long this connection waited to establish, start
-// to "ready"). The latter is a one-time fact, not a per-batch reading, so a
-// client sends this once (its first batch after connecting) rather than
-// repeating it — see ClientStats.connection_stat.
+// to "ready"). A client sends this on every batch, since values like the
+// outgoing bitrate change over time. One-time facts like "time_to_connect_ms"
+// are only included on the first batch after connecting.
 message ClientConnectionStat {
   // Epoch milliseconds, the client's own clock.
   int64 timestamp = 1;
@@ -152,6 +152,7 @@ message ClientConnectionStat {
 // periodically rather than one message per reading.
 message ClientStats {
   repeated ClientTrackStat track_stats = 1;
-  // Absent on most batches — see ClientConnectionStat's own doc for why.
+  // Present on every batch; see ClientConnectionStat for which values are
+  // only on the first one.
   ClientConnectionStat connection_stat = 2;
 }
