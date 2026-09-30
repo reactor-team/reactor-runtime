@@ -52,6 +52,8 @@ class MyModel(ReactorApp):
 
 That is a complete application. The runtime calls `generate()` in a loop for as long as someone is watching and emits what it returns. Every public field on `MyState` is a command the client can send: here `set_prompt` and `set_paused`, validated from the fields, and the next step reads the new values.
 
+State and message classes can be subclassed. A subclass keeps every field of its parents and adds its own, so `class SeededState(MyState): seed: int = InputField(default=0)` exposes `set_prompt`, `set_paused`, and `set_seed`. A field declared again in the subclass replaces the parent's, default and constraints included. The fields a subclass adds are keyword-only in its constructor, which lets a required field follow an inherited one that has a default. A private field (leading underscore) always needs a default, because the state is built from defaults when a session starts.
+
 A step is three calls, and `generate()` is the one you must write. `process_input()` runs before it, reading `self.state` and the media tracks, and decides whether a step can happen: return the input `generate()` gets, or raise `ApplicationError("reason")` to skip the step without touching the model. `process_output(outcome)` runs after it, with the result or the error, and returns the media to emit; send a message from there with `await self.send()` and it reaches the client before the step's frames. Both have defaults, so the model above writes neither.
 
 ```python
