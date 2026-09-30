@@ -181,6 +181,7 @@ Not on macOS, or pinning a release in CI? See [Install the CLI](https://docs.rea
 - [Starter example](./examples/starter/README.md): the model `reactor init` scaffolds: one class, `generate()` alone, the smallest complete `ReactorApp`
 - [Echo example](./examples/echo/README.md): the client's webcam and microphone in, an effect applied, both sent back, in batches
 - [Waypoint example](./examples/waypoint/README.md): a world model on a GPU, seeded from an upload and steered live
+- [FlashDreams Waypoint example](./examples/flashdreams-waypoint/README.md): the same model served from FlashDreams by naming it, with no Python in the workspace
 
 ## Development
 

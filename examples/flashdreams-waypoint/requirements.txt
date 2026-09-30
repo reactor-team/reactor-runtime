@@ -1,0 +1,14 @@
+# Python dependencies installed into the model image in one pip pass, so a
+# version conflict between them fails the build instead of surfacing at
+# model load. reactor-runtime itself comes from reactor.yaml's
+# build.runtime_version.
+#
+# FlashDreams core, from a pinned commit of https://github.com/NVIDIA/flashdreams.
+# Its v2 packages are on GitHub only; PyPI's `flashdreams` predates the v2 API.
+# It brings torch and its CUDA stack with it. The action2v family app and the
+# Waypoint model install from the same commit in reactor.yaml's build.run.
+flashdreams @ git+https://github.com/NVIDIA/flashdreams@f40179b2#subdirectory=flashdreams
+
+# Decoding the uploaded seed image in set_image, and the Waypoint adapter's own
+# image loading.
+pillow>=10
