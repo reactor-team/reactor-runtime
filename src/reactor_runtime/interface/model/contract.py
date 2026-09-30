@@ -34,6 +34,7 @@ from reactor_runtime.interface.events.decorators import (
     DISCONNECTED_ATTR,
     EVENT_ATTR,
     FILE_UPLOADED_ATTR,
+    GENERATED_SETTER_ATTR,
     SESSION_ENDED_ATTR,
     SESSION_STARTED_ATTR,
     EventHandler,
@@ -205,11 +206,18 @@ class ModelContract:
         commands: dict[str, CommandSpec] = {}
         claimed_by: dict[str, str] = {}
         hooks: dict[str, Callable[..., Any]] = {}
+        state_fields = _state_field_names(model_cls)
 
         for klass in model_cls.__mro__:
             for attr_name, attr in vars(klass).items():
                 handler = getattr(attr, EVENT_ATTR, None)
                 if isinstance(handler, EventHandler):
+                    generated_for = getattr(attr, GENERATED_SETTER_ATTR, None)
+                    if generated_for is not None and generated_for not in state_fields:
+                        # A base app generated this setter for its own state
+                        # class. The state class this app names does not
+                        # declare the field, so the command is not this app's.
+                        continue
                     if handler.name in commands:
                         # A less-derived copy of the same method is the inherited
                         # original; a different method is a genuine name clash.
@@ -325,6 +333,18 @@ _LIFECYCLE_ATTRS = {
     DISCONNECTED_ATTR: "disconnected",
     FILE_UPLOADED_ATTR: "file_uploaded",
 }
+
+
+def _state_field_names(model_cls: type) -> frozenset[str]:
+    """Return the public field names of the state class *model_cls* declares.
+
+    An app records its state class as ``__app_state__``. A class with none
+    has no fields, so a generated setter inherited from a base app is dropped.
+    """
+    state_cls = getattr(model_cls, "__app_state__", None)
+    if state_cls is None:
+        return frozenset()
+    return frozenset(getattr(state_cls, "_public_fields", {}))
 
 
 def _command_spec(handler: EventHandler, method: Callable[..., Any]) -> CommandSpec:

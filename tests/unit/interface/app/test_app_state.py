@@ -134,6 +134,14 @@ class StricterChild(App):
     state: StricterState
 
 
+class NarrowState(InputState):
+    speed: float = InputField(default=1.0)
+
+
+class NarrowChild(App):
+    state: NarrowState
+
+
 class HandWrittenParent(ReactorApp):
     state: State
 
@@ -192,6 +200,13 @@ async def test_the_stricter_setter_enforces_its_own_limit() -> None:
 
 def test_a_hand_written_setter_on_the_parent_app_still_wins_in_the_child() -> None:
     assert ModelContract.of(HandWrittenChild).commands["set_speed"].description == "hand written"
+
+
+def test_a_child_app_naming_a_narrower_state_drops_the_parents_setter() -> None:
+    commands = ModelContract.of(NarrowChild).commands
+    assert "set_speed" in commands
+    assert "set_seed" not in commands
+    assert "set_seed" in ModelContract.of(App).commands
 
 
 def test_a_child_app_that_keeps_the_parents_state_declares_the_same_setters() -> None:

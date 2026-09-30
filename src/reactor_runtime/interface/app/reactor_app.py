@@ -60,6 +60,7 @@ from reactor_runtime.interface.app.outcome import StepOutcome
 from reactor_runtime.interface.client import ClientInfo
 from reactor_runtime.interface.events.decorators import (
     EVENT_ATTR,
+    GENERATED_SETTER_ATTR,
     RESERVED_PARAMS,
     EventHandler,
     make_command,
@@ -664,11 +665,6 @@ def _resolve_state_class(cls: type) -> type[InputState] | None:
     return None
 
 
-_GENERATED_ATTR = "__reactor_generated_setter__"
-"""Marks a ``set_<field>`` handler the runtime generated, as opposed to one an
-author wrote. Only hand-written handlers block a generated one."""
-
-
 def _existing_command_names(cls: type) -> set[str]:
     """Collect the command names claimed by hand-written ``@event`` handlers on *cls*.
 
@@ -680,7 +676,7 @@ def _existing_command_names(cls: type) -> set[str]:
     for klass in cls.__mro__:
         for attr in vars(klass).values():
             handler = getattr(attr, EVENT_ATTR, None)
-            if isinstance(handler, EventHandler) and not getattr(attr, _GENERATED_ATTR, False):
+            if isinstance(handler, EventHandler) and not hasattr(attr, GENERATED_SETTER_ATTR):
                 names.add(handler.name)
     return names
 
@@ -719,7 +715,7 @@ def _stamp_auto_setters(cls: type, state_cls: type[InputState]) -> None:
                 reserved=(),
             ),
         )
-        setattr(handler, _GENERATED_ATTR, True)
+        setattr(handler, GENERATED_SETTER_ATTR, field_name)
         setattr(cls, command_name, handler)
 
 

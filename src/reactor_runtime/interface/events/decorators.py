@@ -46,6 +46,10 @@ handler) is deliberately absent — only handler-backed events register.
 _RESERVED_EVENT_NAMES = frozenset({"connected", "disconnected"})
 
 EVENT_ATTR = "__reactor_event__"
+GENERATED_SETTER_ATTR = "__reactor_generated_setter__"
+"""Set on a ``set_<field>`` handler the runtime generated from a state field,
+holding that field's name. Absent from a handler an author wrote. The contract
+keeps a generated setter only while the app's state class declares its field."""
 SESSION_STARTED_ATTR = "__reactor_session_started__"
 SESSION_ENDED_ATTR = "__reactor_session_ended__"
 CONNECTED_ATTR = "__reactor_connected__"
