@@ -38,6 +38,7 @@ from reactor_runtime.interface.events.decorators import (
     SESSION_ENDED_ATTR,
     SESSION_STARTED_ATTR,
     EventHandler,
+    check_file_uploaded_signature,
 )
 from reactor_runtime.interface.events.messages import MESSAGE_REGISTRY, ModelMessage
 from reactor_runtime.interface.model.schema import (
@@ -190,6 +191,13 @@ class ModelContract:
         here — they are read from the registries through :attr:`tracks` /
         :attr:`messages` when the schema renders.
 
+        A lifecycle hook kind binds to one method name across the hierarchy.
+        The method that runs is the most-derived definition of that name,
+        decorated again or not, so a subclass extends a base's hook by
+        overriding the method and calling ``super()``. A second method marked
+        with the same kind, in the same class or in a subclass, is rejected:
+        the alternative is a hook that is silently never run.
+
         Args:
             model_cls: The model class to assemble the contract for.
 
@@ -199,16 +207,19 @@ class ModelContract:
         Raises:
             ValueError: If two distinct handlers claim the same command name.
             TypeError: If a handler's return annotation is neither a
-                :class:`ModelMessage` subclass nor ``None``. Declaring the model
+                :class:`ModelMessage` subclass nor ``None``, or if two methods
+                are marked with the same lifecycle hook. Declaring the model
                 calls this, so a mismatch between the schema and the wire is a
                 failure to import the model rather than a run-time surprise.
         """
         commands: dict[str, CommandSpec] = {}
         claimed_by: dict[str, str] = {}
         hooks: dict[str, Callable[..., Any]] = {}
+        hook_owner: dict[str, tuple[type, str]] = {}
         state_fields = _state_field_names(model_cls)
 
         for klass in model_cls.__mro__:
+            marked_here: dict[str, str] = {}
             for attr_name, attr in vars(klass).items():
                 handler = getattr(attr, EVENT_ATTR, None)
                 if isinstance(handler, EventHandler):
@@ -228,8 +239,48 @@ class ModelContract:
                     claimed_by[handler.name] = attr_name
                     continue
                 for lifecycle_attr, key in _LIFECYCLE_ATTRS.items():
-                    if getattr(attr, lifecycle_attr, False):
-                        hooks.setdefault(key, attr)
+                    if not getattr(attr, lifecycle_attr, False):
+                        continue
+                    if key in marked_here:
+                        raise TypeError(
+                            f"{klass.__qualname__} marks both {marked_here[key]} and "
+                            f"{attr_name} with @{key}. A class has one method per "
+                            f"lifecycle hook."
+                        )
+                    marked_here[key] = attr_name
+                    owner = hook_owner.get(key)
+                    if owner is None:
+                        hook_owner[key] = (klass, attr_name)
+                        hook = inspect.getattr_static(model_cls, attr_name)
+                        if not callable(hook):
+                            raise TypeError(
+                                f"{model_cls.__qualname__}.{attr_name} is "
+                                f"{type(hook).__name__}, not a method, but "
+                                f"{klass.__qualname__}.{attr_name} is marked @{key}. "
+                                f"A subclass may override a lifecycle hook only with "
+                                f"a method."
+                            )
+                        if hook is not attr and isinstance(
+                            getattr(hook, EVENT_ATTR, None), EventHandler
+                        ):
+                            raise TypeError(
+                                f"{model_cls.__qualname__}.{attr_name} is an @event "
+                                f"handler, but {klass.__qualname__}.{attr_name} is "
+                                f"marked @{key}. A method is a command or a lifecycle "
+                                f"hook, not both."
+                            )
+                        if key == "file_uploaded" and hook is not attr:
+                            check_file_uploaded_signature(hook)
+                        hooks[key] = hook
+                    elif owner[1] != attr_name:
+                        owner_cls, owner_name = owner
+                        raise TypeError(
+                            f"{owner_cls.__qualname__}.{owner_name} and "
+                            f"{klass.__qualname__}.{attr_name} are both marked @{key}. "
+                            f"A model has one method per lifecycle hook: override "
+                            f"{attr_name} in {owner_cls.__qualname__} and call "
+                            f"super().{attr_name}() to extend it."
+                        )
 
         return cls(
             model=pascal_to_snake(model_cls.__name__),

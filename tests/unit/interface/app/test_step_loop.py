@@ -632,3 +632,19 @@ async def test_fps_pinned_in_load_is_honoured() -> None:
     task = await _run_for(app)
     assert app.emitted[0][1] is None
     await _stop(task)
+
+
+async def test_fps_assigned_on_the_output_in_load_does_not_pin() -> None:
+    # `self.output.fps` is the between-emits rate control, not the pin: the
+    # step loop still paces from the measured generate() time.
+    class SetsRateInLoad(OnlyGenerate):
+        def load(self, config_path: Any) -> None:
+            self.output.fps = 12
+
+    app = SetsRateInLoad()
+    app.load(None)
+    _ready(app)
+    await _go_live(app)
+    task = await _run_for(app)
+    assert app.emitted[0][1] is not None
+    await _stop(task)

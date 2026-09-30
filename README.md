@@ -95,7 +95,7 @@ class MyModel(ReactorApp):
         return outcome.to_output()
 ```
 
-Command handlers and lifecycle hooks run between steps, never during one. The default `run()` is the loop that drives the three hooks. Override it to write your own loop against `emit()`, `send()`, `@event`, `self.connected`, and the tracks; `process_input()`, `generate()`, and `process_output()` are then not called. Do that for a loop that is not one step per emit, such as a renderer that emits several times per step or a model that must block on an input.
+Command handlers and lifecycle hooks run between steps, never during one. A model has one method per lifecycle hook kind (`@session_started`, `@session_ended`, `@connected`, `@disconnected`, `@file_uploaded`). A subclass extends an inherited hook by overriding that method and calling `super()`; the override runs whether or not it repeats the decorator. Marking a second method with the same kind, in one class or in a subclass, fails when the class is defined, so a hook is never dropped in silence. The default `run()` is the loop that drives the three hooks. Override it to write your own loop against `emit()`, `send()`, `@event`, `self.connected`, and the tracks; `process_input()`, `generate()`, and `process_output()` are then not called. Do that for a loop that is not one step per emit, such as a renderer that emits several times per step or a model that must block on an input.
 
 Scaffold, build, and run it with the CLI:
 

@@ -93,9 +93,10 @@ class ReactorApp(ReactorCore):
     ``process_output()`` to turn the model's result into media and messages.
     Decorate methods with ``@event`` to expose commands, and with the lifecycle
     decorators to hook session and connection events — ``@session_started`` is
-    the hook for once-per-session initialization. Declaring the subclass
-    resolves the contract and caches it on the class, reachable through
-    :meth:`ModelContract.of`.
+    the hook for once-per-session initialization. A model has one method per
+    hook kind; a subclass extends an inherited hook by overriding that method
+    and calling ``super()``. Declaring the subclass resolves the contract and
+    caches it on the class, reachable through :meth:`ModelContract.of`.
 
     Override ``run()`` to write your own loop against ``emit()``, ``send()``,
     ``@event``, :attr:`connected`, and the tracks. The three step hooks are then
@@ -103,10 +104,13 @@ class ReactorApp(ReactorCore):
 
     Class attributes:
         fps: The nominal rate, in frames per second, an emitted chunk plays out
-            at. Declare it to pin playout; leave it out and the step loop paces
-            playout from the measured ``generate()`` time. A hand-written
-            ``run()`` that passes ``compute_time`` to :meth:`emit` paces itself
-            and this is only the fallback.
+            at. Declare it on the class to pin playout; leave it out and the
+            step loop paces playout from the measured ``generate()`` time. The
+            pin is read from the class, so ``type(self).fps = 24`` in ``load()``
+            pins too, while ``self.output.fps = 24`` only sets the rate the next
+            unmeasured chunks are tagged with. A hand-written ``run()`` that
+            passes ``compute_time`` to :meth:`emit` paces itself and this is
+            only the fallback.
         state: Optional. Annotate with an :class:`InputState` subclass to declare
             the client-settable state. Every public field becomes a
             ``set_<field>`` command, inherited fields included; a hand-written
@@ -248,8 +252,9 @@ class ReactorApp(ReactorCore):
         request, so a paused application does not spin a core.
 
         Playout is paced from the measured ``generate()`` time unless the author
-        declares ``fps``. Whether ``fps`` is pinned is read when the loop starts,
-        so a ``load()`` that assigns it counts.
+        declares ``fps`` on the class. Whether ``fps`` is pinned is read when
+        the loop starts, so a ``load()`` that assigns ``type(self).fps`` counts;
+        an assignment to ``self.output.fps`` does not pin.
 
         When the gate drops, the input buffers reset, so the next session or
         client starts from empty tracks. A drop and a re-set that both land
