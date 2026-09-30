@@ -39,6 +39,11 @@ logger = get_logger(__name__)
 # that refused to load, both of which exit clean.
 FAILURE_EXIT_CODE = 1
 
+# How long a forced exit waits for its structured log record to be written
+# before leaving anyway. The handlers lock, and the thread that is stuck may be
+# holding that lock; the raw stderr line and the stack dump are already out.
+_EXIT_RECORD_GRACE = 1.0
+
 
 def _exit(code: int) -> None:
     """Leave the process now, skipping interpreter cleanup.
@@ -214,23 +219,36 @@ class Service:
     def _force_exit(self) -> None:
         """Leave the process from the deadline thread, with every stack on record.
 
-        Runs off the event loop, which may itself be the thing that is stuck.
-        The stacks go to stderr through ``faulthandler`` first — the one writer
-        that needs no lock a hung thread might hold, so the record of where the
-        process was stuck is written whatever else is wedged — then the reason
-        is logged and the streams flushed, so both reach the container log.
+        Runs off the event loop, which may itself be the thing that is stuck,
+        and nothing on the way to ``_exit`` may wait on a lock another thread
+        could hold. The reason and the stacks go straight to the stderr file
+        descriptor — ``os.write`` and ``faulthandler`` take no Python-level
+        lock — so the record of why and where the process was stuck is written
+        whatever else is wedged. The structured log record is written too, for
+        the log stream that filters on it, but on a helper thread joined for a
+        bounded time: the logging handlers lock, and the wedged thread may be
+        the one holding that lock. The exit itself is unconditional.
         """
+        code = self.exit_code
+        threads = [thread.name for thread in threading.enumerate()]
+        reason = f"shutdown deadline exceeded; forcing exit (exit_code={code}, threads={threads})\n"
+        with contextlib.suppress(Exception):
+            os.write(sys.stderr.fileno(), reason.encode(errors="replace"))
         with contextlib.suppress(Exception):
             faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
-        logger.error(
-            "shutdown deadline exceeded; forcing exit",
-            exit_code=self.exit_code,
-            threads=[thread.name for thread in threading.enumerate()],
-        )
-        for stream in (sys.stdout, sys.stderr):
-            with contextlib.suppress(Exception):
+
+        def record() -> None:
+            logger.error(
+                "shutdown deadline exceeded; forcing exit", exit_code=code, threads=threads
+            )
+            for stream in (sys.stdout, sys.stderr):
                 stream.flush()
-        _exit(self.exit_code)
+
+        with contextlib.suppress(Exception):
+            recorder = threading.Thread(target=record, name="exit-record", daemon=True)
+            recorder.start()
+            recorder.join(timeout=_EXIT_RECORD_GRACE)
+        _exit(code)
 
     def _install_signal_handlers(self) -> None:
         """Route SIGTERM and SIGINT to a shutdown request, where supported."""

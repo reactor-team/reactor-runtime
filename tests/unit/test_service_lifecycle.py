@@ -324,6 +324,48 @@ async def test_a_stuck_wind_down_is_forced_out_at_the_deadline(
         await task
 
 
+async def test_the_forced_exit_does_not_wait_on_a_wedged_logger(
+    monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    _no_signals(monkeypatch)
+    exits, fired = _intercept_exit(monkeypatch)
+    # The thread that is stuck may hold the logging handlers' lock, so the
+    # structured record cannot be allowed to stand between the deadline and
+    # the exit. Stand in for that with a handler whose emit never returns.
+    monkeypatch.setattr(service_module, "_EXIT_RECORD_GRACE", 0.2)
+
+    class _WedgedHandler(logging.Handler):
+        # Blocks in handle() rather than emit() so the handler's own lock stays
+        # free: logging.shutdown() acquires it at interpreter exit, and a lock
+        # held by the parked thread would hang the test process on the way out.
+        def handle(self, record: logging.LogRecord) -> bool:
+            threading.Event().wait()
+            return True
+
+    wedged = _WedgedHandler()
+    target = logging.getLogger("reactor_runtime.service")
+    target.addHandler(wedged)
+    service = Service(exit_timeout=0.1, grace_period=60.0)
+    service.add(_StuckComponent("runner", ()))
+
+    task = asyncio.create_task(service.run())
+    try:
+        await asyncio.sleep(0.01)
+        service.request_shutdown(failure=True)
+
+        assert await asyncio.to_thread(fired.wait, 2.0)
+        assert exits == [1]
+        # The reason and the stacks still reached stderr, through the descriptor.
+        err = capfd.readouterr().err
+        assert "shutdown deadline exceeded; forcing exit" in err
+        assert "Thread 0x" in err
+    finally:
+        target.removeHandler(wedged)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
 async def test_a_failure_deadline_skips_the_session_grace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
