@@ -249,14 +249,19 @@ def _point_caches_at(weights_root: str) -> None:
     environment sets it: a run that fills an empty bundle exports it as ``0``.
     """
     root = Path(weights_root)
-    if "huggingface_hub" in sys.modules:
+    hf_cache = str(root / "huggingface")
+    # The caller that imported huggingface_hub may have pointed the caches here
+    # itself first, as the application half does in-process; that is not a
+    # problem. An import with the caches pointed elsewhere, or nowhere, is.
+    already_here = os.environ.get("HF_HUB_CACHE") == hf_cache
+    if "huggingface_hub" in sys.modules and not already_here:
         logger.warning(
             "huggingface_hub was imported before the caches were pointed at the weights "
             "root; its cache location is already fixed",
             extra={"weights_root": str(root)},
         )
     os.environ["FLASHDREAMS_CACHE_DIR"] = str(root)
-    os.environ["HF_HUB_CACHE"] = str(root / "huggingface")
+    os.environ["HF_HUB_CACHE"] = hf_cache
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 

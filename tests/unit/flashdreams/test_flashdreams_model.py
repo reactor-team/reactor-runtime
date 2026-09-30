@@ -239,6 +239,25 @@ def test_load_points_both_caches_at_the_weights_root(
     assert os.environ["HF_HUB_OFFLINE"] == "1"
 
 
+def test_a_late_cache_pointing_warns_only_when_the_caches_were_elsewhere(
+    fake_flashdreams: dict[str, Any],
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setitem(sys.modules, "huggingface_hub", types.ModuleType("huggingface_hub"))
+    with caplog.at_level(logging.WARNING, logger=model_module.__name__):
+        # The application half pointed the caches here before it imported FlashDreams.
+        monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "huggingface"))
+        model_module._point_caches_at(str(tmp_path))
+        assert caplog.records == []
+        # Nothing did, or something pointed them elsewhere: the cache location is fixed.
+        monkeypatch.setenv("HF_HUB_CACHE", "/somewhere/else")
+        model_module._point_caches_at(str(tmp_path))
+        assert [r.levelname for r in caplog.records] == ["WARNING"]
+    assert os.environ["HF_HUB_CACHE"] == str(tmp_path / "huggingface")
+
+
 def test_load_keeps_an_offline_flag_the_environment_already_sets(
     fake_flashdreams: dict[str, Any], tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
