@@ -56,9 +56,11 @@ class InputState:
     the subclass partitions its fields and turns it into a dataclass, so a fresh
     instance constructs from defaults at the start of every session.
 
-    A field declared without a default is a required field; a client must set it
-    before its value is read. Mutable defaults (``list`` / ``dict`` / ``set``)
-    are rejected at declaration, since one would be shared across sessions.
+    A public field declared without a default is a required field; a client
+    must set it before its value is read. A private field always needs a
+    default, because nothing but the defaults builds the state at session
+    start. Mutable defaults (``list`` / ``dict`` / ``set``) are rejected at
+    declaration, since one would be shared across sessions.
 
     A subclass of a state class inherits every field of its parents. A field it
     declares again replaces the parent's, default and constraints included. The
@@ -107,6 +109,14 @@ class InputState:
             uploads.discard(name)
 
             if name.startswith("_"):
+                if raw is _MISSING:
+                    # A private field is the model's own; no client sets it, and
+                    # the state is built with no arguments at session start.
+                    raise TypeError(
+                        f"{cls.__qualname__}: private field '{name}' needs a default. "
+                        "The state is built from defaults when a session starts, and "
+                        "no set_ command fills a private field."
+                    )
                 private.add(name)
                 has_default.append(name)
             elif is_upload:

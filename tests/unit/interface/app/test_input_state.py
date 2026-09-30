@@ -66,6 +66,14 @@ def test_mutable_literal_default_is_rejected() -> None:
             items: dict[str, int] = {"a": 1}  # noqa: RUF012 — the rejection under test
 
 
+def test_a_private_field_without_a_default_is_rejected() -> None:
+    with pytest.raises(TypeError, match="private field '_cache' needs a default"):
+
+        class _Bad(InputState):
+            speed: float = 1.0
+            _cache: int  # type: ignore[ty:dataclass-field-order]  # the rejection under test
+
+
 # -- inheritance -------------------------------------------------------------
 
 
@@ -139,6 +147,17 @@ def test_a_parent_default_redeclared_as_required_does_not_leak_through() -> None
     with pytest.raises(TypeError):
         Strict()  # type: ignore[ty:missing-argument]
     assert Strict(seed=5).seed == 5
+
+
+def test_a_redeclared_private_field_replaces_the_parents_default() -> None:
+    class Warmer(BaseState):
+        _cache: int = 11
+
+    assert Warmer()._cache == 11
+    with pytest.raises(TypeError, match="private field '_cache' needs a default"):
+
+        class _Bad(BaseState):
+            _cache: int
 
 
 def test_an_upload_field_redeclared_as_plain_leaves_the_upload_set() -> None:
