@@ -113,6 +113,109 @@ def test_an_app_without_state_declares_no_setters_and_constructs() -> None:
     assert Bare().state is None
 
 
+# -- an inherited state class -------------------------------------------------
+
+
+class FamilyState(State):
+    keys: str = InputField(default="", max_length=8)
+
+
+class FamilyApp(ReactorApp):
+    state: FamilyState
+
+    async def run(self) -> None: ...
+
+
+class StricterState(State):
+    speed: float = InputField(default=1.0, ge=0.0, le=2.0)
+
+
+class StricterChild(App):
+    state: StricterState
+
+
+class NarrowState(InputState):
+    speed: float = InputField(default=1.0)
+
+
+class NarrowChild(App):
+    state: NarrowState
+
+
+class HandWrittenParent(ReactorApp):
+    state: State
+
+    @event(name="set_speed", description="hand written")
+    def set_speed(self, speed: float = InputField(default=2.0)) -> None:
+        self.state.speed = speed
+
+    async def run(self) -> None: ...
+
+
+class HandWrittenChild(HandWrittenParent):
+    state: StricterState
+
+
+def test_an_app_naming_a_state_subclass_gets_a_setter_for_every_inherited_field() -> None:
+    commands = ModelContract.of(FamilyApp).commands
+    assert {name for name in commands if name.startswith("set_")} == {
+        "set_speed",
+        "set_seed",
+        "set_keys",
+    }
+    assert commands["set_speed"].command.__command_fields__["speed"].info.le == 10.0
+
+
+async def test_an_inherited_setter_writes_the_live_state() -> None:
+    app = FamilyApp()
+    _ready(app)
+    await app._dispatch_reactor_event(SessionStarted("s"))
+    command = ModelContract.of(FamilyApp).validate("set_speed", {"speed": 4.0})
+    await app._dispatch_command(CommandEnvelope(command, ConnId(1001), None))
+    assert app.state.speed == 4.0
+    assert app.state.keys == ""
+
+
+def _speed_limit(app_cls: type) -> float | None:
+    command = ModelContract.of(app_cls).commands["set_speed"].command
+    return command.__command_fields__["speed"].info.le
+
+
+def test_a_child_app_naming_a_stricter_state_gets_the_stricter_setter() -> None:
+    assert _speed_limit(StricterChild) == 2.0
+    assert _speed_limit(App) == 10.0
+
+
+async def test_the_stricter_setter_enforces_its_own_limit() -> None:
+    contract = ModelContract.of(StricterChild)
+    with pytest.raises(Exception, match="le"):
+        contract.validate("set_speed", {"speed": 5.0})
+    app = StricterChild()
+    _ready(app)
+    await app._dispatch_reactor_event(SessionStarted("s"))
+    command = contract.validate("set_speed", {"speed": 1.5})
+    await app._dispatch_command(CommandEnvelope(command, ConnId(1001), None))
+    assert app.state.speed == 1.5
+
+
+def test_a_hand_written_setter_on_the_parent_app_still_wins_in_the_child() -> None:
+    assert ModelContract.of(HandWrittenChild).commands["set_speed"].description == "hand written"
+
+
+def test_a_child_app_naming_a_narrower_state_drops_the_parents_setter() -> None:
+    commands = ModelContract.of(NarrowChild).commands
+    assert "set_speed" in commands
+    assert "set_seed" not in commands
+    assert "set_seed" in ModelContract.of(App).commands
+
+
+def test_a_child_app_that_keeps_the_parents_state_declares_the_same_setters() -> None:
+    class Child(App):
+        pass
+
+    assert set(ModelContract.of(Child).commands) == set(ModelContract.of(App).commands)
+
+
 # -- session scope ------------------------------------------------------------
 
 

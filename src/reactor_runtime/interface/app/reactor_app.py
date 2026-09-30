@@ -60,6 +60,7 @@ from reactor_runtime.interface.app.outcome import StepOutcome
 from reactor_runtime.interface.client import ClientInfo
 from reactor_runtime.interface.events.decorators import (
     EVENT_ATTR,
+    GENERATED_SETTER_ATTR,
     RESERVED_PARAMS,
     EventHandler,
     make_command,
@@ -108,8 +109,10 @@ class ReactorApp(ReactorCore):
             and this is only the fallback.
         state: Optional. Annotate with an :class:`InputState` subclass to declare
             the client-settable state. Every public field becomes a
-            ``set_<field>`` command; a hand-written ``@event`` of the same name
-            wins over the generated one.
+            ``set_<field>`` command, inherited fields included; a hand-written
+            ``@event`` of the same name wins over the generated one. A subclass
+            that names its own state class gets setters for that class, so a
+            field declared again there is set with its new constraints.
 
     Lifecycle:
         connected: An :class:`asyncio.Event` set while at least one client is
@@ -663,12 +666,17 @@ def _resolve_state_class(cls: type) -> type[InputState] | None:
 
 
 def _existing_command_names(cls: type) -> set[str]:
-    """Collect the command names already claimed by ``@event`` handlers on *cls*."""
+    """Collect the command names claimed by hand-written ``@event`` handlers on *cls*.
+
+    A setter a parent app generated is left out. It describes the parent's
+    state class, and the state class this app names may declare the same field
+    with a different default or new constraints, so the app generates its own.
+    """
     names: set[str] = set()
     for klass in cls.__mro__:
         for attr in vars(klass).values():
             handler = getattr(attr, EVENT_ATTR, None)
-            if isinstance(handler, EventHandler):
+            if isinstance(handler, EventHandler) and not hasattr(attr, GENERATED_SETTER_ATTR):
                 names.add(handler.name)
     return names
 
@@ -679,7 +687,9 @@ def _stamp_auto_setters(cls: type, state_cls: type[InputState]) -> None:
     Each handler carries the same :class:`EventHandler` metadata an ``@event``
     decorator produces, so the contract treats it identically. A field whose
     ``set_`` name is already claimed by a hand-written handler is skipped, so an
-    author can override the generated setter.
+    author can override the generated setter. A setter a parent app generated
+    does not block one: this app stamps its own under the same name, and the
+    contract takes the most-derived definition.
     """
     existing = _existing_command_names(cls)
     try:
@@ -705,6 +715,7 @@ def _stamp_auto_setters(cls: type, state_cls: type[InputState]) -> None:
                 reserved=(),
             ),
         )
+        setattr(handler, GENERATED_SETTER_ATTR, field_name)
         setattr(cls, command_name, handler)
 
 
