@@ -101,10 +101,19 @@ class InputState:
         # with one, so the two are gathered separately and re-laid in that order.
         no_default: list[str] = []
         has_default: list[str] = []
+        class_vars: list[str] = []
 
         for name in list(annotations):
             raw = cls.__dict__.get(name, _MISSING)
             annotation = hints.get(name, annotations[name])
+            if annotation is ClassVar or get_origin(annotation) is ClassVar:
+                # A ClassVar is not a field. Redeclaring an inherited field as
+                # one takes it out of the dataclass, so it leaves the record too.
+                public.pop(name, None)
+                private.discard(name)
+                uploads.discard(name)
+                class_vars.append(name)
+                continue
             is_upload = annotation is UploadedFile or _unwrap_optional(annotation) is UploadedFile
             uploads.discard(name)
 
@@ -142,7 +151,9 @@ class InputState:
                 public[name] = FieldInfo()
                 no_default.append(name)
 
-        cls.__annotations__ = {name: annotations[name] for name in no_default + has_default}
+        cls.__annotations__ = {
+            name: annotations[name] for name in no_default + has_default + class_vars
+        }
         cls._public_fields = public
         cls._private_fields = private
         cls._upload_fields = uploads

@@ -1,4 +1,5 @@
 import dataclasses
+from typing import ClassVar
 
 import pytest
 
@@ -145,6 +146,16 @@ def test_a_parent_default_redeclared_as_required_does_not_leak_through() -> None
     with pytest.raises(TypeError):
         Strict(step=1)  # type: ignore[ty:missing-argument]
     assert Strict(step=1, total=5).total == 5
+
+
+def test_an_inherited_field_redeclared_as_a_classvar_leaves_the_record() -> None:
+    class Fixed(Progress):
+        total: ClassVar[int] = 10  # type: ignore[ty:invalid-attribute-override]  # the redeclaration under test
+
+    assert list(Fixed.__message_fields__) == ["step"]
+    assert Fixed(step=1).to_wire_format()["data"] == {"step": 1}
+    with pytest.raises(TypeError):
+        Fixed(step=1, total=5)  # the rejection under test
 
 
 def test_a_root_message_is_declared_positionally() -> None:

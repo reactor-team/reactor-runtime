@@ -1,5 +1,5 @@
 import dataclasses
-from typing import Literal
+from typing import ClassVar, Literal
 
 import pytest
 
@@ -173,6 +173,17 @@ def test_an_upload_field_redeclared_as_plain_leaves_the_upload_set() -> None:
         channel: str = "main"
 
     assert Plain.__upload_fields__ == frozenset()
+
+
+def test_an_inherited_field_redeclared_as_a_classvar_leaves_the_record() -> None:
+    class Pinned(SetBrightness):
+        level: ClassVar[float] = 0.5  # type: ignore[ty:invalid-attribute-override]  # the redeclaration under test
+
+    assert list(Pinned.__command_fields__) == ["mode"]
+    assert [f.name for f in dataclasses.fields(Pinned)] == ["mode"]
+    assert Pinned().level == 0.5
+    with pytest.raises(TypeError):
+        Pinned(level=0.9)  # the rejection under test
 
 
 def test_the_nearer_base_decides_whether_a_shared_name_is_an_upload() -> None:

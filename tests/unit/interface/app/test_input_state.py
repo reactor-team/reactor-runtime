@@ -1,4 +1,5 @@
 import dataclasses
+from typing import ClassVar
 
 import pytest
 
@@ -177,6 +178,26 @@ def test_two_declared_parents_both_contribute() -> None:
 
     assert set(Both._public_fields) == {"paused", "seed", "image", "speed"}
     assert Both().speed == 1.0
+
+
+def test_an_inherited_field_redeclared_as_a_classvar_leaves_the_record() -> None:
+    class Pinned(BaseState):
+        seed: ClassVar[int] = 7  # type: ignore[ty:invalid-attribute-override]  # the redeclaration under test
+
+    assert list(Pinned._public_fields) == ["paused", "image"]
+    assert "seed" not in {f.name for f in dataclasses.fields(Pinned)}
+    assert Pinned().seed == 7
+    with pytest.raises(TypeError):
+        Pinned(seed=3)  # the rejection under test
+
+
+def test_a_classvar_on_a_state_class_is_not_a_field() -> None:
+    class WithConstant(InputState):
+        limit: ClassVar[int] = 3
+        speed: float = 1.0
+
+    assert list(WithConstant._public_fields) == ["speed"]
+    assert WithConstant().limit == 3
 
 
 def test_the_nearer_base_decides_whether_a_shared_name_is_an_upload() -> None:

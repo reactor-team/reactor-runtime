@@ -134,6 +134,9 @@ def _build_command(cls: type[Command]) -> None:
     for name in list(annotations):
         annotation = hints.get(name, annotations[name])
         if _is_classvar(annotation):
+            # A ClassVar is not a field. Redeclaring an inherited field as one
+            # takes it out of the dataclass, so it leaves the record too.
+            fields.pop(name, None)
             continue
 
         raw = cls.__dict__.get(name, NO_DEFAULT)
