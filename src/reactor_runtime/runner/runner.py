@@ -21,7 +21,7 @@ import importlib.metadata
 import time
 import uuid
 from collections.abc import Callable, Coroutine, Mapping
-from typing import Any
+from typing import Any, Protocol
 
 from reactor_runtime.codes import INVALID_COMMAND, UNRESOLVED_UPLOAD
 from reactor_runtime.core import (
@@ -162,7 +162,20 @@ def _server_version() -> str:
         return "0.0.0"
 
 
-def _no_shutdown() -> None:
+class ShutdownHook(Protocol):
+    """The process-shutdown hook the assembly wires into the runner.
+
+    ``failure`` says whether the process is going down because something broke
+    — the model loop crashed — rather than because it was asked to stop or
+    refused to load; the service turns it into the exit status and the exit
+    deadline.
+    """
+
+    def __call__(self, *, failure: bool = False) -> None:
+        """Ask the process to shut down."""
+
+
+def _no_shutdown(*, failure: bool = False) -> None:
     """Default process-shutdown hook — a no-op until the service wires one in."""
 
 
@@ -251,9 +264,9 @@ class Runner(ServiceComponent, ConnectionSink):
         self._accepting = True
         # The process-shutdown hook, wired by the assembly so the runner can ask
         # the service to bring the process down when the session is terminated
-        # (a failed model load). A no-op until then, so the runner stays usable
-        # on its own.
-        self.request_shutdown: Callable[[], None] = _no_shutdown
+        # (a failed model load, or a crashed model loop). A no-op until then, so
+        # the runner stays usable on its own.
+        self.request_shutdown: ShutdownHook = _no_shutdown
 
     # -- lifecycle (ServiceComponent) -----------------------------------------
 
@@ -1146,7 +1159,9 @@ class Runner(ServiceComponent, ConnectionSink):
         ``CLOSING`` clears the session's uploaded files, tears the connections
         down, and, once they have closed, unwinds the session to ready, carrying
         the end reason through; and entering ``TERMINATED`` asks the service to
-        bring the process down. A crash evicts straight to ``TERMINATED``
+        bring the process down, as a failure when the move carries an error
+        (a crashed model loop) and clean otherwise (a model that refused to
+        load). A crash evicts straight to ``TERMINATED``
         without passing through ``CLOSING``, so that move runs the same teardown
         on its way out — minus the ``CLEANUP_COMPLETE`` unwind, which would
         declare a dead model ready again. Real moves log at info; journal
@@ -1206,7 +1221,12 @@ class Runner(ServiceComponent, ConnectionSink):
                 self._uploads.clear()
                 self._spawn_teardown(asyncio.to_thread(self._recorder.stop))
                 self._spawn_teardown(self._connections.close_all())
-            self.request_shutdown()
+            # An eviction carrying an error is a model loop that crashed, and
+            # the process exits as a failure. A failed load is not one: the
+            # process refused to serve before it had anything to serve, and
+            # exits clean.
+            crashed = transition.detail.get("reason") is EndReason.ERROR
+            self.request_shutdown(failure=crashed)
 
     def _start_recorder(self) -> None:
         """Arm the recorder for the session, best-effort.

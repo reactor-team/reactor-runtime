@@ -253,8 +253,9 @@ def _apply_env(cfg: RuntimeConfig) -> RuntimeConfig:
     """Overlay the lifecycle/bind tunables from the environment onto *cfg*.
 
     The manifest names the model; ``HOST`` / ``PORT`` name where to bind, and
-    ``ORPHAN_TIMEOUT_SECONDS`` / ``SIGTERM_GRACE_PERIOD`` tune the session and
-    shutdown windows. Unset variables leave the dataclass defaults in place.
+    ``ORPHAN_TIMEOUT_SECONDS`` / ``SIGTERM_GRACE_PERIOD`` / ``EXIT_TIMEOUT_SECONDS``
+    tune the session, drain, and forced-exit windows. Unset variables leave the
+    dataclass defaults in place.
 
     Raises:
         SystemExit: If ``PORT`` or a timeout is set but not numeric.
@@ -274,6 +275,7 @@ def _apply_env(cfg: RuntimeConfig) -> RuntimeConfig:
         port=port,
         orphan_timeout=_float_env("ORPHAN_TIMEOUT_SECONDS", cfg.orphan_timeout),
         grace_period=_float_env("SIGTERM_GRACE_PERIOD", cfg.grace_period),
+        exit_timeout=_float_env("EXIT_TIMEOUT_SECONDS", cfg.exit_timeout),
         recording=recording,
     )
 
@@ -296,9 +298,11 @@ def _assemble(
     drive and the transport reports into. The WebRTC transport is mounted with
     the selected media engine, so a client can negotiate a peer connection and
     stream to and from the model. The runner's shutdown hook is wired to the
-    service so a failed model load brings the whole process down, and the
-    service's aggregate health is wired into the HTTP server so ``/health``
-    answers for every component of the process. The metrics registry is created
+    service so a failed model load or a crashed model loop brings the whole
+    process down, inside the exit deadline the service arms from the lifecycle
+    timeouts, and the service's aggregate health is wired into the HTTP server
+    so ``/health`` answers for every component of the process. The metrics
+    registry is created
     here too, the one place that knows the identity of the process, and handed
     both to the runner that observes on it and to the HTTP server that renders
     it.
@@ -320,7 +324,7 @@ def _assemble(
             detail = str(exc) or type(exc).__name__
             raise SystemExit(f"the libwebrtc media engine is unavailable: {detail}") from exc
         peer_factory = libwebrtc_peer_factory
-    service = Service()
+    service = Service(exit_timeout=cfg.exit_timeout, grace_period=cfg.grace_period)
     metrics = RuntimeMetrics(version=_version(), model=cfg.model_ref)
     runner = Runner(cfg, metrics)
     runner.request_shutdown = service.request_shutdown
@@ -343,7 +347,7 @@ async def serve(
     webrtc: WebRtcConfig | None = None,
     *,
     peer_factory: WebRtcPeerFactory | None = None,
-) -> None:
+) -> int:
     """Run the runtime to completion: assemble the service and supervise it.
 
     Args:
@@ -352,8 +356,22 @@ async def serve(
             ``WebRtcConfig`` when omitted.
         peer_factory: The media engine to mount; defaults to the libwebrtc
             engine when omitted.
+
+    Returns:
+        The status the process should exit with: ``0`` for a stop that was
+        asked for or a model that refused to load, non-zero for a model loop
+        that crashed.
+
+    The service's wind-down is bounded by the deadline the shutdown request
+    armed. The teardown that follows this coroutine — the loop joining its
+    worker threads, the interpreter joining every thread still alive — is
+    bounded by a second one armed here, so the caller's exit cannot be held
+    up by a thread the runtime does not own.
     """
-    await _assemble(cfg, webrtc, peer_factory=peer_factory).run()
+    service = _assemble(cfg, webrtc, peer_factory=peer_factory)
+    await service.run()
+    service.bound_process_exit()
+    return service.exit_code
 
 
 def main() -> None:
@@ -367,7 +385,8 @@ def main() -> None:
 
     Raises:
         SystemExit: If no ``reactor.yaml`` is found or an environment variable
-            is set to a malformed value.
+            is set to a malformed value, and — carrying the failure status —
+            when the runtime went down because its model loop crashed.
     """
     from reactor_runtime.transport.webrtc.peer import libwebrtc_peer_factory
 
@@ -394,7 +413,9 @@ def main() -> None:
         port_range=webrtc.port_range,
         ice_policy=str(webrtc.transport_policy),
     )
-    asyncio.run(serve(cfg, webrtc, peer_factory=libwebrtc_peer_factory))
+    code = asyncio.run(serve(cfg, webrtc, peer_factory=libwebrtc_peer_factory))
+    if code:
+        raise SystemExit(code)
 
 
 if __name__ == "__main__":

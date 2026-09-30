@@ -112,6 +112,8 @@ class RuntimeConfig:
         host: Address the HTTP ingress binds.
         port: Port the HTTP ingress binds.
         grace_period: Seconds a draining session is given to end before stop.
+        exit_timeout: Seconds the orderly shutdown may take, on top of any
+            session drain it includes, before the process is forced to exit.
         orphan_timeout: Seconds a session may stay client-less before it closes.
         recording: The recorder's configuration; disabled by default.
     """
@@ -122,5 +124,6 @@ class RuntimeConfig:
     host: str = "0.0.0.0"
     port: int = 8080
     grace_period: float = 30.0
+    exit_timeout: float = 10.0
     orphan_timeout: float = 60.0
     recording: RecordingConfig = field(default_factory=RecordingConfig)
