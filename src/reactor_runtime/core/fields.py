@@ -14,6 +14,7 @@ graph alongside the neutral value vocabulary.
 from __future__ import annotations
 
 import dataclasses
+import inspect
 from dataclasses import dataclass
 from typing import Any, Final
 
@@ -122,6 +123,18 @@ def InputField(  # noqa: N802 — a capitalised factory reads as a type in field
     )
 
 
+def own_annotations(cls: type) -> dict[str, Any]:
+    """Return the annotations *cls* declares itself, none from its bases.
+
+    Goes through :func:`inspect.get_annotations` rather than the class
+    ``__dict__``. From Python 3.14 (PEP 649) a class stores its annotations
+    lazily, behind ``__annotate__``, and a direct dict read finds nothing; the
+    accessor materialises them on every version. Inherited annotations are
+    read from the bases' cached field records, never re-resolved.
+    """
+    return inspect.get_annotations(cls)
+
+
 def inherited_record(cls: type, attribute: str) -> dict[str, Any]:
     """Merge the field records the bases of *cls* store on themselves.
 
@@ -157,7 +170,11 @@ def apply_dataclass(cls: type, *, required: list[str], inherits: bool) -> None:
     A required field hides any class attribute a parent holds under the same
     name for the duration of the conversion. The dataclass reads a field's
     default with ``getattr``, so without this a field declared required again
-    would silently inherit the parent's default.
+    would silently inherit the parent's default. Once the placeholder is
+    removed the parent's attribute is reachable through the subclass again, so
+    ``Child.x`` reads the parent's value while ``dataclasses.fields(Child)``
+    and the field record both say required. The runtime reads defaults from
+    the record, never from the class attribute.
 
     Args:
         cls: The class to convert. A class that already carries its own

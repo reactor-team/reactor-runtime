@@ -28,6 +28,7 @@ from reactor_runtime.core.fields import (
     InputField,
     apply_dataclass,
     inherited_record,
+    own_annotations,
     raise_if_default_invalid,
     raise_if_default_not_static,
 )
@@ -88,7 +89,7 @@ class InputState:
                     uploads.discard(name)
         inherits_fields = bool(public or private)
 
-        annotations = cls.__dict__.get("__annotations__", {})
+        annotations = own_annotations(cls)
         try:
             hints = get_type_hints(cls)
         except Exception:

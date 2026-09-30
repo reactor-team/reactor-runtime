@@ -21,6 +21,7 @@ from reactor_runtime.core.fields import (
     NO_DEFAULT,
     apply_dataclass,
     inherited_record,
+    own_annotations,
     raise_if_default_not_static,
 )
 from reactor_runtime.core.naming import pascal_to_snake
@@ -165,7 +166,7 @@ def _build_message(cls: type[ModelMessage]) -> None:
 
     fields = inherited_record(cls, "__message_fields__")
     inherits = bool(fields)
-    annotations: dict[str, Any] = cls.__dict__.get("__annotations__", {})
+    annotations = own_annotations(cls)
     if not annotations:
         cls.__message_fields__ = fields
         apply_dataclass(cls, required=[], inherits=inherits)

@@ -22,6 +22,7 @@ from reactor_runtime.core.fields import (
     InputField,
     apply_dataclass,
     inherited_record,
+    own_annotations,
     raise_if_default_invalid,
     raise_if_default_not_static,
 )
@@ -114,7 +115,7 @@ def _build_command(cls: type[Command]) -> None:
     fields = inherited_record(cls, "__command_fields__")
     inherits = bool(fields)
 
-    annotations: dict[str, Any] = cls.__dict__.get("__annotations__", {})
+    annotations = own_annotations(cls)
     if not annotations:
         cls.__command_fields__ = fields
         cls.__upload_fields__ = frozenset(n for n, f in fields.items() if is_upload(f.spec))
