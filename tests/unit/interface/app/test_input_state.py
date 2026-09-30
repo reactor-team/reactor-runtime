@@ -1,6 +1,10 @@
+import dataclasses
+from typing import ClassVar
+
 import pytest
 
 from reactor_runtime import InputField, InputState, UploadedFile
+from reactor_runtime.core.fields import NO_DEFAULT
 
 
 class State(InputState):
@@ -61,3 +65,168 @@ def test_mutable_literal_default_is_rejected() -> None:
 
         class _Bad(InputState):
             items: dict[str, int] = {"a": 1}  # noqa: RUF012 — the rejection under test
+
+
+def test_a_private_field_without_a_default_is_rejected() -> None:
+    with pytest.raises(TypeError, match="private field '_cache' needs a default"):
+
+        class _Bad(InputState):
+            speed: float = 1.0
+            _cache: int  # type: ignore[ty:dataclass-field-order]  # the rejection under test
+
+
+# -- inheritance -------------------------------------------------------------
+
+
+class BaseState(InputState):
+    paused: bool = InputField(default=False)
+    seed: int = InputField(default=42, ge=0)
+    image: UploadedFile = InputField(default=None)
+    _cache: int = 7
+
+
+class FamilyState(BaseState):
+    keys: str = InputField(default="")
+
+
+def test_a_subclass_inherits_every_field() -> None:
+    assert list(FamilyState._public_fields) == ["paused", "seed", "image", "keys"]
+    assert FamilyState._private_fields == {"_cache"}
+    assert FamilyState._upload_fields == {"image"}
+    assert [f.name for f in dataclasses.fields(FamilyState)] == [
+        "paused",
+        "seed",
+        "image",
+        "_cache",
+        "keys",
+    ]
+    state = FamilyState()
+    assert (state.paused, state.seed, state.image, state._cache, state.keys) == (
+        False,
+        42,
+        None,
+        7,
+        "",
+    )
+
+
+def test_an_inherited_field_keeps_its_constraints() -> None:
+    assert FamilyState._public_fields["seed"].ge == 0
+
+
+def test_a_subclass_with_no_fields_of_its_own_inherits_everything() -> None:
+    class Same(BaseState):
+        pass
+
+    assert list(Same._public_fields) == ["paused", "seed", "image"]
+    assert Same().seed == 42
+
+
+def test_a_required_field_added_by_a_subclass_is_required() -> None:
+    class Needs(BaseState):
+        prompt: str
+
+    assert Needs._public_fields["prompt"].default is NO_DEFAULT
+    with pytest.raises(TypeError):
+        Needs()  # type: ignore[ty:missing-argument]
+    assert Needs(prompt="hi").prompt == "hi"
+
+
+def test_a_redeclared_field_replaces_the_parents() -> None:
+    class Stricter(BaseState):
+        seed: int = InputField(default=3, ge=1, le=10)
+
+    assert list(Stricter._public_fields) == ["paused", "seed", "image"]
+    assert Stricter._public_fields["seed"].le == 10
+    assert Stricter().seed == 3
+
+
+def test_a_parent_default_redeclared_as_required_does_not_leak_through() -> None:
+    class Strict(BaseState):
+        seed: int = InputField(ge=0)
+
+    with pytest.raises(TypeError):
+        Strict()  # type: ignore[ty:missing-argument]
+    assert Strict(seed=5).seed == 5
+
+
+def test_a_redeclared_private_field_replaces_the_parents_default() -> None:
+    class Warmer(BaseState):
+        _cache: int = 11
+
+    assert Warmer()._cache == 11
+    with pytest.raises(TypeError, match="private field '_cache' needs a default"):
+
+        class _Bad(BaseState):
+            _cache: int
+
+
+def test_an_upload_field_redeclared_as_plain_leaves_the_upload_set() -> None:
+    class Plain(BaseState):
+        image: str = "none"
+
+    assert Plain._upload_fields == set()
+    assert Plain().image == "none"
+
+
+def test_two_declared_parents_both_contribute() -> None:
+    class Other(InputState):
+        speed: float = 1.0
+
+    class Both(BaseState, Other):
+        pass
+
+    assert set(Both._public_fields) == {"paused", "seed", "image", "speed"}
+    assert Both().speed == 1.0
+
+
+def test_an_inherited_field_redeclared_as_a_classvar_leaves_the_record() -> None:
+    class Pinned(BaseState):
+        seed: ClassVar[int] = 7  # type: ignore[ty:invalid-attribute-override]  # the redeclaration under test
+
+    assert list(Pinned._public_fields) == ["paused", "image"]
+    assert "seed" not in {f.name for f in dataclasses.fields(Pinned)}
+    assert Pinned().seed == 7
+    with pytest.raises(TypeError):
+        Pinned(seed=3)  # the rejection under test
+
+
+def test_a_classvar_on_a_state_class_is_not_a_field() -> None:
+    class WithConstant(InputState):
+        limit: ClassVar[int] = 3
+        speed: float = 1.0
+
+    assert list(WithConstant._public_fields) == ["speed"]
+    assert WithConstant().limit == 3
+
+
+def test_the_nearer_base_decides_whether_a_shared_name_is_an_upload() -> None:
+    class AsText(InputState):
+        image: str = "none"
+
+    class TextWins(AsText, BaseState):
+        pass
+
+    class UploadWins(BaseState, AsText):
+        pass
+
+    assert TextWins._upload_fields == set()
+    assert TextWins().image == "none"
+    assert UploadWins._upload_fields == {"image"}
+    assert UploadWins().image is None
+
+
+def test_a_plain_mixin_contributes_no_fields() -> None:
+    class Mixin:
+        helper: int = 1
+
+    class WithMixin(Mixin, BaseState):
+        pass
+
+    assert "helper" not in WithMixin._public_fields
+    assert "helper" not in {f.name for f in dataclasses.fields(WithMixin)}
+
+
+def test_a_root_state_class_is_declared_positionally() -> None:
+    # No parent fields, so the constructor is the one a plain dataclass gives.
+    assert State(1.5).required_axis == 1.5

@@ -1,5 +1,5 @@
 import dataclasses
-from typing import Literal
+from typing import ClassVar, Literal
 
 import pytest
 
@@ -109,3 +109,107 @@ def test_mutable_static_default_is_rejected() -> None:
 
         class Bad(Command):
             items: list[str] = ["a"]  # noqa: RUF012 — the test asserts this is rejected
+
+
+# -- inheritance -------------------------------------------------------------
+
+
+class SetBrightnessOn(SetBrightness):
+    channel: UploadedFile | None = None
+    steps: int  # type: ignore[ty:dataclass-field-order]  # runtime reorders it
+
+
+def test_a_subclass_inherits_every_field() -> None:
+    assert list(SetBrightnessOn.__command_fields__) == ["level", "mode", "channel", "steps"]
+    assert SetBrightnessOn.__command_fields__["level"].info.le == 1.0
+    assert SetBrightnessOn.__upload_fields__ == frozenset({"channel"})
+    assert [f.name for f in dataclasses.fields(SetBrightnessOn)] == [
+        "level",
+        "mode",
+        "steps",
+        "channel",
+    ]
+
+
+def test_a_subclass_constructs_with_inherited_and_added_fields() -> None:
+    cmd = SetBrightnessOn(steps=3)
+    assert (cmd.level, cmd.mode, cmd.channel, cmd.steps) == (1.0, "a", None, 3)
+    with pytest.raises(TypeError):
+        SetBrightnessOn()  # type: ignore[ty:missing-argument]
+
+
+def test_a_subclass_has_its_own_name() -> None:
+    assert SetBrightnessOn.name == "set_brightness_on"
+
+
+def test_a_subclass_with_no_fields_of_its_own_inherits_everything() -> None:
+    class Same(SetBrightness):
+        pass
+
+    assert list(Same.__command_fields__) == ["level", "mode"]
+    assert Same().level == 1.0
+
+
+def test_a_redeclared_field_replaces_the_parents() -> None:
+    class Dimmer(SetBrightness):
+        level: float = InputField(default=0.2, ge=0.0, le=0.5)
+
+    assert list(Dimmer.__command_fields__) == ["level", "mode"]
+    assert Dimmer.__command_fields__["level"].info.le == 0.5
+    assert Dimmer().level == 0.2
+
+
+def test_a_parent_default_redeclared_as_required_does_not_leak_through() -> None:
+    class Strict(SetBrightness):
+        level: float
+
+    assert Strict.__command_fields__["level"].info.default is NO_DEFAULT
+    with pytest.raises(TypeError):
+        Strict()  # type: ignore[ty:missing-argument]
+
+
+def test_an_upload_field_redeclared_as_plain_leaves_the_upload_set() -> None:
+    class Plain(SetBrightnessOn):
+        channel: str = "main"
+
+    assert Plain.__upload_fields__ == frozenset()
+
+
+def test_an_inherited_field_redeclared_as_a_classvar_leaves_the_record() -> None:
+    class Pinned(SetBrightness):
+        level: ClassVar[float] = 0.5  # type: ignore[ty:invalid-attribute-override]  # the redeclaration under test
+
+    assert list(Pinned.__command_fields__) == ["mode"]
+    assert [f.name for f in dataclasses.fields(Pinned)] == ["mode"]
+    assert Pinned().level == 0.5
+    with pytest.raises(TypeError):
+        Pinned(level=0.9)  # the rejection under test
+
+
+def test_a_classvar_redeclaration_survives_field_reordering() -> None:
+    # A required and a defaulted field in the same subclass trigger the
+    # annotation reordering; the ClassVar must stay in the annotations so the
+    # dataclass masks the parent's field.
+    class Mixed(SetBrightness):
+        level: ClassVar[float] = 0.5  # type: ignore[ty:invalid-attribute-override]  # the redeclaration under test
+        defaulted: int = 1
+        required: str  # type: ignore[ty:dataclass-field-order]  # runtime reorders it
+
+    assert list(Mixed.__command_fields__) == ["mode", "defaulted", "required"]
+    assert "level" not in {f.name for f in dataclasses.fields(Mixed)}
+    with pytest.raises(TypeError):
+        Mixed(required="r", level=0.9)  # the rejection under test
+
+
+def test_the_nearer_base_decides_whether_a_shared_name_is_an_upload() -> None:
+    class AsText(Command):
+        channel: str = "main"
+
+    class TextWins(AsText, SetBrightnessOn):
+        pass
+
+    class UploadWins(SetBrightnessOn, AsText):
+        pass
+
+    assert TextWins.__upload_fields__ == frozenset()
+    assert UploadWins.__upload_fields__ == frozenset({"channel"})

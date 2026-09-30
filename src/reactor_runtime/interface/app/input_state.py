@@ -19,7 +19,6 @@ Field visibility is by name:
 
 from __future__ import annotations
 
-import dataclasses
 from types import UnionType
 from typing import Any, ClassVar, Union, dataclass_transform, get_args, get_origin, get_type_hints
 
@@ -27,6 +26,9 @@ from reactor_runtime.core.fields import (
     NO_DEFAULT,
     FieldInfo,
     InputField,
+    apply_dataclass,
+    inherited_record,
+    own_annotations,
     raise_if_default_invalid,
     raise_if_default_not_static,
 )
@@ -54,9 +56,16 @@ class InputState:
     the subclass partitions its fields and turns it into a dataclass, so a fresh
     instance constructs from defaults at the start of every session.
 
-    A field declared without a default is a required field; a client must set it
-    before its value is read. Mutable defaults (``list`` / ``dict`` / ``set``)
-    are rejected at declaration, since one would be shared across sessions.
+    A public field declared without a default is a required field; a client
+    must set it before its value is read. A private field always needs a
+    default, because nothing but the defaults builds the state at session
+    start. Mutable defaults (``list`` / ``dict`` / ``set``) are rejected at
+    declaration, since one would be shared across sessions.
+
+    A subclass of a state class inherits every field of its parents. A field it
+    declares again replaces the parent's, default and constraints included. The
+    fields a subclass adds are keyword-only in its constructor, so a required
+    field can follow an inherited one that has a default.
     """
 
     _public_fields: ClassVar[dict[str, FieldInfo]]
@@ -66,11 +75,23 @@ class InputState:
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
 
-        public: dict[str, FieldInfo] = {}
+        public = inherited_record(cls, "_public_fields")
         private: set[str] = set()
         uploads: set[str] = set()
+        for base in reversed(cls.__mro__[1:]):
+            private |= base.__dict__.get("_private_fields", set())
+            # Upload membership follows the same base that wins the field, so a
+            # name one base declares as an upload and a nearer base as something
+            # else is not an upload.
+            base_uploads = base.__dict__.get("_upload_fields", set())
+            for name in base.__dict__.get("_public_fields", {}):
+                if name in base_uploads:
+                    uploads.add(name)
+                else:
+                    uploads.discard(name)
+        inherits_fields = bool(public or private)
 
-        annotations = getattr(cls, "__annotations__", {})
+        annotations = own_annotations(cls)
         try:
             hints = get_type_hints(cls)
         except Exception:
@@ -80,13 +101,31 @@ class InputState:
         # with one, so the two are gathered separately and re-laid in that order.
         no_default: list[str] = []
         has_default: list[str] = []
+        class_vars: list[str] = []
 
         for name in list(annotations):
             raw = cls.__dict__.get(name, _MISSING)
             annotation = hints.get(name, annotations[name])
+            if annotation is ClassVar or get_origin(annotation) is ClassVar:
+                # A ClassVar is not a field. Redeclaring an inherited field as
+                # one takes it out of the dataclass, so it leaves the record too.
+                public.pop(name, None)
+                private.discard(name)
+                uploads.discard(name)
+                class_vars.append(name)
+                continue
             is_upload = annotation is UploadedFile or _unwrap_optional(annotation) is UploadedFile
+            uploads.discard(name)
 
             if name.startswith("_"):
+                if raw is _MISSING:
+                    # A private field is the model's own; no client sets it, and
+                    # the state is built with no arguments at session start.
+                    raise TypeError(
+                        f"{cls.__qualname__}: private field '{name}' needs a default. "
+                        "The state is built from defaults when a session starts, and "
+                        "no set_ command fills a private field."
+                    )
                 private.add(name)
                 has_default.append(name)
             elif is_upload:
@@ -99,8 +138,6 @@ class InputState:
             elif isinstance(raw, FieldInfo):
                 public[name] = raw
                 if raw.default is NO_DEFAULT:
-                    if hasattr(cls, name):
-                        delattr(cls, name)
                     no_default.append(name)
                 else:
                     raise_if_default_invalid(cls.__qualname__, name, raw.default, raw)
@@ -114,10 +151,11 @@ class InputState:
                 public[name] = FieldInfo()
                 no_default.append(name)
 
-        cls.__annotations__ = {name: annotations[name] for name in no_default + has_default}
+        cls.__annotations__ = {
+            name: annotations[name] for name in no_default + has_default + class_vars
+        }
         cls._public_fields = public
         cls._private_fields = private
         cls._upload_fields = uploads
 
-        if not dataclasses.is_dataclass(cls):
-            dataclasses.dataclass(cls)
+        apply_dataclass(cls, required=no_default, inherits=inherits_fields)

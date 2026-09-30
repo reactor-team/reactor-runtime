@@ -16,7 +16,7 @@ import nox
 # (tests-<version>): the local matrix runs them all, and each CI matrix leg runs
 # the single session for its version. CI declares the same version list in its
 # workflow matrix, so a version added here is added there too.
-PYTHON_VERSIONS = ["3.12", "3.13"]
+PYTHON_VERSIONS = ["3.12", "3.13", "3.14"]
 
 nox.options.default_venv_backend = "uv"
 # Reuse the per-version environments across runs: the locked `uv sync` in each
