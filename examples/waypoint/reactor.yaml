@@ -1,6 +1,4 @@
-$schema: reactor/v1
-apiVersion: v1beta
-kind: VideoModel
+$schema: reactor/v2
 
 # `reactor build` / `reactor run` read this file: `model:` describes the model,
 # `runtime:` names the class to serve and the config file it reads, and
