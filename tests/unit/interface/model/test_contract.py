@@ -294,6 +294,14 @@ def test_shadowing_a_hook_with_a_non_method_is_rejected() -> None:
                 return None
 
 
+def test_shadowing_a_hook_with_a_command_handler_is_rejected() -> None:
+    with pytest.raises(TypeError, match=r"reset_model is an @event handler.*session_ended"):
+
+        class Shadowed(HookedBase):
+            @event(name="reset_now")
+            def reset_model(self) -> None: ...
+
+
 def test_an_upload_hook_override_keeps_the_required_signature() -> None:
     class Uploads(ReactorApp):
         @file_uploaded

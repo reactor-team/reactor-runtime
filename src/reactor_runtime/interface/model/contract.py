@@ -260,6 +260,15 @@ class ModelContract:
                                 f"A subclass may override a lifecycle hook only with "
                                 f"a method."
                             )
+                        if hook is not attr and isinstance(
+                            getattr(hook, EVENT_ATTR, None), EventHandler
+                        ):
+                            raise TypeError(
+                                f"{model_cls.__qualname__}.{attr_name} is an @event "
+                                f"handler, but {klass.__qualname__}.{attr_name} is "
+                                f"marked @{key}. A method is a command or a lifecycle "
+                                f"hook, not both."
+                            )
                         if key == "file_uploaded" and hook is not attr:
                             check_file_uploaded_signature(hook)
                         hooks[key] = hook
