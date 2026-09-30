@@ -1539,12 +1539,14 @@ async def test_init_failure_requests_shutdown(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", boom)
     runner = _runner()
     called: list[bool] = []
-    runner.request_shutdown = lambda: called.append(True)
+    runner.request_shutdown = lambda *, failure=False: called.append(failure)
 
     await runner.start()
 
     assert runner._sm.current_state is SessionState.TERMINATED
-    assert called == [True]
+    # A model that refused to load is a clean exit, not a failure: the process
+    # had nothing to serve and says so with a zero status.
+    assert called == [False]
 
 
 # --- model run-loop crash -------------------------------------------------
@@ -1564,7 +1566,7 @@ async def test_model_crash_terminates_the_session(monkeypatch: pytest.MonkeyPatc
     )
     runner = _runner()
     called: list[bool] = []
-    runner.request_shutdown = lambda: called.append(True)
+    runner.request_shutdown = lambda *, failure=False: called.append(failure)
 
     await runner.start()
     try:
@@ -1577,6 +1579,8 @@ async def test_model_crash_terminates_the_session(monkeypatch: pytest.MonkeyPatc
 
         assert runner._sm.current_state is SessionState.TERMINATED
         assert runner.health().status is HealthStatus.UNHEALTHY
+        # A crashed loop asks for the process to go down as a failure, so the
+        # exit status tells the orchestrator this was not a clean stop.
         assert called == [True]
         moves = [
             e.transition
@@ -2387,15 +2391,15 @@ async def test_terminated_self_loop_does_not_rerequest_shutdown(
     monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", boom)
     runner = _runner()
     called: list[bool] = []
-    runner.request_shutdown = lambda: called.append(True)
+    runner.request_shutdown = lambda *, failure=False: called.append(failure)
     await runner.start()
-    assert called == [True]
+    assert called == [False]
 
     # An error journalled after the terminal move self-loops in TERMINATED
     # without asking the service to bring the process down a second time.
     assert runner._sm.send(SessionEvent.ERROR, message="late") is True
     assert runner._sm.current_state is SessionState.TERMINATED
-    assert called == [True]
+    assert called == [False]
 
 
 async def test_transitions_are_logged(

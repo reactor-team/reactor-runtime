@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from reactor_runtime.core import Health, HealthStatus, RuntimeConfig
 from reactor_runtime.http import HttpServer
+from reactor_runtime.http.server import _HTTP_SHUTDOWN_SECONDS
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.runner.runner import Runner
 from reactor_runtime.transport.router import SessionControl, TransportRouter
@@ -107,9 +108,12 @@ async def test_stop_swallows_a_failed_serve_task() -> None:
     await server.stop()
 
 
-async def test_graceful_shutdown_is_bounded_by_the_grace_period() -> None:
+async def test_graceful_shutdown_is_bounded_short_whatever_the_grace_period() -> None:
+    # The session drain is the runner's and runs before this server stops, so
+    # the requests still open here are long-lived subscriptions that are cut,
+    # not waited on: the grace period must not reach uvicorn.
     server = HttpServer(
-        RuntimeConfig(model_ref="fake:Model", host="127.0.0.1", port=0, grace_period=7.0),
+        RuntimeConfig(model_ref="fake:Model", host="127.0.0.1", port=0, grace_period=60.0),
         _runner(),
         [],
         Health.healthy,
@@ -119,7 +123,8 @@ async def test_graceful_shutdown_is_bounded_by_the_grace_period() -> None:
     await server.start()
     try:
         assert server._server is not None
-        assert server._server.config.timeout_graceful_shutdown == 7
+        assert server._server.config.timeout_graceful_shutdown == _HTTP_SHUTDOWN_SECONDS
+        assert _HTTP_SHUTDOWN_SECONDS <= 2
     finally:
         await server.drain()
         await asyncio.wait_for(server.stop(), timeout=5.0)

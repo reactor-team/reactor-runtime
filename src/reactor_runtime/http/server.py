@@ -31,6 +31,14 @@ from reactor_runtime.transport.router import TransportRouter
 
 logger = get_logger(__name__)
 
+# How long uvicorn waits for open requests once the server is asked to stop.
+# The session drain is the runner's, and runs before this server stops, so by
+# the time uvicorn is winding down the requests still open are long-lived
+# subscriptions — `/events` streams — that have already been sent the terminal
+# transition. They are cut short rather than waited on: every second spent
+# here is a second the restart of a crashed process is delayed.
+_HTTP_SHUTDOWN_SECONDS = 2
+
 
 def build_app(
     runner: Runner,
@@ -142,14 +150,14 @@ class HttpServer(ServiceComponent):
         """
         # `/events` is an unbounded stream, so a client still subscribed when the
         # server drains never lets uvicorn's graceful shutdown complete on its
-        # own. Bound the wait with the same grace period a draining session gets,
-        # so `stop()` cannot hang on a long-lived connection.
+        # own. The wait is bounded short (see _HTTP_SHUTDOWN_SECONDS) so `stop()`
+        # cannot linger on a long-lived connection.
         config = uvicorn.Config(
             self._app,
             host=self._cfg.host,
             port=self._cfg.port,
             log_level="warning",
-            timeout_graceful_shutdown=int(self._cfg.grace_period),
+            timeout_graceful_shutdown=_HTTP_SHUTDOWN_SECONDS,
         )
         self._server = _ServerWithoutSignals(config)
         self._serve_task = asyncio.create_task(self._server.serve())
@@ -177,7 +185,7 @@ class HttpServer(ServiceComponent):
     async def stop(self) -> None:
         """Await the server's own shutdown, bounded by the graceful-shutdown timeout.
 
-        The wait is already bounded — ``timeout_graceful_shutdown`` caps how long
+        The wait is already bounded — ``_HTTP_SHUTDOWN_SECONDS`` caps how long
         uvicorn lingers on a still-open connection — so this only awaits the serve
         task to settle. A failure surfacing from that task during shutdown is
         logged rather than raised, so a late serve error cannot abort the rest of

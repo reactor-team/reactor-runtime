@@ -18,6 +18,7 @@ from reactor_runtime.serve import (
     _video_codecs_from_env,
     _webrtc_config_from_env,
     main,
+    serve,
 )
 from reactor_runtime.transport.webrtc.config import CodecEntry, IceTransportPolicy, WebRtcConfig
 from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
@@ -57,6 +58,7 @@ _RUNTIME_ENV = (
     "PORT",
     "ORPHAN_TIMEOUT_SECONDS",
     "SIGTERM_GRACE_PERIOD",
+    "EXIT_TIMEOUT_SECONDS",
     "REACTOR_LOG_LEVEL",
 )
 
@@ -153,6 +155,69 @@ def test_assemble_wires_the_runner_shutdown_to_the_service() -> None:
     runner = service._components["runner"]
     assert isinstance(runner, Runner)
     assert runner.request_shutdown == service.request_shutdown
+
+
+def test_assemble_hands_the_exit_budgets_to_the_service() -> None:
+    cfg = RuntimeConfig(model_ref="fake:Model", grace_period=7.0, exit_timeout=3.0)
+
+    service = _assemble(cfg, peer_factory=_UNUSED)
+
+    assert service._grace_period == 7.0
+    assert service._exit_timeout == 3.0
+
+
+class _ServiceStub:
+    """A service whose run is instant, standing in for the assembled one."""
+
+    def __init__(self, exit_code: int) -> None:
+        self.exit_code = exit_code
+        self.bounded = False
+
+    async def run(self) -> None: ...
+
+    def bound_process_exit(self) -> None:
+        self.bounded = True
+
+
+async def test_serve_reports_the_service_exit_status_and_bounds_the_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub = _ServiceStub(exit_code=1)
+    monkeypatch.setattr("reactor_runtime.serve._assemble", lambda *a, **k: stub)
+
+    code = await serve(RuntimeConfig(model_ref="fake:Model"), peer_factory=_UNUSED)
+
+    assert code == 1
+    # The teardown after the loop is the caller's; serve arms its deadline.
+    assert stub.bounded
+
+
+def _fake_main_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int) -> None:
+    (tmp_path / "reactor.yaml").write_text("runtime:\n  import: fake:Model\n")
+    monkeypatch.chdir(tmp_path)
+
+    async def fake_serve(*args: object, **kwargs: object) -> int:
+        return code
+
+    monkeypatch.setattr("reactor_runtime.serve.serve", fake_serve)
+
+
+def test_main_exits_with_the_failure_status_after_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_main_environment(tmp_path, monkeypatch, code=1)
+
+    with pytest.raises(SystemExit) as raised:
+        main()
+    assert raised.value.code == 1
+
+
+def test_main_returns_normally_after_a_clean_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_main_environment(tmp_path, monkeypatch, code=0)
+
+    main()
 
 
 def test_version_is_a_non_empty_string() -> None:
@@ -410,6 +475,7 @@ def test_apply_env_overlays_bind_and_lifecycle_tunables(
     monkeypatch.setenv("PORT", "8090")
     monkeypatch.setenv("ORPHAN_TIMEOUT_SECONDS", "5")
     monkeypatch.setenv("SIGTERM_GRACE_PERIOD", "10")
+    monkeypatch.setenv("EXIT_TIMEOUT_SECONDS", "3.5")
 
     cfg = _apply_env(RuntimeConfig(model_ref="fake:Model"))
 
@@ -417,6 +483,7 @@ def test_apply_env_overlays_bind_and_lifecycle_tunables(
     assert cfg.port == 8090
     assert cfg.orphan_timeout == 5.0
     assert cfg.grace_period == 10.0
+    assert cfg.exit_timeout == 3.5
 
 
 def test_apply_env_keeps_defaults_when_unset() -> None:
@@ -424,6 +491,34 @@ def test_apply_env_keeps_defaults_when_unset() -> None:
 
     assert cfg.host == "0.0.0.0"
     assert cfg.port == 8080
+    assert cfg.exit_timeout == 10.0
+
+
+def test_apply_env_rejects_a_non_numeric_exit_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXIT_TIMEOUT_SECONDS", "soon")
+
+    with pytest.raises(SystemExit):
+        _apply_env(RuntimeConfig(model_ref="fake:Model"))
+
+
+@pytest.mark.parametrize("name", ["EXIT_TIMEOUT_SECONDS", "SIGTERM_GRACE_PERIOD"])
+@pytest.mark.parametrize("value", ["inf", "-inf", "nan", "-1"])
+def test_apply_env_rejects_a_deadline_window_a_timer_cannot_hold(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    # Both windows feed the forced-exit deadline. `float` parses these, but an
+    # infinite timer never fires and a NaN or negative one fires at once, so
+    # the misconfiguration is refused at boot instead.
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(SystemExit, match="finite number >= 0"):
+        _apply_env(RuntimeConfig(model_ref="fake:Model"))
+
+
+def test_apply_env_accepts_a_zero_exit_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXIT_TIMEOUT_SECONDS", "0")
+
+    assert _apply_env(RuntimeConfig(model_ref="fake:Model")).exit_timeout == 0.0
 
 
 def test_apply_env_rejects_a_non_integer_port(monkeypatch: pytest.MonkeyPatch) -> None:

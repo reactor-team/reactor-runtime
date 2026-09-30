@@ -3,9 +3,11 @@ import logging
 import threading
 from pathlib import Path
 
+import httpx
 import pytest
 
 from reactor_runtime import Output, ReactorApp, Video
+from reactor_runtime import service as service_module
 from reactor_runtime.core import (
     Health,
     HealthStatus,
@@ -265,3 +267,256 @@ async def test_http_surface_is_up_before_the_model_finishes_loading(
         _LOAD_GATE.set()
         service.request_shutdown()
         await asyncio.wait_for(task, timeout=5.0)
+
+
+# --- a requested shutdown ends the process inside a deadline (REA-6768) -------
+
+
+class _StuckComponent(FakeComponent):
+    """A component whose stop never returns — a thread the runtime does not own."""
+
+    async def stop(self) -> None:
+        self._trace.append(f"stop:{self.name}")
+        await asyncio.Event().wait()
+
+
+def _intercept_exit(monkeypatch: pytest.MonkeyPatch) -> tuple[list[int], threading.Event]:
+    """Replace the forced exit with a recorder, so the test process survives it."""
+    exits: list[int] = []
+    fired = threading.Event()
+
+    def record(code: int) -> None:
+        exits.append(code)
+        fired.set()
+
+    monkeypatch.setattr(service_module, "_exit", record)
+    return exits, fired
+
+
+async def test_a_stuck_wind_down_is_forced_out_at_the_deadline(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _no_signals(monkeypatch)
+    exits, fired = _intercept_exit(monkeypatch)
+    trace: list[str] = []
+    service = Service(exit_timeout=0.2, grace_period=60.0)
+    service.add(_StuckComponent("runner", (), trace=trace))
+
+    with caplog.at_level(logging.ERROR, logger="reactor_runtime.service"):
+        task = asyncio.create_task(service.run())
+        for _ in range(100):
+            if "start:runner" in trace:
+                break
+            await asyncio.sleep(0.01)
+        service.request_shutdown(failure=True)
+
+        # The deadline fires off the event loop, so a wind-down stuck on the
+        # loop cannot hold it up; it carries the failure status.
+        assert await asyncio.to_thread(fired.wait, 2.0)
+    assert exits == [1]
+    assert service.exit_code == 1
+    assert "stop:runner" in trace
+    assert not task.done()
+    # Why the process left is on record before it does.
+    assert any("shutdown deadline exceeded" in r.getMessage() for r in caplog.records)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_the_forced_exit_does_not_wait_on_a_wedged_logger(
+    monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    _no_signals(monkeypatch)
+    exits, fired = _intercept_exit(monkeypatch)
+    # The thread that is stuck may hold the logging handlers' lock, so the
+    # structured record cannot be allowed to stand between the deadline and
+    # the exit. Stand in for that with a handler whose emit never returns.
+    monkeypatch.setattr(service_module, "_EXIT_RECORD_GRACE", 0.2)
+
+    class _WedgedHandler(logging.Handler):
+        # Blocks in handle() rather than emit() so the handler's own lock stays
+        # free: logging.shutdown() acquires it at interpreter exit, and a lock
+        # held by the parked thread would hang the test process on the way out.
+        def handle(self, record: logging.LogRecord) -> bool:
+            threading.Event().wait()
+            return True
+
+    wedged = _WedgedHandler()
+    target = logging.getLogger("reactor_runtime.service")
+    target.addHandler(wedged)
+    service = Service(exit_timeout=0.1, grace_period=60.0)
+    service.add(_StuckComponent("runner", ()))
+
+    task = asyncio.create_task(service.run())
+    try:
+        await asyncio.sleep(0.01)
+        service.request_shutdown(failure=True)
+
+        assert await asyncio.to_thread(fired.wait, 2.0)
+        assert exits == [1]
+        # The reason and the stacks still reached stderr, through the descriptor.
+        err = capfd.readouterr().err
+        assert "shutdown deadline exceeded; forcing exit" in err
+        assert "Thread 0x" in err
+    finally:
+        target.removeHandler(wedged)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+async def test_a_failure_deadline_skips_the_session_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_signals(monkeypatch)
+    exits, fired = _intercept_exit(monkeypatch)
+    # A crash has no session left to drain, so its budget is exit_timeout
+    # alone; the grace period would otherwise hold the restart up for nothing.
+    service = Service(exit_timeout=0.2, grace_period=60.0)
+    service.add(_StuckComponent("runner", ()))
+
+    task = asyncio.create_task(service.run())
+    await asyncio.sleep(0.01)
+    service.request_shutdown(failure=True)
+
+    assert await asyncio.to_thread(fired.wait, 2.0)
+    assert exits == [1]
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_a_requested_stop_keeps_the_session_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_signals(monkeypatch)
+    exits, fired = _intercept_exit(monkeypatch)
+    service = Service(exit_timeout=0.1, grace_period=0.4)
+    service.add(_StuckComponent("runner", ()))
+
+    task = asyncio.create_task(service.run())
+    await asyncio.sleep(0.01)
+    service.request_shutdown()
+
+    # Inside the grace period the deadline is still pending.
+    assert not await asyncio.to_thread(fired.wait, 0.2)
+    assert await asyncio.to_thread(fired.wait, 2.0)
+    assert exits == [0]
+    assert service.exit_code == 0
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_a_crash_during_a_requested_stop_is_still_a_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_signals(monkeypatch)
+    _intercept_exit(monkeypatch)
+    service = Service(exit_timeout=60.0, grace_period=60.0)
+    service.add(FakeComponent("runner", ()))
+
+    task = asyncio.create_task(service.run())
+    service.request_shutdown()
+    service.request_shutdown(failure=True)
+    await asyncio.wait_for(task, timeout=2.0)
+
+    assert service.exit_code == 1
+
+
+async def test_a_wind_down_that_completes_disarms_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_signals(monkeypatch)
+    exits, fired = _intercept_exit(monkeypatch)
+    service = Service(exit_timeout=0.1, grace_period=0.0)
+    service.add(FakeComponent("runner", ()))
+
+    task = asyncio.create_task(service.run())
+    service.request_shutdown(failure=True)
+    await asyncio.wait_for(task, timeout=2.0)
+
+    assert service.exit_code == 1
+    assert not await asyncio.to_thread(fired.wait, 0.3)
+    assert exits == []
+
+
+async def test_bounding_the_process_exit_arms_a_fresh_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_signals(monkeypatch)
+    exits, fired = _intercept_exit(monkeypatch)
+    service = Service(exit_timeout=0.1, grace_period=0.0)
+    service.add(FakeComponent("runner", ()))
+
+    task = asyncio.create_task(service.run())
+    service.request_shutdown(failure=True)
+    await asyncio.wait_for(task, timeout=2.0)
+    # The interpreter's own teardown — thread joins the runtime does not
+    # control — is what this second deadline bounds.
+    service.bound_process_exit()
+
+    assert await asyncio.to_thread(fired.wait, 2.0)
+    assert exits == [1]
+
+
+class _CrashingModel(ReactorApp):
+    """A model whose run loop dies as soon as it starts."""
+
+    output: _GatedOut
+
+    def load(self, config_path: Path | None) -> None: ...
+
+    async def run(self) -> None:
+        raise RuntimeError("gpu fell off")
+
+
+def _bound_port(http: HttpServer) -> int:
+    assert http._server is not None
+    return http._server.servers[0].sockets[0].getsockname()[1]
+
+
+async def test_a_crashed_model_ends_the_service_in_seconds_with_a_subscriber_attached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_signals(monkeypatch)
+    _intercept_exit(monkeypatch)
+    monkeypatch.setattr(
+        "reactor_runtime.runner.runner.import_model_class", lambda ref: _CrashingModel
+    )
+    # The grace period is what an open `/events` subscription used to cost the
+    # exit: uvicorn waited it out before cutting the stream. Left long here to
+    # prove the wind-down does not depend on it any more.
+    cfg = RuntimeConfig(model_ref="x:_CrashingModel", host="127.0.0.1", port=0, grace_period=60.0)
+    service = Service(exit_timeout=30.0, grace_period=cfg.grace_period)
+    runner = Runner(cfg)
+    runner.request_shutdown = service.request_shutdown
+    metrics = RuntimeMetrics(version="0.0.0", model=cfg.model_ref)
+    http = HttpServer(cfg, runner, [], process_health=service.health, metrics=metrics)
+    service.add(runner)
+    service.add(http)
+
+    task = asyncio.create_task(service.run())
+    try:
+        for _ in range(500):
+            if http._server is not None and http._server.started:
+                break
+            await asyncio.sleep(0.01)
+        assert http._server is not None
+        assert http._server.started
+        # A subscriber holds the stream open across the crash and the exit, as
+        # a long-lived `/events` consumer does.
+        url = f"http://127.0.0.1:{_bound_port(http)}/events"
+        async with httpx.AsyncClient() as client, client.stream("GET", url) as stream:
+            assert stream.status_code == 200
+            started_at = asyncio.get_running_loop().time()
+            await asyncio.wait_for(task, timeout=10.0)
+            elapsed = asyncio.get_running_loop().time() - started_at
+        assert elapsed < 5.0
+        assert _state(runner) is SessionState.TERMINATED
+        assert service.exit_code == 1
+    finally:
+        if not task.done():
+            service.request_shutdown()
+            await asyncio.wait_for(task, timeout=10.0)
