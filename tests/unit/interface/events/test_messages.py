@@ -158,5 +158,21 @@ def test_an_inherited_field_redeclared_as_a_classvar_leaves_the_record() -> None
         Fixed(step=1, total=5)  # the rejection under test
 
 
+def test_a_classvar_redeclaration_survives_field_reordering() -> None:
+    class Mixed(Progress):
+        total: ClassVar[int] = 10  # type: ignore[ty:invalid-attribute-override]  # the redeclaration under test
+        defaulted: int = 1
+        required: str  # type: ignore[ty:dataclass-field-order]  # runtime reorders it
+
+    assert list(Mixed.__message_fields__) == ["step", "defaulted", "required"]
+    assert Mixed(step=1, required="r").to_wire_format()["data"] == {
+        "step": 1,
+        "required": "r",
+        "defaulted": 1,
+    }
+    with pytest.raises(TypeError):
+        Mixed(step=1, required="r", total=5)  # the rejection under test
+
+
 def test_a_root_message_is_declared_positionally() -> None:
     assert Progress(4).step == 4

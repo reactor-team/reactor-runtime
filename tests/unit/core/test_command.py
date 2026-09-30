@@ -186,6 +186,21 @@ def test_an_inherited_field_redeclared_as_a_classvar_leaves_the_record() -> None
         Pinned(level=0.9)  # the rejection under test
 
 
+def test_a_classvar_redeclaration_survives_field_reordering() -> None:
+    # A required and a defaulted field in the same subclass trigger the
+    # annotation reordering; the ClassVar must stay in the annotations so the
+    # dataclass masks the parent's field.
+    class Mixed(SetBrightness):
+        level: ClassVar[float] = 0.5  # type: ignore[ty:invalid-attribute-override]  # the redeclaration under test
+        defaulted: int = 1
+        required: str  # type: ignore[ty:dataclass-field-order]  # runtime reorders it
+
+    assert list(Mixed.__command_fields__) == ["mode", "defaulted", "required"]
+    assert "level" not in {f.name for f in dataclasses.fields(Mixed)}
+    with pytest.raises(TypeError):
+        Mixed(required="r", level=0.9)  # the rejection under test
+
+
 def test_the_nearer_base_decides_whether_a_shared_name_is_an_upload() -> None:
     class AsText(Command):
         channel: str = "main"

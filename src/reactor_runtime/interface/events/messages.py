@@ -180,6 +180,7 @@ def _build_message(cls: type[ModelMessage]) -> None:
     owner = cls.__qualname__
     no_default: list[str] = []
     has_default: list[str] = []
+    class_vars: list[str] = []
 
     for name in list(annotations):
         annotation = hints.get(name, annotations[name])
@@ -187,6 +188,7 @@ def _build_message(cls: type[ModelMessage]) -> None:
             # A ClassVar is not a field. Redeclaring an inherited field as one
             # takes it out of the dataclass, so it leaves the record too.
             fields.pop(name, None)
+            class_vars.append(name)
             continue
 
         raw = cls.__dict__.get(name, NO_DEFAULT)
@@ -226,7 +228,9 @@ def _build_message(cls: type[ModelMessage]) -> None:
         fields[name] = MessageFieldSpec(spec=spec, description=description, default=default)
 
     if no_default and has_default:
-        cls.__annotations__ = {key: annotations[key] for key in no_default + has_default}
+        cls.__annotations__ = {
+            key: annotations[key] for key in no_default + has_default + class_vars
+        }
 
     cls.__message_fields__ = fields
     apply_dataclass(cls, required=no_default, inherits=inherits)

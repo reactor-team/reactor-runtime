@@ -130,6 +130,7 @@ def _build_command(cls: type[Command]) -> None:
     owner = cls.__qualname__
     no_default: list[str] = []
     has_default: list[str] = []
+    class_vars: list[str] = []
 
     for name in list(annotations):
         annotation = hints.get(name, annotations[name])
@@ -137,6 +138,7 @@ def _build_command(cls: type[Command]) -> None:
             # A ClassVar is not a field. Redeclaring an inherited field as one
             # takes it out of the dataclass, so it leaves the record too.
             fields.pop(name, None)
+            class_vars.append(name)
             continue
 
         raw = cls.__dict__.get(name, NO_DEFAULT)
@@ -174,7 +176,9 @@ def _build_command(cls: type[Command]) -> None:
         fields[name] = CommandField(spec=spec, info=info)
 
     if no_default and has_default:
-        cls.__annotations__ = {key: annotations[key] for key in no_default + has_default}
+        cls.__annotations__ = {
+            key: annotations[key] for key in no_default + has_default + class_vars
+        }
 
     cls.__command_fields__ = fields
     # Read off the winning definition of every field, so a name one base
