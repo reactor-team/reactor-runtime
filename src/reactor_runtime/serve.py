@@ -22,6 +22,7 @@ import asyncio
 import dataclasses
 import importlib.metadata
 import logging
+import math
 import os
 import sys
 from pathlib import Path
@@ -165,6 +166,23 @@ def _float_env(name: str, default: float) -> float:
         raise SystemExit(f"{name} {raw!r} must be a number") from None
 
 
+def _duration_env(name: str, default: float) -> float:
+    """Return env var *name* as a finite, non-negative number of seconds.
+
+    For a window that arms a timer. ``float`` also parses ``inf`` and ``nan``,
+    which a timer cannot hold — an infinite deadline never fires and a NaN or
+    negative one fires at once — so those are refused at boot rather than
+    left to disable or trip the guarantee the window exists for.
+
+    Raises:
+        SystemExit: If the value is set but not a finite number of at least zero.
+    """
+    value = _float_env(name, default)
+    if not math.isfinite(value) or value < 0:
+        raise SystemExit(f"{name} {os.getenv(name, '').strip()!r} must be a finite number >= 0")
+    return value
+
+
 def _int_env(name: str, default: int) -> int:
     """Return env var *name* as an int, or *default* when unset/empty.
 
@@ -258,7 +276,8 @@ def _apply_env(cfg: RuntimeConfig) -> RuntimeConfig:
     dataclass defaults in place.
 
     Raises:
-        SystemExit: If ``PORT`` or a timeout is set but not numeric.
+        SystemExit: If ``PORT`` or a timeout is set but not numeric, or a
+            drain or exit window is not a finite number of at least zero.
     """
     port_raw = os.getenv("PORT", "").strip()
     try:
@@ -274,8 +293,8 @@ def _apply_env(cfg: RuntimeConfig) -> RuntimeConfig:
         host=os.getenv("HOST", cfg.host),
         port=port,
         orphan_timeout=_float_env("ORPHAN_TIMEOUT_SECONDS", cfg.orphan_timeout),
-        grace_period=_float_env("SIGTERM_GRACE_PERIOD", cfg.grace_period),
-        exit_timeout=_float_env("EXIT_TIMEOUT_SECONDS", cfg.exit_timeout),
+        grace_period=_duration_env("SIGTERM_GRACE_PERIOD", cfg.grace_period),
+        exit_timeout=_duration_env("EXIT_TIMEOUT_SECONDS", cfg.exit_timeout),
         recording=recording,
     )
 

@@ -501,6 +501,26 @@ def test_apply_env_rejects_a_non_numeric_exit_timeout(monkeypatch: pytest.Monkey
         _apply_env(RuntimeConfig(model_ref="fake:Model"))
 
 
+@pytest.mark.parametrize("name", ["EXIT_TIMEOUT_SECONDS", "SIGTERM_GRACE_PERIOD"])
+@pytest.mark.parametrize("value", ["inf", "-inf", "nan", "-1"])
+def test_apply_env_rejects_a_deadline_window_a_timer_cannot_hold(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    # Both windows feed the forced-exit deadline. `float` parses these, but an
+    # infinite timer never fires and a NaN or negative one fires at once, so
+    # the misconfiguration is refused at boot instead.
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(SystemExit, match="finite number >= 0"):
+        _apply_env(RuntimeConfig(model_ref="fake:Model"))
+
+
+def test_apply_env_accepts_a_zero_exit_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXIT_TIMEOUT_SECONDS", "0")
+
+    assert _apply_env(RuntimeConfig(model_ref="fake:Model")).exit_timeout == 0.0
+
+
 def test_apply_env_rejects_a_non_integer_port(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PORT", "eighty-ninety")
 
