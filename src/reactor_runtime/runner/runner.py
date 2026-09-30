@@ -268,8 +268,9 @@ class Runner(ServiceComponent, ConnectionSink):
         Bringing the model up is the one step that can fail outright. A failure
         here is terminal for the process — there is no model to serve — so it is
         caught and turned into ``INITIALIZATION_FAIL`` (moving the session to
-        ``TERMINATED``) rather than raised; the dispatch on that move asks the
-        service to bring the process down. ``start`` itself always returns.
+        ``TERMINATED``, with the error as its detail) rather than raised; the
+        dispatch on that move asks the service to bring the process down.
+        ``start`` itself always returns.
 
         The model load runs off the event loop (it may block while it reads
         weights), so the HTTP surface — already up by the time this runs — stays
@@ -303,10 +304,14 @@ class Runner(ServiceComponent, ConnectionSink):
                 failure=self._on_model_failure,
             )
             bridge.start()
-        except Exception:
+        except Exception as exc:
             self._model_metrics.load_failed(since=started_at)
             logger.exception("model failed to load; terminating the session")
-            self._sm.send(SessionEvent.INITIALIZATION_FAIL)
+            self._sm.send(
+                SessionEvent.INITIALIZATION_FAIL,
+                reason=EndReason.ERROR,
+                error=str(exc) or repr(exc),
+            )
             return
         self._model_metrics.loaded(since=started_at)
         self._bridge = bridge
