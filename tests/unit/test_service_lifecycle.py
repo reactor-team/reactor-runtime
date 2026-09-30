@@ -464,7 +464,7 @@ async def test_a_crashed_model_ends_the_service_in_seconds_with_a_subscriber_att
         assert http._server is not None
         assert http._server.started
         # A subscriber holds the stream open across the crash and the exit, as
-        # the platform's own event consumer does.
+        # a long-lived `/events` consumer does.
         url = f"http://127.0.0.1:{_bound_port(http)}/events"
         async with httpx.AsyncClient() as client, client.stream("GET", url) as stream:
             assert stream.status_code == 200
