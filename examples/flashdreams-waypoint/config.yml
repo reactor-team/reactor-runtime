@@ -1,0 +1,13 @@
+# Read by the action2v family class at load. The runtime passes this file's
+# path through and does not parse it.
+
+# The FlashDreams application slug. It must belong to the action2v family.
+application: action2v-waypoint-1-5-1b
+
+# Start every session from the adapter's own example image, so a client sees
+# a world before it uploads one. `false` waits for set_image.
+example_image: true
+
+# Pipeline steps run at load before the first client waits. Waypoint's
+# pipeline compiles nothing at load, so none are needed.
+warmup_steps: 0
