@@ -194,8 +194,8 @@ class Action2V(FlashDreamsApp):
     @event(
         name="set_image",
         description=(
-            "Upload the image the world starts from. PNG or JPEG. The next step starts a "
-            "new world from it."
+            "Upload the image the world starts from. PNG or JPEG, up to 4096x4096 pixels. "
+            "The next step starts a new world from it."
         ),
     )
     async def set_image(
@@ -210,6 +210,8 @@ class Action2V(FlashDreamsApp):
             # Pillow is missing from the image: a deployment fault, not a bad
             # upload. The runtime answers internal_error and logs the traceback.
             raise
+        except _ImageTooLargeError as exc:
+            raise CommandError("image_too_large", str(exc)) from exc
         except Exception as exc:
             raise CommandError("undecodable_image", "The file is not a decodable image.") from exc
         self.state._image = data
@@ -230,15 +232,36 @@ class Action2V(FlashDreamsApp):
         self.state._wheel += wheel
 
 
+MAX_SEED_PIXELS = 4096 * 4096
+"""The most pixels a seed upload may hold.
+
+The adapter sizes the seed to the model's frame itself, so nothing is gained
+above this, and the bound is what keeps a small file that declares a huge
+image from allocating hundreds of megabytes when it is decoded.
+"""
+
+
+class _ImageTooLargeError(ValueError):
+    """The upload declares more pixels than :data:`MAX_SEED_PIXELS`."""
+
+
 def _as_rgb_png(data: bytes) -> bytes:
     """Decode an upload, apply its EXIF orientation, and re-encode it as an RGB PNG.
 
     The adapter's seed loader accepts RGB and RGBA images and sizes them itself,
-    so the seed is kept at its own size and only its mode is settled here.
+    so the seed is kept at its own size and only its mode is settled here. The
+    declared size is checked against :data:`MAX_SEED_PIXELS` before any pixel
+    is decoded.
     """
     from PIL import Image, ImageOps  # a dependency of the workspace, not of the runtime
 
     with Image.open(io.BytesIO(data)) as decoded:
+        width, height = decoded.size
+        if width * height > MAX_SEED_PIXELS:
+            raise _ImageTooLargeError(
+                f"The image is {width}x{height}; a seed image may hold at most "
+                f"{MAX_SEED_PIXELS} pixels."
+            )
         image = ImageOps.exif_transpose(decoded).convert("RGB")
     out = io.BytesIO()
     image.save(out, format="PNG")
