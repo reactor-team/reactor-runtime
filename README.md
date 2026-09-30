@@ -95,6 +95,33 @@ class MyModel(ReactorApp):
 
 Command handlers and lifecycle hooks run between steps, never during one. The default `run()` is the loop that drives the three hooks. Override it to write your own loop against `emit()`, `send()`, `@event`, `self.connected`, and the tracks; `process_input()`, `generate()`, and `process_output()` are then not called. Do that for a loop that is not one step per emit, such as a renderer that emits several times per step or a model that must block on an input.
 
+Stateful models that use [`reactor-realtime-engine`](https://pypi.org/project/reactor-realtime-engine/) can use the optional `RealtimePipeline` adapter instead of writing the queue and lifecycle glue themselves. Include `reactor-realtime-engine>=0.4,<0.5` in the model's dependencies, implement `build_engine()`, and declare the client-controlled state:
+
+```python
+from pathlib import Path
+
+from reactor_runtime import InputState
+from reactor_runtime.realtime import AdvancementMode, RealtimePipeline
+
+
+class Controls(InputState):
+    prompt: str = "a sunny meadow"
+
+
+class MyEngineModel(RealtimePipeline):
+    state: Controls
+    advancement_mode = AdvancementMode.AUTOMATIC
+
+    def build_engine(self, config_path: Path | None):
+        return load_my_realtime_engine(config_path)
+```
+
+The adapter attaches once per runtime session, snapshots `state` into engine conditioning, pauses automatic stepping when the last client disconnects, and resumes without discarding engine-owned state. Engine outputs that are runtime `Output` or `ModelMessage` values are routed automatically; override `on_output()` for another chunk type.
+
+Robotics and closed-loop models can set `advancement_mode = AdvancementMode.EXTERNAL` and await `advance_engine()` from an `@event` handler. Each call produces one correlated engine advance and resolves only after its output has been routed; a terminal engine rejection raises `RealtimeStepError` instead of leaving the client waiting.
+
+Because one runtime process currently hosts one session, this adapter is deliberately B=1. It provides the same authoring and pacing contract, but cross-session batching requires a worker that shares one engine host across multiple runtime sessions.
+
 Scaffold, build, and run it with the CLI:
 
 ```sh
