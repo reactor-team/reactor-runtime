@@ -334,6 +334,21 @@ async def test_set_image_keeps_the_upload_as_rgb_and_starts_a_new_rollout(
         assert (kept.mode, kept.size) == ("RGB", (20, 10))
 
 
+async def test_set_image_rejects_an_image_that_declares_too_many_pixels(tmp_path: Path) -> None:
+    app, _ = _configured(tmp_path)
+    await app._dispatch_reactor_event(SessionStarted("s"))
+    before = app.state._image
+    # A flat image compresses to a few kilobytes but declares 25 million pixels.
+    huge = _png((5000, 5000), mode="L")
+    assert len(huge) < 64 * 1024
+    with pytest.raises(CommandError) as excinfo:
+        await app.set_image(UploadedFile(name="huge.png", mime_type="image/png", data=huge))
+    assert excinfo.value.code == "image_too_large"
+    assert "5000x5000" in excinfo.value.message
+    assert app.state._image is before
+    assert app.state._rollout_id == 1
+
+
 async def test_set_image_rejects_a_file_that_is_not_an_image(tmp_path: Path) -> None:
     app, _ = _configured(tmp_path)
     await app._dispatch_reactor_event(SessionStarted("s"))
