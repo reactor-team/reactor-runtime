@@ -14,6 +14,15 @@ A consumer reconciles against the runtime as the source of truth — it reads a
 snapshot's sequence to replay anything it missed and follow live. The consumer's
 view is only ever a mirror; the runtime stays authoritative.
 
+Periodic quality readings are not journal facts. A
+:class:`~reactor_runtime.core.model.StatsEvent` is published live only, to the
+subscribers that asked for readings (:meth:`EventStream.subscribe_with_live`):
+it takes no sequence number, is not kept for replay, and is admitted to a
+subscriber's queue only while the queue has room to spare. A reading arrives
+every few seconds per connection; keeping it out of the history and out of a
+crowded queue is what guarantees it can never cost a consumer a lifecycle fact.
+A plain :meth:`EventStream.subscribe` never sees one.
+
 Memory is bounded so a busy, hours-long session cannot grow the journal without
 limit. Replay history is capped at a fixed number of recent events, and each
 subscriber's live queue is capped too — a consumer that falls behind has its
@@ -30,8 +39,9 @@ import contextlib
 from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import cast
 
-from reactor_runtime.core import SessionEvent, SessionState, TransitionEvent
+from reactor_runtime.core import SessionEvent, SessionState, StatsEvent, TransitionEvent
 
 DEFAULT_HISTORY_LIMIT = 4096
 """How many recent events the journal retains for replay by default.
@@ -48,7 +58,10 @@ Past this, the oldest queued event is dropped to admit the newest, so a stalled
 or slow consumer bounds its own memory instead of the writer's.
 """
 
-_SubscriberQueue = asyncio.Queue[tuple[int, "TransitionEvent"]]
+JournalItem = tuple[int, TransitionEvent] | StatsEvent
+"""What a subscription yields: a sequenced journal fact, or a live reading."""
+
+_SubscriberQueue = asyncio.Queue[JournalItem]
 
 
 @dataclass(frozen=True)
@@ -112,7 +125,13 @@ class EventStream:
         self._seq = 0
         self._history: deque[tuple[int, TransitionEvent]] = deque(maxlen=history_limit)
         self._subscriber_limit = subscriber_limit
+        # A live reading is admitted only while a subscriber's queue is under
+        # half full, so readings alone can never fill it: the other half is
+        # always there for the journal facts.
+        self._live_limit = max(1, subscriber_limit // 2)
         self._subscribers: set[_SubscriberQueue] = set()
+        # The subset of subscribers that also take live readings.
+        self._live_subscribers: set[_SubscriberQueue] = set()
         self._state: SessionState | None = None
         self._connections = 0
 
@@ -137,7 +156,7 @@ class EventStream:
         for queue in self._subscribers:
             self._offer(queue, item)
 
-    def _offer(self, queue: _SubscriberQueue, item: tuple[int, TransitionEvent]) -> None:
+    def _offer(self, queue: _SubscriberQueue, item: JournalItem) -> None:
         """Hand *item* to a subscriber, shedding its oldest event if the queue is full.
 
         A full queue means the consumer is not keeping up. Dropping the oldest
@@ -154,6 +173,22 @@ class EventStream:
                 queue.get_nowait()
             queue.put_nowait(item)
 
+    def publish_live(self, event: StatsEvent) -> None:
+        """Deliver a reading to the live subscribers connected right now.
+
+        Unlike :meth:`emit`, nothing is journalled: the reading takes no
+        sequence number, is not kept for replay, and does not touch the tracked
+        session state. A subscriber whose queue is already half full is skipped
+        for this reading rather than made to shed anything — readings are
+        periodic, so the next one replaces it, while a journal fact dropped from
+        a crowded queue would have to be reconciled.
+
+        Called only on the event loop that owns the stream, like :meth:`emit`.
+        """
+        for queue in self._live_subscribers:
+            if queue.qsize() < self._live_limit:
+                queue.put_nowait(event)
+
     def subscribe(self, since: int | None = None) -> AsyncIterator[tuple[int, TransitionEvent]]:
         """Return an iterator over ``(seq, event)`` pairs after *since*, then live ones.
 
@@ -167,15 +202,31 @@ class EventStream:
         from the next event. The iterator runs until the caller stops consuming
         it.
         """
+        # A queue outside the live set is never handed a StatsEvent.
+        return cast("AsyncIterator[tuple[int, TransitionEvent]]", self._register(since, live=False))
+
+    def subscribe_with_live(self, since: int | None = None) -> AsyncIterator[JournalItem]:
+        """Like :meth:`subscribe`, and also yield the readings published live.
+
+        Each :class:`StatsEvent` published while subscribed (see
+        :meth:`publish_live`) is yielded bare, between the ``(seq, event)``
+        pairs, in the order it was published. Replay never includes one.
+        """
+        return self._register(since, live=True)
+
+    def _register(self, since: int | None, *, live: bool) -> AsyncIterator[JournalItem]:
+        """Register a subscriber queue and return its stream; see :meth:`subscribe`."""
         start = self._seq if since is None else since
         queue: _SubscriberQueue = asyncio.Queue(self._subscriber_limit)
         self._subscribers.add(queue)
+        if live:
+            self._live_subscribers.add(queue)
         backlog = [item for item in self._history if item[0] > start]
         return self._stream(queue, backlog)
 
     async def _stream(
         self, queue: _SubscriberQueue, backlog: list[tuple[int, TransitionEvent]]
-    ) -> AsyncIterator[tuple[int, TransitionEvent]]:
+    ) -> AsyncIterator[JournalItem]:
         """Yield the captured backlog, then live events, deregistering on exit.
 
         The queue is registered before the backlog is captured with no await in
@@ -190,6 +241,7 @@ class EventStream:
                 yield await queue.get()
         finally:
             self._subscribers.discard(queue)
+            self._live_subscribers.discard(queue)
 
     def snapshot(self) -> SessionSnapshot:
         """Return the current session state for a consumer to reconcile against."""

@@ -7,6 +7,7 @@ import pytest
 from reactor_runtime.core import (
     SessionEvent,
     SessionState,
+    StatsEvent,
     Transition,
     TransitionEvent,
 )
@@ -249,3 +250,70 @@ async def test_a_slow_subscriber_does_not_starve_a_prompt_one() -> None:
     assert got == [(seq, _journal(str(seq - 1))) for seq in range(1, 6)]
     await _aclose(prompt)
     await _aclose(slow)
+
+
+def _reading(n: int) -> StatsEvent:
+    return StatsEvent(name="client_stats", detail={"n": n}, ts_ms=0)
+
+
+async def test_a_live_reading_reaches_live_subscribers_only() -> None:
+    stream = EventStream()
+    plain = stream.subscribe()
+    live = stream.subscribe_with_live()
+
+    stream.publish_live(_reading(1))
+    stream.emit(_journal("after"))
+
+    assert await anext(live) == _reading(1)
+    assert await anext(live) == (1, _journal("after"))
+    # The plain subscriber goes straight to the journal fact.
+    assert await _next(plain) == (1, _journal("after"))
+    await _aclose(plain)
+    await cast(AsyncGenerator[object, None], live).aclose()
+
+
+async def test_a_live_reading_takes_no_sequence_number_and_is_never_replayed() -> None:
+    stream = EventStream()
+    stream.emit(_journal("one"))
+    stream.publish_live(_reading(1))
+    stream.emit(_journal("two"))
+
+    assert stream.snapshot().last_seq == 2
+    replay = stream.subscribe_with_live(since=0)
+    assert await anext(replay) == (1, _journal("one"))
+    assert await anext(replay) == (2, _journal("two"))
+    await cast(AsyncGenerator[object, None], replay).aclose()
+
+
+async def test_a_live_reading_never_displaces_a_journal_fact() -> None:
+    # A queue of 4 admits readings only while it holds fewer than 2 items.
+    stream = EventStream(subscriber_limit=4)
+    live = stream.subscribe_with_live()
+
+    stream.emit(_journal("one"))
+    stream.emit(_journal("two"))
+    for n in range(5):
+        stream.publish_live(_reading(n))  # Skipped: the queue is already half full.
+    stream.emit(_journal("three"))
+    stream.emit(_journal("four"))
+
+    received = [await anext(live) for _ in range(4)]
+    assert received == [
+        (1, _journal("one")),
+        (2, _journal("two")),
+        (3, _journal("three")),
+        (4, _journal("four")),
+    ]
+    await cast(AsyncGenerator[object, None], live).aclose()
+
+
+async def test_closing_a_live_subscription_stops_its_readings() -> None:
+    stream = EventStream()
+    live = stream.subscribe_with_live()
+    stream.publish_live(_reading(1))
+    assert await anext(live) == _reading(1)
+
+    await cast(AsyncGenerator[object, None], live).aclose()
+
+    assert not stream._live_subscribers  # Deregistered with the subscription.
+    stream.publish_live(_reading(2))  # No one left to hand it to; no error.

@@ -4,10 +4,10 @@ import logging
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -48,6 +48,7 @@ from reactor_runtime.core import (
     SessionEvent,
     SessionStarted,
     SessionState,
+    StatsEvent,
     TrackData,
     TrackInfo,
     TrackKind,
@@ -2572,3 +2573,93 @@ async def test_journal_self_loops_are_logged_at_debug(
         and getattr(r, "reactor_fields", {}).get("event") == "chunk_ready"
     )
     assert record.levelno == logging.DEBUG
+
+
+def _one_track_batch(**metrics: float) -> ClientStatsBatch:
+    return ClientStatsBatch(
+        track_stats=[
+            ClientTrackStat(
+                timestamp=1_700_000_000_000,
+                track_name="main_video",
+                kind="video",
+                direction="recvonly",
+                codec="VP9",
+                paused=False,
+                metrics=metrics,
+            )
+        ],
+        connection_stat=ClientConnectionStat(
+            timestamp=1_700_000_000_000, metrics={"connection_rtt_ms": 25.0}
+        ),
+    )
+
+
+async def test_client_stats_are_published_live_with_the_session_and_connection(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
+    live = started_runner.events.subscribe_with_live()
+
+    started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=30.0))
+
+    reading = await asyncio.wait_for(anext(live), timeout=1.0)
+    assert isinstance(reading, StatsEvent)
+    assert reading.name == "client_stats"
+    assert reading.detail == {
+        "session_id": _LIVE_SESSION_ID,
+        "conn_id": ConnId(3),
+        "track_stats": [
+            {
+                "timestamp": 1_700_000_000_000,
+                "track_name": "main_video",
+                "kind": "video",
+                "direction": "recvonly",
+                "codec": "VP9",
+                "paused": False,
+                "metrics": {"frames_per_second": 30.0},
+            }
+        ],
+        "connection_stat": {
+            "timestamp": 1_700_000_000_000,
+            "metrics": {"connection_rtt_ms": 25.0},
+        },
+    }
+    await cast(AsyncGenerator[object, None], live).aclose()
+
+
+async def test_client_stats_are_not_journalled(started_runner: Runner) -> None:
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
+    seq_before = started_runner.events.snapshot().last_seq
+
+    started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=30.0))
+
+    assert started_runner.events.snapshot().last_seq == seq_before
+
+
+async def test_client_stats_are_not_published_before_a_session_starts(
+    started_runner: Runner,
+) -> None:
+    live = started_runner.events.subscribe_with_live()
+
+    started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=30.0))
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
+
+    # The first item is the session start, not a reading from before it.
+    first = await asyncio.wait_for(anext(live), timeout=1.0)
+    assert not isinstance(first, StatsEvent)
+    await cast(AsyncGenerator[object, None], live).aclose()
+
+
+async def test_client_stats_leave_out_values_json_cannot_carry(started_runner: Runner) -> None:
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
+    live = started_runner.events.subscribe_with_live()
+
+    started_runner.client_stats_received(
+        ConnId(3),
+        _one_track_batch(jitter_ms=float("nan"), bitrate_bps=float("inf"), packets_lost=4.0),
+    )
+
+    reading = await asyncio.wait_for(anext(live), timeout=1.0)
+    assert isinstance(reading, StatsEvent)
+    assert reading.detail["track_stats"][0]["metrics"] == {"packets_lost": 4.0}
+    await cast(AsyncGenerator[object, None], live).aclose()

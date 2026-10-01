@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.metadata
+import math
 import time
 import uuid
 from collections.abc import Callable, Coroutine, Mapping
@@ -46,6 +47,7 @@ from reactor_runtime.core import (
     SessionEvent,
     SessionStarted,
     SessionState,
+    StatsEvent,
     TrackDirection,
     Transition,
     TransitionEvent,
@@ -111,6 +113,11 @@ def _stamp_log_state(state: SessionState) -> None:
     looking at showed them.
     """
     set_state(state.name.lower(), _RUNTIME_STATES[state].value)
+
+
+def _finite(metrics: Mapping[str, float]) -> dict[str, float]:
+    """Keep the metric values JSON can carry: finite numbers, not NaN or infinity."""
+    return {key: value for key, value in metrics.items() if math.isfinite(value)}
 
 
 def _recording_id_from(params: Mapping[str, Any]) -> str:
@@ -554,24 +561,30 @@ class Runner(ServiceComponent, ConnectionSink):
         self._reply_clip(conn_id, request_id, lambda: self._recorder.request_recording())
 
     def client_stats_received(self, conn_id: ConnId, batch: ClientStatsBatch) -> None:
-        """Log a client-reported quality batch at debug, tagged with this session and connection.
+        """Log a client-reported quality batch and publish it live on the egress stream.
 
         The client is the only vantage point onto its own receive-side
-        quality, so each reading is logged as reported: one line for the
-        connection-wide reading, when the batch carries one, and one per
-        track. At that rate per connection the lines are for local debugging,
-        so they are logged at debug.
+        quality, so each fact is passed on as reported, tagged with the
+        session and the connection it came from. *conn_id* is the runtime's
+        own identity for the connection, and the session id is the one the
+        session is known by, never ``_session_id``, the fixed transport id.
+        Neither is ever anything the payload claims, because the payload
+        carries neither.
 
-        The session id comes from the log's session context, which stamps the
-        id the session is known by on every record while it is live, never
-        ``_session_id``, the fixed transport id. *conn_id* is the runtime's own
-        identity for the connection. Neither is ever anything the payload
-        claims, because the payload carries neither.
+        Logging: one line for the connection-wide reading, when the batch
+        carries one, and one per track. At that rate per connection the lines
+        are for local debugging, so they are logged at debug. Their session id
+        comes from the log's session context. A reading's metrics go under one
+        ``metrics`` field: their names are the client's to choose, so they are
+        logged as data inside that value, never as field names of their own,
+        and can neither take the place of the runtime's own fields nor break
+        the log line's format.
 
-        A reading's metrics go under one ``metrics`` field. Their names are the
-        client's to choose, so they are logged as data inside that value, never
-        as field names of their own: a name can then neither take the place of
-        one of the runtime's own fields nor break the log line's format.
+        Publishing: the whole batch as one ``client_stats`` reading on
+        :attr:`events`, for an external consumer to forward. It is published
+        only once a session has started, since before that there is no session
+        id to tag it with, and a metric value that isn't a finite number is
+        left out, since JSON has no way to carry it.
         """
         if batch.connection_stat is not None:
             logger.debug(
@@ -592,6 +605,39 @@ class Runner(ServiceComponent, ConnectionSink):
                 timestamp=stat.timestamp,
                 metrics=dict(stat.metrics),
             )
+
+        if self._recording_id == SESSION_ID:
+            return
+        self._events.publish_live(
+            StatsEvent(
+                name="client_stats",
+                detail={
+                    "session_id": self._recording_id,
+                    "conn_id": conn_id,
+                    "track_stats": [
+                        {
+                            "timestamp": stat.timestamp,
+                            "track_name": stat.track_name,
+                            "kind": stat.kind,
+                            "direction": stat.direction,
+                            "codec": stat.codec,
+                            "paused": stat.paused,
+                            "metrics": _finite(stat.metrics),
+                        }
+                        for stat in batch.track_stats
+                    ],
+                    "connection_stat": (
+                        {
+                            "timestamp": batch.connection_stat.timestamp,
+                            "metrics": _finite(batch.connection_stat.metrics),
+                        }
+                        if batch.connection_stat is not None
+                        else None
+                    ),
+                },
+                ts_ms=time.time_ns() // 1_000_000,
+            )
+        )
 
     def _reply_clip(
         self, conn_id: ConnId, request_id: str, resolve: Callable[[], ClipResult]

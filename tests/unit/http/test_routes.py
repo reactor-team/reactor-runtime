@@ -9,7 +9,7 @@ import pytest
 from fastapi import FastAPI, HTTPException, Request
 
 from reactor_runtime import InputField, Output, ReactorApp, Video, event
-from reactor_runtime.core import Health, HealthStatus, RuntimeConfig
+from reactor_runtime.core import Health, HealthStatus, RuntimeConfig, StatsEvent
 from reactor_runtime.http import EgressRoutes, RecordingRoutes, SessionRoutes, UploadRoutes
 from reactor_runtime.http.routes import _read_capped, _resume_from, _stream_events
 from reactor_runtime.metrics import RuntimeMetrics
@@ -566,6 +566,26 @@ async def test_events_replays_the_backlog_as_sse(
         assert second.startswith("id: 2\n")
         body = json.loads(second.split("data: ", 1)[1].strip())
         assert body["to"] == "ready"
+    finally:
+        await stream.aclose()
+
+
+async def test_events_streams_live_readings_without_an_id_between_journal_facts(
+    client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    _, runner = client
+    stream = _stream_events(runner, None)
+    try:
+        # Prime the generator so its subscription is registered before publishing.
+        pending = asyncio.ensure_future(anext(stream))
+        await asyncio.sleep(0)
+        runner.events.publish_live(StatsEvent(name="client_stats", detail={"n": 1}, ts_ms=7))
+
+        reading = await asyncio.wait_for(pending, timeout=1.0)
+        assert reading.startswith("data: ")
+        assert "id:" not in reading
+        body = json.loads(reading.split("data: ", 1)[1].strip())
+        assert body == {"type": "stats", "event": "client_stats", "ts": 7, "detail": {"n": 1}}
     finally:
         await stream.aclose()
 
