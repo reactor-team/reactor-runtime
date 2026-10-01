@@ -119,6 +119,49 @@ logger.info("scene changed", prompt=self.prompt)
 
 Records render as `key=value` text by default, or as one JSON object per line under `REACTOR_LOG_FORMAT=json`. While a session is live, its id is stamped on every record, so tracing one run's logs never requires threading an id through your call sites. Every record also carries the lifecycle phase it was written in, at both granularities: `state`, the session state machine's word, and `runtime_state`, the coarse word the health endpoint serves — so the logs of one phase — loading weights, a live session, teardown — are filterable by whichever vocabulary you are reading off another surface. The stamp is applied where records are written rather than where they are made, so a plain `logging.getLogger(__name__)` and the libraries your model imports are covered too.
 
+### Serving a FlashDreams model
+
+A model built on [NVIDIA FlashDreams](https://github.com/NVIDIA/flashdreams) is served by naming it. `reactor_runtime.flashdreams` ships a `ReactorApp` per FlashDreams family, and the family class supplies the state, the commands, and the step; the FlashDreams adapter registered under the model's slug supplies the pipeline, the frame size and rate, and the model's own input mapping. The workspace is two YAML files and no Python:
+
+```yaml
+# reactor.yaml
+runtime:
+  import: reactor_runtime.flashdreams.action2v:Action2V   # the family class
+  config: config.yml
+
+# config.yml
+application: action2v-waypoint-1-5-1b   # the FlashDreams application slug
+example_image: true                     # start each session from the adapter's example image
+```
+
+`action2v` is the family driven by keyboard and mouse. Its client gets `set_image`, `set_keys`, `move`, `set_seed`, `set_paused`, and `reset`, and frames on `main_video` at the size and rate the adapter declares. FlashDreams is not a dependency of the runtime: the workspace's `requirements.txt` installs its packages, and the class imports them when the model loads.
+
+For more control, subclass the family class and override the same hooks as on any `ReactorApp`. Here `process_input()` scales the pointer motion by a field the subclass adds to the family's state:
+
+```python
+from dataclasses import replace
+
+from reactor_runtime import InputField
+from reactor_runtime.flashdreams.action2v import Action2V, Action2VInput, Action2VState
+
+
+class WaypointState(Action2VState):
+    mouse_sensitivity: float = InputField(default=1.0, ge=0.0, le=4.0)
+
+
+class WaypointWorld(Action2V):
+    application = "action2v-waypoint-1-5-1b"
+    state: WaypointState
+
+    async def process_input(self) -> Action2VInput:
+        step = await super().process_input()
+        k = self.state.mouse_sensitivity
+        control = replace(step.control, mouse_dx=step.control.mouse_dx * k, mouse_dy=step.control.mouse_dy * k)
+        return replace(step, control=control)
+```
+
+`process_output()` decides what the client receives, including what happens when a rollout reaches the model's limit, and `model_class` names the model half, whose `initialize_cache()` is the one method a model with unusual starting conditions overrides.
+
 ## Install
 
 Everything runs through the [`reactor` CLI](https://docs.reactor.inc/deploy/platform/installation). There is nothing to install on your host but the CLI and Docker; the runtime ships inside the image the CLI builds for your workspace.
