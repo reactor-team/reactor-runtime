@@ -1,0 +1,15 @@
+# Read by the cam2v family class at load. The runtime passes this file's path
+# through and does not parse it.
+
+# The FlashDreams application slug. It must belong to the cam2v family.
+application: cam2v-lingbot
+
+# Start every session from the adapter's own example data: a first frame, a
+# prompt, the camera intrinsics, and the world scale. Six examples ship,
+# numbered 0 to 5. Instead of these two keys, a workspace may name `prompt`,
+# `image_path`, `intrinsic_path`, and `pose_path` or `world_scale` itself.
+example_data: true
+example_idx: 0
+
+# Pipeline steps run at load before the first client waits. None are needed.
+warmup_steps: 0
