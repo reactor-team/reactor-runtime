@@ -9,8 +9,10 @@ commands, or the runtime's loop, and nothing imports
 :class:`~reactor_runtime.distributed.DistributedRunner` unchanged.
 
 A family subclass writes one method, :meth:`FlashDreamsModel.initialize_cache`,
-which starts a rollout from what the step input carries. Everything else on this
-class is the same for every FlashDreams model.
+which starts a rollout from what the step input carries, and overrides
+``_pipeline_input()`` when the pipeline's per-step input is not the step's
+``control`` as the application built it. Everything else on this class is the
+same for every FlashDreams model.
 
 FlashDreams and torch are imported inside the methods that need them, so this
 module imports, and its tests run, on a machine without either.
@@ -54,7 +56,8 @@ class FlashDreamsModel:
     starts a new rollout through :meth:`initialize_cache`. It may also carry
     ``prompt``, which a new value in the same rollout swaps in place when the
     model class supports it, and ``control``, which reaches the pipeline as its
-    per-step ``input``.
+    per-step ``input`` unless the model class builds that input itself in
+    ``_pipeline_input()``.
 
     Attributes:
         app: The FlashDreams application the slug resolved to, after ``load()``.
@@ -185,7 +188,7 @@ class FlashDreamsModel:
             video = self.pipeline.generate(
                 autoregressive_index=index,
                 cache=self.cache,
-                input=getattr(step, "control", None),
+                input=self._pipeline_input(step, index),
             )
             self.pipeline.finalize(autoregressive_index=index, cache=self.cache)
         except Exception:
@@ -218,6 +221,16 @@ class FlashDreamsModel:
             f"{type(self).__name__} must define initialize_cache(); the generic "
             "FlashDreamsModel does not know what starts a rollout."
         )
+
+    def _pipeline_input(self, step: Any, index: int) -> Any:
+        """Return the pipeline's per-step input for *step* at *index*.
+
+        The default hands the step's ``control`` to the pipeline as it is, which
+        is what a family whose adapter builds the control type does. A family
+        whose pipeline input is built from the step on the GPU, such as camera
+        poses, overrides this.
+        """
+        return getattr(step, "control", None)
 
     def _replace_prompt(self, step: Any) -> None:
         """Swap the prompt within the rollout the model holds.
