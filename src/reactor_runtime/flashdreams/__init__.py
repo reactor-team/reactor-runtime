@@ -9,7 +9,9 @@ loader, the key mapping.
 
 This package is the runtime's side of that seam. :mod:`.contract` is what the
 two halves of a model exchange, :mod:`.model` is the generic model half every
-family builds on, and :mod:`.app` is the generic application half. FlashDreams
+family builds on, and :mod:`.app` is the generic application half. Each family
+is one module beside them, named after it: :mod:`.cam2v`; :mod:`.seed_image`
+holds what the families that start from an upload share. FlashDreams
 is not a dependency of the runtime: a workspace installs it, and the modules
 here import it only when a model loads. Like :mod:`reactor_runtime.distributed`,
 nothing else in the runtime imports this package.
