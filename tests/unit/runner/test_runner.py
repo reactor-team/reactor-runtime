@@ -2468,8 +2468,10 @@ async def test_client_stats_are_logged_with_session_and_connection_identity(
     # The id the session is known by, not the fixed transport id.
     assert connection_fields["session_id"] == _LIVE_SESSION_ID
     assert connection_fields["conn_id"] == ConnId(3)
-    assert connection_fields["available_outgoing_bitrate_bps"] == 2_000_000
-    assert connection_fields["time_to_connect_ms"] == 850
+    assert connection_fields["metrics"] == {
+        "available_outgoing_bitrate_bps": 2_000_000,
+        "time_to_connect_ms": 850,
+    }
 
     record = next(r for r in caplog.records if r.getMessage() == "client stats")
     # Both lines stay below the default log level.
@@ -2483,21 +2485,10 @@ async def test_client_stats_are_logged_with_session_and_connection_identity(
     assert fields["direction"] == "recvonly"
     assert fields["codec"] == "VP9"
     assert fields["paused"] is False
-    assert fields["bitrate_bps"] == 950_000
-    assert fields["frames_per_second"] == 29.5
-    assert fields["packets_lost"] == 4
-    assert fields["packets_received"] == 996
-    assert fields["jitter_ms"] == 12.0
-    assert fields["round_trip_time_ms"] == 48.0
-    assert fields["frames_decoded"] == 900
-    assert fields["frames_dropped"] == 2
-    assert fields["frame_width"] == 1280
-    assert fields["frame_height"] == 720
-    assert fields["nack_count"] == 3
-    assert fields["keyframe_requests"] == 1
+    assert fields["metrics"] == dict(stat.metrics)
 
 
-async def test_client_stats_metrics_cannot_clobber_the_runtimes_own_identity_fields(
+async def test_client_stats_metric_names_stay_inside_the_metrics_field(
     started_runner: Runner, caplog: pytest.LogCaptureFixture
 ) -> None:
     stat = ClientTrackStat(
@@ -2507,22 +2498,9 @@ async def test_client_stats_metrics_cannot_clobber_the_runtimes_own_identity_fie
         direction="recvonly",
         codec="VP9",
         paused=False,
-        # A client claiming its own session_id/conn_id under a metric name
-        # must not reach the log line, let alone override the real ones —
-        # metrics is client content, this identity is the runtime's own. The
-        # same goes for the fields the session context stamps, which would
-        # otherwise yield to an explicit one. "msg" is dropped for a different
-        # reason: it collides with StructuredLogger.info's own positional
-        # parameter and would raise TypeError rather than merely clobber a
-        # field.
-        metrics={
-            "session_id": -1,
-            "state": -1,
-            "runtime_state": -1,
-            "conn_id": -1,
-            "msg": -1,
-            "bitrate_bps": 950_000,
-        },
+        # Metric names are the client's to choose. Named like the runtime's own
+        # fields, they stay data inside `metrics` and leave the real fields alone.
+        metrics={"session_id": -1, "state": -1, "conn_id": -1, "msg": -1, "bitrate_bps": 950_000},
     )
     batch = ClientStatsBatch(track_stats=[stat], connection_stat=None)
     started_runner.start_session({"session_id": _LIVE_SESSION_ID})
@@ -2533,10 +2511,31 @@ async def test_client_stats_metrics_cannot_clobber_the_runtimes_own_identity_fie
     fields = _stamped_fields(record)
     assert fields["session_id"] == _LIVE_SESSION_ID
     assert fields["state"] != -1
-    assert fields["runtime_state"] != -1
     assert fields["conn_id"] == ConnId(3)
-    assert fields["bitrate_bps"] == 950_000
-    assert "msg" not in fields
+    assert fields["metrics"] == dict(stat.metrics)
+
+
+async def test_client_stats_metric_names_cannot_break_a_text_log_line(
+    started_runner: Runner, caplog: pytest.LogCaptureFixture
+) -> None:
+    stat = ClientTrackStat(
+        timestamp=1_700_000_000_000,
+        track_name="main_video",
+        kind="video",
+        direction="recvonly",
+        codec="VP9",
+        paused=False,
+        metrics={"x\nforged=line": 1.0, "a b=c": 2.0},
+    )
+    batch = ClientStatsBatch(track_stats=[stat], connection_stat=None)
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
+    with caplog.at_level(logging.DEBUG, logger="reactor_runtime.runner.runner"):
+        started_runner.client_stats_received(ConnId(3), batch)
+
+    record = next(r for r in caplog.records if r.getMessage() == "client stats")
+    line = log.TextFormatter().format(record)
+    assert "\n" not in line
+    assert "forged=line" not in line.split("metrics=", 1)[0]
 
 
 async def test_client_stats_logs_no_connection_line_when_the_batch_carries_none(

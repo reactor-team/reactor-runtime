@@ -89,32 +89,6 @@ _STALE_CONNECTION_STATES = frozenset(
     {SessionState.READY, SessionState.CLOSING, SessionState.TERMINATED}
 )
 
-# The field names a client stats line carries besides a stat's own metrics
-# map: the ones client_stats_received logs itself, and the ones the log's
-# session context stamps on every record (session_id, state, runtime_state),
-# which yield to an explicit field of the same name. A client-supplied metric
-# under one of these names is dropped rather than masking the real value —
-# metrics is client content, and this identity is the runtime's own, never
-# the client's to set.
-# "msg" is here for a different reason: it's not a field this method logs
-# itself, but StructuredLogger.info's own positional parameter name — passing
-# it back as a keyword via **metrics raises TypeError, not a silent clobber.
-_RESERVED_STAT_FIELDS = frozenset(
-    {
-        "session_id",
-        "state",
-        "runtime_state",
-        "conn_id",
-        "track_name",
-        "kind",
-        "direction",
-        "codec",
-        "paused",
-        "timestamp",
-        "msg",
-    }
-)
-
 # The lifecycle word reported for each session state. Coarser than the session
 # machine on purpose: an outside observer cares whether the process is loading,
 # free, occupied, or finished — not which serving sub-state the session is in.
@@ -583,39 +557,30 @@ class Runner(ServiceComponent, ConnectionSink):
         """Log a client-reported quality batch at debug, tagged with this session and connection.
 
         The client is the only vantage point onto its own receive-side
-        quality, so each fact is logged as reported. At one line per track
-        every few seconds per connection, these lines are for local
-        debugging, so they stay below the default log level. The session's id comes
-        from the log's session context, which stamps the id the session is
-        known by on every record while it is live — not ``_session_id``, the
-        fixed transport id, which is one constant per process and would mask
-        it. *conn_id* is the runtime's own identity for the connection. Neither
-        is ever anything the payload claims, because the payload carries
-        neither.
+        quality, so each reading is logged as reported: one line for the
+        connection-wide reading, when the batch carries one, and one per
+        track. At that rate per connection the lines are for local debugging,
+        so they are logged at debug.
 
-        A connection-wide fact set logs once per batch, separately from the
-        per-track readings, so it isn't repeated once per track on a
-        multi-track connection — and only when this batch actually carries
-        one.
+        The session id comes from the log's session context, which stamps the
+        id the session is known by on every record while it is live, never
+        ``_session_id``, the fixed transport id. *conn_id* is the runtime's own
+        identity for the connection. Neither is ever anything the payload
+        claims, because the payload carries neither.
+
+        A reading's metrics go under one ``metrics`` field. Their names are the
+        client's to choose, so they are logged as data inside that value, never
+        as field names of their own: a name can then neither take the place of
+        one of the runtime's own fields nor break the log line's format.
         """
         if batch.connection_stat is not None:
-            metrics = {
-                key: value
-                for key, value in batch.connection_stat.metrics.items()
-                if key not in _RESERVED_STAT_FIELDS
-            }
             logger.debug(
                 "client connection stats",
                 conn_id=conn_id,
                 timestamp=batch.connection_stat.timestamp,
-                **metrics,
+                metrics=dict(batch.connection_stat.metrics),
             )
         for stat in batch.track_stats:
-            metrics = {
-                key: value
-                for key, value in stat.metrics.items()
-                if key not in _RESERVED_STAT_FIELDS
-            }
             logger.debug(
                 "client stats",
                 conn_id=conn_id,
@@ -625,7 +590,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 codec=stat.codec,
                 paused=stat.paused,
                 timestamp=stat.timestamp,
-                **metrics,
+                metrics=dict(stat.metrics),
             )
 
     def _reply_clip(
