@@ -89,16 +89,21 @@ _STALE_CONNECTION_STATES = frozenset(
     {SessionState.READY, SessionState.CLOSING, SessionState.TERMINATED}
 )
 
-# The field names client_stats_received always logs itself, alongside a
-# stat's own metrics map. A client-supplied metric under one of these names
-# is dropped rather than clobbering the real value — metrics is client
-# content, and this identity is the runtime's own, never the client's to set.
+# The field names a client stats line carries besides a stat's own metrics
+# map: the ones client_stats_received logs itself, and the ones the log's
+# session context stamps on every record (session_id, state, runtime_state),
+# which yield to an explicit field of the same name. A client-supplied metric
+# under one of these names is dropped rather than masking the real value —
+# metrics is client content, and this identity is the runtime's own, never
+# the client's to set.
 # "msg" is here for a different reason: it's not a field this method logs
 # itself, but StructuredLogger.info's own positional parameter name — passing
 # it back as a keyword via **metrics raises TypeError, not a silent clobber.
 _RESERVED_STAT_FIELDS = frozenset(
     {
         "session_id",
+        "state",
+        "runtime_state",
         "conn_id",
         "track_name",
         "kind",
@@ -578,10 +583,13 @@ class Runner(ServiceComponent, ConnectionSink):
         """Log a client-reported quality batch, tagged with this session and connection.
 
         The client is the only vantage point onto its own receive-side
-        quality, so each fact is logged as reported. ``session_id`` and
-        *conn_id* are the runtime's own identity for this session and
-        connection — never anything the payload claims, because the payload
-        carries neither.
+        quality, so each fact is logged as reported. The session's id comes
+        from the log's session context, which stamps the id the session is
+        known by on every record while it is live — not ``_session_id``, the
+        fixed transport id, which is one constant per process and would mask
+        it. *conn_id* is the runtime's own identity for the connection. Neither
+        is ever anything the payload claims, because the payload carries
+        neither.
 
         A connection-wide fact set logs once per batch, separately from the
         per-track readings, so it isn't repeated once per track on a
@@ -597,7 +605,6 @@ class Runner(ServiceComponent, ConnectionSink):
             }
             logger.info(
                 "client connection stats",
-                session_id=self._session_id,
                 conn_id=conn_id,
                 timestamp=batch.connection_stat.timestamp,
                 **metrics,
@@ -610,7 +617,6 @@ class Runner(ServiceComponent, ConnectionSink):
             }
             logger.info(
                 "client stats",
-                session_id=self._session_id,
                 conn_id=conn_id,
                 track_name=stat.track_name,
                 kind=stat.kind,

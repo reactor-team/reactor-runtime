@@ -2418,6 +2418,15 @@ async def test_transitions_are_logged(
     assert fields["to_state"] == "waiting"
 
 
+_LIVE_SESSION_ID = "0f0e0d0c-0b0a-0908-0706-050403020100"
+
+
+def _stamped_fields(record: logging.LogRecord) -> dict[str, Any]:
+    """Return *record*'s fields as the handler writes them, session context included."""
+    log.SessionContextFilter().filter(record)
+    return getattr(record, "reactor_fields", {})
+
+
 async def test_client_stats_are_logged_with_session_and_connection_identity(
     started_runner: Runner, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -2448,21 +2457,23 @@ async def test_client_stats_are_logged_with_session_and_connection_identity(
         metrics={"available_outgoing_bitrate_bps": 2_000_000, "time_to_connect_ms": 850},
     )
     batch = ClientStatsBatch(track_stats=[stat], connection_stat=connection_stat)
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
     with caplog.at_level(logging.INFO, logger="reactor_runtime.runner.runner"):
         started_runner.client_stats_received(ConnId(3), batch)
 
     connection_record = next(
         r for r in caplog.records if r.getMessage() == "client connection stats"
     )
-    connection_fields = getattr(connection_record, "reactor_fields", {})
-    assert connection_fields["session_id"] == SESSION_ID
+    connection_fields = _stamped_fields(connection_record)
+    # The id the session is known by, not the fixed transport id.
+    assert connection_fields["session_id"] == _LIVE_SESSION_ID
     assert connection_fields["conn_id"] == ConnId(3)
     assert connection_fields["available_outgoing_bitrate_bps"] == 2_000_000
     assert connection_fields["time_to_connect_ms"] == 850
 
     record = next(r for r in caplog.records if r.getMessage() == "client stats")
-    fields = getattr(record, "reactor_fields", {})
-    assert fields["session_id"] == SESSION_ID
+    fields = _stamped_fields(record)
+    assert fields["session_id"] == _LIVE_SESSION_ID
     assert fields["conn_id"] == ConnId(3)
     assert fields["track_name"] == "main_video"
     assert fields["kind"] == "video"
@@ -2495,19 +2506,31 @@ async def test_client_stats_metrics_cannot_clobber_the_runtimes_own_identity_fie
         paused=False,
         # A client claiming its own session_id/conn_id under a metric name
         # must not reach the log line, let alone override the real ones —
-        # metrics is client content, this identity is the runtime's own.
-        # "msg" is dropped for a different reason: it collides with
-        # StructuredLogger.info's own positional parameter and would raise
-        # TypeError rather than merely clobber a field.
-        metrics={"session_id": -1, "conn_id": -1, "msg": -1, "bitrate_bps": 950_000},
+        # metrics is client content, this identity is the runtime's own. The
+        # same goes for the fields the session context stamps, which would
+        # otherwise yield to an explicit one. "msg" is dropped for a different
+        # reason: it collides with StructuredLogger.info's own positional
+        # parameter and would raise TypeError rather than merely clobber a
+        # field.
+        metrics={
+            "session_id": -1,
+            "state": -1,
+            "runtime_state": -1,
+            "conn_id": -1,
+            "msg": -1,
+            "bitrate_bps": 950_000,
+        },
     )
     batch = ClientStatsBatch(track_stats=[stat], connection_stat=None)
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
     with caplog.at_level(logging.INFO, logger="reactor_runtime.runner.runner"):
         started_runner.client_stats_received(ConnId(3), batch)
 
     record = next(r for r in caplog.records if r.getMessage() == "client stats")
-    fields = getattr(record, "reactor_fields", {})
-    assert fields["session_id"] == SESSION_ID
+    fields = _stamped_fields(record)
+    assert fields["session_id"] == _LIVE_SESSION_ID
+    assert fields["state"] != -1
+    assert fields["runtime_state"] != -1
     assert fields["conn_id"] == ConnId(3)
     assert fields["bitrate_bps"] == 950_000
     assert "msg" not in fields
