@@ -11,8 +11,9 @@ commands, or the runtime's loop, and nothing imports
 A family subclass writes one method, :meth:`FlashDreamsModel.initialize_cache`,
 which starts a rollout from what the step input carries, and overrides
 ``_pipeline_input()`` when the pipeline's per-step input is not the step's
-``control`` as the application built it. Everything else on this class is the
-same for every FlashDreams model.
+``control`` as the application built it, or ``_run_step()`` when the adapter
+puts a hook of its own between that input and the pipeline. Everything else on
+this class is the same for every FlashDreams model.
 
 FlashDreams and torch are imported inside the methods that need them, so this
 module imports, and its tests run, on a machine without either.
@@ -144,9 +145,10 @@ class FlashDreamsModel:
         :class:`PromptSwapUnsupported`. The step's index is the pipeline's own
         count plus one; at the adapter's ``total_blocks`` the step raises
         :class:`RolloutExhausted` and the rollout is kept, so the application
-        decides what follows. The pipeline's ``generate()`` then ``finalize()``
-        run with the step's ``control`` as the pipeline input; a failure in
-        either drops the half-written cache before it propagates.
+        decides what follows. The step then runs through ``_run_step()`` with
+        ``_pipeline_input()`` as the pipeline input, and the pipeline's
+        ``finalize()`` follows; a failure in either drops the half-written
+        cache before it propagates.
 
         Args:
             step: The step input. Reads ``rollout_id``, and ``prompt`` and
@@ -185,11 +187,7 @@ class FlashDreamsModel:
         if index >= self.max_blocks:
             raise RolloutExhausted(index)
         try:
-            video = self.pipeline.generate(
-                autoregressive_index=index,
-                cache=self.cache,
-                input=self._pipeline_input(step, index),
-            )
+            video = self._run_step(index, self._pipeline_input(step, index))
             self.pipeline.finalize(autoregressive_index=index, cache=self.cache)
         except Exception:
             self.reset()
@@ -231,6 +229,19 @@ class FlashDreamsModel:
         poses, overrides this.
         """
         return getattr(step, "control", None)
+
+    def _run_step(self, index: int, pipeline_input: Any) -> Any:
+        """Run step *index* with *pipeline_input* and return the pipeline's video.
+
+        The default is the pipeline's own ``generate()``. A family whose
+        adapter declares a hook between the step's input and the pipeline, as
+        the cam2v adapters do with ``generate_step``, overrides this to run
+        the hook, so an adapter that rewrites the input for its model is
+        served the way FlashDreams itself serves it.
+        """
+        return self.pipeline.generate(
+            autoregressive_index=index, cache=self.cache, input=pipeline_input
+        )
 
     def _replace_prompt(self, step: Any) -> None:
         """Swap the prompt within the rollout the model holds.
