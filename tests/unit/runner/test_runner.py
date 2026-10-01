@@ -2458,7 +2458,7 @@ async def test_client_stats_are_logged_with_session_and_connection_identity(
     )
     batch = ClientStatsBatch(track_stats=[stat], connection_stat=connection_stat)
     started_runner.start_session({"session_id": _LIVE_SESSION_ID})
-    with caplog.at_level(logging.INFO, logger="reactor_runtime.runner.runner"):
+    with caplog.at_level(logging.DEBUG, logger="reactor_runtime.runner.runner"):
         started_runner.client_stats_received(ConnId(3), batch)
 
     connection_record = next(
@@ -2472,6 +2472,9 @@ async def test_client_stats_are_logged_with_session_and_connection_identity(
     assert connection_fields["time_to_connect_ms"] == 850
 
     record = next(r for r in caplog.records if r.getMessage() == "client stats")
+    # Both lines stay below the default log level.
+    assert connection_record.levelno == logging.DEBUG
+    assert record.levelno == logging.DEBUG
     fields = _stamped_fields(record)
     assert fields["session_id"] == _LIVE_SESSION_ID
     assert fields["conn_id"] == ConnId(3)
@@ -2523,7 +2526,7 @@ async def test_client_stats_metrics_cannot_clobber_the_runtimes_own_identity_fie
     )
     batch = ClientStatsBatch(track_stats=[stat], connection_stat=None)
     started_runner.start_session({"session_id": _LIVE_SESSION_ID})
-    with caplog.at_level(logging.INFO, logger="reactor_runtime.runner.runner"):
+    with caplog.at_level(logging.DEBUG, logger="reactor_runtime.runner.runner"):
         started_runner.client_stats_received(ConnId(3), batch)
 
     record = next(r for r in caplog.records if r.getMessage() == "client stats")
@@ -2549,7 +2552,7 @@ async def test_client_stats_logs_no_connection_line_when_the_batch_carries_none(
         metrics={"bitrate_bps": 950_000},
     )
     batch = ClientStatsBatch(track_stats=[stat], connection_stat=None)
-    with caplog.at_level(logging.INFO, logger="reactor_runtime.runner.runner"):
+    with caplog.at_level(logging.DEBUG, logger="reactor_runtime.runner.runner"):
         started_runner.client_stats_received(ConnId(3), batch)
 
     assert [r for r in caplog.records if r.getMessage() == "client connection stats"] == []

@@ -580,10 +580,12 @@ class Runner(ServiceComponent, ConnectionSink):
         self._reply_clip(conn_id, request_id, lambda: self._recorder.request_recording())
 
     def client_stats_received(self, conn_id: ConnId, batch: ClientStatsBatch) -> None:
-        """Log a client-reported quality batch, tagged with this session and connection.
+        """Log a client-reported quality batch at debug, tagged with this session and connection.
 
         The client is the only vantage point onto its own receive-side
-        quality, so each fact is logged as reported. The session's id comes
+        quality, so each fact is logged as reported. At one line per track
+        every few seconds per connection, these lines are for local
+        debugging, so they stay below the default log level. The session's id comes
         from the log's session context, which stamps the id the session is
         known by on every record while it is live — not ``_session_id``, the
         fixed transport id, which is one constant per process and would mask
@@ -594,8 +596,7 @@ class Runner(ServiceComponent, ConnectionSink):
         A connection-wide fact set logs once per batch, separately from the
         per-track readings, so it isn't repeated once per track on a
         multi-track connection — and only when this batch actually carries
-        one: a client sends it once, on its first batch after connecting,
-        and omits it on every batch after, so most batches have none to log.
+        one.
         """
         if batch.connection_stat is not None:
             metrics = {
@@ -603,7 +604,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 for key, value in batch.connection_stat.metrics.items()
                 if key not in _RESERVED_STAT_FIELDS
             }
-            logger.info(
+            logger.debug(
                 "client connection stats",
                 conn_id=conn_id,
                 timestamp=batch.connection_stat.timestamp,
@@ -615,7 +616,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 for key, value in stat.metrics.items()
                 if key not in _RESERVED_STAT_FIELDS
             }
-            logger.info(
+            logger.debug(
                 "client stats",
                 conn_id=conn_id,
                 track_name=stat.track_name,
