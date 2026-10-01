@@ -95,7 +95,11 @@ class FlashDreamsApp(ReactorApp):
         model_class: The model half ``load()`` constructs, a
             :class:`FlashDreamsModel` subclass. Set by the family class.
         world_size: GPUs to run the model half on. Above one, the model runs
-            behind a ``DistributedRunner`` with one process per GPU.
+            behind a ``DistributedRunner`` with one process per GPU. Running a
+            FlashDreams pipeline across several ranks is unverified: the
+            runner's wiring is tested with a stand-in model half, and no
+            FlashDreams pipeline has yet been stepped through real workers.
+            Keep ``1`` until a model has been.
         isolate: On one GPU, run the model half in its own process, so a hard
             crash in FlashDreams reaches ``process_output()`` as an error
             instead of ending this process.
