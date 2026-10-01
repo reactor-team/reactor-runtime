@@ -240,6 +240,23 @@ def test_configure_keeps_the_adapters_mapper_and_example_image(tmp_path: Path) -
     assert (mapper.desc.frames_per_second_for_step, mapper.sensitivity) == (60, 1.0)
 
 
+def test_a_missing_example_image_fails_configure_with_the_reason(tmp_path: Path) -> None:
+    # FlashDreams fetches the example image through its own download helper,
+    # which skips the network only when the file is already in the cache; with
+    # no network, a bundle filled without the image fails here, not later.
+    fd_app = FakeApp(tmp_path / "absent.png")
+
+    def resolver(values: dict[str, Any]) -> Path:
+        raise RuntimeError("Failed to download https://example.invalid/seed.jpg")
+
+    fd_app.defaults.input_resolver = resolver  # type: ignore[ty:invalid-assignment]
+    app = Action2V()
+    with pytest.raises(RuntimeError, match="example_image") as excinfo:
+        app.configure(fd_app, {"example_image": True})
+    assert "Failed to download" in str(excinfo.value.__cause__)
+    assert app.default_image is None
+
+
 def test_configure_without_example_image_starts_from_nothing(tmp_path: Path) -> None:
     app, fd_app = _configured(tmp_path, example_image=False)
     assert fd_app.defaults.resolved == []
