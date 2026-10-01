@@ -18,6 +18,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+from flashdreams_fakes import FRAMES, FakeVideo
 from PIL import Image
 
 from reactor_runtime import ApplicationError, CommandError, StepOutcome, UploadedFile
@@ -103,6 +104,12 @@ class FakeDefaults:
         self.resolved: list[dict[str, Any]] = []
         self.integrators: list[FakeIntegrator] = []
         self.fail_with: Exception | None = None
+        self.hooked_steps: list[tuple[Any, int, Any, Any]] = []
+
+    def generate_step(self, pipeline: Any, index: int, cache: Any, camera_input: Any) -> Any:
+        """The adapter's hook: SANA-WM's rewrites the input; this one records and forwards."""
+        self.hooked_steps.append((pipeline, index, cache, camera_input))
+        return pipeline.generate(autoregressive_index=index, cache=cache, input=camera_input)
 
     def input_resolver(self, values: dict[str, Any]) -> FakeConditioning:
         self.resolved.append(dict(values))
@@ -138,16 +145,23 @@ class FakePipeline:
     def __init__(self, rng: FakeRng | None) -> None:
         self.device = "cuda:0"
         self.diffusion_model = types.SimpleNamespace(rng=rng)
-        self.caches: list[dict[str, Any]] = []
+        self.caches: list[types.SimpleNamespace] = []
         self.frame_counts = {0: 9}
 
     def get_num_output_frames(self, index: int) -> int:
         return self.frame_counts.get(index, 12)
 
-    def initialize_cache(self, *, text: list[str], image: Any) -> dict[str, Any]:
-        cache = {"text": text, "image": image, "autoregressive_index": None}
+    def initialize_cache(self, *, text: list[str], image: Any) -> types.SimpleNamespace:
+        cache = types.SimpleNamespace(text=text, image=image, autoregressive_index=None)
         self.caches.append(cache)
         return cache
+
+    def generate(self, autoregressive_index: int, cache: Any, input: Any = None) -> FakeVideo:
+        cache.autoregressive_index = autoregressive_index
+        return FakeVideo()
+
+    def finalize(self, autoregressive_index: int, cache: Any) -> None:
+        cache.finalized = autoregressive_index
 
 
 class RecordingModel:
@@ -182,6 +196,7 @@ def fake_gpu_side(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
     torch = types.ModuleType("torch")
     torch.float32 = "float32"  # type: ignore[ty:unresolved-attribute]
+    torch.uint8 = "uint8"  # type: ignore[ty:unresolved-attribute]
     torch.device = lambda name: f"device({name})"  # type: ignore[ty:unresolved-attribute]
     torch.as_tensor = lambda array: FakeTensor(np.asarray(array))  # type: ignore[ty:unresolved-attribute]
     torch.from_numpy = lambda array: FakeTensor(array)  # type: ignore[ty:unresolved-attribute]
@@ -419,8 +434,8 @@ def test_initialize_cache_loads_the_frame_seeds_the_rng_and_starts_the_camera(
     assert fake_gpu_side["global_seeds"] == []
     (recorded,) = pipeline.caches
     assert cache is recorded
-    assert recorded["text"] == ["a sunlit valley"]
-    assert recorded["image"] == "first-frame-tensor"
+    assert recorded.text == ["a sunlit valley"]
+    assert recorded.image == "first-frame-tensor"
     assert len(fd_app.defaults.integrators) == 1
     assert model.clock == 0.0
     assert model.world_scale == 0.25
@@ -478,6 +493,34 @@ def test_the_pipeline_input_holds_the_keys_for_one_period_per_output_frame(
     assert (first.poses.device, first.poses.dtype) == ("cuda:0", "float32")
     assert first.world_scale == 0.25
     assert second.poses.array.shape == (12, 4, 4)
+
+
+def test_a_step_runs_through_the_adapters_generate_step_hook(
+    tmp_path: Path, fake_gpu_side: dict[str, Any]
+) -> None:
+    """The adapter's hook sits between the camera input and the pipeline.
+
+    SANA-WM's hook rewrites the camera input into its own conditioning and keeps
+    the camera's history on the cache; Lingbot's is the pipeline's ``generate()``.
+    Either way the family calls the hook, with what FlashDreams' own session
+    passes it, and finalizes the step after it.
+    """
+    model, fd_app, pipeline = _model(tmp_path)
+
+    first = model.generate(_step())
+    second = model.generate(_step(image=None, keys=frozenset({"s"})))
+
+    (cache,) = pipeline.caches
+    hooked = fd_app.defaults.hooked_steps
+    assert [(p is pipeline, i, c is cache) for p, i, c, _ in hooked] == [
+        (True, 0, True),
+        (True, 1, True),
+    ]
+    assert isinstance(hooked[0][3], CameraControlInput)
+    assert hooked[1][3].poses.array.shape == (12, 4, 4)
+    assert cache.finalized == 1
+    assert (first.index, second.index) == (0, 1)
+    np.testing.assert_array_equal(second.frames, FRAMES)
 
 
 def test_reset_forgets_the_camera_with_the_rollout(

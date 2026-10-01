@@ -136,7 +136,9 @@ class Cam2VModel(FlashDreamsModel):
     The camera is rollout state: the adapter's pose integrator carries the
     camera from step to step, and a new rollout starts it again at the origin.
     Each step turns the keys held during it into one camera pose per output
-    frame and hands the pipeline those poses with the intrinsics.
+    frame and hands those poses with the intrinsics to the adapter's
+    ``generate_step`` hook, which is the pipeline's own ``generate()`` unless
+    the adapter rewrites the camera input for its model first.
     """
 
     def __init__(self) -> None:
@@ -230,6 +232,16 @@ class Cam2VModel(FlashDreamsModel):
             poses=torch.from_numpy(poses).to(device=device, dtype=torch.float32),
             world_scale=self.world_scale,
         )
+
+    def _run_step(self, index: int, pipeline_input: Any) -> Any:
+        """Run the step through the adapter's ``generate_step`` hook.
+
+        Every cam2v adapter declares one. Most keep FlashDreams' default, the
+        pipeline's own ``generate()``; an adapter whose model takes its own
+        conditioning, such as SANA-WM, turns the camera input into it here
+        and keeps the camera's history across the rollout.
+        """
+        return self.app.defaults.generate_step(self.pipeline, index, self.cache, pipeline_input)
 
 
 class Cam2V(FlashDreamsApp):
