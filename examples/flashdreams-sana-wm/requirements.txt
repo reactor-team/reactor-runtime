@@ -1,0 +1,23 @@
+# Python dependencies installed into the model image in one pip pass, so a
+# version conflict between them fails the build instead of surfacing at
+# model load. reactor-runtime itself comes from reactor.yaml's
+# build.runtime_version.
+#
+# FlashDreams core, from a pinned commit of https://github.com/NVIDIA/flashdreams.
+# Its v2 packages are on GitHub only; PyPI's `flashdreams` predates the v2 API.
+# It brings torch and its CUDA stack with it. The `runners` extra carries the
+# image readers its first-frame loader uses. The cam2v family app and the
+# SANA-WM model install from the same commit in reactor.yaml's build.run.
+flashdreams[runners] @ git+https://github.com/NVIDIA/flashdreams@f40179b2#subdirectory=flashdreams
+
+# What flashdreams-sana-wm imports beyond FlashDreams core, as its own
+# pyproject declares them: the Diffusers autoencoder and refiner, Accelerate
+# for loading them, the Gemma tokenizer, and torchvision for the first frame.
+accelerate>=1.0
+diffusers>=0.36
+sentencepiece>=0.2
+torchvision>=0.26
+
+# Decoding the uploaded first frame in set_image; the adapter's own image
+# reader as well.
+pillow>=10
