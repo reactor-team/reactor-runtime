@@ -129,6 +129,11 @@ class Action2V(FlashDreamsApp):
     Config keys read from ``config.yml``, beyond the generic ones:
     ``example_image`` (default ``false``), which starts every session from the
     adapter's own example image, so a client sees a world before it uploads one.
+    The adapter fetches that image the first time it is asked for and keeps it
+    in the FlashDreams cache under the weights root; the fetch does not read
+    ``HF_HUB_OFFLINE``, so a bundle filled with ``example_image: true`` holds
+    the image and a bundle filled without it does not. ``load()`` fails with
+    the reason when the image is missing and cannot be fetched.
 
     Attributes:
         default_image: The image every session starts from, or ``None``.
@@ -144,10 +149,23 @@ class Action2V(FlashDreamsApp):
     map_action: Any
 
     def configure(self, fd_app: Any, config: dict[str, Any]) -> None:
-        """Keep the adapter's action mapper, and its example image when asked for."""
+        """Keep the adapter's action mapper, and its example image when asked for.
+
+        Raises:
+            RuntimeError: ``example_image`` is set and the adapter's example
+                image is not in the weights bundle and could not be fetched.
+        """
         self.default_image = None
         if config.get("example_image"):
-            path = fd_app.defaults.input_resolver({"image_path": None, "example_data": True})
+            try:
+                path = fd_app.defaults.input_resolver({"image_path": None, "example_data": True})
+            except Exception as exc:
+                raise RuntimeError(
+                    "The adapter's example image is not in the weights bundle and could not "
+                    "be fetched. FlashDreams fetches it on first use whatever HF_HUB_OFFLINE "
+                    "says, so fill the bundle once with `example_image: true` and downloads "
+                    "allowed, or set `example_image: false`."
+                ) from exc
             self.default_image = Path(path).read_bytes()
         self.map_action = fd_app.defaults.action_mapper_factory(fd_app.session_desc(), 1.0)
 
