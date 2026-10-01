@@ -47,7 +47,11 @@ the [Reactor Sandbox](https://reactor-sandbox.vercel.app/) (pick **Local
 example image. Upload your own with `set_image`.
 
 `build.runtime_version` names the reactor-runtime release the image installs,
-and it must carry `reactor_runtime.flashdreams`. The class imports FlashDreams
+and it must carry `reactor_runtime.flashdreams`. The pinned `3.6.0` does not:
+it predates the module, so the image it builds cannot import the class, and
+the steps above work once the pin names the first release that ships it. Until
+then the example runs with a runtime checkout mounted over the image's
+installed package, which is how it was verified. The class imports FlashDreams
 when the model loads, so the runtime itself has no FlashDreams dependency.
 
 ### The image
@@ -73,8 +77,16 @@ comments in `reactor.yaml` say why each is there:
 A FlashDreams pipeline downloads its checkpoints from Hugging Face when it is
 built, into the FlashDreams cache and the Hugging Face cache. The model half
 points both at the weights root the runtime provides, `REACTOR_WEIGHTS_PATH`,
-and sets `HF_HUB_OFFLINE=1`, so a deployed model reads only from its bundle
-and a missing file fails at load rather than reaching for the network.
+and sets `HF_HUB_OFFLINE=1`, so the checkpoints are read from the bundle and
+a missing checkpoint fails at load rather than reaching for the network.
+
+The adapter's example image is the one file outside that rule. FlashDreams
+fetches it the first time `example_image: true` asks for it and keeps it in
+the FlashDreams cache under the weights root, and that fetch does not read
+`HF_HUB_OFFLINE`: with the file in the bundle no request is made; without it,
+the adapter tries the network and `load()` fails with the reason when it
+cannot. So fill the bundle with the same `example_image` setting the
+deployment uses.
 
 The bundle is that directory. To fill it, run once with an empty weights
 directory and downloads allowed, as the `reactor run` line above does with
