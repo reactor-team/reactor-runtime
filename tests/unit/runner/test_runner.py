@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 import threading
@@ -2662,4 +2663,40 @@ async def test_client_stats_leave_out_values_json_cannot_carry(started_runner: R
     reading = await asyncio.wait_for(anext(live), timeout=1.0)
     assert isinstance(reading, StatsEvent)
     assert reading.detail["track_stats"][0]["metrics"] == {"packets_lost": 4.0}
+    await cast(AsyncGenerator[object, None], live).aclose()
+
+
+async def test_client_stats_are_published_for_a_session_started_with_the_all_zero_id(
+    started_runner: Runner,
+) -> None:
+    # The all-zero id is a value a caller may pass like any other; running is
+    # judged by the session's state, not by its id.
+    all_zero = "00000000-0000-0000-0000-000000000000"
+    started_runner.start_session({"session_id": all_zero})
+    live = started_runner.events.subscribe_with_live()
+
+    started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=30.0))
+
+    reading = await asyncio.wait_for(anext(live), timeout=1.0)
+    assert isinstance(reading, StatsEvent)
+    assert reading.detail["session_id"] == all_zero
+    await cast(AsyncGenerator[object, None], live).aclose()
+
+
+async def test_client_stats_are_not_published_once_the_session_is_closing(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
+    started_runner.stop_session()
+    assert started_runner._sm.current_state is SessionState.CLOSING
+    live = started_runner.events.subscribe_with_live()
+
+    started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=30.0))
+
+    # The session's cleanup may still journal facts; none of what arrives is a reading.
+    received: list[object] = []
+    with contextlib.suppress(TimeoutError):
+        while True:
+            received.append(await asyncio.wait_for(anext(live), timeout=0.05))
+    assert not any(isinstance(item, StatsEvent) for item in received)
     await cast(AsyncGenerator[object, None], live).aclose()

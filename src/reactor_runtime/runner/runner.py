@@ -582,8 +582,9 @@ class Runner(ServiceComponent, ConnectionSink):
 
         Publishing: the whole batch as one ``client_stats`` reading on
         :attr:`events`, for an external consumer to forward. It is published
-        only once a session has started, since before that there is no session
-        id to tag it with, and a metric value that isn't a finite number is
+        only while a session is running, judged by the session's state rather
+        than by its id, which any value can be: outside a session there is no
+        session to tag it with. A metric value that isn't a finite number is
         left out, since JSON has no way to carry it.
         """
         if batch.connection_stat is not None:
@@ -606,7 +607,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 metrics=dict(stat.metrics),
             )
 
-        if self._recording_id == SESSION_ID:
+        if self._sm.current_state not in _RUNNING_STATES:
             return
         self._events.publish_live(
             StatsEvent(
