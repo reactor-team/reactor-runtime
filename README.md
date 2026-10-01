@@ -139,6 +139,7 @@ Not on macOS, or pinning a release in CI? See [Install the CLI](https://docs.rea
 - [Echo example](./examples/echo/README.md): the client's webcam and microphone in, an effect applied, both sent back, in batches
 - [Waypoint example](./examples/waypoint/README.md): a world model on a GPU, seeded from an upload and steered live
 - [FlashDreams Lingbot example](./examples/flashdreams-lingbot/README.md): a camera-flown world served from FlashDreams by naming it, with no Python in the workspace
+- [FlashDreams SANA-WM example](./examples/flashdreams-sana-wm/README.md): a second camera-flown world on the same family class, with a different slug and model package
 
 ## Development
 
