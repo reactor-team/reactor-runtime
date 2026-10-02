@@ -1,7 +1,7 @@
 """The engine half of the model layer — :class:`ReactorCore`.
 
 The machinery a model author never touches: the model's own thread and asyncio
-loop, its media buffers, the two typed inbound queues, and the outbound slots.
+loop, its media buffers, the inbound queue, and the outbound slots.
 ``ReactorCore`` owns the *how*; :class:`ReactorApp` supplies the *what* —
 handler semantics — by overriding the loop hooks. Everything that reaches the
 model from the outside arrives through a handful of thread-safe entrypoints,
@@ -192,13 +192,21 @@ class CommandEnvelope:
     request_id: RequestId | None
 
 
-class ReactorCore:
-    """The model's loop, buffers, queues, and outbound slots.
+Inbound = CommandEnvelope | ReactorEvent
+"""One item of the model's inbound queue: a validated command or a reactor event."""
 
-    Subclassed by :class:`ReactorApp`, which fills the loop hooks with the two
-    dispatchers. On its own, ``ReactorCore`` accepts inbound traffic onto the two
-    queues and routes media into the input buffers; nothing drains the queues
-    until a subclass supplies the drain loops via :meth:`_background_coros`.
+
+class ReactorCore:
+    """The model's loop, buffers, inbound queue, and outbound slots.
+
+    Subclassed by :class:`ReactorApp`, which fills the loop hooks with the
+    dispatcher. On its own, ``ReactorCore`` accepts commands and reactor events
+    onto one queue and routes media into the input buffers; nothing drains the
+    queue until a subclass supplies the drain loop via :meth:`_background_coros`.
+
+    Commands and reactor events share the queue so they keep the order they
+    were posted in. A command sent after a session start reaches the model after
+    that start, and a session end reaches it after the commands sent before it.
     """
 
     fps: float = 30.0
@@ -219,8 +227,7 @@ class ReactorCore:
         self._thread: threading.Thread | None = None
         self._loop_task: asyncio.Task[None] | None = None
 
-        self._command_q: asyncio.Queue[CommandEnvelope] | None = None
-        self._reactor_q: asyncio.Queue[ReactorEvent] | None = None
+        self._inbound_q: asyncio.Queue[Inbound] | None = None
 
         self._out_broadcast: BroadcastSink | None = None
         self._out_addressed: AddressedSink | None = None
@@ -329,11 +336,11 @@ class ReactorCore:
         self, command: Command, conn_id: ConnId | None, request_id: RequestId | None
     ) -> None:
         """Enqueue a validated command onto the model loop."""
-        self._enqueue(self._command_q, CommandEnvelope(command, conn_id, request_id))
+        self._enqueue(CommandEnvelope(command, conn_id, request_id))
 
     def post_reactor_event(self, event: ReactorEvent) -> None:
         """Enqueue a reactor-authoritative event onto the model loop."""
-        self._enqueue(self._reactor_q, event)
+        self._enqueue(event)
 
     def push_media(self, track: str, frame: InputFrame) -> None:
         """Route an inbound frame into its track's buffer."""
@@ -345,8 +352,9 @@ class ReactorCore:
             return
         buffer.push(frame)
 
-    def _enqueue(self, queue: asyncio.Queue[Any] | None, item: Any) -> None:
-        """Thread-safe put onto a loop-bound queue, dropped before the loop runs."""
+    def _enqueue(self, item: Inbound) -> None:
+        """Thread-safe put onto the inbound queue, dropped before the loop runs."""
+        queue = self._inbound_q
         if queue is None or self._loop.is_closed():
             return
         with contextlib.suppress(RuntimeError):
@@ -373,7 +381,7 @@ class ReactorCore:
             self._loop.close()
 
     async def _lifecycle(self) -> None:
-        """Bootstrap loop-bound state, start the drain loops, then run the model.
+        """Bootstrap loop-bound state, start the drain loop, then run the model.
 
         A ``run()`` that raises anything but cancellation is an unrecoverable
         crash: the model loop is gone and there is nothing left to serve. The
@@ -381,8 +389,7 @@ class ReactorCore:
         tasks are cancelled, so the owner can end the session rather than keep
         serving a dead loop. Cancellation is the normal stop and reports nothing.
         """
-        self._command_q = asyncio.Queue()
-        self._reactor_q = asyncio.Queue()
+        self._inbound_q = asyncio.Queue()
         self._loop_task = asyncio.current_task()
         self._on_loop_ready()
         tasks = [asyncio.create_task(coro) for coro in self._background_coros()]

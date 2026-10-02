@@ -1,18 +1,18 @@
 """The application authoring base, :class:`ReactorApp`.
 
 What an author subclasses. It joins the two halves of the model layer: the
-:class:`ReactorCore` engine it inherits (thread, loop, buffers, queues) and the
+:class:`ReactorCore` engine it inherits (thread, loop, buffers, queue) and the
 :class:`ModelContract` it assembles. Declaring a subclass resolves the contract
 once, from a single traversal of the class, and caches it on the class — the
 commands its ``@event`` handlers expose, the messages they return, its tracks,
 and its lifecycle hooks.
 
-This class supplies the *what* the engine leaves open: the two dispatch loops
-that drain the engine's typed queues into handlers. The command loop validates
-nothing — that happened at the bridge — and turns each :class:`CommandEnvelope`
-back into a handler call, replying with the handler's returned message to the
-one connection that sent the command. The reactor loop runs the lifecycle hooks
-and maintains :attr:`connected` from the live client count.
+This class supplies the *what* the engine leaves open: the dispatch loop that
+drains the engine's inbound queue into handlers, one item at a time, in the
+order the items were posted. A command validates nothing — that happened at
+the bridge — and turns back into a handler call, replying with the handler's
+returned message to the one connection that sent it. A reactor event runs its
+lifecycle hook and maintains :attr:`connected` from the live client count.
 
 It also owns the typed, client-settable state. An application that declares
 ``state: MyState`` (an :class:`InputState` subclass) gets one ``set_<field>``
@@ -343,7 +343,7 @@ class ReactorApp(ReactorCore):
     # -- engine hooks ---------------------------------------------------------
 
     def _on_loop_ready(self) -> None:
-        """Create the loop-bound state the dispatchers and the step loop share."""
+        """Create the loop-bound state the dispatcher and the step loop share."""
         self.connected = asyncio.Event()
         self._clients = {}
         self._session_active = False
@@ -353,18 +353,27 @@ class ReactorApp(ReactorCore):
         self._gate_drops = 0
 
     def _background_coros(self) -> list[Coroutine[Any, Any, None]]:
-        """Run the two queue-drain loops alongside ``run()``."""
-        return [self._command_loop(), self._reactor_loop()]
+        """Run the inbound drain loop alongside ``run()``."""
+        return [self._inbound_loop()]
 
-    # -- command dispatch -----------------------------------------------------
+    async def _inbound_loop(self) -> None:
+        """Drain the inbound queue, dispatching each item before taking the next.
 
-    async def _command_loop(self) -> None:
-        """Drain validated commands and dispatch each to its handler."""
-        queue = self._command_q
+        Commands and reactor events are handled one at a time in the order they
+        were posted, so a command never runs ahead of a session start or a
+        client connection posted before it. A handler or hook therefore must
+        not wait for a later reactor event: that event is queued behind it.
+        """
+        queue = self._inbound_q
         assert queue is not None
         while True:
-            envelope = await queue.get()
-            await self._dispatch_command(envelope)
+            item = await queue.get()
+            if isinstance(item, CommandEnvelope):
+                await self._dispatch_command(item)
+            else:
+                await self._dispatch_reactor_event(item)
+
+    # -- command dispatch -----------------------------------------------------
 
     async def _dispatch_command(self, envelope: CommandEnvelope) -> None:
         """Invoke a command's handler and reply to the sender with its return.
@@ -428,14 +437,6 @@ class ReactorApp(ReactorCore):
             self._reply(envelope.conn_id, None, envelope.request_id)
 
     # -- reactor-event dispatch -----------------------------------------------
-
-    async def _reactor_loop(self) -> None:
-        """Drain authoritative reactor events and run their lifecycle hooks."""
-        queue = self._reactor_q
-        assert queue is not None
-        while True:
-            event = await queue.get()
-            await self._dispatch_reactor_event(event)
 
     async def _dispatch_reactor_event(self, event: ReactorEvent) -> None:
         """Run the lifecycle hook for one reactor event and track liveness.
@@ -562,8 +563,8 @@ class ReactorApp(ReactorCore):
     def _client_for(self, conn_id: ConnId | None) -> ClientInfo | None:
         """Return the handle for *conn_id*, building one if the registry lacks it.
 
-        A command can race ahead of its ``ClientConnected`` event since the two
-        ride separate queues, so a missing entry is filled rather than dropped.
+        A command posted before its connection's ``ClientConnected`` event
+        finds no entry, so a missing entry is filled rather than dropped.
         """
         if conn_id is None:
             return None

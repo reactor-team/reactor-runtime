@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ from reactor_runtime import (
     ReactorApp,
     UploadedFile,
     Video,
+    connected,
     event,
     session_ended,
     session_started,
@@ -541,6 +543,98 @@ async def test_a_session_end_drops_the_gate_before_its_hook_runs() -> None:
     assert app._live.is_set()
     await app._dispatch_reactor_event(SessionEnded("s", EndReason.STOPPED))
     assert seen == [False]
+
+
+# -- command ordering against reactor events ----------------------------------
+
+
+class Serving(ReactorApp):
+    state: State
+
+    async def run(self) -> None:
+        await asyncio.Event().wait()
+
+
+@contextlib.asynccontextmanager
+async def _loops(app: ReactorApp) -> AsyncIterator[None]:
+    """Run the app's dispatch loops on the test's event loop, as the model thread does."""
+    app._loop.close()
+    app._loop = asyncio.get_running_loop()
+    app.bind_output(
+        broadcast=lambda message: None, addressed=lambda *args: None, media=lambda chunk: None
+    )
+    task = asyncio.create_task(app._lifecycle())
+    await asyncio.sleep(0)
+    try:
+        yield
+    finally:
+        task.cancel()
+        await task
+
+
+async def _settle() -> None:
+    """Give every runnable task on the loop a turn."""
+    for _ in range(20):
+        await asyncio.sleep(0)
+
+
+async def test_a_command_waits_for_the_session_start_posted_before_it() -> None:
+    # The connected hook holds the step lock while the session start and a
+    # command wait behind it. The command must not reach the lock before the
+    # start, or it writes into a state that does not exist yet.
+    release = asyncio.Event()
+
+    class SlowJoin(Serving):
+        @connected
+        async def joined(self) -> None:
+            await release.wait()
+
+    app = SlowJoin()
+    async with _loops(app):
+        app.post_reactor_event(ClientConnected(ConnId(1001), 1))
+        app.post_reactor_event(SessionStarted("s"))
+        command = ModelContract.of(SlowJoin).validate("set_speed", {"speed": 3.0})
+        app.submit_command(command, ConnId(1001), None)
+        await _settle()
+        assert app.state is None
+        release.set()
+        await _settle()
+        assert app.state.speed == 3.0
+
+
+async def test_a_command_runs_after_the_session_started_hook_returns() -> None:
+    seen: list[float] = []
+
+    class Hooked(Serving):
+        @session_started
+        async def start(self) -> None:
+            await asyncio.sleep(0)
+            seen.append(self.state.speed)
+
+    app = Hooked()
+    async with _loops(app):
+        app.post_reactor_event(SessionStarted("s"))
+        app.submit_command(
+            ModelContract.of(Hooked).validate("set_speed", {"speed": 4.0}), ConnId(1001), None
+        )
+        await _settle()
+    assert seen == [1.0]
+    assert app.state.speed == 4.0
+
+
+async def test_a_command_between_sessions_is_not_held_for_the_next_one() -> None:
+    app = Serving()
+    async with _loops(app):
+        app.post_reactor_event(SessionStarted("s1"))
+        app.post_reactor_event(SessionEnded("s1", EndReason.STOPPED))
+        await _settle()
+        app.submit_command(
+            ModelContract.of(Serving).validate("set_seed", {"seed": 5}), ConnId(1001), None
+        )
+        await _settle()
+        app.post_reactor_event(SessionStarted("s2"))
+        await _settle()
+        assert app.state.seed == 0
 
 
 # -- an app that declares no state owns the attribute -------------------------
