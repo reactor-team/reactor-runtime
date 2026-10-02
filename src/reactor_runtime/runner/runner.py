@@ -46,6 +46,7 @@ from reactor_runtime.core import (
     SessionEvent,
     SessionStarted,
     SessionState,
+    StartingInputApplied,
     TrackDirection,
     Transition,
     TransitionEvent,
@@ -76,9 +77,11 @@ from reactor_runtime.runner.offer_epochs import OfferEpochs
 from reactor_runtime.runner.session_start import (
     InvalidSessionStartError,
     SessionStart,
+    StartingCommand,
     parse_session_start,
 )
 from reactor_runtime.runner.state_machine import SessionStateMachine
+from reactor_runtime.runner.system_client import SYSTEM_CONN_ID, SystemConnection
 from reactor_runtime.runner.upload_resolution import declares_upload, resolve_uploads
 from reactor_runtime.transport.router import (
     SessionNotRunningError,
@@ -252,7 +255,7 @@ class Runner(ServiceComponent, ConnectionSink):
         # Which client stats batches are journalled: each connection's last
         # accepted time, to drop a batch that follows it too soon.
         self._client_stats = ClientStatsGate()
-        self._gateway = MessageGateway(sink=self, on_command=self._submit_command)
+        self._gateway = MessageGateway(sink=self, on_command=self._submit_client_command)
         self._bridge: ModelBridge | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._inbound: set[asyncio.Task[None]] = set()
@@ -272,6 +275,11 @@ class Runner(ServiceComponent, ConnectionSink):
         # step limit — resolved at the start transition like the recording id,
         # so a rejected start cannot replace it.
         self._session_start = SessionStart()
+        # Set once the live session's starting input has been submitted. Client
+        # commands wait on it, so they reach the model after the list. A new
+        # event per session; set outside a session, so nothing waits there.
+        self._starting_input_done = asyncio.Event()
+        self._starting_input_done.set()
         # Names the log's current session binding, so the release that follows a
         # session retires that binding and not a later session's. Zero until the
         # first session binds one.
@@ -737,7 +745,9 @@ class Runner(ServiceComponent, ConnectionSink):
         :mod:`reactor_runtime.runner.session_start`). Their shape, and each
         starting command against the model's contract, are checked before the
         session moves, so a body the model could not apply is rejected without
-        touching the session (see :meth:`_check_starting_input`).
+        touching the session (see :meth:`_check_starting_input`). A session that has either one
+        connects the system client as it starts (see
+        :mod:`reactor_runtime.runner.system_client`), so it opens streaming.
 
         Args:
             params: The initial session parameters supplied by the caller.
@@ -752,6 +762,7 @@ class Runner(ServiceComponent, ConnectionSink):
             raise SessionTransitionError("start", self._sm.current_state)
         self._offer_epochs.session_started()
         self._model_metrics.session_started()
+        self._begin_session_inputs()
 
     def _check_starting_input(self, start: SessionStart) -> None:
         """Refuse a starting input whose commands the model's contract rejects.
@@ -918,6 +929,9 @@ class Runner(ServiceComponent, ConnectionSink):
                 "chunk_seconds": self._cfg.recording.chunk_seconds,
             },
         }
+        starting = self._session_start.starting_input
+        if starting is not None and self._sm.current_state in _RUNNING_STATES:
+            descriptor["starting_input"] = {"applied": len(starting.as_commands())}
         if self._bridge is None:
             return descriptor
         contract = self._bridge.contract
@@ -959,8 +973,23 @@ class Runner(ServiceComponent, ConnectionSink):
         contract = self._bridge.contract
         return contract.render_schema(name=self._cfg.model_name).to_openapi()
 
-    async def _submit_command(self, command: InboundCommand) -> None:
-        """Submit a decoded client command to the model through the bridge.
+    async def _submit_client_command(self, command: InboundCommand) -> None:
+        """Submit a client's command once the session's starting input is submitted.
+
+        A client that connects while the starting input still runs, for
+        example while a starting command waits for its upload, has its commands
+        held until the list is done, so the model sees the starting input first.
+        """
+        await self._starting_input_done.wait()
+        await self._submit_command(command)
+
+    async def _submit_command(
+        self,
+        command: InboundCommand,
+        *,
+        upload_wait: float = _UPLOAD_RESOLVE_TIMEOUT_SECONDS,
+    ) -> None:
+        """Submit a decoded command to the model through the bridge.
 
         Each upload the command references is resolved to its bytes through the
         store and merged into the arguments before validation, so the model
@@ -978,7 +1007,8 @@ class Runner(ServiceComponent, ConnectionSink):
         the egress stream so a consumer can audit or moderate it; a command the
         contract rejects is journalled as an error instead and never reaches the
         model. The journalled argument record carries the scalar arguments, never
-        the resolved file bytes.
+        the resolved file bytes. Each upload waits up to *upload_wait* seconds
+        for its bytes.
 
         This is also where the command instruments are recorded, because the
         branches below are the outcomes a command that reached the runtime can
@@ -995,9 +1025,13 @@ class Runner(ServiceComponent, ConnectionSink):
         resolve_started = time.monotonic()
         try:
             for param, upload_id in command.uploads.items():
-                args[param] = await self._fetch_upload(upload_id)
+                args[param] = await self._fetch_upload(upload_id, upload_wait)
+
+            async def fetch(upload_id: str) -> UploadedFile:
+                return await self._fetch_upload(upload_id, upload_wait)
+
             for param, spec in inline.items():
-                args[param] = await resolve_uploads(spec, args[param], self._fetch_upload)
+                args[param] = await resolve_uploads(spec, args[param], fetch)
         except UnknownUploadError:
             self._command_metrics.unresolved_upload(label)
             self._sm.send(
@@ -1065,9 +1099,11 @@ class Runner(ServiceComponent, ConnectionSink):
             if param in args and declares_upload(field.spec)
         }
 
-    async def _fetch_upload(self, upload_id: str) -> UploadedFile:
-        """Read one upload from the store, waiting the standard grace for its bytes."""
-        return await self._uploads.fetch(upload_id, wait_seconds=_UPLOAD_RESOLVE_TIMEOUT_SECONDS)
+    async def _fetch_upload(
+        self, upload_id: str, wait_seconds: float = _UPLOAD_RESOLVE_TIMEOUT_SECONDS
+    ) -> UploadedFile:
+        """Read one upload from the store, waiting up to *wait_seconds* for its bytes."""
+        return await self._uploads.fetch(upload_id, wait_seconds=wait_seconds)
 
     def _command_label(self, name: str) -> str:
         """Return a command name that is safe to label a metric with.
@@ -1351,12 +1387,14 @@ class Runner(ServiceComponent, ConnectionSink):
             elif close_reason:
                 self._broadcast_session_ended(close_reason)
             self._uploads.clear()
+            self._starting_input_done.set()
             self._client_stats.clear()
             self._spawn_teardown(asyncio.to_thread(self._recorder.stop))
             self._spawn_teardown(self._close_session(reason))
         if entered and transition.to_state is SessionState.TERMINATED:
             if transition.event is SessionEvent.EVICTION and self._loop is not None:
                 self._uploads.clear()
+                self._starting_input_done.set()
                 self._spawn_teardown(asyncio.to_thread(self._recorder.stop))
                 self._spawn_teardown(self._connections.close_all())
             # An eviction carrying an error is a model loop that crashed, and
@@ -1365,6 +1403,76 @@ class Runner(ServiceComponent, ConnectionSink):
             # exits clean.
             crashed = transition.detail.get("reason") is EndReason.ERROR
             self.request_shutdown(failure=crashed)
+
+    def _begin_session_inputs(self) -> None:
+        """Connect the system client and submit the starting input, as the session asks.
+
+        Runs once the start has been applied, so ``SessionStarted`` is already
+        posted to the model. A session with a starting input or a step count
+        gets the system client next, so the model sees it connect before the
+        first starting command arrives. Client commands wait until the list has
+        been submitted. Only a start calls this, so a client that joins or
+        reconnects later does not apply the list again.
+        """
+        done = asyncio.Event()
+        self._starting_input_done = done
+        start = self._session_start
+        if start.starting_input is not None or start.steps is not None:
+            self._connections.register(SystemConnection(), system=True)
+        if start.starting_input is None or self._loop is None:
+            done.set()
+            return
+        commands = start.starting_input.as_commands()
+        logger.info("applying the starting input", commands=len(commands))
+        task = self._loop.create_task(self._apply_starting_input(commands, done))
+        self._inbound.add(task)
+        task.add_done_callback(self._inbound.discard)
+
+    async def _apply_starting_input(
+        self, commands: tuple[StartingCommand, ...], done: asyncio.Event
+    ) -> None:
+        """Submit each starting command on the normal command path, in order.
+
+        A starting command is sent by the system client, and is validated, has
+        its uploads resolved, and is journalled exactly as a client's command
+        is: a rejected one is journalled as an error and the rest still run.
+        One that names an upload waits up to the orphan timeout for the bytes,
+        because the caller seeds them only after the session has started. The
+        list stops when its session ends.
+
+        Once the list is submitted, the system client leaves a session that
+        has no step count, so the session waits for a client of its own as any
+        live session does. A session with a step count keeps it until the end.
+        Then :class:`StartingInputApplied` follows the last command into the
+        model, which opens its step loop: no step runs before the starting
+        input has landed, and a live session takes its first step only once a
+        client of its own has joined.
+        """
+        upload_wait = max(self._cfg.orphan_timeout, _UPLOAD_RESOLVE_TIMEOUT_SECONDS)
+        try:
+            for command in commands:
+                if self._starting_input_done is not done:
+                    return
+                if self._sm.current_state not in _RUNNING_STATES:
+                    return
+                await self._submit_command(
+                    InboundCommand(
+                        name=command.command,
+                        args=dict(command.data),
+                        uploads={},
+                        conn_id=SYSTEM_CONN_ID,
+                        request_id=uuid.uuid4().hex,
+                        received_at=time.monotonic(),
+                    ),
+                    upload_wait=upload_wait,
+                )
+        finally:
+            if self._starting_input_done is done and self._sm.current_state in _RUNNING_STATES:
+                if self._session_start.steps is None:
+                    self._connections.drop(SYSTEM_CONN_ID, system=True)
+                if self._bridge is not None:
+                    self._bridge.dispatch_reactor_event(StartingInputApplied())
+            done.set()
 
     def _start_recorder(self) -> None:
         """Arm the recorder for the session, best-effort.
@@ -1387,7 +1495,12 @@ class Runner(ServiceComponent, ConnectionSink):
         client — so they pass to the model unvalidated.
         """
         if transition.is_session_start:
-            bridge.dispatch_reactor_event(SessionStarted(self._session_id))
+            bridge.dispatch_reactor_event(
+                SessionStarted(
+                    self._session_id,
+                    starting_input=self._session_start.starting_input is not None,
+                )
+            )
         if transition.is_session_end:
             reason = transition.detail.get("reason", EndReason.STOPPED)
             bridge.dispatch_reactor_event(
@@ -1398,7 +1511,11 @@ class Runner(ServiceComponent, ConnectionSink):
             )
         if transition.event is SessionEvent.CONNECTION_OPENED:
             bridge.dispatch_reactor_event(
-                ClientConnected(transition.detail["conn_id"], self._connections.count)
+                ClientConnected(
+                    transition.detail["conn_id"],
+                    self._connections.count,
+                    system=bool(transition.detail.get("system", False)),
+                )
             )
         if transition.event is SessionEvent.CONNECTION_CLOSED:
             bridge.dispatch_reactor_event(

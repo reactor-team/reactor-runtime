@@ -70,6 +70,11 @@ _MAX_CONN_ID = 9999
 _MAX_MINT_ATTEMPTS = 100
 
 
+def _connection_detail(cid: ConnId, system: bool) -> dict[str, ConnId | bool]:
+    """Build a connection move's journal detail, marking the system client only."""
+    return {"conn_id": cid, "system": True} if system else {"conn_id": cid}
+
+
 def _deliver(conn: Connection, operation: str, act: Callable[[Connection], None]) -> None:
     """Hand one already-encoded frame to one wire, containing what the wire raises.
 
@@ -152,7 +157,7 @@ class ConnectionManager:
                 return conn_id
         raise ConnectionsExhaustedError
 
-    def register(self, conn: Connection) -> None:
+    def register(self, conn: Connection, *, system: bool = False) -> None:
         """Add a connection and advance the session for it.
 
         A fresh registration sends a single ``CONNECTION_OPENED``; the state
@@ -162,13 +167,18 @@ class ConnectionManager:
         sees this connection counted. Re-registering an id already present
         replaces the handle without re-driving the session — connection identity
         across a reconnect is the transport's concern, not the manager's.
+
+        Args:
+            conn: The connection to add.
+            system: Whether this is the runtime's own system client. The
+                ``CONNECTION_OPENED`` then carries ``system=True`` in its detail.
         """
         known = conn.id in self._by_id
         self._by_id = {**self._by_id, conn.id: conn}
         if not known:
-            self._sm.send(SessionEvent.CONNECTION_OPENED, conn_id=conn.id)
+            self._sm.send(SessionEvent.CONNECTION_OPENED, **_connection_detail(conn.id, system))
 
-    def drop(self, cid: ConnId) -> None:
+    def drop(self, cid: ConnId, *, system: bool = False) -> None:
         """Remove a connection and advance the session for its loss.
 
         Sends a single ``CONNECTION_CLOSED``; the state machine derives occupancy
@@ -177,11 +187,16 @@ class ConnectionManager:
         the event so a listener reading the live count sees this connection gone.
         Any tracks the connection still held are released. A drop for an id that
         is not registered is ignored.
+
+        Args:
+            cid: The connection to remove.
+            system: Whether this is the runtime's own system client. The
+                ``CONNECTION_CLOSED`` then carries ``system=True`` in its detail.
         """
         if cid not in self._by_id:
             return
         self._by_id = {other: conn for other, conn in self._by_id.items() if other != cid}
-        self._sm.send(SessionEvent.CONNECTION_CLOSED, conn_id=cid)
+        self._sm.send(SessionEvent.CONNECTION_CLOSED, **_connection_detail(cid, system))
         held = [name for name, owner in self._publishers.items() if owner == cid]
         for name in held:
             del self._publishers[name]

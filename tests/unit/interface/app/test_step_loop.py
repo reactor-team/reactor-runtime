@@ -33,6 +33,7 @@ from reactor_runtime.core.model import (
     EndReason,
     SessionEnded,
     SessionStarted,
+    StartingInputApplied,
 )
 from reactor_runtime.core.values import ConnId
 from reactor_runtime.interface.internal.reactor_core import CommandEnvelope
@@ -119,6 +120,37 @@ async def _stop(task: asyncio.Task[None]) -> None:
 
 
 # -- the simplest model -------------------------------------------------------
+
+
+async def test_no_step_runs_until_the_starting_input_has_been_applied() -> None:
+    app = OnlyGenerate()
+    _ready(app)
+    await app._dispatch_reactor_event(SessionStarted("s", starting_input=True))
+    await app._dispatch_reactor_event(ClientConnected(ConnId(0), 1, system=True))
+    task = await _run_for(app)
+    # The system client is connected, but the starting commands have not landed.
+    assert app.connected.is_set()
+    assert app.generated == 0
+
+    await app._dispatch_reactor_event(StartingInputApplied())
+    await asyncio.sleep(0.02)
+    await _stop(task)
+    assert app.generated > 0
+
+
+async def test_each_session_with_a_starting_input_waits_for_its_own() -> None:
+    app = OnlyGenerate()
+    _ready(app)
+    await app._dispatch_reactor_event(SessionStarted("s", starting_input=True))
+    await app._dispatch_reactor_event(ClientConnected(ConnId(0), 1, system=True))
+    await app._dispatch_reactor_event(StartingInputApplied())
+    assert app._live.is_set()
+    await app._dispatch_reactor_event(SessionEnded("s", EndReason.STOPPED))
+
+    await app._dispatch_reactor_event(SessionStarted("t", starting_input=True))
+    await app._dispatch_reactor_event(ClientConnected(ConnId(0), 1, system=True))
+
+    assert not app._live.is_set()
 
 
 async def test_a_model_that_writes_only_generate_runs_and_emits() -> None:

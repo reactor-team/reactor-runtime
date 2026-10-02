@@ -27,8 +27,9 @@ command handler, every lifecycle hook, and the build and clear of ``self.state``
 at the session boundaries, so a ``run()`` that takes the same lock around one
 unit of work never has a handler land inside it and never sees its state
 replaced or cleared under it. The live gate is
-set while a session has started and at least one client is connected; a
-``run()`` waits on it and checks it between units of work.
+set while a session has started, its starting input (if any) has been
+applied, and at least one client is connected; a ``run()`` waits on it and
+checks it between units of work.
 
 The default ``run()`` is the step loop. Each turn takes the step lock and calls
 ``process_input()``, ``generate()``, and ``process_output()`` in that order, then
@@ -53,6 +54,7 @@ from reactor_runtime.core.model import (
     ReactorEvent,
     SessionEnded,
     SessionStarted,
+    StartingInputApplied,
 )
 from reactor_runtime.core.values import CommandFailure, ConnId
 from reactor_runtime.interface.app.input_state import InputState
@@ -135,6 +137,7 @@ class ReactorApp(ReactorCore):
     connected: asyncio.Event
     _clients: dict[ConnId, ClientInfo]
     _session_active: bool
+    _starting_input_pending: bool
     _live: asyncio.Event
     _step_lock: asyncio.Lock
     _step_requested: asyncio.Event
@@ -347,6 +350,7 @@ class ReactorApp(ReactorCore):
         self.connected = asyncio.Event()
         self._clients = {}
         self._session_active = False
+        self._starting_input_pending = False
         self._live = asyncio.Event()
         self._step_lock = asyncio.Lock()
         self._step_requested = asyncio.Event()
@@ -459,13 +463,19 @@ class ReactorApp(ReactorCore):
         ``process_output()`` finishes on the state it started with.
 
         The live gate, :attr:`_live`, is a session that has started and a client
-        that is connected. A session end drops the gate before its hook runs, so
-        a ``run()`` loop that checks the gate between units of work stops at the
-        next boundary instead of waiting for the hook to take the step lock.
+        that is connected. A session that starts with a starting input keeps
+        the gate shut until :class:`StartingInputApplied` arrives, so the step
+        loop's first step sees the state the starting commands set; the
+        connection count, and so :attr:`connected`, is unaffected. A session
+        end drops the gate before its hook runs, so a ``run()`` loop that
+        checks the gate between units of work stops at the next boundary
+        instead of waiting for the hook to take the step lock.
         """
         hooks = self.__reactor_contract__.lifecycle
         if isinstance(event, ClientConnected):
-            self._clients[event.conn_id] = self._make_client(event.conn_id, time.monotonic())
+            self._clients[event.conn_id] = self._make_client(
+                event.conn_id, time.monotonic(), system=event.system
+            )
             self._set_connected(event.total)
             await self._invoke_hook(hooks.connected, event.conn_id)
         elif isinstance(event, ClientDisconnected):
@@ -474,6 +484,7 @@ class ReactorApp(ReactorCore):
             self._clients.pop(event.conn_id, None)
         elif isinstance(event, SessionStarted):
             self._session_active = True
+            self._starting_input_pending = event.starting_input
             self._update_live()
             # The state is written under the step lock, hook or no hook: a step
             # suspended in one of its hooks holds the lock and must not see the
@@ -482,8 +493,12 @@ class ReactorApp(ReactorCore):
                 if self.__app_state__ is not None:
                     self.state = self.__app_state__()
                 await self._call_hook(hooks.session_started, None)
+        elif isinstance(event, StartingInputApplied):
+            self._starting_input_pending = False
+            self._update_live()
         elif isinstance(event, SessionEnded):
             self._session_active = False
+            self._starting_input_pending = False
             self._set_connected(0)
             async with self._step_lock:
                 await self._call_hook(hooks.session_ended, None)
@@ -543,12 +558,12 @@ class ReactorApp(ReactorCore):
         self._update_live()
 
     def _update_live(self) -> None:
-        """Reconcile the live gate from session liveness and the client count.
+        """Reconcile the live gate from session liveness, the starting input, and the client count.
 
         Every drop of the gate is counted, so a loop that was blocked while the
         gate dropped and came back still sees that a boundary passed.
         """
-        if self.connected.is_set() and self._session_active:
+        if self.connected.is_set() and self._session_active and not self._starting_input_pending:
             self._live.set()
         elif self._live.is_set():
             self._live.clear()
@@ -574,11 +589,14 @@ class ReactorApp(ReactorCore):
             self._clients[conn_id] = client
         return client
 
-    def _make_client(self, conn_id: ConnId, joined_at: float) -> ClientInfo:
+    def _make_client(
+        self, conn_id: ConnId, joined_at: float, *, system: bool = False
+    ) -> ClientInfo:
         """Build a client handle bound to the addressed sink for *conn_id*."""
         return ClientInfo(
             id=conn_id,
             joined_at=joined_at,
+            system=system,
             _send=lambda message: self._reply(conn_id, message, None),
         )
 

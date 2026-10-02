@@ -243,9 +243,22 @@ class SessionStarted(ReactorEvent):
 
     Attributes:
         session_id: Identifier for the session that started.
+        starting_input: Whether a starting input follows. When one does, the
+            step loop takes no step until :class:`StartingInputApplied`
+            arrives, so its first step sees the state the starting input set.
     """
 
     session_id: str
+    starting_input: bool = False
+
+
+@dataclass(frozen=True)
+class StartingInputApplied(ReactorEvent):
+    """Every command of the session's starting input has been handed to the model.
+
+    It follows the last starting command on the same ordered queue, so every
+    starting handler has returned by the time the model handles it.
+    """
 
 
 @dataclass(frozen=True)
@@ -274,10 +287,12 @@ class ClientConnected(ReactorEvent):
     Attributes:
         conn_id: The connection that opened.
         total: Live connection count after the open.
+        system: Whether the connection is the runtime's own system client.
     """
 
     conn_id: ConnId
     total: int
+    system: bool = False
 
 
 @dataclass(frozen=True)

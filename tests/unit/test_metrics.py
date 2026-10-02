@@ -184,6 +184,26 @@ def test_counts_each_client_that_arrives_and_leaves() -> None:
     assert session.value("runtime_session_state", state="streaming") == 1.0
 
 
+def test_the_system_client_is_not_counted_as_a_client() -> None:
+    session = _Session()
+    session.open_session()
+
+    session.clock.tick(0.5)
+    session.send(SessionEvent.CONNECTION_OPENED, conn_id=0, system=True)
+    session.clock.tick(3.0)
+    session.send(SessionEvent.CONNECTION_OPENED, conn_id=1002)
+    session.send(SessionEvent.CONNECTION_CLOSED, conn_id=0, system=True)
+
+    assert session.value("runtime_connections_opened_total") == 1.0
+    assert session.value("runtime_connections_closed_total") == 0.0
+    assert session.value("runtime_connections_active") == 1.0
+    # The first client is the real one, 3.5 s in, not the system client.
+    assert session.value("runtime_session_time_to_first_client_seconds_count") == 1.0
+    assert session.value("runtime_session_time_to_first_client_seconds_sum") == 3.5
+    # The session state still follows the machine, which counts both.
+    assert session.value("runtime_session_state", state="streaming") == 1.0
+
+
 def test_the_last_client_to_leave_orphans_the_session() -> None:
     session = _Session()
     session.open_session()

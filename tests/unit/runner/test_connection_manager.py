@@ -178,6 +178,22 @@ def test_first_connection_moves_session_to_streaming() -> None:
     assert sm.current_state is SessionState.STREAMING
 
 
+def test_only_the_system_client_is_marked_in_the_journal_detail() -> None:
+    cm, sm = waiting_manager()
+    seen: list[Transition] = []
+    sm.on_transition(seen.append)
+    cm.register(FakeConnection(0), system=True)
+    cm.register(FakeConnection(1002))
+    cm.drop(ConnId(0), system=True)
+    cm.drop(ConnId(1002))
+    assert [(t.event, dict(t.detail)) for t in seen] == [
+        (SessionEvent.CONNECTION_OPENED, {"conn_id": 0, "system": True}),
+        (SessionEvent.CONNECTION_OPENED, {"conn_id": 1002}),
+        (SessionEvent.CONNECTION_CLOSED, {"conn_id": 0, "system": True}),
+        (SessionEvent.CONNECTION_CLOSED, {"conn_id": 1002}),
+    ]
+
+
 def test_additional_connection_does_not_re_enter_streaming() -> None:
     cm, sm = waiting_manager()
     seen: list[Transition] = []
