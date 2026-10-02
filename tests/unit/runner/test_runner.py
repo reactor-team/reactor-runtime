@@ -846,13 +846,13 @@ async def _two_sessions_with_a_started_barrier(
     runner = _runner()
     await runner.start()
     try:
-        # The model thread creates its queues on its own loop, and an event
+        # The model thread creates its queue on its own loop, and an event
         # enqueued before then is deliberately dropped. Production start_session
         # calls arrive long after boot; this test's arrives instantly, so wait
         # for the loop before opening the first session.
         model = created_models[-1]
         deadline = time.monotonic() + 2.0
-        while model._reactor_q is None:
+        while model._inbound_q is None:
             assert time.monotonic() < deadline, "model loop never became ready"
             await asyncio.sleep(0.01)
         runner.start_session({"session_id": first_sid})

@@ -33,7 +33,7 @@ from reactor_runtime.log import get_logger
 logger = get_logger(__name__)
 
 # A short pause on an idle turn or a generator restart yields the loop so the
-# dispatch loops deliver commands, without busy-spinning.
+# dispatch loop delivers commands, without busy-spinning.
 _IDLE_SLEEP = 0.005
 _RESTART_SLEEP = 0.005
 
