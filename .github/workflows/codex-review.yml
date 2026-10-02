@@ -305,7 +305,7 @@ jobs:
 
     steps:
       - name: Checkout PR head
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -518,7 +518,7 @@ jobs:
       - name: Checkout PR head for scope recovery
         if: needs.acknowledge.outputs.comment_id != '' && (needs.review.outputs.scope == '' || needs.review.outputs.diff_base_sha == '')
         continue-on-error: true
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ needs.acknowledge.outputs.target_sha }}
