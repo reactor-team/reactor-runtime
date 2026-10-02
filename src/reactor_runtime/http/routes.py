@@ -21,6 +21,7 @@ from reactor_runtime.metrics import CONTENT_TYPE as METRICS_CONTENT_TYPE
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.recording import ClipManifest, ClipSessionGoneError, Pending
 from reactor_runtime.runner import Runner
+from reactor_runtime.runner.session_start import InvalidSessionStartError
 from reactor_runtime.transport.router import (
     ErrorDetail,
     SessionNotRunningError,
@@ -57,6 +58,10 @@ class StopSessionRequest(BaseModel):
 _TRANSITION_RESPONSES: dict[int | str, dict[str, Any]] = {
     409: {"model": ErrorDetail},
     503: {"model": ErrorDetail},
+}
+_START_RESPONSES: dict[int | str, dict[str, Any]] = {
+    400: {"model": ErrorDetail},
+    **_TRANSITION_RESPONSES,
 }
 _GUARD_RESPONSES: dict[int | str, dict[str, Any]] = {
     400: {"model": ErrorDetail},
@@ -108,12 +113,14 @@ class SessionRoutes:
         """Register the session-control routes against *app*."""
         runner = self._runner
 
-        @app.post("/start_session", responses=_TRANSITION_RESPONSES)
+        @app.post("/start_session", responses=_START_RESPONSES)
         async def start_session(
             params: Annotated[dict[str, Any] | None, Body()] = None,
         ) -> dict[str, Any]:
             try:
                 runner.start_session(params or {})
+            except InvalidSessionStartError as invalid:
+                raise HTTPException(status_code=400, detail=str(invalid)) from None
             except SessionTransitionError as rejected:
                 raise _transition_rejection(rejected) from None
             return runner.descriptor()

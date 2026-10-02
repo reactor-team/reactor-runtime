@@ -72,6 +72,10 @@ from reactor_runtime.runner.runner import (
     SESSION_ID,
     Runner,
 )
+from reactor_runtime.runner.session_start import (
+    InvalidSessionStartError,
+    SessionStart,
+)
 from reactor_runtime.transport.router import (
     SessionControl,
     SessionNotRunningError,
@@ -1016,6 +1020,47 @@ async def test_a_rejected_start_leaves_the_recording_id_untouched(
     with pytest.raises(SessionTransitionError):
         started_runner.start_session({})
     assert started_runner._recording_id == supplied
+
+
+async def test_start_session_adopts_the_session_shape(started_runner: Runner) -> None:
+    started_runner.start_session(
+        {
+            "starting_input": {"commands": [{"command": "set_mode", "data": {"mode": "x"}}]},
+            "steps": 2,
+        }
+    )
+    shape = started_runner._session_start
+    assert shape.steps == 2
+    assert shape.starting_input is not None
+    assert [command.command for command in shape.starting_input.commands] == ["set_mode"]
+
+
+async def test_a_malformed_start_is_rejected_before_the_session_moves(
+    started_runner: Runner,
+) -> None:
+    with pytest.raises(InvalidSessionStartError):
+        started_runner.start_session({"steps": 0})
+    assert started_runner._sm.current_state is SessionState.READY
+    assert _moves(started_runner, SessionEvent.START_SESSION) == []
+
+
+async def test_a_rejected_start_leaves_the_session_shape_untouched(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({"steps": 3})
+    with pytest.raises(SessionTransitionError):
+        started_runner.start_session({"steps": 5})
+    with pytest.raises(InvalidSessionStartError):
+        started_runner.start_session({"steps": 0})
+    assert started_runner._session_start.steps == 3
+
+
+async def test_the_next_session_starts_from_its_own_shape(started_runner: Runner) -> None:
+    started_runner.start_session({"steps": 3})
+    started_runner.stop_session()
+    await started_runner._drain_teardown()
+    started_runner.start_session({})
+    assert started_runner._session_start == SessionStart()
 
 
 def test_start_session_rejects_before_the_model_is_loaded() -> None:
