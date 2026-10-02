@@ -2580,8 +2580,8 @@ def _one_track_batch(**metrics: float) -> ClientStatsBatch:
             ClientTrackStat(
                 timestamp=1_700_000_000_000,
                 track_name="main_video",
-                kind="video",
-                direction="recvonly",
+                kind=TrackKind.VIDEO,
+                direction=ClientTrackDirection.RECVONLY,
                 codec="VP9",
                 paused=False,
                 metrics=metrics,
