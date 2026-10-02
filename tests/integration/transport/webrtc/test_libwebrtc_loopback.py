@@ -121,7 +121,7 @@ class _Client:
     send track is natively awaitable in `reactor-webrtc`, which `__init__`
     cannot await."""
 
-    def __init__(self, factory: rw.PeerConnectionFactory) -> None:
+    def __init__(self, factory: rw.PeerConnectionFactory, *, open_data: bool = True) -> None:
         self.ice: list[rw.IceCandidate] = []
         self.received_video = 0
         self.received_audio = 0
@@ -147,14 +147,24 @@ class _Client:
         # Nothing to attach for metadata in either direction: reactor-webrtc
         # advertises the capability in the offer, the runtime's answer mirrors it,
         # and both peers install their own embed/strip steps on negotiation.
-        self.data = self.pc.create_data_channel("data")
+        # ``open_data=False`` leaves the data channel for the test to open later,
+        # once the association is up; the control channel alone carries the
+        # application section of the offer.
+        self.data: rw.DataChannel | None = (
+            self.pc.create_data_channel("data") if open_data else None
+        )
         self.control = self.pc.create_data_channel("control")
 
     @classmethod
-    async def create(cls, factory: rw.PeerConnectionFactory) -> _Client:
-        self = cls(factory)
+    async def create(cls, factory: rw.PeerConnectionFactory, *, open_data: bool = True) -> _Client:
+        self = cls(factory, open_data=open_data)
         await self.send.set_track(self.send_track)
         return self
+
+    def open_data(self) -> rw.DataChannel:
+        """Open the data channel on an association that is already up."""
+        self.data = self.pc.create_data_channel("data")
+        return self.data
 
     def _on_track(self, kind: rw.MediaKind, track: rw.Track) -> None:
         self._recv_tracks.append(track)
@@ -429,6 +439,7 @@ async def test_a_frame_sent_from_the_connected_callback_reaches_the_client() -> 
         received.append(bytes(data))
         greeted.set()
 
+    assert client.data is not None
     client.data.on_message(_on_client_message)
 
     peer, answer = await libwebrtc_peer_factory(
@@ -462,6 +473,77 @@ async def test_a_frame_sent_from_the_connected_callback_reaches_the_client() -> 
         )
         assert channel_states == [rw.DataChannelState.Open, rw.DataChannelState.Open]
         assert received == [b"welcome"]
+    finally:
+        stop_trickle.set()
+        trickle_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await trickle_task
+        await peer.close()
+        client.pc = None  # type: ignore[assignment]
+
+
+async def test_a_frame_sent_before_the_wire_opens_arrives_after_the_connected_callback() -> None:
+    """A client may send as soon as its own channel opens.
+
+    Here the client opens the control channel alone, sends a ``resume_track``
+    on it, and only then opens the data channel. The wire is not open on this
+    side until both channels are, so the frame reaches the peer before the
+    connection is reported. It must not be lost or delivered ahead of the
+    connection: whoever acts on it needs to know the connection exists. The
+    peer holds it and delivers it right after the connected callback.
+    """
+    factory = _get_factory(WebRtcConfig())
+    client = await _Client.create(factory, open_data=False)
+    offer_sdp = await client.create_offer()
+    resume = b'{"type": "notification", "event": "resume_track", "data": {"name": "out_video"}}'
+
+    control_open = threading.Event()
+    client.control.on_state_change(
+        lambda state: control_open.set() if state == rw.DataChannelState.Open else None
+    )
+
+    peer, answer = await libwebrtc_peer_factory(
+        ConnId(6),
+        SdpOffer(sdp=offer_sdp),
+        client.track_map(),
+        WebRtcConfig(ice_gathering_timeout_ms=4000),
+        ProtocolVersion.V0,
+    )
+    events: list[tuple[str, Any]] = []
+    delivered = asyncio.Event()
+
+    def _on_message(payload: bytes | str, version: ProtocolVersion, channel: Channel) -> None:
+        events.append(("message", (payload, version, channel)))
+        delivered.set()
+
+    peer.on_message(_on_message)
+    peer.on_media(lambda *_: None)
+    peer.on_ping(lambda: None)
+    peer.on_connected(lambda: events.append(("connected", None)))
+    peer.on_disconnect(lambda: None)
+
+    stop_trickle = asyncio.Event()
+    trickle_task = asyncio.create_task(_trickle_until(client, peer, stop_trickle))
+    try:
+        await client.accept_answer(answer.sdp)
+        assert await asyncio.to_thread(control_open.wait, _TIMEOUT_S), (
+            "the control channel never opened"
+        )
+        # The peer adopts the channel on a libwebrtc thread a moment after it
+        # opens; give it that moment so the frame is read by the peer, which is
+        # what this test is about, rather than racing the adoption itself.
+        await asyncio.sleep(0.1)
+        assert events == [], "the wire counted as open with only the control channel"
+        client.control.send(resume, binary=False)
+        await asyncio.sleep(0.1)
+        assert events == [], "a frame arrived before the connection was reported"
+
+        client.open_data()
+        assert await _reached(delivered), "the early control frame was never delivered"
+        assert events == [
+            ("connected", None),
+            ("message", (resume.decode(), ProtocolVersion.V0, Channel.CONTROL)),
+        ]
     finally:
         stop_trickle.set()
         trickle_task.cancel()
@@ -600,6 +682,7 @@ async def test_loopback_carries_media_and_messages() -> None:
 
         # A client data-channel frame must surface through on_message, tagged with
         # the sniffed codec version and the channel it arrived on.
+        assert client.data is not None
         client.data.send(b'{"type": "hello"}', binary=False)
         assert await _reached(message_arrived), "inbound data-channel frame not surfaced"
         payload, version, channel = messages[0]

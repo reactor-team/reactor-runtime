@@ -161,6 +161,13 @@ CONTROL_CHANNEL_LABEL = "control"
 # behind is dropped rather than allowed to grow unbounded latency.
 _FRAME_QUEUE_MAX = 10
 
+# How many inbound data-channel frames a wire holds while it is not yet open. A
+# client may send as soon as its own channels open, which can be before this
+# side counts the wire open; those frames wait here and are delivered right
+# after the connected callback. A client sends a handful in that window, so the
+# bound only stops one that floods before opening from growing memory.
+_MAX_EARLY_FRAMES = 64
+
 # Outbound audio is 48 kHz mono, matching the runtime's audio frames and the
 # rate the synthetic audio device plays out at. The device takes one 10 ms frame
 # (480 samples) per push, so audio is fed in 480-sample frames on a 10 ms clock.
@@ -433,6 +440,10 @@ class WebRTCPeer:
         self._data_open = False
         self._control_open = False
         self._connected = threading.Event()
+        # Inbound frames that arrived before the wire counted as open, in arrival
+        # order, each with the codec version and channel it came in on. Guarded
+        # by ``_ready_lock`` so a frame is either held or delivered, never both.
+        self._early_frames: list[tuple[bytes | str, ProtocolVersion, Channel]] = []
 
         logger.info("WebRTCPeer initialized")
 
@@ -441,7 +452,12 @@ class WebRTCPeer:
     # =========================================================================
 
     def on_message(self, callback: Callable[[bytes | str, ProtocolVersion, Channel], None]) -> None:
-        """Register the sink for inbound frames on either channel."""
+        """Register the sink for inbound frames on either channel.
+
+        A frame that arrives before the wire is open is held and delivered, in
+        arrival order, right after the connected callback, so the receiver
+        always learns of the connection before it sees any of its frames.
+        """
         self._cb_message = callback
 
     def on_media(self, callback: Callable[[str, InputFrame], None]) -> None:
@@ -459,6 +475,9 @@ class WebRTCPeer:
         control channel are open, so a frame sent from the callback reaches
         the client. The peer connection reaches its connected state first; the
         channels open after it, once the SCTP association is up.
+
+        Frames the client sent before then are delivered to the message sink
+        immediately after this callback.
         """
         self._cb_connected = callback
 
@@ -728,13 +747,18 @@ class WebRTCPeer:
     def _fire_connected_if_ready(self) -> None:
         """Report the wire connected once, when every part of it is up.
 
-        Called with ``_ready_lock`` held.
+        Called with ``_ready_lock`` held. The frames held while the wire was not
+        open are scheduled right behind the connected callback, so the loop runs
+        that callback first and then each frame in the order it arrived.
         """
         if self._stop_event.is_set() or self._connected.is_set():
             return
         if self._peer_connected and self._data_open and self._control_open:
             self._connected.set()
             self._fire(self._cb_connected)
+            held, self._early_frames = self._early_frames, []
+            for payload, version, channel in held:
+                self._deliver(payload, version, channel)
 
     def _make_message_sink(self, channel: Channel) -> Callable[[bytes, bool], None]:
         def sink(data: bytes, binary: bool) -> None:
@@ -744,10 +768,32 @@ class WebRTCPeer:
             if not self._protocol_sniffed:
                 self.protocol_version = sniff(payload)
                 self._protocol_sniffed = True
-            self._fire(self._cb_message, payload, self.protocol_version, channel)
-            self._fire(self._cb_ping)
+            with self._ready_lock:
+                if not self._connected.is_set():
+                    self._hold(payload, channel)
+                    return
+                self._deliver(payload, self.protocol_version, channel)
 
         return sink
+
+    def _hold(self, payload: bytes | str, channel: Channel) -> None:
+        """Keep a frame that arrived before the wire is open, within the bound.
+
+        Called with ``_ready_lock`` held.
+        """
+        if len(self._early_frames) >= _MAX_EARLY_FRAMES:
+            logger.warning(
+                "dropping an inbound frame on %s: %d frames already wait for the wire to open",
+                channel,
+                _MAX_EARLY_FRAMES,
+            )
+            return
+        self._early_frames.append((payload, self.protocol_version, channel))
+
+    def _deliver(self, payload: bytes | str, version: ProtocolVersion, channel: Channel) -> None:
+        """Hand one inbound frame to the message sink and note the client's liveness."""
+        self._fire(self._cb_message, payload, version, channel)
+        self._fire(self._cb_ping)
 
     def _report_loss(self) -> None:
         """Release the wire and report an involuntary loss, exactly once.
@@ -769,6 +815,8 @@ class WebRTCPeer:
         self._fire(self._cb_disconnect)
 
     def _release_wire(self) -> None:
+        with self._ready_lock:
+            self._early_frames.clear()
         self._pc = None
         self._data_channel = None
         self._control_channel = None

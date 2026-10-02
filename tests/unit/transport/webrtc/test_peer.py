@@ -40,6 +40,7 @@ from reactor_runtime.transport.webrtc.peer import (  # noqa: E402
     _AUDIO_GRACE_TICKS,
     _AUDIO_SILENT_FRAME,
     _FRAME_QUEUE_MAX,
+    _MAX_EARLY_FRAMES,
     WebRTCPeer,
     _apply_bitrate_limits,
     _build_rtc_config,
@@ -154,6 +155,7 @@ def _video_bundle(
 async def test_message_sink_sniffs_once_and_reports_ping() -> None:
     peer = WebRTCPeer()
     peer._loop = asyncio.get_running_loop()
+    peer._connected.set()
     messages: list[tuple[bytes | str, ProtocolVersion, Channel]] = []
     pings: list[int] = []
     peer.on_message(lambda payload, version, channel: messages.append((payload, version, channel)))
@@ -172,6 +174,7 @@ async def test_message_sink_sniffs_once_and_reports_ping() -> None:
 async def test_control_channel_sink_tags_control() -> None:
     peer = WebRTCPeer()
     peer._loop = asyncio.get_running_loop()
+    peer._connected.set()
     seen: list[Channel] = []
     peer.on_message(lambda _p, _v, channel: seen.append(channel))
     peer.on_ping(lambda: None)
@@ -1549,6 +1552,114 @@ async def test_a_channel_opening_after_the_wire_is_lost_does_not_connect() -> No
     await _settle()
 
     assert fired == []
+
+
+# ── Frames that arrive before the wire is open ───────────────────────────────
+
+
+def _recording_peer() -> tuple[WebRTCPeer, list[tuple[str, Any]]]:
+    """A peer whose connected, message, and ping callbacks log into one ordered list."""
+    peer = WebRTCPeer()
+    peer._loop = asyncio.get_running_loop()
+    events: list[tuple[str, Any]] = []
+    peer.on_connected(lambda: events.append(("connected", None)))
+    peer.on_message(
+        lambda payload, version, channel: events.append(("message", (payload, version, channel)))
+    )
+    peer.on_ping(lambda: events.append(("ping", None)))
+    return peer, events
+
+
+def _open_wire(peer: WebRTCPeer) -> None:
+    peer._on_connection_state_change(rw.PeerConnectionState.Connected)
+    peer._on_data_channel(cast(Any, _FakeChannel("control")))
+    peer._on_data_channel(cast(Any, _FakeChannel("data")))
+
+
+async def test_a_frame_before_the_wire_opens_waits_for_it() -> None:
+    peer, events = _recording_peer()
+
+    peer._make_message_sink(Channel.CONTROL)(b'{"type": "hello"}', False)
+    await _settle()
+
+    assert events == []
+
+
+async def test_a_held_frame_is_delivered_right_after_the_connected_callback() -> None:
+    peer, events = _recording_peer()
+
+    peer._make_message_sink(Channel.CONTROL)(b'{"type": "hello"}', False)
+    _open_wire(peer)
+    await _settle()
+
+    assert events == [
+        ("connected", None),
+        ("message", ('{"type": "hello"}', ProtocolVersion.V0, Channel.CONTROL)),
+        ("ping", None),
+    ]
+
+
+async def test_held_frames_keep_their_arrival_order_across_channels() -> None:
+    peer, events = _recording_peer()
+    control = peer._make_message_sink(Channel.CONTROL)
+    data = peer._make_message_sink(Channel.DATA)
+
+    control(b'{"n": 1}', False)
+    data(b'{"n": 2}', False)
+    control(b'{"n": 3}', False)
+    _open_wire(peer)
+    await _settle()
+
+    messages = [detail for kind, detail in events if kind == "message"]
+    assert [(payload, channel) for payload, _, channel in messages] == [
+        ('{"n": 1}', Channel.CONTROL),
+        ('{"n": 2}', Channel.DATA),
+        ('{"n": 3}', Channel.CONTROL),
+    ]
+
+
+async def test_a_frame_after_the_wire_opens_follows_the_held_ones() -> None:
+    peer, events = _recording_peer()
+    control = peer._make_message_sink(Channel.CONTROL)
+
+    control(b'{"n": 1}', False)
+    _open_wire(peer)
+    control(b'{"n": 2}', False)
+    await _settle()
+
+    assert [kind for kind, _ in events] == ["connected", "message", "ping", "message", "ping"]
+    payloads = [detail[0] for kind, detail in events if kind == "message"]
+    assert payloads == ['{"n": 1}', '{"n": 2}']
+
+
+async def test_held_frames_are_discarded_when_the_wire_is_lost() -> None:
+    peer, events = _recording_peer()
+    peer.on_disconnect(lambda: None)
+
+    peer._make_message_sink(Channel.CONTROL)(b'{"type": "hello"}', False)
+    peer._report_loss()
+    _open_wire(peer)
+    await _settle()
+
+    assert events == []
+    assert peer._early_frames == []
+
+
+async def test_frames_past_the_bound_are_dropped_and_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    peer, events = _recording_peer()
+    sink = peer._make_message_sink(Channel.DATA)
+
+    with caplog.at_level(logging.WARNING):
+        for n in range(_MAX_EARLY_FRAMES + 3):
+            sink(f'{{"n": {n}}}'.encode(), False)
+    _open_wire(peer)
+    await _settle()
+
+    payloads = [detail[0] for kind, detail in events if kind == "message"]
+    assert payloads == [f'{{"n": {n}}}' for n in range(_MAX_EARLY_FRAMES)]
+    assert len(_warnings(caplog)) == 3
 
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
