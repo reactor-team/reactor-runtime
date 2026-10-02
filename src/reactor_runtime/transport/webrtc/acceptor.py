@@ -401,6 +401,7 @@ class WebRTCAcceptor(ConnectionAcceptor):
             )
             conn.on_media(lambda track, frame: self._sink.media_received(conn_id, track, frame))
             conn.on_ping(lambda: self._sink.keepalive(conn_id))
+            conn.on_client_stats(lambda batch: self._sink.client_stats_received(conn_id, batch))
             conn.on_connected(lambda: self._opened(conn_id, conn, offered_at))
             conn.on_disconnect(lambda: self._closed(conn_id, offered_at))
             conn.on_closed(lambda: self._forget(conn_id, offered_at))

@@ -3,7 +3,7 @@ from collections.abc import Mapping
 
 import pytest
 
-from reactor_runtime.core import Connection, ConnId, InputFrame
+from reactor_runtime.core import ClientStatsBatch, Connection, ConnId, InputFrame
 from reactor_runtime.message_gateway import InboundCommand, MessageGateway
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.protocol.common import dict_to_struct
@@ -64,6 +64,9 @@ class FakeSink:
 
     def recording_requested(self, conn_id: ConnId, request_id: str) -> None:
         self.recordings.append((conn_id, request_id))
+
+    def client_stats_received(self, conn_id: ConnId, batch: ClientStatsBatch) -> None:
+        pass
 
     def connection_answered(self, conn_id: ConnId, answer: Mapping[str, str]) -> None:
         pass

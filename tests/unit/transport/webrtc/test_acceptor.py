@@ -5,9 +5,10 @@ import numpy as np
 import pytest
 from conftest import FakePeer
 
-from reactor_runtime.core import Connection, ConnId, InputFrame, TrackDirection
+from reactor_runtime.core import ClientStatsBatch, Connection, ConnId, InputFrame, TrackDirection
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.protocol import Channel, ProtocolVersion
+from reactor_runtime.protocol.v1.codec import V1Codec
 from reactor_runtime.transport import TooManyConnectionsError
 from reactor_runtime.transport.webrtc import (
     PortRangeUnavailableError,
@@ -28,6 +29,7 @@ from reactor_runtime.transport.webrtc.connection import WebRTCConnection
 from reactor_runtime.transport.webrtc.metrics import WebRtcMetrics
 from reactor_runtime.transport.webrtc.signaling import IceCandidate
 from reactor_runtime.transport.webrtc.stats import OutboundMediaHealth, PeerStats, TrackStat
+from reactor_wire.v1 import control_pb2, platform_pb2
 
 
 class FakeSink:
@@ -39,6 +41,7 @@ class FakeSink:
         self.messages: list[tuple[ConnId, bytes | str]] = []
         self.media: list[tuple[ConnId, str]] = []
         self.keepalives: list[ConnId] = []
+        self.client_stats: list[tuple[ConnId, ClientStatsBatch]] = []
         self.answered: list[tuple[ConnId, dict[str, str]]] = []
 
     def connection_opened(self, conn: Connection) -> None:
@@ -81,6 +84,9 @@ class FakeSink:
 
     def recording_requested(self, conn_id: ConnId, request_id: str) -> None:
         pass
+
+    def client_stats_received(self, conn_id: ConnId, batch: ClientStatsBatch) -> None:
+        self.client_stats.append((conn_id, batch))
 
     def connection_answered(self, conn_id: ConnId, answer: Mapping[str, str]) -> None:
         self.answered.append((conn_id, dict(answer)))
@@ -315,6 +321,27 @@ async def test_sink_callbacks_are_wired(
     assert sink.media == [(ConnId(7), "webcam")]
     assert sink.keepalives == [ConnId(7)]
     fake_peer.fire_disconnect()
+
+
+async def test_client_stats_reach_the_sink_with_the_connection_id(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    sink = FakeSink()
+    acceptor = _acceptor(sink, fake_peer, factory_for)
+    await _negotiate(acceptor, ConnId(7), SdpOffer("offer"), out_av_tracks)
+    fake_peer.protocol_version = ProtocolVersion.V1
+    _, frame = V1Codec().encode(
+        control_pb2.ControlClientMessage(client_stats=platform_pb2.ClientStats())
+    )
+
+    fake_peer.fire_message(frame, Channel.CONTROL)
+
+    assert sink.client_stats == [
+        (ConnId(7), ClientStatsBatch(track_stats=[], connection_stat=None))
+    ]
+    assert sink.messages == []
 
 
 async def test_disconnect_after_open_reports_closed(

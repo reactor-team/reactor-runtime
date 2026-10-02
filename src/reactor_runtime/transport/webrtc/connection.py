@@ -17,6 +17,7 @@ from collections.abc import Callable
 from dataclasses import replace
 
 from reactor_runtime.core import (
+    ClientStatsBatch,
     ConnectionCapabilities,
     ConnId,
     InputFrame,
@@ -26,6 +27,7 @@ from reactor_runtime.core import (
     TrackKind,
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion
+from reactor_runtime.transport.webrtc.client_stats import read_client_stats
 from reactor_runtime.transport.webrtc.config import WebRtcConfig
 from reactor_runtime.transport.webrtc.pacer import MediaPacer
 from reactor_runtime.transport.webrtc.peer import WebRTCPeer, WebRtcPeerFactory
@@ -92,6 +94,7 @@ class WebRTCConnection:
         self._on_message: Callable[[bytes | str, ProtocolVersion, Channel], None] | None = None
         self._on_media: Callable[[str, InputFrame], None] | None = None
         self._on_ping: Callable[[], None] | None = None
+        self._on_client_stats: Callable[[ClientStatsBatch], None] | None = None
         self._on_connected: Callable[[], None] | None = None
         self._on_disconnect: Callable[[], None] | None = None
         self._on_closed: Callable[[], None] | None = None
@@ -165,6 +168,14 @@ class WebRTCConnection:
     def on_ping(self, callback: Callable[[], None]) -> None:
         """Register the sink for client liveness pings."""
         self._on_ping = callback
+
+    def on_client_stats(self, callback: Callable[[ClientStatsBatch], None]) -> None:
+        """Register the sink for the client's own quality readings.
+
+        A control frame that carries a client-stats batch goes here, decoded,
+        and not to :meth:`on_message`.
+        """
+        self._on_client_stats = callback
 
     def on_connected(self, callback: Callable[[], None]) -> None:
         """Register the sink for the wire becoming able to carry frames.
@@ -260,6 +271,11 @@ class WebRTCConnection:
     def _handle_message(
         self, payload: bytes | str, version: ProtocolVersion, channel: Channel
     ) -> None:
+        batch = read_client_stats(payload, version, channel)
+        if batch is not None:
+            if self._on_client_stats is not None:
+                self._on_client_stats(batch)
+            return
         if self._on_message is not None:
             self._on_message(payload, version, channel)
 

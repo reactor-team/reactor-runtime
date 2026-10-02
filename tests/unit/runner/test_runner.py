@@ -29,7 +29,11 @@ from reactor_runtime import (
 from reactor_runtime.codes import UNRESOLVED_UPLOAD
 from reactor_runtime.core import (
     ClientConnected,
+    ClientConnectionStat,
     ClientDisconnected,
+    ClientStatsBatch,
+    ClientTrackDirection,
+    ClientTrackStat,
     CommandFailure,
     ConnectionCapabilities,
     ConnId,
@@ -2413,6 +2417,146 @@ async def test_transitions_are_logged(
     assert fields["event"] == "start_session"
     assert fields["from_state"] == "ready"
     assert fields["to_state"] == "waiting"
+
+
+_LIVE_SESSION_ID = "0f0e0d0c-0b0a-0908-0706-050403020100"
+
+
+def _stamped_fields(record: logging.LogRecord) -> dict[str, Any]:
+    """Return *record*'s fields as the handler writes them, session context included."""
+    log.SessionContextFilter().filter(record)
+    return getattr(record, "reactor_fields", {})
+
+
+async def test_client_stats_are_logged_with_session_and_connection_identity(
+    started_runner: Runner, caplog: pytest.LogCaptureFixture
+) -> None:
+    stat = ClientTrackStat(
+        timestamp=1_700_000_000_000,
+        track_name="main_video",
+        kind=TrackKind.VIDEO,
+        direction=ClientTrackDirection.RECVONLY,
+        codec="VP9",
+        paused=False,
+        metrics={
+            "bitrate_bps": 950_000,
+            "frames_per_second": 29.5,
+            "packets_lost": 4,
+            "packets_received": 996,
+            "jitter_ms": 12.0,
+            "round_trip_time_ms": 48.0,
+            "frames_decoded": 900,
+            "frames_dropped": 2,
+            "frame_width": 1280,
+            "frame_height": 720,
+            "nack_count": 3,
+            "keyframe_requests": 1,
+        },
+    )
+    connection_stat = ClientConnectionStat(
+        timestamp=1_700_000_000_000,
+        metrics={"available_outgoing_bitrate_bps": 2_000_000, "time_to_connect_ms": 850},
+    )
+    batch = ClientStatsBatch(track_stats=[stat], connection_stat=connection_stat)
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
+    with caplog.at_level(logging.DEBUG, logger="reactor_runtime.runner.runner"):
+        started_runner.client_stats_received(ConnId(3), batch)
+
+    connection_record = next(
+        r for r in caplog.records if r.getMessage() == "client connection stats"
+    )
+    connection_fields = _stamped_fields(connection_record)
+    # The id the session is known by, not the fixed transport id.
+    assert connection_fields["session_id"] == _LIVE_SESSION_ID
+    assert connection_fields["conn_id"] == ConnId(3)
+    assert connection_fields["metrics"] == {
+        "available_outgoing_bitrate_bps": 2_000_000,
+        "time_to_connect_ms": 850,
+    }
+
+    record = next(r for r in caplog.records if r.getMessage() == "client stats")
+    # Both lines stay below the default log level.
+    assert connection_record.levelno == logging.DEBUG
+    assert record.levelno == logging.DEBUG
+    fields = _stamped_fields(record)
+    assert fields["session_id"] == _LIVE_SESSION_ID
+    assert fields["conn_id"] == ConnId(3)
+    assert fields["track_name"] == "main_video"
+    assert fields["kind"] == "video"
+    assert fields["direction"] == "recvonly"
+    assert fields["codec"] == "VP9"
+    assert fields["paused"] is False
+    assert fields["metrics"] == dict(stat.metrics)
+
+
+async def test_client_stats_metric_names_stay_inside_the_metrics_field(
+    started_runner: Runner, caplog: pytest.LogCaptureFixture
+) -> None:
+    stat = ClientTrackStat(
+        timestamp=1_700_000_000_000,
+        track_name="main_video",
+        kind=TrackKind.VIDEO,
+        direction=ClientTrackDirection.RECVONLY,
+        codec="VP9",
+        paused=False,
+        # Metric names are the client's to choose. Named like the runtime's own
+        # fields, they stay data inside `metrics` and leave the real fields alone.
+        metrics={"session_id": -1, "state": -1, "conn_id": -1, "msg": -1, "bitrate_bps": 950_000},
+    )
+    batch = ClientStatsBatch(track_stats=[stat], connection_stat=None)
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
+    with caplog.at_level(logging.DEBUG, logger="reactor_runtime.runner.runner"):
+        started_runner.client_stats_received(ConnId(3), batch)
+
+    record = next(r for r in caplog.records if r.getMessage() == "client stats")
+    fields = _stamped_fields(record)
+    assert fields["session_id"] == _LIVE_SESSION_ID
+    assert fields["state"] != -1
+    assert fields["conn_id"] == ConnId(3)
+    assert fields["metrics"] == dict(stat.metrics)
+
+
+async def test_client_stats_metric_names_cannot_break_a_text_log_line(
+    started_runner: Runner, caplog: pytest.LogCaptureFixture
+) -> None:
+    stat = ClientTrackStat(
+        timestamp=1_700_000_000_000,
+        track_name="main_video",
+        kind=TrackKind.VIDEO,
+        direction=ClientTrackDirection.RECVONLY,
+        codec="VP9",
+        paused=False,
+        metrics={"x\nforged=line": 1.0, "a b=c": 2.0},
+    )
+    batch = ClientStatsBatch(track_stats=[stat], connection_stat=None)
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
+    with caplog.at_level(logging.DEBUG, logger="reactor_runtime.runner.runner"):
+        started_runner.client_stats_received(ConnId(3), batch)
+
+    record = next(r for r in caplog.records if r.getMessage() == "client stats")
+    line = log.TextFormatter().format(record)
+    assert "\n" not in line
+    assert "forged=line" not in line.split("metrics=", 1)[0]
+
+
+async def test_client_stats_logs_no_connection_line_when_the_batch_carries_none(
+    started_runner: Runner, caplog: pytest.LogCaptureFixture
+) -> None:
+    stat = ClientTrackStat(
+        timestamp=1_700_000_000_000,
+        track_name="main_video",
+        kind=TrackKind.VIDEO,
+        direction=ClientTrackDirection.RECVONLY,
+        codec="VP9",
+        paused=False,
+        metrics={"bitrate_bps": 950_000},
+    )
+    batch = ClientStatsBatch(track_stats=[stat], connection_stat=None)
+    with caplog.at_level(logging.DEBUG, logger="reactor_runtime.runner.runner"):
+        started_runner.client_stats_received(ConnId(3), batch)
+
+    assert [r for r in caplog.records if r.getMessage() == "client connection stats"] == []
+    assert [r for r in caplog.records if r.getMessage() == "client stats"]
 
 
 async def test_journal_self_loops_are_logged_at_debug(

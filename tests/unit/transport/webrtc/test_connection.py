@@ -6,9 +6,17 @@ import numpy as np
 import pytest
 from conftest import FakePeer
 
-from reactor_runtime.core import Connection, ConnId, InputFrame, MediaBundle, MediaChunk
+from reactor_runtime.core import (
+    ClientStatsBatch,
+    Connection,
+    ConnId,
+    InputFrame,
+    MediaBundle,
+    MediaChunk,
+)
 from reactor_runtime.core.values import TrackData, TrackInfo, TrackKind
 from reactor_runtime.protocol import Channel, ProtocolVersion
+from reactor_runtime.protocol.v1.codec import V1Codec
 from reactor_runtime.transport.webrtc import (
     OutboundMediaHealth,
     PeerStats,
@@ -19,6 +27,7 @@ from reactor_runtime.transport.webrtc import (
     WebRtcPeerFactory,
 )
 from reactor_runtime.transport.webrtc.signaling import IceCandidate
+from reactor_wire.v1 import control_pb2, platform_pb2
 
 
 async def _connect(
@@ -176,6 +185,33 @@ async def test_inbound_message_and_media_forwarded(
         ('{"type":"notification"}', ProtocolVersion.V0, Channel.CONTROL),
     ]
     assert media == [("webcam", frame)]
+
+
+async def test_a_client_stats_frame_goes_to_on_client_stats_not_on_message(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    conn = await _connect(fake_peer, factory_for(fake_peer), out_av_tracks)
+    fake_peer.protocol_version = ProtocolVersion.V1
+    messages: list[bytes | str] = []
+    batches: list[ClientStatsBatch] = []
+    conn.on_message(lambda payload, version, channel: messages.append(payload))
+    conn.on_client_stats(batches.append)
+
+    _, stats = V1Codec().encode(
+        control_pb2.ControlClientMessage(
+            client_stats=platform_pb2.ClientStats(
+                track_stats=[platform_pb2.ClientTrackStat(track_name="main_video")]
+            )
+        )
+    )
+    _, ping = V1Codec().encode(control_pb2.ControlClientMessage(ping=platform_pb2.Ping()))
+    fake_peer.fire_message(stats, Channel.CONTROL)
+    fake_peer.fire_message(ping, Channel.CONTROL)
+
+    assert [stat.track_name for batch in batches for stat in batch.track_stats] == ["main_video"]
+    assert messages == [ping]
 
 
 async def test_send_control_delegates_to_peer(

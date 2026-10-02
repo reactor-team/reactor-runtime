@@ -30,6 +30,10 @@ from reactor_runtime.core.session import (
 from reactor_runtime.core.transport import Connection, ConnectionSink
 from reactor_runtime.core.typespec import TypeSpec
 from reactor_runtime.core.values import (
+    ClientConnectionStat,
+    ClientStatsBatch,
+    ClientTrackDirection,
+    ClientTrackStat,
     CommandFailure,
     ConnectionCapabilities,
     ConnId,
@@ -48,7 +52,11 @@ from reactor_runtime.core.values import (
 __all__ = [
     "JOURNAL_EVENTS",
     "ClientConnected",
+    "ClientConnectionStat",
     "ClientDisconnected",
+    "ClientStatsBatch",
+    "ClientTrackDirection",
+    "ClientTrackStat",
     "Command",
     "CommandFailure",
     "CommandField",

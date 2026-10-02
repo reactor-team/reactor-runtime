@@ -28,6 +28,7 @@ from reactor_runtime.core import (
     JOURNAL_EVENTS,
     ClientConnected,
     ClientDisconnected,
+    ClientStatsBatch,
     CommandFailure,
     Connection,
     ConnectionSink,
@@ -551,6 +552,46 @@ class Runner(ServiceComponent, ConnectionSink):
     def recording_requested(self, conn_id: ConnId, request_id: str) -> None:
         """Resolve a full-session recording request and reply, correlated by *request_id*."""
         self._reply_clip(conn_id, request_id, lambda: self._recorder.request_recording())
+
+    def client_stats_received(self, conn_id: ConnId, batch: ClientStatsBatch) -> None:
+        """Log a client-reported quality batch at debug, tagged with this session and connection.
+
+        The client is the only vantage point onto its own receive-side
+        quality, so each reading is logged as reported: one line for the
+        connection-wide reading, when the batch carries one, and one per
+        track. At that rate per connection the lines are for local debugging,
+        so they are logged at debug.
+
+        The session id comes from the log's session context, which stamps the
+        id the session is known by on every record while it is live, never
+        ``_session_id``, the fixed transport id. *conn_id* is the runtime's own
+        identity for the connection. Neither is ever anything the payload
+        claims, because the payload carries neither.
+
+        A reading's metrics go under one ``metrics`` field. Their names are the
+        client's to choose, so they are logged as data inside that value, never
+        as field names of their own: a name can then neither take the place of
+        one of the runtime's own fields nor break the log line's format.
+        """
+        if batch.connection_stat is not None:
+            logger.debug(
+                "client connection stats",
+                conn_id=conn_id,
+                timestamp=batch.connection_stat.timestamp,
+                metrics=dict(batch.connection_stat.metrics),
+            )
+        for stat in batch.track_stats:
+            logger.debug(
+                "client stats",
+                conn_id=conn_id,
+                track_name=stat.track_name,
+                kind=stat.kind,
+                direction=stat.direction,
+                codec=stat.codec,
+                paused=stat.paused,
+                timestamp=stat.timestamp,
+                metrics=dict(stat.metrics),
+            )
 
     def _reply_clip(
         self, conn_id: ConnId, request_id: str, resolve: Callable[[], ClipResult]
