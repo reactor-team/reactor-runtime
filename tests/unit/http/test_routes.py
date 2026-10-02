@@ -151,6 +151,17 @@ async def test_start_session_conflicts_when_already_running(
     assert response.status_code == 409
 
 
+async def test_start_session_rejects_a_malformed_body_with_400(
+    client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, _ = client
+
+    response = await http_client.post("/start_session", json={"steps": "1"})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "steps must be a positive integer"
+
+
 async def test_stop_session_conflicts_when_nothing_is_running(
     client: tuple[httpx.AsyncClient, Runner],
 ) -> None:
