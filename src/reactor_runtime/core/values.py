@@ -64,9 +64,9 @@ class ClientTrackStat:
         timestamp: When the client took this reading, on its own clock, in
             epoch milliseconds.
         track_name: The track the reading is for.
-        kind: ``"video"`` or ``"audio"``.
-        direction: ``"recvonly"`` or ``"sendonly"``, from the client's own
-            perspective.
+        kind: The track's kind; ``None`` when the client did not say.
+        direction: The track's direction from the client's own perspective;
+            ``None`` when the client did not say.
         codec: The negotiated codec, e.g. ``"VP9"``, ``"opus"`` — empty when
             the browser hasn't reported it yet.
         paused: Whether the client has this track paused right now.
@@ -84,8 +84,8 @@ class ClientTrackStat:
 
     timestamp: int
     track_name: str
-    kind: str
-    direction: str
+    kind: TrackKind | None
+    direction: ClientTrackDirection | None
     codec: str
     paused: bool
     metrics: Mapping[str, float]
@@ -190,6 +190,18 @@ class TrackDirection(StrEnum):
 
     IN = "in"
     OUT = "out"
+
+
+class ClientTrackDirection(StrEnum):
+    """Direction of flow for a track, from the client's perspective.
+
+    The opposite polarity of :class:`TrackDirection`: a model output track
+    (``OUT``) is one the client receives (``RECVONLY``), and a model input
+    track (``IN``) is one the client sends (``SENDONLY``).
+    """
+
+    RECVONLY = "recvonly"
+    SENDONLY = "sendonly"
 
 
 @dataclass(frozen=True)

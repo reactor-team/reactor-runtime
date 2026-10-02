@@ -32,6 +32,7 @@ from reactor_runtime.core.typespec import TypeSpec
 from reactor_runtime.core.values import (
     ClientConnectionStat,
     ClientStatsBatch,
+    ClientTrackDirection,
     ClientTrackStat,
     CommandFailure,
     ConnectionCapabilities,
@@ -54,6 +55,7 @@ __all__ = [
     "ClientConnectionStat",
     "ClientDisconnected",
     "ClientStatsBatch",
+    "ClientTrackDirection",
     "ClientTrackStat",
     "Command",
     "CommandFailure",

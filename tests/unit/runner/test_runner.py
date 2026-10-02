@@ -32,6 +32,7 @@ from reactor_runtime.core import (
     ClientConnectionStat,
     ClientDisconnected,
     ClientStatsBatch,
+    ClientTrackDirection,
     ClientTrackStat,
     CommandFailure,
     ConnectionCapabilities,
@@ -2433,8 +2434,8 @@ async def test_client_stats_are_logged_with_session_and_connection_identity(
     stat = ClientTrackStat(
         timestamp=1_700_000_000_000,
         track_name="main_video",
-        kind="video",
-        direction="recvonly",
+        kind=TrackKind.VIDEO,
+        direction=ClientTrackDirection.RECVONLY,
         codec="VP9",
         paused=False,
         metrics={
@@ -2494,8 +2495,8 @@ async def test_client_stats_metric_names_stay_inside_the_metrics_field(
     stat = ClientTrackStat(
         timestamp=1_700_000_000_000,
         track_name="main_video",
-        kind="video",
-        direction="recvonly",
+        kind=TrackKind.VIDEO,
+        direction=ClientTrackDirection.RECVONLY,
         codec="VP9",
         paused=False,
         # Metric names are the client's to choose. Named like the runtime's own
@@ -2521,8 +2522,8 @@ async def test_client_stats_metric_names_cannot_break_a_text_log_line(
     stat = ClientTrackStat(
         timestamp=1_700_000_000_000,
         track_name="main_video",
-        kind="video",
-        direction="recvonly",
+        kind=TrackKind.VIDEO,
+        direction=ClientTrackDirection.RECVONLY,
         codec="VP9",
         paused=False,
         metrics={"x\nforged=line": 1.0, "a b=c": 2.0},
@@ -2544,8 +2545,8 @@ async def test_client_stats_logs_no_connection_line_when_the_batch_carries_none(
     stat = ClientTrackStat(
         timestamp=1_700_000_000_000,
         track_name="main_video",
-        kind="video",
-        direction="recvonly",
+        kind=TrackKind.VIDEO,
+        direction=ClientTrackDirection.RECVONLY,
         codec="VP9",
         paused=False,
         metrics={"bitrate_bps": 950_000},
