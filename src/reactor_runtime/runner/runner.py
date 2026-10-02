@@ -69,6 +69,8 @@ from reactor_runtime.metrics import (
 )
 from reactor_runtime.protocol import Channel, Codec, ProtocolVersion, select
 from reactor_runtime.recording import ClipResult, Recorder, RecorderError
+from reactor_runtime.runner import client_stats
+from reactor_runtime.runner.client_stats import ClientStatsGate
 from reactor_runtime.runner.connection_manager import ConnectionManager
 from reactor_runtime.runner.offer_epochs import OfferEpochs
 from reactor_runtime.runner.state_machine import SessionStateMachine
@@ -242,6 +244,9 @@ class Runner(ServiceComponent, ConnectionSink):
         # the codec for each target connection, so a mixed-version session is
         # addressed in each client's own version.
         self._codecs: dict[ProtocolVersion, Codec] = {}
+        # Which client stats batches are journalled: each connection's last
+        # accepted time, to drop a batch that follows it too soon.
+        self._client_stats = ClientStatsGate()
         self._gateway = MessageGateway(sink=self, on_command=self._submit_command)
         self._bridge: ModelBridge | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -432,6 +437,7 @@ class Runner(ServiceComponent, ConnectionSink):
     def connection_closed(self, conn_id: ConnId) -> None:
         """Drop a previously opened connection that has gone away."""
         self._connections.drop(conn_id)
+        self._client_stats.forget(conn_id)
 
     def connection_answered(self, conn_id: ConnId, answer: Mapping[str, str]) -> None:
         """Record a transport's negotiation answer for a connection.
@@ -554,25 +560,50 @@ class Runner(ServiceComponent, ConnectionSink):
         self._reply_clip(conn_id, request_id, lambda: self._recorder.request_recording())
 
     def client_stats_received(self, conn_id: ConnId, batch: ClientStatsBatch) -> None:
-        """Log a client-reported quality batch at debug, tagged with this session and connection.
+        """Log a client-reported quality batch and journal it on the egress stream.
 
         The client is the only vantage point onto its own receive-side
-        quality, so each reading is logged as reported: one line for the
-        connection-wide reading, when the batch carries one, and one per
-        track. At that rate per connection the lines are for local debugging,
-        so they are logged at debug.
+        quality, so each fact is passed on as reported, tagged with the
+        session and the connection it came from. *conn_id* is the runtime's
+        own identity for the connection, and the session id is the one the
+        session is known by, never ``_session_id``, the fixed transport id.
+        Neither is ever anything the payload claims, because the payload
+        carries neither.
 
-        The session id comes from the log's session context, which stamps the
-        id the session is known by on every record while it is live, never
-        ``_session_id``, the fixed transport id. *conn_id* is the runtime's own
-        identity for the connection. Neither is ever anything the payload
-        claims, because the payload carries neither.
+        Logging: one line for the connection-wide reading, when the batch
+        carries one, and one per track. At that rate per connection the lines
+        are for local debugging, so they are logged at debug. Their session id
+        comes from the log's session context. A reading's metrics go under one
+        ``metrics`` field: their names are the client's to choose, so they are
+        logged as data inside that value, never as field names of their own,
+        and can neither take the place of the runtime's own fields nor break
+        the log line's format.
 
-        A reading's metrics go under one ``metrics`` field. Their names are the
-        client's to choose, so they are logged as data inside that value, never
-        as field names of their own: a name can then neither take the place of
-        one of the runtime's own fields nor break the log line's format.
+        Journalling: the whole batch as one ``metric`` journal fact named
+        ``client_stats``, a self-loop like every other journal fact, so it
+        reaches an external consumer on :attr:`events` with the session id and
+        the connection id in its ``detail``. A metric value that isn't a
+        finite number is left out, since JSON has no way to carry it
+        (:func:`client_stats.to_detail`).
+
+        A batch counts only while a session is running, judged by the
+        session's state rather than by its id, which any value can be: outside
+        a session there is no session to tag it with, so it is neither logged
+        nor journalled, and it leaves the limits alone.
+
+        Limits: the client chooses how often it sends and how much, and the
+        journal keeps a bounded number of facts, so :class:`ClientStatsGate`
+        drops a batch that follows the connection's last one by less than a
+        second, or that is larger than the SDK ever sends, before it is logged
+        or journalled.
         """
+        if self._sm.current_state not in _RUNNING_STATES:
+            return
+        dropped = self._client_stats.accept(conn_id, batch)
+        if dropped is not None:
+            logger.debug("client stats batch dropped", conn_id=conn_id, reason=dropped)
+            return
+
         if batch.connection_stat is not None:
             logger.debug(
                 "client connection stats",
@@ -592,6 +623,14 @@ class Runner(ServiceComponent, ConnectionSink):
                 timestamp=stat.timestamp,
                 metrics=dict(stat.metrics),
             )
+
+        self._sm.send(
+            SessionEvent.METRIC,
+            name="client_stats",
+            session_id=self._recording_id,
+            conn_id=conn_id,
+            **client_stats.to_detail(batch),
+        )
 
     def _reply_clip(
         self, conn_id: ConnId, request_id: str, resolve: Callable[[], ClipResult]
@@ -1255,6 +1294,7 @@ class Runner(ServiceComponent, ConnectionSink):
             elif close_reason:
                 self._broadcast_session_ended(close_reason)
             self._uploads.clear()
+            self._client_stats.clear()
             self._spawn_teardown(asyncio.to_thread(self._recorder.stop))
             self._spawn_teardown(self._close_session(reason))
         if entered and transition.to_state is SessionState.TERMINATED:

@@ -65,6 +65,7 @@ from reactor_runtime.message_gateway import InboundCommand
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.protocol.common import dict_to_struct, struct_to_dict
 from reactor_runtime.recording import ClipResult
+from reactor_runtime.runner.client_stats import ClientStatsGate
 from reactor_runtime.runner.runner import (
     _DRAIN_CLOSE_REASON,
     _RUNTIME_STATES,
@@ -2552,6 +2553,7 @@ async def test_client_stats_logs_no_connection_line_when_the_batch_carries_none(
         metrics={"bitrate_bps": 950_000},
     )
     batch = ClientStatsBatch(track_stats=[stat], connection_stat=None)
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
     with caplog.at_level(logging.DEBUG, logger="reactor_runtime.runner.runner"):
         started_runner.client_stats_received(ConnId(3), batch)
 
@@ -2572,3 +2574,190 @@ async def test_journal_self_loops_are_logged_at_debug(
         and getattr(r, "reactor_fields", {}).get("event") == "chunk_ready"
     )
     assert record.levelno == logging.DEBUG
+
+
+def _one_track_batch(**metrics: float) -> ClientStatsBatch:
+    return ClientStatsBatch(
+        track_stats=[
+            ClientTrackStat(
+                timestamp=1_700_000_000_000,
+                track_name="main_video",
+                kind=TrackKind.VIDEO,
+                direction=ClientTrackDirection.RECVONLY,
+                codec="VP9",
+                paused=False,
+                metrics=metrics,
+            )
+        ],
+        connection_stat=ClientConnectionStat(
+            timestamp=1_700_000_000_000, metrics={"connection_rtt_ms": 25.0}
+        ),
+    )
+
+
+def _client_stats_facts(runner: Runner) -> list[Transition]:
+    metrics = _moves(runner, SessionEvent.METRIC)
+    return [t for t in metrics if t.detail.get("name") == "client_stats"]
+
+
+async def test_client_stats_are_journalled_as_a_metric_with_the_session_and_connection(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
+    state = started_runner._sm.current_state
+
+    started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=30.0))
+
+    (fact,) = _client_stats_facts(started_runner)
+    # A self-loop like every other journal fact: the session state is unchanged.
+    assert fact.from_state is state
+    assert fact.to_state is state
+    assert dict(fact.detail) == {
+        "name": "client_stats",
+        "session_id": _LIVE_SESSION_ID,
+        "conn_id": ConnId(3),
+        "track_stats": [
+            {
+                "timestamp": 1_700_000_000_000,
+                "track_name": "main_video",
+                "kind": "video",
+                "direction": "recvonly",
+                "codec": "VP9",
+                "paused": False,
+                "metrics": {"frames_per_second": 30.0},
+            }
+        ],
+        "connection_stat": {
+            "timestamp": 1_700_000_000_000,
+            "metrics": {"connection_rtt_ms": 25.0},
+        },
+    }
+
+
+async def test_client_stats_are_not_journalled_before_a_session_starts(
+    started_runner: Runner,
+) -> None:
+    started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=30.0))
+
+    assert _client_stats_facts(started_runner) == []
+
+
+async def test_client_stats_leave_out_values_json_cannot_carry(started_runner: Runner) -> None:
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
+
+    started_runner.client_stats_received(
+        ConnId(3),
+        _one_track_batch(jitter_ms=float("nan"), bitrate_bps=float("inf"), packets_lost=4.0),
+    )
+
+    (fact,) = _client_stats_facts(started_runner)
+    assert fact.detail["track_stats"][0]["metrics"] == {"packets_lost": 4.0}
+
+
+async def test_client_stats_are_journalled_for_a_session_started_with_the_all_zero_id(
+    started_runner: Runner,
+) -> None:
+    # The all-zero id is a value a caller may pass like any other; running is
+    # judged by the session's state, not by its id.
+    all_zero = "00000000-0000-0000-0000-000000000000"
+    started_runner.start_session({"session_id": all_zero})
+
+    started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=30.0))
+
+    (fact,) = _client_stats_facts(started_runner)
+    assert fact.detail["session_id"] == all_zero
+
+
+async def test_client_stats_are_not_journalled_once_the_session_is_closing(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
+    started_runner.stop_session()
+    assert started_runner._sm.current_state is SessionState.CLOSING
+
+    started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=30.0))
+
+    assert _client_stats_facts(started_runner) == []
+
+
+def _pin_client_stats_clock(runner: Runner, start: float = 1000.0) -> list[float]:
+    """Give the runner's client stats gate a clock the test moves by hand."""
+    now = [start]
+    runner._client_stats = ClientStatsGate(clock=lambda: now[0])
+    return now
+
+
+async def test_client_stats_a_batch_that_comes_too_soon_is_neither_journalled_nor_logged(
+    started_runner: Runner, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The client chooses its cadence; a fast one would push lifecycle facts
+    # out of the bounded journal.
+    now = _pin_client_stats_clock(started_runner)
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
+    started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=30.0))
+    now[0] += 0.5
+
+    with caplog.at_level(logging.DEBUG, logger="reactor_runtime.runner.runner"):
+        started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=29.0))
+
+    assert len(_client_stats_facts(started_runner)) == 1
+    messages = [r.getMessage() for r in caplog.records]
+    assert "client stats" not in messages
+    assert "client connection stats" not in messages
+
+
+async def test_client_stats_a_batch_larger_than_the_sdk_sends_is_not_journalled(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
+
+    started_runner.client_stats_received(
+        ConnId(3), _one_track_batch(**{f"metric_{i}": 1.0 for i in range(65)})
+    )
+
+    assert _client_stats_facts(started_runner) == []
+
+
+async def test_client_stats_limit_restarts_with_a_new_connection_of_the_same_id(
+    started_runner: Runner,
+) -> None:
+    _pin_client_stats_clock(started_runner)
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
+
+    started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=30.0))
+    started_runner.connection_closed(ConnId(3))
+    started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=29.0))
+
+    assert len(_client_stats_facts(started_runner)) == 2
+
+
+async def test_client_stats_outside_a_session_leave_the_limits_alone(
+    started_runner: Runner,
+) -> None:
+    # A batch before the session starts is dropped, and must not hold back
+    # the session's first reading.
+    _pin_client_stats_clock(started_runner)
+    started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=30.0))
+
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
+    started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=29.0))
+
+    assert len(_client_stats_facts(started_runner)) == 1
+    started_runner.stop_session()
+    started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=28.0))
+    assert started_runner._client_stats._accepted_at == {}
+
+
+async def test_client_stats_limits_are_cleared_when_the_session_closes(
+    started_runner: Runner,
+) -> None:
+    # A closing session forgets its connections' last batch times, so they
+    # never outlive the session.
+    _pin_client_stats_clock(started_runner)
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
+    started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=30.0))
+    assert started_runner._client_stats._accepted_at
+
+    started_runner.stop_session()
+
+    assert started_runner._client_stats._accepted_at == {}
