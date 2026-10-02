@@ -47,7 +47,6 @@ from reactor_runtime.core import (
     SessionEvent,
     SessionStarted,
     SessionState,
-    StatsEvent,
     TrackDirection,
     Transition,
     TransitionEvent,
@@ -580,12 +579,14 @@ class Runner(ServiceComponent, ConnectionSink):
         and can neither take the place of the runtime's own fields nor break
         the log line's format.
 
-        Publishing: the whole batch as one ``client_stats`` reading on
-        :attr:`events`, for an external consumer to forward. It is published
-        only while a session is running, judged by the session's state rather
-        than by its id, which any value can be: outside a session there is no
-        session to tag it with. A metric value that isn't a finite number is
-        left out, since JSON has no way to carry it.
+        Journalling: the whole batch as one ``metric`` journal fact named
+        ``client_stats``, a self-loop like every other journal fact, so it
+        reaches an external consumer on :attr:`events` with the session id and
+        the connection id in its ``detail``. It is journalled only while a
+        session is running, judged by the session's state rather than by its
+        id, which any value can be: outside a session there is no session to
+        tag it with. A metric value that isn't a finite number is left out,
+        since JSON has no way to carry it.
         """
         if batch.connection_stat is not None:
             logger.debug(
@@ -609,35 +610,31 @@ class Runner(ServiceComponent, ConnectionSink):
 
         if self._sm.current_state not in _RUNNING_STATES:
             return
-        self._events.publish_live(
-            StatsEvent(
-                name="client_stats",
-                detail={
-                    "session_id": self._recording_id,
-                    "conn_id": conn_id,
-                    "track_stats": [
-                        {
-                            "timestamp": stat.timestamp,
-                            "track_name": stat.track_name,
-                            "kind": stat.kind,
-                            "direction": stat.direction,
-                            "codec": stat.codec,
-                            "paused": stat.paused,
-                            "metrics": _finite(stat.metrics),
-                        }
-                        for stat in batch.track_stats
-                    ],
-                    "connection_stat": (
-                        {
-                            "timestamp": batch.connection_stat.timestamp,
-                            "metrics": _finite(batch.connection_stat.metrics),
-                        }
-                        if batch.connection_stat is not None
-                        else None
-                    ),
-                },
-                ts_ms=time.time_ns() // 1_000_000,
-            )
+        self._sm.send(
+            SessionEvent.METRIC,
+            name="client_stats",
+            session_id=self._recording_id,
+            conn_id=conn_id,
+            track_stats=[
+                {
+                    "timestamp": stat.timestamp,
+                    "track_name": stat.track_name,
+                    "kind": stat.kind,
+                    "direction": stat.direction,
+                    "codec": stat.codec,
+                    "paused": stat.paused,
+                    "metrics": _finite(stat.metrics),
+                }
+                for stat in batch.track_stats
+            ],
+            connection_stat=(
+                {
+                    "timestamp": batch.connection_stat.timestamp,
+                    "metrics": _finite(batch.connection_stat.metrics),
+                }
+                if batch.connection_stat is not None
+                else None
+            ),
         )
 
     def _reply_clip(

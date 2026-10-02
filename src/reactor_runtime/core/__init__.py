@@ -17,7 +17,6 @@ from reactor_runtime.core.model import (
     ReactorEvent,
     SessionEnded,
     SessionStarted,
-    StatsEvent,
     TransitionEvent,
     UploadedFile,
 )
@@ -83,7 +82,6 @@ __all__ = [
     "SessionEvent",
     "SessionStarted",
     "SessionState",
-    "StatsEvent",
     "TrackData",
     "TrackDirection",
     "TrackInfo",

@@ -7,7 +7,6 @@ import pytest
 from reactor_runtime.core import (
     SessionEvent,
     SessionState,
-    StatsEvent,
     Transition,
     TransitionEvent,
 )
@@ -183,13 +182,13 @@ async def test_ending_a_subscription_deregisters_it() -> None:
 
 
 def test_limits_below_one_are_rejected() -> None:
-    # A zero limit would hold nothing, so each is a constructor error.
+    # asyncio.Queue treats sizes <= 0 as unbounded, so a zero subscriber limit
+    # would silently disable the memory bound; a zero history limit would
+    # retain nothing. Both are constructor errors.
     with pytest.raises(ValueError, match="history_limit"):
         EventStream(history_limit=0)
     with pytest.raises(ValueError, match="subscriber_limit"):
         EventStream(subscriber_limit=0)
-    with pytest.raises(ValueError, match="live_limit"):
-        EventStream(live_limit=0)
 
 
 def test_history_is_bounded_to_the_limit() -> None:
@@ -250,99 +249,3 @@ async def test_a_slow_subscriber_does_not_starve_a_prompt_one() -> None:
     assert got == [(seq, _journal(str(seq - 1))) for seq in range(1, 6)]
     await _aclose(prompt)
     await _aclose(slow)
-
-
-def _reading(n: int) -> StatsEvent:
-    return StatsEvent(name="client_stats", detail={"n": n}, ts_ms=0)
-
-
-async def test_a_live_reading_reaches_live_subscribers_only() -> None:
-    stream = EventStream()
-    plain = stream.subscribe()
-    live = stream.subscribe_with_live()
-
-    stream.publish_live(_reading(1))
-    stream.emit(_journal("after"))
-
-    assert await anext(live) == _reading(1)
-    assert await anext(live) == (1, _journal("after"))
-    # The plain subscriber goes straight to the journal fact.
-    assert await _next(plain) == (1, _journal("after"))
-    await _aclose(plain)
-    await cast(AsyncGenerator[object, None], live).aclose()
-
-
-async def test_a_live_reading_takes_no_sequence_number_and_is_never_replayed() -> None:
-    stream = EventStream()
-    stream.emit(_journal("one"))
-    stream.publish_live(_reading(1))
-    stream.emit(_journal("two"))
-
-    assert stream.snapshot().last_seq == 2
-    replay = stream.subscribe_with_live(since=0)
-    assert await anext(replay) == (1, _journal("one"))
-    assert await anext(replay) == (2, _journal("two"))
-    await cast(AsyncGenerator[object, None], replay).aclose()
-
-
-async def test_a_queued_reading_never_takes_a_journal_facts_place() -> None:
-    # Four journal facts fit a cap of 4 whether or not a reading is queued
-    # among them: readings are counted against their own cap.
-    stream = EventStream(subscriber_limit=4)
-    live = stream.subscribe_with_live()
-
-    stream.emit(_journal("one"))
-    stream.publish_live(_reading(1))
-    stream.emit(_journal("two"))
-    stream.emit(_journal("three"))
-    stream.emit(_journal("four"))
-
-    received = [await anext(live) for _ in range(5)]
-    assert received == [
-        (1, _journal("one")),
-        _reading(1),
-        (2, _journal("two")),
-        (3, _journal("three")),
-        (4, _journal("four")),
-    ]
-    await cast(AsyncGenerator[object, None], live).aclose()
-
-
-async def test_a_full_journal_cap_drops_the_oldest_fact_not_a_reading() -> None:
-    stream = EventStream(subscriber_limit=2)
-    live = stream.subscribe_with_live()
-
-    stream.publish_live(_reading(1))
-    stream.emit(_journal("one"))
-    stream.emit(_journal("two"))
-    stream.emit(_journal("three"))  # Drops fact one, the oldest fact.
-
-    received = [await anext(live) for _ in range(3)]
-    assert received == [_reading(1), (2, _journal("two")), (3, _journal("three"))]
-    await cast(AsyncGenerator[object, None], live).aclose()
-
-
-async def test_a_full_reading_cap_drops_the_oldest_reading_not_a_fact() -> None:
-    stream = EventStream(live_limit=2)
-    live = stream.subscribe_with_live()
-
-    stream.publish_live(_reading(1))
-    stream.emit(_journal("one"))
-    stream.publish_live(_reading(2))
-    stream.publish_live(_reading(3))  # Drops reading 1, the oldest reading.
-
-    received = [await anext(live) for _ in range(3)]
-    assert received == [(1, _journal("one")), _reading(2), _reading(3)]
-    await cast(AsyncGenerator[object, None], live).aclose()
-
-
-async def test_closing_a_live_subscription_stops_its_readings() -> None:
-    stream = EventStream()
-    live = stream.subscribe_with_live()
-    stream.publish_live(_reading(1))
-    assert await anext(live) == _reading(1)
-
-    await cast(AsyncGenerator[object, None], live).aclose()
-
-    assert not stream._subscribers  # Deregistered with the subscription.
-    stream.publish_live(_reading(2))  # No one left to hand it to; no error.

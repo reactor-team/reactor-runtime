@@ -14,16 +14,6 @@ A consumer reconciles against the runtime as the source of truth — it reads a
 snapshot's sequence to replay anything it missed and follow live. The consumer's
 view is only ever a mirror; the runtime stays authoritative.
 
-Periodic quality readings are not journal facts. A
-:class:`~reactor_runtime.core.model.StatsEvent` is published live only, to the
-subscribers that asked for readings (:meth:`EventStream.subscribe_with_live`):
-it takes no sequence number and is not kept for replay. A subscriber queues
-readings under a cap of their own, apart from the journal facts' cap, so a
-queued reading never takes a journal fact's place. A reading arrives every few
-seconds per connection; keeping it out of the history and out of the journal's
-capacity is what guarantees it can never cost a consumer a lifecycle fact. A
-plain :meth:`EventStream.subscribe` never sees one.
-
 Memory is bounded so a busy, hours-long session cannot grow the journal without
 limit. Replay history is capped at a fixed number of recent events, and each
 subscriber's live queue is capped too — a consumer that falls behind has its
@@ -36,12 +26,12 @@ from a fresh :meth:`snapshot`; the runtime never blocks on a slow reader.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import cast
 
-from reactor_runtime.core import SessionEvent, SessionState, StatsEvent, TransitionEvent
+from reactor_runtime.core import SessionEvent, SessionState, TransitionEvent
 
 DEFAULT_HISTORY_LIMIT = 4096
 """How many recent events the journal retains for replay by default.
@@ -58,75 +48,7 @@ Past this, the oldest queued event is dropped to admit the newest, so a stalled
 or slow consumer bounds its own memory instead of the writer's.
 """
 
-DEFAULT_LIVE_LIMIT = 256
-"""How many undelivered live readings a single subscriber holds by default.
-
-Counted apart from the journal facts. Past this, the oldest queued reading is
-dropped to admit the newest: readings are periodic, so the newest matters most.
-"""
-
-JournalItem = tuple[int, TransitionEvent] | StatsEvent
-"""What a subscription yields: a sequenced journal fact, or a live reading."""
-
-
-class _Subscriber:
-    """One subscriber's undelivered items, in the order they were offered.
-
-    Journal facts and live readings share the delivery order but not the
-    capacity: each kind is counted against its own cap, so a queued reading
-    never takes a journal fact's place. At a cap, the oldest queued item of
-    that kind is dropped to admit the newest, which keeps the consumer on the
-    live tail; a dropped journal fact leaves a hole the consumer detects as a
-    jump in the sequence numbers it receives.
-    """
-
-    def __init__(self, journal_limit: int, live_limit: int, *, live: bool) -> None:
-        self.live = live
-        self._items: deque[JournalItem] = deque()
-        self._journal_limit = journal_limit
-        self._live_limit = live_limit
-        self._journal_count = 0
-        self._live_count = 0
-        self._ready = asyncio.Event()
-
-    def offer_fact(self, item: tuple[int, TransitionEvent]) -> None:
-        """Queue a journal fact, dropping the oldest queued fact when at its cap."""
-        if self._journal_count >= self._journal_limit:
-            self._drop_oldest(readings=False)
-        self._items.append(item)
-        self._journal_count += 1
-        self._ready.set()
-
-    def offer_reading(self, event: StatsEvent) -> None:
-        """Queue a live reading, dropping the oldest queued reading when at its cap."""
-        if self._live_count >= self._live_limit:
-            self._drop_oldest(readings=True)
-        self._items.append(event)
-        self._live_count += 1
-        self._ready.set()
-
-    def _drop_oldest(self, *, readings: bool) -> None:
-        """Drop the oldest queued item of one kind, leaving the other kind untouched."""
-        for index, queued in enumerate(self._items):
-            if isinstance(queued, StatsEvent) is readings:
-                del self._items[index]
-                if readings:
-                    self._live_count -= 1
-                else:
-                    self._journal_count -= 1
-                return
-
-    async def next(self) -> JournalItem:
-        """Wait for and return the oldest undelivered item."""
-        while not self._items:
-            self._ready.clear()
-            await self._ready.wait()
-        item = self._items.popleft()
-        if isinstance(item, StatsEvent):
-            self._live_count -= 1
-        else:
-            self._journal_count -= 1
-        return item
+_SubscriberQueue = asyncio.Queue[tuple[int, "TransitionEvent"]]
 
 
 @dataclass(frozen=True)
@@ -157,13 +79,11 @@ class EventStream:
 
     Memory is bounded on both axes. Replay history keeps only the most recent
     ``history_limit`` events, so a consumer cannot replay further back than that.
-    Each subscriber holds a queue capped at ``subscriber_limit`` journal facts;
-    when a consumer falls behind and the queue fills, its oldest queued event is
-    dropped to make room for the newest. Live readings are capped separately, at
-    ``live_limit``, and never count against the journal's cap. Both journal
-    drops — replaying past the retained history, or a full subscriber queue —
-    surface to the consumer the same way: a gap in the sequence numbers it
-    receives, which it reconciles against a fresh snapshot.
+    Each subscriber holds a queue capped at ``subscriber_limit``; when a consumer
+    falls behind and the queue fills, its oldest queued event is dropped to make
+    room for the newest. Both drops — replaying past the retained history, or a
+    full subscriber queue — surface to the consumer the same way: a gap in the
+    sequence numbers it receives, which it reconciles against a fresh snapshot.
     """
 
     def __init__(
@@ -171,32 +91,28 @@ class EventStream:
         *,
         history_limit: int = DEFAULT_HISTORY_LIMIT,
         subscriber_limit: int = DEFAULT_SUBSCRIBER_LIMIT,
-        live_limit: int = DEFAULT_LIVE_LIMIT,
     ) -> None:
         """Start an empty journal with no subscribers.
 
         Args:
             history_limit: The number of recent events retained for replay.
-            subscriber_limit: The number of undelivered journal facts a single
-                subscriber holds before its oldest is dropped.
-            live_limit: The number of undelivered live readings a single
-                subscriber holds before its oldest is dropped.
+            subscriber_limit: The number of undelivered events a single
+                subscriber's queue holds before its oldest is dropped.
 
         Raises:
-            ValueError: If any limit is less than 1.
+            ValueError: If either limit is less than 1.
         """
-        # A limit below 1 would not shrink the bound; it would hold nothing.
+        # A limit below 1 would not shrink the bound — it would remove it on
+        # one axis and empty the other: asyncio.Queue treats sizes <= 0 as
+        # unbounded, while deque(maxlen=0) retains nothing.
         if history_limit < 1:
             raise ValueError(f"history_limit must be at least 1, got {history_limit}")
         if subscriber_limit < 1:
             raise ValueError(f"subscriber_limit must be at least 1, got {subscriber_limit}")
-        if live_limit < 1:
-            raise ValueError(f"live_limit must be at least 1, got {live_limit}")
         self._seq = 0
         self._history: deque[tuple[int, TransitionEvent]] = deque(maxlen=history_limit)
         self._subscriber_limit = subscriber_limit
-        self._live_limit = live_limit
-        self._subscribers: set[_Subscriber] = set()
+        self._subscribers: set[_SubscriberQueue] = set()
         self._state: SessionState | None = None
         self._connections = 0
 
@@ -205,9 +121,8 @@ class EventStream:
 
         Assigns the next sequence number, folds the event into the tracked
         session state, and hands it to every current subscriber. A subscriber
-        whose queue is full of journal facts has its oldest one dropped so the
-        newest is always admitted — the writer is never held back by a slow
-        reader.
+        whose queue is full has its oldest queued event dropped so the newest is
+        always admitted — the writer is never held back by a slow reader.
 
         This is the single writer: it must be called only on the one event loop
         that owns the stream, so the ``+= 1`` sequence bump and the history
@@ -219,23 +134,25 @@ class EventStream:
         item = (self._seq, event)
         self._history.append(item)
         self._fold(event)
-        for subscriber in self._subscribers:
-            subscriber.offer_fact(item)
+        for queue in self._subscribers:
+            self._offer(queue, item)
 
-    def publish_live(self, event: StatsEvent) -> None:
-        """Deliver a reading to the live subscribers connected right now.
+    def _offer(self, queue: _SubscriberQueue, item: tuple[int, TransitionEvent]) -> None:
+        """Hand *item* to a subscriber, shedding its oldest event if the queue is full.
 
-        Unlike :meth:`emit`, nothing is journalled: the reading takes no
-        sequence number, is not kept for replay, and does not touch the tracked
-        session state. It counts against the subscriber's live-reading cap
-        only, so it never takes a journal fact's place; at that cap, the
-        subscriber's oldest queued reading is dropped instead.
-
-        Called only on the event loop that owns the stream, like :meth:`emit`.
+        A full queue means the consumer is not keeping up. Dropping the oldest
+        queued event (rather than refusing the newest) keeps the consumer on the
+        live tail; the dropped sequence numbers leave a hole it detects as a jump
+        in the ids it receives. This runs synchronously within :meth:`emit` with
+        no ``await`` between the drop and the enqueue, so no consumer interleaves:
+        a queue is only ever full when no getter is currently waiting on it.
         """
-        for subscriber in self._subscribers:
-            if subscriber.live:
-                subscriber.offer_reading(event)
+        try:
+            queue.put_nowait(item)
+        except asyncio.QueueFull:
+            with contextlib.suppress(asyncio.QueueEmpty):
+                queue.get_nowait()
+            queue.put_nowait(item)
 
     def subscribe(self, since: int | None = None) -> AsyncIterator[tuple[int, TransitionEvent]]:
         """Return an iterator over ``(seq, event)`` pairs after *since*, then live ones.
@@ -250,43 +167,29 @@ class EventStream:
         from the next event. The iterator runs until the caller stops consuming
         it.
         """
-        # A subscriber registered without live readings is never handed one.
-        return cast("AsyncIterator[tuple[int, TransitionEvent]]", self._register(since, live=False))
-
-    def subscribe_with_live(self, since: int | None = None) -> AsyncIterator[JournalItem]:
-        """Like :meth:`subscribe`, and also yield the readings published live.
-
-        Each :class:`StatsEvent` published while subscribed (see
-        :meth:`publish_live`) is yielded bare, between the ``(seq, event)``
-        pairs, in the order it was published. Replay never includes one.
-        """
-        return self._register(since, live=True)
-
-    def _register(self, since: int | None, *, live: bool) -> AsyncIterator[JournalItem]:
-        """Register a subscriber and return its stream; see :meth:`subscribe`."""
         start = self._seq if since is None else since
-        subscriber = _Subscriber(self._subscriber_limit, self._live_limit, live=live)
-        self._subscribers.add(subscriber)
+        queue: _SubscriberQueue = asyncio.Queue(self._subscriber_limit)
+        self._subscribers.add(queue)
         backlog = [item for item in self._history if item[0] > start]
-        return self._stream(subscriber, backlog)
+        return self._stream(queue, backlog)
 
     async def _stream(
-        self, subscriber: _Subscriber, backlog: list[tuple[int, TransitionEvent]]
-    ) -> AsyncIterator[JournalItem]:
+        self, queue: _SubscriberQueue, backlog: list[tuple[int, TransitionEvent]]
+    ) -> AsyncIterator[tuple[int, TransitionEvent]]:
         """Yield the captured backlog, then live events, deregistering on exit.
 
-        The subscriber is registered before the backlog is captured with no
-        await in between, so the two are disjoint: the backlog holds everything
-        retained up to the subscribe call and the subscriber holds only what is
-        emitted after it.
+        The queue is registered before the backlog is captured with no await in
+        between, so the two are disjoint: the backlog holds everything retained
+        up to the subscribe call and the queue holds only what is emitted after
+        it.
         """
         try:
             for item in backlog:
                 yield item
             while True:
-                yield await subscriber.next()
+                yield await queue.get()
         finally:
-            self._subscribers.discard(subscriber)
+            self._subscribers.discard(queue)
 
     def snapshot(self) -> SessionSnapshot:
         """Return the current session state for a consumer to reconcile against."""

@@ -15,8 +15,8 @@ from fastapi import Body, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from reactor_runtime.core import Health, HealthStatus, RuntimeState, SessionState, StatsEvent
-from reactor_runtime.http.events import format_live_sse, format_sse
+from reactor_runtime.core import Health, HealthStatus, RuntimeState, SessionState
+from reactor_runtime.http.events import format_sse
 from reactor_runtime.metrics import CONTENT_TYPE as METRICS_CONTENT_TYPE
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.recording import ClipManifest, ClipSessionGoneError, Pending
@@ -445,15 +445,10 @@ def _resume_from(last_event_id: str | None) -> int | None:
 async def _stream_events(runner: Runner, since: int | None) -> AsyncGenerator[str, None]:
     """Yield the runner's events as SSE messages, resuming after *since*.
 
-    Each journal fact carries its own sequence number, emitted as the SSE
-    ``id``. The journal bounds its memory and may drop events for a consumer
-    that falls behind, so the numbers are not necessarily contiguous: a jump is
-    how a consumer learns it missed events and should reconcile from
-    ``GET /session``. Live readings go out between them without an ``id``.
+    Each event carries its own sequence number, emitted as the SSE ``id``. The
+    journal bounds its memory and may drop events for a consumer that falls
+    behind, so the numbers are not necessarily contiguous: a jump is how a
+    consumer learns it missed events and should reconcile from ``GET /session``.
     """
-    async for item in runner.events.subscribe_with_live(since):
-        if isinstance(item, StatsEvent):
-            yield format_live_sse(item)
-        else:
-            seq, event = item
-            yield format_sse(seq, event)
+    async for seq, event in runner.events.subscribe(since):
+        yield format_sse(seq, event)

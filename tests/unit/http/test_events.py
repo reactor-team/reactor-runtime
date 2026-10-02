@@ -1,22 +1,14 @@
 import json
 import time
 
-import pytest
-
 from reactor_runtime.core import (
     ConnId,
     SessionEvent,
     SessionState,
-    StatsEvent,
     Transition,
     TransitionEvent,
 )
-from reactor_runtime.http.events import (
-    format_live_sse,
-    format_sse,
-    runner_event_to_dict,
-    stats_event_to_dict,
-)
+from reactor_runtime.http.events import format_sse, runner_event_to_dict
 
 
 def _transition() -> TransitionEvent:
@@ -158,28 +150,3 @@ def test_format_sse_frames_id_and_data() -> None:
     body = json.loads(message.split("data: ", 1)[1].strip())
     assert body["type"] == "transition"
     assert body["ts"] == 123
-
-
-def test_a_live_reading_renders_as_a_stats_envelope() -> None:
-    reading = StatsEvent(name="client_stats", detail={"conn_id": ConnId(7)}, ts_ms=456)
-
-    assert stats_event_to_dict(reading) == {
-        "type": "stats",
-        "event": "client_stats",
-        "ts": 456,
-        "detail": {"conn_id": 7},
-    }
-
-
-def test_a_live_reading_is_framed_without_an_id() -> None:
-    frame = format_live_sse(StatsEvent(name="client_stats", detail={}, ts_ms=1))
-
-    assert not frame.startswith("id:")
-    assert frame.startswith("data: ")
-    assert frame.endswith("\n\n")
-    assert json.loads(frame[len("data: ") :])["type"] == "stats"
-
-
-def test_a_live_reading_refuses_a_value_json_cannot_carry() -> None:
-    with pytest.raises(ValueError, match="JSON compliant"):
-        format_live_sse(StatsEvent(name="client_stats", detail={"x": float("nan")}, ts_ms=1))

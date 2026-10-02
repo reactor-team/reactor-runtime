@@ -31,8 +31,6 @@ from reactor_runtime.core.session import Transition
 from reactor_runtime.core.values import ConnId
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from reactor_runtime.core.typespec import TypeSpec
 
 
@@ -312,7 +310,7 @@ class FileUploaded(ReactorEvent):
 class TransitionEvent:
     """A session-state move, journalled for an external consumer.
 
-    The one fact type the egress journal records. Lifecycle moves and the
+    The one fact type the egress journal carries. Lifecycle moves and the
     journal-only self-loops (``chunk_ready``, ``clip_ready``, ``command``,
     ``error``, ``metric``) all ride it, each with its payload in the
     transition's ``detail``.
@@ -322,24 +320,3 @@ class TransitionEvent:
     """
 
     transition: Transition
-
-
-@dataclass(frozen=True)
-class StatsEvent:
-    """A periodic quality reading, published live for an external consumer.
-
-    Not a session fact, so not a :class:`TransitionEvent`: it arrives every few
-    seconds per connection, and the next one supersedes it. It takes no
-    sequence number and is not kept for replay, so it can never push a
-    lifecycle fact out of the journal's history — a consumer that is not
-    subscribed when it is published simply never sees it.
-
-    Attributes:
-        name: What the reading is, e.g. ``"client_stats"``.
-        detail: The reading, JSON-serialisable.
-        ts_ms: When the runtime recorded it, as Unix epoch milliseconds.
-    """
-
-    name: str
-    detail: Mapping[str, Any]
-    ts_ms: int
