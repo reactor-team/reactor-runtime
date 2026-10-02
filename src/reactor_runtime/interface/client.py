@@ -24,10 +24,16 @@ class ClientInfo:
         id: The connection id, stable for the lifetime of this connection.
         joined_at: Monotonic seconds (``time.monotonic()``) captured when the
             client connected.
+        system: Whether this is the runtime's own system client rather than a
+            client that connected over a transport. A session started with a
+            starting input or a step count has one: it sends the starting
+            commands, and it keeps a session with a step count generating with
+            no other client connected. Nothing sent to it is delivered.
     """
 
     id: ConnId
     joined_at: float
+    system: bool = False
     _send: Callable[[ModelMessage], None] | None = field(default=None, compare=False, repr=False)
 
     async def send(self, message: ModelMessage) -> None:

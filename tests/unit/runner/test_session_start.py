@@ -67,6 +67,22 @@ def test_command_order_is_kept() -> None:
     ]
 
 
+def test_state_runs_as_setters_ahead_of_the_commands() -> None:
+    starting = StartingInput(
+        state={"spin_speed": 2.0, "paused": True},
+        commands=(StartingCommand("set_static_interval", {"static_interval": 4}),),
+    )
+    assert starting.as_commands() == (
+        StartingCommand("set_spin_speed", {"spin_speed": 2.0}),
+        StartingCommand("set_paused", {"paused": True}),
+        StartingCommand("set_static_interval", {"static_interval": 4}),
+    )
+
+
+def test_an_empty_starting_input_runs_nothing() -> None:
+    assert StartingInput().as_commands() == ()
+
+
 @pytest.mark.parametrize(
     ("body", "message"),
     [
