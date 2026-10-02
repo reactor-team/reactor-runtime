@@ -103,9 +103,11 @@ class _FakeAudioTrack:
 class _FakeChannel:
     """A data channel as the peer sees it: a label, a state, and its sinks."""
 
-    def __init__(self, label: str = "data", state: Any = None) -> None:
+    def __init__(self, label: str = "data", state: Any = None, *, chunked: bool = False) -> None:
         self.sent: list[tuple[bytes, bool]] = []
         self.send_error: Exception | None = None
+        self.drain_timeouts: list[float] = []
+        self._chunked = chunked
         self._label = label
         self._state = state if state is not None else rw.DataChannelState.Open
         self._on_state_change: Callable[[Any], None] | None = None
@@ -115,6 +117,9 @@ class _FakeChannel:
 
     def state(self) -> Any:
         return self._state
+
+    def is_chunked(self) -> bool:
+        return self._chunked
 
     def send(self, data: bytes, binary: bool = True) -> None:
         if self.send_error is not None:
@@ -131,9 +136,13 @@ class _FakeChannel:
         """Move the channel to Open through its transition callback."""
         self._transition(rw.DataChannelState.Open)
 
-    def close(self) -> None:
-        """Move the channel to Closed through its transition callback."""
-        self._transition(rw.DataChannelState.Closed)
+    def close(self, drain_timeout: float | None = None) -> None:
+        """Move the channel to Closed, recording the drain the caller allowed."""
+        if drain_timeout is not None:
+            self.drain_timeouts.append(drain_timeout)
+        self._state = rw.DataChannelState.Closed
+        if self._on_state_change is not None:
+            self._on_state_change(self._state)
 
     def _transition(self, state: Any) -> None:
         self._state = state
@@ -1768,6 +1777,35 @@ async def test_report_loss_fires_disconnect_once() -> None:
 
     assert fired == [1]
     assert peer._stop_event.is_set()
+
+
+async def test_close_drains_open_chunked_channels_only() -> None:
+    """A chunked channel's queue leaves before the wire is let go; a plain one is left alone."""
+    peer = WebRTCPeer()
+    data: Any = _FakeChannel(chunked=True)
+    control: Any = _FakeChannel("control")
+    peer._data_channel = data
+    peer._control_channel = control
+
+    await peer.close()
+
+    assert len(data.drain_timeouts) == 1
+    assert 0.0 < data.drain_timeouts[0] <= peer_module._CLOSE_DRAIN_S
+    assert data.state() == rw.DataChannelState.Closed
+    assert control.drain_timeouts == []
+    assert control.state() == rw.DataChannelState.Open
+    assert peer._data_channel is None
+    assert peer._control_channel is None
+
+
+async def test_close_skips_a_chunked_channel_that_is_no_longer_open() -> None:
+    peer = WebRTCPeer()
+    data: Any = _FakeChannel(chunked=True, state=rw.DataChannelState.Closing)
+    peer._data_channel = data
+
+    await peer.close()
+
+    assert data.drain_timeouts == []
 
 
 async def test_close_is_idempotent() -> None:
