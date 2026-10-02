@@ -114,6 +114,30 @@ def _stamp_log_state(state: SessionState) -> None:
     set_state(state.name.lower(), _RUNTIME_STATES[state].value)
 
 
+# Limits on what one client can make the runtime journal. The SDK sends a
+# batch every few seconds, with a few tracks and a few dozen metrics each; a
+# client that sends more often, or more, would push lifecycle facts out of the
+# bounded journal, so its batch is dropped.
+_CLIENT_STATS_MIN_INTERVAL_SECONDS = 1.0
+_CLIENT_STATS_MAX_TRACKS = 32
+_CLIENT_STATS_MAX_METRICS = 64
+_CLIENT_STATS_MAX_NAME_LENGTH = 128
+
+
+def _client_stats_fit(batch: ClientStatsBatch) -> bool:
+    """Report whether *batch* is within the sizes a client may journal."""
+    if len(batch.track_stats) > _CLIENT_STATS_MAX_TRACKS:
+        return False
+    readings = [stat.metrics for stat in batch.track_stats]
+    if batch.connection_stat is not None:
+        readings.append(batch.connection_stat.metrics)
+    if any(len(metrics) > _CLIENT_STATS_MAX_METRICS for metrics in readings):
+        return False
+    names = [name for metrics in readings for name in metrics]
+    names += [field for stat in batch.track_stats for field in (stat.track_name, stat.codec)]
+    return all(len(name) <= _CLIENT_STATS_MAX_NAME_LENGTH for name in names)
+
+
 def _finite(metrics: Mapping[str, float]) -> dict[str, float]:
     """Keep the metric values JSON can carry: finite numbers, not NaN or infinity."""
     return {key: value for key, value in metrics.items() if math.isfinite(value)}
@@ -248,6 +272,9 @@ class Runner(ServiceComponent, ConnectionSink):
         # the codec for each target connection, so a mixed-version session is
         # addressed in each client's own version.
         self._codecs: dict[ProtocolVersion, Codec] = {}
+        # When each connection's last client stats batch was accepted, on the
+        # monotonic clock, to drop a batch that follows too soon.
+        self._client_stats_at: dict[ConnId, float] = {}
         self._gateway = MessageGateway(sink=self, on_command=self._submit_command)
         self._bridge: ModelBridge | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -438,6 +465,7 @@ class Runner(ServiceComponent, ConnectionSink):
     def connection_closed(self, conn_id: ConnId) -> None:
         """Drop a previously opened connection that has gone away."""
         self._connections.drop(conn_id)
+        self._client_stats_at.pop(conn_id, None)
 
     def connection_answered(self, conn_id: ConnId, answer: Mapping[str, str]) -> None:
         """Record a transport's negotiation answer for a connection.
@@ -560,7 +588,7 @@ class Runner(ServiceComponent, ConnectionSink):
         self._reply_clip(conn_id, request_id, lambda: self._recorder.request_recording())
 
     def client_stats_received(self, conn_id: ConnId, batch: ClientStatsBatch) -> None:
-        """Log a client-reported quality batch and publish it live on the egress stream.
+        """Log a client-reported quality batch and journal it on the egress stream.
 
         The client is the only vantage point onto its own receive-side
         quality, so each fact is passed on as reported, tagged with the
@@ -587,7 +615,22 @@ class Runner(ServiceComponent, ConnectionSink):
         id, which any value can be: outside a session there is no session to
         tag it with. A metric value that isn't a finite number is left out,
         since JSON has no way to carry it.
+
+        Limits: the client chooses how often it sends and how much, and the
+        journal keeps a bounded number of facts. A batch that follows the
+        connection's last one by less than a second, or that is larger than
+        the SDK ever sends, is dropped before it is logged or journalled.
         """
+        now = time.monotonic()
+        last = self._client_stats_at.get(conn_id)
+        if last is not None and now - last < _CLIENT_STATS_MIN_INTERVAL_SECONDS:
+            logger.debug("client stats batch dropped: sent too soon", conn_id=conn_id)
+            return
+        if not _client_stats_fit(batch):
+            logger.debug("client stats batch dropped: too large", conn_id=conn_id)
+            return
+        self._client_stats_at[conn_id] = now
+
         if batch.connection_stat is not None:
             logger.debug(
                 "client connection stats",
@@ -1299,6 +1342,7 @@ class Runner(ServiceComponent, ConnectionSink):
             elif close_reason:
                 self._broadcast_session_ended(close_reason)
             self._uploads.clear()
+            self._client_stats_at.clear()
             self._spawn_teardown(asyncio.to_thread(self._recorder.stop))
             self._spawn_teardown(self._close_session(reason))
         if entered and transition.to_state is SessionState.TERMINATED:

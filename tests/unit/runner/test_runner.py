@@ -5,7 +5,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -2676,3 +2676,125 @@ async def test_client_stats_are_not_journalled_once_the_session_is_closing(
     started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=30.0))
 
     assert _client_stats_facts(started_runner) == []
+
+
+def _clock(monkeypatch: pytest.MonkeyPatch, start: float = 1000.0) -> list[float]:
+    """Pin the runner's monotonic clock; move it by changing the list's value."""
+    now = [start]
+    monkeypatch.setattr("reactor_runtime.runner.runner.time.monotonic", lambda: now[0])
+    return now
+
+
+async def test_client_stats_drop_a_batch_that_follows_the_last_too_soon(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The client chooses its cadence; a fast one would push lifecycle facts
+    # out of the bounded journal.
+    now = _clock(monkeypatch)
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
+
+    started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=30.0))
+    now[0] += 0.5
+    started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=29.0))
+    started_runner.client_stats_received(ConnId(4), _one_track_batch(frames_per_second=28.0))
+    now[0] += 1.0
+    started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=27.0))
+
+    facts = _client_stats_facts(started_runner)
+    fps = [f.detail["track_stats"][0]["metrics"]["frames_per_second"] for f in facts]
+    assert fps == [30.0, 28.0, 27.0]
+
+
+async def test_client_stats_dropped_for_coming_too_soon_are_not_logged(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _clock(monkeypatch)
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
+    started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=30.0))
+
+    with caplog.at_level(logging.DEBUG, logger="reactor_runtime.runner.runner"):
+        started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=29.0))
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert "client stats" not in messages
+    assert "client connection stats" not in messages
+
+
+async def test_client_stats_limit_restarts_with_a_new_connection_of_the_same_id(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clock(monkeypatch)
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
+
+    started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=30.0))
+    started_runner.connection_closed(ConnId(3))
+    started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=29.0))
+
+    assert len(_client_stats_facts(started_runner)) == 2
+
+
+@pytest.mark.parametrize(
+    "batch",
+    [
+        pytest.param(
+            ClientStatsBatch(
+                track_stats=[*_one_track_batch(frames_per_second=30.0).track_stats] * 33,
+                connection_stat=None,
+            ),
+            id="too many tracks",
+        ),
+        pytest.param(
+            _one_track_batch(**{f"metric_{i}": 1.0 for i in range(65)}),
+            id="too many metrics",
+        ),
+        pytest.param(
+            _one_track_batch(**{"m" * 129: 1.0}),
+            id="a metric name too long",
+        ),
+        pytest.param(
+            ClientStatsBatch(
+                track_stats=[
+                    replace(
+                        _one_track_batch(frames_per_second=30.0).track_stats[0],
+                        track_name="t" * 129,
+                    )
+                ],
+                connection_stat=None,
+            ),
+            id="a track name too long",
+        ),
+        pytest.param(
+            ClientStatsBatch(
+                track_stats=[],
+                connection_stat=ClientConnectionStat(
+                    timestamp=1_700_000_000_000,
+                    metrics={f"metric_{i}": 1.0 for i in range(65)},
+                ),
+            ),
+            id="too many connection metrics",
+        ),
+    ],
+)
+async def test_client_stats_drop_a_batch_larger_than_the_sdk_sends(
+    started_runner: Runner, batch: ClientStatsBatch
+) -> None:
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
+
+    started_runner.client_stats_received(ConnId(3), batch)
+
+    assert _client_stats_facts(started_runner) == []
+
+
+async def test_client_stats_limits_are_cleared_when_the_session_closes(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A closing session forgets its connections' last batch times, so the
+    # map never outlives the session.
+    _clock(monkeypatch)
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
+    started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=30.0))
+    assert started_runner._client_stats_at
+
+    started_runner.stop_session()
+
+    assert started_runner._client_stats_at == {}
