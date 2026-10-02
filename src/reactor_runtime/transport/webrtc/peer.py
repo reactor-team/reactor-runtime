@@ -202,6 +202,14 @@ _AUDIO_SILENCE_WARN_RATIO = 0.05
 # clears them with margin and still bounds what an idle track costs.
 _AUDIO_GRACE_TICKS = 300  # 3 s
 
+# How long a teardown waits, across both channels, for frames a chunked channel
+# still queues to leave before it closes. A notice broadcast just ahead of the
+# close (moderation, session ended) is small, but the channel is ordered, so it
+# leaves only after any large message queued before it; early in a connection
+# SCTP may move only a few MB a second. Kept well inside the 10 s a crashed
+# model's process gets to exit, since a teardown also runs on that path.
+_CLOSE_DRAIN_S = 5.0
+
 # Shared media engine: one PeerConnectionFactory per process (libwebrtc requires
 # this). Audio isolation between peers is achieved at the track level via
 # LocalAudioSource, not via separate factories.
@@ -820,6 +828,25 @@ class WebRTCPeer:
         self._release_wire()
         self._fire(self._cb_disconnect)
 
+    def _drain_channels(self) -> None:
+        """Close each open chunked channel once what it queues has left.
+
+        A frame sent on a chunked channel can still sit in the channel's queue,
+        above libwebrtc's buffer, when the connection is torn down, and letting
+        go of the connection would discard it. Closing the channel first sends
+        it, so a frame queued ahead of the close arrives ahead of it. A plain
+        channel has no such queue and is left to the connection.
+        """
+        deadline = time.monotonic() + _CLOSE_DRAIN_S
+        for channel in (self._data_channel, self._control_channel):
+            if channel is None or channel.state() != rw.DataChannelState.Open:
+                continue
+            try:
+                if channel.is_chunked():
+                    channel.close(drain_timeout=max(0.0, deadline - time.monotonic()))
+            except Exception:
+                logger.debug("data-channel close failed", exc_info=True)
+
     def _release_wire(self) -> None:
         with self._ready_lock:
             self._early_frames.clear()
@@ -1346,6 +1373,7 @@ class WebRTCPeer:
         if self._stop_event.is_set() and self._frame_thread is None:
             return
         self._stop_event.set()
+        self._drain_channels()
         self._release_wire()
         for thread in (self._frame_thread, self._audio_thread):
             if thread is not None and thread.is_alive():
