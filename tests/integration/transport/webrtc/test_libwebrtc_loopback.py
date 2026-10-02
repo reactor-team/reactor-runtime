@@ -482,6 +482,80 @@ async def test_a_frame_sent_from_the_connected_callback_reaches_the_client() -> 
         client.pc = None  # type: ignore[assignment]
 
 
+async def test_a_chunking_client_exchanges_messages_past_the_plain_limits() -> None:
+    """A client whose offer asks for chunking gets it from the runtime.
+
+    The client here comes from the same engine as the peer, so its offer
+    declares ``a=x-reactor-dc-chunking`` and the answer mirrors it. Both
+    channels are then chunked: the client sends 1 MiB, four times the 256 KiB
+    a plain channel takes, and the peer sends 20 MiB, past the 16 MiB at which
+    libwebrtc closes a plain channel. Both arrive whole and the channel stays
+    open.
+    """
+    factory = _get_factory(WebRtcConfig())
+    client = await _Client.create(factory)
+    offer_sdp = await client.create_offer()
+    assert "a=x-reactor-dc-chunking:1" in offer_sdp
+
+    inbound = bytes(range(256)) * (4 * 1024)  # 1 MiB
+    outbound = bytes(reversed(range(256))) * (80 * 1024)  # 20 MiB
+    at_client: list[bytes] = []
+    client_got = threading.Event()
+
+    def _on_client_message(data: bytes, _binary: bool) -> None:
+        at_client.append(bytes(data))
+        client_got.set()
+
+    assert client.data is not None
+    client.data.on_message(_on_client_message)
+
+    peer, answer = await libwebrtc_peer_factory(
+        ConnId(9),
+        SdpOffer(sdp=offer_sdp),
+        client.track_map(),
+        WebRtcConfig(ice_gathering_timeout_ms=4000),
+        ProtocolVersion.V0,
+    )
+    assert "a=x-reactor-dc-chunking:1" in answer.sdp
+    at_peer: list[bytes | str] = []
+    peer_got = asyncio.Event()
+    connected = asyncio.Event()
+
+    def _on_message(payload: bytes | str, _version: ProtocolVersion, _channel: Channel) -> None:
+        at_peer.append(payload)
+        peer_got.set()
+
+    peer.on_message(_on_message)
+    peer.on_media(lambda *_: None)
+    peer.on_ping(lambda: None)
+    peer.on_connected(connected.set)
+    peer.on_disconnect(lambda: None)
+
+    stop_trickle = asyncio.Event()
+    trickle_task = asyncio.create_task(_trickle_until(client, peer, stop_trickle))
+    try:
+        await client.accept_answer(answer.sdp)
+        assert await _reached(connected), "the peers never connected"
+        assert client.data.is_chunked()
+
+        client.data.send(inbound)
+        peer.send_message(outbound)
+        assert await _reached(peer_got), "the client's 1 MiB message never arrived"
+        assert await asyncio.to_thread(client_got.wait, _TIMEOUT_S), (
+            "the peer's 20 MiB message never reached the client"
+        )
+        assert at_peer == [inbound]
+        assert at_client == [outbound]
+        assert client.data.state() == rw.DataChannelState.Open
+    finally:
+        stop_trickle.set()
+        trickle_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await trickle_task
+        await peer.close()
+        client.pc = None  # type: ignore[assignment]
+
+
 async def test_a_frame_sent_before_the_wire_opens_arrives_after_the_connected_callback() -> None:
     """A client may send as soon as its own channel opens.
 

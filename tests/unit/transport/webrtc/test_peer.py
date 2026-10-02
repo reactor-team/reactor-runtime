@@ -891,13 +891,20 @@ def test_build_rtc_config_leaves_snap_off_when_warp_is_off() -> None:
     assert _build_rtc_config(WebRtcConfig(warp=False)).sctp_snap is False
 
 
-def _record_factory_builds(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
-    """Point the peer at a recording builder, returning the SPED flags it is handed."""
-    recorded: list[bool] = []
+def _record_factory_builds(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """Point the peer at a recording builder, returning what it is asked for.
+
+    Each SPED flag is recorded as itself and each chunking request as
+    ``"dc_chunking"``, in call order.
+    """
+    recorded: list[object] = []
 
     class _Builder:
         def with_dtls_in_stun(self, enabled: bool) -> None:
             recorded.append(enabled)
+
+        def with_dc_chunking(self) -> None:
+            recorded.append("dc_chunking")
 
         def build(self) -> object:
             return SimpleNamespace()
@@ -910,7 +917,7 @@ def _record_factory_builds(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
 @pytest.mark.parametrize("warp", [True, False])
 def test_get_factory_carries_warp_into_sped(monkeypatch: pytest.MonkeyPatch, warp: bool) -> None:
     recorded = _record_factory_builds(monkeypatch)
-    peer_module._get_factory(WebRtcConfig(warp=warp))
+    peer_module._get_factory(WebRtcConfig(warp=warp, dc_chunking=False))
     assert recorded == [warp]
 
 
@@ -918,9 +925,29 @@ def test_get_factory_builds_the_engine_once(monkeypatch: pytest.MonkeyPatch) -> 
     """The engine is process-wide, so the first connection's WARP setting is the one that sticks."""
     recorded = _record_factory_builds(monkeypatch)
     first = peer_module._get_factory(WebRtcConfig(warp=True))
-    second = peer_module._get_factory(WebRtcConfig(warp=False))
+    second = peer_module._get_factory(WebRtcConfig(warp=False, dc_chunking=False))
     assert first is second
-    assert recorded == [True]
+    assert recorded == [True, "dc_chunking"]
+
+
+# ── Data-channel chunking ────────────────────────────────────────────────────
+
+
+def test_build_rtc_config_takes_part_in_chunking_by_default() -> None:
+    assert _build_rtc_config(WebRtcConfig()).dc_chunking is True
+
+
+def test_build_rtc_config_opts_the_connection_out_when_chunking_is_off() -> None:
+    assert _build_rtc_config(WebRtcConfig(dc_chunking=False)).dc_chunking is False
+
+
+@pytest.mark.parametrize("dc_chunking", [True, False])
+def test_get_factory_offers_chunking_only_when_asked(
+    monkeypatch: pytest.MonkeyPatch, dc_chunking: bool
+) -> None:
+    recorded = _record_factory_builds(monkeypatch)
+    peer_module._get_factory(WebRtcConfig(dc_chunking=dc_chunking))
+    assert ("dc_chunking" in recorded) is dc_chunking
 
 
 # ── Trickle ICE ──────────────────────────────────────────────────────────────
