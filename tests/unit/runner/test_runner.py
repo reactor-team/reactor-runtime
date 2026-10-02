@@ -2553,6 +2553,7 @@ async def test_client_stats_logs_no_connection_line_when_the_batch_carries_none(
         metrics={"bitrate_bps": 950_000},
     )
     batch = ClientStatsBatch(track_stats=[stat], connection_stat=None)
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
     with caplog.at_level(logging.DEBUG, logger="reactor_runtime.runner.runner"):
         started_runner.client_stats_received(ConnId(3), batch)
 
@@ -2728,6 +2729,23 @@ async def test_client_stats_limit_restarts_with_a_new_connection_of_the_same_id(
     started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=29.0))
 
     assert len(_client_stats_facts(started_runner)) == 2
+
+
+async def test_client_stats_outside_a_session_leave_the_limits_alone(
+    started_runner: Runner,
+) -> None:
+    # A batch before the session starts is dropped, and must not hold back
+    # the session's first reading.
+    _pin_client_stats_clock(started_runner)
+    started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=30.0))
+
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
+    started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=29.0))
+
+    assert len(_client_stats_facts(started_runner)) == 1
+    started_runner.stop_session()
+    started_runner.client_stats_received(ConnId(3), _one_track_batch(frames_per_second=28.0))
+    assert started_runner._client_stats._accepted_at == {}
 
 
 async def test_client_stats_limits_are_cleared_when_the_session_closes(

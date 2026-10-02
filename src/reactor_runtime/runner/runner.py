@@ -582,11 +582,14 @@ class Runner(ServiceComponent, ConnectionSink):
         Journalling: the whole batch as one ``metric`` journal fact named
         ``client_stats``, a self-loop like every other journal fact, so it
         reaches an external consumer on :attr:`events` with the session id and
-        the connection id in its ``detail``. It is journalled only while a
-        session is running, judged by the session's state rather than by its
-        id, which any value can be: outside a session there is no session to
-        tag it with. A metric value that isn't a finite number is left out,
-        since JSON has no way to carry it (:func:`client_stats.to_detail`).
+        the connection id in its ``detail``. A metric value that isn't a
+        finite number is left out, since JSON has no way to carry it
+        (:func:`client_stats.to_detail`).
+
+        A batch counts only while a session is running, judged by the
+        session's state rather than by its id, which any value can be: outside
+        a session there is no session to tag it with, so it is neither logged
+        nor journalled, and it leaves the limits alone.
 
         Limits: the client chooses how often it sends and how much, and the
         journal keeps a bounded number of facts, so :class:`ClientStatsGate`
@@ -594,6 +597,8 @@ class Runner(ServiceComponent, ConnectionSink):
         second, or that is larger than the SDK ever sends, before it is logged
         or journalled.
         """
+        if self._sm.current_state not in _RUNNING_STATES:
+            return
         dropped = self._client_stats.accept(conn_id, batch)
         if dropped is not None:
             logger.debug("client stats batch dropped", conn_id=conn_id, reason=dropped)
@@ -619,8 +624,6 @@ class Runner(ServiceComponent, ConnectionSink):
                 metrics=dict(stat.metrics),
             )
 
-        if self._sm.current_state not in _RUNNING_STATES:
-            return
         self._sm.send(
             SessionEvent.METRIC,
             name="client_stats",
