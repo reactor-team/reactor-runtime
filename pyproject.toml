@@ -16,7 +16,7 @@ namespace = true
 # gates the pin against proto/, so a release cannot ship a schema older than the
 # sources it was built from.
 [tool.reactor-wire]
-version = "1.20260814.7"
+version = "1.20260929.8"
 
 [project]
 name = "reactor-runtime"
