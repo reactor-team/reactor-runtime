@@ -288,6 +288,10 @@ def _apply_env(cfg: RuntimeConfig) -> RuntimeConfig:
     recordings_dir = os.getenv("REACTOR_RECORDINGS_DIR", "").strip()
     if recordings_dir:
         recording = dataclasses.replace(recording, recording_dir=recordings_dir)
+    step_results = cfg.step_results
+    step_results_dir = os.getenv("REACTOR_STEP_RESULTS_DIR", "").strip()
+    if step_results_dir:
+        step_results = dataclasses.replace(step_results, step_results_dir=step_results_dir)
     return dataclasses.replace(
         cfg,
         host=os.getenv("HOST", cfg.host),
@@ -296,6 +300,7 @@ def _apply_env(cfg: RuntimeConfig) -> RuntimeConfig:
         grace_period=_duration_env("SIGTERM_GRACE_PERIOD", cfg.grace_period),
         exit_timeout=_duration_env("EXIT_TIMEOUT_SECONDS", cfg.exit_timeout),
         recording=recording,
+        step_results=step_results,
     )
 
 

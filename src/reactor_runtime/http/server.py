@@ -22,6 +22,7 @@ from reactor_runtime.http.routes import (
     EgressRoutes,
     RecordingRoutes,
     SessionRoutes,
+    StepResultRoutes,
     UploadRoutes,
 )
 from reactor_runtime.log import get_logger
@@ -80,6 +81,7 @@ def build_app(
     EgressRoutes(runner, process_health, metrics).mount(app)
     UploadRoutes(runner).mount(app)
     RecordingRoutes(runner).mount(app)
+    StepResultRoutes(runner).mount(app)
     for transport in transports:
         transport.mount(app, runner)
     return app

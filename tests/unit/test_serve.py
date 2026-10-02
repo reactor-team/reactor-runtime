@@ -492,6 +492,16 @@ def test_apply_env_keeps_defaults_when_unset() -> None:
     assert cfg.host == "0.0.0.0"
     assert cfg.port == 8080
     assert cfg.exit_timeout == 10.0
+    assert cfg.step_results.step_results_dir is None
+
+
+def test_apply_env_points_step_results_at_a_directory(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("REACTOR_STEP_RESULTS_DIR", "/data/steps")
+
+    cfg = _apply_env(RuntimeConfig(model_ref="fake:Model"))
+
+    assert cfg.step_results.step_results_dir == "/data/steps"
+    assert cfg.step_results.enabled is False
 
 
 def test_apply_env_rejects_a_non_numeric_exit_timeout(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -15,7 +15,7 @@ import contextlib
 import json
 import logging
 import threading
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar, TypeVar, get_type_hints
@@ -25,6 +25,7 @@ import numpy.typing as npt
 from reactor_runtime.core.model import Command, ReactorEvent
 from reactor_runtime.core.values import (
     CommandFailure,
+    CompletedStep,
     ConnId,
     InputFrame,
     MediaBundle,
@@ -61,6 +62,16 @@ MediaSink = Callable[[MediaChunk], None]
 
 FailureSink = Callable[[BaseException], None]
 """Receives the exception that ended :meth:`ReactorCore.run`, on the model thread."""
+
+
+StepSink = Callable[[CompletedStep], None]
+"""Receives each step the model completes, to be saved downstream, on the model thread.
+
+Fire-and-forget, like :data:`MediaSink`: the call hands the step over and
+returns; saving it happens on a runtime worker. Bound only when the model turns
+step results on, so a model reads whether the feature is on from the slot being
+bound.
+"""
 
 
 @dataclass(frozen=True)
@@ -225,8 +236,16 @@ class ReactorCore:
         self._out_broadcast: BroadcastSink | None = None
         self._out_addressed: AddressedSink | None = None
         self._out_media: MediaSink | None = None
+        self._out_step: StepSink | None = None
         self._media_ops: MediaOps | None = None
         self._on_failure: FailureSink | None = None
+        # The messages a step sends while the step loop is collecting them for
+        # its result, or None outside that window. Opened and closed by the
+        # loop around process_output(); send() appends while it is open.
+        self._step_messages: list[dict[str, Any]] | None = None
+        # How many steps this model has announced, so the step loop can tell
+        # whether a hook announced the step itself.
+        self._steps_announced = 0
         self.output = OutputStream(self)
 
         self._input_buffers: dict[str, InputBuffer] = {}
@@ -277,9 +296,76 @@ class ReactorCore:
         await self.output.emit(output, compute_time=compute_time, drop=drop)
 
     async def send(self, message: ModelMessage) -> None:
-        """Broadcast a typed message to every connected client."""
+        """Broadcast a typed message to every connected client.
+
+        While the step loop is collecting a step's messages for its result,
+        the message is recorded there too, in wire form.
+        """
+        if self._step_messages is not None:
+            self._step_messages.append(message.to_wire_format())
         if self._out_broadcast is not None:
             self._out_broadcast(message)
+
+    @property
+    def step_results_enabled(self) -> bool:
+        """Whether this model saves step results, from its ``reactor.yaml``."""
+        return self._out_step is not None
+
+    async def save_step_result(
+        self,
+        output: Output | None = None,
+        *,
+        fps: float | None = None,
+        files: Mapping[str, bytes | Path] | None = None,
+    ) -> None:
+        """Announce a finished step, to be saved as a folder of files.
+
+        For a model with its own ``run()`` loop, this is how a step is saved:
+        one call per finished piece of work, with the ``Output`` it produced.
+        Like :meth:`emit`, the call hands the step downstream and returns; the
+        runtime numbers it, encodes the output as ``output.mp4`` with every
+        track as its own stream, adds the *files*, writes a ``result.json``
+        that lists them, and announces the folder on its event stream as
+        ``step_result_ready``, all on a worker of its own. The model is never
+        held for a save. Nothing else goes in the folder: a message the model
+        sends is not recorded here, because nothing passes it in.
+
+        The default step loop announces the output ``process_output()``
+        returns on its own, so an application that keeps the default loop need
+        not call this. One that does call it inside ``process_output()``, to
+        add files, is not announced a second time for that step.
+
+        The arrays are read by the encoder after this call returns, as they
+        are by the wire after :meth:`emit`: hand over arrays the model does not
+        write to again.
+
+        Args:
+            output: The step's media, or ``None`` for a step that produced
+                files only.
+            fps: The rate the video plays at. Defaults to :attr:`fps`.
+            files: Extra files to add to the folder, by name: the bytes to
+                write, or a path to copy. A name is one plain path segment.
+
+        Raises:
+            RuntimeError: If step results are off for this model, or the
+                runtime has not bound its outbound path yet.
+            ValueError: If the output's metadata cannot be encoded.
+        """
+        bundle = self._to_bundle(output) if output is not None else None
+        step = CompletedStep(
+            bundle=bundle,
+            fps=float(self.fps) if fps is None else float(fps),
+            files=dict(files or {}),
+        )
+        await self._announce_step(step)
+
+    async def _announce_step(self, step: CompletedStep) -> None:
+        """Hand a completed step to the bound sink, off the loop like a media chunk."""
+        sink = self._out_step
+        if sink is None:
+            raise RuntimeError("step results are not enabled for this model")
+        await asyncio.to_thread(sink, step)
+        self._steps_announced += 1
 
     # -- outbound binding (called once by the bridge) -------------------------
 
@@ -290,12 +376,14 @@ class ReactorCore:
         addressed: AddressedSink,
         media: MediaSink,
         media_ops: MediaOps | None = None,
+        step: StepSink | None = None,
     ) -> None:
         """Bind the outbound sinks. Called once before the loop starts.
 
         Pushes the playout settings declared or set before binding — the
         model's ``buffer_size`` class attribute, and a rate assigned to
         ``self.output.fps`` during ``load()`` — down to the media consumers.
+        ``step`` is bound only when the model turns step results on.
 
         Raises:
             ValueError: If the model declares a non-positive ``buffer_size``.
@@ -307,6 +395,7 @@ class ReactorCore:
         self._out_broadcast = broadcast
         self._out_addressed = addressed
         self._out_media = media
+        self._out_step = step
         self._media_ops = media_ops
         if media_ops is not None:
             if self.buffer_size is not None:

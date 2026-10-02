@@ -9,9 +9,10 @@ the import graph.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum, StrEnum
+from pathlib import Path
 from typing import Any, NewType
 
 import numpy as np
@@ -319,6 +320,34 @@ class MediaChunk:
     def frames(self) -> list[MediaBundle]:
         """Split the chunk into one single-frame bundle per carried frame."""
         return split_batch(self.bundle)
+
+
+@dataclass(frozen=True)
+class CompletedStep:
+    """A finished step, as the model announces it to be saved.
+
+    What the model hands downstream when a step's work is done, the way a
+    :class:`MediaChunk` is what it hands downstream to be played. The model's
+    only concern is producing it; numbering the step, encoding its media,
+    writing the folder, and announcing it are all the runtime's, on a worker
+    of its own, so the model is never held for a save.
+
+    Attributes:
+        bundle: The step's media, every track of the ``Output``, or ``None``
+            for a step that produced files only.
+        fps: The rate the video streams play at.
+        files: Extra files to add to the folder, by name: bytes to write or a
+            path to copy.
+        messages: The messages sent during the step, in wire form, when the
+            producer collected them; ``None`` leaves them out of the result.
+        timings: Timings the producer measured, in seconds.
+    """
+
+    bundle: MediaBundle | None
+    fps: float
+    files: Mapping[str, bytes | Path] = field(default_factory=dict)
+    messages: list[dict[str, Any]] | None = None
+    timings: Mapping[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

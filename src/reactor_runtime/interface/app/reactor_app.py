@@ -54,7 +54,7 @@ from reactor_runtime.core.model import (
     SessionEnded,
     SessionStarted,
 )
-from reactor_runtime.core.values import CommandFailure, ConnId
+from reactor_runtime.core.values import CommandFailure, CompletedStep, ConnId
 from reactor_runtime.interface.app.input_state import InputState
 from reactor_runtime.interface.app.outcome import StepOutcome
 from reactor_runtime.interface.client import ClientInfo
@@ -206,10 +206,12 @@ class ReactorApp(ReactorCore):
         runtime built: ``outcome.result`` when ``generate()`` returned,
         ``outcome.error`` when it raised. Run the step's effects here: ``await
         self.send()`` for a message, which goes on the wire before the step's
-        media; ``self.output.flush()``; recovery from a model error. Return the
+        media; ``        self.output.flush()``; recovery from a model error. Return the
         :class:`Output` to emit, or ``None`` to emit nothing.
 
-        Runs under the step lock.
+        Runs under the step lock. When step results are on, the returned
+        output is announced as the step's result and the messages sent from
+        here are listed in its ``result.json``; a ``None`` announces nothing.
 
         This is the one place a model failure is decided. When ``outcome.error``
         is set, either recover or re-raise:
@@ -251,6 +253,14 @@ class ReactorApp(ReactorCore):
         on a full wire. A refused step waits a few milliseconds before the next
         request, so a paused application does not spin a core.
 
+        When the model turns step results on in its ``reactor.yaml``, the media
+        a step returns is also announced as that step's result, at the declared
+        :attr:`fps`, with the messages ``process_output()`` sent and the
+        measured ``generate()`` time. The announcement is a hand-off like the
+        emit: the runtime saves the folder on a worker of its own and the loop
+        does not wait for it. A hook that calls :meth:`save_step_result`
+        itself, to add files, is not announced again.
+
         Playout is paced from the measured ``generate()`` time unless the author
         declares ``fps`` on the class. Whether ``fps`` is pinned is read when
         the loop starts, so a ``load()`` that assigns ``type(self).fps`` counts;
@@ -287,6 +297,8 @@ class ReactorApp(ReactorCore):
                     # may await; the lock is what stops a handler, a lifecycle
                     # hook, or the session boundary's write to self.state from
                     # landing in one of those gaps.
+                    announced_before = self._steps_announced
+                    messages: list[dict[str, Any]] | None = None
                     async with self._step_lock:
                         # 2. The application gate.
                         try:
@@ -322,12 +334,26 @@ class ReactorApp(ReactorCore):
 
                             # 4. The application collects the outcome into media,
                             #    sends its messages, or recovers. A raise ends the
-                            #    loop.
-                            media = await self.process_output(outcome)
+                            #    loop. The messages it sends are collected for the
+                            #    step's result, and only those: the window opens
+                            #    and closes around this one call.
+                            # The hook may announce the step itself; the count
+                            # before it runs is what tells.
+                            if self.step_results_enabled:
+                                self._step_messages = []
+                            try:
+                                media = await self.process_output(outcome)
+                            finally:
+                                messages = self._step_messages
+                                self._step_messages = None
 
-                    # 5. Emit outside the lock, so a handler can run while the
-                    #    wire is full.
+                    # 5. Announce the completed step, unless the hook announced
+                    #    it itself, then emit outside the lock, so a handler can
+                    #    run while the wire is full. Both are hand-offs: the save
+                    #    runs on a runtime worker and never holds the loop.
                     if media is not None and outcome is not None:
+                        if self.step_results_enabled and self._steps_announced == announced_before:
+                            await self._announce_step_output(media, outcome, messages)
                         pace = None if fps_pinned else outcome.elapsed
                         await self.emit(media, compute_time=pace)
 
@@ -339,6 +365,28 @@ class ReactorApp(ReactorCore):
             finally:
                 for buffer in self._input_buffers.values():
                     buffer.reset()
+
+    async def _announce_step_output(
+        self, media: Output, outcome: StepOutcome, messages: list[dict[str, Any]] | None
+    ) -> None:
+        """Announce the step's media as its result, at the declared frame rate.
+
+        Best-effort, like the session recording: a hand-off that fails is
+        logged and the loop goes on, because the media still reaches the
+        clients and a step result is not what the model is for.
+        """
+        step = CompletedStep(
+            bundle=self._to_bundle(media),
+            fps=float(self.fps),
+            messages=messages if messages is not None else [],
+            timings={"generate_s": round(outcome.elapsed, 4)},
+        )
+        try:
+            await self._announce_step(step)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("failed to announce the step result")
 
     # -- engine hooks ---------------------------------------------------------
 

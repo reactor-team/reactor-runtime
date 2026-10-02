@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -25,6 +26,7 @@ from reactor_runtime import (
     ReactorApp,
     StepOutcome,
     Video,
+    connected,
     event,
 )
 from reactor_runtime.core.model import (
@@ -34,7 +36,7 @@ from reactor_runtime.core.model import (
     SessionEnded,
     SessionStarted,
 )
-from reactor_runtime.core.values import ConnId
+from reactor_runtime.core.values import CompletedStep, ConnId
 from reactor_runtime.interface.internal.reactor_core import CommandEnvelope
 from reactor_runtime.interface.model.contract import ModelContract
 
@@ -631,6 +633,210 @@ async def test_fps_pinned_in_load_is_honoured() -> None:
     await _go_live(app)
     task = await _run_for(app)
     assert app.emitted[0][1] is None
+    await _stop(task)
+
+
+# -- step results --------------------------------------------------------------
+
+
+class FakeStepSink:
+    """Stands in for the runner's step sink: records each step the model announces."""
+
+    def __init__(self, *, hold: threading.Event | None = None) -> None:
+        self.steps: list[CompletedStep] = []
+        self.hold = hold
+        self.fail = False
+
+    def __call__(self, step: CompletedStep) -> None:
+        if self.hold is not None:
+            self.hold.wait(timeout=2.0)
+        if self.fail:
+            raise RuntimeError("nowhere to put it")
+        self.steps.append(step)
+
+
+def _ready_with_steps(app: Recording, sink: FakeStepSink | None) -> None:
+    app._on_loop_ready()
+    app.bind_output(
+        broadcast=lambda message: app.wire.append(type(message).__name__),
+        addressed=lambda *args: None,
+        media=lambda chunk: None,
+        step=sink,
+    )
+
+
+async def test_without_the_block_the_loop_announces_nothing() -> None:
+    app = OnlyGenerate()
+    _ready_with_steps(app, None)
+    await _go_live(app)
+    task = await _run_for(app)
+    assert app.step_results_enabled is False
+    assert app.generated > 0
+    await _stop(task)
+
+
+async def test_each_productive_step_is_announced_once_at_the_declared_fps() -> None:
+    class Pinned(OnlyGenerate):
+        fps = 12
+
+    sink = FakeStepSink()
+    app = Pinned()
+    _ready_with_steps(app, sink)
+    await _go_live(app)
+    task = await _run_for(app)
+    await _stop(task)
+    assert app.step_results_enabled is True
+    # The announcement precedes the emit, so the stop may land between them.
+    assert len(app.emitted) <= len(sink.steps) <= len(app.emitted) + 1
+    assert len(sink.steps) > 0
+    step = sink.steps[0]
+    assert step.fps == 12.0
+    assert step.bundle is not None
+    assert list(step.bundle.tracks) == ["main_video"]
+    assert step.files == {}
+    assert "generate_s" in step.timings
+
+
+async def test_a_step_that_returns_none_announces_nothing() -> None:
+    class Silent(Recording):
+        def generate(self, input: State) -> Frame:
+            self.generated += 1
+            return _frame()
+
+        async def process_output(self, outcome: StepOutcome) -> Output | None:
+            return None
+
+    sink = FakeStepSink()
+    app = Silent()
+    _ready_with_steps(app, sink)
+    await _go_live(app)
+    task = await _run_for(app)
+    assert app.generated > 0
+    assert sink.steps == []
+    await _stop(task)
+
+
+async def test_a_refused_step_announces_nothing() -> None:
+    class Refusing(Recording):
+        async def process_input(self) -> State:
+            raise ApplicationError("paused")
+
+        def generate(self, input: State) -> Frame:
+            return _frame()
+
+    sink = FakeStepSink()
+    app = Refusing()
+    _ready_with_steps(app, sink)
+    await _go_live(app)
+    task = await _run_for(app)
+    assert sink.steps == []
+    await _stop(task)
+
+
+async def test_the_messages_sent_in_process_output_are_the_steps_messages() -> None:
+    class Announcing(Recording):
+        def generate(self, input: State) -> Frame:
+            return _frame()
+
+        async def process_output(self, outcome: StepOutcome) -> Output | None:
+            await self.send(Restarted(reason="every step"))
+            return outcome.to_output()
+
+    sink = FakeStepSink()
+    app = Announcing()
+    _ready_with_steps(app, sink)
+    await _go_live(app)
+    task = await _run_for(app)
+    await _stop(task)
+    assert sink.steps
+    for step in sink.steps:
+        assert step.messages == [{"type": "restarted", "data": {"reason": "every step"}}]
+
+
+async def test_a_send_from_a_handler_or_a_hook_is_not_a_step_message() -> None:
+    class Chatty(Recording):
+        def generate(self, input: State) -> Frame:
+            return _frame()
+
+        @event(name="announce")
+        async def announce(self) -> None:
+            await self.send(Restarted(reason="from a handler"))
+
+        @connected
+        async def on_connected(self) -> None:
+            await self.send(Restarted(reason="from a hook"))
+
+    sink = FakeStepSink()
+    app = Chatty()
+    _ready_with_steps(app, sink)
+    await _go_live(app)
+    task = await _run_for(app)
+    command = ModelContract.of(Chatty).commands["announce"].command()
+    await app._dispatch_command(CommandEnvelope(command, ConnId(1001), "r1"))
+    await asyncio.sleep(0.02)
+    await _stop(task)
+    assert "Restarted" in app.wire
+    assert sink.steps
+    assert all(step.messages == [] for step in sink.steps)
+
+
+async def test_a_hook_that_announces_for_itself_is_not_announced_again() -> None:
+    class SavesItself(Recording):
+        def generate(self, input: State) -> Frame:
+            return _frame()
+
+        async def process_output(self, outcome: StepOutcome) -> Output | None:
+            media = outcome.to_output()
+            assert media is not None
+            await self.send(Restarted(reason="not recorded"))
+            await self.save_step_result(media, files={"note.txt": b"hi"})
+            return media
+
+    sink = FakeStepSink()
+    app = SavesItself()
+    _ready_with_steps(app, sink)
+    await _go_live(app)
+    task = await _run_for(app)
+    await _stop(task)
+    # One announcement per step, never two.
+    assert len(app.emitted) <= len(sink.steps) <= len(app.emitted) + 1
+    # Every announcement is the hook's own — it carried the files — and, like
+    # every explicit one, no messages: nothing passed them in.
+    for step in sink.steps:
+        assert step.files == {"note.txt": b"hi"}
+        assert step.messages is None
+
+
+async def test_the_loop_does_not_wait_for_the_save() -> None:
+    # The sink is a hand-off: whatever the runtime does with the step after it
+    # takes it is not the loop's wait. A sink that blocks stands in for a
+    # runtime worker that is slow to *accept*; a slow *save* never reaches the
+    # loop at all, which the runner-side tests cover.
+    hold = threading.Event()
+    sink = FakeStepSink(hold=hold)
+    app = OnlyGenerate()
+    _ready_with_steps(app, sink)
+    await _go_live(app)
+    task = await _run_for(app)
+    assert app.generated == 1
+    hold.set()
+    await asyncio.sleep(0.05)
+    assert app.generated > 1
+    await _stop(task)
+
+
+async def test_a_failed_announcement_is_logged_and_the_loop_goes_on(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sink = FakeStepSink()
+    sink.fail = True
+    app = OnlyGenerate()
+    _ready_with_steps(app, sink)
+    await _go_live(app)
+    with caplog.at_level(logging.ERROR):
+        task = await _run_for(app)
+    assert app.generated > 1
+    assert any("failed to announce the step result" in r.message for r in caplog.records)
     await _stop(task)
 
 

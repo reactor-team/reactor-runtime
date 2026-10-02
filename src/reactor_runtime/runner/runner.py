@@ -23,12 +23,13 @@ import uuid
 from collections.abc import Callable, Coroutine, Mapping
 from typing import Any, Protocol
 
-from reactor_runtime.codes import INVALID_COMMAND, UNRESOLVED_UPLOAD
+from reactor_runtime.codes import INTERNAL_ERROR, INVALID_COMMAND, UNRESOLVED_UPLOAD
 from reactor_runtime.core import (
     JOURNAL_EVENTS,
     ClientConnected,
     ClientDisconnected,
     CommandFailure,
+    CompletedStep,
     Connection,
     ConnectionSink,
     ConnId,
@@ -72,6 +73,7 @@ from reactor_runtime.runner.connection_manager import ConnectionManager
 from reactor_runtime.runner.offer_epochs import OfferEpochs
 from reactor_runtime.runner.state_machine import SessionStateMachine
 from reactor_runtime.runner.upload_resolution import declares_upload, resolve_uploads
+from reactor_runtime.step_results import StepResult, StepResultStore
 from reactor_runtime.transport.router import (
     SessionNotRunningError,
     SessionTransitionError,
@@ -225,6 +227,7 @@ class Runner(ServiceComponent, ConnectionSink):
             on_clip_ready=self._on_clip_ready,
             on_chunk_ready=self._on_chunk_ready,
         )
+        self._step_results = StepResultStore(cfg.step_results, on_ready=self._on_step_result_ready)
         self._connections = ConnectionManager(state_machine=self._sm)
         self._offer_epochs = OfferEpochs()
         # Playout settings the model set through its output handle, remembered
@@ -314,6 +317,9 @@ class Runner(ServiceComponent, ConnectionSink):
                     set_depth=self._set_media_depth,
                 ),
                 failure=self._on_model_failure,
+                # Bound only when the model turns step results on, so the
+                # model reads the feature's state off the slot.
+                step=self._on_step_completed if self._step_results.enabled else None,
             )
             bridge.start()
         except Exception:
@@ -363,6 +369,7 @@ class Runner(ServiceComponent, ConnectionSink):
         self._cancel_orphan_timeout()
         await self._drain_teardown()
         await asyncio.to_thread(self._recorder.close)
+        await asyncio.to_thread(self._step_results.close)
         if self._bridge is not None:
             await self._bridge.stop()
 
@@ -599,10 +606,21 @@ class Runner(ServiceComponent, ConnectionSink):
         The model reports its run-loop crash from its own thread, so the
         terminal move is scheduled on the runtime loop, where the state machine
         and the egress journal are single-writer.
+
+        When the session saves step results, the crash is written first as a
+        step of its own: a ``result.json`` carrying the error, announced before
+        the eviction, so a consumer waiting on the next step reads the reason
+        instead of watching the session vanish. Best-effort: a failure
+        to write it never delays the eviction.
         """
+        message = str(error) or repr(error)
+        try:
+            self._step_results.fail(INTERNAL_ERROR, message)
+        except Exception:
+            logger.exception("failed to record the crash as a step result")
         loop = self._loop
         if loop is not None:
-            loop.call_soon_threadsafe(self._evict_on_failure, str(error) or repr(error))
+            loop.call_soon_threadsafe(self._evict_on_failure, message)
 
     def _evict_on_failure(self, error: str) -> None:
         """Evict the session to terminated, carrying the crash as its reason."""
@@ -621,6 +639,30 @@ class Runner(ServiceComponent, ConnectionSink):
     def _emit_chunk_ready(self, recording_id: str, idx: int) -> None:
         """Journal a chunk-ready fact as a self-loop move on the session machine."""
         self._sm.send(SessionEvent.CHUNK_READY, recording_id=recording_id, idx=idx)
+
+    def _on_step_completed(self, step: CompletedStep) -> None:
+        """Hand a step the model announced to the store. The model's step sink.
+
+        Called off the model loop, like :meth:`_emit_media`. The store queues
+        the step for its worker and this returns; the save, the numbering, and
+        the announcement all happen there.
+        """
+        self._step_results.enqueue(step)
+
+    def _on_step_result_ready(self, result: StepResult) -> None:
+        """Journal a saved step once its folder is complete, hopping onto the loop.
+
+        The store fires this from the thread that saved the step, so the emit
+        is scheduled on the runtime loop where the egress journal is
+        single-writer.
+        """
+        loop = self._loop
+        if loop is not None:
+            loop.call_soon_threadsafe(self._emit_step_result_ready, result)
+
+    def _emit_step_result_ready(self, result: StepResult) -> None:
+        """Journal a step-result-ready fact as a self-loop move on the session machine."""
+        self._sm.send(SessionEvent.STEP_RESULT_READY, **result.to_dict())
 
     # -- session control (driven by the HTTP routes) --------------------------
 
@@ -756,6 +798,22 @@ class Runner(ServiceComponent, ConnectionSink):
     def recorder(self) -> Recorder:
         """The recorder the HTTP clip routes read and the runner drives."""
         return self._recorder
+
+    @property
+    def step_results(self) -> StepResultStore:
+        """The step-result store the HTTP step routes read and the model's steps land in."""
+        return self._step_results
+
+    def step_results_id(self, sid: str) -> str:
+        """Resolve the id a request's step results are stored under.
+
+        The live session is addressed by the fixed transport id
+        (:data:`SESSION_ID`), while its steps are stored under the session's
+        own id, the one its start parameters named. Any other *sid* is taken
+        as that stored id, so a finished session's steps stay fetchable by the
+        id the caller knows it by.
+        """
+        return self._recording_id if sid == self._session_id else sid
 
     def descriptor(self) -> dict[str, Any]:
         """Describe the session in the shape the client validates against.
@@ -1201,6 +1259,7 @@ class Runner(ServiceComponent, ConnectionSink):
             self._dispatch_reactor_events(transition, self._bridge)
         if transition.is_session_start and self._bridge is not None:
             self._start_recorder()
+            self._start_step_results()
         entered = transition.from_state is not transition.to_state
         if entered:
             self._reset_orphan_timeout(transition.to_state)
@@ -1215,11 +1274,13 @@ class Runner(ServiceComponent, ConnectionSink):
                 self._broadcast_session_ended(close_reason)
             self._uploads.clear()
             self._spawn_teardown(asyncio.to_thread(self._recorder.stop))
+            self._spawn_teardown(asyncio.to_thread(self._step_results.stop))
             self._spawn_teardown(self._close_session(reason))
         if entered and transition.to_state is SessionState.TERMINATED:
             if transition.event is SessionEvent.EVICTION and self._loop is not None:
                 self._uploads.clear()
                 self._spawn_teardown(asyncio.to_thread(self._recorder.stop))
+                self._spawn_teardown(asyncio.to_thread(self._step_results.stop))
                 self._spawn_teardown(self._connections.close_all())
             # An eviction carrying an error is a model loop that crashed, and
             # the process exits as a failure. A failed load is not one: the
@@ -1241,6 +1302,17 @@ class Runner(ServiceComponent, ConnectionSink):
             self._recorder.start(self._recording_id)
         except Exception:
             logger.exception("failed to start the recorder; continuing without recording")
+
+    def _start_step_results(self) -> None:
+        """Open the session's step-result directory, best-effort.
+
+        Like the recorder, the store must never break the session: one that
+        fails to start logs and leaves the session without step results.
+        """
+        try:
+            self._step_results.start(self._recording_id)
+        except Exception:
+            logger.exception("failed to start step results; continuing without them")
 
     def _dispatch_reactor_events(self, transition: Transition, bridge: ModelBridge) -> None:
         """Cross session and connection facts into the model as reactor events.

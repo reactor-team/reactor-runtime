@@ -20,7 +20,12 @@ from reactor_runtime.core.model import (
     TransitionEvent,
     UploadedFile,
 )
-from reactor_runtime.core.service import RecordingConfig, RuntimeConfig, ServiceComponent
+from reactor_runtime.core.service import (
+    RecordingConfig,
+    RuntimeConfig,
+    ServiceComponent,
+    StepResultsConfig,
+)
 from reactor_runtime.core.session import (
     JOURNAL_EVENTS,
     SessionEvent,
@@ -31,6 +36,7 @@ from reactor_runtime.core.transport import Connection, ConnectionSink
 from reactor_runtime.core.typespec import TypeSpec
 from reactor_runtime.core.values import (
     CommandFailure,
+    CompletedStep,
     ConnectionCapabilities,
     ConnId,
     Health,
@@ -52,6 +58,7 @@ __all__ = [
     "Command",
     "CommandFailure",
     "CommandField",
+    "CompletedStep",
     "ConnId",
     "Connection",
     "ConnectionCapabilities",
@@ -74,6 +81,7 @@ __all__ = [
     "SessionEvent",
     "SessionStarted",
     "SessionState",
+    "StepResultsConfig",
     "TrackData",
     "TrackDirection",
     "TrackInfo",

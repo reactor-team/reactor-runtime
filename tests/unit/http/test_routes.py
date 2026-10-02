@@ -5,12 +5,28 @@ from pathlib import Path
 from typing import cast
 
 import httpx
+import numpy as np
 import pytest
 from fastapi import FastAPI, HTTPException, Request
 
 from reactor_runtime import InputField, Output, ReactorApp, Video, event
-from reactor_runtime.core import Health, HealthStatus, RuntimeConfig
-from reactor_runtime.http import EgressRoutes, RecordingRoutes, SessionRoutes, UploadRoutes
+from reactor_runtime.core import (
+    Health,
+    HealthStatus,
+    MediaBundle,
+    RuntimeConfig,
+    StepResultsConfig,
+    TrackData,
+    TrackInfo,
+    TrackKind,
+)
+from reactor_runtime.http import (
+    EgressRoutes,
+    RecordingRoutes,
+    SessionRoutes,
+    StepResultRoutes,
+    UploadRoutes,
+)
 from reactor_runtime.http.routes import _read_capped, _resume_from, _stream_events
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.runner.runner import SESSION_ID, Runner
@@ -50,6 +66,7 @@ def _app(
     EgressRoutes(runner, process_health or runner.health, metrics or _metrics()).mount(app)
     UploadRoutes(runner).mount(app)
     RecordingRoutes(runner).mount(app)
+    StepResultRoutes(runner).mount(app)
     return app
 
 
@@ -673,6 +690,176 @@ async def test_clip_chunk_is_gone_for_an_unknown_recording(
     response = await http_client.get(f"/clips/chunks/{_RECORDING_ID}/init.mp4")
 
     assert response.status_code == 410
+
+
+# -- step results --------------------------------------------------------------
+
+_STEP_SESSION = "00000000-0000-0000-0000-000000000abc"
+
+
+@pytest.fixture
+async def step_client(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> AsyncIterator[tuple[httpx.AsyncClient, Runner]]:
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
+    runner = Runner(
+        RuntimeConfig(
+            model_ref="fake:Model",
+            step_results=StepResultsConfig(enabled=True, step_results_dir=str(tmp_path)),
+        )
+    )
+    await runner.start()
+    transport = httpx.ASGITransport(app=_app(runner))
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            yield http_client, runner
+    finally:
+        await runner.stop()
+
+
+def _save_step(runner: Runner, **files: bytes) -> None:
+    bundle = MediaBundle(
+        tracks={
+            "main": TrackData(
+                info=TrackInfo(name="main", kind=TrackKind.VIDEO),
+                data=np.zeros((2, 8, 8, 3), dtype=np.uint8),
+            )
+        }
+    )
+    runner.step_results.save(bundle, 24.0, files)
+
+
+async def test_steps_lists_the_live_sessions_complete_steps(
+    step_client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, runner = step_client
+    runner.start_session({"session_id": _STEP_SESSION})
+    _save_step(runner)
+    _save_step(runner, **{"last_frame.png": b"png"})
+
+    response = await http_client.get(f"/sessions/{SESSION_ID}/steps")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {"step": 1, "files": ["output.mp4", "result.json"]},
+        {"step": 2, "files": ["output.mp4", "last_frame.png", "result.json"]},
+    ]
+
+
+async def test_steps_are_also_reachable_by_the_sessions_own_id(
+    step_client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, runner = step_client
+    runner.start_session({"session_id": _STEP_SESSION})
+    _save_step(runner)
+    runner.stop_session()
+    await asyncio.sleep(0.05)
+
+    response = await http_client.get(f"/sessions/{_STEP_SESSION}/steps")
+
+    assert response.status_code == 200
+    assert [entry["step"] for entry in response.json()] == [1]
+
+
+async def test_steps_is_empty_before_the_first_save(
+    step_client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, runner = step_client
+    runner.start_session({"session_id": _STEP_SESSION})
+
+    response = await http_client.get(f"/sessions/{SESSION_ID}/steps")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+async def test_steps_is_not_found_with_no_session_or_an_unknown_id(
+    step_client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, runner = step_client
+
+    assert (await http_client.get(f"/sessions/{SESSION_ID}/steps")).status_code == 404
+    runner.start_session({"session_id": _STEP_SESSION})
+    assert (await http_client.get("/sessions/not-a-uuid/steps")).status_code == 404
+    other = "00000000-0000-0000-0000-000000000def"
+    assert (await http_client.get(f"/sessions/{other}/steps")).status_code == 404
+
+
+async def test_steps_is_not_found_when_step_results_are_off(
+    client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, _ = client
+    await http_client.post("/start_session", json={})
+
+    response = await http_client.get(f"/sessions/{SESSION_ID}/steps")
+
+    assert response.status_code == 404
+
+
+async def test_a_step_serves_its_result_manifest(
+    step_client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, runner = step_client
+    runner.start_session({"session_id": _STEP_SESSION})
+    _save_step(runner, **{"last_frame.png": b"png"})
+
+    response = await http_client.get(f"/sessions/{SESSION_ID}/steps/1")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/json"
+    document = response.json()
+    assert document["step"] == 1
+    assert [entry["name"] for entry in document["files"]] == ["output.mp4", "last_frame.png"]
+    assert document["tracks"][0]["name"] == "main"
+
+
+async def test_a_step_that_is_not_complete_is_not_found(
+    step_client: tuple[httpx.AsyncClient, Runner], tmp_path: Path
+) -> None:
+    http_client, runner = step_client
+    runner.start_session({"session_id": _STEP_SESSION})
+    _save_step(runner)
+    # A step still being written is a hidden partial, and the next number is
+    # not there at all.
+    (tmp_path / _STEP_SESSION / "steps" / ".2.partial").mkdir()
+
+    assert (await http_client.get(f"/sessions/{SESSION_ID}/steps/2")).status_code == 404
+    assert (await http_client.get(f"/sessions/{SESSION_ID}/steps/3")).status_code == 404
+    assert (await http_client.get(f"/sessions/{SESSION_ID}/steps/0")).status_code == 404
+
+
+async def test_a_step_file_is_served_in_its_listed_content_type(
+    step_client: tuple[httpx.AsyncClient, Runner],
+) -> None:
+    http_client, runner = step_client
+    runner.start_session({"session_id": _STEP_SESSION})
+    _save_step(runner, **{"last_frame.png": b"png bytes"})
+
+    media = await http_client.get(f"/sessions/{SESSION_ID}/steps/1/output.mp4")
+    extra = await http_client.get(f"/sessions/{SESSION_ID}/steps/1/last_frame.png")
+    manifest = await http_client.get(f"/sessions/{SESSION_ID}/steps/1/result.json")
+
+    assert media.status_code == 200
+    assert media.headers["content-type"] == "video/mp4"
+    assert media.content[4:8] == b"ftyp"
+    assert extra.status_code == 200
+    assert extra.headers["content-type"] == "image/png"
+    assert extra.content == b"png bytes"
+    assert manifest.status_code == 200
+    assert manifest.headers["content-type"] == "application/json"
+
+
+async def test_a_step_file_the_manifest_does_not_list_is_not_found(
+    step_client: tuple[httpx.AsyncClient, Runner], tmp_path: Path
+) -> None:
+    http_client, runner = step_client
+    runner.start_session({"session_id": _STEP_SESSION})
+    _save_step(runner)
+    (tmp_path / _STEP_SESSION / "steps" / "1" / "secret.txt").write_text("hidden")
+
+    assert (await http_client.get(f"/sessions/{SESSION_ID}/steps/1/secret.txt")).status_code == 404
+    assert (await http_client.get(f"/sessions/{SESSION_ID}/steps/1/missing.png")).status_code == 404
+    assert (await http_client.get(f"/sessions/{SESSION_ID}/steps/2/output.mp4")).status_code == 404
 
 
 def test_resume_from_reads_a_numeric_last_event_id() -> None:

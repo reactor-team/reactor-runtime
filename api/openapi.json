@@ -366,6 +366,28 @@
         "title": "SdpParamsRequest",
         "type": "object"
       },
+      "StepListing": {
+        "description": "One complete step of a session: its number and the files in its folder.",
+        "properties": {
+          "files": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Files",
+            "type": "array"
+          },
+          "step": {
+            "title": "Step",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "step",
+          "files"
+        ],
+        "title": "StepListing",
+        "type": "object"
+      },
       "StopSessionRequest": {
         "description": "Optional qualifiers on a session stop.\n\n``moderate`` marks the stop as a content-moderation verdict: the session\nends as moderated and clients are notified before their connections close.\n``reason`` is the platform's human-readable description of why the session\nis ending: when set, clients receive a session-ended notice carrying it\nverbatim before their connections close. A moderated stop outranks it \u2014\nclients see only the moderation notice. The body itself is optional \u2014 a\nbare ``POST /stop_session`` is a plain stop.",
         "properties": {
@@ -774,6 +796,185 @@
           }
         },
         "summary": "Get Session"
+      }
+    },
+    "/sessions/{sid}/steps": {
+      "get": {
+        "operationId": "list_steps_sessions__sid__steps_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sid",
+            "required": true,
+            "schema": {
+              "title": "Sid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/StepListing"
+                  },
+                  "title": "Response List Steps Sessions  Sid  Steps Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Steps"
+      }
+    },
+    "/sessions/{sid}/steps/{step}": {
+      "get": {
+        "operationId": "get_step_sessions__sid__steps__step__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sid",
+            "required": true,
+            "schema": {
+              "title": "Sid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "step",
+            "required": true,
+            "schema": {
+              "title": "Step",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The step's result.json: its files, tracks, and timings."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Step"
+      }
+    },
+    "/sessions/{sid}/steps/{step}/{name}": {
+      "get": {
+        "operationId": "get_step_file_sessions__sid__steps__step___name__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sid",
+            "required": true,
+            "schema": {
+              "title": "Sid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "step",
+            "required": true,
+            "schema": {
+              "title": "Step",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "One file of the step, in the content type result.json lists."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Step File"
       }
     },
     "/sessions/{sid}/transport/webrtc/connections": {

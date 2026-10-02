@@ -2,8 +2,9 @@
 
 The ``reactor.yaml`` manifest is the runtime's one configuration file:
 ``runtime.import`` names the model as a ``"module:Class"`` reference,
-``runtime.config`` points at the model's own config file, and the
-``runtime.recording`` block configures the recorder. This module turns that file into
+``runtime.config`` points at the model's own config file, the
+``runtime.recording`` block configures the recorder, and the
+``runtime.step_results`` block turns on per-step result folders. This module turns that file into
 a :class:`~reactor_runtime.core.RuntimeConfig` and the reference into the model
 class — and it is the only code that does either, so every entry point resolves
 the same model from the same directory.
@@ -21,7 +22,7 @@ from typing import Any
 
 import yaml
 
-from reactor_runtime.core import RecordingConfig, RuntimeConfig
+from reactor_runtime.core import RecordingConfig, RuntimeConfig, StepResultsConfig
 from reactor_runtime.interface.internal.reactor_core import ReactorCore
 
 MANIFEST = "reactor.yaml"
@@ -32,19 +33,20 @@ def load_config(manifest: Path) -> RuntimeConfig:
 
     ``runtime.import`` — the ``"module:Class"`` model reference — and
     ``runtime.config`` — the path to the model's own config file — name the
-    model, ``model.name`` is the name it is published under, and the
-    ``runtime.recording`` block configures the recorder; the rest of the manifest
-    describes the model to the platform and is not the runtime's concern. The
-    config path is passed to the model verbatim (resolved to an absolute path);
-    the runtime never parses its contents.
+    model, ``model.name`` is the name it is published under, the
+    ``runtime.recording`` block configures the recorder, and the
+    ``runtime.step_results`` block turns on per-step result folders; the rest
+    of the manifest describes the model to the platform and is not the
+    runtime's concern. The config path is passed to the model verbatim
+    (resolved to an absolute path); the runtime never parses its contents.
 
     Args:
         manifest: Path to the ``reactor.yaml`` file.
 
     Returns:
         A configuration naming the model the manifest points at, the name it
-        publishes under, the path to its config file when present, and the
-        recorder's settings.
+        publishes under, the path to its config file when present, the
+        recorder's settings, and the step-result store's settings.
 
     Raises:
         SystemExit: If the manifest is not valid YAML, is not a mapping, or
@@ -66,6 +68,7 @@ def load_config(manifest: Path) -> RuntimeConfig:
         model_name=_model_name(document.get("model")),
         config_path=_resolve_config_path(runtime, manifest),
         recording=_recording_from_manifest(runtime, document),
+        step_results=_step_results_from_manifest(runtime),
     )
 
 
@@ -153,9 +156,57 @@ def _recording_from_manifest(runtime: dict[str, Any], document: dict[str, Any]) 
     )
 
 
+def _step_results_from_manifest(runtime: dict[str, Any]) -> StepResultsConfig:
+    """Parse ``runtime.step_results`` into a :class:`StepResultsConfig`.
+
+    The block nests under ``runtime:`` only. A missing or non-mapping block
+    leaves step results disabled at their defaults. Unknown keys are ignored,
+    as they are for the recording block, so a manifest can carry
+    forward-looking settings without breaking an older runtime.
+
+    Args:
+        runtime: The manifest's ``runtime`` section.
+
+    Returns:
+        The parsed step-result configuration.
+    """
+    block = runtime.get("step_results")
+    if not isinstance(block, dict):
+        return StepResultsConfig()
+    raw_video = block.get("video")
+    video: dict[str, Any] = raw_video if isinstance(raw_video, dict) else {}
+    raw_audio = block.get("audio")
+    audio: dict[str, Any] = raw_audio if isinstance(raw_audio, dict) else {}
+    defaults = StepResultsConfig()
+    return StepResultsConfig(
+        enabled=bool(block.get("enabled", defaults.enabled)),
+        keep_last=_positive_int(block.get("keep_last")),
+        video_codec=str(video.get("codec", defaults.video_codec)),
+        video_preset=str(video.get("preset", defaults.video_preset)),
+        video_crf=int(video.get("crf", defaults.video_crf)),
+        audio_codec=str(audio.get("codec", defaults.audio_codec)),
+        audio_bitrate_kbps=int(audio.get("bitrate_kbps", defaults.audio_bitrate_kbps)),
+    )
+
+
 def _optional_int(value: Any) -> int | None:
     """Coerce an optional manifest value to ``int``, leaving ``None`` as is."""
     return None if value is None else int(value)
+
+
+def _positive_int(value: Any) -> int | None:
+    """Coerce a manifest value to a positive ``int``, or ``None`` for anything else.
+
+    A bound that is missing, not a number, or not positive is no bound. A
+    bool is left out too: YAML ``true`` is not a count.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
 
 
 def _resolve_config_path(runtime: dict[str, Any], manifest: Path) -> Path | None:

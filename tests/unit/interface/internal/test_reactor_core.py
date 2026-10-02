@@ -1,12 +1,14 @@
 import asyncio
+import threading
 import time
 from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import pytest
 
 from reactor_runtime import Audio, MediaInput, ModelMessage, Output, TrackPayload, Video
-from reactor_runtime.core import Command, MediaChunk, SessionStarted
+from reactor_runtime.core import Command, CompletedStep, MediaChunk, SessionStarted
 from reactor_runtime.core.values import ConnId, InputFrame, TrackDirection
 from reactor_runtime.interface.internal.reactor_core import MediaOps, ReactorCore
 
@@ -342,6 +344,114 @@ def test_send_routes_to_the_bound_broadcast_sink() -> None:
     )
     asyncio.run(core.send(Ping(note="hi")))
     assert sent == [Ping(note="hi")]
+
+
+# -- step results ---------------------------------------------------------------
+
+
+def _bind_steps(core: ReactorCore, sink: Any) -> None:
+    core.bind_output(
+        broadcast=lambda msg: None,
+        addressed=lambda conn, msg, req: None,
+        media=lambda chunk: None,
+        step=sink,
+    )
+
+
+def test_step_results_are_off_until_the_sink_is_bound() -> None:
+    core = OutputOnlyCore()
+    assert core.step_results_enabled is False
+    _bind_steps(core, None)
+    assert core.step_results_enabled is False
+    bound = OutputOnlyCore()
+    _bind_steps(bound, lambda step: None)
+    assert bound.step_results_enabled is True
+
+
+def test_save_step_result_without_the_feature_raises() -> None:
+    core = OutputOnlyCore()
+    _bind_steps(core, None)
+    with pytest.raises(RuntimeError, match="not enabled"):
+        asyncio.run(core.save_step_result(Out(main=np.zeros((2, 2, 3), dtype=np.uint8))))
+
+
+def test_save_step_result_announces_the_bundle_the_rate_and_the_files() -> None:
+    class Rated(OutputOnlyCore):
+        fps = 24
+
+    core = Rated()
+    announced: list[CompletedStep] = []
+    _bind_steps(core, announced.append)
+    frames = np.zeros((3, 2, 2, 3), dtype=np.uint8)
+
+    returned = asyncio.run(
+        core.save_step_result(Out(main=frames), files={"last_frame.png": b"\x89PNG"})
+    )
+
+    # A hand-off, like emit: nothing comes back, the step is announced later.
+    assert returned is None
+    step = announced[0]
+    assert step.fps == 24.0
+    assert step.bundle is not None
+    assert step.bundle.tracks["main"].data is frames
+    assert step.files == {"last_frame.png": b"\x89PNG"}
+    # An explicit announcement records no messages — nothing passes them in.
+    assert step.messages is None
+    assert core._steps_announced == 1
+
+
+def test_save_step_result_takes_an_explicit_rate_and_a_files_only_step() -> None:
+    core = OutputOnlyCore()
+    announced: list[CompletedStep] = []
+    _bind_steps(core, announced.append)
+
+    asyncio.run(core.save_step_result(None, fps=12.5, files={"report.json": b"{}"}))
+
+    assert announced[0].bundle is None
+    assert announced[0].fps == 12.5
+
+
+def test_save_step_result_returns_before_the_save_runs() -> None:
+    # The sink is where the runtime queues the step; whatever it does after
+    # the hand-off is not the model's wait. Here the sink records the moment it
+    # was called and the save is simulated as never happening at all.
+    core = OutputOnlyCore()
+    handed_over = threading.Event()
+    _bind_steps(core, lambda step: handed_over.set())
+
+    started = time.perf_counter()
+    asyncio.run(core.save_step_result(None, files={"x": b""}))
+
+    assert handed_over.is_set()
+    assert time.perf_counter() - started < 0.5
+
+
+def test_save_step_result_raises_what_the_sink_raised() -> None:
+    core = OutputOnlyCore()
+
+    def sink(step: CompletedStep) -> None:
+        raise ValueError("nowhere to put it")
+
+    _bind_steps(core, sink)
+    with pytest.raises(ValueError, match="nowhere to put it"):
+        asyncio.run(core.save_step_result(None, files={"x": b""}))
+    assert core._steps_announced == 0
+
+
+def test_send_records_a_step_message_only_while_the_window_is_open() -> None:
+    core = OutputOnlyCore()
+    _bind_steps(core, None)
+
+    async def scenario() -> list[dict[str, Any]]:
+        await core.send(Ping(note="before"))
+        core._step_messages = []
+        await core.send(Ping(note="during"))
+        recorded = core._step_messages
+        core._step_messages = None
+        await core.send(Ping(note="after"))
+        return recorded
+
+    assert asyncio.run(scenario()) == [{"type": "ping", "data": {"note": "during"}}]
 
 
 def test_ingress_lands_on_the_two_typed_queues() -> None:

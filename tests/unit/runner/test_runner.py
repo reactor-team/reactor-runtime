@@ -31,6 +31,7 @@ from reactor_runtime.core import (
     ClientConnected,
     ClientDisconnected,
     CommandFailure,
+    CompletedStep,
     ConnectionCapabilities,
     ConnId,
     EndReason,
@@ -44,6 +45,7 @@ from reactor_runtime.core import (
     SessionEvent,
     SessionStarted,
     SessionState,
+    StepResultsConfig,
     TrackData,
     TrackInfo,
     TrackKind,
@@ -56,6 +58,7 @@ from reactor_runtime.interface.internal.reactor_core import (
     BroadcastSink,
     MediaOps,
     MediaSink,
+    StepSink,
 )
 from reactor_runtime.message_gateway import InboundCommand
 from reactor_runtime.metrics import RuntimeMetrics
@@ -142,10 +145,15 @@ class FakeModel(ReactorApp):
         addressed: AddressedSink,
         media: MediaSink,
         media_ops: MediaOps | None = None,
+        step: StepSink | None = None,
     ) -> None:
         self.events.append("bind")
         super().bind_output(
-            broadcast=broadcast, addressed=addressed, media=media, media_ops=media_ops
+            broadcast=broadcast,
+            addressed=addressed,
+            media=media,
+            media_ops=media_ops,
+            step=step,
         )
 
     def start_thread(self) -> None:
@@ -2428,3 +2436,234 @@ async def test_journal_self_loops_are_logged_at_debug(
         and getattr(r, "reactor_fields", {}).get("event") == "chunk_ready"
     )
     assert record.levelno == logging.DEBUG
+
+
+# -- step results ---------------------------------------------------------------
+
+_STEP_SESSION = "00000000-0000-0000-0000-00000000abcd"
+
+
+async def _wait_until(predicate: Callable[[], bool]) -> None:
+    """Poll *predicate* for up to five seconds; the test's own assertion follows."""
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.02)
+
+
+async def _step_runner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, enabled: bool = True
+) -> Runner:
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
+    runner = Runner(
+        RuntimeConfig(
+            model_ref="fake:Model",
+            step_results=StepResultsConfig(enabled=enabled, step_results_dir=str(tmp_path)),
+        )
+    )
+    await runner.start()
+    return runner
+
+
+def _step_bundle() -> MediaBundle:
+    return MediaBundle(
+        tracks={
+            "main": TrackData(
+                info=TrackInfo(name="main", kind=TrackKind.VIDEO),
+                data=np.zeros((2, 8, 8, 3), dtype=np.uint8),
+            )
+        }
+    )
+
+
+async def test_the_step_sink_is_bound_only_when_the_model_turns_step_results_on(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runner = await _step_runner(monkeypatch, tmp_path, enabled=False)
+    try:
+        assert created_models[-1].step_results_enabled is False
+    finally:
+        await runner.stop()
+    runner = await _step_runner(monkeypatch, tmp_path)
+    try:
+        assert created_models[-1].step_results_enabled is True
+    finally:
+        await runner.stop()
+
+
+async def test_step_results_open_under_the_session_id_and_close_with_the_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runner = await _step_runner(monkeypatch, tmp_path)
+    try:
+        runner.start_session({"session_id": _STEP_SESSION})
+        assert (tmp_path / _STEP_SESSION / "steps").is_dir()
+        assert runner.step_results_id(SESSION_ID) == _STEP_SESSION
+        assert runner.step_results_id("other") == "other"
+
+        assert runner.step_results.save(_step_bundle(), 24.0).step == 1
+        assert runner.step_results.save(_step_bundle(), 24.0).step == 2
+
+        runner.stop_session()
+        await _wait_until(lambda: (tmp_path / _STEP_SESSION / ".complete").is_file())
+        assert (tmp_path / _STEP_SESSION / ".complete").is_file()
+        assert runner.step_results.list_steps(_STEP_SESSION) is not None
+    finally:
+        await runner.stop()
+
+
+async def test_an_announced_step_is_saved_by_the_store_and_journalled_on_the_egress(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runner = await _step_runner(monkeypatch, tmp_path)
+    try:
+        runner.start_session({"session_id": _STEP_SESSION})
+        step = CompletedStep(bundle=_step_bundle(), fps=24.0, files={"a.txt": b"a"})
+        started = time.perf_counter()
+        runner._on_step_completed(step)
+        # The sink is a hand-off: it returns before the encode has run.
+        assert time.perf_counter() - started < 0.5
+        await _wait_until(lambda: bool(_moves(runner, SessionEvent.STEP_RESULT_READY)))
+
+        ready = _moves(runner, SessionEvent.STEP_RESULT_READY)
+        assert len(ready) == 1
+        assert ready[0].from_state is ready[0].to_state
+        assert ready[0].detail == {
+            "session_id": _STEP_SESSION,
+            "step": 1,
+            "files": ["output.mp4", "a.txt", "result.json"],
+        }
+        assert (tmp_path / _STEP_SESSION / "steps" / "1" / "output.mp4").is_file()
+    finally:
+        await runner.stop()
+
+
+async def test_a_step_announced_with_no_session_is_dropped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    runner = await _step_runner(monkeypatch, tmp_path)
+    try:
+        with caplog.at_level(logging.WARNING):
+            runner._on_step_completed(CompletedStep(bundle=_step_bundle(), fps=24.0))
+        assert any("no session to save it into" in r.message for r in caplog.records)
+        assert _moves(runner, SessionEvent.STEP_RESULT_READY) == []
+    finally:
+        await runner.stop()
+
+
+async def test_a_model_crash_writes_the_error_step_before_the_eviction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runner = await _step_runner(monkeypatch, tmp_path)
+    try:
+        runner.start_session({"session_id": _STEP_SESSION})
+        runner._on_model_failure(RuntimeError("gpu fell off"))
+        await asyncio.sleep(0.05)
+
+        _expect_state(runner, SessionState.TERMINATED)
+        events = [
+            e.transition.event
+            for e in _egress(runner)
+            if isinstance(e, TransitionEvent)
+            and e.transition.event in (SessionEvent.STEP_RESULT_READY, SessionEvent.EVICTION)
+        ]
+        assert events == [SessionEvent.STEP_RESULT_READY, SessionEvent.EVICTION]
+        ready = _moves(runner, SessionEvent.STEP_RESULT_READY)[0]
+        assert ready.detail == {
+            "session_id": _STEP_SESSION,
+            "step": 1,
+            "files": ["result.json"],
+        }
+        document = json.loads(
+            (tmp_path / _STEP_SESSION / "steps" / "1" / "result.json").read_text()
+        )
+        assert document["error"] == {"code": "internal_error", "message": "gpu fell off"}
+        # The error step stays fetchable after the eviction, by the session's id.
+        assert runner.step_results.result_path(_STEP_SESSION, 1) is not None
+    finally:
+        await runner.stop()
+
+
+async def test_a_model_crash_with_step_results_off_writes_nothing_and_still_evicts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runner = await _step_runner(monkeypatch, tmp_path, enabled=False)
+    try:
+        runner.start_session({"session_id": _STEP_SESSION})
+        runner._on_model_failure(RuntimeError("gpu fell off"))
+        await asyncio.sleep(0.05)
+
+        _expect_state(runner, SessionState.TERMINATED)
+        assert _moves(runner, SessionEvent.STEP_RESULT_READY) == []
+        assert not (tmp_path / _STEP_SESSION).exists()
+    finally:
+        await runner.stop()
+
+
+class SteppingModel(ReactorApp):
+    """A model on the default step loop: every step produces two frames."""
+
+    fps = 24
+    output: FakeOut
+
+    def load(self, config_path: Path | None) -> None: ...
+
+    def generate(self, input: None) -> FakeOut:
+        time.sleep(0.01)
+        return FakeOut(main=np.zeros((2, 8, 8, 3), dtype=np.uint8))
+
+    async def process_output(self, outcome: Any) -> FakeOut | None:
+        await self.send(Greeting(text="stepped"))
+        return outcome.to_output()
+
+
+async def test_a_step_loop_model_saves_a_folder_per_step_through_the_runner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, register_model: Callable[[type], None]
+) -> None:
+    # The whole path, end to end: the default step loop, the sink the runner
+    # binds, the store on disk, and the journal — with no HTTP in between.
+    register_model(SteppingModel)
+    monkeypatch.setattr(
+        "reactor_runtime.runner.runner.import_model_class", lambda ref: SteppingModel
+    )
+    runner = Runner(
+        RuntimeConfig(
+            model_ref="fake:Stepping",
+            step_results=StepResultsConfig(enabled=True, step_results_dir=str(tmp_path)),
+        )
+    )
+    await runner.start()
+    try:
+        # The model thread bootstraps its queues after start() returns; an event
+        # posted before that is dropped, so give it a moment as a caller would.
+        await asyncio.sleep(0.1)
+        runner.start_session({"session_id": _STEP_SESSION})
+        runner.connection_opened(FakeConnection(1))
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if len(_moves(runner, SessionEvent.STEP_RESULT_READY)) >= 2:
+                break
+            await asyncio.sleep(0.05)
+
+        ready = _moves(runner, SessionEvent.STEP_RESULT_READY)
+        assert [move.detail["step"] for move in ready[:2]] == [1, 2]
+        folder = tmp_path / _STEP_SESSION / "steps" / "1"
+        assert sorted(path.name for path in folder.iterdir()) == ["output.mp4", "result.json"]
+        document = json.loads((folder / "result.json").read_text())
+        assert document["messages"] == [{"type": "greeting", "data": {"text": "stepped"}}]
+        assert document["tracks"][0] == {
+            "name": "main",
+            "kind": "video",
+            "file": "output.mp4",
+            "stream": 0,
+            "width": 8,
+            "height": 8,
+            "fps": 24.0,
+            "frames": 2,
+            "default": True,
+        }
+        assert document["timings"]["generate_s"] >= 0.01
+        assert "encode_s" in document["timings"]
+    finally:
+        await runner.stop()

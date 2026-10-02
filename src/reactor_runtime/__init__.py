@@ -69,6 +69,7 @@ from reactor_runtime.interface.pipeline import Idle as _Idle
 from reactor_runtime.interface.pipeline import ReactorPipeline as _ReactorPipeline
 from reactor_runtime.log import get_logger
 from reactor_runtime.paths import get_weights_path
+from reactor_runtime.step_results import StepResult, StepResultError
 
 __version__ = version("reactor-runtime")
 
@@ -97,6 +98,8 @@ __all__ = [
     "ReactorApp",
     "ReadMode",
     "StepOutcome",
+    "StepResult",
+    "StepResultError",
     "Track",
     "TrackPayload",
     "UploadedFile",

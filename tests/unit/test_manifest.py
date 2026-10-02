@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from reactor_runtime import ReactorApp
-from reactor_runtime.core import RecordingConfig
+from reactor_runtime.core import RecordingConfig, StepResultsConfig
 from reactor_runtime.manifest import import_model_class, load_config
 
 _MANIFEST = """\
@@ -176,6 +176,112 @@ def test_load_config_ignores_unknown_recording_keys(tmp_path: Path) -> None:
     )
 
     assert load_config(manifest).recording.enabled is True
+
+
+def test_load_config_leaves_step_results_off_when_absent(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text("runtime:\n  import: pipeline:Demo\n")
+
+    step_results = load_config(manifest).step_results
+
+    assert step_results == StepResultsConfig()
+    assert step_results.enabled is False
+
+
+def test_load_config_reads_the_step_results_block_nested_under_runtime(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(
+        "runtime:\n"
+        "  import: pipeline:Demo\n"
+        "  step_results:\n"
+        "    enabled: true\n"
+        "    video:\n"
+        "      codec: h265\n"
+        "      preset: fast\n"
+        "      crf: 18\n"
+        "    audio:\n"
+        "      codec: libopus\n"
+        "      bitrate_kbps: 96\n"
+    )
+
+    step_results = load_config(manifest).step_results
+
+    assert step_results.enabled is True
+    assert step_results.video_codec == "h265"
+    assert step_results.video_preset == "fast"
+    assert step_results.video_crf == 18
+    assert step_results.audio_codec == "libopus"
+    assert step_results.audio_bitrate_kbps == 96
+
+
+def test_load_config_enables_step_results_with_the_one_key(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text("runtime:\n  import: pipeline:Demo\n  step_results:\n    enabled: true\n")
+
+    step_results = load_config(manifest).step_results
+
+    assert step_results.enabled is True
+    assert step_results.keep_last is None
+    assert step_results.video_codec == "h264"
+    assert step_results.audio_codec == "aac"
+
+
+def test_load_config_reads_the_step_results_window(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(
+        "runtime:\n  import: pipeline:Demo\n  step_results:\n    enabled: true\n    keep_last: 5\n"
+    )
+
+    assert load_config(manifest).step_results.keep_last == 5
+
+
+@pytest.mark.parametrize("raw", ["0", "-3", "many", "true", "null"])
+def test_a_step_results_window_that_is_not_a_positive_count_is_no_window(
+    tmp_path: Path, raw: str
+) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(
+        "runtime:\n  import: pipeline:Demo\n  step_results:\n"
+        f"    enabled: true\n    keep_last: {raw}\n"
+    )
+
+    assert load_config(manifest).step_results.keep_last is None
+
+
+def test_load_config_ignores_a_top_level_step_results_block(tmp_path: Path) -> None:
+    # Unlike recording, step results never had a top-level form to honour.
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text("runtime:\n  import: pipeline:Demo\nstep_results:\n  enabled: true\n")
+
+    assert load_config(manifest).step_results.enabled is False
+
+
+@pytest.mark.parametrize(
+    "block",
+    ["  step_results: true\n", "  step_results: [1, 2]\n", "  step_results:\n    video: 7\n"],
+)
+def test_load_config_tolerates_a_malformed_step_results_block(tmp_path: Path, block: str) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text("runtime:\n  import: pipeline:Demo\n" + block)
+
+    step_results = load_config(manifest).step_results
+
+    assert step_results.enabled is False
+    assert step_results.video_codec == "h264"
+
+
+def test_load_config_ignores_unknown_step_results_keys(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(
+        "runtime:\n"
+        "  import: pipeline:Demo\n"
+        "  step_results:\n"
+        "    enabled: true\n"
+        "    video_track: main_video\n"
+        "    from_the_future: 7\n"
+    )
+
+    assert load_config(manifest).step_results.enabled is True
 
 
 def test_import_model_class_resolves_a_model_reference() -> None:

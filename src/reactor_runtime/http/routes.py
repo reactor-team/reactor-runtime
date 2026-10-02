@@ -338,6 +338,82 @@ class RecordingRoutes:
             return FileResponse(path, media_type=media_type)
 
 
+class StepListing(BaseModel):
+    """One complete step of a session: its number and the files in its folder."""
+
+    step: int
+    files: list[str]
+
+
+class StepResultRoutes:
+    """Step-result folders over HTTP, straight from local disk.
+
+    Three endpoints serve what a model saved per step: the list of complete
+    steps, a step's ``result.json``, and one file of a step. A step appears
+    only once its folder is complete, so a caller never reads a half-written
+    result. The live session is addressed by its session id; a finished
+    session's steps stay reachable, under the id its start named, for the
+    store's retention window.
+    """
+
+    def __init__(self, runner: Runner) -> None:
+        """Bind the route group to the runner whose step-result store it reads."""
+        self._runner = runner
+
+    def mount(self, app: FastAPI) -> None:
+        """Register the step-result routes against *app*."""
+        runner = self._runner
+
+        @app.get(
+            "/sessions/{sid}/steps",
+            responses={404: {"model": ErrorDetail}},
+        )
+        async def list_steps(sid: str) -> list[StepListing]:
+            listed = runner.step_results.list_steps(runner.step_results_id(sid))
+            if listed is None:
+                raise HTTPException(status_code=404, detail="Step results not found")
+            return [StepListing(**entry) for entry in listed]
+
+        @app.get(
+            "/sessions/{sid}/steps/{step}",
+            response_class=Response,
+            responses={
+                200: {
+                    "description": "The step's result.json: its files, tracks, and timings.",
+                    "content": {"application/json": {"schema": {"type": "object"}}},
+                },
+                404: {"model": ErrorDetail},
+            },
+        )
+        async def get_step(sid: str, step: int) -> FileResponse:
+            path = runner.step_results.result_path(runner.step_results_id(sid), step)
+            if path is None:
+                raise HTTPException(status_code=404, detail="Step result not found")
+            return FileResponse(path, media_type="application/json")
+
+        @app.get(
+            "/sessions/{sid}/steps/{step}/{name}",
+            response_class=Response,
+            responses={
+                200: {
+                    "description": "One file of the step, in the content type result.json lists.",
+                    "content": {
+                        "application/octet-stream": {
+                            "schema": {"type": "string", "format": "binary"}
+                        }
+                    },
+                },
+                404: {"model": ErrorDetail},
+            },
+        )
+        async def get_step_file(sid: str, step: int, name: str) -> FileResponse:
+            found = runner.step_results.file_path(runner.step_results_id(sid), step, name)
+            if found is None:
+                raise HTTPException(status_code=404, detail="Step file not found")
+            path, media_type = found
+            return FileResponse(path, media_type=media_type)
+
+
 class HealthResponse(BaseModel):
     """The process verdict, the lifecycle word behind it, and why.
 

@@ -93,6 +93,45 @@ class RecordingConfig:
 
 
 @dataclass(frozen=True)
+class StepResultsConfig:
+    """The step-result store's tunables, from the manifest's ``step_results:`` block.
+
+    A step result is the folder of files one step produced: the step's
+    ``Output`` encoded as ``output.mp4``, any extra files the model adds, and a
+    ``result.json`` that lists them. It is a model choice, not a session option:
+    a model with no ``step_results:`` block saves nothing, and ``enabled`` is
+    the one key a model needs. Every track the ``Output`` declares goes into
+    the media file as its own stream, so there is no track to name here; the
+    encoder fields tune how those streams are encoded.
+
+    A session's steps stay on disk until it ends unless ``keep_last`` bounds
+    them: with it, the folder of step ``n - keep_last`` is deleted when step
+    ``n`` lands, so a long session holds a fixed number of steps at a time.
+
+    Attributes:
+        enabled: Whether the runtime saves a result per step.
+        keep_last: How many of the most recent steps to keep on disk during a
+            session, or ``None`` to keep them all until the session ends.
+        video_codec: ``"h264"`` or ``"h265"``.
+        video_preset: The libx264/libx265 preset.
+        video_crf: The constant-rate-factor quality target.
+        audio_codec: The audio codec, e.g. ``"aac"``.
+        audio_bitrate_kbps: The audio bitrate in kilobits per second.
+        step_results_dir: Directory step folders are written under, or ``None``
+            to use a fresh temporary directory.
+    """
+
+    enabled: bool = False
+    keep_last: int | None = None
+    video_codec: str = "h264"
+    video_preset: str = "veryfast"
+    video_crf: int = 23
+    audio_codec: str = "aac"
+    audio_bitrate_kbps: int = 128
+    step_results_dir: str | None = None
+
+
+@dataclass(frozen=True)
 class RuntimeConfig:
     """The single configuration object threaded through ``serve``.
 
@@ -116,6 +155,7 @@ class RuntimeConfig:
             session drain it includes, before the process is forced to exit.
         orphan_timeout: Seconds a session may stay client-less before it closes.
         recording: The recorder's configuration; disabled by default.
+        step_results: The step-result store's configuration; disabled by default.
     """
 
     model_ref: str
@@ -127,3 +167,4 @@ class RuntimeConfig:
     exit_timeout: float = 10.0
     orphan_timeout: float = 60.0
     recording: RecordingConfig = field(default_factory=RecordingConfig)
+    step_results: StepResultsConfig = field(default_factory=StepResultsConfig)
