@@ -214,6 +214,7 @@ async def test_close_is_silent(
     await conn.close()
 
     assert fake_peer.closed is True
+    assert fake_peer.closed_with_drain is True, "a commanded close drains"
     assert events == ["up"]
 
 
@@ -281,6 +282,7 @@ async def test_watchdog_times_out_when_no_ping(
 
     assert downs == [1]
     assert fake_peer.closed is True
+    assert fake_peer.closed_with_drain is False, "nothing would take a drain"
 
 
 async def test_peer_disconnect_does_not_reclose_peer(
