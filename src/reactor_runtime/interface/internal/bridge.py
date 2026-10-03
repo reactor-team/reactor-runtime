@@ -28,6 +28,7 @@ from reactor_runtime.interface.internal.reactor_core import (
     MediaSink,
     ReactorCore,
     RequestId,
+    StepSink,
 )
 from reactor_runtime.interface.model.contract import ContractError, ModelContract
 
@@ -143,6 +144,7 @@ class ModelBridge:
         media: MediaSink,
         media_ops: MediaOps | None = None,
         failure: FailureSink | None = None,
+        step: StepSink | None = None,
     ) -> None:
         """Wire the model's outbound paths down into the runner. Call once.
 
@@ -156,7 +158,9 @@ class ModelBridge:
         behind the model's ``output`` handle, each a one-way call with plain
         arguments. ``failure`` receives the exception that ends the model's run
         loop, at most once, on the model thread — it is how the owner learns
-        the model died rather than idled.
+        the model died rather than idled. ``step`` receives each
+        :class:`~reactor_runtime.core.CompletedStep` the model reports, on the
+        model thread.
 
         Args:
             broadcast: Sink for a message sent to all clients.
@@ -165,6 +169,7 @@ class ModelBridge:
             media_ops: Operations over the downstream media consumers, for
                 the model's ``output`` handle.
             failure: Sink for an unrecoverable crash of the model's run loop.
+            step: Sink for each step the model reports finished.
 
         Raises:
             RuntimeError: If outbound has already been bound.
@@ -172,7 +177,7 @@ class ModelBridge:
         if self._outbound_bound:
             raise RuntimeError("bind_outbound must be called once")
         self._model.bind_output(
-            broadcast=broadcast, addressed=addressed, media=media, media_ops=media_ops
+            broadcast=broadcast, addressed=addressed, media=media, media_ops=media_ops, step=step
         )
         if failure is not None:
             self._model.bind_failure(failure)

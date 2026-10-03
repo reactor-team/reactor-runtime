@@ -26,7 +26,7 @@ from reactor_runtime.core import (
     InputFrame,
     UploadedFile,
 )
-from reactor_runtime.interface.app import InputState, ReactorApp, StepOutcome
+from reactor_runtime.interface.app import InputState, ReactorApp, StepCompleted, StepOutcome
 from reactor_runtime.interface.client import ClientInfo
 from reactor_runtime.interface.events import (
     EVENT_REGISTRY,
@@ -96,6 +96,7 @@ __all__ = [
     "OutputStream",
     "ReactorApp",
     "ReadMode",
+    "StepCompleted",
     "StepOutcome",
     "Track",
     "TrackPayload",

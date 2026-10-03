@@ -30,6 +30,7 @@ from reactor_runtime.core import (
     ClientDisconnected,
     ClientStatsBatch,
     CommandFailure,
+    CompletedStep,
     Connection,
     ConnectionSink,
     ConnId,
@@ -278,6 +279,9 @@ class Runner(ServiceComponent, ConnectionSink):
         # event per session; set outside a session, so nothing waits there.
         self._starting_input_done = asyncio.Event()
         self._starting_input_done.set()
+        # How many steps the model has reported in the current session, which
+        # numbers each step_completed fact. Reset when a session starts.
+        self._steps_completed = 0
         # Names the log's current session binding, so the release that follows a
         # session retires that binding and not a later session's. Zero until the
         # first session binds one.
@@ -335,6 +339,7 @@ class Runner(ServiceComponent, ConnectionSink):
                     set_depth=self._set_media_depth,
                 ),
                 failure=self._on_model_failure,
+                step=self._on_step_completed,
             )
             bridge.start()
         except Exception:
@@ -686,6 +691,33 @@ class Runner(ServiceComponent, ConnectionSink):
             now_marker=clip.now_marker,
             predicted_ready_at_ms=clip.predicted_ready_at_ms,
             playlist_url=clip.playlist_url,
+        )
+
+    def _on_step_completed(self, step: CompletedStep) -> None:
+        """Record a step the model reported finished, hopping onto the loop.
+
+        The model reports from its own thread, so the journal move is scheduled
+        on the runtime loop, where the state machine and the journal are
+        single-writer. A step reported before a crash hops before the crash
+        does, so its fact is journalled first.
+        """
+        loop = self._loop
+        if loop is not None:
+            loop.call_soon_threadsafe(self._record_step, step)
+
+    def _record_step(self, step: CompletedStep) -> None:
+        """Number a reported step and journal it as a ``step_completed`` fact.
+
+        The detail carries the step's number within the session, whether a
+        step result follows for it, and its error. Saving is off, so no step
+        result follows.
+        """
+        self._steps_completed += 1
+        self._sm.send(
+            SessionEvent.STEP_COMPLETED,
+            step=self._steps_completed,
+            saved=False,
+            error=step.error,
         )
 
     def _on_model_failure(self, error: BaseException) -> None:
@@ -1377,6 +1409,7 @@ class Runner(ServiceComponent, ConnectionSink):
         """
         done = asyncio.Event()
         self._starting_input_done = done
+        self._steps_completed = 0
         start = self._session_start
         if start.starting_input is not None or start.steps is not None:
             self._connections.register(SystemConnection(), system=True)

@@ -35,6 +35,7 @@ from reactor_runtime.core import (
     ClientTrackDirection,
     ClientTrackStat,
     CommandFailure,
+    CompletedStep,
     Connection,
     ConnectionCapabilities,
     ConnId,
@@ -61,6 +62,7 @@ from reactor_runtime.interface.internal.reactor_core import (
     BroadcastSink,
     MediaOps,
     MediaSink,
+    StepSink,
 )
 from reactor_runtime.message_gateway import InboundCommand
 from reactor_runtime.metrics import RuntimeMetrics
@@ -153,10 +155,11 @@ class FakeModel(ReactorApp):
         addressed: AddressedSink,
         media: MediaSink,
         media_ops: MediaOps | None = None,
+        step: StepSink | None = None,
     ) -> None:
         self.events.append("bind")
         super().bind_output(
-            broadcast=broadcast, addressed=addressed, media=media, media_ops=media_ops
+            broadcast=broadcast, addressed=addressed, media=media, media_ops=media_ops, step=step
         )
 
     def start_thread(self) -> None:
@@ -1333,6 +1336,65 @@ def test_the_system_client_carries_no_media_and_conforms_to_the_protocol() -> No
     assert conn.id == SYSTEM_CONN_ID
     assert not conn.capabilities.carries_video
     assert not conn.capabilities.carries_audio
+
+
+def _step_facts(runner: Runner) -> list[dict[str, Any]]:
+    return [dict(move.detail) for move in _moves(runner, SessionEvent.STEP_COMPLETED)]
+
+
+async def test_each_reported_step_is_journalled_with_its_number(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    started_runner._record_step(CompletedStep(bundle=None))
+    started_runner._record_step(CompletedStep(bundle=None, error="RuntimeError: out of memory"))
+
+    assert _step_facts(started_runner) == [
+        {"step": 1, "saved": False, "error": None},
+        {"step": 2, "saved": False, "error": "RuntimeError: out of memory"},
+    ]
+    move = _moves(started_runner, SessionEvent.STEP_COMPLETED)[0]
+    assert move.from_state is move.to_state
+
+
+async def test_step_numbers_start_over_with_each_session(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    started_runner._record_step(CompletedStep(bundle=None))
+    started_runner.stop_session()
+    await started_runner._drain_teardown()
+    started_runner.start_session({})
+    started_runner._record_step(CompletedStep(bundle=None))
+
+    assert [fact["step"] for fact in _step_facts(started_runner)] == [1, 1]
+
+
+async def test_a_step_reported_from_the_model_thread_is_journalled_on_the_loop(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    await asyncio.to_thread(started_runner._on_step_completed, CompletedStep(bundle=None))
+    await asyncio.sleep(0)
+
+    assert _step_facts(started_runner) == [{"step": 1, "saved": False, "error": None}]
+
+
+async def test_a_step_reported_before_a_crash_is_journalled_before_the_eviction(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+
+    def report_then_crash() -> None:
+        started_runner._on_step_completed(CompletedStep(bundle=None))
+        started_runner._on_model_failure(RuntimeError("boom"))
+
+    await asyncio.to_thread(report_then_crash)
+    await asyncio.sleep(0)
+
+    events = [
+        e.transition.event
+        for e in _egress(started_runner)
+        if isinstance(e, TransitionEvent)
+        and e.transition.event in {SessionEvent.STEP_COMPLETED, SessionEvent.EVICTION}
+    ]
+    assert events == [SessionEvent.STEP_COMPLETED, SessionEvent.EVICTION]
 
 
 async def test_the_descriptor_echoes_how_many_starting_commands_apply(
