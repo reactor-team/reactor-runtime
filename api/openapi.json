@@ -366,6 +366,164 @@
         "title": "SdpParamsRequest",
         "type": "object"
       },
+      "StepFile": {
+        "description": "One file kept in a step's folder.",
+        "properties": {
+          "content_type": {
+            "title": "Content Type",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "size": {
+            "description": "Size in bytes.",
+            "title": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "content_type",
+          "size"
+        ],
+        "title": "StepFile",
+        "type": "object"
+      },
+      "StepList": {
+        "description": "The steps of a session whose folders are complete.",
+        "properties": {
+          "steps": {
+            "description": "Step numbers, in order.",
+            "items": {
+              "type": "integer"
+            },
+            "title": "Steps",
+            "type": "array"
+          }
+        },
+        "required": [
+          "steps"
+        ],
+        "title": "StepList",
+        "type": "object"
+      },
+      "StepMessage": {
+        "description": "A message the model broadcast during the step, in its wire form.",
+        "properties": {
+          "data": {
+            "additionalProperties": true,
+            "title": "Data",
+            "type": "object"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "data"
+        ],
+        "title": "StepMessage",
+        "type": "object"
+      },
+      "StepResult": {
+        "description": "A step's ``result.json``: what the folder holds and how the step went.",
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why the step failed, or null when it worked.",
+            "title": "Error"
+          },
+          "files": {
+            "description": "The files beside result.json.",
+            "items": {
+              "$ref": "#/components/schemas/StepFile"
+            },
+            "title": "Files",
+            "type": "array"
+          },
+          "messages": {
+            "description": "The messages the model broadcast since the step before.",
+            "items": {
+              "$ref": "#/components/schemas/StepMessage"
+            },
+            "title": "Messages",
+            "type": "array"
+          },
+          "save_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why the step's files could not be saved, or null when they were.",
+            "title": "Save Error"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "step": {
+            "title": "Step",
+            "type": "integer"
+          },
+          "timings": {
+            "$ref": "#/components/schemas/StepTimings"
+          }
+        },
+        "required": [
+          "step",
+          "session_id",
+          "files",
+          "messages",
+          "error",
+          "save_error",
+          "timings"
+        ],
+        "title": "StepResult",
+        "type": "object"
+      },
+      "StepTimings": {
+        "description": "How long the step took, in seconds.",
+        "properties": {
+          "encode_s": {
+            "description": "Time to save the step's files.",
+            "title": "Encode S",
+            "type": "number"
+          },
+          "generate_s": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Time to generate, when measured.",
+            "title": "Generate S"
+          }
+        },
+        "required": [
+          "generate_s",
+          "encode_s"
+        ],
+        "title": "StepTimings",
+        "type": "object"
+      },
       "StopSessionRequest": {
         "description": "Optional qualifiers on a session stop.\n\n``moderate`` marks the stop as a content-moderation verdict: the session\nends as moderated and clients are notified before their connections close.\n``reason`` is the platform's human-readable description of why the session\nis ending: when set, clients receive a session-ended notice carrying it\nverbatim before their connections close. A moderated stop outranks it \u2014\nclients see only the moderation notice. The body itself is optional \u2014 a\nbare ``POST /stop_session`` is a plain stop.",
         "properties": {
@@ -774,6 +932,181 @@
           }
         },
         "summary": "Get Session"
+      }
+    },
+    "/sessions/{session_id}/steps": {
+      "get": {
+        "operationId": "list_steps_sessions__session_id__steps_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StepList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Steps"
+      }
+    },
+    "/sessions/{session_id}/steps/{step}": {
+      "get": {
+        "operationId": "get_step_sessions__session_id__steps__step__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "step",
+            "required": true,
+            "schema": {
+              "title": "Step",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StepResult"
+                }
+              }
+            },
+            "description": "The step's result.json."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Step"
+      }
+    },
+    "/sessions/{session_id}/steps/{step}/{name}": {
+      "get": {
+        "operationId": "get_step_file_sessions__session_id__steps__step___name__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "step",
+            "required": true,
+            "schema": {
+              "title": "Step",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "A file the step's result.json lists."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Step File"
       }
     },
     "/sessions/{sid}/transport/webrtc/connections": {
