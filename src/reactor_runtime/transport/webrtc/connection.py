@@ -251,7 +251,7 @@ class WebRTCConnection:
         """Add a trickle-ICE candidate, valid before and after the wire connects."""
         await self._peer.add_ice(candidate)
 
-    async def close(self) -> None:
+    async def close(self, *, drain: bool = True) -> None:
         """Tear the connection down without reporting a loss upward.
 
         A commanded close — session teardown — is silent toward the sink: the
@@ -259,12 +259,17 @@ class WebRTCConnection:
         disconnect callback does not fire, because the runner initiated this and
         is not waiting to hear its own command back. The ``on_closed`` observer
         does fire, once, so the owner that built the connection can forget it.
+
+        Args:
+            drain: Whether the peer first sends what its chunked channels
+                queue. ``False`` for a connection being replaced by a
+                reconnect, whose client is not waiting for it.
         """
         if not self._alive:
             return
         self._alive = False
         self._cancel_tasks()
-        await self._close_peer()
+        await self._close_peer(drain=drain)
         if self._on_closed is not None:
             self._on_closed()
 
@@ -331,7 +336,8 @@ class WebRTCConnection:
                 if last is None:
                     return
                 if time.monotonic() - last > self._ping_timeout:
-                    await self._close_peer()
+                    # The client stopped pinging: nothing would take a drain.
+                    await self._close_peer(drain=False)
                     self._report_loss()
                     return
         except asyncio.CancelledError:
@@ -391,10 +397,10 @@ class WebRTCConnection:
             frames,
         )
 
-    async def _close_peer(self) -> None:
+    async def _close_peer(self, *, drain: bool = True) -> None:
         """Close the media peer, logging but not raising on failure."""
         try:
-            await self._peer.close()
+            await self._peer.close(drain=drain)
         except Exception:
             logger.exception("error closing WebRTC peer")
 

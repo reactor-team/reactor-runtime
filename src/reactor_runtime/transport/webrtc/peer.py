@@ -1365,15 +1365,22 @@ class WebRTCPeer:
             media=self._media_health(),
         )
 
-    async def close(self) -> None:
-        """Tear the peer connection down, joining the pump threads off the loop."""
-        await asyncio.to_thread(self._teardown)
+    async def close(self, *, drain: bool = True) -> None:
+        """Tear the peer connection down, joining the pump threads off the loop.
 
-    def _teardown(self) -> None:
+        Args:
+            drain: Whether chunked channels first send what they queue (see
+                ``_drain_channels``). A connection being replaced passes
+                ``False``: its client is the one reconnecting.
+        """
+        await asyncio.to_thread(self._teardown, drain)
+
+    def _teardown(self, drain: bool = True) -> None:
         if self._stop_event.is_set() and self._frame_thread is None:
             return
         self._stop_event.set()
-        self._drain_channels()
+        if drain:
+            self._drain_channels()
         self._release_wire()
         for thread in (self._frame_thread, self._audio_thread):
             if thread is not None and thread.is_alive():

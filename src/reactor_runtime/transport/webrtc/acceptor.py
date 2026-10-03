@@ -391,7 +391,9 @@ class WebRTCAcceptor(ConnectionAcceptor):
             previous = self._conns.pop(conn_id, None)
             if previous is not None:
                 self._live.discard(conn_id)
-                await previous.close()
+                # No drain: the client this connection served is the one
+                # reconnecting, and the new connection waits on this close.
+                await previous.close(drain=False)
 
             conn, answer = await WebRTCConnection.create(
                 conn_id, sdp_offer, tracks, config, version, peer_factory=self._peer_factory
