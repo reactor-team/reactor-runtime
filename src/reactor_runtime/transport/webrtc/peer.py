@@ -213,9 +213,9 @@ def _get_factory(config: WebRtcConfig) -> rw.PeerConnectionFactory:
     """Return the process-wide media engine, creating it on first use.
 
     The engine carries the SPED half of *config*'s WARP setting, which libwebrtc
-    reads from the engine's environment rather than per connection. The engine
-    outlives the connection that built it, so the first connection to arrive
-    fixes SPED for the process.
+    reads from the engine's environment rather than per connection, and its
+    data-channel chunking. The engine outlives the connection that built it, so
+    the first connection to arrive fixes both for the process.
     """
     global _factory
     if _factory is None:
@@ -223,18 +223,21 @@ def _get_factory(config: WebRtcConfig) -> rw.PeerConnectionFactory:
             if _factory is None:
                 builder = rw.PeerConnectionFactoryBuilder()
                 builder.with_dtls_in_stun(config.warp)
+                if config.dc_chunking:
+                    builder.with_dc_chunking()
                 _factory = builder.build()
     return _factory
 
 
 def _build_rtc_config(config: WebRtcConfig) -> rw.RtcConfiguration:
-    """Translate the transport config's ICE servers, port range, and WARP setting.
+    """Translate the transport config's ICE servers, port range, WARP, and chunking.
 
     Returns the libwebrtc configuration the connection is created with.
     """
     rtc = rw.RtcConfiguration()
     rtc.ice_transport_type = str(config.transport_policy)
     rtc.sctp_snap = config.warp
+    rtc.dc_chunking = config.dc_chunking
     if config.ice_servers:
         rtc.ice_servers = [
             rw.IceServer(

@@ -178,6 +178,21 @@ class WebRtcConfig:
             from the media engine's environment, and the engine is built once
             on the first connection, so the first connection's value is the
             one the process keeps.
+        dc_chunking: Whether to carry data-channel messages larger than the
+            256 KiB a plain channel takes, in frames, to clients that ask for
+            it. The runtime answers, so a connection uses it only when the
+            client's offer declares ``a=x-reactor-dc-chunking``; any other
+            client keeps the plain channel. On a chunked channel a message of
+            up to 64 MiB passes in either direction, and sends past
+            libwebrtc's 16 MiB buffer queue instead of closing the channel.
+
+            It is process-wide like SPED, for the same reason: the media
+            engine carries it and is built on the first connection. With it
+            on, a connection built with ``False`` keeps the plain channel.
+            The engine also raises SCTP's per-send burst for every data
+            channel it creates, plain or chunked, so a connection's ``False``
+            does not restore the previous send timing; congestion control
+            still bounds every send.
     """
 
     ice_servers: tuple[IceServer, ...] = ()
@@ -204,3 +219,4 @@ class WebRtcConfig:
     max_connections: int = 64
     negotiation_timeout: float = 30.0
     warp: bool = True
+    dc_chunking: bool = True
