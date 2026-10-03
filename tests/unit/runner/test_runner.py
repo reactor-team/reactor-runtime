@@ -35,6 +35,7 @@ from reactor_runtime.core import (
     ClientTrackDirection,
     ClientTrackStat,
     CommandFailure,
+    Connection,
     ConnectionCapabilities,
     ConnId,
     EndReason,
@@ -76,6 +77,7 @@ from reactor_runtime.runner.session_start import (
     InvalidSessionStartError,
     SessionStart,
 )
+from reactor_runtime.runner.system_client import SYSTEM_CONN_ID, SystemConnection
 from reactor_runtime.transport.router import (
     SessionControl,
     SessionNotRunningError,
@@ -1053,6 +1055,307 @@ async def test_a_rejected_start_leaves_the_session_shape_untouched(
     with pytest.raises(InvalidSessionStartError):
         started_runner.start_session({"steps": 0})
     assert started_runner._session_start.steps == 3
+
+
+def _journalled_commands(runner: Runner) -> list[tuple[str, dict[str, Any], Any]]:
+    return [
+        (move.detail["name"], move.detail["args"], move.detail["conn_id"])
+        for move in _moves(runner, SessionEvent.COMMAND)
+    ]
+
+
+def _client_command(name: str, **args: Any) -> InboundCommand:
+    return InboundCommand(
+        name=name,
+        args=args,
+        uploads={},
+        conn_id=ConnId(1),
+        request_id="r1",
+        received_at=time.monotonic(),
+    )
+
+
+async def test_the_starting_input_runs_its_state_then_its_commands(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session(
+        {
+            "starting_input": {
+                "state": {"mode": "from-state"},
+                "commands": [{"command": "set_mode", "data": {"mode": "from-commands"}}],
+            }
+        }
+    )
+    await started_runner._starting_input_done.wait()
+
+    assert _journalled_commands(started_runner) == [
+        ("set_mode", {"mode": "from-state"}, SYSTEM_CONN_ID),
+        ("set_mode", {"mode": "from-commands"}, SYSTEM_CONN_ID),
+    ]
+
+
+async def test_a_rejected_starting_command_is_journalled_and_the_rest_still_run(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session(
+        {
+            "starting_input": {
+                "state": {"speed": 3},
+                "commands": [
+                    {"command": "set_mode", "data": {"mode": ""}},
+                    {"command": "set_mode", "data": {"mode": "ok"}},
+                ],
+            }
+        }
+    )
+    await started_runner._starting_input_done.wait()
+
+    errors = [move.detail["message"] for move in _moves(started_runner, SessionEvent.ERROR)]
+    assert len(errors) == 2
+    assert "set_speed" in errors[0]
+    assert "set_mode" in errors[1]
+    assert _journalled_commands(started_runner) == [("set_mode", {"mode": "ok"}, SYSTEM_CONN_ID)]
+
+
+async def test_a_client_command_waits_behind_the_starting_input(started_runner: Runner) -> None:
+    started_runner.start_session(
+        {
+            "starting_input": {
+                "commands": [{"command": "set_image", "data": {"image": {"upload_id": "u-1"}}}]
+            }
+        }
+    )
+    client = asyncio.create_task(
+        started_runner._submit_client_command(_client_command("set_mode", mode="client"))
+    )
+    await asyncio.sleep(0.05)
+    # The starting command waits for its upload, and the client's waits behind it.
+    assert _journalled_commands(started_runner) == []
+
+    started_runner.uploads.create_slot("fox.png", "image/png", 3, "u-1")
+    started_runner.uploads.put("u-1", b"png")
+    await client
+
+    assert [name for name, _, _ in _journalled_commands(started_runner)] == [
+        "set_image",
+        "set_mode",
+    ]
+
+
+async def test_a_starting_command_waits_longer_than_a_client_for_its_upload(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The starting wait is the orphan timeout, never less than the client's.
+    # Shrinking the client's shows the starting command does not use it.
+    monkeypatch.setattr("reactor_runtime.runner.runner._UPLOAD_RESOLVE_TIMEOUT_SECONDS", 0.01)
+    started_runner.start_session(
+        {
+            "starting_input": {
+                "commands": [{"command": "set_image", "data": {"image": {"upload_id": "u-1"}}}]
+            }
+        }
+    )
+    await asyncio.sleep(0.1)
+    started_runner.uploads.create_slot("fox.png", "image/png", 3, "u-1")
+    started_runner.uploads.put("u-1", b"png")
+    await started_runner._starting_input_done.wait()
+
+    assert [name for name, _, _ in _journalled_commands(started_runner)] == ["set_image"]
+    assert _moves(started_runner, SessionEvent.ERROR) == []
+
+
+async def test_the_starting_input_runs_once_per_session(started_runner: Runner) -> None:
+    started_runner.start_session(
+        {"starting_input": {"commands": [{"command": "set_mode", "data": {"mode": "a"}}]}}
+    )
+    await started_runner._starting_input_done.wait()
+    started_runner.connection_opened(FakeConnection(1))
+    started_runner.connection_closed(ConnId(1))
+    started_runner.connection_opened(FakeConnection(2))
+    await asyncio.sleep(0.01)
+    assert len(_journalled_commands(started_runner)) == 1
+
+    started_runner.stop_session()
+    await started_runner._drain_teardown()
+    started_runner.start_session({})
+    await started_runner._starting_input_done.wait()
+    assert len(_journalled_commands(started_runner)) == 1
+
+
+async def test_a_session_end_stops_the_starting_input_and_frees_client_commands(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session(
+        {
+            "starting_input": {
+                "commands": [
+                    {"command": "set_image", "data": {"image": {"upload_id": "never"}}},
+                    {"command": "set_mode", "data": {"mode": "after"}},
+                ]
+            }
+        }
+    )
+    await asyncio.sleep(0.01)
+    started_runner.stop_session()
+    await asyncio.wait_for(started_runner._starting_input_done.wait(), 1.0)
+    await asyncio.sleep(0.01)
+
+    assert _journalled_commands(started_runner) == []
+    errors = [move.detail["message"] for move in _moves(started_runner, SessionEvent.ERROR)]
+    assert errors == ["command 'set_image' references an unresolved upload"]
+
+
+def _connection_moves(runner: Runner) -> list[tuple[SessionEvent, dict[str, Any]]]:
+    connection_events = {SessionEvent.CONNECTION_OPENED, SessionEvent.CONNECTION_CLOSED}
+    return [
+        (e.transition.event, dict(e.transition.detail))
+        for e in _egress(runner)
+        if isinstance(e, TransitionEvent) and e.transition.event in connection_events
+    ]
+
+
+_SYSTEM_DETAIL = {"conn_id": SYSTEM_CONN_ID, "system": True}
+
+
+async def test_the_system_client_connects_before_the_starting_commands(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = _record_reactor_events(started_runner, monkeypatch)
+    started_runner.start_session(
+        {"starting_input": {"commands": [{"command": "set_mode", "data": {"mode": "a"}}]}}
+    )
+    await started_runner._starting_input_done.wait()
+
+    # The model learns the session started, then that the system client joined,
+    # and only then receives the starting command it sends.
+    assert isinstance(events[0], SessionStarted)
+    assert events[1] == ClientConnected(SYSTEM_CONN_ID, 1, system=True)
+    moves = [
+        e.transition.event
+        for e in _egress(started_runner)
+        if isinstance(e, TransitionEvent)
+        and e.transition.event
+        in {
+            SessionEvent.START_SESSION,
+            SessionEvent.CONNECTION_OPENED,
+            SessionEvent.COMMAND,
+            SessionEvent.CONNECTION_CLOSED,
+        }
+    ]
+    assert moves == [
+        SessionEvent.START_SESSION,
+        SessionEvent.CONNECTION_OPENED,
+        SessionEvent.COMMAND,
+        SessionEvent.CONNECTION_CLOSED,
+    ]
+
+
+async def test_without_steps_the_system_client_leaves_after_the_starting_input(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session(
+        {"starting_input": {"commands": [{"command": "set_mode", "data": {"mode": "a"}}]}}
+    )
+    await started_runner._starting_input_done.wait()
+
+    assert _connection_moves(started_runner) == [
+        (SessionEvent.CONNECTION_OPENED, _SYSTEM_DETAIL),
+        (SessionEvent.CONNECTION_CLOSED, _SYSTEM_DETAIL),
+    ]
+    # The session waits for a client of its own, as any live session does.
+    _expect_state(started_runner, SessionState.ORPHANED)
+    assert started_runner._orphan_task is not None
+
+
+async def test_with_steps_the_system_client_stays_after_the_starting_input(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session(
+        {
+            "starting_input": {"commands": [{"command": "set_mode", "data": {"mode": "a"}}]},
+            "steps": 1,
+        }
+    )
+    await started_runner._starting_input_done.wait()
+
+    assert _connection_moves(started_runner) == [(SessionEvent.CONNECTION_OPENED, _SYSTEM_DETAIL)]
+    _expect_state(started_runner, SessionState.STREAMING)
+    assert started_runner._orphan_task is None
+
+
+async def test_steps_alone_connect_the_system_client(started_runner: Runner) -> None:
+    started_runner.start_session({"steps": 3})
+
+    assert _connection_moves(started_runner) == [(SessionEvent.CONNECTION_OPENED, _SYSTEM_DETAIL)]
+    _expect_state(started_runner, SessionState.STREAMING)
+
+
+async def test_a_session_without_a_starting_input_or_steps_has_no_system_client(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+
+    assert _connection_moves(started_runner) == []
+    _expect_state(started_runner, SessionState.WAITING)
+
+
+async def test_a_real_client_keeps_the_session_streaming_when_the_system_client_leaves(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session(
+        {
+            "starting_input": {
+                "commands": [{"command": "set_image", "data": {"image": {"upload_id": "u-1"}}}]
+            }
+        }
+    )
+    started_runner.connection_opened(FakeConnection(1002))
+    started_runner.uploads.create_slot("fox.png", "image/png", 3, "u-1")
+    started_runner.uploads.put("u-1", b"png")
+    await started_runner._starting_input_done.wait()
+
+    _expect_state(started_runner, SessionState.STREAMING)
+    assert started_runner._connections.count == 1
+
+
+async def test_the_session_end_closes_the_system_client(started_runner: Runner) -> None:
+    started_runner.start_session({"steps": 1})
+    started_runner.stop_session()
+    await started_runner._drain_teardown()
+
+    _expect_state(started_runner, SessionState.READY)
+    assert started_runner._connections.count == 0
+
+
+def test_the_system_client_carries_no_media_and_conforms_to_the_protocol() -> None:
+    conn = SystemConnection()
+    assert isinstance(conn, Connection)
+    assert conn.id == SYSTEM_CONN_ID
+    assert not conn.capabilities.carries_video
+    assert not conn.capabilities.carries_audio
+
+
+async def test_the_descriptor_echoes_how_many_starting_commands_apply(
+    started_runner: Runner,
+) -> None:
+    assert "starting_input" not in started_runner.descriptor()
+    started_runner.start_session(
+        {
+            "starting_input": {
+                "state": {"mode": "a"},
+                "commands": [{"command": "set_mode", "data": {"mode": "b"}}],
+            }
+        }
+    )
+    assert started_runner.descriptor()["starting_input"] == {"applied": 2}
+    started_runner.stop_session()
+    await started_runner._drain_teardown()
+    assert "starting_input" not in started_runner.descriptor()
+
+
+async def test_a_session_without_a_starting_input_echoes_none(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    assert "starting_input" not in started_runner.descriptor()
 
 
 async def test_the_next_session_starts_from_its_own_shape(started_runner: Runner) -> None:

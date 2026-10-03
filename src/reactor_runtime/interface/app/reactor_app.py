@@ -465,7 +465,9 @@ class ReactorApp(ReactorCore):
         """
         hooks = self.__reactor_contract__.lifecycle
         if isinstance(event, ClientConnected):
-            self._clients[event.conn_id] = self._make_client(event.conn_id, time.monotonic())
+            self._clients[event.conn_id] = self._make_client(
+                event.conn_id, time.monotonic(), system=event.system
+            )
             self._set_connected(event.total)
             await self._invoke_hook(hooks.connected, event.conn_id)
         elif isinstance(event, ClientDisconnected):
@@ -574,11 +576,14 @@ class ReactorApp(ReactorCore):
             self._clients[conn_id] = client
         return client
 
-    def _make_client(self, conn_id: ConnId, joined_at: float) -> ClientInfo:
+    def _make_client(
+        self, conn_id: ConnId, joined_at: float, *, system: bool = False
+    ) -> ClientInfo:
         """Build a client handle bound to the addressed sink for *conn_id*."""
         return ClientInfo(
             id=conn_id,
             joined_at=joined_at,
+            system=system,
             _send=lambda message: self._reply(conn_id, message, None),
         )
 

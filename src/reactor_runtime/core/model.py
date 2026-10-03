@@ -274,10 +274,12 @@ class ClientConnected(ReactorEvent):
     Attributes:
         conn_id: The connection that opened.
         total: Live connection count after the open.
+        system: Whether the connection is the runtime's own system client.
     """
 
     conn_id: ConnId
     total: int
+    system: bool = False
 
 
 @dataclass(frozen=True)
