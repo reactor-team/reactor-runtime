@@ -242,6 +242,10 @@ class ReactorCore:
         self._out_addressed: AddressedSink | None = None
         self._out_media: MediaSink | None = None
         self._out_step: StepSink | None = None
+        # How many session starts the model has received, kept by the
+        # subclass's dispatcher. A step report carries it, so the runtime can
+        # set apart a late report from a session that has ended.
+        self._sessions_started = 0
         self._media_ops: MediaOps | None = None
         self._on_failure: FailureSink | None = None
         self.output = OutputStream(self)
@@ -308,15 +312,28 @@ class ReactorCore:
         on, saves it. The output is handed over as it is, so a model must not
         change its arrays after reporting them.
 
+        A report counts toward the session the model is in when the call is
+        made. A ``run()`` whose unit of work began in a session that has since
+        ended reports into the session it is in by then, so such a loop checks
+        for a session change itself when that matters.
+
         Args:
             step: What the step produced.
         """
+        self._report_step(step, self._sessions_started)
+
+    def _report_step(self, step: StepCompleted, session: int) -> None:
+        """Hand a step report to the bound sink, stamped with *session*."""
         if self._out_step is None:
             return
         bundle = self._to_bundle(step.output) if step.output is not None else None
         self._out_step(
             CompletedStep(
-                bundle=bundle, files=dict(step.files), error=step.error, elapsed=step.elapsed
+                bundle=bundle,
+                files=dict(step.files),
+                error=step.error,
+                elapsed=step.elapsed,
+                session=session,
             )
         )
 

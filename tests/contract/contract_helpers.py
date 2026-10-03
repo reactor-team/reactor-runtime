@@ -24,10 +24,19 @@ from pathlib import Path
 from typing import Any, cast
 
 import httpx
+import numpy as np
 import pytest
 from fastapi import FastAPI
 
-from reactor_runtime import InputField, MediaInput, Output, ReactorApp, Video, event
+from reactor_runtime import (
+    InputField,
+    InputState,
+    MediaInput,
+    Output,
+    ReactorApp,
+    Video,
+    event,
+)
 from reactor_runtime.core import (
     ConnectionCapabilities,
     ConnId,
@@ -84,6 +93,25 @@ class ContractModel(ReactorApp):
 
     async def run(self) -> None:
         await asyncio.sleep(60)
+
+
+class SteppingOutput(Output):
+    frames: Video
+
+
+class SteppingState(InputState):
+    speed: float = InputField(default=1.0)
+
+
+class SteppingModel(ReactorApp):
+    """A model on the default step loop, producing one small frame per step."""
+
+    state: SteppingState
+
+    def load(self, config_path: Path | None) -> None: ...
+
+    def generate(self, input: SteppingState) -> SteppingOutput:
+        return SteppingOutput(frames=np.zeros((2, 2, 3), dtype=np.uint8))
 
 
 class CrashingModel(ReactorApp):

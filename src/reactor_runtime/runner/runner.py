@@ -161,6 +161,10 @@ _CLIENT_DIRECTION = {"out": "recvonly", "in": "sendonly"}
 # Kept within the 64-character bound the stop route enforces on the platform's.
 _DRAIN_CLOSE_REASON = "Session ended: the server is shutting down."
 
+# The close reason a session that reached its steps sends to clients, which the
+# runtime words for the same reason as the drain's.
+_STEPS_CLOSE_REASON = "Session ended: the requested steps are complete."
+
 logger = get_logger(__name__)
 
 
@@ -282,6 +286,10 @@ class Runner(ServiceComponent, ConnectionSink):
         # How many steps the model has reported in the current session, which
         # numbers each step_completed fact. Reset when a session starts.
         self._steps_completed = 0
+        # How many session starts have been posted to the model. A step report
+        # carries the model's own count, so one from an earlier session is
+        # recognised and dropped.
+        self._sessions_posted = 0
         # Names the log's current session binding, so the release that follows a
         # session retires that binding and not a later session's. Zero until the
         # first session binds one.
@@ -706,12 +714,28 @@ class Runner(ServiceComponent, ConnectionSink):
             loop.call_soon_threadsafe(self._record_step, step)
 
     def _record_step(self, step: CompletedStep) -> None:
-        """Number a reported step and journal it as a ``step_completed`` fact.
+        """Number a reported step, journal it, and close a session that reached its steps.
 
-        The detail carries the step's number within the session, whether a
-        step result follows for it, and its error. Saving is off, so no step
-        result follows.
+        The detail of the ``step_completed`` fact carries the step's number
+        within the session, whether a step result follows for it, and its
+        error. Saving is off, so no step result follows.
+
+        The step that brings a running session to its ``steps`` stops it, with
+        a close reason the clients are told. A model keeps stepping until the
+        session end reaches it, so a step reported after the stop is journalled
+        with its number and stops nothing.
+
+        A report from an earlier session, one that arrives after a quick stop
+        and restart, is dropped: it is neither journalled nor counted, so it
+        cannot close the session that followed.
         """
+        if step.session != self._sessions_posted:
+            logger.debug(
+                "dropping a step report from an earlier session",
+                reported_session=step.session,
+                current_session=self._sessions_posted,
+            )
+            return
         self._steps_completed += 1
         self._sm.send(
             SessionEvent.STEP_COMPLETED,
@@ -719,6 +743,18 @@ class Runner(ServiceComponent, ConnectionSink):
             saved=False,
             error=step.error,
         )
+        limit = self._session_start.steps
+        if (
+            limit is not None
+            and self._steps_completed == limit
+            and self._sm.current_state in _RUNNING_STATES
+        ):
+            logger.info("session reached its steps; stopping", steps=limit)
+            self._sm.send(
+                SessionEvent.STOP_SESSION,
+                reason=EndReason.STOPPED,
+                close_reason=_STEPS_CLOSE_REASON,
+            )
 
     def _on_model_failure(self, error: BaseException) -> None:
         """End the session for a model that crashed, hopping onto the loop.
@@ -1486,6 +1522,7 @@ class Runner(ServiceComponent, ConnectionSink):
         client — so they pass to the model unvalidated.
         """
         if transition.is_session_start:
+            self._sessions_posted += 1
             bridge.dispatch_reactor_event(SessionStarted(self._session_id))
         if transition.is_session_end:
             reason = transition.detail.get("reason", EndReason.STOPPED)

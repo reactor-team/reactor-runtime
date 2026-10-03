@@ -1338,14 +1338,19 @@ def test_the_system_client_carries_no_media_and_conforms_to_the_protocol() -> No
     assert not conn.capabilities.carries_audio
 
 
+def _step(runner: Runner, *, error: str | None = None) -> CompletedStep:
+    """A step report from the session the runner is serving now."""
+    return CompletedStep(bundle=None, error=error, session=runner._sessions_posted)
+
+
 def _step_facts(runner: Runner) -> list[dict[str, Any]]:
     return [dict(move.detail) for move in _moves(runner, SessionEvent.STEP_COMPLETED)]
 
 
 async def test_each_reported_step_is_journalled_with_its_number(started_runner: Runner) -> None:
     started_runner.start_session({})
-    started_runner._record_step(CompletedStep(bundle=None))
-    started_runner._record_step(CompletedStep(bundle=None, error="RuntimeError: out of memory"))
+    started_runner._record_step(_step(started_runner))
+    started_runner._record_step(_step(started_runner, error="RuntimeError: out of memory"))
 
     assert _step_facts(started_runner) == [
         {"step": 1, "saved": False, "error": None},
@@ -1357,20 +1362,99 @@ async def test_each_reported_step_is_journalled_with_its_number(started_runner: 
 
 async def test_step_numbers_start_over_with_each_session(started_runner: Runner) -> None:
     started_runner.start_session({})
-    started_runner._record_step(CompletedStep(bundle=None))
+    started_runner._record_step(_step(started_runner))
     started_runner.stop_session()
     await started_runner._drain_teardown()
     started_runner.start_session({})
-    started_runner._record_step(CompletedStep(bundle=None))
+    started_runner._record_step(_step(started_runner))
 
     assert [fact["step"] for fact in _step_facts(started_runner)] == [1, 1]
+
+
+async def test_a_session_stops_when_it_reaches_its_steps(started_runner: Runner) -> None:
+    started_runner.start_session({"steps": 2})
+    started_runner._record_step(_step(started_runner))
+    _expect_state(started_runner, SessionState.STREAMING)
+    started_runner._record_step(_step(started_runner))
+
+    stops = _moves(started_runner, SessionEvent.STOP_SESSION)
+    assert len(stops) == 1
+    assert stops[0].detail == {
+        "reason": EndReason.STOPPED,
+        "close_reason": "Session ended: the requested steps are complete.",
+    }
+    _expect_state(started_runner, SessionState.CLOSING)
+    await started_runner._drain_teardown()
+    _expect_state(started_runner, SessionState.READY)
+
+
+async def test_a_step_after_the_stop_is_journalled_and_stops_nothing(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({"steps": 1})
+    started_runner._record_step(_step(started_runner))
+    started_runner._record_step(_step(started_runner))
+
+    assert [fact["step"] for fact in _step_facts(started_runner)] == [1, 2]
+    assert len(_moves(started_runner, SessionEvent.STOP_SESSION)) == 1
+
+
+async def test_a_late_step_from_the_previous_session_cannot_close_the_next(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({"steps": 1})
+    previous = _step(started_runner)
+    started_runner.stop_session()
+    await started_runner._drain_teardown()
+    started_runner.start_session({"steps": 1})
+
+    # The model finishes a unit it began before the restart and reports it now.
+    started_runner._record_step(previous)
+
+    assert _step_facts(started_runner) == []
+    _expect_state(started_runner, SessionState.STREAMING)
+    started_runner._record_step(_step(started_runner))
+    assert _step_facts(started_runner) == [{"step": 1, "saved": False, "error": None}]
+    _expect_state(started_runner, SessionState.CLOSING)
+
+
+async def test_each_session_start_posted_to_the_model_is_counted(started_runner: Runner) -> None:
+    assert started_runner._sessions_posted == 0
+    started_runner.start_session({})
+    started_runner.stop_session()
+    await started_runner._drain_teardown()
+    started_runner.start_session({})
+    assert started_runner._sessions_posted == 2
+
+
+async def test_a_session_without_steps_never_stops_on_its_own(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    for _ in range(10):
+        started_runner._record_step(_step(started_runner))
+
+    assert _moves(started_runner, SessionEvent.STOP_SESSION) == []
+    _expect_state(started_runner, SessionState.WAITING)
+
+
+async def test_a_session_that_reaches_its_steps_tells_its_clients(started_runner: Runner) -> None:
+    started_runner.start_session({"steps": 1})
+    conn = FakeConnection(1002)
+    started_runner.connection_opened(conn)
+    started_runner._record_step(_step(started_runner))
+    await started_runner._drain_teardown()
+
+    frame = next(f for f in conn.sent if isinstance(f, str) and "sessionEnded" in f)
+    reason = json.loads(frame)["data"]["data"]["reason"]
+    assert reason == "Session ended: the requested steps are complete."
+    assert len(reason) <= 64
+    assert conn.closed
 
 
 async def test_a_step_reported_from_the_model_thread_is_journalled_on_the_loop(
     started_runner: Runner,
 ) -> None:
     started_runner.start_session({})
-    await asyncio.to_thread(started_runner._on_step_completed, CompletedStep(bundle=None))
+    await asyncio.to_thread(started_runner._on_step_completed, _step(started_runner))
     await asyncio.sleep(0)
 
     assert _step_facts(started_runner) == [{"step": 1, "saved": False, "error": None}]
@@ -1382,7 +1466,7 @@ async def test_a_step_reported_before_a_crash_is_journalled_before_the_eviction(
     started_runner.start_session({})
 
     def report_then_crash() -> None:
-        started_runner._on_step_completed(CompletedStep(bundle=None))
+        started_runner._on_step_completed(_step(started_runner))
         started_runner._on_model_failure(RuntimeError("boom"))
 
     await asyncio.to_thread(report_then_crash)
