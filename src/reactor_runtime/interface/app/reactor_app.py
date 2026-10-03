@@ -33,9 +33,11 @@ checks it between units of work.
 
 The default ``run()`` is the step loop. Each turn takes the step lock and calls
 ``process_input()``, ``generate()``, and ``process_output()`` in that order, then
-emits the media the step produced. An author who needs a different loop
-overrides ``run()``. That replaces the loop and only the loop: the dispatch
-layer above stays, and the three hooks are never called for that class.
+emits the media the step produced and reports the step with
+:meth:`complete_step`. An author who needs a different loop overrides
+``run()``. That replaces the loop and only the loop: the dispatch layer above
+stays, the three hooks are never called for that class, and the loop calls
+:meth:`complete_step` itself when it finishes a unit of work.
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ import asyncio
 import inspect
 import time
 from collections.abc import Callable, Coroutine
+from dataclasses import replace
 from typing import Any, ClassVar, get_type_hints
 
 from reactor_runtime.codes import INTERNAL_ERROR
@@ -59,6 +62,7 @@ from reactor_runtime.core.model import (
 from reactor_runtime.core.values import CommandFailure, ConnId
 from reactor_runtime.interface.app.input_state import InputState
 from reactor_runtime.interface.app.outcome import StepOutcome
+from reactor_runtime.interface.app.step_completed import StepCompleted
 from reactor_runtime.interface.client import ClientInfo
 from reactor_runtime.interface.events.decorators import (
     EVENT_ATTR,
@@ -202,7 +206,7 @@ class ReactorApp(ReactorCore):
             "the model with its own loop."
         )
 
-    async def process_output(self, outcome: StepOutcome, /) -> Output | None:
+    async def process_output(self, outcome: StepOutcome, /) -> Output | StepCompleted | None:
         """Turn what ``generate()`` did into what the client receives.
 
         The application half again. Receives the :class:`StepOutcome` the
@@ -211,6 +215,13 @@ class ReactorApp(ReactorCore):
         self.send()`` for a message, which goes on the wire before the step's
         media; ``self.output.flush()``; recovery from a model error. Return the
         :class:`Output` to emit, or ``None`` to emit nothing.
+
+        The loop reports every step this method returns from, with the media it
+        emitted and the time ``generate()`` took. Return a
+        :class:`StepCompleted` instead to write that report: the loop emits its
+        ``output`` and reports it as given, with the measured time when its
+        ``elapsed`` is unset. Use this to keep extra ``files`` with the step, or
+        to mark a recovered step with an ``error``.
 
         Runs under the step lock.
 
@@ -236,8 +247,9 @@ class ReactorApp(ReactorCore):
             outcome: What ``generate()`` did.
 
         Returns:
-            The media to emit on the declared tracks, or ``None``. The default
-            re-raises an error and otherwise returns ``outcome.to_output()``.
+            The media to emit on the declared tracks, the step's report, or
+            ``None``. The default re-raises an error and otherwise returns
+            ``outcome.to_output()``.
         """
         if outcome.error is not None:
             raise outcome.error
@@ -248,8 +260,11 @@ class ReactorApp(ReactorCore):
 
         Steps run while a session is live and at least one client is connected.
         Each turn waits for a step request, takes the step lock, runs the three
-        hooks, releases the lock, emits the media the step produced, yields once
-        so handlers already waiting get their turn, and requests the next step.
+        hooks, releases the lock, emits the media the step produced, reports the
+        step with :meth:`complete_step`, yields once so handlers already
+        waiting get their turn, and requests the next step. Every step that is
+        not refused and does not raise is reported, including one that emitted
+        nothing and one whose error ``process_output()`` recovered from.
         A productive step is not paced here: a fast model waits in :meth:`emit`
         on a full wire. A refused step waits a few milliseconds before the next
         request, so a paused application does not spin a core.
@@ -304,7 +319,7 @@ class ReactorApp(ReactorCore):
                                     kind=type(refused).__name__,
                                 )
                                 last_refusal = reason
-                            media = None
+                            returned = None
                             outcome = None
                         else:
                             last_refusal = None
@@ -326,13 +341,16 @@ class ReactorApp(ReactorCore):
                             # 4. The application collects the outcome into media,
                             #    sends its messages, or recovers. A raise ends the
                             #    loop.
-                            media = await self.process_output(outcome)
+                            returned = await self.process_output(outcome)
 
                     # 5. Emit outside the lock, so a handler can run while the
-                    #    wire is full.
-                    if media is not None and outcome is not None:
-                        pace = None if fps_pinned else outcome.elapsed
-                        await self.emit(media, compute_time=pace)
+                    #    wire is full, then report the step that ran.
+                    if outcome is not None:
+                        report = _step_report(returned, outcome)
+                        if report.output is not None:
+                            pace = None if fps_pinned else outcome.elapsed
+                            await self.emit(report.output, compute_time=pace)
+                        await self.complete_step(report)
 
                     # A refused turn waits a little before asking again; a
                     # productive turn yields once so handler tasks already
@@ -625,6 +643,15 @@ class ReactorApp(ReactorCore):
         """
         if self._out_addressed is not None:
             self._out_addressed(conn_id, message, request_id)
+
+
+def _step_report(returned: Output | StepCompleted | None, outcome: StepOutcome) -> StepCompleted:
+    """Return the report for a step whose ``process_output()`` returned *returned*."""
+    if not isinstance(returned, StepCompleted):
+        return StepCompleted(output=returned, elapsed=outcome.elapsed)
+    if returned.elapsed is None:
+        return replace(returned, elapsed=outcome.elapsed)
+    return returned
 
 
 def _hook_reserved(hook: Callable[..., Any]) -> tuple[str, ...]:

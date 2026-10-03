@@ -308,6 +308,28 @@ async def test_run_emits_each_yielded_output() -> None:
     assert all(isinstance(output, Frame) for output, _ in pipe.emitted)
 
 
+async def test_a_pipeline_reports_no_steps() -> None:
+    # Step reports come from the default step loop and from a hand-written
+    # run() that calls complete_step(); the generator driver does neither.
+    pipe = FixedRecorder()
+    steps: list[Any] = []
+    pipe._on_loop_ready()
+    pipe.bind_output(
+        broadcast=lambda message: None,
+        addressed=lambda *args: None,
+        media=lambda chunk: None,
+        step=steps.append,
+    )
+    _open_session(pipe)
+    task = asyncio.create_task(pipe.run())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert len(pipe.emitted) >= 3
+    assert steps == []
+
+
 async def test_fixed_fps_emits_without_a_compute_time() -> None:
     pipe = FixedRecorder()
     await _drive(pipe)
