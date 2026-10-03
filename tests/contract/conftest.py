@@ -5,7 +5,8 @@ an external consumer reads it: the ``/events`` SSE journal (framing, the single
 ``transition`` envelope, the event and state vocabulary, per-event ``detail``
 payloads), the session-lifecycle routes and their status-code semantics, the
 fixed transport session id, the recording id adopted from ``start_session``,
-the ``/clips`` segment paths, and the seedable upload slots.
+the ``/clips`` segment paths, the seedable upload slots, and the saved step
+folders under ``/sessions/{id}/steps``.
 
 A failing test in this suite is a breaking change for the consumers built on
 this surface — fix the change, do not update the test. Deliberate contract

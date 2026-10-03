@@ -197,6 +197,74 @@ class StepStore:
         if reaper is not None:
             reaper.join(timeout=2.0)
 
+    # -- reading -----------------------------------------------------------------
+
+    def ready_steps(self, session_id: str) -> list[int] | None:
+        """Return the numbers of a session's complete steps, in order.
+
+        Args:
+            session_id: The session to list.
+
+        Returns:
+            The numbers of the steps whose ``result.json`` is written, or
+            ``None`` when no folder is kept for the session: it saved no step,
+            its folders have aged out, or the id is not a UUID.
+        """
+        session_dir = self._session_dir(session_id)
+        if session_dir is None:
+            return None
+        try:
+            children = list(session_dir.iterdir())
+        except FileNotFoundError:
+            return None
+        return sorted(
+            int(child.name)
+            for child in children
+            if child.name.isdigit() and (child / RESULT_FILE).is_file()
+        )
+
+    def result_path(self, session_id: str, step: int) -> Path | None:
+        """Return the path of a step's ``result.json``, or ``None`` until it is written."""
+        session_dir = self._session_dir(session_id)
+        if session_dir is None or step < 1:
+            return None
+        path = session_dir / str(step) / RESULT_FILE
+        return path if path.is_file() else None
+
+    def file_path(self, session_id: str, step: int, name: str) -> tuple[Path, str] | None:
+        """Return the path and content type of a file a complete step lists.
+
+        Only a name the step's ``result.json`` lists is served, so a file
+        still being written, or a name that leaves the folder, is never found.
+
+        Args:
+            session_id: The session the step belongs to.
+            step: The step's number.
+            name: The file's name, as ``result.json`` lists it.
+
+        Returns:
+            The file's path and content type, or ``None`` when the step is not
+            complete or does not list *name*.
+        """
+        result = self.result_path(session_id, step)
+        if result is None:
+            return None
+        try:
+            entries = json.loads(result.read_text()).get("files", [])
+        except (OSError, ValueError):
+            return None
+        for entry in entries:
+            if entry.get("name") == name:
+                path = result.parent / name
+                return (path, entry["content_type"]) if path.is_file() else None
+        return None
+
+    def _session_dir(self, session_id: str) -> Path | None:
+        if self._root is None or not _SESSION_ID_RE.match(session_id):
+            return None
+        session_dir = self._root / session_id
+        return session_dir if session_dir.is_dir() else None
+
     # -- saving ------------------------------------------------------------------
 
     def _ensure_started(self) -> None:

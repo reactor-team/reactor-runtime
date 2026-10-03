@@ -378,3 +378,50 @@ def test_a_step_admitted_while_the_store_closes_is_still_saved(
     assert outcome == [True]
     assert [step.step for step in saved.steps] == [1]
     assert store.admit(_SESSION, 2, CompletedStep(bundle=None)) is False
+
+
+def test_only_complete_steps_are_listed(
+    make_store: Callable[..., StepStore], saved: _Saved
+) -> None:
+    store = make_store()
+    for step in (2, 1, 10):
+        store.admit(_SESSION, step, CompletedStep(bundle=None))
+    saved.wait_for(3)
+    assert store.root is not None
+    (store.root / _SESSION / "11").mkdir()
+
+    assert store.ready_steps(_SESSION) == [1, 2, 10]
+    assert store.result_path(_SESSION, 11) is None
+    assert store.result_path(_SESSION, 1) == store.root / _SESSION / "1" / "result.json"
+
+
+def test_a_session_with_no_folder_is_unknown(
+    make_store: Callable[..., StepStore], saved: _Saved
+) -> None:
+    store = make_store()
+    assert store.ready_steps(_SESSION) is None
+
+    store.admit(_SESSION, 1, CompletedStep(bundle=None))
+    saved.wait_for(1)
+
+    assert store.ready_steps("00000000-0000-4000-8000-000000000000") is None
+    assert store.ready_steps("../" + _SESSION) is None
+
+
+def test_only_a_file_the_result_lists_is_found(
+    make_store: Callable[..., StepStore], saved: _Saved
+) -> None:
+    store = make_store()
+    store.admit(_SESSION, 1, CompletedStep(bundle=None, files={"note.txt": b"hi"}))
+    saved.wait_for(1)
+    assert store.root is not None
+    (store.root / _SESSION / "1" / "stray.bin").write_bytes(b"not listed")
+
+    assert store.file_path(_SESSION, 1, "note.txt") == (
+        store.root / _SESSION / "1" / "note.txt",
+        "text/plain",
+    )
+    assert store.file_path(_SESSION, 1, "stray.bin") is None
+    assert store.file_path(_SESSION, 1, "result.json") is None
+    assert store.file_path(_SESSION, 1, "../1/note.txt") is None
+    assert store.file_path(_SESSION, 2, "note.txt") is None
