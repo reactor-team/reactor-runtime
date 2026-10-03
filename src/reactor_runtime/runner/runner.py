@@ -163,6 +163,10 @@ _CLIENT_DIRECTION = {"out": "recvonly", "in": "sendonly"}
 # Kept within the 64-character bound the stop route enforces on the platform's.
 _DRAIN_CLOSE_REASON = "Session ended: the server is shutting down."
 
+# The close reason a session that reached its steps sends to clients, which the
+# runtime words for the same reason as the drain's.
+_STEPS_CLOSE_REASON = "Session ended: the requested steps are complete."
+
 logger = get_logger(__name__)
 
 
@@ -708,11 +712,16 @@ class Runner(ServiceComponent, ConnectionSink):
             loop.call_soon_threadsafe(self._record_step, step)
 
     def _record_step(self, step: CompletedStep) -> None:
-        """Number a reported step and journal it as a ``step_completed`` fact.
+        """Number a reported step, journal it, and close a session that reached its steps.
 
-        The detail carries the step's number within the session, whether a
-        step result follows for it, and its error. Saving is off, so no step
-        result follows.
+        The detail of the ``step_completed`` fact carries the step's number
+        within the session, whether a step result follows for it, and its
+        error. Saving is off, so no step result follows.
+
+        The step that brings a running session to its ``steps`` stops it, with
+        a close reason the clients are told. A model keeps stepping until the
+        session end reaches it, so a step reported after the stop is journalled
+        with its number and stops nothing.
         """
         self._steps_completed += 1
         self._sm.send(
@@ -721,6 +730,18 @@ class Runner(ServiceComponent, ConnectionSink):
             saved=False,
             error=step.error,
         )
+        limit = self._session_start.steps
+        if (
+            limit is not None
+            and self._steps_completed == limit
+            and self._sm.current_state in _RUNNING_STATES
+        ):
+            logger.info("session reached its steps; stopping", steps=limit)
+            self._sm.send(
+                SessionEvent.STOP_SESSION,
+                reason=EndReason.STOPPED,
+                close_reason=_STEPS_CLOSE_REASON,
+            )
 
     def _on_model_failure(self, error: BaseException) -> None:
         """End the session for a model that crashed, hopping onto the loop.

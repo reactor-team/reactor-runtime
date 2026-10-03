@@ -1554,6 +1554,57 @@ async def test_step_numbers_start_over_with_each_session(started_runner: Runner)
     assert [fact["step"] for fact in _step_facts(started_runner)] == [1, 1]
 
 
+async def test_a_session_stops_when_it_reaches_its_steps(started_runner: Runner) -> None:
+    started_runner.start_session({"steps": 2})
+    started_runner._record_step(CompletedStep(bundle=None))
+    _expect_state(started_runner, SessionState.STREAMING)
+    started_runner._record_step(CompletedStep(bundle=None))
+
+    stops = _moves(started_runner, SessionEvent.STOP_SESSION)
+    assert len(stops) == 1
+    assert stops[0].detail == {
+        "reason": EndReason.STOPPED,
+        "close_reason": "Session ended: the requested steps are complete.",
+    }
+    _expect_state(started_runner, SessionState.CLOSING)
+    await started_runner._drain_teardown()
+    _expect_state(started_runner, SessionState.READY)
+
+
+async def test_a_step_after_the_stop_is_journalled_and_stops_nothing(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({"steps": 1})
+    started_runner._record_step(CompletedStep(bundle=None))
+    started_runner._record_step(CompletedStep(bundle=None))
+
+    assert [fact["step"] for fact in _step_facts(started_runner)] == [1, 2]
+    assert len(_moves(started_runner, SessionEvent.STOP_SESSION)) == 1
+
+
+async def test_a_session_without_steps_never_stops_on_its_own(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    for _ in range(10):
+        started_runner._record_step(CompletedStep(bundle=None))
+
+    assert _moves(started_runner, SessionEvent.STOP_SESSION) == []
+    _expect_state(started_runner, SessionState.WAITING)
+
+
+async def test_a_session_that_reaches_its_steps_tells_its_clients(started_runner: Runner) -> None:
+    started_runner.start_session({"steps": 1})
+    conn = FakeConnection(1002)
+    started_runner.connection_opened(conn)
+    started_runner._record_step(CompletedStep(bundle=None))
+    await started_runner._drain_teardown()
+
+    frame = next(f for f in conn.sent if isinstance(f, str) and "sessionEnded" in f)
+    reason = json.loads(frame)["data"]["data"]["reason"]
+    assert reason == "Session ended: the requested steps are complete."
+    assert len(reason) <= 64
+    assert conn.closed
+
+
 async def test_a_step_reported_from_the_model_thread_is_journalled_on_the_loop(
     started_runner: Runner,
 ) -> None:
