@@ -286,6 +286,10 @@ class Runner(ServiceComponent, ConnectionSink):
         # How many steps the model has reported in the current session, which
         # numbers each step_completed fact. Reset when a session starts.
         self._steps_completed = 0
+        # How many session starts have been posted to the model. A step report
+        # carries the model's own count, so one from an earlier session is
+        # recognised and dropped.
+        self._sessions_posted = 0
         # Names the log's current session binding, so the release that follows a
         # session retires that binding and not a later session's. Zero until the
         # first session binds one.
@@ -720,7 +724,18 @@ class Runner(ServiceComponent, ConnectionSink):
         a close reason the clients are told. A model keeps stepping until the
         session end reaches it, so a step reported after the stop is journalled
         with its number and stops nothing.
+
+        A report from an earlier session, one that arrives after a quick stop
+        and restart, is dropped: it is neither journalled nor counted, so it
+        cannot close the session that followed.
         """
+        if step.session != self._sessions_posted:
+            logger.debug(
+                "dropping a step report from an earlier session",
+                reported_session=step.session,
+                current_session=self._sessions_posted,
+            )
+            return
         self._steps_completed += 1
         self._sm.send(
             SessionEvent.STEP_COMPLETED,
@@ -1507,6 +1522,7 @@ class Runner(ServiceComponent, ConnectionSink):
         client — so they pass to the model unvalidated.
         """
         if transition.is_session_start:
+            self._sessions_posted += 1
             bridge.dispatch_reactor_event(SessionStarted(self._session_id))
         if transition.is_session_end:
             reason = transition.detail.get("reason", EndReason.STOPPED)
