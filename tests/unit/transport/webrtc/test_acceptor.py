@@ -564,6 +564,23 @@ async def test_a_reconnect_is_admitted_at_the_ceiling(
     assert acceptor.take_answer(ConnId(7)) is not None
 
 
+async def test_a_reconnect_closes_the_replaced_connection_without_a_drain(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    """The client being served is the one reconnecting; the new connection
+    waits on the old one's close, so it must not wait on a drain."""
+    acceptor = _capped_acceptor(fake_peer, factory_for, limit=0)
+    await _negotiate(acceptor, ConnId(7), SdpOffer("first"), out_av_tracks)
+
+    acceptor.start_offer(ConnId(7), SdpOffer("again"), out_av_tracks, ProtocolVersion.V0)
+    await acceptor._negotiating[ConnId(7)]
+
+    assert fake_peer.closed is True
+    assert fake_peer.closed_with_drain is False
+
+
 async def test_a_freed_slot_admits_a_later_connection(
     fake_peer: FakePeer,
     factory_for: Callable[..., WebRtcPeerFactory],
