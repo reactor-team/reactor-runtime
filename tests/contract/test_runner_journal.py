@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from typing import Any
 
 import pytest
 from contract_helpers import (
@@ -19,6 +20,7 @@ from contract_helpers import (
     FakeConnection,
     Harness,
     JournalReader,
+    SteppingModel,
     UnloadableModel,
     running_runtime,
 )
@@ -146,6 +148,49 @@ async def test_a_starting_input_is_sent_by_the_system_client(harness: Harness) -
         assert closed["detail"] == {"conn_id": 0, "system": True}
     finally:
         await journal.aclose()
+
+
+async def test_a_session_with_steps_runs_with_no_client_and_closes_itself() -> None:
+    # The orphan timeout is short enough to fire during the test, so the close
+    # this sees is the one the step count made, not a client-less timeout.
+    cfg = RuntimeConfig(model_ref="contract:Model", orphan_timeout=0.05)
+    async with running_runtime(model_cls=SteppingModel, cfg=cfg) as harness:
+        journal = JournalReader(harness.runner)
+        try:
+            response = await harness.client.post(
+                "/start_session",
+                json={"starting_input": {"state": {"speed": 2.0}}, "steps": 2},
+            )
+            assert response.status_code == 200
+            assert response.json()["state"] == "streaming"
+
+            seen: list[dict[str, Any]] = []
+            while not seen or seen[-1]["event"] != "cleanup_complete":
+                seen.append(await journal.next())
+        finally:
+            await journal.aclose()
+
+    names = [envelope["event"] for envelope in seen]
+    assert "timeout" not in names
+    start = names.index("start_session")
+    stop = names.index("stop_session")
+    assert names[start:stop] == [
+        "start_session",
+        "connection_opened",
+        "command",
+        "step_completed",
+        "step_completed",
+    ]
+    opened, command, first, second = seen[start + 1 : stop]
+    assert opened["detail"] == {"conn_id": 0, "system": True}
+    assert command["detail"] == {"name": "set_speed", "args": {"speed": 2.0}, "conn_id": 0}
+    assert first["detail"] == {"step": 1, "saved": False, "error": None}
+    assert second["detail"] == {"step": 2, "saved": False, "error": None}
+    assert seen[stop]["detail"] == {
+        "reason": "stopped",
+        "close_reason": "Session ended: the requested steps are complete.",
+    }
+    assert seen[-1]["to"] == "ready"
 
 
 async def test_a_clientless_session_times_out_and_unwinds() -> None:
