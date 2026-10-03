@@ -689,6 +689,7 @@ async def test_each_step_is_reported_after_its_media() -> None:
     assert first.error is None
     assert first.files == {}
     assert first.elapsed is not None
+    assert first.fps == float(app.fps)
 
 
 async def test_a_refused_step_is_not_reported() -> None:

@@ -334,6 +334,7 @@ class ReactorCore:
                 error=step.error,
                 elapsed=step.elapsed,
                 session=session,
+                fps=float(self.fps),
             )
         )
 

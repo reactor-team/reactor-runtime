@@ -1508,6 +1508,106 @@ def test_the_descriptor_says_whether_step_results_are_kept() -> None:
     assert keeping.descriptor()["step_results"] == {"enabled": True}
 
 
+_SAVING_SESSION_ID = "3a1b2c3d-0000-4000-8000-0000000000aa"
+
+
+@pytest.fixture
+async def saving_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
+    created_models.clear()
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
+    runner = Runner(
+        RuntimeConfig(model_ref="fake:Model", step_results=StepResultsConfig(enabled=True))
+    )
+    assert runner.step_store is not None
+    runner.step_store._root = tmp_path / "steps"
+    await runner.start()
+    try:
+        yield runner
+    finally:
+        await runner.stop()
+
+
+async def _saved_facts(runner: Runner, count: int) -> list[dict[str, Any]]:
+    """Wait for *count* step_result_ready facts and return their details."""
+    for _ in range(500):
+        facts = [dict(move.detail) for move in _moves(runner, SessionEvent.STEP_RESULT_READY)]
+        if len(facts) >= count:
+            return facts
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"expected {count} step_result_ready facts")
+
+
+def _saved_result(runner: Runner, step: int) -> dict[str, Any]:
+    store = runner.step_store
+    assert store is not None
+    assert store.root is not None
+    path = store.root / _SAVING_SESSION_ID / str(step) / "result.json"
+    return json.loads(path.read_text())
+
+
+async def test_a_saved_step_is_journalled_saved_then_ready(saving_runner: Runner) -> None:
+    saving_runner.start_session({"session_id": _SAVING_SESSION_ID})
+    saving_runner._record_step(_step(saving_runner))
+
+    assert _step_facts(saving_runner) == [{"step": 1, "saved": True, "error": None}]
+    assert await _saved_facts(saving_runner, 1) == [
+        {"session_id": _SAVING_SESSION_ID, "step": 1, "files": []}
+    ]
+    assert _saved_result(saving_runner, 1)["step"] == 1
+
+
+async def test_a_saved_step_keeps_the_messages_broadcast_since_the_step_before(
+    saving_runner: Runner,
+) -> None:
+    saving_runner.start_session({"session_id": _SAVING_SESSION_ID})
+
+    def model_thread() -> None:
+        saving_runner._broadcast_message(Greeting(text="before the first step"))
+        saving_runner._on_step_completed(_step(saving_runner))
+        saving_runner._on_step_completed(_step(saving_runner))
+
+    await asyncio.to_thread(model_thread)
+    await _saved_facts(saving_runner, 2)
+
+    assert _saved_result(saving_runner, 1)["messages"] == [
+        {"type": "greeting", "data": {"text": "before the first step"}}
+    ]
+    assert _saved_result(saving_runner, 2)["messages"] == []
+
+
+async def test_messages_from_before_the_session_are_not_kept(saving_runner: Runner) -> None:
+    saving_runner._broadcast_message(Greeting(text="between sessions"))
+    saving_runner.start_session({"session_id": _SAVING_SESSION_ID})
+    await asyncio.to_thread(saving_runner._on_step_completed, _step(saving_runner))
+    await _saved_facts(saving_runner, 1)
+
+    assert _saved_result(saving_runner, 1)["messages"] == []
+
+
+async def test_a_step_after_the_steps_stop_is_saved_too(saving_runner: Runner) -> None:
+    saving_runner.start_session({"session_id": _SAVING_SESSION_ID, "steps": 1})
+    saving_runner._record_step(_step(saving_runner))
+    saving_runner._record_step(_step(saving_runner))
+
+    assert [fact["saved"] for fact in _step_facts(saving_runner)] == [True, True]
+    assert [fact["step"] for fact in await _saved_facts(saving_runner, 2)] == [1, 2]
+
+
+async def test_a_session_whose_id_is_not_a_uuid_saves_nothing(saving_runner: Runner) -> None:
+    saving_runner.start_session({"session_id": "my-session"})
+    saving_runner._record_step(_step(saving_runner))
+
+    assert _step_facts(saving_runner) == [{"step": 1, "saved": False, "error": None}]
+
+
+async def test_without_step_results_no_message_is_kept(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    started_runner._broadcast_message(Greeting(text="hello"))
+
+    assert started_runner.step_store is None
+    assert list(started_runner._step_messages) == []
+
+
 async def test_a_session_without_a_starting_input_echoes_none(started_runner: Runner) -> None:
     started_runner.start_session({})
     assert "starting_input" not in started_runner.descriptor()

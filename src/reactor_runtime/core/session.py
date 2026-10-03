@@ -75,9 +75,10 @@ class SessionEvent(Enum):
     one phase otherwise silent, since the runner emits nothing until it leaves
     ``CREATED`` on ``INITIALIZATION_SUCCESS``.
 
-    ``CHUNK_READY``, ``CLIP_READY``, ``COMMAND``, ``ERROR``, ``METRIC``, and
-    ``STEP_COMPLETED`` are the journal-only events (:data:`JOURNAL_EVENTS`): facts recorded for an
-    external consumer rather than moves of the lifecycle. Each is a pure
+    ``CHUNK_READY``, ``CLIP_READY``, ``COMMAND``, ``ERROR``, ``METRIC``,
+    ``STEP_COMPLETED``, and ``STEP_RESULT_READY`` are the journal-only events
+    (:data:`JOURNAL_EVENTS`): facts recorded for an external consumer rather
+    than moves of the lifecycle. Each is a pure
     self-loop legal in **every** state — a journal fact must never be silently
     dropped by the transition table (the final ``CHUNK_READY`` fires during
     ``CLOSING``; an ``ERROR`` can fire while ``ORPHANED``) — that changes no
@@ -102,6 +103,7 @@ class SessionEvent(Enum):
     ERROR = auto()
     METRIC = auto()
     STEP_COMPLETED = auto()
+    STEP_RESULT_READY = auto()
 
 
 JOURNAL_EVENTS: frozenset[SessionEvent] = frozenset(
@@ -112,6 +114,7 @@ JOURNAL_EVENTS: frozenset[SessionEvent] = frozenset(
         SessionEvent.ERROR,
         SessionEvent.METRIC,
         SessionEvent.STEP_COMPLETED,
+        SessionEvent.STEP_RESULT_READY,
     }
 )
 """The journal-only events: pure self-loops in every state, payload in ``detail``."""
