@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from reactor_runtime import ReactorApp
-from reactor_runtime.core import RecordingConfig
+from reactor_runtime.core import RecordingConfig, StepResultsConfig
 from reactor_runtime.manifest import import_model_class, load_config
 
 _MANIFEST = """\
@@ -176,6 +176,90 @@ def test_load_config_ignores_unknown_recording_keys(tmp_path: Path) -> None:
     )
 
     assert load_config(manifest).recording.enabled is True
+
+
+def test_load_config_leaves_step_results_off_when_absent(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_MANIFEST)
+    assert load_config(manifest).step_results == StepResultsConfig()
+    assert load_config(manifest).step_results.enabled is False
+
+
+def test_load_config_reads_the_step_results_block(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(
+        "runtime:\n"
+        "  import: pipeline:Demo\n"
+        "  step_results:\n"
+        "    enabled: true\n"
+        "    video: {codec: h265, preset: medium, crf: 28}\n"
+        "    audio: {codec: aac, bitrate_kbps: 96}\n"
+        "    queue: 3\n"
+    )
+
+    assert load_config(manifest).step_results == StepResultsConfig(
+        enabled=True,
+        video_codec="h265",
+        video_preset="medium",
+        video_crf=28,
+        audio_codec="aac",
+        audio_bitrate_kbps=96,
+        queue=3,
+    )
+
+
+@pytest.mark.parametrize("queue", [0, -2])
+def test_load_config_rejects_a_step_results_queue_below_one(tmp_path: Path, queue: int) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(
+        "runtime:\n  import: pipeline:Demo\n  step_results:\n"
+        f"    enabled: true\n    queue: {queue}\n"
+    )
+
+    with pytest.raises(ValueError, match="queue must be at least 1"):
+        load_config(manifest)
+
+
+def test_load_config_fills_unset_step_results_settings_with_defaults(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text("runtime:\n  import: pipeline:Demo\n  step_results:\n    enabled: true\n")
+
+    assert load_config(manifest).step_results == StepResultsConfig(enabled=True)
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        "  step_results: true\n",
+        "  step_results: [enabled]\n",
+        "  step_results:\n    enabled: true\n    video: fast\n    audio: [aac]\n",
+    ],
+)
+def test_load_config_tolerates_a_step_results_block_of_the_wrong_shape(
+    tmp_path: Path, block: str
+) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text("runtime:\n  import: pipeline:Demo\n" + block)
+
+    step_results = load_config(manifest).step_results
+
+    defaults = StepResultsConfig()
+    assert step_results.video_codec == defaults.video_codec
+    assert step_results.audio_bitrate_kbps == defaults.audio_bitrate_kbps
+
+
+def test_load_config_ignores_unknown_step_results_keys(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(
+        "runtime:\n"
+        "  import: pipeline:Demo\n"
+        "  step_results:\n"
+        "    enabled: true\n"
+        "    tracks: [main_video]\n"
+        "    video: {codec: h264, from_the_future: 1}\n"
+    )
+
+    assert load_config(manifest).step_results == StepResultsConfig(enabled=True)
 
 
 def test_import_model_class_resolves_a_model_reference() -> None:

@@ -50,6 +50,7 @@ from reactor_runtime.core import (
     SessionEvent,
     SessionStarted,
     SessionState,
+    StepResultsConfig,
     TrackData,
     TrackInfo,
     TrackKind,
@@ -1497,6 +1498,14 @@ async def test_the_descriptor_echoes_how_many_starting_commands_apply(
     started_runner.stop_session()
     await started_runner._drain_teardown()
     assert "starting_input" not in started_runner.descriptor()
+
+
+def test_the_descriptor_says_whether_step_results_are_kept() -> None:
+    assert _runner().descriptor()["step_results"] == {"enabled": False}
+    keeping = Runner(
+        RuntimeConfig(model_ref="fake:Model", step_results=StepResultsConfig(enabled=True))
+    )
+    assert keeping.descriptor()["step_results"] == {"enabled": True}
 
 
 async def test_a_session_without_a_starting_input_echoes_none(started_runner: Runner) -> None:
