@@ -36,6 +36,7 @@ async def test_start_session_returns_the_descriptor(harness: Harness) -> None:
     assert {"name": "main", "kind": "video", "direction": "recvonly"} in capabilities["tracks"]
     assert {"name": "webcam", "kind": "video", "direction": "sendonly"} in capabilities["tracks"]
     assert body["recording"] == {"enabled": False, "chunk_seconds": 4}
+    assert body["step_results"] == {"enabled": False}
 
 
 async def test_get_session_reports_the_current_state(harness: Harness) -> None:

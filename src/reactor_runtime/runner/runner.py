@@ -998,6 +998,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 "enabled": self._cfg.recording.enabled,
                 "chunk_seconds": self._cfg.recording.chunk_seconds,
             },
+            "step_results": {"enabled": self._cfg.step_results.enabled},
         }
         starting = self._session_start.starting_input
         if starting is not None and self._sm.current_state in _RUNNING_STATES:
