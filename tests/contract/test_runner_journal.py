@@ -11,20 +11,25 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 from contract_helpers import (
+    FIXED_SESSION_ID,
     ContractModel,
     CrashingModel,
     FakeConnection,
     Harness,
     JournalReader,
     SteppingModel,
+    SteppingOutput,
     UnloadableModel,
     running_runtime,
 )
 
+from reactor_runtime import InputField, InputState, ReactorApp, UploadedFile
 from reactor_runtime.core import ConnId, RuntimeConfig
 
 _PLATFORM_SESSION_ID = "7d9f5c1e-1111-2222-3333-444444444444"
@@ -208,6 +213,56 @@ async def test_a_session_with_steps_runs_with_no_client_and_closes_itself() -> N
         "close_reason": "Session ended: the requested steps are complete.",
     }
     assert seen[-1]["to"] == "ready"
+
+
+class ImageState(InputState):
+    image: UploadedFile = InputField(default=None)
+
+
+class ImageModel(ReactorApp):
+    """A model on the default step loop whose state names an uploaded image."""
+
+    state: ImageState
+
+    def load(self, config_path: Path | None) -> None: ...
+
+    def generate(self, input: ImageState) -> SteppingOutput:
+        return SteppingOutput(frames=np.zeros((2, 2, 3), dtype=np.uint8))
+
+
+async def test_no_step_runs_before_the_starting_input_has_landed() -> None:
+    async with running_runtime(model_cls=ImageModel) as harness:
+        journal = JournalReader(harness.runner)
+        upload_id = str(uuid.uuid4())
+        try:
+            response = await harness.client.post(
+                "/start_session",
+                json={"starting_input": {"state": {"image": {"upload_id": upload_id}}}, "steps": 2},
+            )
+            assert response.status_code == 200
+            # The caller seeds the image only after the start, as a platform does.
+            await asyncio.sleep(0.2)
+            reserved = await harness.client.post(
+                f"/sessions/{FIXED_SESSION_ID}/uploads",
+                json={"name": "a.png", "size": 3, "mime_type": "image/png", "upload_id": upload_id},
+            )
+            assert reserved.status_code == 201
+            assert (
+                await harness.client.put(f"/uploads/{upload_id}", content=b"png")
+            ).status_code == 200
+
+            seen: list[dict[str, Any]] = []
+            while not seen or seen[-1]["event"] != "cleanup_complete":
+                seen.append(await journal.next())
+        finally:
+            await journal.aclose()
+
+    names = [envelope["event"] for envelope in seen]
+    command = names.index("command")
+    assert seen[command]["detail"]["name"] == "set_image"
+    assert "step_completed" not in names[:command]
+    assert names.count("step_completed") >= 2
+    assert names.index("stop_session") > names.index("step_completed")
 
 
 async def test_a_clientless_session_times_out_and_unwinds() -> None:
