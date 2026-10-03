@@ -225,6 +225,35 @@ def test_a_refused_send_is_logged_as_a_warning(
     assert "10 bytes on data" in record.getMessage()
 
 
+def test_repeated_refusals_warn_once_per_channel_and_kind(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A model that oversends every step gets one warning, not one per frame."""
+    peer = WebRTCPeer()
+    data: Any = _FakeChannel()
+    control: Any = _FakeChannel("control")
+    peer._data_channel = data
+    peer._control_channel = control
+
+    with caplog.at_level(logging.DEBUG, logger=peer_module.logger.name):
+        data.send_error = rw.DataChannelMessageTooLarge("too large")
+        for _ in range(3):
+            peer.send_message(b"x")
+        data.send_error = rw.DataChannelQueueFull("full")
+        peer.send_message(b"x")
+        control.send_error = rw.DataChannelMessageTooLarge("too large")
+        peer.send_control(b"x")
+
+    refusals = [r for r in caplog.records if "send refused" in r.getMessage()]
+    assert [r.levelno for r in refusals] == [
+        logging.WARNING,
+        logging.DEBUG,
+        logging.DEBUG,
+        logging.WARNING,
+        logging.WARNING,
+    ]
+
+
 def test_a_send_that_races_teardown_stays_quiet(caplog: pytest.LogCaptureFixture) -> None:
     peer = WebRTCPeer()
     data: Any = _FakeChannel()
