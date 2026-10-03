@@ -18,13 +18,14 @@ import threading
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, TypeVar, get_type_hints
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, get_type_hints
 
 import numpy.typing as npt
 
 from reactor_runtime.core.model import Command, ReactorEvent
 from reactor_runtime.core.values import (
     CommandFailure,
+    CompletedStep,
     ConnId,
     InputFrame,
     MediaBundle,
@@ -36,6 +37,11 @@ from reactor_runtime.core.values import (
 from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.input_buffer import InputBuffer
 from reactor_runtime.interface.tracks import MediaInput, Metadata, Output
+
+if TYPE_CHECKING:
+    # The app package imports this module, so the step type is named for the
+    # checker only; nothing here builds one.
+    from reactor_runtime.interface.app.step_completed import StepCompleted
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +64,9 @@ does not come.
 
 MediaSink = Callable[[MediaChunk], None]
 """Receives each finished media chunk the model emits, unpaced, on the model thread."""
+
+StepSink = Callable[[CompletedStep], None]
+"""Receives each step the model reports finished, on the model thread."""
 
 FailureSink = Callable[[BaseException], None]
 """Receives the exception that ended :meth:`ReactorCore.run`, on the model thread."""
@@ -232,6 +241,7 @@ class ReactorCore:
         self._out_broadcast: BroadcastSink | None = None
         self._out_addressed: AddressedSink | None = None
         self._out_media: MediaSink | None = None
+        self._out_step: StepSink | None = None
         self._media_ops: MediaOps | None = None
         self._on_failure: FailureSink | None = None
         self.output = OutputStream(self)
@@ -288,6 +298,28 @@ class ReactorCore:
         if self._out_broadcast is not None:
             self._out_broadcast(message)
 
+    async def complete_step(self, step: StepCompleted) -> None:
+        """Report that one step is done.
+
+        The default step loop calls this after each step that ran. A model with
+        its own ``run()`` calls it each time it finishes a unit of work, for
+        example a built clip. The runtime counts each report against the
+        session's step limit and, when the model's manifest turns step results
+        on, saves it. The output is handed over as it is, so a model must not
+        change its arrays after reporting them.
+
+        Args:
+            step: What the step produced.
+        """
+        if self._out_step is None:
+            return
+        bundle = self._to_bundle(step.output) if step.output is not None else None
+        self._out_step(
+            CompletedStep(
+                bundle=bundle, files=dict(step.files), error=step.error, elapsed=step.elapsed
+            )
+        )
+
     # -- outbound binding (called once by the bridge) -------------------------
 
     def bind_output(
@@ -297,6 +329,7 @@ class ReactorCore:
         addressed: AddressedSink,
         media: MediaSink,
         media_ops: MediaOps | None = None,
+        step: StepSink | None = None,
     ) -> None:
         """Bind the outbound sinks. Called once before the loop starts.
 
@@ -315,6 +348,7 @@ class ReactorCore:
         self._out_addressed = addressed
         self._out_media = media
         self._media_ops = media_ops
+        self._out_step = step
         if media_ops is not None:
             if self.buffer_size is not None:
                 media_ops.set_depth(self.buffer_size)

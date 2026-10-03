@@ -23,6 +23,7 @@ from reactor_runtime import (
     ModelMessage,
     Output,
     ReactorApp,
+    StepCompleted,
     StepOutcome,
     Video,
     event,
@@ -34,7 +35,7 @@ from reactor_runtime.core.model import (
     SessionEnded,
     SessionStarted,
 )
-from reactor_runtime.core.values import ConnId
+from reactor_runtime.core.values import CompletedStep, ConnId
 from reactor_runtime.interface.internal.reactor_core import CommandEnvelope
 from reactor_runtime.interface.model.contract import ModelContract
 
@@ -648,3 +649,188 @@ async def test_fps_assigned_on_the_output_in_load_does_not_pin() -> None:
     task = await _run_for(app)
     assert app.emitted[0][1] is not None
     await _stop(task)
+
+
+# -- step reports ---------------------------------------------------------------
+
+
+def _ready_reporting(app: Recording) -> list[CompletedStep]:
+    """Bring the app up with a step sink that records each report in wire order."""
+    steps: list[CompletedStep] = []
+
+    def record(step: CompletedStep) -> None:
+        steps.append(step)
+        app.wire.append("step")
+
+    app._on_loop_ready()
+    app.bind_output(
+        broadcast=lambda message: app.wire.append(type(message).__name__),
+        addressed=lambda *args: None,
+        media=lambda chunk: None,
+        step=record,
+    )
+    return steps
+
+
+async def test_each_step_is_reported_after_its_media() -> None:
+    app = OnlyGenerate()
+    steps = _ready_reporting(app)
+    await _go_live(app)
+    task = await _run_for(app)
+    await _stop(task)
+
+    # The cancel can land between a step's generate() and its report.
+    assert app.generated - 1 <= len(steps) <= app.generated
+    assert len(steps) > 0
+    assert app.wire[:4] == ["media", "step", "media", "step"]
+    first = steps[0]
+    assert first.bundle is not None
+    assert set(first.bundle.tracks) == {"main_video"}
+    assert first.error is None
+    assert first.files == {}
+    assert first.elapsed is not None
+
+
+async def test_a_refused_step_is_not_reported() -> None:
+    class Gated(OnlyGenerate):
+        async def process_input(self) -> State:
+            if self.state.paused:
+                raise ApplicationError("paused")
+            return self.state
+
+    app = Gated()
+    steps = _ready_reporting(app)
+    await _go_live(app)
+    app.state.paused = True
+    task = await _run_for(app)
+    await _stop(task)
+
+    assert steps == []
+
+
+async def test_a_step_that_emits_nothing_is_reported_without_media() -> None:
+    class Quiet(Recording):
+        def generate(self, input: State) -> None:
+            self.generated += 1
+
+    app = Quiet()
+    steps = _ready_reporting(app)
+    await _go_live(app)
+    task = await _run_for(app)
+    await _stop(task)
+
+    assert app.generated - 1 <= len(steps) <= app.generated
+    assert len(steps) > 0
+    assert all(step.bundle is None and step.error is None for step in steps)
+
+
+async def test_a_step_process_output_recovered_is_reported_as_a_normal_step() -> None:
+    class Flaky(Recording):
+        def generate(self, input: State) -> Frame:
+            self.generated += 1
+            if self.generated == 1:
+                raise RuntimeError("one bad step")
+            return _frame()
+
+        async def process_output(self, outcome: StepOutcome) -> Output | None:
+            if outcome.error is not None:
+                return None
+            return outcome.to_output()
+
+    app = Flaky()
+    steps = _ready_reporting(app)
+    await _go_live(app)
+    task = await _run_for(app)
+    await _stop(task)
+
+    assert steps[0].bundle is None
+    assert steps[0].error is None
+    assert steps[1].bundle is not None
+
+
+async def test_a_step_report_process_output_returns_is_emitted_and_reported_as_given() -> None:
+    class KeepsFiles(OnlyGenerate):
+        async def process_output(self, outcome: StepOutcome) -> StepCompleted:
+            return StepCompleted(output=outcome.to_output(), files={"prompt.txt": b"a red door"})
+
+    app = KeepsFiles()
+    steps = _ready_reporting(app)
+    await _go_live(app)
+    task = await _run_for(app)
+    await _stop(task)
+
+    assert app.wire[:2] == ["media", "step"]
+    first = steps[0]
+    assert first.bundle is not None
+    assert set(first.bundle.tracks) == {"main_video"}
+    assert first.files == {"prompt.txt": b"a red door"}
+    assert first.elapsed is not None
+
+
+async def test_a_recovered_step_can_report_its_error_without_media() -> None:
+    class MarksFailures(Recording):
+        def generate(self, input: State) -> Frame:
+            self.generated += 1
+            raise RuntimeError("no reference")
+
+        async def process_output(self, outcome: StepOutcome) -> StepCompleted:
+            return StepCompleted(error=f"recovered: {outcome.error}", elapsed=1.5)
+
+    app = MarksFailures()
+    steps = _ready_reporting(app)
+    await _go_live(app)
+    task = await _run_for(app)
+    await _stop(task)
+
+    assert "media" not in app.wire
+    assert steps[0].bundle is None
+    assert steps[0].error == "recovered: no reference"
+    assert steps[0].elapsed == 1.5
+
+
+async def test_a_step_that_crashes_the_loop_is_not_reported() -> None:
+    class Broken(Recording):
+        def generate(self, input: State) -> Frame:
+            raise RuntimeError("cannot step from here")
+
+    app = Broken()
+    steps = _ready_reporting(app)
+    await _go_live(app)
+    task = asyncio.create_task(app.run())
+    with pytest.raises(RuntimeError, match="cannot step from here"):
+        await asyncio.wait_for(task, timeout=1.0)
+
+    assert steps == []
+
+
+async def test_a_hand_written_run_reports_its_own_steps() -> None:
+    class BuildsClips(Recording):
+        async def run(self) -> None:
+            await self.complete_step(
+                StepCompleted(
+                    output=_frame(),
+                    files={"last_frame.png": b"png"},
+                    error=None,
+                    elapsed=1.5,
+                )
+            )
+            await self.complete_step(StepCompleted(error="RuntimeError: out of memory"))
+
+    app = BuildsClips()
+    steps = _ready_reporting(app)
+    await app.run()
+
+    assert [step.error for step in steps] == [None, "RuntimeError: out of memory"]
+    assert steps[0].bundle is not None
+    assert steps[0].files == {"last_frame.png": b"png"}
+    assert steps[0].elapsed == 1.5
+    assert steps[1].bundle is None
+
+
+async def test_complete_step_without_a_sink_does_nothing() -> None:
+    app = OnlyGenerate()
+    app._on_loop_ready()
+    app.bind_output(
+        broadcast=lambda message: None, addressed=lambda *args: None, media=lambda chunk: None
+    )
+    await app.complete_step(StepCompleted(output=_frame()))
