@@ -28,7 +28,7 @@ def test_transition_is_stamped_with_epoch_milliseconds() -> None:
     assert before <= t.ts_ms <= after
 
 
-def test_journal_events_are_the_six_feature_signals() -> None:
+def test_journal_events_are_the_seven_feature_signals() -> None:
     expected = {
         SessionEvent.CHUNK_READY,
         SessionEvent.CLIP_READY,
@@ -36,6 +36,7 @@ def test_journal_events_are_the_six_feature_signals() -> None:
         SessionEvent.ERROR,
         SessionEvent.METRIC,
         SessionEvent.STEP_COMPLETED,
+        SessionEvent.STEP_RESULT_READY,
     }
     assert expected == JOURNAL_EVENTS
 
