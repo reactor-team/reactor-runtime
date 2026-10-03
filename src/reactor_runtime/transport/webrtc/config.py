@@ -189,6 +189,10 @@ class WebRtcConfig:
             It is process-wide like SPED, for the same reason: the media
             engine carries it and is built on the first connection. With it
             on, a connection built with ``False`` keeps the plain channel.
+            The engine also raises SCTP's per-send burst for every data
+            channel it creates, plain or chunked, so a connection's ``False``
+            does not restore the previous send timing; congestion control
+            still bounds every send.
     """
 
     ice_servers: tuple[IceServer, ...] = ()
