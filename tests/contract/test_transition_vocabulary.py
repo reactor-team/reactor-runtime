@@ -46,10 +46,19 @@ _EVENTS = frozenset(
         "error",
         "metric",
         "step_completed",
+        "step_result_ready",
     }
 )
 _JOURNAL_FACTS = frozenset(
-    {"chunk_ready", "clip_ready", "command", "error", "metric", "step_completed"}
+    {
+        "chunk_ready",
+        "clip_ready",
+        "command",
+        "error",
+        "metric",
+        "step_completed",
+        "step_result_ready",
+    }
 )
 
 
@@ -321,3 +330,19 @@ def test_chunk_ready_detail_names_the_recording_and_segment_index() -> None:
         "idx": -1,
     }
     assert isinstance(payload["detail"]["idx"], int)
+
+
+def test_step_result_ready_detail_names_the_session_step_and_files() -> None:
+    payload = _apply(
+        _machine("closing"),
+        SessionEvent.STEP_RESULT_READY,
+        session_id="7d9f5c1e-0000-0000-0000-000000000042",
+        step=2,
+        files=["output.mp4", "prompt.txt"],
+    )
+    assert payload is not None
+    assert payload["detail"] == {
+        "session_id": "7d9f5c1e-0000-0000-0000-000000000042",
+        "step": 2,
+        "files": ["output.mp4", "prompt.txt"],
+    }

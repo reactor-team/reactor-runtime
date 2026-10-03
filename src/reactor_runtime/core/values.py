@@ -439,6 +439,8 @@ class CompletedStep:
             starts the model had received when the step began. The runtime
             counts the session starts it posts the same way, so it can tell a
             late report from an earlier session apart from the current one.
+        fps: The model's playout rate when the step was reported, the rate a
+            saved step's video plays at.
     """
 
     bundle: MediaBundle | None
@@ -446,6 +448,7 @@ class CompletedStep:
     error: str | None = None
     elapsed: float | None = None
     session: int = 0
+    fps: float = 30.0
 
 
 @dataclass(frozen=True)
