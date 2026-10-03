@@ -345,6 +345,118 @@ class RecordingRoutes:
             return FileResponse(path, media_type=media_type)
 
 
+class StepList(BaseModel):
+    """The steps of a session whose folders are complete."""
+
+    steps: list[int] = Field(description="Step numbers, in order.")
+
+
+class StepFile(BaseModel):
+    """One file kept in a step's folder."""
+
+    name: str
+    content_type: str
+    size: int = Field(description="Size in bytes.")
+
+
+class StepMessage(BaseModel):
+    """A message the model broadcast during the step, in its wire form."""
+
+    type: str
+    data: dict[str, Any]
+
+
+class StepTimings(BaseModel):
+    """How long the step took, in seconds."""
+
+    generate_s: float | None = Field(description="Time to generate, when measured.")
+    encode_s: float = Field(description="Time to save the step's files.")
+
+
+class StepResult(BaseModel):
+    """A step's ``result.json``: what the folder holds and how the step went."""
+
+    step: int
+    session_id: str
+    files: list[StepFile] = Field(description="The files beside result.json.")
+    messages: list[StepMessage] = Field(
+        description="The messages the model broadcast since the step before."
+    )
+    error: str | None = Field(description="Why the step failed, or null when it worked.")
+    save_error: str | None = Field(
+        description="Why the step's files could not be saved, or null when they were."
+    )
+    timings: StepTimings
+
+
+class StepRoutes:
+    """Saved step folders over HTTP.
+
+    A session is addressed by its own id, the one ``/clips/chunks`` uses, and
+    its folders stay readable after it ends, until they age out. A step is
+    served only once its ``result.json`` is written, so a reader never sees a
+    step that is half saved.
+    """
+
+    def __init__(self, runner: Runner) -> None:
+        """Bind the route group to the runner whose step store it reads."""
+        self._runner = runner
+
+    def mount(self, app: FastAPI) -> None:
+        """Register the step routes against *app*."""
+        runner = self._runner
+
+        @app.get(
+            "/sessions/{session_id}/steps",
+            response_model=StepList,
+            responses={404: {"model": ErrorDetail}},
+        )
+        async def list_steps(session_id: str) -> StepList:
+            store = runner.step_store
+            steps = store.ready_steps(session_id) if store is not None else None
+            if steps is None:
+                raise HTTPException(status_code=404, detail="No step results for this session")
+            return StepList(steps=steps)
+
+        @app.get(
+            "/sessions/{session_id}/steps/{step}",
+            response_class=FileResponse,
+            responses={
+                200: {"model": StepResult, "description": "The step's result.json."},
+                404: {"model": ErrorDetail},
+            },
+        )
+        async def get_step(session_id: str, step: int) -> FileResponse:
+            store = runner.step_store
+            path = store.result_path(session_id, step) if store is not None else None
+            if path is None:
+                raise HTTPException(status_code=404, detail="Step result not found")
+            return FileResponse(path, media_type="application/json")
+
+        @app.get(
+            "/sessions/{session_id}/steps/{step}/{name}",
+            response_class=FileResponse,
+            responses={
+                200: {
+                    "description": "A file the step's result.json lists.",
+                    "content": {
+                        "application/octet-stream": {
+                            "schema": {"type": "string", "format": "binary"}
+                        }
+                    },
+                },
+                404: {"model": ErrorDetail},
+            },
+        )
+        async def get_step_file(session_id: str, step: int, name: str) -> FileResponse:
+            store = runner.step_store
+            found = store.file_path(session_id, step, name) if store is not None else None
+            if found is None:
+                raise HTTPException(status_code=404, detail="Step file not found")
+            path, content_type = found
+            return FileResponse(path, media_type=content_type)
+
+
 class HealthResponse(BaseModel):
     """The process verdict, the lifecycle word behind it, and why.
 

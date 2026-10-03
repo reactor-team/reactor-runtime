@@ -99,6 +99,8 @@ Command handlers and lifecycle hooks run between steps, never during one. A mode
 
 A session can start with its setup already in hand: `POST /start_session` takes a `starting_input` of state values and commands, which the runtime applies on the normal command path before any client connects. A system client sends them, a connection the runtime opens itself, so a handler that takes `client` gets a `ClientInfo` whose `system` is true. A model sees it connect like any client, which is what lets it generate before a viewer arrives.
 
+A start body with `steps: N` ends the session once the model has reported N steps, so a session can run a fixed amount of work with no client at all. Each reported step can also be kept: turn on `runtime.step_results` in `reactor.yaml`, and every step is saved as a folder holding its output as one `output.mp4`, the extra `files` it carried, and a `result.json` that lists them with the messages the model sent during the step. `GET /sessions/{id}/steps` lists a session's folders by the session's own id; each stays readable for five minutes after it is written, after the session ends too.
+
 Scaffold, build, and run it with the CLI:
 
 ```sh
