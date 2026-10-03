@@ -20,7 +20,12 @@ from reactor_runtime.core.model import (
     TransitionEvent,
     UploadedFile,
 )
-from reactor_runtime.core.service import RecordingConfig, RuntimeConfig, ServiceComponent
+from reactor_runtime.core.service import (
+    RecordingConfig,
+    RuntimeConfig,
+    ServiceComponent,
+    StepResultsConfig,
+)
 from reactor_runtime.core.session import (
     JOURNAL_EVENTS,
     SessionEvent,
@@ -84,6 +89,7 @@ __all__ = [
     "SessionEvent",
     "SessionStarted",
     "SessionState",
+    "StepResultsConfig",
     "TrackData",
     "TrackDirection",
     "TrackInfo",

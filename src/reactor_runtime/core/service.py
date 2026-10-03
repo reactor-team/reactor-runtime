@@ -93,6 +93,36 @@ class RecordingConfig:
 
 
 @dataclass(frozen=True)
+class StepResultsConfig:
+    """How each finished step is kept, drawn from the manifest's ``step_results:`` block.
+
+    A model with no ``step_results:`` block keeps nothing (``enabled`` is
+    ``False``). When enabled, every step the model reports is saved as a
+    folder: its output in one ``output.mp4``, with each track of the step's
+    ``Output`` as its own stream, beside any extra files and a ``result.json``.
+    Turning it on is the model's choice, not a session option.
+
+    Attributes:
+        enabled: Whether the runtime saves each finished step.
+        video_codec: ``"h264"`` or ``"h265"``.
+        video_preset: The libx264/libx265 preset.
+        video_crf: The constant-rate-factor quality target.
+        audio_codec: The audio codec, e.g. ``"aac"``.
+        audio_bitrate_kbps: The audio bitrate in kilobits per second.
+        queue: How many steps may wait to be saved. A step that finds the
+            queue full is not saved, so the model never waits on saving.
+    """
+
+    enabled: bool = False
+    video_codec: str = "h264"
+    video_preset: str = "veryfast"
+    video_crf: int = 23
+    audio_codec: str = "aac"
+    audio_bitrate_kbps: int = 128
+    queue: int = 8
+
+
+@dataclass(frozen=True)
 class RuntimeConfig:
     """The single configuration object threaded through ``serve``.
 
@@ -116,6 +146,7 @@ class RuntimeConfig:
             session drain it includes, before the process is forced to exit.
         orphan_timeout: Seconds a session may stay client-less before it closes.
         recording: The recorder's configuration; disabled by default.
+        step_results: How each finished step is saved; disabled by default.
     """
 
     model_ref: str
@@ -127,3 +158,4 @@ class RuntimeConfig:
     exit_timeout: float = 10.0
     orphan_timeout: float = 60.0
     recording: RecordingConfig = field(default_factory=RecordingConfig)
+    step_results: StepResultsConfig = field(default_factory=StepResultsConfig)
