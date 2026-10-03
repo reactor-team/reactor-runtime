@@ -866,3 +866,40 @@ async def test_complete_step_without_a_sink_does_nothing() -> None:
         broadcast=lambda message: None, addressed=lambda *args: None, media=lambda chunk: None
     )
     await app.complete_step(StepCompleted(output=_frame()))
+
+
+async def test_a_report_is_stamped_with_the_session_the_model_is_in() -> None:
+    app = OnlyGenerate()
+    steps = _ready_reporting(app)
+    await app._dispatch_reactor_event(SessionStarted("s1"))
+    await app.complete_step(StepCompleted())
+    await app._dispatch_reactor_event(SessionEnded("s1", EndReason.STOPPED))
+    await app._dispatch_reactor_event(SessionStarted("s2"))
+    await app.complete_step(StepCompleted())
+
+    assert [step.session for step in steps] == [1, 2]
+
+
+async def test_a_step_that_spans_a_restart_keeps_the_session_it_began_in() -> None:
+    release = asyncio.Event()
+
+    class SlowWire(OnlyGenerate):
+        async def emit(
+            self, output: Output, *, compute_time: float | None = None, drop: bool = False
+        ) -> None:
+            await release.wait()
+
+    app = SlowWire()
+    steps = _ready_reporting(app)
+    await _go_live(app)
+    task = asyncio.create_task(app.run())
+    await asyncio.sleep(0.01)  # the first step is now blocked in emit
+
+    await app._dispatch_reactor_event(SessionEnded("s", EndReason.STOPPED))
+    await app._dispatch_reactor_event(SessionStarted("s2"))
+    release.set()
+    await asyncio.sleep(0.01)
+    await _stop(task)
+
+    assert app._sessions_started == 2
+    assert steps[0].session == 1
