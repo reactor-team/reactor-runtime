@@ -52,6 +52,7 @@ from reactor_runtime.core import (
     SessionStarted,
     SessionState,
     StartingInputApplied,
+    StepResultsConfig,
     TrackData,
     TrackInfo,
     TrackKind,
@@ -1769,6 +1770,28 @@ async def test_messages_from_before_the_session_are_not_kept(saving_runner: Runn
     await _saved_facts(saving_runner, 1)
 
     assert _saved_result(saving_runner, 1)["messages"] == []
+
+
+async def test_a_late_report_leaves_the_current_sessions_messages(
+    saving_runner: Runner,
+) -> None:
+    saving_runner.start_session({"session_id": _SAVING_SESSION_ID})
+    previous = _step(saving_runner)
+    saving_runner.stop_session()
+    await saving_runner._drain_teardown()
+    saving_runner.start_session({"session_id": _SAVING_SESSION_ID})
+
+    def model_thread() -> None:
+        saving_runner._broadcast_message(Greeting(text="sent in the new session"))
+        saving_runner._on_step_completed(previous)
+        saving_runner._on_step_completed(_step(saving_runner))
+
+    await asyncio.to_thread(model_thread)
+    await _saved_facts(saving_runner, 1)
+
+    assert _saved_result(saving_runner, 1)["messages"] == [
+        {"type": "greeting", "data": {"text": "sent in the new session"}}
+    ]
 
 
 async def test_a_step_after_the_steps_stop_is_saved_too(saving_runner: Runner) -> None:

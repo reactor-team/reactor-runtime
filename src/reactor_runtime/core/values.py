@@ -439,8 +439,9 @@ class CompletedStep:
             starts the model had received when the step began. The runtime
             counts the session starts it posts the same way, so it can tell a
             late report from an earlier session apart from the current one.
-        fps: The model's playout rate when the step was reported, the rate a
-            saved step's video plays at.
+        fps: The rate the step's media was emitted at, which a saved step's
+            video plays at: the measured throughput for a model that does not
+            pin its rate.
     """
 
     bundle: MediaBundle | None

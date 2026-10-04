@@ -736,8 +736,11 @@ class Runner(ServiceComponent, ConnectionSink):
         messages: tuple[dict[str, Any], ...] = ()
         if self._step_store is not None:
             with self._step_messages_lock:
-                messages = tuple(self._step_messages)
-                self._step_messages.clear()
+                # A late report from an earlier session is dropped on the loop,
+                # so it must not take the messages the current session sent.
+                if step.session == self._sessions_posted:
+                    messages = tuple(self._step_messages)
+                    self._step_messages.clear()
         loop = self._loop
         if loop is not None:
             loop.call_soon_threadsafe(self._record_step, step, messages)
@@ -1058,6 +1061,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 "enabled": self._cfg.recording.enabled,
                 "chunk_seconds": self._cfg.recording.chunk_seconds,
             },
+            "step_results": {"enabled": self._cfg.step_results.enabled},
         }
         starting = self._session_start.starting_input
         if starting is not None and self._sm.current_state in _RUNNING_STATES:

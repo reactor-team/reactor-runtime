@@ -350,10 +350,13 @@ class ReactorApp(ReactorCore):
                     #    wire is full, then report the step that ran.
                     if outcome is not None:
                         report = _step_report(returned, outcome)
+                        rate = None
                         if report.output is not None:
                             pace = None if fps_pinned else outcome.elapsed
                             await self.emit(report.output, compute_time=pace)
-                        self._report_step(report, session)
+                            frames = self._to_bundle(report.output).frame_count
+                            rate = self._playout_rate(frames, pace)
+                        self._report_step(report, session, rate)
 
                     # A refused turn waits a little before asking again; a
                     # productive turn yields once so handler tasks already

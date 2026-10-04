@@ -25,6 +25,7 @@ import shutil
 import tempfile
 import threading
 import time
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -112,6 +113,9 @@ class StepStore:
         # removal of an empty session folder, so neither undoes the other.
         self._layout_lock = threading.Lock()
         self._start_lock = threading.Lock()
+        # Orders an admission against close(), so a step admitted is always
+        # in the queue before the worker is told to drain and stop.
+        self._admit_lock = threading.Lock()
         self._worker: threading.Thread | None = None
         self._reaper: threading.Thread | None = None
         self._closing = threading.Event()
@@ -148,8 +152,6 @@ class StepStore:
             ``result.json`` follows; ``False`` means the store is closed, the
             session id cannot name a folder, or the queue is full.
         """
-        if self._closed:
-            return False
         if not _SESSION_ID_RE.match(session_id):
             logger.warning(
                 "not saving a step for a session id that is not a UUID",
@@ -157,13 +159,16 @@ class StepStore:
                 step=step,
             )
             return False
-        self._ensure_started()
-        try:
-            self._queue.put_nowait(_Pending(session_id, step, completed, tuple(messages)))
-        except queue.Full:
-            self._note_dropped(session_id, step)
-            return False
-        return True
+        with self._admit_lock:
+            if self._closed:
+                return False
+            self._ensure_started()
+            try:
+                self._queue.put_nowait(_Pending(session_id, step, completed, tuple(messages)))
+            except queue.Full:
+                self._note_dropped(session_id, step)
+                return False
+            return True
 
     def close(self, drain_seconds: float = _DRAIN_SECONDS) -> None:
         """Stop taking steps, let pending saves finish, and stop the reaper.
@@ -175,8 +180,9 @@ class StepStore:
         Args:
             drain_seconds: How long pending saves may keep running.
         """
-        self._closed = True
-        self._closing.set()
+        with self._admit_lock:
+            self._closed = True
+            self._closing.set()
         worker = self._worker
         if worker is not None:
             worker.join(timeout=drain_seconds)
@@ -246,26 +252,31 @@ class StepStore:
                 logger.exception("step result callback failed", step=pending.step)
 
     def _save(self, pending: _Pending) -> SavedStep:
-        """Write one step's folder, ``result.json`` last.
+        """Write one step's folder, ``result.json`` last, and put it in place whole.
 
-        A step that cannot be encoded or written still gets its
-        ``result.json``, holding the reason in ``save_error`` and no files, so
-        an admitted step always ends in a complete folder.
+        The folder is written under a hidden name and renamed to the step's
+        number once complete, replacing a folder a reused session id left
+        there, so a reader never sees a ``result.json`` beside files still
+        being written. A step that failed keeps only its ``result.json``,
+        whatever its report carried. A step that cannot be encoded or written
+        still gets its ``result.json``, holding the reason in ``save_error``
+        and no files, so an admitted step always ends in a complete folder.
         """
         assert self._root is not None
-        step_dir = self._root / pending.session_id / str(pending.step)
+        session_dir = self._root / pending.session_id
         with self._layout_lock:
-            step_dir.mkdir(parents=True, exist_ok=True)
+            session_dir.mkdir(parents=True, exist_ok=True)
+            step_dir = Path(tempfile.mkdtemp(prefix=f".{pending.step}.", dir=session_dir))
         completed = pending.completed
         started = time.perf_counter()
         files: list[dict[str, Any]] = []
         save_error: str | None = None
         try:
-            if completed.bundle is not None and completed.bundle.tracks:
+            if completed.error is None and completed.bundle is not None and completed.bundle.tracks:
                 path = step_dir / OUTPUT_FILE
                 write_mp4(path, completed.bundle, completed.fps, self._config)
                 files.append(_file_entry(path))
-            for name, data in completed.files.items():
+            for name, data in completed.files.items() if completed.error is None else ():
                 path = step_dir / name
                 path.write_bytes(data)
                 files.append(_file_entry(path))
@@ -292,11 +303,23 @@ class StepStore:
             },
         }
         _write_atomically(step_dir / RESULT_FILE, json.dumps(result, default=str).encode())
+        self._publish(step_dir, session_dir / str(pending.step))
         return SavedStep(
             session_id=pending.session_id,
             step=pending.step,
             files=tuple(entry["name"] for entry in files),
         )
+
+    def _publish(self, written: Path, final: Path) -> None:
+        """Rename a complete folder to its step's name, replacing one already there."""
+        replaced: Path | None = None
+        with self._layout_lock:
+            if final.exists():
+                replaced = final.with_name(f".{final.name}.replaced-{uuid.uuid4().hex}")
+                final.rename(replaced)
+            written.rename(final)
+        if replaced is not None:
+            shutil.rmtree(replaced, ignore_errors=True)
 
     # -- retention ---------------------------------------------------------------
 
@@ -311,8 +334,8 @@ class StepStore:
     def _reap_expired(self, now: float) -> None:
         """Delete every step folder whose ``result.json`` is older than the retention.
 
-        A folder still being written has no ``result.json`` and is never
-        deleted. A session folder left empty is removed too.
+        A folder still being written has a hidden name until it is complete
+        and is never deleted. A session folder left empty is removed too.
         """
         root = self._root
         if root is None:
@@ -321,6 +344,8 @@ class StepStore:
             if not session_dir.is_dir():
                 continue
             for step_dir in session_dir.iterdir():
+                if step_dir.name.startswith("."):
+                    continue
                 result = step_dir / RESULT_FILE
                 try:
                     written_at = result.stat().st_mtime

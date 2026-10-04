@@ -295,3 +295,86 @@ def test_a_folder_still_being_written_is_never_deleted(
 
     assert unfinished.exists()
     assert not (store.root / _SESSION / "1").exists()
+
+
+def test_a_failed_step_keeps_only_its_result_whatever_its_report_carried(
+    make_store: Callable[..., StepStore], saved: _Saved
+) -> None:
+    store = make_store()
+    step = CompletedStep(
+        bundle=_bundle(), files={"partial.txt": b"half"}, error="RuntimeError: oom"
+    )
+    store.admit(_SESSION, 1, step)
+
+    assert saved.wait_for(1)[0].files == ()
+    assert _folder(store, 1) == {"result.json"}
+    assert _result(store, 1)["error"] == "RuntimeError: oom"
+
+
+def test_a_reused_session_id_never_shows_a_step_while_it_is_rewritten(
+    make_store: Callable[..., StepStore], saved: _Saved, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = make_store()
+    store.admit(_SESSION, 1, CompletedStep(bundle=None, files={"note.txt": b"first session"}))
+    saved.wait_for(1)
+
+    encoding = threading.Event()
+    release = threading.Event()
+    real_write = store_module.write_mp4
+
+    def slow_write(path: Path, *args: Any) -> None:
+        encoding.set()
+        assert release.wait(timeout=10.0)
+        real_write(path, *args)
+
+    monkeypatch.setattr(store_module, "write_mp4", slow_write)
+    # A later session under the same id reaches its own step 1.
+    store.admit(_SESSION, 1, CompletedStep(bundle=_bundle(), files={"note.txt": b"second"}))
+    assert encoding.wait(timeout=10.0)
+
+    assert store.root is not None
+    step_dir = store.root / _SESSION / "1"
+    assert _folder(store, 1) == {"note.txt", "result.json"}
+    assert (step_dir / "note.txt").read_bytes() == b"first session"
+    assert [f["name"] for f in _result(store, 1)["files"]] == ["note.txt"]
+
+    release.set()
+    saved.wait_for(2)
+    assert _folder(store, 1) == {"output.mp4", "note.txt", "result.json"}
+    assert (step_dir / "note.txt").read_bytes() == b"second"
+    assert [path.name for path in (store.root / _SESSION).iterdir()] == ["1"]
+
+
+def test_a_step_admitted_while_the_store_closes_is_still_saved(
+    make_store: Callable[..., StepStore], saved: _Saved, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = make_store()
+    admitting = threading.Event()
+    release = threading.Event()
+    real_start = store._ensure_started
+
+    def paused_start() -> None:
+        admitting.set()
+        assert release.wait(timeout=10.0)
+        real_start()
+
+    monkeypatch.setattr(store, "_ensure_started", paused_start)
+    outcome: list[bool] = []
+    admitter = threading.Thread(
+        target=lambda: outcome.append(store.admit(_SESSION, 1, CompletedStep(bundle=None)))
+    )
+    admitter.start()
+    assert admitting.wait(timeout=10.0)
+    closer = threading.Thread(target=store.close)
+    closer.start()
+    closer.join(timeout=0.2)
+    # close() waits for the admission it raced instead of draining around it.
+    assert closer.is_alive()
+
+    release.set()
+    admitter.join(timeout=10.0)
+    closer.join(timeout=10.0)
+
+    assert outcome == [True]
+    assert [step.step for step in saved.steps] == [1]
+    assert store.admit(_SESSION, 2, CompletedStep(bundle=None)) is False
