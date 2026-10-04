@@ -20,10 +20,11 @@ from typing import Any
 
 
 class InvalidSessionStartError(ValueError):
-    """The ``/start_session`` body has a key of the wrong shape.
+    """The ``/start_session`` body is one the session cannot start from.
 
-    Raised before the session moves, so a rejected body leaves the session as
-    it was. The message names the key and what it must be.
+    A key has the wrong shape, or a starting command fails the model's
+    contract. Raised before the session moves, so a rejected body leaves the session as
+    it was. The message names the key and what is wrong with it.
     """
 
 

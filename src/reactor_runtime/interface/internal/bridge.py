@@ -116,6 +116,27 @@ class ModelBridge:
         self._model.submit_command(command, conn_id, request_id)
         return CommandOutcome.accept()
 
+    def check_command(self, name: str, raw_args: dict[str, Any]) -> CommandOutcome:
+        """Validate a command against the contract without admitting it.
+
+        The same check :meth:`submit_command` runs, for a caller that must know
+        a command is valid before it can send it. Nothing reaches the model.
+        An upload argument passes as an unresolved ``upload_id`` reference.
+
+        Args:
+            name: The command name.
+            raw_args: The raw argument mapping.
+
+        Returns:
+            An accepted outcome when the command is valid, else a rejected one
+            carrying the failing field and reason.
+        """
+        try:
+            self._contract.validate(name, raw_args)
+        except ContractError as error:
+            return CommandOutcome.reject(error.field, error.reason)
+        return CommandOutcome.accept()
+
     # -- inbound: reactor-authoritative, trusted --------------------------
 
     def dispatch_reactor_event(self, event: ReactorEvent) -> None:

@@ -87,6 +87,21 @@ async def test_a_malformed_session_shape_is_400_and_leaves_the_session_ready(
     assert (await harness.client.get("/session")).json()["state"] == "ready"
 
 
+async def test_a_starting_command_the_model_refuses_is_400_and_leaves_the_session_ready(
+    harness: Harness,
+) -> None:
+    response = await harness.client.post(
+        "/start_session",
+        json={"starting_input": {"state": {"color": "#f"}}, "steps": 1},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "starting_input.state.color is refused: set_color: unknown command"
+    )
+    assert (await harness.client.get("/session")).json()["state"] == "ready"
+
+
 async def test_starting_twice_conflicts(harness: Harness) -> None:
     await harness.client.post("/start_session", json={})
 

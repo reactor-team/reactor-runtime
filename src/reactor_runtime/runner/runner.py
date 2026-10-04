@@ -73,7 +73,11 @@ from reactor_runtime.runner import client_stats
 from reactor_runtime.runner.client_stats import ClientStatsGate
 from reactor_runtime.runner.connection_manager import ConnectionManager
 from reactor_runtime.runner.offer_epochs import OfferEpochs
-from reactor_runtime.runner.session_start import SessionStart, parse_session_start
+from reactor_runtime.runner.session_start import (
+    InvalidSessionStartError,
+    SessionStart,
+    parse_session_start,
+)
 from reactor_runtime.runner.state_machine import SessionStateMachine
 from reactor_runtime.runner.upload_resolution import declares_upload, resolve_uploads
 from reactor_runtime.transport.router import (
@@ -730,23 +734,60 @@ class Runner(ServiceComponent, ConnectionSink):
         always :data:`SESSION_ID`.
 
         The body may also carry ``starting_input`` and ``steps`` (see
-        :mod:`reactor_runtime.runner.session_start`). Their
-        shape is checked before the session moves, so a malformed body is
-        rejected without touching the session.
+        :mod:`reactor_runtime.runner.session_start`). Their shape, and each
+        starting command against the model's contract, are checked before the
+        session moves, so a body the model could not apply is rejected without
+        touching the session (see :meth:`_check_starting_input`).
 
         Args:
             params: The initial session parameters supplied by the caller.
 
         Raises:
             InvalidSessionStartError: If a session-shaping key has the wrong
-                shape.
+                shape, or a starting command fails the model's contract.
             SessionTransitionError: If the session is not in a startable state.
         """
-        parse_session_start(params)
+        self._check_starting_input(parse_session_start(params))
         if not self._sm.send(SessionEvent.START_SESSION, params=dict(params)):
             raise SessionTransitionError("start", self._sm.current_state)
         self._offer_epochs.session_started()
         self._model_metrics.session_started()
+
+    def _check_starting_input(self, start: SessionStart) -> None:
+        """Refuse a starting input whose commands the model's contract rejects.
+
+        Each command is checked as a client's would be: it must exist, carry
+        only arguments it declares, and give each one a value of the right
+        type within its constraints. The check reads nothing but the command
+        and the contract, so it runs before the session starts and a session
+        that starts never has a starting command refused for its arguments.
+        An upload argument is checked as a reference only; its bytes arrive
+        after the start and are resolved when the command runs.
+
+        Raises:
+            InvalidSessionStartError: Naming the first refused command, by its
+                key in the body, and why.
+        """
+        starting = start.starting_input
+        if starting is None or self._bridge is None:
+            return
+        # Each state key runs as the set_<key> command its field generates.
+        checks = [
+            (f"starting_input.state.{key}", f"set_{key}", {key: value})
+            for key, value in starting.state.items()
+        ]
+        checks += [
+            (f"starting_input.commands[{index}]", command.command, dict(command.data))
+            for index, command in enumerate(starting.commands)
+        ]
+        for key, name, args in checks:
+            outcome = self._bridge.check_command(name, args)
+            if not outcome.accepted:
+                reason = str(outcome.reason)
+                # A constraint's reason already opens with the field it names.
+                if not reason.startswith(f"{outcome.field}:"):
+                    reason = f"{outcome.field}: {reason}"
+                raise InvalidSessionStartError(f"{key} is refused: {reason}")
 
     def stop_session(self, *, moderated: bool = False, reason: str = "") -> None:
         """Close the active session, leaving the model loaded and ready again.
