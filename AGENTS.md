@@ -39,19 +39,21 @@ them.
 
 ## Examples
 
-`examples/` holds four workspaces, and each shows one shape on purpose.
+`examples/` holds five workspaces, and each shows one shape on purpose.
 `starter` is the smallest complete model: one class that writes `generate()`
 alone, with the runtime's default `process_input()` and `process_output()`.
 It stays that way; a change that adds either hook, or splits it into two
 files, removes the example's reason to exist. `echo` and `waypoint` carry the
 application/model split, and they are where that pattern is taught. Its rules
 live in `skills/application-model-isolation`, which says the split is
-optional and when to make it. `flashdreams-lingbot` is a model served from
-FlashDreams with no Python: `reactor.yaml` names a family class the runtime
-ships, `reactor_runtime.flashdreams.cam2v:Cam2V`, and `config.yml` names the
-model's slug. It stays two YAML files and a requirements file; a change that
-adds a Python module to it belongs in `reactor_runtime.flashdreams` or in a
-subclass the README shows, not in the workspace.
+optional and when to make it. `flashdreams-lingbot` and `flashdreams-sana-wm`
+are models served from FlashDreams with no Python: `reactor.yaml` names a
+family class the runtime ships, `reactor_runtime.flashdreams.cam2v:Cam2V`, and
+`config.yml` names the model's slug. Two of them exist to show that the second
+model is the first with a different slug and model package. Each stays two
+YAML files and a requirements file; a change that adds a Python module to one
+belongs in `reactor_runtime.flashdreams` or in a subclass the README shows,
+not in the workspace.
 
 ## Toolchain
 

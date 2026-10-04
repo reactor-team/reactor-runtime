@@ -1,0 +1,16 @@
+# Read by the cam2v family class at load. The runtime passes this file's path
+# through and does not parse it.
+
+# The FlashDreams application slug. It must belong to the cam2v family.
+application: cam2v-sana-wm-streaming
+
+# Start every session from the adapter's own example data: a first frame and
+# its prompt; the camera intrinsics come from the image's size and the world
+# scale is 1. Five examples ship, numbered 0 to 4. Instead of these two keys,
+# a workspace may name `prompt` (or `prompt_path`), `image_path`, and
+# optionally `intrinsic_path` and `world_scale` itself.
+example_data: true
+example_idx: 0
+
+# Pipeline steps run at load before the first client waits. None are needed.
+warmup_steps: 0
