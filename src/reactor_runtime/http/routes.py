@@ -8,8 +8,9 @@ and connections never surface here.
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Callable
-from typing import Annotated, Any
+import os
+from collections.abc import AsyncGenerator, Callable, Iterator
+from typing import Annotated, Any, BinaryIO
 
 from fastapi import Body, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
@@ -420,22 +421,27 @@ class StepRoutes:
 
         @app.get(
             "/sessions/{session_id}/steps/{step}",
-            response_class=FileResponse,
+            response_class=Response,
             responses={
                 200: {"model": StepResult, "description": "The step's result.json."},
                 404: {"model": ErrorDetail},
             },
         )
-        async def get_step(session_id: str, step: int) -> FileResponse:
+        async def get_step(session_id: str, step: int) -> Response:
             store = runner.step_store
             path = store.result_path(session_id, step) if store is not None else None
-            if path is None:
+            # The folder can age out between the lookup and the read.
+            try:
+                body = path.read_bytes() if path is not None else None
+            except FileNotFoundError:
+                body = None
+            if body is None:
                 raise HTTPException(status_code=404, detail="Step result not found")
-            return FileResponse(path, media_type="application/json")
+            return Response(content=body, media_type="application/json")
 
         @app.get(
             "/sessions/{session_id}/steps/{step}/{name}",
-            response_class=FileResponse,
+            response_class=Response,
             responses={
                 200: {
                     "description": "A file the step's result.json lists.",
@@ -448,13 +454,33 @@ class StepRoutes:
                 404: {"model": ErrorDetail},
             },
         )
-        async def get_step_file(session_id: str, step: int, name: str) -> FileResponse:
+        async def get_step_file(session_id: str, step: int, name: str) -> StreamingResponse:
             store = runner.step_store
             found = store.file_path(session_id, step, name) if store is not None else None
-            if found is None:
+            # Opening the file here, rather than when the response is sent, means
+            # a folder that ages out after the lookup is a 404, and one that ages
+            # out mid-response is still read whole from the open handle.
+            try:
+                handle = found[0].open("rb") if found is not None else None
+            except FileNotFoundError:
+                handle = None
+            if found is None or handle is None:
                 raise HTTPException(status_code=404, detail="Step file not found")
-            path, content_type = found
-            return FileResponse(path, media_type=content_type)
+            size = os.fstat(handle.fileno()).st_size
+            return StreamingResponse(
+                _read_chunks(handle),
+                media_type=found[1],
+                headers={"Content-Length": str(size)},
+            )
+
+
+def _read_chunks(handle: BinaryIO, size: int = 1 << 16) -> Iterator[bytes]:
+    """Yield an open file's bytes in chunks, closing it once read."""
+    try:
+        while chunk := handle.read(size):
+            yield chunk
+    finally:
+        handle.close()
 
 
 class HealthResponse(BaseModel):

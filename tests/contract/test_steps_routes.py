@@ -9,11 +9,13 @@ folders stay readable after the session ends.
 from __future__ import annotations
 
 import io
+import shutil
 from pathlib import Path
 from typing import Any
 
 import av
 import numpy as np
+import pytest
 from contract_helpers import Harness, JournalReader, SteppingState, running_runtime
 
 from reactor_runtime import ReactorApp, StepCompleted, StepOutcome
@@ -132,3 +134,43 @@ async def test_without_step_results_there_are_no_steps_to_read(harness: Harness)
     response = await harness.client.get(f"/sessions/{_SESSION_ID}/steps")
 
     assert response.status_code == 404
+
+
+async def test_a_step_that_ages_out_after_its_lookup_is_404(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with running_runtime(model_cls=SavingModel, cfg=_saving_config()) as harness:
+        await _run_two_saved_steps(harness, tmp_path)
+        store = harness.runner.step_store
+        assert store is not None
+        result_path, file_path = store.result_path, store.file_path
+
+        def reaped_after_lookup(lookup: Any) -> Any:
+            def lookup_then_reap(*args: Any) -> Any:
+                found = lookup(*args)
+                shutil.rmtree(tmp_path / _SESSION_ID / str(args[1]))
+                return found
+
+            return lookup_then_reap
+
+        monkeypatch.setattr(store, "result_path", reaped_after_lookup(result_path))
+        result = await harness.client.get(f"/sessions/{_SESSION_ID}/steps/1")
+        monkeypatch.setattr(store, "result_path", result_path)
+        monkeypatch.setattr(store, "file_path", reaped_after_lookup(file_path))
+        note = await harness.client.get(f"/sessions/{_SESSION_ID}/steps/2/note.txt")
+
+    assert result.status_code == 404
+    assert note.status_code == 404
+
+
+async def test_a_file_reaped_while_it_is_sent_is_still_sent_whole(tmp_path: Path) -> None:
+    async with running_runtime(model_cls=SavingModel, cfg=_saving_config()) as harness:
+        await _run_two_saved_steps(harness, tmp_path)
+        async with harness.client.stream(
+            "GET", f"/sessions/{_SESSION_ID}/steps/1/output.mp4"
+        ) as response:
+            shutil.rmtree(tmp_path / _SESSION_ID / "1")
+            body = await response.aread()
+
+    assert response.status_code == 200
+    assert len(body) == int(response.headers["content-length"])
