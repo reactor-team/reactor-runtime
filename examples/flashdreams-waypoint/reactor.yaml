@@ -1,0 +1,58 @@
+$schema: reactor/v2
+
+# `reactor build` / `reactor run` read this file: `model:` describes the model,
+# `runtime:` names the class to serve and the config file it reads, and
+# `build:` defines the image every build produces. There is no Dockerfile and
+# no Python in this workspace: the class is the runtime's own action2v family,
+# and the model is the FlashDreams application config.yml names.
+model:
+  name: flashdreams-waypoint
+  version: v0.1.0
+  description: |
+    Waypoint 1.5 served through FlashDreams: an explorable world started from
+    an image and steered live with the keyboard and mouse. Four frames per
+    step at 1024x512, played at 60 fps.
+  resources:
+    gpu:
+      count: 1
+
+runtime:
+  # The action2v family class, shipped by the runtime. config.yml names the model.
+  import: reactor_runtime.flashdreams.action2v:Action2V
+  config: config.yml
+  recording:
+    enabled: true
+    chunk_seconds: 4
+    clip_max_seconds: 300
+    video_track: main_video
+    video:
+      codec: h264
+      preset: veryfast
+      crf: 23
+
+build:
+  # The reactor-runtime release the image installs. It must carry
+  # reactor_runtime.flashdreams; pin the first release that ships it.
+  runtime_version: "3.6.0"
+  # FlashDreams builds against CUDA 13 with PyTorch 2.9 or later. The declared
+  # version selects the CUDA base image and the cu130 PyTorch index.
+  cuda_version: "13.0.2"
+  # The FlashDreams packages install from git.
+  system_packages: [git]
+  # flashdreams builds with setuptools>=77, which needs packaging>=24.2. With
+  # cuda_version set, uv reads the PyTorch index first, which carries an older
+  # packaging, and by default takes a package only from the first index that
+  # has it. This lets the build-isolation resolve reach PyPI for the newer one.
+  build_env:
+    UV_INDEX_STRATEGY: unsafe-best-match
+  # The two FlashDreams packages that are not on PyPI's dependency graph of
+  # `flashdreams` core: the action2v family app and the Waypoint model. Both are
+  # installed without their declared dependencies, because flashdreams-action2v
+  # asks for `flashdreams[serving]`, whose aiortc pins av<18 while the runtime
+  # needs av>=18, and the family app never imports that extra. Everything they
+  # do import is installed by requirements.txt. Pin the same commit as there.
+  run:
+    - >-
+      uv pip install --no-deps
+      'flashdreams-action2v @ git+https://github.com/NVIDIA/flashdreams@f40179b2#subdirectory=apps/action2v'
+      'flashdreams-waypoint @ git+https://github.com/NVIDIA/flashdreams@f40179b2#subdirectory=integrations_v2/waypoint'
