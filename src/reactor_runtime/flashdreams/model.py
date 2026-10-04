@@ -9,8 +9,11 @@ commands, or the runtime's loop, and nothing imports
 :class:`~reactor_runtime.distributed.DistributedRunner` unchanged.
 
 A family subclass writes one method, :meth:`FlashDreamsModel.initialize_cache`,
-which starts a rollout from what the step input carries. Everything else on this
-class is the same for every FlashDreams model.
+which starts a rollout from what the step input carries, and overrides
+``_pipeline_input()`` when the pipeline's per-step input is not the step's
+``control`` as the application built it, or ``_run_step()`` when the adapter
+puts a hook of its own between that input and the pipeline. Everything else on
+this class is the same for every FlashDreams model.
 
 FlashDreams and torch are imported inside the methods that need them, so this
 module imports, and its tests run, on a machine without either.
@@ -54,7 +57,8 @@ class FlashDreamsModel:
     starts a new rollout through :meth:`initialize_cache`. It may also carry
     ``prompt``, which a new value in the same rollout swaps in place when the
     model class supports it, and ``control``, which reaches the pipeline as its
-    per-step ``input``.
+    per-step ``input`` unless the model class builds that input itself in
+    ``_pipeline_input()``.
 
     Attributes:
         app: The FlashDreams application the slug resolved to, after ``load()``.
@@ -141,9 +145,10 @@ class FlashDreamsModel:
         :class:`PromptSwapUnsupported`. The step's index is the pipeline's own
         count plus one; at the adapter's ``total_blocks`` the step raises
         :class:`RolloutExhausted` and the rollout is kept, so the application
-        decides what follows. The pipeline's ``generate()`` then ``finalize()``
-        run with the step's ``control`` as the pipeline input; a failure in
-        either drops the half-written cache before it propagates.
+        decides what follows. The step then runs through ``_run_step()`` with
+        ``_pipeline_input()`` as the pipeline input, and the pipeline's
+        ``finalize()`` follows; a failure in either drops the half-written
+        cache before it propagates.
 
         Args:
             step: The step input. Reads ``rollout_id``, and ``prompt`` and
@@ -182,11 +187,7 @@ class FlashDreamsModel:
         if index >= self.max_blocks:
             raise RolloutExhausted(index)
         try:
-            video = self.pipeline.generate(
-                autoregressive_index=index,
-                cache=self.cache,
-                input=getattr(step, "control", None),
-            )
+            video = self._run_step(index, self._pipeline_input(step, index))
             self.pipeline.finalize(autoregressive_index=index, cache=self.cache)
         except Exception:
             self.reset()
@@ -217,6 +218,29 @@ class FlashDreamsModel:
         raise NotImplementedError(
             f"{type(self).__name__} must define initialize_cache(); the generic "
             "FlashDreamsModel does not know what starts a rollout."
+        )
+
+    def _pipeline_input(self, step: Any, index: int) -> Any:
+        """Return the pipeline's per-step input for *step* at *index*.
+
+        The default hands the step's ``control`` to the pipeline as it is, which
+        is what a family whose adapter builds the control type does. A family
+        whose pipeline input is built from the step on the GPU, such as camera
+        poses, overrides this.
+        """
+        return getattr(step, "control", None)
+
+    def _run_step(self, index: int, pipeline_input: Any) -> Any:
+        """Run step *index* with *pipeline_input* and return the pipeline's video.
+
+        The default is the pipeline's own ``generate()``. A family whose
+        adapter declares a hook between the step's input and the pipeline, as
+        the cam2v adapters do with ``generate_step``, overrides this to run
+        the hook, so an adapter that rewrites the input for its model is
+        served the way FlashDreams itself serves it.
+        """
+        return self.pipeline.generate(
+            autoregressive_index=index, cache=self.cache, input=pipeline_input
         )
 
     def _replace_prompt(self, step: Any) -> None:
