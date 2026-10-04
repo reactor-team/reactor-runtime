@@ -1158,15 +1158,19 @@ async def test_the_starting_input_runs_its_state_then_its_commands(
     ]
 
 
-async def test_a_rejected_starting_command_is_journalled_and_the_rest_still_run(
-    started_runner: Runner,
+async def test_a_starting_command_that_fails_when_it_runs_is_journalled_and_the_rest_still_run(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Its arguments pass at the start; only running it shows the upload is missing.
+    async def never_arrives(upload_id: str, **kwargs: Any) -> UploadedFile:
+        raise UnknownUploadError(upload_id)
+
+    monkeypatch.setattr(started_runner._uploads, "fetch", never_arrives)
     started_runner.start_session(
         {
             "starting_input": {
-                "state": {"speed": 3},
                 "commands": [
-                    {"command": "set_mode", "data": {"mode": ""}},
+                    {"command": "set_image", "data": {"image": {"upload_id": "never"}}},
                     {"command": "set_mode", "data": {"mode": "ok"}},
                 ],
             }
@@ -1175,9 +1179,7 @@ async def test_a_rejected_starting_command_is_journalled_and_the_rest_still_run(
     await started_runner._starting_input_done.wait()
 
     errors = [move.detail["message"] for move in _moves(started_runner, SessionEvent.ERROR)]
-    assert len(errors) == 2
-    assert "set_speed" in errors[0]
-    assert "set_mode" in errors[1]
+    assert errors == ["command 'set_image' references an unresolved upload"]
     assert _journalled_commands(started_runner) == [("set_mode", {"mode": "ok"}, SYSTEM_CONN_ID)]
 
 

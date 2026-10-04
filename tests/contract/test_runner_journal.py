@@ -121,15 +121,12 @@ async def test_a_starting_input_is_sent_by_the_system_client(harness: Harness) -
             json={
                 "starting_input": {
                     "state": {"mode": "warm"},
-                    "commands": [
-                        {"command": "set_mode", "data": {"mode": ""}},
-                        {"command": "set_mode", "data": {"mode": "hot"}},
-                    ],
+                    "commands": [{"command": "set_mode", "data": {"mode": "hot"}}],
                 }
             },
         )
         assert response.status_code == 200
-        assert response.json()["starting_input"] == {"applied": 3}
+        assert response.json()["starting_input"] == {"applied": 2}
 
         # With no step count, the system client does not occupy the session:
         # its moves are self-loops and the session waits for a client.
@@ -138,8 +135,6 @@ async def test_a_starting_input_is_sent_by_the_system_client(harness: Harness) -
         assert opened["detail"] == {"conn_id": 0, "system": True}
         first = await journal.expect("command")
         assert first["detail"] == {"name": "set_mode", "args": {"mode": "warm"}, "conn_id": 0}
-        rejected = await journal.expect("error")
-        assert "set_mode" in rejected["detail"]["message"]
         second = await journal.expect("command")
         assert second["detail"] == {"name": "set_mode", "args": {"mode": "hot"}, "conn_id": 0}
         # With no step count, the system client leaves once the list is submitted.

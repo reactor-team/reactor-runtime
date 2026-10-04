@@ -1410,7 +1410,7 @@ class Runner(ServiceComponent, ConnectionSink):
         """Connect the system client and submit the starting input, as the session asks.
 
         Runs once the start has been applied, so ``SessionStarted`` is already
-        posted to the model.         A session with a starting input or a step count
+        posted to the model. A session with a starting input or a step count
         gets the system client next, so the model sees it connect before the
         first starting command arrives. Client commands wait until the list has
         been submitted. Only a start calls this, so a client that joins or
@@ -1446,7 +1446,10 @@ class Runner(ServiceComponent, ConnectionSink):
 
         A starting command is sent by the system client, and is validated, has
         its uploads resolved, and is journalled exactly as a client's command
-        is: a rejected one is journalled as an error and the rest still run.
+        is. Its arguments were checked against the contract when the session
+        started, so what can still fail here is what only running it shows,
+        such as an upload whose bytes never arrive: that command is journalled
+        as an error and the rest still run.
         One that names an upload waits up to the orphan timeout for the bytes,
         because the caller seeds them only after the session has started. The
         list stops when its session ends.
