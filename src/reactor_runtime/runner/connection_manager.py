@@ -32,9 +32,10 @@ replaced rather than edited.
   here: a fan-out can block for seconds inside a connection's pacer waiting for
   queue room, and a lock spanning that wait would hold the event loop out of
   the very disconnect it needs to process.
-* The publisher table and the used-id pool stay ordinary mutable containers.
-  Both are read and written only on the event loop, and nothing iterates them
-  from another thread.
+* The publisher table, the used-id pool, and the set of connections that do not
+  occupy the session stay ordinary mutable containers. They are read and
+  written only on the event loop, and nothing iterates them from another
+  thread.
 """
 
 from __future__ import annotations
@@ -129,6 +130,9 @@ class ConnectionManager:
         # cleared on teardown so ids do not accumulate across sessions and the
         # full range is available again to the next one.
         self._used_conn_ids: set[ConnId] = set()
+        # The registered connections that do not count toward occupancy, so a
+        # drop sends the same kind of close its register sent as an open.
+        self._unoccupying: set[ConnId] = set()
 
     @property
     def count(self) -> int:
@@ -157,7 +161,7 @@ class ConnectionManager:
                 return conn_id
         raise ConnectionsExhaustedError
 
-    def register(self, conn: Connection, *, system: bool = False) -> None:
+    def register(self, conn: Connection, *, system: bool = False, occupies: bool = True) -> None:
         """Add a connection and advance the session for it.
 
         A fresh registration sends a single ``CONNECTION_OPENED``; the state
@@ -172,21 +176,32 @@ class ConnectionManager:
             conn: The connection to add.
             system: Whether this is the runtime's own system client. The
                 ``CONNECTION_OPENED`` then carries ``system=True`` in its detail.
+            occupies: Whether the connection counts toward occupancy. One that
+                does not still receives broadcasts and reaches the model as a
+                client, but its open and its later close are self-loops that
+                leave the session in the state it was in.
         """
         known = conn.id in self._by_id
         self._by_id = {**self._by_id, conn.id: conn}
-        if not known:
-            self._sm.send(SessionEvent.CONNECTION_OPENED, **_connection_detail(conn.id, system))
+        if known:
+            return
+        detail = _connection_detail(conn.id, system)
+        if occupies:
+            self._sm.send(SessionEvent.CONNECTION_OPENED, **detail)
+        else:
+            self._unoccupying.add(conn.id)
+            self._sm.send_without_occupancy(SessionEvent.CONNECTION_OPENED, **detail)
 
     def drop(self, cid: ConnId, *, system: bool = False) -> None:
         """Remove a connection and advance the session for its loss.
 
         Sends a single ``CONNECTION_CLOSED``; the state machine derives occupancy
         from it, carrying the session into orphaned when the last connection
-        leaves and self-looping while others remain. The handle is removed before
-        the event so a listener reading the live count sees this connection gone.
-        Any tracks the connection still held are released. A drop for an id that
-        is not registered is ignored.
+        leaves and self-looping while others remain. A connection registered as
+        not occupying the session closes as a self-loop. The handle is removed
+        before the event so a listener reading the live count sees this
+        connection gone. Any tracks the connection still held are released. A
+        drop for an id that is not registered is ignored.
 
         Args:
             cid: The connection to remove.
@@ -196,7 +211,12 @@ class ConnectionManager:
         if cid not in self._by_id:
             return
         self._by_id = {other: conn for other, conn in self._by_id.items() if other != cid}
-        self._sm.send(SessionEvent.CONNECTION_CLOSED, **_connection_detail(cid, system))
+        detail = _connection_detail(cid, system)
+        if cid in self._unoccupying:
+            self._unoccupying.discard(cid)
+            self._sm.send_without_occupancy(SessionEvent.CONNECTION_CLOSED, **detail)
+        else:
+            self._sm.send(SessionEvent.CONNECTION_CLOSED, **detail)
         held = [name for name, owner in self._publishers.items() if owner == cid]
         for name in held:
             del self._publishers[name]
@@ -218,6 +238,7 @@ class ConnectionManager:
         self._by_id = {}
         self._publishers.clear()
         self._used_conn_ids.clear()
+        self._unoccupying.clear()
         for conn in conns:
             await conn.close()
 

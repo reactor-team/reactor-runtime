@@ -747,7 +747,9 @@ class Runner(ServiceComponent, ConnectionSink):
         session moves, so a body the model could not apply is rejected without
         touching the session (see :meth:`_check_starting_input`). A session that has either one
         connects the system client as it starts (see
-        :mod:`reactor_runtime.runner.system_client`), so it opens streaming.
+        :mod:`reactor_runtime.runner.system_client`). A session with ``steps``
+        then opens streaming; one with only a starting input stays waiting for
+        a client.
 
         Args:
             params: The initial session parameters supplied by the caller.
@@ -1408,17 +1410,26 @@ class Runner(ServiceComponent, ConnectionSink):
         """Connect the system client and submit the starting input, as the session asks.
 
         Runs once the start has been applied, so ``SessionStarted`` is already
-        posted to the model. A session with a starting input or a step count
+        posted to the model.         A session with a starting input or a step count
         gets the system client next, so the model sees it connect before the
         first starting command arrives. Client commands wait until the list has
         been submitted. Only a start calls this, so a client that joins or
         reconnects later does not apply the list again.
+
+        The system client occupies the session only when the session has a step
+        count, because it is then the session's only client and the session
+        must stream until its steps are done. A session without a step count
+        waits for a client: applying its starting input leaves it waiting, and
+        its orphan timer keeps running from the start, as it does for any
+        session that no client has joined yet.
         """
         done = asyncio.Event()
         self._starting_input_done = done
         start = self._session_start
         if start.starting_input is not None or start.steps is not None:
-            self._connections.register(SystemConnection(), system=True)
+            self._connections.register(
+                SystemConnection(), system=True, occupies=start.steps is not None
+            )
         if start.starting_input is None or self._loop is None:
             done.set()
             return

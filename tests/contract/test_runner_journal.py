@@ -131,8 +131,10 @@ async def test_a_starting_input_is_sent_by_the_system_client(harness: Harness) -
         assert response.status_code == 200
         assert response.json()["starting_input"] == {"applied": 3}
 
+        # With no step count, the system client does not occupy the session:
+        # its moves are self-loops and the session waits for a client.
         opened = await journal.expect("connection_opened")
-        assert (opened["from"], opened["to"]) == ("waiting", "streaming")
+        assert (opened["from"], opened["to"]) == ("waiting", "waiting")
         assert opened["detail"] == {"conn_id": 0, "system": True}
         first = await journal.expect("command")
         assert first["detail"] == {"name": "set_mode", "args": {"mode": "warm"}, "conn_id": 0}
@@ -142,8 +144,28 @@ async def test_a_starting_input_is_sent_by_the_system_client(harness: Harness) -
         assert second["detail"] == {"name": "set_mode", "args": {"mode": "hot"}, "conn_id": 0}
         # With no step count, the system client leaves once the list is submitted.
         closed = await journal.expect("connection_closed")
-        assert (closed["from"], closed["to"]) == ("streaming", "orphaned")
+        assert (closed["from"], closed["to"]) == ("waiting", "waiting")
         assert closed["detail"] == {"conn_id": 0, "system": True}
+    finally:
+        await journal.aclose()
+
+
+async def test_with_steps_the_system_client_occupies_the_session(harness: Harness) -> None:
+    journal = JournalReader(harness.runner)
+    try:
+        response = await harness.client.post(
+            "/start_session",
+            json={
+                "starting_input": {"commands": [{"command": "set_mode", "data": {"mode": "hot"}}]},
+                "steps": 5,
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["state"] == "streaming"
+
+        opened = await journal.expect("connection_opened")
+        assert (opened["from"], opened["to"]) == ("waiting", "streaming")
+        assert opened["detail"] == {"conn_id": 0, "system": True}
     finally:
         await journal.aclose()
 

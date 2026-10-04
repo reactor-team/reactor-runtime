@@ -2,8 +2,10 @@
 
 A session started with a starting input or a step count gets one. It is the
 sender of the starting commands, so a handler addresses a real client instead
-of none, and while it is connected the session has an audience: the model
-generates with no other client connected. It takes connection id ``0``, which
+of none. In a session with a step count it occupies the session for its whole
+run, so the model generates with no other client connected and the session
+streams. In a session without one it does not occupy the session: its open and
+close leave the session waiting for a client. It takes connection id ``0``, which
 no transport mints, and carries no media, so the media fan-out skips it and a
 model is never held to a playout rate nobody is watching. Anything sent to it
 is dropped.
@@ -22,7 +24,8 @@ class SystemConnection:
     """A connection with no wire, conforming to :class:`~reactor_runtime.core.Connection`.
 
     Every send is a no-op and it advertises no media, so registering it changes
-    only what the session knows about its occupancy.
+    only the clients the model sees and, in a session with a step count, the
+    session's occupancy.
     """
 
     id = SYSTEM_CONN_ID

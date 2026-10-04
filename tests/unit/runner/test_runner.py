@@ -1326,9 +1326,51 @@ async def test_without_steps_the_system_client_leaves_after_the_starting_input(
         (SessionEvent.CONNECTION_OPENED, _SYSTEM_DETAIL),
         (SessionEvent.CONNECTION_CLOSED, _SYSTEM_DETAIL),
     ]
-    # The session waits for a client of its own, as any live session does.
-    _expect_state(started_runner, SessionState.ORPHANED)
+    # The system client does not occupy a session without steps: its open and
+    # close are self-loops, and the session waits for a client of its own.
+    for connection_event in (SessionEvent.CONNECTION_OPENED, SessionEvent.CONNECTION_CLOSED):
+        (move,) = _moves(started_runner, connection_event)
+        assert (move.from_state, move.to_state) == (SessionState.WAITING, SessionState.WAITING)
+    _expect_state(started_runner, SessionState.WAITING)
     assert started_runner._orphan_task is not None
+
+
+async def test_without_steps_the_orphan_timer_runs_while_the_starting_input_applies(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session(
+        {"starting_input": {"commands": [{"command": "set_mode", "data": {"mode": "a"}}]}}
+    )
+    # The timer armed by the start is the one that still runs: the system
+    # client's open and close leave the session in waiting, so neither re-arms it.
+    armed = started_runner._orphan_task
+    assert armed is not None
+    await started_runner._starting_input_done.wait()
+
+    assert started_runner._orphan_task is armed
+
+
+async def test_without_steps_a_client_that_joins_during_the_starting_input_occupies_the_session(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session(
+        {"starting_input": {"commands": [{"command": "set_mode", "data": {"mode": "a"}}]}}
+    )
+    conn = FakeConnection(1002)
+    started_runner.connection_opened(conn)
+    _expect_state(started_runner, SessionState.STREAMING)
+    await started_runner._starting_input_done.wait()
+
+    # The system client's close is a self-loop, so the client keeps the session
+    # streaming; the client's own close then leaves it orphaned.
+    (closed,) = _moves(started_runner, SessionEvent.CONNECTION_CLOSED)
+    assert closed.detail == _SYSTEM_DETAIL
+    assert (closed.from_state, closed.to_state) == (
+        SessionState.STREAMING,
+        SessionState.STREAMING,
+    )
+    started_runner.connection_closed(conn.id)
+    _expect_state(started_runner, SessionState.ORPHANED)
 
 
 async def test_with_steps_the_system_client_stays_after_the_starting_input(
