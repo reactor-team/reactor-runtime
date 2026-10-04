@@ -11,6 +11,7 @@ and each audio stream plays its samples at the track's own rate.
 from __future__ import annotations
 
 import contextlib
+import heapq
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, cast
@@ -67,10 +68,20 @@ def write_mp4(path: Path, bundle: MediaBundle, fps: float, config: StepResultsCo
         # stream is added before any is encoded.
         video_streams = [_add_video(container, frames, fps, config) for _, frames in videos]
         audio_streams = [_add_audio(container, track, config) for track in audios]
-        for (_, frames), stream in zip(videos, video_streams, strict=True):
-            _encode_video(container, stream, frames)
-        for track, stream in zip(audios, audio_streams, strict=True):
-            _encode_audio(container, stream, track)
+        encoded = [
+            *(
+                _encode_video(stream, frames)
+                for (_, frames), stream in zip(videos, video_streams, strict=True)
+            ),
+            *(
+                _encode_audio(stream, track)
+                for track, stream in zip(audios, audio_streams, strict=True)
+            ),
+        ]
+        # The muxer buffers only a bounded span of one stream while it waits
+        # for the others, so every stream's packets go in by decode time.
+        for packet in heapq.merge(*encoded, key=_decode_time):
+            container.mux(packet)
         container.close()
     except BaseException:
         with contextlib.suppress(Exception):
@@ -112,28 +123,33 @@ def _add_audio(
     return stream
 
 
-def _encode_video(
-    container: av.container.OutputContainer, stream: av.VideoStream, frames: npt.NDArray[Any]
-) -> None:
+def _encode_video(stream: av.VideoStream, frames: npt.NDArray[Any]) -> list[av.Packet]:
+    packets: list[av.Packet] = []
     for index, frame in enumerate(frames):
         picture = av.VideoFrame.from_ndarray(_even(frame), format="rgb24")
         picture.pts = index
         picture.time_base = stream.time_base
-        container.mux(stream.encode(picture))
-    container.mux(stream.encode(None))
+        packets.extend(stream.encode(picture))
+    packets.extend(stream.encode(None))
+    return packets
 
 
-def _encode_audio(
-    container: av.container.OutputContainer, stream: av.AudioStream, track: TrackData
-) -> None:
+def _encode_audio(stream: av.AudioStream, track: TrackData) -> list[av.Packet]:
     rate = stream.rate
     samples = np.ascontiguousarray(track.data, dtype=np.int16).reshape(1, -1)
     block = av.AudioFrame.from_ndarray(samples, format="s16", layout="mono")
     block.rate = rate
     block.pts = 0
     block.time_base = Fraction(1, rate)
-    container.mux(stream.encode(block))
-    container.mux(stream.encode(None))
+    return [*stream.encode(block), *stream.encode(None)]
+
+
+def _decode_time(packet: av.Packet) -> Fraction:
+    """Return when *packet* is decoded, in seconds, so streams can be merged in order."""
+    stamp = packet.dts if packet.dts is not None else packet.pts
+    if stamp is None or packet.time_base is None:
+        return Fraction(0)
+    return stamp * packet.time_base
 
 
 def _video_frames(track: TrackData) -> npt.NDArray[Any]:

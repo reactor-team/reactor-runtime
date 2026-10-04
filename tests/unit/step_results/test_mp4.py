@@ -88,6 +88,21 @@ def test_a_video_and_an_audio_track_become_two_streams(tmp_path: Path) -> None:
     assert 24_000 <= audio["samples"] <= 24_000 + 3 * 1024
 
 
+def test_a_long_video_and_audio_output_is_interleaved(tmp_path: Path) -> None:
+    # Twenty seconds of each: longer than the muxer buffers for one stream
+    # while it waits for the other.
+    path = tmp_path / "output.mp4"
+    frames = np.zeros((600, 48, 64, 3), dtype=np.uint8)
+    samples = np.zeros((1, 48_000 * 20), dtype=np.int16)
+    write_mp4(
+        path, _bundle(_video("main_video", frames), _audio("main_audio", samples)), 30, _CONFIG
+    )
+
+    video, audio = _decoded(path)
+    assert video["frames"] == 600
+    assert 48_000 * 20 <= audio["samples"] <= 48_000 * 20 + 3 * 1024
+
+
 def test_a_video_only_output_has_one_stream(tmp_path: Path) -> None:
     path = tmp_path / "output.mp4"
     write_mp4(path, _bundle(_video("main_video", _frames(3))), 30, _CONFIG)
