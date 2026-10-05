@@ -8,7 +8,11 @@ import pytest
 from reactor_runtime import Audio, MediaInput, ModelMessage, Output, TrackPayload, Video
 from reactor_runtime.core import Command, MediaChunk, SessionStarted
 from reactor_runtime.core.values import ConnId, InputFrame, TrackDirection
-from reactor_runtime.interface.internal.reactor_core import MediaOps, ReactorCore
+from reactor_runtime.interface.internal.reactor_core import (
+    CommandEnvelope,
+    MediaOps,
+    ReactorCore,
+)
 
 
 class Out(Output):
@@ -344,18 +348,22 @@ def test_send_routes_to_the_bound_broadcast_sink() -> None:
     assert sent == [Ping(note="hi")]
 
 
-def test_ingress_lands_on_the_two_typed_queues() -> None:
+def test_ingress_lands_on_one_queue_in_the_order_it_was_posted() -> None:
     core = IdleCore()
     core.start_thread()
     try:
-        time.sleep(0.1)  # let the loop bootstrap its queues
+        time.sleep(0.1)  # let the loop bootstrap its queue
+        started = SessionStarted(session_id="s-1")
+        core.post_reactor_event(started)
         core.submit_command(Go(), ConnId(1), "req-1")
-        core.post_reactor_event(SessionStarted(session_id="s-1"))
         time.sleep(0.1)
-        assert core._command_q is not None
-        assert core._reactor_q is not None
-        assert core._command_q.qsize() == 1
-        assert core._reactor_q.qsize() == 1
+        queue = core._inbound_q
+        assert queue is not None
+        assert queue.qsize() == 2
+        assert queue.get_nowait() == started
+        envelope = queue.get_nowait()
+        assert isinstance(envelope, CommandEnvelope)
+        assert envelope.request_id == "req-1"
     finally:
         core.stop()
         time.sleep(0.1)
