@@ -11,6 +11,7 @@ from reactor_runtime.http.routes import (
     EgressRoutes,
     RecordingRoutes,
     SessionRoutes,
+    StepRoutes,
     UploadRoutes,
 )
 from reactor_runtime.http.server import HttpServer
@@ -20,5 +21,6 @@ __all__ = [
     "HttpServer",
     "RecordingRoutes",
     "SessionRoutes",
+    "StepRoutes",
     "UploadRoutes",
 ]

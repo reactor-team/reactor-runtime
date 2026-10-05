@@ -112,6 +112,8 @@ runtime:
 
 Every track of the step's output becomes its own stream in one `output.mp4`, beside the extra `files` the step carried and a `result.json` that lists them. `queue` bounds how many steps may wait to be saved; a step that finds it full is not saved, so saving never holds the model up. Each step is its own encode, so this suits a model that finishes a step every few seconds rather than every frame.
 
+When step results are on, `GET /sessions/{id}/steps` lists a session's saved folders by the session's own id; each stays readable for five minutes after it is written, after the session ends too.
+
 Scaffold, build, and run it with the CLI:
 
 ```sh
