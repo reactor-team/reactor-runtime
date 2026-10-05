@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 import threading
 import time
 import uuid
@@ -71,6 +72,10 @@ from reactor_runtime.runner.runner import (
     _RUNTIME_STATES,
     SESSION_ID,
     Runner,
+)
+from reactor_runtime.runner.session_start import (
+    InvalidSessionStartError,
+    SessionStart,
 )
 from reactor_runtime.transport.router import (
     SessionControl,
@@ -1016,6 +1021,109 @@ async def test_a_rejected_start_leaves_the_recording_id_untouched(
     with pytest.raises(SessionTransitionError):
         started_runner.start_session({})
     assert started_runner._recording_id == supplied
+
+
+async def test_start_session_adopts_the_session_shape(started_runner: Runner) -> None:
+    started_runner.start_session(
+        {
+            "starting_input": {"commands": [{"command": "set_mode", "data": {"mode": "x"}}]},
+            "steps": 2,
+        }
+    )
+    shape = started_runner._session_start
+    assert shape.steps == 2
+    assert shape.starting_input is not None
+    assert [command.command for command in shape.starting_input.commands] == ["set_mode"]
+
+
+async def test_a_malformed_start_is_rejected_before_the_session_moves(
+    started_runner: Runner,
+) -> None:
+    with pytest.raises(InvalidSessionStartError):
+        started_runner.start_session({"steps": 0})
+    assert started_runner._sm.current_state is SessionState.READY
+    assert _moves(started_runner, SessionEvent.START_SESSION) == []
+
+
+@pytest.mark.parametrize(
+    ("starting_input", "message"),
+    [
+        ({"state": {"mode": ""}}, "starting_input.state.mode is refused: mode: "),
+        (
+            {
+                "commands": [
+                    {"command": "set_mode", "data": {"mode": "ok"}},
+                    {"command": "set_mode", "data": {"mode": ""}},
+                ]
+            },
+            "starting_input.commands[1] is refused: mode: ",
+        ),
+        (
+            {"commands": [{"command": "set_mode", "data": {"mode": "ok", "extra": 1}}]},
+            "starting_input.commands[0] is refused: extra: unexpected argument",
+        ),
+        (
+            {"commands": [{"command": "nope"}]},
+            "starting_input.commands[0] is refused: nope: unknown command",
+        ),
+        (
+            {"state": {"speed": 2}},
+            "starting_input.state.speed is refused: set_speed: unknown command",
+        ),
+        (
+            {"commands": [{"command": "set_image", "data": {"image": "fox.png"}}]},
+            "starting_input.commands[0] is refused: image: ",
+        ),
+    ],
+)
+async def test_a_starting_command_the_contract_refuses_refuses_the_start(
+    started_runner: Runner, starting_input: dict[str, Any], message: str
+) -> None:
+    with pytest.raises(InvalidSessionStartError, match=re.escape(message)):
+        started_runner.start_session({"starting_input": starting_input, "steps": 1})
+
+    assert started_runner._sm.current_state is SessionState.READY
+    assert _moves(started_runner, SessionEvent.START_SESSION) == []
+    assert started_runner._session_start == SessionStart()
+
+
+async def test_a_refused_starting_command_names_its_field_once(started_runner: Runner) -> None:
+    with pytest.raises(InvalidSessionStartError) as refused:
+        started_runner.start_session({"starting_input": {"state": {"mode": ""}}})
+
+    assert str(refused.value).count("mode:") == 1
+
+
+async def test_a_starting_upload_is_checked_as_a_reference_only(started_runner: Runner) -> None:
+    # The bytes arrive after the start, so only the reference's shape is checked.
+    started_runner.start_session(
+        {
+            "starting_input": {
+                "commands": [{"command": "set_image", "data": {"image": {"upload_id": "u-1"}}}]
+            }
+        }
+    )
+
+    assert started_runner._sm.current_state is not SessionState.READY
+
+
+async def test_a_rejected_start_leaves_the_session_shape_untouched(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({"steps": 3})
+    with pytest.raises(SessionTransitionError):
+        started_runner.start_session({"steps": 5})
+    with pytest.raises(InvalidSessionStartError):
+        started_runner.start_session({"steps": 0})
+    assert started_runner._session_start.steps == 3
+
+
+async def test_the_next_session_starts_from_its_own_shape(started_runner: Runner) -> None:
+    started_runner.start_session({"steps": 3})
+    started_runner.stop_session()
+    await started_runner._drain_teardown()
+    started_runner.start_session({})
+    assert started_runner._session_start == SessionStart()
 
 
 def test_start_session_rejects_before_the_model_is_loaded() -> None:

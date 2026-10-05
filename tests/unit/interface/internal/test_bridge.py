@@ -117,6 +117,19 @@ def test_submit_command_rejects_an_unknown_command() -> None:
     assert outcome.field == "nope"
 
 
+def test_check_command_validates_without_admitting(monkeypatch: pytest.MonkeyPatch) -> None:
+    bridge, model = make_bridge()
+    admitted: list[object] = []
+    monkeypatch.setattr(model, "submit_command", lambda *args: admitted.append(args))
+
+    valid = bridge.check_command("set_prompt", {"prompt": "hi"})
+    refused = bridge.check_command("set_prompt", {"prompt": ""})
+
+    assert valid.accepted is True
+    assert (refused.accepted, refused.field) == (False, "prompt")
+    assert admitted == []
+
+
 # --- routing across the three inbound faces ------------------------------
 
 
