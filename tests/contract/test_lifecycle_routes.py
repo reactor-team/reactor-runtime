@@ -17,6 +17,8 @@ from contract_helpers import (
     running_runtime,
 )
 
+_SHAPELESS_ID = "8c0e7a52-0000-4000-8000-000000000001"
+
 
 async def test_start_session_returns_the_descriptor(harness: Harness) -> None:
     response = await harness.client.post("/start_session", json={})
@@ -72,6 +74,14 @@ async def test_a_body_with_the_session_shape_keys_starts_the_session(harness: Ha
             "steps": 1,
         },
     )
+
+    assert response.status_code == 200
+    # The system client connects as the session starts, so it opens streaming.
+    assert response.json()["state"] == "streaming"
+
+
+async def test_a_session_without_the_shape_keys_still_opens_waiting(harness: Harness) -> None:
+    response = await harness.client.post("/start_session", json={"session_id": _SHAPELESS_ID})
 
     assert response.status_code == 200
     assert response.json()["state"] == "waiting"

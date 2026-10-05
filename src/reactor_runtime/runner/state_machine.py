@@ -11,7 +11,10 @@ Session occupancy is derived, not signalled. The connection manager reports only
 the per-connection ``CONNECTION_OPENED`` / ``CONNECTION_CLOSED`` facts; the
 machine counts live connections and moves ``WAITING``/``ORPHANED`` to
 ``STREAMING`` on the first connection and ``STREAMING`` to ``ORPHANED`` on the
-last, while connections in between ride as self-loops. ``CONNECTION_ANSWERED``
+last, while connections in between ride as self-loops. A connection that does
+not occupy the session, such as the system client of a session without a step
+count, opens and closes as a self-loop on the current state and is left out of
+the count, so it never makes the session streaming. ``CONNECTION_ANSWERED``
 self-loops in every state and leaves the count untouched: it records a
 negotiation answer for a connection that has not yet connected, so the answer is
 always journalled regardless of the state the session is in.
@@ -90,6 +93,9 @@ _TRANSITIONS: dict[SessionEvent, dict[SessionState, SessionState]] = {
 # put for a later one. from_state alone decides the open, count-blind.
 _CONNECTABLE = frozenset({SessionState.WAITING, SessionState.ORPHANED, SessionState.STREAMING})
 
+# The per-connection facts the live count is built from.
+_CONNECTION_EVENTS = frozenset({SessionEvent.CONNECTION_OPENED, SessionEvent.CONNECTION_CLOSED})
+
 
 class SessionStateMachine:
     """The session lifecycle as a validated, synchronous machine.
@@ -150,11 +156,42 @@ class SessionStateMachine:
         if target is None:
             return False
         self._update_count(event)
+        self._apply(event, target, detail)
+        return True
+
+    def send_without_occupancy(self, event: SessionEvent, **detail: Any) -> bool:
+        """Apply a connection open or close that does not count toward occupancy.
+
+        The move is a self-loop on the current state, legal wherever a
+        connection can be (``WAITING``, ``STREAMING``, ``ORPHANED``), and it
+        leaves the live count alone, so only the connections that count decide
+        whether the session is streaming. Listeners are notified exactly as for
+        :meth:`send`.
+
+        Args:
+            event: ``CONNECTION_OPENED`` or ``CONNECTION_CLOSED``.
+            **detail: Out-of-band context recorded on the resulting transition.
+
+        Returns:
+            ``True`` if the move was applied, ``False`` if the session is in a
+            state no connection can be in.
+
+        Raises:
+            ValueError: If *event* is not a connection open or close.
+        """
+        if event not in _CONNECTION_EVENTS:
+            raise ValueError(f"{event.name} is not a connection open or close")
+        if self._state not in _CONNECTABLE:
+            return False
+        self._apply(event, self._state, detail)
+        return True
+
+    def _apply(self, event: SessionEvent, target: SessionState, detail: dict[str, Any]) -> None:
+        """Flip to *target* and notify every listener of the recorded move."""
         previous, self._state = self._state, target
         transition = Transition(event, previous, target, detail)
         for listener in self._listeners:
             listener(transition)
-        return True
 
     def _resolve(self, event: SessionEvent) -> SessionState | None:
         """Resolve the target state for ``event``, or ``None`` if it is illegal.

@@ -189,6 +189,40 @@ async def test_return_value_is_dropped_without_an_originating_connection() -> No
     assert addressed == []
 
 
+async def test_a_handler_and_a_hook_can_tell_the_system_client_apart() -> None:
+    seen: list[tuple[str, bool]] = []
+
+    class Watching(ReactorApp):
+        @event(name="touch")
+        async def touch(self, client: ClientInfo) -> None:
+            seen.append(("touch", client.system))
+
+        @connected
+        async def on_connect(self, client: ClientInfo) -> None:
+            seen.append(("connected", client.system))
+
+        async def run(self) -> None:
+            await asyncio.Event().wait()
+
+    model = Watching()
+    model._on_loop_ready()
+    model.bind_output(
+        broadcast=lambda message: None, addressed=lambda *args: None, media=lambda chunk: None
+    )
+    await model._dispatch_reactor_event(ClientConnected(ConnId(0), 1, system=True))
+    await model._dispatch_reactor_event(ClientConnected(ConnId(1002), 2))
+    command = Watching.__reactor_contract__.validate("touch", {})
+    await model._dispatch_command(CommandEnvelope(command, ConnId(0), None))
+    await model._dispatch_command(CommandEnvelope(command, ConnId(1002), None))
+
+    assert seen == [
+        ("connected", True),
+        ("connected", False),
+        ("touch", True),
+        ("touch", False),
+    ]
+
+
 async def test_client_connected_sets_the_event_and_fires_the_hook() -> None:
     model = Model()
     _ready(model)

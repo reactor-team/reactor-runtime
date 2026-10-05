@@ -178,6 +178,64 @@ def test_first_connection_moves_session_to_streaming() -> None:
     assert sm.current_state is SessionState.STREAMING
 
 
+def test_only_the_system_client_is_marked_in_the_journal_detail() -> None:
+    cm, sm = waiting_manager()
+    seen: list[Transition] = []
+    sm.on_transition(seen.append)
+    cm.register(FakeConnection(0), system=True)
+    cm.register(FakeConnection(1002))
+    cm.drop(ConnId(0), system=True)
+    cm.drop(ConnId(1002))
+    assert [(t.event, dict(t.detail)) for t in seen] == [
+        (SessionEvent.CONNECTION_OPENED, {"conn_id": 0, "system": True}),
+        (SessionEvent.CONNECTION_OPENED, {"conn_id": 1002}),
+        (SessionEvent.CONNECTION_CLOSED, {"conn_id": 0, "system": True}),
+        (SessionEvent.CONNECTION_CLOSED, {"conn_id": 1002}),
+    ]
+
+
+def test_a_connection_that_does_not_occupy_leaves_the_session_waiting() -> None:
+    cm, sm = waiting_manager()
+    seen: list[Transition] = []
+    sm.on_transition(seen.append)
+    cm.register(FakeConnection(0), system=True, occupies=False)
+    assert cm.count == 1
+    expect_state(sm, SessionState.WAITING)
+    cm.drop(ConnId(0), system=True)
+    assert cm.count == 0
+    expect_state(sm, SessionState.WAITING)
+    # The drop closes the connection the way it opened: both are self-loops.
+    assert [(t.event, t.from_state, t.to_state) for t in seen] == [
+        (SessionEvent.CONNECTION_OPENED, SessionState.WAITING, SessionState.WAITING),
+        (SessionEvent.CONNECTION_CLOSED, SessionState.WAITING, SessionState.WAITING),
+    ]
+
+
+def test_a_connection_that_does_not_occupy_does_not_hold_the_session_streaming() -> None:
+    cm, sm = waiting_manager()
+    cm.register(FakeConnection(0), system=True, occupies=False)
+    cm.register(FakeConnection(1002))
+    expect_state(sm, SessionState.STREAMING)
+    cm.drop(ConnId(1002))
+    expect_state(sm, SessionState.ORPHANED)
+    cm.drop(ConnId(0), system=True)
+    expect_state(sm, SessionState.ORPHANED)
+
+
+@pytest.mark.asyncio
+async def test_close_all_forgets_which_connections_do_not_occupy() -> None:
+    cm, sm = waiting_manager()
+    cm.register(FakeConnection(0), system=True, occupies=False)
+    await cm.close_all()
+    sm.send(SessionEvent.STOP_SESSION)
+    sm.send(SessionEvent.CLEANUP_COMPLETE)
+    sm.send(SessionEvent.START_SESSION)
+    # In the next session the same id counts again unless it is registered as
+    # not occupying.
+    cm.register(FakeConnection(0), system=True)
+    expect_state(sm, SessionState.STREAMING)
+
+
 def test_additional_connection_does_not_re_enter_streaming() -> None:
     cm, sm = waiting_manager()
     seen: list[Transition] = []

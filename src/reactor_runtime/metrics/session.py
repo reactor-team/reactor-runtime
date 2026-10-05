@@ -140,12 +140,16 @@ class MetricsRecorder:
         now = self._clock()
         event = transition.event
         entered = transition.from_state is not transition.to_state
-        self._fold_connections(event)
+        # The runtime's own system client is not a client: its connection moves
+        # stay out of the connection series and the wait for a first client.
+        system = bool(transition.detail.get("system", False))
+        if not system:
+            self._fold_connections(event)
         if entered:
             self._publish_state(transition.to_state)
         if event is SessionEvent.ERROR:
             self._errors.inc()
-        if event is SessionEvent.CONNECTION_OPENED:
+        if event is SessionEvent.CONNECTION_OPENED and not system:
             self._note_first_client(now)
         if transition.is_session_start:
             self._started_at = now

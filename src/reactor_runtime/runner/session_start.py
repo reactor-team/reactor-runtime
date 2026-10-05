@@ -53,6 +53,20 @@ class StartingInput:
     state: Mapping[str, Any] = field(default_factory=dict)
     commands: tuple[StartingCommand, ...] = ()
 
+    def as_commands(self) -> tuple[StartingCommand, ...]:
+        """Return the commands this input runs, in the order they run.
+
+        Each ``state`` key becomes the ``set_<key>`` command the model's state
+        generates, with ``{key: value}`` as its data, ahead of ``commands``.
+        The ``state`` keys keep the order the body lists them in. That order
+        does not change the result, because each generated setter writes one
+        field; a caller that needs an order sends those as ``commands``.
+        """
+        setters = tuple(
+            StartingCommand(f"set_{key}", {key: value}) for key, value in self.state.items()
+        )
+        return setters + self.commands
+
 
 @dataclass(frozen=True)
 class SessionStart:

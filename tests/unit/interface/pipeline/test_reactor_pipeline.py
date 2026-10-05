@@ -21,6 +21,7 @@ from reactor_runtime.core.model import (
     EndReason,
     SessionEnded,
     SessionStarted,
+    StartingInputApplied,
 )
 from reactor_runtime.core.values import ConnId
 from reactor_runtime.interface.internal.input_buffer import BufferClosed
@@ -477,6 +478,18 @@ async def test_a_started_session_with_a_client_is_runnable() -> None:
     _ready(pipe)
     await pipe._dispatch_reactor_event(SessionStarted("s"))
     await pipe._dispatch_reactor_event(ClientConnected(ConnId(1001), 1))
+    assert pipe._live.is_set()
+
+
+async def test_the_run_gate_waits_for_the_starting_input() -> None:
+    pipe = Pipe()
+    _ready(pipe)
+    await pipe._dispatch_reactor_event(SessionStarted("s", starting_input=True))
+    await pipe._dispatch_reactor_event(ClientConnected(ConnId(1001), 1))
+    assert pipe.connected.is_set()
+    assert not pipe._live.is_set()
+
+    await pipe._dispatch_reactor_event(StartingInputApplied())
     assert pipe._live.is_set()
 
 

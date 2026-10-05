@@ -126,6 +126,55 @@ def test_connection_close_is_illegal_outside_streaming() -> None:
         assert sm.current_state is state
 
 
+@pytest.mark.parametrize(
+    "state", [SessionState.WAITING, SessionState.STREAMING, SessionState.ORPHANED]
+)
+def test_a_connection_that_does_not_occupy_self_loops(state: SessionState) -> None:
+    sm = SessionStateMachine(initial_state=state)
+    seen: list[Transition] = []
+    sm.on_transition(seen.append)
+    assert sm.send_without_occupancy(SessionEvent.CONNECTION_OPENED, conn_id=0) is True
+    assert sm.send_without_occupancy(SessionEvent.CONNECTION_CLOSED, conn_id=0) is True
+    assert [(t.from_state, t.to_state) for t in seen] == [(state, state), (state, state)]
+    assert [dict(t.detail) for t in seen] == [{"conn_id": 0}, {"conn_id": 0}]
+
+
+def test_a_connection_that_does_not_occupy_is_illegal_outside_an_open_session() -> None:
+    for state in (
+        SessionState.CREATED,
+        SessionState.READY,
+        SessionState.CLOSING,
+        SessionState.TERMINATED,
+    ):
+        sm = SessionStateMachine(initial_state=state)
+        seen: list[Transition] = []
+        sm.on_transition(seen.append)
+        assert sm.send_without_occupancy(SessionEvent.CONNECTION_OPENED, conn_id=0) is False
+        assert sm.send_without_occupancy(SessionEvent.CONNECTION_CLOSED, conn_id=0) is False
+        assert sm.current_state is state
+        assert seen == []
+
+
+def test_a_connection_that_does_not_occupy_leaves_the_count_alone() -> None:
+    sm = SessionStateMachine(initial_state=SessionState.WAITING)
+    sm.send_without_occupancy(SessionEvent.CONNECTION_OPENED, conn_id=0)
+    sm.send(SessionEvent.CONNECTION_OPENED, conn_id=1)
+    expect_state(sm, SessionState.STREAMING)
+    # Leaving does not take the counted client with it.
+    sm.send_without_occupancy(SessionEvent.CONNECTION_CLOSED, conn_id=0)
+    expect_state(sm, SessionState.STREAMING)
+    # The counted client is the last one, so its close orphans the session.
+    sm.send(SessionEvent.CONNECTION_CLOSED, conn_id=1)
+    expect_state(sm, SessionState.ORPHANED)
+
+
+def test_only_a_connection_move_can_skip_occupancy() -> None:
+    sm = SessionStateMachine(initial_state=SessionState.READY)
+    with pytest.raises(ValueError, match="START_SESSION"):
+        sm.send_without_occupancy(SessionEvent.START_SESSION)
+    expect_state(sm, SessionState.READY)
+
+
 def test_count_resets_across_a_session_restart() -> None:
     # A stale count from a prior streaming span must not survive into a new one,
     # or the last close of the new session would fail to orphan it.
