@@ -164,10 +164,8 @@ class OutputStream:
         core = self._core
         bundle = core._to_bundle(output)
         n_frames = bundle.frame_count
-        if compute_time is not None and compute_time > 0:
-            fps = n_frames / compute_time
-        else:
-            fps = float(core.fps)
+        fps = core._playout_rate(n_frames, compute_time)
+        core._last_emit_fps = fps
         if core._out_media is not None:
             chunk = MediaChunk(bundle=bundle, fps=fps, n_frames=n_frames, wait=not drop)
             await asyncio.to_thread(core._out_media, chunk)
@@ -246,6 +244,9 @@ class ReactorCore:
         # subclass's dispatcher. A step report carries it, so the runtime can
         # set apart a late report from a session that has ended.
         self._sessions_started = 0
+        # The rate the last emission played at, which a step reported through
+        # complete_step() is saved at.
+        self._last_emit_fps: float | None = None
         self._media_ops: MediaOps | None = None
         self._on_failure: FailureSink | None = None
         self.output = OutputStream(self)
@@ -322,11 +323,18 @@ class ReactorCore:
         """
         self._report_step(step, self._sessions_started)
 
-    def _report_step(self, step: StepCompleted, session: int) -> None:
-        """Hand a step report to the bound sink, stamped with *session*."""
+    def _report_step(self, step: StepCompleted, session: int, fps: float | None = None) -> None:
+        """Hand a step report to the bound sink, stamped with *session* and its playout rate.
+
+        *fps* is the rate the step's media was emitted at. Without it, the
+        report carries the rate of the last emission, or :attr:`fps` before
+        any.
+        """
         if self._out_step is None:
             return
         bundle = self._to_bundle(step.output) if step.output is not None else None
+        if fps is None:
+            fps = self._last_emit_fps if self._last_emit_fps is not None else float(self.fps)
         self._out_step(
             CompletedStep(
                 bundle=bundle,
@@ -334,8 +342,15 @@ class ReactorCore:
                 error=step.error,
                 elapsed=step.elapsed,
                 session=session,
+                fps=fps,
             )
         )
+
+    def _playout_rate(self, n_frames: int, compute_time: float | None) -> float:
+        """Return the rate *n_frames* play at: their measured throughput, else :attr:`fps`."""
+        if compute_time is not None and compute_time > 0:
+            return n_frames / compute_time
+        return float(self.fps)
 
     # -- outbound binding (called once by the bridge) -------------------------
 

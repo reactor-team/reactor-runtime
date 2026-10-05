@@ -7,5 +7,6 @@ lists them.
 """
 
 from reactor_runtime.step_results.mp4 import write_mp4
+from reactor_runtime.step_results.store import SavedStep, StepStore
 
-__all__ = ["write_mp4"]
+__all__ = ["SavedStep", "StepStore", "write_mp4"]

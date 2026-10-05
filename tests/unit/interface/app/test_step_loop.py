@@ -721,6 +721,8 @@ async def test_each_step_is_reported_after_its_media() -> None:
     assert first.error is None
     assert first.files == {}
     assert first.elapsed is not None
+    # The model pins no rate, so its frames play at their measured throughput.
+    assert first.fps == pytest.approx(1 / first.elapsed)
 
 
 async def test_a_refused_step_is_not_reported() -> None:
@@ -857,6 +859,32 @@ async def test_a_hand_written_run_reports_its_own_steps() -> None:
     assert steps[0].files == {"last_frame.png": b"png"}
     assert steps[0].elapsed == 1.5
     assert steps[1].bundle is None
+
+
+async def test_a_step_from_a_model_that_pins_its_rate_reports_that_rate() -> None:
+    class Pinned(OnlyGenerate):
+        fps = 12
+
+    app = Pinned()
+    steps = _ready_reporting(app)
+    await _go_live(app)
+    task = await _run_for(app)
+    await _stop(task)
+
+    assert steps[0].fps == 12
+
+
+async def test_a_step_reported_by_hand_carries_the_rate_of_the_last_emission() -> None:
+    class EmitsThenReports(OnlyGenerate):
+        async def run(self) -> None:
+            await self.output.emit(_frame(), compute_time=0.5)
+            await self.complete_step(StepCompleted(output=_frame()))
+
+    app = EmitsThenReports()
+    steps = _ready_reporting(app)
+    await app.run()
+
+    assert steps[0].fps == pytest.approx(2.0)
 
 
 async def test_complete_step_without_a_sink_does_nothing() -> None:

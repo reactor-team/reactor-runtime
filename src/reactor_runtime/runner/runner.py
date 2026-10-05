@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import asyncio
 import importlib.metadata
+import threading
 import time
 import uuid
+from collections import deque
 from collections.abc import Callable, Coroutine, Mapping
 from typing import Any, Protocol
 
@@ -84,6 +86,7 @@ from reactor_runtime.runner.session_start import (
 from reactor_runtime.runner.state_machine import SessionStateMachine
 from reactor_runtime.runner.system_client import SYSTEM_CONN_ID, SystemConnection
 from reactor_runtime.runner.upload_resolution import declares_upload, resolve_uploads
+from reactor_runtime.step_results import SavedStep, StepStore
 from reactor_runtime.transport.router import (
     SessionNotRunningError,
     SessionTransitionError,
@@ -166,6 +169,10 @@ _DRAIN_CLOSE_REASON = "Session ended: the server is shutting down."
 # The close reason a session that reached its steps sends to clients, which the
 # runtime words for the same reason as the drain's.
 _STEPS_CLOSE_REASON = "Session ended: the requested steps are complete."
+# The most broadcast messages one saved step's result.json keeps, the latest
+# ones. A model that broadcasts without reporting steps would otherwise grow
+# the buffer for as long as its session runs.
+_STEP_MESSAGES_LIMIT = 256
 
 logger = get_logger(__name__)
 
@@ -241,6 +248,16 @@ class Runner(ServiceComponent, ConnectionSink):
             on_clip_ready=self._on_clip_ready,
             on_chunk_ready=self._on_chunk_ready,
         )
+        # Saves each reported step as a folder when the manifest turns step
+        # results on, and is None otherwise, so nothing is captured or written.
+        self._step_store = (
+            StepStore(cfg.step_results, self._on_step_saved) if cfg.step_results.enabled else None
+        )
+        # The messages the model broadcast since its last step report, kept for
+        # the next saved step's result.json. The model thread appends and takes
+        # them; the lock orders that against the reset at a session start.
+        self._step_messages: deque[dict[str, Any]] = deque(maxlen=_STEP_MESSAGES_LIMIT)
+        self._step_messages_lock = threading.Lock()
         self._connections = ConnectionManager(state_machine=self._sm)
         self._offer_epochs = OfferEpochs()
         # Playout settings the model set through its output handle, remembered
@@ -399,6 +416,8 @@ class Runner(ServiceComponent, ConnectionSink):
         self._cancel_orphan_timeout()
         await self._drain_teardown()
         await asyncio.to_thread(self._recorder.close)
+        if self._step_store is not None:
+            await asyncio.to_thread(self._step_store.close)
         if self._bridge is not None:
             await self._bridge.stop()
 
@@ -710,17 +729,30 @@ class Runner(ServiceComponent, ConnectionSink):
         on the runtime loop, where the state machine and the journal are
         single-writer. A step reported before a crash hops before the crash
         does, so its fact is journalled first.
+
+        The messages the model broadcast since its last report are taken here,
+        on the model's thread, so they belong to this step and not the next.
         """
+        messages: tuple[dict[str, Any], ...] = ()
+        if self._step_store is not None:
+            with self._step_messages_lock:
+                # A late report from an earlier session is dropped on the loop,
+                # so it must not take the messages the current session sent.
+                if step.session == self._sessions_posted:
+                    messages = tuple(self._step_messages)
+                    self._step_messages.clear()
         loop = self._loop
         if loop is not None:
-            loop.call_soon_threadsafe(self._record_step, step)
+            loop.call_soon_threadsafe(self._record_step, step, messages)
 
-    def _record_step(self, step: CompletedStep) -> None:
+    def _record_step(self, step: CompletedStep, messages: tuple[dict[str, Any], ...] = ()) -> None:
         """Number a reported step, journal it, and close a session that reached its steps.
 
         The detail of the ``step_completed`` fact carries the step's number
         within the session, whether a step result follows for it, and its
-        error. Saving is off, so no step result follows.
+        error. When step results are on, the step is offered to the store,
+        with *messages* for its ``result.json``; ``saved`` is whether the
+        store took it, so ``saved: true`` always means a folder follows.
 
         The step that brings a running session to its ``steps`` stops it, with
         a close reason the clients are told. A model keeps stepping until the
@@ -739,10 +771,13 @@ class Runner(ServiceComponent, ConnectionSink):
             )
             return
         self._steps_completed += 1
+        saved = self._step_store is not None and self._step_store.admit(
+            self._recording_id, self._steps_completed, step, messages
+        )
         self._sm.send(
             SessionEvent.STEP_COMPLETED,
             step=self._steps_completed,
-            saved=False,
+            saved=saved,
             error=step.error,
         )
         limit = self._session_start.steps
@@ -757,6 +792,29 @@ class Runner(ServiceComponent, ConnectionSink):
                 reason=EndReason.STOPPED,
                 close_reason=_STEPS_CLOSE_REASON,
             )
+
+    def _on_step_saved(self, saved: SavedStep) -> None:
+        """Journal a step whose folder is complete, hopping onto the loop.
+
+        The store fires this from its own writer thread, so the emit is
+        scheduled on the runtime loop where the egress journal is single-writer.
+        """
+        loop = self._loop
+        if loop is not None:
+            loop.call_soon_threadsafe(self._emit_step_saved, saved)
+
+    def _emit_step_saved(self, saved: SavedStep) -> None:
+        """Journal a step-result-ready fact as a self-loop move on the session machine.
+
+        The detail names the session, because a folder can finish after its
+        session has ended.
+        """
+        self._sm.send(
+            SessionEvent.STEP_RESULT_READY,
+            session_id=saved.session_id,
+            step=saved.step,
+            files=list(saved.files),
+        )
 
     def _on_model_failure(self, error: BaseException) -> None:
         """End the session for a model that crashed, hopping onto the loop.
@@ -972,6 +1030,11 @@ class Runner(ServiceComponent, ConnectionSink):
         """The recorder the HTTP clip routes read and the runner drives."""
         return self._recorder
 
+    @property
+    def step_store(self) -> StepStore | None:
+        """The store saved steps are kept in, or ``None`` when step results are off."""
+        return self._step_store
+
     def descriptor(self) -> dict[str, Any]:
         """Describe the session in the shape the client validates against.
 
@@ -998,6 +1061,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 "enabled": self._cfg.recording.enabled,
                 "chunk_seconds": self._cfg.recording.chunk_seconds,
             },
+            "step_results": {"enabled": self._cfg.step_results.enabled},
         }
         starting = self._session_start.starting_input
         if starting is not None and self._sm.current_state in _RUNNING_STATES:
@@ -1258,8 +1322,17 @@ class Runner(ServiceComponent, ConnectionSink):
         self._connections.set_media_depth(depth)
 
     def _broadcast_message(self, message: ModelMessage) -> None:
-        """Broadcast a model message, encoded for each connection's codec."""
-        data = message.to_wire_format()["data"]
+        """Broadcast a model message, encoded for each connection's codec.
+
+        When step results are on, the message is also kept for the next saved
+        step's ``result.json``. The model broadcasts and reports steps from its
+        own thread, so a message lands with the step it was sent before.
+        """
+        wire = message.to_wire_format()
+        data = wire["data"]
+        if self._step_store is not None:
+            with self._step_messages_lock:
+                self._step_messages.append(wire)
         self._connections.broadcast(
             lambda version: self._codec_for(version).encode_model_message(message.name, data)[1]
         )
@@ -1427,6 +1500,8 @@ class Runner(ServiceComponent, ConnectionSink):
             self._recording_id = _recording_id_from(params)
             self._session_start = parse_session_start(params)
             self._log_binding = set_session_id(self._recording_id)
+            with self._step_messages_lock:
+                self._step_messages.clear()
         if transition.from_state is not transition.to_state:
             _stamp_log_state(transition.to_state)
         log = logger.debug if transition.event in JOURNAL_EVENTS else logger.info
