@@ -423,6 +423,27 @@ class MediaChunk:
 
 
 @dataclass(frozen=True)
+class CompletedStep:
+    """One finished step, as the model reports it to the runtime.
+
+    The neutral form of a model's step report: the media as a bundle rather
+    than the model's own output class, and the extra files as bytes, so the
+    runtime can count, journal, and save the step without touching model code.
+
+    Attributes:
+        bundle: The media the step produced, or ``None`` when it produced none.
+        files: Extra files the model keeps with the step, keyed by file name.
+        error: Why the step failed, or ``None`` when it worked.
+        elapsed: Wall-clock seconds the step took, when measured.
+    """
+
+    bundle: MediaBundle | None
+    files: Mapping[str, bytes] = field(default_factory=dict)
+    error: str | None = None
+    elapsed: float | None = None
+
+
+@dataclass(frozen=True)
 class ConnectionCapabilities:
     """What media a connection's wire can carry.
 
