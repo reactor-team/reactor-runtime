@@ -61,8 +61,9 @@ class FakePeer:
             raise RuntimeError("transient stats failure")
         return self._stats
 
-    async def close(self) -> None:
+    async def close(self, *, drain: bool = True) -> None:
         self.closed = True
+        self.closed_with_drain = drain
 
     def on_message(self, callback: Callable[[bytes | str, ProtocolVersion, Channel], None]) -> None:
         self._on_message = callback
