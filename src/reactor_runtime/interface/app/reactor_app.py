@@ -306,6 +306,9 @@ class ReactorApp(ReactorCore):
                     # hook, or the session boundary's write to self.state from
                     # landing in one of those gaps.
                     async with self._step_lock:
+                        # The step belongs to the session it began in, even if
+                        # that session ends while it emits.
+                        session = self._sessions_started
                         # 2. The application gate.
                         try:
                             input = await self.process_input()
@@ -350,7 +353,7 @@ class ReactorApp(ReactorCore):
                         if report.output is not None:
                             pace = None if fps_pinned else outcome.elapsed
                             await self.emit(report.output, compute_time=pace)
-                        await self.complete_step(report)
+                        self._report_step(report, session)
 
                     # A refused turn waits a little before asking again; a
                     # productive turn yields once so handler tasks already
@@ -501,6 +504,7 @@ class ReactorApp(ReactorCore):
             await self._invoke_hook(hooks.disconnected, event.conn_id)
             self._clients.pop(event.conn_id, None)
         elif isinstance(event, SessionStarted):
+            self._sessions_started += 1
             self._session_active = True
             self._starting_input_pending = event.starting_input
             self._update_live()
