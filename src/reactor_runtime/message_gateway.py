@@ -40,8 +40,8 @@ class InboundCommand:
             validation or coercion has been applied.
         uploads: Argument name to the ``upload_id`` it references, still
             unresolved. The handler fetches the bytes for these.
-        conn_id: The connection the command arrived on, or ``None`` for a
-            command the runtime submits itself, such as a starting command.
+        conn_id: The connection the command arrived on. A starting command
+            arrives on the system client's, connection id 0.
         request_id: The correlation id, guaranteed present — carried from the
             client when supplied, minted here when absent, and minted by the
             runner for a command it submits itself.
@@ -53,7 +53,7 @@ class InboundCommand:
     name: str
     args: Mapping[str, Any]
     uploads: Mapping[str, str]
-    conn_id: ConnId | None
+    conn_id: ConnId
     request_id: str
     received_at: float
 
