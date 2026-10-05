@@ -99,6 +99,19 @@ Command handlers and lifecycle hooks run between steps, never during one. A mode
 
 A session can start with its setup already in hand: `POST /start_session` takes a `starting_input` of state values and commands, which the runtime applies on the normal command path before any client connects. A system client sends them, a connection the runtime opens itself, so a handler that takes `client` gets a `ClientInfo` whose `system` is true. The step loop takes its first step only once every starting command has landed, uploads included, so no step runs on the defaults the starting input replaces. In a live session the system client then leaves and the loop waits for a viewer, as it always does; a model with its own `run()` sees the system client connect like any client. A live session stays `waiting` while its starting input applies, because the system client does not occupy it, and `/events` journals the system client's `connection_opened` and `connection_closed` as `waiting -> waiting`. A session with `steps` is occupied by the system client until it ends, so it streams with no other client. The runtime ends it itself once the model has reported that many steps, with a normal stop whose close reason is "Session ended: the requested steps are complete."
 
+A model can keep each step it reports as a folder of files, turned on in `reactor.yaml`:
+
+```yaml
+runtime:
+  step_results:
+    enabled: true
+    video: {codec: h264, preset: veryfast, crf: 23}   # or codec: h265
+    audio: {codec: aac, bitrate_kbps: 128}
+    queue: 8
+```
+
+Every track of the step's output becomes its own stream in one `output.mp4`, beside the extra `files` the step carried and a `result.json` that lists them. `queue` bounds how many steps may wait to be saved; a step that finds it full is not saved, so saving never holds the model up. Each step is its own encode, so this suits a model that finishes a step every few seconds rather than every frame.
+
 Scaffold, build, and run it with the CLI:
 
 ```sh

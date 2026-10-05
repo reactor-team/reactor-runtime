@@ -2,8 +2,10 @@
 
 The ``reactor.yaml`` manifest is the runtime's one configuration file:
 ``runtime.import`` names the model as a ``"module:Class"`` reference,
-``runtime.config`` points at the model's own config file, and the
-``runtime.recording`` block configures the recorder. This module turns that file into
+``runtime.config`` points at the model's own config file, the
+``runtime.recording`` block configures the recorder, and the
+``runtime.step_results`` block says how each finished step is saved. This
+module turns that file into
 a :class:`~reactor_runtime.core.RuntimeConfig` and the reference into the model
 class — and it is the only code that does either, so every entry point resolves
 the same model from the same directory.
@@ -21,7 +23,7 @@ from typing import Any
 
 import yaml
 
-from reactor_runtime.core import RecordingConfig, RuntimeConfig
+from reactor_runtime.core import RecordingConfig, RuntimeConfig, StepResultsConfig
 from reactor_runtime.interface.internal.reactor_core import ReactorCore
 
 MANIFEST = "reactor.yaml"
@@ -32,8 +34,9 @@ def load_config(manifest: Path) -> RuntimeConfig:
 
     ``runtime.import`` — the ``"module:Class"`` model reference — and
     ``runtime.config`` — the path to the model's own config file — name the
-    model, ``model.name`` is the name it is published under, and the
-    ``runtime.recording`` block configures the recorder; the rest of the manifest
+    model, ``model.name`` is the name it is published under, the
+    ``runtime.recording`` block configures the recorder, and the
+    ``runtime.step_results`` block configures step results; the rest of the manifest
     describes the model to the platform and is not the runtime's concern. The
     config path is passed to the model verbatim (resolved to an absolute path);
     the runtime never parses its contents.
@@ -43,8 +46,8 @@ def load_config(manifest: Path) -> RuntimeConfig:
 
     Returns:
         A configuration naming the model the manifest points at, the name it
-        publishes under, the path to its config file when present, and the
-        recorder's settings.
+        publishes under, the path to its config file when present, the
+        recorder's settings, and the step-results settings.
 
     Raises:
         SystemExit: If the manifest is not valid YAML, is not a mapping, or
@@ -66,6 +69,7 @@ def load_config(manifest: Path) -> RuntimeConfig:
         model_name=_model_name(document.get("model")),
         config_path=_resolve_config_path(runtime, manifest),
         recording=_recording_from_manifest(runtime, document),
+        step_results=_step_results_from_manifest(runtime),
     )
 
 
@@ -150,6 +154,46 @@ def _recording_from_manifest(runtime: dict[str, Any], document: dict[str, Any]) 
         target_height=_optional_int(video.get("target_height")),
         audio_codec=str(audio.get("codec", defaults.audio_codec)),
         audio_bitrate_kbps=int(audio.get("bitrate_kbps", defaults.audio_bitrate_kbps)),
+    )
+
+
+def _step_results_from_manifest(runtime: dict[str, Any]) -> StepResultsConfig:
+    """Parse the manifest's ``runtime.step_results`` block into a :class:`StepResultsConfig`.
+
+    A missing or non-mapping block leaves step results disabled at their
+    defaults, and so does a non-mapping ``video`` or ``audio`` sub-block for
+    its own settings. Unknown keys are ignored so a manifest can carry
+    forward-looking settings without breaking an older runtime. The block names
+    no tracks: every track of a step's output is kept as its own stream.
+
+    Args:
+        runtime: The manifest's ``runtime`` section.
+
+    Returns:
+        The parsed step-results configuration.
+
+    Raises:
+        ValueError: ``queue`` is below 1.
+    """
+    block = runtime.get("step_results")
+    if not isinstance(block, dict):
+        return StepResultsConfig()
+    raw_video = block.get("video")
+    video: dict[str, Any] = raw_video if isinstance(raw_video, dict) else {}
+    raw_audio = block.get("audio")
+    audio: dict[str, Any] = raw_audio if isinstance(raw_audio, dict) else {}
+    defaults = StepResultsConfig()
+    queue = int(block.get("queue", defaults.queue))
+    if queue < 1:
+        raise ValueError(f"runtime.step_results.queue must be at least 1, got {queue}")
+    return StepResultsConfig(
+        enabled=bool(block.get("enabled", defaults.enabled)),
+        video_codec=str(video.get("codec", defaults.video_codec)),
+        video_preset=str(video.get("preset", defaults.video_preset)),
+        video_crf=int(video.get("crf", defaults.video_crf)),
+        audio_codec=str(audio.get("codec", defaults.audio_codec)),
+        audio_bitrate_kbps=int(audio.get("bitrate_kbps", defaults.audio_bitrate_kbps)),
+        queue=queue,
     )
 
 
