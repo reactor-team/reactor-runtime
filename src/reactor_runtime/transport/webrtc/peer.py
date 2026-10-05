@@ -369,6 +369,9 @@ class WebRTCPeer:
         self._pc: rw.PeerConnection | None = None
         self._data_channel: rw.DataChannel | None = None
         self._control_channel: rw.DataChannel | None = None
+        # (channel label, refusal) pairs already warned about: a model that
+        # oversends on every step would otherwise log a warning per frame.
+        self._refusals_warned: set[tuple[str, type[Exception]]] = set()
 
         # OUT tracks (model to client) by track name, attached before the answer.
         self._out_tracks: dict[str, rw.Track] = {}
@@ -1032,11 +1035,23 @@ class WebRTCPeer:
     def _send_on(self, channel: rw.DataChannel | None, payload: bytes | str) -> None:
         if self._stop_event.is_set() or channel is None:
             return
+        binary = not isinstance(payload, str)
+        data = payload if isinstance(payload, bytes) else payload.encode("utf-8")
         try:
-            if isinstance(payload, str):
-                channel.send(payload.encode("utf-8"), binary=False)
-            else:
-                channel.send(payload, binary=True)
+            channel.send(data, binary=binary)
+        except (rw.DataChannelMessageTooLarge, rw.DataChannelQueueFull) as exc:
+            # Refused whole, with the channel left open: larger than the
+            # client accepts, or more than the channel may queue. The frame is
+            # lost, which is the sender's problem to see, unlike a send that
+            # races teardown. Warned once per channel and kind of refusal;
+            # repeats go to debug.
+            label = channel.label()
+            key = (label, type(exc))
+            level = logging.DEBUG if key in self._refusals_warned else logging.WARNING
+            self._refusals_warned.add(key)
+            logger.log(
+                level, "data-channel send refused: %d bytes on %s: %s", len(data), label, exc
+            )
         except Exception:
             logger.debug("data-channel send failed", exc_info=True)
 
