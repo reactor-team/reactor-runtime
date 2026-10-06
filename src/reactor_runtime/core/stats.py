@@ -83,12 +83,6 @@ class TrackStat:
 
     name: str
     direction: TrackDirection
-    kind: TrackKind | None = None
-    codec: str | None = None
-    frames_per_second: float | None = None
-    frame_width: int | None = None
-    frame_height: int | None = None
-    target_bitrate_bps: float | None = None
     packets_sent: int | None = None
     packets_received: int | None = None
     packets_lost: int | None = None
@@ -103,6 +97,12 @@ class TrackStat:
     jitter: float | None = None
     rtt_seconds: float | None = None
     loss_ratio: float | None = None
+    kind: TrackKind | None = None
+    codec: str | None = None
+    frames_per_second: float | None = None
+    frame_width: int | None = None
+    frame_height: int | None = None
+    target_bitrate_bps: float | None = None
 
 
 @dataclass(frozen=True)
