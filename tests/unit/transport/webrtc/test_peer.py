@@ -1298,6 +1298,12 @@ def test_stats_from_report_maps_tracks_and_rtt() -> None:
     report: Any = SimpleNamespace(
         outbound_rtp=[
             SimpleNamespace(
+                mid="0",
+                codec_mime_type="video/VP9",
+                target_bitrate_bps=1_500_000.0,
+                frames_per_second=29.5,
+                frame_width=1280,
+                frame_height=720,
                 packets_sent=417,
                 packets_lost=5,
                 retransmitted_packets_sent=9,
@@ -1312,6 +1318,11 @@ def test_stats_from_report_maps_tracks_and_rtt() -> None:
         ],
         inbound_rtp=[
             SimpleNamespace(
+                mid="1",
+                codec_mime_type="video/VP8",
+                frames_per_second=24.0,
+                frame_width=640,
+                frame_height=360,
                 packets_received=200,
                 packets_lost=3,
                 bytes_received=48_000,
@@ -1363,6 +1374,129 @@ def test_stats_from_report_maps_tracks_and_rtt() -> None:
     assert inbound.nacks == 7
     assert inbound.keyframe_requests == 4
     assert inbound.jitter == 0.02
+    assert (out.kind, out.codec, out.target_bitrate_bps) == (
+        TrackKind.VIDEO,
+        "video/VP9",
+        1_500_000.0,
+    )
+    assert (out.frames_per_second, out.frame_width, out.frame_height) == (29.5, 1280, 720)
+    assert (inbound.kind, inbound.codec) == (TrackKind.VIDEO, "video/VP8")
+    assert (inbound.frames_per_second, inbound.frame_width, inbound.frame_height) == (
+        24.0,
+        640,
+        360,
+    )
+
+
+def _rtp(mid: str | None, **counts: Any) -> SimpleNamespace:
+    """An RTP stream sample with every field the mapping reads, zeroed unless given."""
+    fields: dict[str, Any] = {
+        "mid": mid,
+        "codec_mime_type": None,
+        "target_bitrate_bps": 0.0,
+        "frames_per_second": 0.0,
+        "frame_width": 0,
+        "frame_height": 0,
+        "packets_sent": 0,
+        "packets_received": 0,
+        "packets_lost": 0,
+        "retransmitted_packets_sent": 0,
+        "bytes_sent": 0,
+        "bytes_received": 0,
+        "frames_sent": 0,
+        "frames_decoded": 0,
+        "frames_dropped": 0,
+        "round_trip_time_s": 0.0,
+        "fraction_lost": 0.0,
+        "nack_count": 0,
+        "pli_count": 0,
+        "fir_count": 0,
+        "jitter_s": 0.0,
+    }
+    fields.update(counts)
+    return SimpleNamespace(**fields)
+
+
+def test_stats_from_report_matches_streams_to_tracks_by_mid() -> None:
+    # Two tracks per direction, with libwebrtc listing the streams in a
+    # different order from the track map: each stream still lands on the
+    # track its transceiver carries.
+    peer = WebRTCPeer()
+    peer._track_map = TrackMap(
+        tracks=(
+            MappedTrack(
+                mid="0",
+                info=TrackInfo(
+                    name="main_video", kind=TrackKind.VIDEO, direction=TrackDirection.OUT
+                ),
+            ),
+            MappedTrack(
+                mid="1",
+                info=TrackInfo(
+                    name="main_audio", kind=TrackKind.AUDIO, direction=TrackDirection.OUT
+                ),
+            ),
+            MappedTrack(
+                mid="2",
+                info=TrackInfo(name="webcam", kind=TrackKind.VIDEO, direction=TrackDirection.IN),
+            ),
+            MappedTrack(
+                mid="3",
+                info=TrackInfo(name="mic", kind=TrackKind.AUDIO, direction=TrackDirection.IN),
+            ),
+        )
+    )
+    report: Any = SimpleNamespace(
+        outbound_rtp=[
+            _rtp("1", codec_mime_type="audio/opus", packets_sent=50, frames_per_second=0.0),
+            _rtp("0", codec_mime_type="video/VP9", packets_sent=400, frames_per_second=30.0),
+        ],
+        inbound_rtp=[
+            _rtp("3", codec_mime_type="audio/opus", packets_received=60),
+            _rtp("2", codec_mime_type="video/VP8", packets_received=300, frame_width=640),
+        ],
+        candidate_pairs=[],
+    )
+
+    by_name = {t.name: t for t in peer._stats_from_report(report).tracks}
+
+    assert by_name["main_video"].packets_sent == 400
+    assert by_name["main_video"].codec == "video/VP9"
+    assert by_name["main_video"].frames_per_second == 30.0
+    assert by_name["main_audio"].packets_sent == 50
+    assert by_name["main_audio"].codec == "audio/opus"
+    assert by_name["webcam"].packets_received == 300
+    assert by_name["webcam"].frame_width == 640
+    assert by_name["mic"].packets_received == 60
+    # An audio track has no frames, so the video-only fields stay unset rather
+    # than reading as a zero-sized, zero-rate picture.
+    assert by_name["main_audio"].frames_per_second is None
+    assert by_name["mic"].frame_width is None
+    assert by_name["mic"].kind is TrackKind.AUDIO
+
+
+def test_stats_from_report_skips_streams_without_a_mapped_track() -> None:
+    # A stream with no mid yet, one on a transceiver no track was declared
+    # on, and one whose mid names a track of the other direction all have no
+    # track to report under.
+    peer = WebRTCPeer()
+    peer._track_map = TrackMap(
+        tracks=(
+            MappedTrack(
+                mid="0",
+                info=TrackInfo(
+                    name="main_video", kind=TrackKind.VIDEO, direction=TrackDirection.OUT
+                ),
+            ),
+        )
+    )
+    report: Any = SimpleNamespace(
+        outbound_rtp=[_rtp(None, packets_sent=1), _rtp("9", packets_sent=2)],
+        inbound_rtp=[_rtp("0", packets_received=3)],
+        candidate_pairs=[],
+    )
+
+    assert peer._stats_from_report(report).tracks == ()
 
 
 def test_stats_from_report_reads_only_the_nominated_pair() -> None:
@@ -1407,6 +1541,11 @@ def test_stats_from_report_ignores_negative_packet_loss() -> None:
         outbound_rtp=[],
         inbound_rtp=[
             SimpleNamespace(
+                mid="1",
+                codec_mime_type=None,
+                frames_per_second=0.0,
+                frame_width=0,
+                frame_height=0,
                 packets_received=10,
                 packets_lost=-4,
                 bytes_received=1_000,
@@ -1442,6 +1581,12 @@ def test_stats_from_report_waits_for_the_receivers_first_report() -> None:
     report: Any = SimpleNamespace(
         outbound_rtp=[
             SimpleNamespace(
+                mid="0",
+                codec_mime_type=None,
+                target_bitrate_bps=0.0,
+                frames_per_second=0.0,
+                frame_width=0,
+                frame_height=0,
                 packets_sent=40,
                 packets_lost=0,
                 retransmitted_packets_sent=0,

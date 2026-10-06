@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from reactor_runtime.core import TrackDirection
+from reactor_runtime.core import TrackDirection, TrackKind
 
 
 @dataclass(frozen=True)
@@ -65,10 +65,28 @@ class TrackStat:
             between ``0.0`` and ``1.0``. Outbound only, and a measurement rather
             than a figure derived here — it is the loss over the window the
             receiver's report covers, not over the sampling interval.
+        kind: Whether the track carries video or audio.
+        codec: The negotiated codec's mime type, such as ``"video/VP9"``, or
+            ``None`` until the first packet settles it.
+        frames_per_second: The frame rate the encoder produced (outbound) or
+            the decoder rendered (inbound) over its own recent window. Video
+            only.
+        frame_width: Width in pixels of the last frame encoded or decoded.
+            Video only.
+        frame_height: Height in pixels of the last frame encoded or decoded.
+            Video only.
+        target_bitrate_bps: The bitrate congestion control currently asks the
+            encoder for. Outbound only.
     """
 
     name: str
     direction: TrackDirection
+    kind: TrackKind | None = None
+    codec: str | None = None
+    frames_per_second: float | None = None
+    frame_width: int | None = None
+    frame_height: int | None = None
+    target_bitrate_bps: float | None = None
     packets_sent: int | None = None
     packets_received: int | None = None
     packets_lost: int | None = None

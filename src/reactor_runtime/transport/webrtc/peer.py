@@ -1308,11 +1308,17 @@ class WebRTCPeer:
                 available_outgoing = pair.available_outgoing_bitrate_bps
             break
 
+        # Each RTP stream names the transceiver it belongs to, and the client's
+        # track map names the track on each transceiver, so a stream is matched
+        # to its track by mid. A stream whose mid is not in the map (none yet,
+        # or a transceiver no track was declared on) has no track to report.
+        by_mid = {mapped.mid: mapped.info for mapped in self._track_map.tracks}
         tracks: list[TrackStat] = []
-        out_infos = self._track_map.by_direction(TrackDirection.OUT)
-        for i, out in enumerate(report.outbound_rtp):
-            if i >= len(out_infos):
-                break
+        for out in report.outbound_rtp:
+            info = by_mid.get(out.mid) if out.mid is not None else None
+            if info is None or info.direction is not TrackDirection.OUT:
+                continue
+            video = info.kind is TrackKind.VIDEO
             # The round trip and the loss fraction both come from the receiver's
             # RTCP report about this stream, and libwebrtc holds the round trip
             # at zero until the first report lands. That zero is what says no
@@ -1321,8 +1327,14 @@ class WebRTCPeer:
             reported = out.round_trip_time_s > 0.0
             tracks.append(
                 TrackStat(
-                    name=out_infos[i].name,
+                    name=info.name,
                     direction=TrackDirection.OUT,
+                    kind=info.kind,
+                    codec=out.codec_mime_type,
+                    frames_per_second=out.frames_per_second if video else None,
+                    frame_width=int(out.frame_width) if video else None,
+                    frame_height=int(out.frame_height) if video else None,
+                    target_bitrate_bps=out.target_bitrate_bps,
                     packets_sent=int(out.packets_sent),
                     # Signed per RFC 3550, and negative when duplicates arrive.
                     packets_lost=max(0, out.packets_lost),
@@ -1339,14 +1351,20 @@ class WebRTCPeer:
                 )
             )
 
-        in_infos = self._track_map.by_direction(TrackDirection.IN)
-        for i, inbound in enumerate(report.inbound_rtp):
-            if i >= len(in_infos):
-                break
+        for inbound in report.inbound_rtp:
+            info = by_mid.get(inbound.mid) if inbound.mid is not None else None
+            if info is None or info.direction is not TrackDirection.IN:
+                continue
+            video = info.kind is TrackKind.VIDEO
             tracks.append(
                 TrackStat(
-                    name=in_infos[i].name,
+                    name=info.name,
                     direction=TrackDirection.IN,
+                    kind=info.kind,
+                    codec=inbound.codec_mime_type,
+                    frames_per_second=inbound.frames_per_second if video else None,
+                    frame_width=int(inbound.frame_width) if video else None,
+                    frame_height=int(inbound.frame_height) if video else None,
                     packets_received=int(inbound.packets_received),
                     packets_lost=max(0, inbound.packets_lost),
                     bytes_received=int(inbound.bytes_received),
