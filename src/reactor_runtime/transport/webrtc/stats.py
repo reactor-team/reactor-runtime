@@ -69,12 +69,12 @@ class TrackStat:
         codec: The negotiated codec's mime type, such as ``"video/VP9"``, or
             ``None`` until the first packet settles it.
         frames_per_second: The frame rate the encoder produced (outbound) or
-            the decoder rendered (inbound) over its own recent window. Video
-            only.
-        frame_width: Width in pixels of the last frame encoded or decoded.
-            Video only.
-        frame_height: Height in pixels of the last frame encoded or decoded.
-            Video only.
+            the decoder rendered (inbound) over its own recent window, or
+            ``None`` while none is measured. Video only.
+        frame_width: Width in pixels of the last frame encoded or decoded, or
+            ``None`` before the first. Video only.
+        frame_height: Height in pixels of the last frame encoded or decoded,
+            or ``None`` before the first. Video only.
         target_bitrate_bps: The bitrate congestion control currently asks the
             encoder for. Outbound only.
     """

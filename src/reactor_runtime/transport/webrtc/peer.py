@@ -332,6 +332,25 @@ async def _apply_sender_bitrate(transceiver: rw.Transceiver, config: WebRtcConfi
     )
 
 
+def _dimension(pixels: int) -> int | None:
+    """Return a frame dimension libwebrtc reported, or ``None`` before it has one.
+
+    libwebrtc reports a frame's width and height as zero until the first frame
+    is encoded or decoded, so zero is the absence of a reading, not a picture.
+    """
+    return int(pixels) if pixels > 0 else None
+
+
+def _frame_rate(fps: float) -> float | None:
+    """Return a frame rate libwebrtc reported, or ``None`` when it measured none.
+
+    The binding reports a frame rate it has not measured as zero, so zero is
+    the absence of a reading. A stalled stream still shows, in frame counts
+    that stop rising.
+    """
+    return fps if fps > 0 else None
+
+
 def _is_terminal_state(state: rw.PeerConnectionState) -> bool:
     """Return whether a peer-connection state means the wire is gone.
 
@@ -1330,9 +1349,9 @@ class WebRTCPeer:
                     direction=TrackDirection.OUT,
                     kind=info.kind,
                     codec=out.codec_mime_type,
-                    frames_per_second=out.frames_per_second if video else None,
-                    frame_width=int(out.frame_width) if video else None,
-                    frame_height=int(out.frame_height) if video else None,
+                    frames_per_second=_frame_rate(out.frames_per_second) if video else None,
+                    frame_width=_dimension(out.frame_width) if video else None,
+                    frame_height=_dimension(out.frame_height) if video else None,
                     target_bitrate_bps=out.target_bitrate_bps,
                     packets_sent=int(out.packets_sent),
                     # Signed per RFC 3550, and negative when duplicates arrive.
@@ -1361,9 +1380,9 @@ class WebRTCPeer:
                     direction=TrackDirection.IN,
                     kind=info.kind,
                     codec=inbound.codec_mime_type,
-                    frames_per_second=inbound.frames_per_second if video else None,
-                    frame_width=int(inbound.frame_width) if video else None,
-                    frame_height=int(inbound.frame_height) if video else None,
+                    frames_per_second=_frame_rate(inbound.frames_per_second) if video else None,
+                    frame_width=_dimension(inbound.frame_width) if video else None,
+                    frame_height=_dimension(inbound.frame_height) if video else None,
                     packets_received=int(inbound.packets_received),
                     packets_lost=max(0, inbound.packets_lost),
                     bytes_received=int(inbound.bytes_received),
