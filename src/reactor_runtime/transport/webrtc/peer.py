@@ -1317,6 +1317,7 @@ class WebRTCPeer:
             info = self._track_by_mid.get(out.mid) if out.mid is not None else None
             if info is None or info.direction is not TrackDirection.OUT:
                 continue
+            video = info.kind is TrackKind.VIDEO
             # The round trip and the loss fraction both come from the receiver's
             # RTCP report about this stream, and libwebrtc holds the round trip
             # at zero until the first report lands. That zero is what says no
@@ -1327,6 +1328,12 @@ class WebRTCPeer:
                 TrackStat(
                     name=info.name,
                     direction=TrackDirection.OUT,
+                    kind=info.kind,
+                    codec=out.codec_mime_type,
+                    frames_per_second=out.frames_per_second if video else None,
+                    frame_width=int(out.frame_width) if video else None,
+                    frame_height=int(out.frame_height) if video else None,
+                    target_bitrate_bps=out.target_bitrate_bps,
                     packets_sent=int(out.packets_sent),
                     # Signed per RFC 3550, and negative when duplicates arrive.
                     packets_lost=max(0, out.packets_lost),
@@ -1347,10 +1354,16 @@ class WebRTCPeer:
             info = self._track_by_mid.get(inbound.mid) if inbound.mid is not None else None
             if info is None or info.direction is not TrackDirection.IN:
                 continue
+            video = info.kind is TrackKind.VIDEO
             tracks.append(
                 TrackStat(
                     name=info.name,
                     direction=TrackDirection.IN,
+                    kind=info.kind,
+                    codec=inbound.codec_mime_type,
+                    frames_per_second=inbound.frames_per_second if video else None,
+                    frame_width=int(inbound.frame_width) if video else None,
+                    frame_height=int(inbound.frame_height) if video else None,
                     packets_received=int(inbound.packets_received),
                     packets_lost=max(0, inbound.packets_lost),
                     bytes_received=int(inbound.bytes_received),
