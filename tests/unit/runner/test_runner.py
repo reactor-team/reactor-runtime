@@ -2927,6 +2927,22 @@ async def test_emitted_media_is_counted_in_frames_per_track(started_runner: Runn
     assert _metric(started_runner, "runtime_media_frames_total", track="main_audio") == 4.0
 
 
+async def test_the_sessions_own_output_counts_start_over_with_each_session(
+    started_runner: Runner,
+) -> None:
+    # The process-wide counter keeps growing; the per-session count that feeds
+    # the runtime's stats starts from zero for every session.
+    started_runner.start_session({})
+    started_runner._emit_media(MediaChunk(bundle=_video_bundle(), fps=30.0, n_frames=3))
+    assert started_runner._model_output.take()["main"]["frames_emitted"] == 3.0
+
+    started_runner.stop_session()
+    await started_runner._drain_teardown()
+    started_runner.start_session({})
+
+    assert started_runner._model_output.take()["main"]["frames_emitted"] == 0.0
+
+
 async def test_media_reaches_the_connections_before_the_recorder(
     started_runner: Runner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
