@@ -59,6 +59,7 @@ from reactor_runtime.core import (
     Transition,
     TransitionEvent,
 )
+from reactor_runtime.core.stats import PeerStats
 from reactor_runtime.interface.internal.bridge import CommandOutcome
 from reactor_runtime.interface.internal.reactor_core import (
     AddressedSink,
@@ -198,6 +199,8 @@ class FakeConnection:
 
     def send_control(self, payload: bytes | str) -> None:
         self.control.append(payload)
+
+    latest_stats: PeerStats | None = None
 
     def send_media(self, chunk: MediaChunk) -> None: ...
 
@@ -370,11 +373,15 @@ def test_a_flush_during_fan_out_abandons_the_remaining_connections() -> None:
     delivered: list[ConnId] = []
 
     class Flushing(FakeConnection):
+        latest_stats: PeerStats | None = None
+
         def send_media(self, chunk: MediaChunk) -> None:
             delivered.append(self.id)
             runner._flush_media()
 
     class Recording(FakeConnection):
+        latest_stats: PeerStats | None = None
+
         def send_media(self, chunk: MediaChunk) -> None:
             delivered.append(self.id)
 
@@ -1525,6 +1532,8 @@ def test_the_system_client_carries_no_media_and_conforms_to_the_protocol() -> No
     assert conn.id == SYSTEM_CONN_ID
     assert not conn.capabilities.carries_video
     assert not conn.capabilities.carries_audio
+    # No wire, so nothing to sample.
+    assert conn.latest_stats is None
 
 
 def _step(runner: Runner, *, error: str | None = None) -> CompletedStep:

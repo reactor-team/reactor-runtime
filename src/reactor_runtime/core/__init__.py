@@ -33,6 +33,7 @@ from reactor_runtime.core.session import (
     SessionState,
     Transition,
 )
+from reactor_runtime.core.stats import OutboundMediaHealth, PeerStats, TrackStat
 from reactor_runtime.core.transport import Connection, ConnectionSink
 from reactor_runtime.core.typespec import TypeSpec
 from reactor_runtime.core.values import (
@@ -81,6 +82,8 @@ __all__ = [
     "InputFrame",
     "MediaBundle",
     "MediaChunk",
+    "OutboundMediaHealth",
+    "PeerStats",
     "ReactorEvent",
     "RecordingConfig",
     "RuntimeConfig",
@@ -96,6 +99,7 @@ __all__ = [
     "TrackDirection",
     "TrackInfo",
     "TrackKind",
+    "TrackStat",
     "Transition",
     "TransitionEvent",
     "TypeSpec",

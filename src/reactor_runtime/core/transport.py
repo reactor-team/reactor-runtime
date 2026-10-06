@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Protocol, runtime_checkable
 
+from reactor_runtime.core.stats import PeerStats
 from reactor_runtime.core.values import (
     ClientStatsBatch,
     ConnectionCapabilities,
@@ -48,6 +49,16 @@ class Connection(Protocol):
         Fixed for the connection's life and read-only here. The runner reads it
         to encode each outbound frame for the codec this client speaks, so a
         mixed-version session addresses each connection in its own version.
+        """
+
+    @property
+    def latest_stats(self) -> PeerStats | None:
+        """The most recent sample of this connection's transport statistics.
+
+        ``None`` before the transport has taken its first sample, and always
+        for a connection whose transport does not measure its wire. The sample
+        is replaced as the transport takes new ones, so reading it never waits
+        on the wire.
         """
 
     def send_message(self, payload: bytes | str) -> None:

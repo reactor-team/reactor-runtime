@@ -13,7 +13,7 @@ is dropped.
 
 from __future__ import annotations
 
-from reactor_runtime.core import ConnectionCapabilities, ConnId, MediaChunk
+from reactor_runtime.core import ConnectionCapabilities, ConnId, MediaChunk, PeerStats
 from reactor_runtime.protocol import ProtocolVersion
 
 SYSTEM_CONN_ID = ConnId(0)
@@ -35,6 +35,11 @@ class SystemConnection:
     def protocol_version(self) -> ProtocolVersion:
         """The codec a reply to the system client is encoded in, before it is dropped."""
         return ProtocolVersion.V1
+
+    @property
+    def latest_stats(self) -> PeerStats | None:
+        """Report no sample; there is no wire to measure."""
+        return None
 
     def send_message(self, payload: bytes | str) -> None:
         """Drop a data frame."""

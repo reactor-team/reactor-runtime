@@ -15,6 +15,7 @@ from reactor_runtime.core import (
     SessionState,
     Transition,
 )
+from reactor_runtime.core.stats import PeerStats
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.runner import ConnectionManager, SessionStateMachine
 from reactor_runtime.transport import ConnectionsExhaustedError
@@ -64,6 +65,8 @@ class FakeConnection:
         self._outbound()
         self.control.append(payload)
 
+    latest_stats: PeerStats | None = None
+
     def send_media(self, chunk: MediaChunk) -> None:
         self._outbound()
         self.media.append(chunk)
@@ -99,6 +102,8 @@ class SilentConnection(FakeConnection):
 
     def send_message(self, payload: bytes | str) -> None:
         pass
+
+    latest_stats: PeerStats | None = None
 
     def send_media(self, chunk: MediaChunk) -> None:
         pass
