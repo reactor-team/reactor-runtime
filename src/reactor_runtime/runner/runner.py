@@ -902,7 +902,6 @@ class Runner(ServiceComponent, ConnectionSink):
             raise SessionTransitionError("start", self._sm.current_state)
         self._offer_epochs.session_started()
         self._model_metrics.session_started()
-        self._model_output.reset()
         self._begin_session_inputs()
 
     def _check_starting_input(self, start: SessionStart) -> None:
@@ -1529,6 +1528,10 @@ class Runner(ServiceComponent, ConnectionSink):
             to_state=transition.to_state.name.lower(),
         )
         self._events.emit(TransitionEvent(transition))
+        if transition.is_session_start:
+            # Before the model hears of the session: from then on its thread
+            # can emit, and every frame it emits belongs to the new count.
+            self._model_output.reset()
         if self._bridge is not None:
             self._dispatch_reactor_events(transition, self._bridge)
         if transition.is_session_start and self._bridge is not None:

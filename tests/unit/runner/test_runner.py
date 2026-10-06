@@ -2938,6 +2938,37 @@ async def test_the_sessions_own_output_counts_start_over_with_each_session(
     assert started_runner._model_output.take()["main"]["frames_emitted"] == 0.0
 
 
+async def test_frames_the_model_emits_as_the_session_starts_are_counted(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The model hears of the session while the start transition is dispatched,
+    # and its thread can emit right away. Those frames belong to the session.
+    dispatch = started_runner._dispatch_reactor_events
+
+    def dispatch_then_emit(transition: Transition, bridge: Any) -> None:
+        dispatch(transition, bridge)
+        if transition.is_session_start:
+            started_runner._model_output.emitted("main", 2)
+
+    monkeypatch.setattr(started_runner, "_dispatch_reactor_events", dispatch_then_emit)
+
+    started_runner.start_session({})
+
+    assert started_runner._model_output.take()["main"]["frames_emitted"] == 2.0
+
+
+async def test_a_rejected_start_leaves_the_running_sessions_counts_alone(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    started_runner._emit_media(MediaChunk(bundle=_video_bundle(), fps=30.0, n_frames=3))
+
+    with pytest.raises(SessionTransitionError):
+        started_runner.start_session({})
+
+    assert started_runner._model_output.take()["main"]["frames_emitted"] == 3.0
+
+
 async def test_media_reaches_the_connections_before_the_recorder(
     started_runner: Runner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
