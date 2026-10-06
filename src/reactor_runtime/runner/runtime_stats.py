@@ -64,8 +64,10 @@ class ModelOutput:
         that emits a batch at a time has the play-out length of a batch as its
         normal gap and a stall shows above it.
         """
-        now = self._clock()
         with self._lock:
+            # Read under the lock, so concurrent emissions store their times
+            # in the order they were taken.
+            now = self._clock()
             previous = self._last_emit.get(track)
             if previous is not None:
                 gap = now - previous
@@ -85,8 +87,8 @@ class ModelOutput:
             saw, when it saw two emissions) and ``ms_since_last_emit``, which
             shows a stall that is still going before the next emission ends it.
         """
-        now = self._clock()
         with self._lock:
+            now = self._clock()
             elapsed = now - self._window_start
             names = dict.fromkeys((*self._tracks, *self._frames))
             readings: dict[str, dict[str, float]] = {}

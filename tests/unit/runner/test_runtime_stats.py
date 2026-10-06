@@ -116,3 +116,19 @@ def test_emissions_from_several_threads_are_all_counted() -> None:
         thread.join()
 
     assert output.take()["main_video"]["frames_emitted"] == 20000.0
+
+
+def test_the_clock_is_read_under_the_lock() -> None:
+    # A time taken before the lock could be stored after a later one from
+    # another thread, which would corrupt the gaps between emissions.
+    output = ModelOutput()
+
+    def clock() -> float:
+        assert output._lock.locked(), "the clock was read outside the lock"
+        return 100.0
+
+    output._clock = clock
+
+    output.emitted("main_video", 1)
+    output.take()
+    output.reset()
