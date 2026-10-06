@@ -49,6 +49,7 @@ from reactor_runtime.core import (
     MediaChunk,
     PeerStats,
     SessionEvent,
+    TransportStatsSource,
 )
 from reactor_runtime.log import get_logger
 from reactor_runtime.protocol import Channel, ProtocolVersion
@@ -144,12 +145,12 @@ class ConnectionManager:
         """The latest transport sample of every connection that has one.
 
         A connection whose transport has not sampled yet, or does not measure
-        its wire, is left out.
+        its wire (it is not a :class:`TransportStatsSource`), is left out.
         """
         return [
             (cid, sample)
             for cid, conn in self._by_id.items()
-            if (sample := conn.latest_stats) is not None
+            if isinstance(conn, TransportStatsSource) and (sample := conn.latest_stats) is not None
         ]
 
     def new_conn_id(self) -> ConnId:

@@ -58,6 +58,7 @@ from reactor_runtime.core import (
     TrackKind,
     Transition,
     TransitionEvent,
+    TransportStatsSource,
 )
 from reactor_runtime.core.stats import PeerStats
 from reactor_runtime.interface.internal.bridge import CommandOutcome
@@ -199,8 +200,6 @@ class FakeConnection:
 
     def send_control(self, payload: bytes | str) -> None:
         self.control.append(payload)
-
-    latest_stats: PeerStats | None = None
 
     def send_media(self, chunk: MediaChunk) -> None: ...
 
@@ -373,15 +372,11 @@ def test_a_flush_during_fan_out_abandons_the_remaining_connections() -> None:
     delivered: list[ConnId] = []
 
     class Flushing(FakeConnection):
-        latest_stats: PeerStats | None = None
-
         def send_media(self, chunk: MediaChunk) -> None:
             delivered.append(self.id)
             runner._flush_media()
 
     class Recording(FakeConnection):
-        latest_stats: PeerStats | None = None
-
         def send_media(self, chunk: MediaChunk) -> None:
             delivered.append(self.id)
 
@@ -1533,7 +1528,7 @@ def test_the_system_client_carries_no_media_and_conforms_to_the_protocol() -> No
     assert not conn.capabilities.carries_video
     assert not conn.capabilities.carries_audio
     # No wire, so nothing to sample.
-    assert conn.latest_stats is None
+    assert not isinstance(conn, TransportStatsSource)
 
 
 def _step(runner: Runner, *, error: str | None = None) -> CompletedStep:
@@ -3472,6 +3467,14 @@ async def test_client_stats_are_journalled_as_a_metric_with_the_session_and_conn
     }
 
 
+class MeasuredConnection(FakeConnection):
+    """A fake whose transport samples its wire."""
+
+    def __init__(self, cid: int, sample: PeerStats | None) -> None:
+        super().__init__(cid)
+        self.latest_stats = sample
+
+
 def _runtime_stats_facts(runner: Runner) -> list[Transition]:
     metrics = _moves(runner, SessionEvent.METRIC)
     return [t for t in metrics if t.detail.get("name") == "runtime_stats"]
@@ -3481,8 +3484,7 @@ async def test_runtime_stats_are_journalled_while_a_session_runs(
     started_runner: Runner,
 ) -> None:
     started_runner._runtime_stats_interval = 0.01
-    conn = FakeConnection(4)
-    conn.latest_stats = PeerStats(rtt_seconds=0.04, taken_at=1.0)
+    conn = MeasuredConnection(4, PeerStats(rtt_seconds=0.04, taken_at=1.0))
     started_runner.start_session({"session_id": _LIVE_SESSION_ID})
     started_runner.connection_opened(conn)
     state = started_runner._sm.current_state
@@ -3503,6 +3505,26 @@ async def test_runtime_stats_are_journalled_while_a_session_runs(
     (connection,) = first.detail["connection_stats"]
     assert connection["conn_id"] == 4
     assert connection["metrics"]["connection_rtt_ms"] == pytest.approx(40.0)
+
+
+async def test_runtime_stats_carry_the_model_output_past_a_connection_that_measures_nothing(
+    started_runner: Runner,
+) -> None:
+    # A transport without the stats capability adds no connection reading, and
+    # the session still reports what its model emitted.
+    started_runner._runtime_stats_interval = 0.01
+    started_runner.start_session({})
+    unmeasured = FakeConnection(5)
+    assert not isinstance(unmeasured, TransportStatsSource)
+    started_runner.connection_opened(unmeasured)
+    started_runner._emit_media(MediaChunk(bundle=_video_bundle(), fps=30.0, n_frames=1))
+
+    await asyncio.sleep(0.05)
+
+    facts = _runtime_stats_facts(started_runner)
+    assert facts
+    assert facts[0].detail["connection_stats"] == []
+    assert facts[0].detail["model_output"][0]["metrics"]["frames_emitted"] == 1.0
 
 
 async def test_runtime_stats_stop_when_the_session_ends(started_runner: Runner) -> None:

@@ -11,7 +11,6 @@ from reactor_runtime.core import (
     InputFrame,
     MediaChunk,
 )
-from reactor_runtime.core.stats import PeerStats
 from reactor_runtime.protocol import Channel, ProtocolVersion
 
 
@@ -27,8 +26,6 @@ class FakeConnection:
 
     def send_message(self, payload: bytes | str) -> None:
         self.sent.append(payload)
-
-    latest_stats: PeerStats | None = None
 
     def send_media(self, chunk: MediaChunk) -> None:
         pass

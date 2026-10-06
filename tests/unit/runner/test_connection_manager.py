@@ -11,11 +11,12 @@ from reactor_runtime.core import (
     ConnId,
     MediaBundle,
     MediaChunk,
+    PeerStats,
     SessionEvent,
     SessionState,
     Transition,
+    TransportStatsSource,
 )
-from reactor_runtime.core.stats import PeerStats
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.runner import ConnectionManager, SessionStateMachine
 from reactor_runtime.transport import ConnectionsExhaustedError
@@ -65,8 +66,6 @@ class FakeConnection:
         self._outbound()
         self.control.append(payload)
 
-    latest_stats: PeerStats | None = None
-
     def send_media(self, chunk: MediaChunk) -> None:
         self._outbound()
         self.media.append(chunk)
@@ -103,8 +102,6 @@ class SilentConnection(FakeConnection):
     def send_message(self, payload: bytes | str) -> None:
         pass
 
-    latest_stats: PeerStats | None = None
-
     def send_media(self, chunk: MediaChunk) -> None:
         pass
 
@@ -124,6 +121,27 @@ def waiting_manager() -> tuple[ConnectionManager, SessionStateMachine]:
 
 def test_fake_connection_conforms_to_the_protocol() -> None:
     assert isinstance(FakeConnection(1), Connection)
+
+
+class MeasuredConnection(FakeConnection):
+    """A fake whose transport samples its wire."""
+
+    def __init__(self, cid: int, sample: PeerStats | None) -> None:
+        super().__init__(cid)
+        self.latest_stats = sample
+
+
+def test_transport_samples_come_from_connections_that_measure_their_wire() -> None:
+    cm, _ = waiting_manager()
+    sample = PeerStats(rtt_seconds=0.05)
+    # A transport that predates the capability has no latest_stats at all; it
+    # is left out rather than failing the reading for everyone.
+    cm.register(FakeConnection(1))
+    cm.register(MeasuredConnection(2, sample))
+    cm.register(MeasuredConnection(3, None))
+
+    assert not isinstance(FakeConnection(1), TransportStatsSource)
+    assert cm.transport_samples() == [(ConnId(2), sample)]
 
 
 def test_new_conn_id_is_random_in_range_and_unique() -> None:

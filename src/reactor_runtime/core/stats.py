@@ -1,8 +1,9 @@
 """Transport statistics a connection samples about its own wire.
 
 A transport that measures its wire reports it in these types, and a
-:class:`~reactor_runtime.core.Connection` hands out its latest sample through
-``latest_stats``, so a reader holds the same shape whichever transport took it.
+:class:`~reactor_runtime.core.TransportStatsSource` hands out its latest sample
+through ``latest_stats``, so a reader holds the same shape whichever transport
+took it.
 """
 
 from __future__ import annotations

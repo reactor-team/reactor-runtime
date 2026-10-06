@@ -14,6 +14,7 @@ from reactor_runtime.core import (
     InputFrame,
     MediaBundle,
     MediaChunk,
+    TransportStatsSource,
 )
 from reactor_runtime.core.values import TrackData, TrackInfo, TrackKind
 from reactor_runtime.protocol import Channel, ProtocolVersion
@@ -88,6 +89,8 @@ async def test_is_a_connection(
 ) -> None:
     conn = await _connect(fake_peer, factory_for(fake_peer), out_av_tracks)
     assert isinstance(conn, Connection)
+    # Its transport samples the wire, so the runner can read the samples.
+    assert isinstance(conn, TransportStatsSource)
 
 
 async def test_outbound_commands_delegate_to_peer(

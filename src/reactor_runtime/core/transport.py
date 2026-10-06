@@ -4,7 +4,8 @@ The two structural protocols that form the seam between a transport and the
 runner, pointing opposite ways. ``Connection`` carries commands down to one
 client; ``ConnectionSink`` carries facts up from the transport. Both are
 ``Protocol``s, so a transport author or a test fake conforms by shape and
-signaling never reaches the runner.
+signaling never reaches the runner. ``TransportStatsSource`` is an optional
+capability a connection adds when its transport measures its wire.
 """
 
 from __future__ import annotations
@@ -51,16 +52,6 @@ class Connection(Protocol):
         mixed-version session addresses each connection in its own version.
         """
 
-    @property
-    def latest_stats(self) -> PeerStats | None:
-        """The most recent sample of this connection's transport statistics.
-
-        ``None`` before the transport has taken its first sample, and always
-        for a connection whose transport does not measure its wire. The sample
-        is replaced as the transport takes new ones, so reading it never waits
-        on the wire.
-        """
-
     def send_message(self, payload: bytes | str) -> None:
         """Send an already-encoded frame to this client.
 
@@ -104,6 +95,27 @@ class Connection(Protocol):
 
     async def close(self) -> None:
         """Tear the connection down."""
+
+
+@runtime_checkable
+class TransportStatsSource(Protocol):
+    """A connection whose transport samples statistics about its own wire.
+
+    Optional, beside :class:`Connection`: a transport that measures its wire
+    implements it on its connections, and a reader checks for it with
+    ``isinstance`` before reading. A connection without it is a connection
+    with nothing to report, not an error, so a transport that predates it
+    keeps working unchanged.
+    """
+
+    @property
+    def latest_stats(self) -> PeerStats | None:
+        """The most recent sample of this connection's transport statistics.
+
+        ``None`` before the transport has taken its first sample. The sample is
+        replaced as the transport takes new ones, so reading it never waits on
+        the wire.
+        """
 
 
 @runtime_checkable
