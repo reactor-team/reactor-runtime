@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from collections.abc import Callable
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -366,7 +367,10 @@ async def test_stats_polling_samples(
     peer.fire_connected()
     await asyncio.sleep(0.05)
 
-    assert conn.latest_stats == PeerStats(rtt_seconds=0.25)
+    assert conn.latest_stats is not None
+    # Each sample is stamped when it was taken, so a reader can time a rate.
+    assert conn.latest_stats.taken_at is not None
+    assert replace(conn.latest_stats, taken_at=None) == PeerStats(rtt_seconds=0.25)
     assert len(samples) >= 1
     await conn.close()
 
@@ -401,7 +405,8 @@ async def test_stats_loop_survives_a_failed_sample(
     await asyncio.sleep(0.06)
 
     # The first sample raised; the sampler kept going and recorded a later one.
-    assert conn.latest_stats == PeerStats(rtt_seconds=0.5)
+    assert conn.latest_stats is not None
+    assert replace(conn.latest_stats, taken_at=None) == PeerStats(rtt_seconds=0.5)
     await conn.close()
 
 

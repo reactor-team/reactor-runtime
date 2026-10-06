@@ -152,9 +152,14 @@ class PeerStats:
         tracks: Per-track samples gathered in the same cycle.
         media: Cumulative counts of outbound media manufactured or discarded
             inside the runtime, which no transport-level statistic reports.
+        taken_at: When the sample was taken, on the monotonic clock
+            (:func:`time.monotonic`), or ``None`` when the transport does not
+            stamp its samples. The byte counts are totals, so a rate is the
+            difference between two samples over the time between them.
     """
 
     rtt_seconds: float | None = None
     available_outgoing_bitrate_bps: float | None = None
     tracks: tuple[TrackStat, ...] = ()
     media: OutboundMediaHealth = field(default_factory=OutboundMediaHealth)
+    taken_at: float | None = None

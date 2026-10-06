@@ -47,6 +47,7 @@ from reactor_runtime.core import (
     Connection,
     ConnId,
     MediaChunk,
+    PeerStats,
     SessionEvent,
 )
 from reactor_runtime.log import get_logger
@@ -138,6 +139,18 @@ class ConnectionManager:
     def count(self) -> int:
         """The number of connections currently registered."""
         return len(self._by_id)
+
+    def transport_samples(self) -> list[tuple[ConnId, PeerStats]]:
+        """The latest transport sample of every connection that has one.
+
+        A connection whose transport has not sampled yet, or does not measure
+        its wire, is left out.
+        """
+        return [
+            (cid, sample)
+            for cid, conn in self._by_id.items()
+            if (sample := conn.latest_stats) is not None
+        ]
 
     def new_conn_id(self) -> ConnId:
         """Mint a fresh random connection id, unique within the session.

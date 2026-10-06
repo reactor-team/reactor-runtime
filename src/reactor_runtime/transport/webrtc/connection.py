@@ -363,6 +363,7 @@ class WebRTCConnection:
                 stats = replace(
                     stats,
                     media=replace(stats.media, dropped_frames=self._pacer.dropped_frames),
+                    taken_at=time.monotonic(),
                 )
                 self._report_media_health(stats.media)
                 self._latest_stats = stats
