@@ -167,7 +167,13 @@ class OutputStream:
         fps = core._playout_rate(n_frames, compute_time)
         core._last_emit_fps = fps
         if core._out_media is not None:
-            chunk = MediaChunk(bundle=bundle, fps=fps, n_frames=n_frames, wait=not drop)
+            chunk = MediaChunk(
+                bundle=bundle,
+                fps=fps,
+                n_frames=n_frames,
+                wait=not drop,
+                session=core._sessions_started,
+            )
             await asyncio.to_thread(core._out_media, chunk)
         await asyncio.sleep(0)
 

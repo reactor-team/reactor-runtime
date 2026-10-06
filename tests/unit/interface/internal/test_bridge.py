@@ -193,6 +193,9 @@ def test_emit_reaches_the_media_sink_as_a_chunk() -> None:
     assert chunk.n_frames == 1
     assert chunk.fps == 20.0  # one frame in 0.05s
     assert chunk.bundle.tracks["main"].data.shape == (2, 2, 3)
+    # Stamped with the session the model was in, so a late chunk of an earlier
+    # session can be told apart downstream.
+    assert chunk.session == model._sessions_started
 
 
 def test_bound_media_ops_reach_the_model_output_handle() -> None:

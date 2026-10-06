@@ -51,6 +51,7 @@ from reactor_runtime.core import (
     SessionState,
     StartingInputApplied,
     TrackDirection,
+    TrackKind,
     Transition,
     TransitionEvent,
     TypeSpec,
@@ -77,6 +78,7 @@ from reactor_runtime.runner import client_stats
 from reactor_runtime.runner.client_stats import ClientStatsGate
 from reactor_runtime.runner.connection_manager import ConnectionManager
 from reactor_runtime.runner.offer_epochs import OfferEpochs
+from reactor_runtime.runner.runtime_stats import ModelOutput
 from reactor_runtime.runner.session_start import (
     InvalidSessionStartError,
     SessionStart,
@@ -241,6 +243,9 @@ class Runner(ServiceComponent, ConnectionSink):
         self._sm.on_transition(self._metrics_recorder.observe)
         self._command_metrics = CommandMetrics(self._metrics)
         self._model_metrics = ModelMetrics(self._metrics)
+        # The same emissions, counted per session for the runtime's own stats.
+        self._model_output = ModelOutput()
+        self._output_kinds: dict[str, TrackKind] = {}
         self._events = EventStream()
         self._uploads = UploadStore()
         self._recorder = Recorder(
@@ -377,9 +382,13 @@ class Runner(ServiceComponent, ConnectionSink):
         self._model_metrics.loaded(since=started_at)
         self._bridge = bridge
         self._command_metrics.declare(contract.commands)
-        self._model_metrics.declare(
-            name for name, info in contract.tracks.items() if info.direction is TrackDirection.OUT
-        )
+        self._output_kinds = {
+            name: info.kind
+            for name, info in contract.tracks.items()
+            if info.direction is TrackDirection.OUT
+        }
+        self._model_metrics.declare(self._output_kinds)
+        self._model_output.declare(self._output_kinds)
         self._sm.send(SessionEvent.INITIALIZATION_SUCCESS)
         logger.info(
             "model loaded; session ready",
@@ -1293,8 +1302,14 @@ class Runner(ServiceComponent, ConnectionSink):
         outright. Feeding the recorder second keeps that bounded stall off the
         live path, and leaves its queue the whole broadcast to drain into.
         """
+        # A chunk the model emitted for an earlier session (from its
+        # session-end hook, say, after the next session started) still plays
+        # out, but it is not this session's output.
+        this_session = chunk.session is None or chunk.session == self._sessions_posted
         for track in chunk.bundle.tracks:
             self._model_metrics.emitted(track, chunk.n_frames)
+            if this_session:
+                self._model_output.emitted(track, chunk.n_frames)
         generation = self._media_generation
         self._connections.broadcast_media(chunk, abort=lambda: self._media_generation != generation)
         # The archive takes the whole chunk even when a flush cut the broadcast
@@ -1515,6 +1530,10 @@ class Runner(ServiceComponent, ConnectionSink):
             to_state=transition.to_state.name.lower(),
         )
         self._events.emit(TransitionEvent(transition))
+        if transition.is_session_start:
+            # Before the model hears of the session: from then on its thread
+            # can emit, and every frame it emits belongs to the new count.
+            self._model_output.reset()
         if self._bridge is not None:
             self._dispatch_reactor_events(transition, self._bridge)
         if transition.is_session_start and self._bridge is not None:
