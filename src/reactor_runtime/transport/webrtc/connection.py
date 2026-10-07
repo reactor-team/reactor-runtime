@@ -25,12 +25,14 @@ from reactor_runtime.core import (
     TrackDirection,
     TrackInfo,
     TrackKind,
+    TransportReading,
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.transport.webrtc.client_stats import read_client_stats
 from reactor_runtime.transport.webrtc.config import WebRtcConfig
 from reactor_runtime.transport.webrtc.pacer import MediaPacer
 from reactor_runtime.transport.webrtc.peer import WebRTCPeer, WebRtcPeerFactory
+from reactor_runtime.transport.webrtc.reading import transport_reading
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpAnswer, SdpOffer, TrackMap
 from reactor_runtime.transport.webrtc.stats import OutboundMediaHealth, PeerStats
 
@@ -105,6 +107,8 @@ class WebRTCConnection:
         self._watchdog_task: asyncio.Task[None] | None = None
         self._stats_task: asyncio.Task[None] | None = None
         self._latest_stats: PeerStats | None = None
+        self._latest_reading: TransportReading | None = None
+        self._sampled_at: float | None = None
         # The counters as of the previous sample, so each report is what the
         # window cost rather than what the connection has cost since it opened.
         self._reported_media = OutboundMediaHealth()
@@ -151,6 +155,15 @@ class WebRTCConnection:
     def latest_stats(self) -> PeerStats | None:
         """The most recent stats sample, or ``None`` before the first cycle."""
         return self._latest_stats
+
+    @property
+    def latest_reading(self) -> TransportReading | None:
+        """The most recent stats sample as a neutral reading, or ``None`` before the first.
+
+        Each track's bitrate is measured between this sample and the one before
+        it, so the reading of a connection's first sample has none.
+        """
+        return self._latest_reading
 
     @property
     def protocol_version(self) -> ProtocolVersion:
@@ -365,7 +378,11 @@ class WebRTCConnection:
                     media=replace(stats.media, dropped_frames=self._pacer.dropped_frames),
                 )
                 self._report_media_health(stats.media)
+                now = time.monotonic()
+                elapsed = now - self._sampled_at if self._sampled_at is not None else None
+                self._latest_reading = transport_reading(stats, self._latest_stats, elapsed)
                 self._latest_stats = stats
+                self._sampled_at = now
                 if self._on_stats is not None:
                     self._on_stats(stats)
         except asyncio.CancelledError:
