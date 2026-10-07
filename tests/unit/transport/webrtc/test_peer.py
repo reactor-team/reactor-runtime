@@ -1365,6 +1365,18 @@ def test_stats_from_report_maps_tracks_and_rtt() -> None:
     assert inbound.nacks == 7
     assert inbound.keyframe_requests == 4
     assert inbound.jitter == 0.02
+    assert (out.kind, out.codec, out.target_bitrate_bps) == (
+        TrackKind.VIDEO,
+        "video/VP9",
+        1_500_000.0,
+    )
+    assert (out.frames_per_second, out.frame_width, out.frame_height) == (29.5, 1280, 720)
+    assert (inbound.kind, inbound.codec) == (TrackKind.VIDEO, "video/VP8")
+    assert (inbound.frames_per_second, inbound.frame_width, inbound.frame_height) == (
+        24.0,
+        640,
+        360,
+    )
 
 
 def _rtp(mid: str | None, **counts: Any) -> SimpleNamespace:
@@ -1422,9 +1434,49 @@ def test_stats_from_report_matches_streams_to_tracks_by_mid() -> None:
     by_name = {t.name: t for t in peer._stats_from_report(report).tracks}
 
     assert by_name["main_video"].packets_sent == 400
+    assert by_name["main_video"].codec == "video/VP9"
+    assert by_name["main_video"].frames_per_second == 30.0
     assert by_name["main_audio"].packets_sent == 50
+    assert by_name["main_audio"].codec == "audio/opus"
     assert by_name["webcam"].packets_received == 300
+    assert by_name["webcam"].frame_width == 640
     assert by_name["mic"].packets_received == 60
+    # An audio track has no frames, so the video-only fields stay unset rather
+    # than reading as a zero-sized, zero-rate picture.
+    assert by_name["main_audio"].frames_per_second is None
+    assert by_name["mic"].frame_width is None
+    assert by_name["mic"].kind is TrackKind.AUDIO
+    # libwebrtc reports zero frames for audio, which is no count either.
+    assert by_name["main_audio"].frames_sent is None
+    assert (by_name["mic"].frames_decoded, by_name["mic"].frames_dropped) == (None, None)
+    assert by_name["main_video"].frames_sent == 0
+    assert by_name["webcam"].frames_decoded == 0
+
+
+def test_stats_from_report_reads_no_frame_size_or_rate_before_one_is_measured() -> None:
+    # libwebrtc reports a frame size of zero until a frame has been encoded or
+    # decoded, a frame rate of zero while it has measured none, and a target
+    # bitrate of zero before the encoder runs; none is a reading of a 0x0
+    # picture, a stopped stream or an encoder asked for nothing.
+    peer = WebRTCPeer()
+    peer._track_by_mid = {
+        "0": TrackInfo(name="main_video", kind=TrackKind.VIDEO, direction=TrackDirection.OUT),
+        "1": TrackInfo(name="webcam", kind=TrackKind.VIDEO, direction=TrackDirection.IN),
+    }
+    report: Any = SimpleNamespace(
+        outbound_rtp=[
+            _rtp("0", frame_width=0, frame_height=0, frames_per_second=0.0, target_bitrate_bps=0.0)
+        ],
+        inbound_rtp=[_rtp("1", frame_width=0, frame_height=0, frames_per_second=0.0)],
+        candidate_pairs=[],
+    )
+
+    tracks = peer._stats_from_report(report).tracks
+    assert [track.name for track in tracks] == ["main_video", "webcam"]
+    for track in tracks:
+        assert (track.frame_width, track.frame_height) == (None, None), track.name
+        assert track.frames_per_second is None, track.name
+        assert track.target_bitrate_bps is None, track.name
 
 
 def test_stats_from_report_skips_streams_without_a_mapped_track() -> None:

@@ -332,6 +332,26 @@ async def _apply_sender_bitrate(transceiver: rw.Transceiver, config: WebRtcConfi
     )
 
 
+def _dimension(pixels: int) -> int | None:
+    """Return a frame dimension libwebrtc reported, or ``None`` before it has one.
+
+    libwebrtc reports a frame's width and height as zero until the first frame
+    is encoded or decoded, so zero is the absence of a reading, not a picture.
+    """
+    return int(pixels) if pixels > 0 else None
+
+
+def _positive(value: float) -> float | None:
+    """Return a rate libwebrtc reported, or ``None`` when it measured none.
+
+    The binding reports a stat libwebrtc has not filled in yet as zero: a frame
+    rate it has not measured, a target bitrate before the encoder runs. Zero is
+    then the absence of a reading. A stalled stream still shows, in frame
+    counts that stop rising.
+    """
+    return value if value > 0 else None
+
+
 def _is_terminal_state(state: rw.PeerConnectionState) -> bool:
     """Return whether a peer-connection state means the wire is gone.
 
@@ -1317,6 +1337,7 @@ class WebRTCPeer:
             info = self._track_by_mid.get(out.mid) if out.mid is not None else None
             if info is None or info.direction is not TrackDirection.OUT:
                 continue
+            video = info.kind is TrackKind.VIDEO
             # The round trip and the loss fraction both come from the receiver's
             # RTCP report about this stream, and libwebrtc holds the round trip
             # at zero until the first report lands. That zero is what says no
@@ -1327,12 +1348,18 @@ class WebRTCPeer:
                 TrackStat(
                     name=info.name,
                     direction=TrackDirection.OUT,
+                    kind=info.kind,
+                    codec=out.codec_mime_type,
+                    frames_per_second=_positive(out.frames_per_second) if video else None,
+                    frame_width=_dimension(out.frame_width) if video else None,
+                    frame_height=_dimension(out.frame_height) if video else None,
+                    target_bitrate_bps=_positive(out.target_bitrate_bps),
                     packets_sent=int(out.packets_sent),
                     # Signed per RFC 3550, and negative when duplicates arrive.
                     packets_lost=max(0, out.packets_lost),
                     retransmitted_packets_sent=int(out.retransmitted_packets_sent),
                     bytes_sent=int(out.bytes_sent),
-                    frames_sent=int(out.frames_sent),
+                    frames_sent=int(out.frames_sent) if video else None,
                     # What the receiver asked this side for. A PLI and a FIR are
                     # the same request in two codec dialects, so they are summed
                     # here rather than left for every reader to add up.
@@ -1347,15 +1374,21 @@ class WebRTCPeer:
             info = self._track_by_mid.get(inbound.mid) if inbound.mid is not None else None
             if info is None or info.direction is not TrackDirection.IN:
                 continue
+            video = info.kind is TrackKind.VIDEO
             tracks.append(
                 TrackStat(
                     name=info.name,
                     direction=TrackDirection.IN,
+                    kind=info.kind,
+                    codec=inbound.codec_mime_type,
+                    frames_per_second=_positive(inbound.frames_per_second) if video else None,
+                    frame_width=_dimension(inbound.frame_width) if video else None,
+                    frame_height=_dimension(inbound.frame_height) if video else None,
                     packets_received=int(inbound.packets_received),
                     packets_lost=max(0, inbound.packets_lost),
                     bytes_received=int(inbound.bytes_received),
-                    frames_decoded=int(inbound.frames_decoded),
-                    frames_dropped=int(inbound.frames_dropped),
+                    frames_decoded=int(inbound.frames_decoded) if video else None,
+                    frames_dropped=int(inbound.frames_dropped) if video else None,
                     nacks=int(inbound.nack_count),
                     keyframe_requests=int(inbound.pli_count) + int(inbound.fir_count),
                     jitter=inbound.jitter_s,

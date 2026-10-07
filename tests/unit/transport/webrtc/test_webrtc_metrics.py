@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from reactor_runtime.core import TrackDirection
@@ -435,8 +437,8 @@ def test_same_name_in_both_directions_has_independent_baselines(field: str) -> N
     for sent, received in [(10, 30), (15, 37), (2, 40)]:
         transport.observe(
             tracks=(
-                TrackStat(name="shared", direction=TrackDirection.OUT, **{field: sent}),
-                TrackStat(name="shared", direction=TrackDirection.IN, **{field: received}),
+                replace(TrackStat(name="shared", direction=TrackDirection.OUT), **{field: sent}),
+                replace(TrackStat(name="shared", direction=TrackDirection.IN), **{field: received}),
             )
         )
     metric = f"runtime_webrtc_{field}_total"
