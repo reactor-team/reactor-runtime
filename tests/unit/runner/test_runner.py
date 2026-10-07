@@ -2921,6 +2921,95 @@ async def test_emitted_media_is_counted_in_frames_per_track(started_runner: Runn
     assert _metric(started_runner, "runtime_media_frames_total", track="main_audio") == 4.0
 
 
+async def test_the_sessions_own_output_counts_start_over_with_each_session(
+    started_runner: Runner,
+) -> None:
+    # The process-wide counter keeps growing; the per-session count that feeds
+    # the runtime's stats starts from zero for every session.
+    started_runner.start_session({})
+    started_runner._emit_media(MediaChunk(bundle=_video_bundle(), fps=30.0, n_frames=3))
+    assert started_runner._model_output.take()["main"]["frames_emitted"] == 3.0
+
+    started_runner.stop_session()
+    await started_runner._drain_teardown()
+    started_runner.start_session({})
+
+    assert started_runner._model_output.take()["main"]["frames_emitted"] == 0.0
+
+
+async def test_frames_the_model_emits_as_the_session_starts_are_counted(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The model hears of the session while the start transition is dispatched,
+    # and its thread can emit right away. Those frames belong to the session.
+    dispatch = started_runner._dispatch_reactor_events
+
+    def dispatch_then_emit(transition: Transition, bridge: Any) -> None:
+        dispatch(transition, bridge)
+        if transition.is_session_start:
+            started_runner._model_output.emitted("main", 2)
+
+    monkeypatch.setattr(started_runner, "_dispatch_reactor_events", dispatch_then_emit)
+
+    started_runner.start_session({})
+
+    assert started_runner._model_output.take()["main"]["frames_emitted"] == 2.0
+
+
+async def test_a_late_chunk_of_an_earlier_session_is_not_counted_for_the_next(
+    started_runner: Runner,
+) -> None:
+    # The model can still emit for the session that ended (from its session-end
+    # hook, say) after the next one starts. That output plays out, but it is
+    # not the new session's.
+    started_runner.start_session({})
+    current = started_runner._sessions_posted
+
+    for session, frames in ((current - 1, 5), (current, 2), (None, 1)):
+        started_runner._emit_media(
+            MediaChunk(bundle=_video_bundle(), fps=30.0, n_frames=frames, session=session)
+        )
+
+    assert started_runner._model_output.take()["main"]["frames_emitted"] == 3.0
+
+
+async def test_a_late_chunk_landing_as_the_count_starts_over_is_not_counted(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The model's thread emits while the loop starts the next session, so an
+    # earlier session's chunk can land the moment the count starts over.
+    started_runner.start_session({})
+    started_runner.stop_session()
+    await started_runner._drain_teardown()
+    earlier = started_runner._sessions_posted
+    output = started_runner._model_output
+    reset = output.reset
+
+    def reset_then_emit_late(session: int | None = None) -> None:
+        reset(session)
+        started_runner._emit_media(
+            MediaChunk(bundle=_video_bundle(), fps=30.0, n_frames=4, session=earlier)
+        )
+
+    monkeypatch.setattr(output, "reset", reset_then_emit_late)
+
+    started_runner.start_session({})
+
+    assert output.take()["main"]["frames_emitted"] == 0.0
+
+
+async def test_a_rejected_start_leaves_the_running_sessions_counts_alone(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    started_runner._emit_media(MediaChunk(bundle=_video_bundle(), fps=30.0, n_frames=3))
+
+    with pytest.raises(SessionTransitionError):
+        started_runner.start_session({})
+
+    assert started_runner._model_output.take()["main"]["frames_emitted"] == 3.0
+
+
 async def test_media_reaches_the_connections_before_the_recorder(
     started_runner: Runner, monkeypatch: pytest.MonkeyPatch
 ) -> None:

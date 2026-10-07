@@ -118,6 +118,18 @@ def test_emissions_from_several_threads_are_all_counted() -> None:
     assert output.take()["main_video"]["frames_emitted"] == 20000.0
 
 
+def test_an_emission_of_another_session_is_not_counted() -> None:
+    output = ModelOutput()
+    output.reset(session=2)
+
+    output.emitted("main_video", 5, session=1)
+    output.emitted("main_video", 2, session=2)
+    # An emitter that does not count sessions is counted as it comes.
+    output.emitted("main_video", 1)
+
+    assert output.take()["main_video"]["frames_emitted"] == 3.0
+
+
 def test_the_clock_is_read_under_the_lock() -> None:
     # A time taken before the lock could be stored after a later one from
     # another thread, which would corrupt the gaps between emissions.

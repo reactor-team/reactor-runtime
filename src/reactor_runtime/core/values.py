@@ -410,12 +410,17 @@ class MediaChunk:
         wait: Whether a consumer with a bounded queue should make the producer
             wait for room (backpressure, throttling the model to the playout
             rate) instead of dropping the overflow.
+        session: The number of the session the model was in when it emitted
+            the chunk, counted on the model's side, or ``None`` when the
+            emitter does not count sessions. A consumer compares it with its
+            own count to tell a late chunk of an earlier session apart.
     """
 
     bundle: MediaBundle
     fps: float
     n_frames: int = 1
     wait: bool = False
+    session: int | None = None
 
     def frames(self) -> list[MediaBundle]:
         """Split the chunk into one single-frame bundle per carried frame."""

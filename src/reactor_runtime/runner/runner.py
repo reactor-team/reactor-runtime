@@ -77,6 +77,7 @@ from reactor_runtime.runner import client_stats
 from reactor_runtime.runner.client_stats import ClientStatsGate
 from reactor_runtime.runner.connection_manager import ConnectionManager
 from reactor_runtime.runner.offer_epochs import OfferEpochs
+from reactor_runtime.runner.runtime_stats import ModelOutput
 from reactor_runtime.runner.session_start import (
     InvalidSessionStartError,
     SessionStart,
@@ -241,6 +242,8 @@ class Runner(ServiceComponent, ConnectionSink):
         self._sm.on_transition(self._metrics_recorder.observe)
         self._command_metrics = CommandMetrics(self._metrics)
         self._model_metrics = ModelMetrics(self._metrics)
+        # The same emissions, counted per session for the runtime's own stats.
+        self._model_output = ModelOutput()
         self._events = EventStream()
         self._uploads = UploadStore()
         self._recorder = Recorder(
@@ -377,9 +380,11 @@ class Runner(ServiceComponent, ConnectionSink):
         self._model_metrics.loaded(since=started_at)
         self._bridge = bridge
         self._command_metrics.declare(contract.commands)
-        self._model_metrics.declare(
+        out_tracks = [
             name for name, info in contract.tracks.items() if info.direction is TrackDirection.OUT
-        )
+        ]
+        self._model_metrics.declare(out_tracks)
+        self._model_output.declare(out_tracks)
         self._sm.send(SessionEvent.INITIALIZATION_SUCCESS)
         logger.info(
             "model loaded; session ready",
@@ -1295,6 +1300,10 @@ class Runner(ServiceComponent, ConnectionSink):
         """
         for track in chunk.bundle.tracks:
             self._model_metrics.emitted(track, chunk.n_frames)
+            # A chunk the model emitted for an earlier session (from its
+            # session-end hook, say, after the next session started) still
+            # plays out, but it is not this session's output.
+            self._model_output.emitted(track, chunk.n_frames, chunk.session)
         generation = self._media_generation
         self._connections.broadcast_media(chunk, abort=lambda: self._media_generation != generation)
         # The archive takes the whole chunk even when a flush cut the broadcast
@@ -1654,6 +1663,9 @@ class Runner(ServiceComponent, ConnectionSink):
         """
         if transition.is_session_start:
             self._sessions_posted += 1
+            # Before the model hears of the session: from then on its thread
+            # can emit, and every frame it emits for this session counts.
+            self._model_output.reset(self._sessions_posted)
             bridge.dispatch_reactor_event(
                 SessionStarted(
                     self._session_id,
