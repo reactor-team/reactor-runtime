@@ -425,6 +425,11 @@ class Runner(ServiceComponent, ConnectionSink):
         thing released even when ``stop`` races a session that is still closing.
         """
         self._cancel_orphan_timeout()
+        task = self._cancel_runtime_stats()
+        if task is not None:
+            # Waits for the reporter to finish without raising its
+            # cancellation, which it never caught if it had not started yet.
+            await asyncio.wait([task])
         await self._drain_teardown()
         await asyncio.to_thread(self._recorder.close)
         if self._step_store is not None:
@@ -1740,9 +1745,15 @@ class Runner(ServiceComponent, ConnectionSink):
         if state in _RUNNING_STATES:
             if self._runtime_stats_task is None and self._loop is not None:
                 self._runtime_stats_task = self._loop.create_task(self._report_runtime_stats())
-        elif self._runtime_stats_task is not None:
-            self._runtime_stats_task.cancel()
-            self._runtime_stats_task = None
+        else:
+            self._cancel_runtime_stats()
+
+    def _cancel_runtime_stats(self) -> asyncio.Task[None] | None:
+        """Cancel the runtime stats reporter, returning its task to await, if one ran."""
+        task, self._runtime_stats_task = self._runtime_stats_task, None
+        if task is not None:
+            task.cancel()
+        return task
 
     async def _report_runtime_stats(self) -> None:
         """Journal a ``runtime_stats`` reading on a fixed cadence until cancelled.

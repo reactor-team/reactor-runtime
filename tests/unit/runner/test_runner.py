@@ -3615,6 +3615,38 @@ async def test_runtime_stats_stop_when_the_session_ends(started_runner: Runner) 
     assert started_runner._runtime_stats_task is None
 
 
+async def test_runtime_stats_stop_when_the_runner_stops_mid_session(
+    started_runner: Runner,
+) -> None:
+    started_runner._runtime_stats_interval = 0.01
+    started_runner.start_session({})
+    await asyncio.sleep(0.03)
+    task = started_runner._runtime_stats_task
+    assert task is not None
+
+    await started_runner.stop()
+    journalled = len(_runtime_stats_facts(started_runner))
+    await asyncio.sleep(0.05)
+
+    assert journalled > 0
+    assert task.done()
+    assert started_runner._runtime_stats_task is None
+    assert len(_runtime_stats_facts(started_runner)) == journalled
+
+
+async def test_the_runner_stops_before_the_runtime_stats_reporter_has_run(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    task = started_runner._runtime_stats_task
+    assert task is not None
+
+    await started_runner.stop()
+
+    assert task.cancelled()
+    assert started_runner._runtime_stats_task is None
+
+
 async def test_runtime_stats_are_not_journalled_without_a_session(started_runner: Runner) -> None:
     started_runner._runtime_stats_interval = 0.01
 
