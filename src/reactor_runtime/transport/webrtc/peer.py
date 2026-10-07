@@ -1312,10 +1312,9 @@ class WebRTCPeer:
         # track map names the track on each transceiver, so a stream is matched
         # to its track by mid. A stream whose mid is not in the map (none yet,
         # or a transceiver no track was declared on) has no track to report.
-        by_mid = {mapped.mid: mapped.info for mapped in self._track_map.tracks}
         tracks: list[TrackStat] = []
         for out in report.outbound_rtp:
-            info = by_mid.get(out.mid) if out.mid is not None else None
+            info = self._track_by_mid.get(out.mid) if out.mid is not None else None
             if info is None or info.direction is not TrackDirection.OUT:
                 continue
             # The round trip and the loss fraction both come from the receiver's
@@ -1345,7 +1344,7 @@ class WebRTCPeer:
             )
 
         for inbound in report.inbound_rtp:
-            info = by_mid.get(inbound.mid) if inbound.mid is not None else None
+            info = self._track_by_mid.get(inbound.mid) if inbound.mid is not None else None
             if info is None or info.direction is not TrackDirection.IN:
                 continue
             tracks.append(
