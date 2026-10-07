@@ -58,6 +58,7 @@ from reactor_runtime.core import (
     TrackKind,
     Transition,
     TransitionEvent,
+    TransportReading,
     TransportStatsSource,
 )
 from reactor_runtime.interface.internal.bridge import CommandOutcome
@@ -3537,6 +3538,89 @@ async def test_client_stats_are_journalled_as_a_metric_with_the_session_and_conn
             "metrics": {"connection_rtt_ms": 25.0},
         },
     }
+
+
+class MeasuredConnection(FakeConnection):
+    """A fake whose transport measures its wire."""
+
+    def __init__(self, cid: int, reading: TransportReading | None) -> None:
+        super().__init__(cid)
+        self.latest_reading = reading
+
+
+def _runtime_stats_facts(runner: Runner) -> list[Transition]:
+    metrics = _moves(runner, SessionEvent.METRIC)
+    return [t for t in metrics if t.detail.get("name") == "runtime_stats"]
+
+
+async def test_runtime_stats_are_journalled_while_a_session_runs(
+    started_runner: Runner,
+) -> None:
+    started_runner._runtime_stats_interval = 0.01
+    conn = MeasuredConnection(4, TransportReading(metrics={"connection_rtt_ms": 40.0}))
+    started_runner.start_session({"session_id": _LIVE_SESSION_ID})
+    started_runner.connection_opened(conn)
+    state = started_runner._sm.current_state
+    started_runner._emit_media(MediaChunk(bundle=_video_bundle(), fps=30.0, n_frames=2))
+
+    await asyncio.sleep(0.05)
+
+    facts = _runtime_stats_facts(started_runner)
+    assert facts, "no runtime_stats reading was journalled"
+    first = facts[0]
+    # A self-loop like every other journal fact: the session state is unchanged.
+    assert first.from_state is state
+    assert first.to_state is state
+    assert first.detail["session_id"] == _LIVE_SESSION_ID
+    (output,) = first.detail["model_output"]
+    assert output["track_name"] == "main"
+    assert output["metrics"]["frames_emitted"] == 2.0
+    (connection,) = first.detail["connection_stats"]
+    assert connection["conn_id"] == 4
+    assert connection["metrics"]["connection_rtt_ms"] == pytest.approx(40.0)
+
+
+async def test_runtime_stats_carry_the_model_output_past_a_connection_that_measures_nothing(
+    started_runner: Runner,
+) -> None:
+    # A transport without the stats capability adds no connection reading, and
+    # the session still reports what its model emitted.
+    started_runner._runtime_stats_interval = 0.01
+    started_runner.start_session({})
+    unmeasured = FakeConnection(5)
+    assert not isinstance(unmeasured, TransportStatsSource)
+    started_runner.connection_opened(unmeasured)
+    started_runner._emit_media(MediaChunk(bundle=_video_bundle(), fps=30.0, n_frames=1))
+
+    await asyncio.sleep(0.05)
+
+    facts = _runtime_stats_facts(started_runner)
+    assert facts
+    assert facts[0].detail["connection_stats"] == []
+    assert facts[0].detail["model_output"][0]["metrics"]["frames_emitted"] == 1.0
+
+
+async def test_runtime_stats_stop_when_the_session_ends(started_runner: Runner) -> None:
+    started_runner._runtime_stats_interval = 0.01
+    started_runner.start_session({})
+    await asyncio.sleep(0.03)
+    started_runner.stop_session()
+    await started_runner._drain_teardown()
+    journalled = len(_runtime_stats_facts(started_runner))
+
+    await asyncio.sleep(0.05)
+
+    assert journalled > 0
+    assert len(_runtime_stats_facts(started_runner)) == journalled
+    assert started_runner._runtime_stats_task is None
+
+
+async def test_runtime_stats_are_not_journalled_without_a_session(started_runner: Runner) -> None:
+    started_runner._runtime_stats_interval = 0.01
+
+    await asyncio.sleep(0.05)
+
+    assert _runtime_stats_facts(started_runner) == []
 
 
 async def test_client_stats_are_not_journalled_before_a_session_starts(

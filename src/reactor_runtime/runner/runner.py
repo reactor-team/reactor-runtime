@@ -51,6 +51,7 @@ from reactor_runtime.core import (
     SessionState,
     StartingInputApplied,
     TrackDirection,
+    TrackKind,
     Transition,
     TransitionEvent,
     TypeSpec,
@@ -73,7 +74,7 @@ from reactor_runtime.metrics import (
 )
 from reactor_runtime.protocol import Channel, Codec, ProtocolVersion, select
 from reactor_runtime.recording import ClipResult, Recorder, RecorderError
-from reactor_runtime.runner import client_stats
+from reactor_runtime.runner import client_stats, runtime_stats
 from reactor_runtime.runner.client_stats import ClientStatsGate
 from reactor_runtime.runner.connection_manager import ConnectionManager
 from reactor_runtime.runner.offer_epochs import OfferEpochs
@@ -244,6 +245,9 @@ class Runner(ServiceComponent, ConnectionSink):
         self._model_metrics = ModelMetrics(self._metrics)
         # The same emissions, counted per session for the runtime's own stats.
         self._model_output = ModelOutput()
+        self._output_kinds: dict[str, TrackKind] = {}
+        self._runtime_stats_interval = runtime_stats.INTERVAL_SECONDS
+        self._runtime_stats_task: asyncio.Task[None] | None = None
         self._events = EventStream()
         self._uploads = UploadStore()
         self._recorder = Recorder(
@@ -380,11 +384,13 @@ class Runner(ServiceComponent, ConnectionSink):
         self._model_metrics.loaded(since=started_at)
         self._bridge = bridge
         self._command_metrics.declare(contract.commands)
-        out_tracks = [
-            name for name, info in contract.tracks.items() if info.direction is TrackDirection.OUT
-        ]
-        self._model_metrics.declare(out_tracks)
-        self._model_output.declare(out_tracks)
+        self._output_kinds = {
+            name: info.kind
+            for name, info in contract.tracks.items()
+            if info.direction is TrackDirection.OUT
+        }
+        self._model_metrics.declare(self._output_kinds.keys())
+        self._model_output.declare(self._output_kinds.keys())
         self._sm.send(SessionEvent.INITIALIZATION_SUCCESS)
         logger.info(
             "model loaded; session ready",
@@ -1531,6 +1537,7 @@ class Runner(ServiceComponent, ConnectionSink):
         entered = transition.from_state is not transition.to_state
         if entered:
             self._reset_orphan_timeout(transition.to_state)
+            self._sync_runtime_stats(transition.to_state)
         if entered and transition.to_state is SessionState.CLOSING and self._loop is not None:
             reason = transition.detail.get("reason", EndReason.STOPPED)
             close_reason = transition.detail.get("close_reason", "")
@@ -1725,6 +1732,57 @@ class Runner(ServiceComponent, ConnectionSink):
         except asyncio.CancelledError:
             return
         self._sm.send(SessionEvent.TIMEOUT, reason=EndReason.TIMED_OUT)
+
+    # -- runtime stats --------------------------------------------------------
+
+    def _sync_runtime_stats(self, state: SessionState) -> None:
+        """Run the runtime stats reporter while a session runs, and only then."""
+        if state in _RUNNING_STATES:
+            if self._runtime_stats_task is None and self._loop is not None:
+                self._runtime_stats_task = self._loop.create_task(self._report_runtime_stats())
+        elif self._runtime_stats_task is not None:
+            self._runtime_stats_task.cancel()
+            self._runtime_stats_task = None
+
+    async def _report_runtime_stats(self) -> None:
+        """Journal a ``runtime_stats`` reading on a fixed cadence until cancelled.
+
+        A reading that fails to build is logged and skipped rather than ending
+        the reporter: stats are best-effort, so one bad sample must not stop
+        them for the rest of the session.
+        """
+        try:
+            while True:
+                await asyncio.sleep(self._runtime_stats_interval)
+                try:
+                    self._journal_runtime_stats()
+                except Exception:
+                    logger.warning("runtime stats reading failed", exc_info=True)
+        except asyncio.CancelledError:
+            return
+
+    def _journal_runtime_stats(self) -> None:
+        """Journal the runtime's own view of the session as one ``metric`` fact.
+
+        The fact is a self-loop named ``runtime_stats``, the runtime's
+        counterpart to a client's ``client_stats``: what the model emitted on
+        each output track over the last window, and each connection's latest
+        transport reading, in the metrics its transport names. Shaped by
+        :func:`runtime_stats.to_detail`.
+        """
+        if self._sm.current_state not in _RUNNING_STATES:
+            return
+        self._sm.send(
+            SessionEvent.METRIC,
+            name="runtime_stats",
+            session_id=self._recording_id,
+            **runtime_stats.to_detail(
+                observed_at_ms=int(time.time() * 1000),
+                model_output=self._model_output.take(),
+                output_kinds=self._output_kinds,
+                readings=self._connections.transport_readings(),
+            ),
+        )
 
     async def _close_session(self, reason: EndReason) -> None:
         """Close the session's connections, then mark cleanup complete.
