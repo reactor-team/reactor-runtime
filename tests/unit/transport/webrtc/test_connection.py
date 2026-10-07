@@ -13,8 +13,9 @@ from reactor_runtime.core import (
     InputFrame,
     MediaBundle,
     MediaChunk,
+    TransportStatsSource,
 )
-from reactor_runtime.core.values import TrackData, TrackInfo, TrackKind
+from reactor_runtime.core.values import TrackData, TrackDirection, TrackInfo, TrackKind
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.protocol.v1.codec import V1Codec
 from reactor_runtime.transport.webrtc import (
@@ -22,6 +23,7 @@ from reactor_runtime.transport.webrtc import (
     PeerStats,
     SdpOffer,
     TrackMap,
+    TrackStat,
     WebRtcConfig,
     WebRTCConnection,
     WebRtcPeerFactory,
@@ -87,6 +89,8 @@ async def test_is_a_connection(
 ) -> None:
     conn = await _connect(fake_peer, factory_for(fake_peer), out_av_tracks)
     assert isinstance(conn, Connection)
+    # Its transport samples the wire, so the runner can read what it measured.
+    assert isinstance(conn, TransportStatsSource)
 
 
 async def test_outbound_commands_delegate_to_peer(
@@ -367,7 +371,36 @@ async def test_stats_polling_samples(
     await asyncio.sleep(0.05)
 
     assert conn.latest_stats == PeerStats(rtt_seconds=0.25)
+    assert conn.latest_reading is not None
+    assert conn.latest_reading.metrics["connection_rtt_ms"] == 250.0
     assert len(samples) >= 1
+    await conn.close()
+
+
+async def test_a_reading_measures_bitrate_between_samples(
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    class SendingPeer(FakePeer):
+        """A peer whose track has sent 1 000 more bytes at every sample."""
+
+        sent = 0
+
+        async def stats(self) -> PeerStats:
+            self.sent += 1_000
+            track = TrackStat(name="main_video", direction=TrackDirection.OUT, bytes_sent=self.sent)
+            return PeerStats(tracks=(track,))
+
+    peer = SendingPeer()
+    conn = await _connect(peer, factory_for(peer), out_av_tracks, ping_timeout=0.0)
+    conn._STATS_INTERVAL_SECONDS = 0.01
+
+    peer.fire_connected()
+    await asyncio.sleep(0.05)
+
+    assert conn.latest_reading is not None
+    (track,) = conn.latest_reading.tracks
+    assert track.metrics["bitrate_bps"] > 0
     await conn.close()
 
 
