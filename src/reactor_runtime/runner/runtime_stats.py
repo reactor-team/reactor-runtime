@@ -8,9 +8,19 @@ them. :class:`ModelOutput` keeps those counts for the session that is running.
 
 from __future__ import annotations
 
+import math
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
+from typing import Any
+
+from reactor_runtime.core import (
+    ClientTrackDirection,
+    ConnId,
+    TrackKind,
+    TransportReading,
+    TransportTrackReading,
+)
 
 
 class ModelOutput:
@@ -128,3 +138,67 @@ class ModelOutput:
             self._longest_gap.clear()
             self._window_start = now
             return readings
+
+
+INTERVAL_SECONDS = 5.0
+"""How often the runner journals a ``runtime_stats`` reading during a session."""
+
+
+def to_detail(
+    *,
+    observed_at_ms: int,
+    model_output: Mapping[str, Mapping[str, float]],
+    output_kinds: Mapping[str, TrackKind],
+    readings: Iterable[tuple[ConnId, TransportReading]],
+) -> dict[str, Any]:
+    """Shape one ``runtime_stats`` reading as a ``metric`` fact's detail.
+
+    The shape follows a ``client_stats`` reading's, so a consumer reads both
+    the same way: tracks carry ``track_name``, ``kind``, ``direction`` (as the
+    client sees the track) and ``codec``, beside their ``metrics``. A metric
+    value that isn't a finite number is left out, since JSON has no way to
+    carry it.
+
+    Args:
+        observed_at_ms: When the reading was taken, in Unix milliseconds.
+        model_output: Per output track, the metrics :meth:`ModelOutput.take`
+            returned.
+        output_kinds: The kind of each output track the model declares.
+        readings: Each connection's latest transport reading.
+    """
+    return {
+        "observed_at": observed_at_ms,
+        "model_output": [
+            {
+                "track_name": name,
+                "kind": str(output_kinds[name]) if name in output_kinds else "",
+                # What the model sends, the client receives.
+                "direction": str(ClientTrackDirection.RECVONLY),
+                "metrics": _finite(metrics),
+            }
+            for name, metrics in model_output.items()
+        ],
+        "connection_stats": [
+            {
+                "conn_id": int(cid),
+                "metrics": _finite(reading.metrics),
+                "track_stats": [_track(track) for track in reading.tracks],
+            }
+            for cid, reading in readings
+        ],
+    }
+
+
+def _track(track: TransportTrackReading) -> dict[str, Any]:
+    return {
+        "track_name": track.track_name,
+        "kind": str(track.kind) if track.kind is not None else "",
+        "direction": str(track.direction),
+        "codec": track.codec,
+        "metrics": _finite(track.metrics),
+    }
+
+
+def _finite(metrics: Mapping[str, float]) -> dict[str, float]:
+    """Keep the values JSON can carry: finite numbers."""
+    return {name: float(value) for name, value in metrics.items() if math.isfinite(value)}

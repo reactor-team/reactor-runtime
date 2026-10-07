@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import threading
+from typing import Any
 
 import pytest
 
-from reactor_runtime.runner.runtime_stats import ModelOutput
+from reactor_runtime.core import (
+    ClientTrackDirection,
+    ConnId,
+    TrackKind,
+    TransportReading,
+    TransportTrackReading,
+)
+from reactor_runtime.runner.runtime_stats import ModelOutput, to_detail
 
 
 class _Clock:
@@ -144,3 +152,84 @@ def test_the_clock_is_read_under_the_lock() -> None:
     output.emitted("main_video", 1)
     output.take()
     output.reset()
+
+
+def _reading() -> TransportReading:
+    return TransportReading(
+        metrics={"connection_rtt_ms": 50.0, "available_outgoing_bitrate_bps": 2_000_000.0},
+        tracks=(
+            TransportTrackReading(
+                track_name="main_video",
+                kind=TrackKind.VIDEO,
+                direction=ClientTrackDirection.RECVONLY,
+                codec="VP9",
+                metrics={"bitrate_bps": 1_000_000.0, "frames_per_second": 30.0},
+            ),
+            TransportTrackReading(
+                track_name="mic",
+                kind=None,
+                direction=ClientTrackDirection.SENDONLY,
+            ),
+        ),
+    )
+
+
+def _detail(*readings: tuple[ConnId, TransportReading]) -> dict[str, Any]:
+    return to_detail(
+        observed_at_ms=1_700_000_000_000,
+        model_output={"main_video": {"frames_emitted": 30.0}},
+        output_kinds={"main_video": TrackKind.VIDEO},
+        readings=readings,
+    )
+
+
+def test_a_reading_is_shaped_like_a_client_reading() -> None:
+    detail = _detail((ConnId(7), _reading()))
+
+    assert detail["observed_at"] == 1_700_000_000_000
+    assert detail["model_output"] == [
+        {
+            "track_name": "main_video",
+            "kind": "video",
+            # What the model sends, the client receives.
+            "direction": "recvonly",
+            "metrics": {"frames_emitted": 30.0},
+        }
+    ]
+    assert detail["connection_stats"] == [
+        {
+            "conn_id": 7,
+            "metrics": {"connection_rtt_ms": 50.0, "available_outgoing_bitrate_bps": 2_000_000.0},
+            "track_stats": [
+                {
+                    "track_name": "main_video",
+                    "kind": "video",
+                    "direction": "recvonly",
+                    "codec": "VP9",
+                    "metrics": {"bitrate_bps": 1_000_000.0, "frames_per_second": 30.0},
+                },
+                {
+                    "track_name": "mic",
+                    "kind": "",
+                    "direction": "sendonly",
+                    "codec": "",
+                    "metrics": {},
+                },
+            ],
+        }
+    ]
+
+
+def test_a_reading_with_no_connections_carries_the_model_output_alone() -> None:
+    detail = _detail()
+
+    assert detail["connection_stats"] == []
+    assert len(detail["model_output"]) == 1
+
+
+def test_values_json_cannot_carry_are_left_out() -> None:
+    reading = TransportReading(metrics={"connection_rtt_ms": float("nan"), "dropped_frames": 2.0})
+
+    detail = _detail((ConnId(7), reading))
+
+    assert detail["connection_stats"][0]["metrics"] == {"dropped_frames": 2.0}
