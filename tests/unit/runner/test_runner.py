@@ -58,6 +58,7 @@ from reactor_runtime.core import (
     TrackKind,
     Transition,
     TransitionEvent,
+    TransportStatsSource,
 )
 from reactor_runtime.interface.internal.bridge import CommandOutcome
 from reactor_runtime.interface.internal.reactor_core import (
@@ -1525,6 +1526,8 @@ def test_the_system_client_carries_no_media_and_conforms_to_the_protocol() -> No
     assert conn.id == SYSTEM_CONN_ID
     assert not conn.capabilities.carries_video
     assert not conn.capabilities.carries_audio
+    # No wire, so nothing to sample.
+    assert not isinstance(conn, TransportStatsSource)
 
 
 def _step(runner: Runner, *, error: str | None = None) -> CompletedStep:

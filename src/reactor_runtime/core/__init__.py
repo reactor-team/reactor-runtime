@@ -34,7 +34,7 @@ from reactor_runtime.core.session import (
     Transition,
 )
 from reactor_runtime.core.stats import TransportReading, TransportTrackReading
-from reactor_runtime.core.transport import Connection, ConnectionSink
+from reactor_runtime.core.transport import Connection, ConnectionSink, TransportStatsSource
 from reactor_runtime.core.typespec import TypeSpec
 from reactor_runtime.core.values import (
     ClientConnectionStat,
@@ -100,6 +100,7 @@ __all__ = [
     "Transition",
     "TransitionEvent",
     "TransportReading",
+    "TransportStatsSource",
     "TransportTrackReading",
     "TypeSpec",
     "UploadedFile",
