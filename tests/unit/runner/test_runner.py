@@ -2973,6 +2973,31 @@ async def test_a_late_chunk_of_an_earlier_session_is_not_counted_for_the_next(
     assert started_runner._model_output.take()["main"]["frames_emitted"] == 3.0
 
 
+async def test_a_late_chunk_landing_as_the_count_starts_over_is_not_counted(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The model's thread emits while the loop starts the next session, so an
+    # earlier session's chunk can land the moment the count starts over.
+    started_runner.start_session({})
+    started_runner.stop_session()
+    await started_runner._drain_teardown()
+    earlier = started_runner._sessions_posted
+    output = started_runner._model_output
+    reset = output.reset
+
+    def reset_then_emit_late(session: int | None = None) -> None:
+        reset(session)
+        started_runner._emit_media(
+            MediaChunk(bundle=_video_bundle(), fps=30.0, n_frames=4, session=earlier)
+        )
+
+    monkeypatch.setattr(output, "reset", reset_then_emit_late)
+
+    started_runner.start_session({})
+
+    assert output.take()["main"]["frames_emitted"] == 0.0
+
+
 async def test_a_rejected_start_leaves_the_running_sessions_counts_alone(
     started_runner: Runner,
 ) -> None:

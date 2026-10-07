@@ -20,7 +20,8 @@ class ModelOutput:
     taken from the runtime's loop, so every access holds a lock. A reading
     covers the window since the previous one: the frame rate and the longest
     gap are what that window saw, while the frame total runs for the whole
-    session. :meth:`reset` starts a new session from zero.
+    session. :meth:`reset` starts a new session from zero, and an emission
+    stamped with another session's number is left out of its count.
     """
 
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
@@ -32,6 +33,7 @@ class ModelOutput:
         self._last_emit: dict[str, float] = {}
         self._longest_gap: dict[str, float] = {}
         self._window_start = clock()
+        self._session: int | None = None
 
     def declare(self, tracks: Iterable[str]) -> None:
         """Name the output tracks the model declares.
@@ -43,28 +45,46 @@ class ModelOutput:
         with self._lock:
             self._tracks = tuple(tracks)
 
-    def reset(self) -> None:
-        """Start counting a new session from zero.
+    def reset(self, session: int | None = None) -> None:
+        """Start counting *session* from zero.
 
         The gap between the last frame of one session and the first of the
         next is the model waiting for a client, so no gap crosses the reset.
+
+        Args:
+            session: The number of the session that starts, as the model counts
+                them. From here on, an emission stamped with any other number
+                belongs to another session and is not counted.
         """
         with self._lock:
+            self._session = session
             self._frames.clear()
             self._window_frames.clear()
             self._last_emit.clear()
             self._longest_gap.clear()
             self._window_start = self._clock()
 
-    def emitted(self, track: str, frames: int) -> None:
+    def emitted(self, track: str, frames: int, session: int | None = None) -> None:
         """Count one emission of *frames* frames on *track*.
 
         Counted in frames because one emission can carry a batch of them. The
         gap is measured between emissions, undivided by the batch, so a model
         that emits a batch at a time has the play-out length of a batch as its
         normal gap and a stall shows above it.
+
+        Args:
+            track: The output track the frames were emitted on.
+            frames: How many frames the emission carried.
+            session: The number of the session the model emitted them in, or
+                ``None`` when the emitter does not count sessions. An emission
+                of a session other than the one :meth:`reset` started is not
+                counted. The check runs under the same lock as the reset, so
+                an emission is counted for the session that is current when
+                it lands.
         """
         with self._lock:
+            if session is not None and self._session is not None and session != self._session:
+                return
             # Read under the lock, so concurrent emissions store their times
             # in the order they were taken.
             now = self._clock()
