@@ -1446,6 +1446,11 @@ def test_stats_from_report_matches_streams_to_tracks_by_mid() -> None:
     assert by_name["main_audio"].frames_per_second is None
     assert by_name["mic"].frame_width is None
     assert by_name["mic"].kind is TrackKind.AUDIO
+    # libwebrtc reports zero frames for audio, which is no count either.
+    assert by_name["main_audio"].frames_sent is None
+    assert (by_name["mic"].frames_decoded, by_name["mic"].frames_dropped) == (None, None)
+    assert by_name["main_video"].frames_sent == 0
+    assert by_name["webcam"].frames_decoded == 0
 
 
 def test_stats_from_report_reads_no_frame_size_or_rate_before_one_is_measured() -> None:

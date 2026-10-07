@@ -44,6 +44,10 @@ class TrackStat:
             one a viewer sees, as distinct from the rate the model produced.
         frames_decoded: Video frames decoded. Inbound only.
         frames_dropped: Video frames the decoder discarded. Inbound only.
+
+        The frame counters are ``None`` on an audio track: libwebrtc counts
+        frames for video alone and reports zero for audio, which is not a
+        measurement.
         nacks: Retransmission requests the stream carried. Which end asked
             follows from the direction: inbound, this process asked the sender;
             outbound, the receiver asked this process. Either way it rises

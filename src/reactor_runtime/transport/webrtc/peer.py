@@ -1359,7 +1359,7 @@ class WebRTCPeer:
                     packets_lost=max(0, out.packets_lost),
                     retransmitted_packets_sent=int(out.retransmitted_packets_sent),
                     bytes_sent=int(out.bytes_sent),
-                    frames_sent=int(out.frames_sent),
+                    frames_sent=int(out.frames_sent) if video else None,
                     # What the receiver asked this side for. A PLI and a FIR are
                     # the same request in two codec dialects, so they are summed
                     # here rather than left for every reader to add up.
@@ -1387,8 +1387,8 @@ class WebRTCPeer:
                     packets_received=int(inbound.packets_received),
                     packets_lost=max(0, inbound.packets_lost),
                     bytes_received=int(inbound.bytes_received),
-                    frames_decoded=int(inbound.frames_decoded),
-                    frames_dropped=int(inbound.frames_dropped),
+                    frames_decoded=int(inbound.frames_decoded) if video else None,
+                    frames_dropped=int(inbound.frames_dropped) if video else None,
                     nacks=int(inbound.nack_count),
                     keyframe_requests=int(inbound.pli_count) + int(inbound.fir_count),
                     jitter=inbound.jitter_s,
