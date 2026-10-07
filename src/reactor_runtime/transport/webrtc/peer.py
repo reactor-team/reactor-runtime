@@ -1308,11 +1308,15 @@ class WebRTCPeer:
                 available_outgoing = pair.available_outgoing_bitrate_bps
             break
 
+        # Each RTP stream names the transceiver it belongs to, and the client's
+        # track map names the track on each transceiver, so a stream is matched
+        # to its track by mid. A stream whose mid is not in the map (none yet,
+        # or a transceiver no track was declared on) has no track to report.
         tracks: list[TrackStat] = []
-        out_infos = self._track_map.by_direction(TrackDirection.OUT)
-        for i, out in enumerate(report.outbound_rtp):
-            if i >= len(out_infos):
-                break
+        for out in report.outbound_rtp:
+            info = self._track_by_mid.get(out.mid) if out.mid is not None else None
+            if info is None or info.direction is not TrackDirection.OUT:
+                continue
             # The round trip and the loss fraction both come from the receiver's
             # RTCP report about this stream, and libwebrtc holds the round trip
             # at zero until the first report lands. That zero is what says no
@@ -1321,7 +1325,7 @@ class WebRTCPeer:
             reported = out.round_trip_time_s > 0.0
             tracks.append(
                 TrackStat(
-                    name=out_infos[i].name,
+                    name=info.name,
                     direction=TrackDirection.OUT,
                     packets_sent=int(out.packets_sent),
                     # Signed per RFC 3550, and negative when duplicates arrive.
@@ -1339,13 +1343,13 @@ class WebRTCPeer:
                 )
             )
 
-        in_infos = self._track_map.by_direction(TrackDirection.IN)
-        for i, inbound in enumerate(report.inbound_rtp):
-            if i >= len(in_infos):
-                break
+        for inbound in report.inbound_rtp:
+            info = self._track_by_mid.get(inbound.mid) if inbound.mid is not None else None
+            if info is None or info.direction is not TrackDirection.IN:
+                continue
             tracks.append(
                 TrackStat(
-                    name=in_infos[i].name,
+                    name=info.name,
                     direction=TrackDirection.IN,
                     packets_received=int(inbound.packets_received),
                     packets_lost=max(0, inbound.packets_lost),

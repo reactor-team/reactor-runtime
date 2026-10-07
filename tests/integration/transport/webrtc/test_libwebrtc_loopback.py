@@ -810,6 +810,15 @@ async def test_loopback_carries_media_and_messages() -> None:
             f"unexpected inbound metadata: {inbound_metadata[0]!r}"
         )
 
+        # Each RTP stream in a real stats report lands on its track by mid.
+        sampled = {t.name: t for t in (await peer.stats()).tracks}
+        assert {"out_video", "out_audio", "in_video"} <= sampled.keys(), sampled.keys()
+        assert sampled["out_video"].direction is TrackDirection.OUT
+        assert sampled["out_video"].frames_sent
+        assert sampled["out_audio"].direction is TrackDirection.OUT
+        assert sampled["in_video"].direction is TrackDirection.IN
+        assert sampled["in_video"].frames_decoded
+
         # A client data-channel frame must surface through on_message, tagged with
         # the sniffed codec version and the channel it arrived on.
         assert client.data is not None
