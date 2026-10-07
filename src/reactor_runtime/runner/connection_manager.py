@@ -48,6 +48,8 @@ from reactor_runtime.core import (
     ConnId,
     MediaChunk,
     SessionEvent,
+    TransportReading,
+    TransportStatsSource,
 )
 from reactor_runtime.log import get_logger
 from reactor_runtime.protocol import Channel, ProtocolVersion
@@ -138,6 +140,20 @@ class ConnectionManager:
     def count(self) -> int:
         """The number of connections currently registered."""
         return len(self._by_id)
+
+    def transport_readings(self) -> list[tuple[ConnId, TransportReading]]:
+        """The latest transport reading of every connection that has one.
+
+        A connection whose transport has not taken a reading yet, or does not
+        measure its wire (it is not a :class:`TransportStatsSource`), is left
+        out.
+        """
+        return [
+            (cid, reading)
+            for cid, conn in self._by_id.items()
+            if isinstance(conn, TransportStatsSource)
+            and (reading := conn.latest_reading) is not None
+        ]
 
     def new_conn_id(self) -> ConnId:
         """Mint a fresh random connection id, unique within the session.

@@ -14,6 +14,8 @@ from reactor_runtime.core import (
     SessionEvent,
     SessionState,
     Transition,
+    TransportReading,
+    TransportStatsSource,
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.runner import ConnectionManager, SessionStateMachine
@@ -119,6 +121,27 @@ def waiting_manager() -> tuple[ConnectionManager, SessionStateMachine]:
 
 def test_fake_connection_conforms_to_the_protocol() -> None:
     assert isinstance(FakeConnection(1), Connection)
+
+
+class MeasuredConnection(FakeConnection):
+    """A fake whose transport samples its wire."""
+
+    def __init__(self, cid: int, reading: TransportReading | None) -> None:
+        super().__init__(cid)
+        self.latest_reading = reading
+
+
+def test_transport_readings_come_from_connections_that_measure_their_wire() -> None:
+    cm, _ = waiting_manager()
+    reading = TransportReading(metrics={"connection_rtt_ms": 50.0})
+    # A transport that predates the capability has no latest_reading at all; it
+    # is left out rather than failing the reading for everyone.
+    cm.register(FakeConnection(1))
+    cm.register(MeasuredConnection(2, reading))
+    cm.register(MeasuredConnection(3, None))
+
+    assert not isinstance(FakeConnection(1), TransportStatsSource)
+    assert cm.transport_readings() == [(ConnId(2), reading)]
 
 
 def test_new_conn_id_is_random_in_range_and_unique() -> None:
