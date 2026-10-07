@@ -74,6 +74,7 @@ from reactor_runtime.interface.events.decorators import (
 from reactor_runtime.interface.events.errors import ApplicationError, CommandError
 from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.reactor_core import (
+    STEP_SESSION,
     CommandEnvelope,
     ReactorCore,
     RequestId,
@@ -353,7 +354,13 @@ class ReactorApp(ReactorCore):
                         rate = None
                         if report.output is not None:
                             pace = None if fps_pinned else outcome.elapsed
-                            await self.emit(report.output, compute_time=pace)
+                            # The media is the step's, so it carries the
+                            # session the step began in, as the report does.
+                            token = STEP_SESSION.set(session)
+                            try:
+                                await self.emit(report.output, compute_time=pace)
+                            finally:
+                                STEP_SESSION.reset(token)
                             frames = self._to_bundle(report.output).frame_count
                             rate = self._playout_rate(frames, pace)
                         self._report_step(report, session, rate)

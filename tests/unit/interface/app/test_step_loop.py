@@ -36,8 +36,8 @@ from reactor_runtime.core.model import (
     SessionStarted,
     StartingInputApplied,
 )
-from reactor_runtime.core.values import CompletedStep, ConnId
-from reactor_runtime.interface.internal.reactor_core import CommandEnvelope
+from reactor_runtime.core.values import CompletedStep, ConnId, MediaChunk
+from reactor_runtime.interface.internal.reactor_core import CommandEnvelope, ReactorCore
 from reactor_runtime.interface.model.contract import ModelContract
 
 
@@ -931,3 +931,44 @@ async def test_a_step_that_spans_a_restart_keeps_the_session_it_began_in() -> No
 
     assert app._sessions_started == 2
     assert steps[0].session == 1
+
+
+async def test_a_steps_media_carries_the_session_the_step_began_in() -> None:
+    # The session can change while a step emits. Its media then counts toward
+    # the same session as its report, rather than the one current at emit time.
+    release = asyncio.Event()
+
+    class SlowWire(OnlyGenerate):
+        async def emit(
+            self, output: Output, *, compute_time: float | None = None, drop: bool = False
+        ) -> None:
+            await release.wait()
+            await ReactorCore.emit(self, output, compute_time=compute_time, drop=drop)
+
+    app = SlowWire()
+    steps = _ready_reporting(app)
+    chunks: list[MediaChunk] = []
+    app._out_media = chunks.append
+    await _go_live(app)
+    task = asyncio.create_task(app.run())
+    await asyncio.sleep(0.01)  # the first step is now blocked in emit
+
+    await app._dispatch_reactor_event(SessionEnded("s", EndReason.STOPPED))
+    await app._dispatch_reactor_event(SessionStarted("s2"))
+    release.set()
+    await asyncio.sleep(0.01)
+    await _stop(task)
+
+    assert (steps[0].session, chunks[0].session) == (1, 1)
+
+
+async def test_media_emitted_outside_a_step_carries_the_current_session() -> None:
+    app = OnlyGenerate()
+    _ready_reporting(app)
+    chunks: list[MediaChunk] = []
+    app._out_media = chunks.append
+    await app._dispatch_reactor_event(SessionStarted("s1"))
+
+    await ReactorCore.emit(app, _frame())
+
+    assert chunks[0].session == 1

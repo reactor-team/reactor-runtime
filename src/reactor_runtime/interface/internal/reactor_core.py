@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import json
 import logging
 import threading
@@ -49,6 +50,17 @@ RequestId = str
 """A client-originated request id, carried end-to-end so a reply can correlate."""
 
 _Holder = TypeVar("_Holder")
+
+STEP_SESSION: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "reactor_step_session", default=None
+)
+"""The session the step being emitted began in, set by the step loop around its emit.
+
+A step reports the session it began in, and its media is stamped with the
+same number, so both count toward one session even when the session changes
+while the step emits. An emit made outside a step leaves it unset and is
+stamped with the session the model is in when it emits.
+"""
 
 BroadcastSink = Callable[[ModelMessage], None]
 
@@ -167,12 +179,13 @@ class OutputStream:
         fps = core._playout_rate(n_frames, compute_time)
         core._last_emit_fps = fps
         if core._out_media is not None:
+            session = STEP_SESSION.get()
             chunk = MediaChunk(
                 bundle=bundle,
                 fps=fps,
                 n_frames=n_frames,
                 wait=not drop,
-                session=core._sessions_started,
+                session=core._sessions_started if session is None else session,
             )
             await asyncio.to_thread(core._out_media, chunk)
         await asyncio.sleep(0)
