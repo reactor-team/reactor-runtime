@@ -51,7 +51,6 @@ from reactor_runtime.core import (
     SessionState,
     StartingInputApplied,
     TrackDirection,
-    TrackKind,
     Transition,
     TransitionEvent,
     TypeSpec,
@@ -245,7 +244,6 @@ class Runner(ServiceComponent, ConnectionSink):
         self._model_metrics = ModelMetrics(self._metrics)
         # The same emissions, counted per session for the runtime's own stats.
         self._model_output = ModelOutput()
-        self._output_kinds: dict[str, TrackKind] = {}
         self._events = EventStream()
         self._uploads = UploadStore()
         self._recorder = Recorder(
@@ -382,13 +380,11 @@ class Runner(ServiceComponent, ConnectionSink):
         self._model_metrics.loaded(since=started_at)
         self._bridge = bridge
         self._command_metrics.declare(contract.commands)
-        self._output_kinds = {
-            name: info.kind
-            for name, info in contract.tracks.items()
-            if info.direction is TrackDirection.OUT
-        }
-        self._model_metrics.declare(self._output_kinds)
-        self._model_output.declare(self._output_kinds)
+        out_tracks = [
+            name for name, info in contract.tracks.items() if info.direction is TrackDirection.OUT
+        ]
+        self._model_metrics.declare(out_tracks)
+        self._model_output.declare(out_tracks)
         self._sm.send(SessionEvent.INITIALIZATION_SUCCESS)
         logger.info(
             "model loaded; session ready",
