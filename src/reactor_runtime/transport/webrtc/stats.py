@@ -76,7 +76,7 @@ class TrackStat:
         frame_height: Height in pixels of the last frame encoded or decoded,
             or ``None`` before the first. Video only.
         target_bitrate_bps: The bitrate congestion control currently asks the
-            encoder for. Outbound only.
+            encoder for, or ``None`` before the encoder runs. Outbound only.
     """
 
     name: str
