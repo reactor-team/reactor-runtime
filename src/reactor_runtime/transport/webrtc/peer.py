@@ -136,6 +136,7 @@ from reactor_runtime.core import (
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion, sniff
 from reactor_runtime.transport.webrtc.config import WebRtcConfig
+from reactor_runtime.transport.webrtc.frame_stages import FrameStageWindow
 from reactor_runtime.transport.webrtc.frames import (
     bgra_to_rgb,
     inbound_audio_to_mono,
@@ -424,7 +425,12 @@ class WebRTCPeer:
         # Outbound media: the drain thread pushes video and buffers audio; the
         # audio thread feeds that buffer to this peer's LocalAudioSource track in
         # steady 10 ms frames via track.push_pcm().
-        self._frame_queue: queue.Queue[MediaBundle] = queue.Queue(maxsize=_FRAME_QUEUE_MAX)
+        # Each bundle carries the time it was queued, to time its wait for libwebrtc.
+        self._frame_queue: queue.Queue[tuple[MediaBundle, float]] = queue.Queue(
+            maxsize=_FRAME_QUEUE_MAX
+        )
+        self.frame_stages = FrameStageWindow()
+        """Where this peer's frames spend their time; see :mod:`.frame_stages`."""
         self._frame_thread: threading.Thread | None = None
         # Outbound audio, keyed by track name. A model may send several audio
         # tracks and each is its own stream on the wire: its own buffer, its
@@ -721,6 +727,7 @@ class WebRTCPeer:
         ) -> None:
             if self._stop_event.is_set():
                 return
+            decoded_at = time.perf_counter()
             metadata = bytes(meta.user_data) if meta is not None else b""
             # Zero is the trailer's "unset", and it is not a clock reading: a frame
             # captured at the epoch is not what a sender means by it.
@@ -731,9 +738,15 @@ class WebRTCPeer:
                 metadata=metadata or None,
                 capture_time_us=capture_us or None,
             )
-            self._fire(self._cb_media, name, frame)
+            self._fire(self._deliver_video, name, frame, decoded_at)
 
         return sink
+
+    def _deliver_video(self, name: str, frame: InputFrame, decoded_at: float) -> None:
+        """Hand a decoded frame on, timing its trip from the decoder."""
+        self.frame_stages.add(name, "delivery", (time.perf_counter() - decoded_at) * 1000.0)
+        if self._cb_media is not None:
+            self._cb_media(name, frame)
 
     def _make_audio_sink(self, name: str) -> Callable[[bytes, int, int, int], None]:
         def sink(pcm: bytes, sample_rate: int, channels: int, frames: int) -> None:
@@ -905,15 +918,15 @@ class WebRTCPeer:
     def _frame_drain_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
-                bundle = self._frame_queue.get(timeout=0.05)
+                bundle, queued_at = self._frame_queue.get(timeout=0.05)
             except queue.Empty:
                 continue
             try:
-                self._push_bundle(bundle)
+                self._push_bundle(bundle, queued_at)
             except Exception:
                 logger.debug("outbound frame push failed", exc_info=True)
 
-    def _push_bundle(self, bundle: MediaBundle) -> None:
+    def _push_bundle(self, bundle: MediaBundle, queued_at: float | None = None) -> None:
         """Push a bundle's video and buffer its audio for the feeder thread.
 
         Video crosses the boundary immediately, carrying the frame's metadata
@@ -935,6 +948,10 @@ class WebRTCPeer:
                 metadata = data.metadata if isinstance(data.metadata, bytes) else None
                 # Deliberately unstamped: see the module's Audio/video sync note.
                 self._out_tracks[name].push_video_frame(bgra, width, height, user_data=metadata)
+                if queued_at is not None:
+                    self.frame_stages.add(
+                        name, "output_queue", (time.perf_counter() - queued_at) * 1000.0
+                    )
             else:
                 self._enqueue_audio(name, to_int16_mono(data.data))
 
@@ -1072,7 +1089,7 @@ class WebRTCPeer:
         if self._stop_event.is_set() or not self._out_tracks:
             return
         try:
-            self._frame_queue.put_nowait(bundle)
+            self._frame_queue.put_nowait((bundle, time.perf_counter()))
         except queue.Full:
             self._dropped_bundles += 1
 

@@ -12,6 +12,7 @@ from reactor_runtime.core.values import (
     TrackInfo,
     TrackKind,
 )
+from reactor_runtime.transport.webrtc.frame_stages import FrameStageWindow
 from reactor_runtime.transport.webrtc.pacer import (
     DEFAULT_FRAME_DIMENSIONS,
     MediaPacer,
@@ -190,12 +191,12 @@ def test_a_drop_chunk_stops_enqueueing_past_a_flush() -> None:
     # flushed run's tail trickles in after the black cut.
     pacer, _ = make_pacer()
 
-    class FlushingQueue(queue.Queue[MediaBundle]):
+    class FlushingQueue(queue.Queue[tuple[MediaBundle, float]]):
         """Flushes the pacer as a side effect of the first enqueue."""
 
         puts = 0
 
-        def put_nowait(self, item: MediaBundle) -> None:
+        def put_nowait(self, item: tuple[MediaBundle, float]) -> None:
             super().put_nowait(item)
             FlushingQueue.puts += 1
             if FlushingQueue.puts == 1:
@@ -360,3 +361,17 @@ def test_dropped_frames_counts_what_the_queue_bound_rejects() -> None:
     pacer.submit(chunk(video_bundle(batch(1)), n_frames=1))
 
     assert pacer.dropped_frames == 2
+
+
+def test_a_video_frames_wait_for_its_tick_is_timed() -> None:
+    stages = FrameStageWindow()
+    pacer = MediaPacer({"main": video_info("main")}, Sink(), stages=stages)
+    pacer.submit(chunk(video_bundle(np.zeros((4, 4, 3), dtype=np.uint8))))
+    time.sleep(0.01)
+
+    pacer._emit_one_tick()  # the queued frame
+    pacer._emit_one_tick()  # a gap-fill, which waited for nothing
+
+    [pacing] = stages.take()["main"]
+    assert (pacing.name, pacing.frames) == ("output_pacing", 1)
+    assert pacing.total_ms >= 10.0

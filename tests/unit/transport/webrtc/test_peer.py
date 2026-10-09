@@ -332,6 +332,18 @@ def test_push_bundle_sends_no_metadata_for_an_unsplit_batch() -> None:
     assert track.user_data == [None]
 
 
+def test_push_bundle_times_a_frames_wait_since_it_was_queued() -> None:
+    peer = WebRTCPeer()
+    track: Any = _FakeTrack()
+    peer._out_tracks["v"] = track
+
+    peer._push_bundle(_video_bundle("v"), queued_at=time.perf_counter() - 0.01)
+
+    [queued] = peer.frame_stages.take()["v"]
+    assert (queued.name, queued.frames) == ("output_queue", 1)
+    assert queued.total_ms >= 10.0
+
+
 # ── Inbound metadata ─────────────────────────────────────────────────────────
 
 
@@ -346,6 +358,18 @@ async def test_video_sink_surfaces_the_metadata_the_sender_attached() -> None:
 
     assert frames[0].metadata == b'{"pose":1}'
     assert frames[0].data.shape == (2, 2, 3)
+
+
+async def test_video_sink_times_a_frames_trip_from_the_decoder() -> None:
+    peer = WebRTCPeer()
+    peer._loop = asyncio.get_running_loop()
+    peer.on_media(lambda _name, _frame: None)
+
+    peer._make_video_sink("cam")(bytes(2 * 2 * 4), 2, 2, None)
+    await asyncio.sleep(0.01)
+
+    [delivery] = peer.frame_stages.take()["cam"]
+    assert (delivery.name, delivery.frames) == ("delivery", 1)
 
 
 async def test_video_sink_surfaces_the_capture_stamp_beside_the_metadata() -> None:

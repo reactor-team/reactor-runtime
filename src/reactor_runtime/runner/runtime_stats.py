@@ -21,6 +21,7 @@ from reactor_runtime.core import (
     TransportReading,
     TransportTrackReading,
 )
+from reactor_runtime.runner.client_stats import frame_stages_detail
 
 
 class ModelOutput:
@@ -196,6 +197,7 @@ def _track(track: TransportTrackReading) -> dict[str, Any]:
         "direction": str(track.direction),
         "codec": track.codec,
         "metrics": _finite(track.metrics),
+        "frame_stages": frame_stages_detail(track.frame_stages),
     }
 
 
