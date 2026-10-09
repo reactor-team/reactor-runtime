@@ -45,6 +45,29 @@ class CommandFailure:
 
 
 @dataclass(frozen=True)
+class FrameStage:
+    """The time a track's frames spent in one stage of their trip, over one window.
+
+    The stages cover the transport between the client's app and the model:
+    ``submit``, ``encode_wait``, ``encode``, ``packetize``, ``pacer``,
+    ``jitter_buffer``, ``decode``, ``delivery``, ``output_pacing`` and
+    ``output_queue``, in the order a frame goes through them. Each side
+    reports the stages it can see. The set grows, so a reader ignores a name
+    it does not know.
+
+    Attributes:
+        name: The stage.
+        total_ms: The time all *frames* frames spent in the stage together,
+            so the average per frame is ``total_ms / frames``.
+        frames: How many frames the window counted in the stage.
+    """
+
+    name: str
+    total_ms: float
+    frames: int
+
+
+@dataclass(frozen=True)
 class ClientTrackStat:
     """One WebRTC quality reading a client took for one of its tracks.
 
@@ -80,6 +103,8 @@ class ClientTrackStat:
             readings with different totals cannot be re-aggregated correctly
             afterward; a raw count can always be summed and divided once, at
             query time.
+        frame_stages: Where the track's frames spent their time since the
+            client's previous batch, stage by stage.
     """
 
     timestamp: int
@@ -89,6 +114,7 @@ class ClientTrackStat:
     codec: str
     paused: bool
     metrics: Mapping[str, float]
+    frame_stages: tuple[FrameStage, ...] = ()
 
 
 @dataclass(frozen=True)
