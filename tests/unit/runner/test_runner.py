@@ -3531,6 +3531,7 @@ async def test_client_stats_are_journalled_as_a_metric_with_the_session_and_conn
                 "codec": "VP9",
                 "paused": False,
                 "metrics": {"frames_per_second": 30.0},
+                "frame_stages": [],
             }
         ],
         "connection_stat": {

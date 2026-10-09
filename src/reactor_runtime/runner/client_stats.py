@@ -12,16 +12,17 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
-from reactor_runtime.core import ClientStatsBatch, ConnId
+from reactor_runtime.core import ClientStatsBatch, ConnId, FrameStage
 
 # The SDK sends a batch every few seconds, with a few tracks and a few dozen
 # metrics each; these limits are far above that.
 MIN_INTERVAL_SECONDS = 1.0
 MAX_TRACKS = 32
 MAX_METRICS = 64
+MAX_FRAME_STAGES = 32
 MAX_NAME_LENGTH = 128
 
 
@@ -70,7 +71,10 @@ def fits(batch: ClientStatsBatch) -> bool:
         readings.append(batch.connection_stat.metrics)
     if any(len(metrics) > MAX_METRICS for metrics in readings):
         return False
+    if any(len(stat.frame_stages) > MAX_FRAME_STAGES for stat in batch.track_stats):
+        return False
     names = [name for metrics in readings for name in metrics]
+    names += [stage.name for stat in batch.track_stats for stage in stat.frame_stages]
     names += [field for stat in batch.track_stats for field in (stat.track_name, stat.codec)]
     return all(len(name) <= MAX_NAME_LENGTH for name in names)
 
@@ -91,6 +95,7 @@ def to_detail(batch: ClientStatsBatch) -> dict[str, Any]:
                 "codec": stat.codec,
                 "paused": stat.paused,
                 "metrics": _finite(stat.metrics),
+                "frame_stages": frame_stages_detail(stat.frame_stages),
             }
             for stat in batch.track_stats
         ],
@@ -103,6 +108,19 @@ def to_detail(batch: ClientStatsBatch) -> dict[str, Any]:
             else None
         ),
     }
+
+
+def frame_stages_detail(stages: Iterable[FrameStage]) -> list[dict[str, Any]]:
+    """Shape a track's stage times for a fact's detail.
+
+    A stage with no name or no frames has no average, and a time JSON cannot
+    carry is no measurement, so both are left out.
+    """
+    return [
+        {"name": stage.name, "total_ms": stage.total_ms, "frames": stage.frames}
+        for stage in stages
+        if stage.name and stage.frames > 0 and math.isfinite(stage.total_ms)
+    ]
 
 
 def _finite(metrics: Mapping[str, float]) -> dict[str, float]:
