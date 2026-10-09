@@ -150,7 +150,12 @@ from reactor_runtime.transport.webrtc.sdp import (
     set_media_direction,
 )
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpAnswer, SdpOffer, TrackMap
-from reactor_runtime.transport.webrtc.stats import OutboundMediaHealth, PeerStats, TrackStat
+from reactor_runtime.transport.webrtc.stats import (
+    OutboundMediaHealth,
+    PeerStats,
+    SenderTiming,
+    TrackStat,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1367,6 +1372,8 @@ class WebRTCPeer:
                     keyframe_requests=int(out.pli_count) + int(out.fir_count),
                     rtt_seconds=out.round_trip_time_s if reported else None,
                     loss_ratio=out.fraction_lost if reported else None,
+                    frames_encoded=int(out.frames_encoded) if video else None,
+                    encode_seconds=out.total_encode_time_s if video else None,
                 )
             )
 
@@ -1392,6 +1399,12 @@ class WebRTCPeer:
                     nacks=int(inbound.nack_count),
                     keyframe_requests=int(inbound.pli_count) + int(inbound.fir_count),
                     jitter=inbound.jitter_s,
+                    decode_seconds=inbound.total_decode_time_s if video else None,
+                    jitter_buffer_frames=(
+                        int(inbound.jitter_buffer_emitted_count) if video else None
+                    ),
+                    jitter_buffer_seconds=inbound.jitter_buffer_delay_s if video else None,
+                    timing_frame=_sender_timing(inbound.timing_frame) if video else None,
                 )
             )
 
@@ -1459,3 +1472,20 @@ WebRtcPeerFactory = Callable[
 Returns the peer and the SDP answer produced during the exchange. *version* is
 the wire codec negotiated for the connection, which the peer holds for its life.
 """
+
+
+def _sender_timing(info: rw.TimingFrameInfo | None) -> SenderTiming | None:
+    """Return the sender's stages for one timing frame."""
+    if info is None:
+        return None
+    sender = info.sender
+
+    def span(start: int, end: int) -> float:
+        return float(max(0, end - start))
+
+    return SenderTiming(
+        rtp_timestamp=info.rtp_timestamp,
+        encode_wait_ms=span(sender.capture_ms, sender.encode_start_ms),
+        packetize_ms=span(sender.encode_finish_ms, sender.packetization_finish_ms),
+        pacer_ms=span(sender.packetization_finish_ms, sender.pacer_exit_ms),
+    )
