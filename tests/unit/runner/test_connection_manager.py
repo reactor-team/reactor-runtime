@@ -182,6 +182,22 @@ def test_transport_readings_carry_each_tracks_frame_stages_once() -> None:
     assert second == reading
 
 
+def test_stages_wait_for_the_connections_first_reading() -> None:
+    cm, _ = waiting_manager()
+    video = TransportTrackReading("main_video", TrackKind.VIDEO, ClientTrackDirection.RECVONLY)
+    pacing = FrameStage("output_pacing", total_ms=300.0, frames=10)
+    conn = TimedConnection(2, TransportReading(tracks=(video,)), {"main_video": (pacing,)})
+    conn.latest_reading = None
+    cm.register(conn)
+
+    assert cm.take_transport_readings() == []
+    assert conn.takes == 0, "the window is left for the first report with a reading"
+
+    conn.latest_reading = TransportReading(tracks=(video,))
+    [(_, reading)] = cm.take_transport_readings()
+    assert reading.tracks[0].frame_stages == (pacing,)
+
+
 def test_new_conn_id_is_random_in_range_and_unique() -> None:
     cm, _ = waiting_manager()
     ids = [cm.new_conn_id() for _ in range(50)]
