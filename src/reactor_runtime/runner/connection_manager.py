@@ -151,16 +151,19 @@ class ConnectionManager:
         out. A connection that also times its frames (a
         :class:`FrameStageSource`) has each track's stage times since the
         previous call added to the track's reading, and its window starts
-        again, so call this once per report.
+        again, so call this once per report. A connection left out keeps its
+        stage times for the next call.
         """
         readings: list[tuple[ConnId, TransportReading]] = []
         for cid, conn in self._by_id.items():
             if not isinstance(conn, TransportStatsSource):
                 continue
-            stages = conn.take_frame_stages() if isinstance(conn, FrameStageSource) else {}
             reading = conn.latest_reading
+            # Without a reading there is nothing to report the stages on, so
+            # they stay in the window for the first report that has one.
             if reading is None:
                 continue
+            stages = conn.take_frame_stages() if isinstance(conn, FrameStageSource) else {}
             if stages:
                 reading = replace(
                     reading,
