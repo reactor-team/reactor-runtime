@@ -1,3 +1,5 @@
+from typing import Any
+
 import pytest
 
 from reactor_runtime.core import (
@@ -6,9 +8,11 @@ from reactor_runtime.core import (
     ClientTrackDirection,
     ClientTrackStat,
     ConnId,
+    FrameStage,
     TrackKind,
 )
 from reactor_runtime.runner.client_stats import (
+    MAX_FRAME_STAGES,
     MAX_METRICS,
     MAX_NAME_LENGTH,
     MAX_TRACKS,
@@ -19,8 +23,8 @@ from reactor_runtime.runner.client_stats import (
 )
 
 
-def _track(**overrides: object) -> ClientTrackStat:
-    fields: dict[str, object] = {
+def _track(**overrides: Any) -> ClientTrackStat:
+    fields: dict[str, Any] = {
         "timestamp": 1_700_000_000_000,
         "track_name": "main_video",
         "kind": TrackKind.VIDEO,
@@ -30,7 +34,7 @@ def _track(**overrides: object) -> ClientTrackStat:
         "metrics": {"frames_per_second": 30.0},
     }
     fields.update(overrides)
-    return ClientTrackStat(**fields)  # type: ignore[arg-type]
+    return ClientTrackStat(**fields)
 
 
 def _batch(
@@ -130,7 +134,13 @@ def test_a_batch_at_the_limits_fits() -> None:
 def test_to_detail_carries_the_readings_and_leaves_out_values_json_cannot_carry() -> None:
     batch = _batch(
         _track(
-            metrics={"jitter_ms": float("nan"), "bitrate_bps": float("inf"), "packets_lost": 4.0}
+            metrics={"jitter_ms": float("nan"), "bitrate_bps": float("inf"), "packets_lost": 4.0},
+            frame_stages=(
+                FrameStage("jitter_buffer", total_ms=1500.0, frames=150),
+                FrameStage("decode", total_ms=float("inf"), frames=150),
+                FrameStage("delivery", total_ms=3.0, frames=0),
+                FrameStage("", total_ms=3.0, frames=1),
+            ),
         ),
         connection_metrics={"connection_rtt_ms": 25.0, "bad": float("-inf")},
     )
@@ -145,6 +155,8 @@ def test_to_detail_carries_the_readings_and_leaves_out_values_json_cannot_carry(
                 "codec": "VP9",
                 "paused": False,
                 "metrics": {"packets_lost": 4.0},
+                # Only a stage with a name, frames and a finite time has an average.
+                "frame_stages": [{"name": "jitter_buffer", "total_ms": 1500.0, "frames": 150}],
             }
         ],
         "connection_stat": {"timestamp": 1_700_000_000_000, "metrics": {"connection_rtt_ms": 25.0}},
@@ -153,3 +165,11 @@ def test_to_detail_carries_the_readings_and_leaves_out_values_json_cannot_carry(
 
 def test_to_detail_without_a_connection_reading() -> None:
     assert to_detail(_batch())["connection_stat"] is None
+
+
+def test_a_track_with_more_stages_than_a_client_sends_is_too_large() -> None:
+    stage = FrameStage("decode", total_ms=1.0, frames=1)
+    assert fits(_batch(_track(frame_stages=(stage,) * MAX_FRAME_STAGES)))
+    assert not fits(_batch(_track(frame_stages=(stage,) * (MAX_FRAME_STAGES + 1))))
+    long_name = FrameStage("x" * (MAX_NAME_LENGTH + 1), total_ms=1.0, frames=1)
+    assert not fits(_batch(_track(frame_stages=(long_name,))))
