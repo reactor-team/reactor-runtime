@@ -133,6 +133,49 @@ message ClientTrackStat {
   // Whether the client has this track paused right now.
   bool paused = 7;
   map<string, double> metrics = 8;
+  // Where this track's frames spent their time, stage by stage, over the
+  // window since the previous batch. See FrameStage.
+  repeated FrameStage frame_stages = 9;
+}
+
+// The time a track's frames spent in one stage of their trip between the
+// client's app and the model, over one window. `total_ms` is the time all
+// `frames` frames spent in the stage together, so the stage's average per
+// frame is total_ms / frames. The stages cover the transport between the
+// client's app and the model, not the model's own time. A window divides at each reading: whoever reads the numbers sums
+// readings to cover a longer window. A stage that saw no frame in a window is
+// left out of that reading.
+//
+// `name` is one of the stages below, in the order a frame goes through them.
+// The set grows without a schema change, so a consumer must ignore a name it
+// does not know. Each side reports the stages it can see, which is not always
+// the side they happen on: libwebrtc carries the sender's encode_wait,
+// packetize and pacer inside the video, so the receiver reports those.
+//
+//   submit         The app hands the frame to the SDK, until the SDK hands it
+//                  to libwebrtc. Client, sending.
+//   encode_wait    The frame waits for the encoder to take it.
+//   encode         The encoder compresses the frame.
+//   packetize      The encoded frame is split into RTP packets.
+//   pacer          The packets wait in libwebrtc's send pacer.
+//   jitter_buffer  The frame waits in the receiver's jitter buffer, as
+//                  libwebrtc's jitterBufferDelay counts it.
+//   decode         The decoder decompresses the frame.
+//   delivery       The decoded frame goes from the decoder to the app (client)
+//                  or to the model's input (runtime).
+//   output_pacing  The model's output waits for its tick in the runtime's
+//                  output pacer. Runtime.
+//   output_queue   The paced frame goes from the output pacer to libwebrtc.
+//                  Runtime.
+//
+// encode_wait, packetize and pacer come from libwebrtc's timing frames, a
+// sample: libwebrtc marks about one frame every 200 ms, the receiver reports
+// the slowest marked frame of the last second, and each time is in whole
+// milliseconds. Every other stage counts every frame.
+message FrameStage {
+  string name = 1;
+  double total_ms = 2;
+  uint64 frames = 3;
 }
 
 // A connection-wide fact, not tied to any one track — e.g.
