@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from reactor_runtime.core.values import ClientTrackDirection, TrackKind
+from reactor_runtime.core.values import ClientTrackDirection, FrameStage, TrackKind
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,8 @@ class TransportTrackReading:
             ``"packets_lost"``, ``"frames_per_second"``), and a measurement the
             transport has no value for is left out rather than reported as
             zero.
+        frame_stages: Where the track's frames spent their time on this side
+            of the wire since the previous reading, stage by stage.
     """
 
     track_name: str
@@ -39,6 +41,7 @@ class TransportTrackReading:
     direction: ClientTrackDirection
     codec: str = ""
     metrics: Mapping[str, float] = field(default_factory=dict)
+    frame_stages: tuple[FrameStage, ...] = ()
 
 
 @dataclass(frozen=True)
