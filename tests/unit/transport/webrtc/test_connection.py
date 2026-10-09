@@ -404,6 +404,42 @@ async def test_a_reading_measures_bitrate_between_samples(
     await conn.close()
 
 
+async def test_stage_times_add_up_across_samples_until_taken(
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    class EncodingPeer(FakePeer):
+        """A peer whose track has encoded 30 more frames, in 60 ms, at every sample."""
+
+        frames = 0
+
+        async def stats(self) -> PeerStats:
+            self.frames += 30
+            track = TrackStat(
+                name="main_video",
+                direction=TrackDirection.OUT,
+                frames_encoded=self.frames,
+                encode_seconds=self.frames * 0.002,
+            )
+            return PeerStats(tracks=(track,))
+
+    peer = EncodingPeer()
+    conn = await _connect(peer, factory_for(peer), out_av_tracks, ping_timeout=0.0)
+    conn._STATS_INTERVAL_SECONDS = 0.01
+
+    peer.fire_connected()
+    await asyncio.sleep(0.08)
+    await conn.close()
+    stages = conn.take_frame_stages()
+
+    [encode] = stages["main_video"]
+    assert encode.name == "encode"
+    # Every sample after the first adds its window, so the take holds several.
+    assert encode.frames >= 60
+    assert encode.total_ms == pytest.approx(encode.frames * 2.0)
+    assert conn.take_frame_stages() == {}
+
+
 async def test_stats_carry_the_frames_the_pacer_dropped(
     factory_for: Callable[..., WebRtcPeerFactory],
     out_av_tracks: TrackMap,

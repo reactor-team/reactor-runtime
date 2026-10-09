@@ -42,10 +42,12 @@ from __future__ import annotations
 
 import random
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 
 from reactor_runtime.core import (
     Connection,
     ConnId,
+    FrameStageSource,
     MediaChunk,
     SessionEvent,
     TransportReading,
@@ -141,19 +143,34 @@ class ConnectionManager:
         """The number of connections currently registered."""
         return len(self._by_id)
 
-    def transport_readings(self) -> list[tuple[ConnId, TransportReading]]:
+    def take_transport_readings(self) -> list[tuple[ConnId, TransportReading]]:
         """The latest transport reading of every connection that has one.
 
         A connection whose transport has not taken a reading yet, or does not
         measure its wire (it is not a :class:`TransportStatsSource`), is left
-        out.
+        out. A connection that also times its frames (a
+        :class:`FrameStageSource`) has each track's stage times since the
+        previous call added to the track's reading, and its window starts
+        again, so call this once per report.
         """
-        return [
-            (cid, reading)
-            for cid, conn in self._by_id.items()
-            if isinstance(conn, TransportStatsSource)
-            and (reading := conn.latest_reading) is not None
-        ]
+        readings: list[tuple[ConnId, TransportReading]] = []
+        for cid, conn in self._by_id.items():
+            if not isinstance(conn, TransportStatsSource):
+                continue
+            stages = conn.take_frame_stages() if isinstance(conn, FrameStageSource) else {}
+            reading = conn.latest_reading
+            if reading is None:
+                continue
+            if stages:
+                reading = replace(
+                    reading,
+                    tracks=tuple(
+                        replace(track, frame_stages=stages.get(track.track_name, ()))
+                        for track in reading.tracks
+                    ),
+                )
+            readings.append((cid, reading))
+        return readings
 
     def new_conn_id(self) -> ConnId:
         """Mint a fresh random connection id, unique within the session.

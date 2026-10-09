@@ -60,6 +60,7 @@ from reactor_runtime.transport.webrtc import (
     WebRtcPeerFactory,
     WebRtcRouter,
 )
+from reactor_runtime.transport.webrtc.frame_stages import FrameStageWindow
 from reactor_runtime.transport.webrtc.signaling import IceCandidate
 
 # The one transport session id a runtime process serves. Spelled out as a
@@ -279,6 +280,7 @@ class FakePeer:
     def __init__(self) -> None:
         self.ice: list[IceCandidate] = []
         self.protocol_version = ProtocolVersion.V0
+        self.frame_stages = FrameStageWindow()
         self._on_message: Callable[[bytes | str, ProtocolVersion, Channel], None] | None = None
         self._on_media: Callable[[str, InputFrame], None] | None = None
         self._on_ping: Callable[[], None] | None = None
