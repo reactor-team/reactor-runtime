@@ -53,6 +53,7 @@ from reactor_runtime.transport.webrtc.signaling import (  # noqa: E402
     SdpOffer,
     TrackMap,
 )
+from reactor_runtime.transport.webrtc.stats import SenderTiming  # noqa: E402
 
 # A capture timestamp standing in for one read of libwebrtc's clock.
 _CAPTURED_US = 1_000_000
@@ -1300,6 +1301,8 @@ def test_stats_from_report_maps_tracks_and_rtt() -> None:
                 retransmitted_packets_sent=9,
                 bytes_sent=120_000,
                 frames_sent=310,
+                frames_encoded=312,
+                total_encode_time_s=0.624,
                 round_trip_time_s=0.18,
                 fraction_lost=0.02,
                 nack_count=23,
@@ -1323,6 +1326,19 @@ def test_stats_from_report_maps_tracks_and_rtt() -> None:
                 pli_count=4,
                 fir_count=0,
                 jitter_s=0.02,
+                total_decode_time_s=0.3,
+                jitter_buffer_emitted_count=148,
+                jitter_buffer_delay_s=1.8,
+                timing_frame=SimpleNamespace(
+                    rtp_timestamp=90_000,
+                    sender=SimpleNamespace(
+                        capture_ms=1_000,
+                        encode_start_ms=1_001,
+                        encode_finish_ms=1_004,
+                        packetization_finish_ms=1_004,
+                        pacer_exit_ms=1_007,
+                    ),
+                ),
             )
         ],
         candidate_pairs=[
@@ -1365,6 +1381,14 @@ def test_stats_from_report_maps_tracks_and_rtt() -> None:
     assert inbound.nacks == 7
     assert inbound.keyframe_requests == 4
     assert inbound.jitter == 0.02
+    # The running totals each stage's time is read from.
+    assert (out.frames_encoded, out.encode_seconds) == (312, 0.624)
+    assert inbound.decode_seconds == 0.3
+    assert (inbound.jitter_buffer_frames, inbound.jitter_buffer_seconds) == (148, 1.8)
+    # The sender's own stages, from the stamps it put on a timing frame.
+    assert inbound.timing_frame == SenderTiming(
+        rtp_timestamp=90_000, encode_wait_ms=1.0, packetize_ms=0.0, pacer_ms=3.0
+    )
     assert (out.kind, out.codec, out.target_bitrate_bps) == (
         TrackKind.VIDEO,
         "video/VP9",
@@ -1395,7 +1419,13 @@ def _rtp(mid: str | None, **counts: Any) -> SimpleNamespace:
         "bytes_sent": 0,
         "bytes_received": 0,
         "frames_sent": 0,
+        "frames_encoded": 0,
+        "total_encode_time_s": 0.0,
         "frames_decoded": 0,
+        "total_decode_time_s": 0.0,
+        "jitter_buffer_emitted_count": 0,
+        "jitter_buffer_delay_s": 0.0,
+        "timing_frame": None,
         "frames_dropped": 0,
         "round_trip_time_s": 0.0,
         "fraction_lost": 0.0,
@@ -1547,6 +1577,10 @@ def test_stats_from_report_ignores_negative_packet_loss() -> None:
                 pli_count=0,
                 fir_count=0,
                 jitter_s=0.0,
+                total_decode_time_s=0.0,
+                jitter_buffer_emitted_count=0,
+                jitter_buffer_delay_s=0.0,
+                timing_frame=None,
             )
         ],
         candidate_pairs=[],
@@ -1579,6 +1613,8 @@ def test_stats_from_report_waits_for_the_receivers_first_report() -> None:
                 retransmitted_packets_sent=0,
                 bytes_sent=9_000,
                 frames_sent=12,
+                frames_encoded=12,
+                total_encode_time_s=0.03,
                 round_trip_time_s=0.0,
                 fraction_lost=0.0,
                 nack_count=0,
