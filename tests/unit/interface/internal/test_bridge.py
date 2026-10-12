@@ -22,7 +22,7 @@ from reactor_runtime.core.values import (
     MediaChunk,
 )
 from reactor_runtime.interface.internal.bridge import ModelBridge
-from reactor_runtime.interface.internal.reactor_core import MediaOps, RequestId
+from reactor_runtime.interface.internal.reactor_core import MediaOps, RequestId, StepEnvelope
 from reactor_runtime.interface.model.contract import ModelContract
 
 
@@ -128,6 +128,50 @@ def test_check_command_validates_without_admitting(monkeypatch: pytest.MonkeyPat
     assert valid.accepted is True
     assert (refused.accepted, refused.field) == (False, "prompt")
     assert admitted == []
+
+
+def test_submit_step_admits_the_step_whole(monkeypatch: pytest.MonkeyPatch) -> None:
+    bridge, model = make_bridge()
+    admitted: list[StepEnvelope] = []
+    monkeypatch.setattr(model, "submit_step", admitted.append)
+    camera = frame()
+
+    outcome = bridge.submit_step(
+        [("set_prompt", {"prompt": "a"}), ("set_prompt", {"prompt": "b"})],
+        {"camera": [camera]},
+        conn_id=ConnId(1002),
+        request_id="s1",
+    )
+
+    assert outcome.accepted is True
+    [step] = admitted
+    assert [getattr(command, "prompt") for command in step.commands] == ["a", "b"]  # noqa: B009
+    assert step.inputs == {"camera": (camera,)}
+    assert (step.conn_id, step.request_id) == (ConnId(1002), "s1")
+
+
+def test_submit_step_admits_nothing_when_one_command_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge, model = make_bridge()
+    admitted: list[StepEnvelope] = []
+    monkeypatch.setattr(model, "submit_step", admitted.append)
+
+    outcome = bridge.submit_step(
+        [("set_prompt", {"prompt": "a"}), ("set_prompt", {"prompt": ""})],
+        {},
+        conn_id=ConnId(1002),
+        request_id="s1",
+    )
+
+    assert (outcome.accepted, outcome.field) == (False, "prompt")
+    assert admitted == []
+
+
+def test_the_bridge_says_whether_the_model_can_step() -> None:
+    bridge, _ = make_bridge()
+    # EchoModel drives its own run(), so it has no step to run on request.
+    assert bridge.supports_stepped is False
 
 
 # --- routing across the three inbound faces ------------------------------

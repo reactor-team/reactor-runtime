@@ -492,6 +492,44 @@ class MediaChunk:
 
 
 @dataclass(frozen=True)
+class RequestedStep:
+    """A client's request for one step of a stepped session, once accepted.
+
+    Attributes:
+        conn_id: The connection that asked for the step.
+        request_id: The id the client sent the request with, which every reply
+            to it carries.
+        index: The step's number in its session, counted from 1. Only an
+            accepted step takes one.
+    """
+
+    conn_id: ConnId
+    request_id: str
+    index: int
+
+
+@dataclass(frozen=True)
+class StepVerdict:
+    """Whether the model took a step a client requested.
+
+    Attributes:
+        conn_id: The connection that asked for the step.
+        request_id: The id the client sent the request with.
+        session: The session the request was handled in, counted the way
+            :attr:`CompletedStep.session` is.
+        index: The accepted step's number in its session, counted from 1, or
+            ``None`` for a refused step, which takes none.
+        refusal: Why the step was refused, or ``None`` when it was accepted.
+    """
+
+    conn_id: ConnId
+    request_id: str
+    session: int
+    index: int | None = None
+    refusal: str | None = None
+
+
+@dataclass(frozen=True)
 class CompletedStep:
     """One finished step, as the model reports it to the runtime.
 
@@ -511,6 +549,8 @@ class CompletedStep:
         fps: The rate the step's media was emitted at, which a saved step's
             video plays at: the measured throughput for a model that does not
             pin its rate.
+        request: The client request the step answers, in a stepped session,
+            or ``None`` for a step the model took on its own.
     """
 
     bundle: MediaBundle | None
@@ -519,6 +559,7 @@ class CompletedStep:
     elapsed: float | None = None
     session: int = 0
     fps: float = 30.0
+    request: RequestedStep | None = None
 
 
 @dataclass(frozen=True)

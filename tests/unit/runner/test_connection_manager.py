@@ -810,3 +810,24 @@ async def test_close_all_does_not_drive_the_session_machine() -> None:
     await cm.close_all()
     assert seen == []
     assert sm.current_state is SessionState.STREAMING
+
+
+def test_a_step_reply_rides_the_data_channel_whatever_channel_the_codec_names() -> None:
+    manager, _ = waiting_manager()
+    conn = FakeConnection(1, protocol_version=ProtocolVersion.V1)
+    manager.register(conn)
+
+    manager.send_step_reply(conn.id, lambda version: (Channel.CONTROL, b"reply"))
+
+    assert conn.messages == [b"reply"]
+    assert conn.control == []
+
+
+def test_a_v0_connection_is_sent_no_step_reply() -> None:
+    manager, _ = waiting_manager()
+    conn = FakeConnection(1)
+    manager.register(conn)
+
+    manager.send_step_reply(conn.id, _refuse_to_encode_response)
+
+    assert conn.messages == []

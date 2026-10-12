@@ -182,6 +182,19 @@ class InputBuffer:
             self._buffer.clear()
             self._total_received = 0
 
+    def snapshot(self) -> tuple[tuple[InputFrame, ...], int]:
+        """Return the buffered frames and the received count, for :meth:`restore`."""
+        with self._lock:
+            return tuple(self._buffer), self._total_received
+
+    def restore(self, snapshot: tuple[tuple[InputFrame, ...], int]) -> None:
+        """Put back the frames and the received count a :meth:`snapshot` returned."""
+        frames, total_received = snapshot
+        with self._condition:
+            self._buffer.clear()
+            self._buffer.extend(frames)
+            self._total_received = total_received
+
     def push(self, frame: InputFrame) -> None:
         """Append a frame from the runtime thread, waking a blocked reader.
 

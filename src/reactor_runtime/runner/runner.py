@@ -25,7 +25,7 @@ from collections import deque
 from collections.abc import Callable, Coroutine, Mapping
 from typing import Any, Protocol
 
-from reactor_runtime.codes import INVALID_COMMAND, UNRESOLVED_UPLOAD
+from reactor_runtime.codes import INVALID_COMMAND, STEP_REFUSED, UNRESOLVED_UPLOAD
 from reactor_runtime.core import (
     JOURNAL_EVENTS,
     ClientConnected,
@@ -50,6 +50,7 @@ from reactor_runtime.core import (
     SessionStarted,
     SessionState,
     StartingInputApplied,
+    StepVerdict,
     TrackDirection,
     TrackKind,
     Transition,
@@ -64,7 +65,7 @@ from reactor_runtime.interface.internal.reactor_core import MediaOps
 from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.log import get_logger, set_session_id, set_state
 from reactor_runtime.manifest import import_model_class
-from reactor_runtime.message_gateway import InboundCommand, MessageGateway
+from reactor_runtime.message_gateway import InboundCommand, InboundStep, MessageGateway
 from reactor_runtime.metrics import (
     UNKNOWN_COMMAND,
     CommandMetrics,
@@ -73,6 +74,7 @@ from reactor_runtime.metrics import (
     RuntimeMetrics,
 )
 from reactor_runtime.protocol import Channel, Codec, ProtocolVersion, select
+from reactor_runtime.protocol.frames import FrameEncodingError, decode_frame
 from reactor_runtime.recording import ClipResult, Recorder, RecorderError
 from reactor_runtime.runner import client_stats, runtime_stats
 from reactor_runtime.runner.client_stats import ClientStatsGate
@@ -80,6 +82,7 @@ from reactor_runtime.runner.connection_manager import ConnectionManager
 from reactor_runtime.runner.offer_epochs import OfferEpochs
 from reactor_runtime.runner.runtime_stats import ModelOutput
 from reactor_runtime.runner.session_start import (
+    Generation,
     InvalidSessionStartError,
     SessionStart,
     StartingCommand,
@@ -95,6 +98,7 @@ from reactor_runtime.transport.router import (
     UnknownSessionError,
 )
 from reactor_runtime.upload_store import UnknownUploadError, UploadStore
+from reactor_wire.v1 import platform_pb2, step_pb2
 
 _RUNNING_STATES = frozenset({SessionState.WAITING, SessionState.STREAMING, SessionState.ORPHANED})
 
@@ -177,6 +181,16 @@ _STEPS_CLOSE_REASON = "Session ended: the requested steps are complete."
 _STEP_MESSAGES_LIMIT = 256
 
 logger = get_logger(__name__)
+
+# The runtime's track kind for each kind a wire message names.
+_WIRE_TRACK_KINDS = {
+    platform_pb2.TRACK_KIND_VIDEO: TrackKind.VIDEO,
+    platform_pb2.TRACK_KIND_AUDIO: TrackKind.AUDIO,
+}
+
+
+class _StepInputError(ValueError):
+    """A step request's input frames cannot be written to the model's tracks."""
 
 
 def _server_version() -> str:
@@ -284,7 +298,9 @@ class Runner(ServiceComponent, ConnectionSink):
         # Which client stats batches are journalled: each connection's last
         # accepted time, to drop a batch that follows it too soon.
         self._client_stats = ClientStatsGate()
-        self._gateway = MessageGateway(sink=self, on_command=self._submit_client_command)
+        self._gateway = MessageGateway(
+            sink=self, on_command=self._submit_client_command, on_step=self._submit_client_step
+        )
         self._bridge: ModelBridge | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._inbound: set[asyncio.Task[None]] = set()
@@ -381,6 +397,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 ),
                 failure=self._on_model_failure,
                 step=self._on_step_completed,
+                step_verdict=self._on_step_verdict,
             )
             bridge.start()
         except Exception:
@@ -707,8 +724,14 @@ class Runner(ServiceComponent, ConnectionSink):
     def _reply_clip(
         self, conn_id: ConnId, request_id: str, resolve: Callable[[], ClipResult]
     ) -> None:
-        """Resolve a clip request and send the clip-ready or clip-failed reply."""
+        """Resolve a clip request and send the clip-ready or clip-failed reply.
+
+        A stepped session streams nothing and is not recorded, so a clip of it
+        is refused.
+        """
         try:
+            if self._session_start.generation is Generation.STEPPED:
+                raise RecorderError("a stepped session is not recorded, so it has no clips")
             clip = resolve().to_dict()
         except (RecorderError, ValueError) as error:
             reason = str(error) or "clip request failed"
@@ -788,6 +811,10 @@ class Runner(ServiceComponent, ConnectionSink):
         after the runtime recorded the session's remaining steps as errors
         (see :meth:`_fail_remaining_steps`), so no step past ``steps`` is
         saved.
+
+        A step a client requested keeps the number the model gave it when it
+        accepted it, the number its ``StepAccepted`` carried, and is answered
+        with its result once journalled.
         """
         if step.session != self._sessions_posted:
             logger.debug(
@@ -805,6 +832,8 @@ class Runner(ServiceComponent, ConnectionSink):
             )
             return
         self._save_step(step, messages)
+        if step.request is not None:
+            self._send_step_result(step, self._steps_completed)
         limit = self._session_start.steps
         if (
             limit is not None
@@ -820,7 +849,12 @@ class Runner(ServiceComponent, ConnectionSink):
 
     def _save_step(self, step: CompletedStep, messages: tuple[dict[str, Any], ...] = ()) -> None:
         """Number a step of the current session, offer it to the store, and journal it."""
-        self._steps_completed += 1
+        # A requested step was numbered when the model accepted it, and the
+        # client was told that number then; its report carries it.
+        if step.request is not None:
+            self._steps_completed = step.request.index
+        else:
+            self._steps_completed += 1
         saved = self._step_store is not None and self._step_store.admit(
             self._recording_id, self._steps_completed, step, messages
         )
@@ -945,8 +979,10 @@ class Runner(ServiceComponent, ConnectionSink):
         live session's id untouched. The transport session id is unaffected: it is
         always :data:`SESSION_ID`.
 
-        The body may also carry ``starting_input`` and ``steps`` (see
-        :mod:`reactor_runtime.runner.session_start`). Their shape, and each
+        The body may also carry ``starting_input``, ``steps``, and
+        ``generation`` (see :mod:`reactor_runtime.runner.session_start`). A
+        stepped generation is refused for a model that cannot run one (see
+        :meth:`_check_generation`). Their shape, and each
         starting command against the model's contract, are checked before the
         session moves, so a body the model could not apply is rejected without
         touching the session (see :meth:`_check_starting_input`). A session that has either one
@@ -963,12 +999,32 @@ class Runner(ServiceComponent, ConnectionSink):
                 shape, or a starting command fails the model's contract.
             SessionTransitionError: If the session is not in a startable state.
         """
-        self._check_starting_input(parse_session_start(params))
+        start = parse_session_start(params)
+        self._check_generation(start)
+        self._check_starting_input(start)
         if not self._sm.send(SessionEvent.START_SESSION, params=dict(params)):
             raise SessionTransitionError("start", self._sm.current_state)
         self._offer_epochs.session_started()
         self._model_metrics.session_started()
         self._begin_session_inputs()
+
+    def _check_generation(self, start: SessionStart) -> None:
+        """Refuse a stepped session for a model that cannot run one.
+
+        Only the default step loop of ``ReactorApp`` runs a step per request. A
+        model that drives its own ``run()``, a ``ReactorPipeline`` among them,
+        is refused rather than started in a mode it would ignore.
+
+        Raises:
+            InvalidSessionStartError: Naming the model and why it cannot step.
+        """
+        if start.generation is not Generation.STEPPED or self._bridge is None:
+            return
+        if not self._bridge.supports_stepped:
+            raise InvalidSessionStartError(
+                f"generation 'stepped' needs a model that runs the default ReactorApp step "
+                f"loop; {self._bridge.contract.model} drives its own run()"
+            )
 
     def _check_starting_input(self, start: SessionStart) -> None:
         """Refuse a starting input whose commands the model's contract rejects.
@@ -997,6 +1053,17 @@ class Runner(ServiceComponent, ConnectionSink):
             (f"starting_input.commands[{index}]", command.command, dict(command.data))
             for index, command in enumerate(starting.commands)
         ]
+        refusal = self._first_refusal(checks)
+        if refusal is not None:
+            raise InvalidSessionStartError(refusal)
+
+    def _first_refusal(self, checks: list[tuple[str, str, dict[str, Any]]]) -> str | None:
+        """Return why the first of *checks* fails the contract, or ``None`` when none does.
+
+        Each check is ``(key, command name, arguments)``; the reason names the
+        key the caller wrote the command under, and the field that failed.
+        """
+        assert self._bridge is not None
         for key, name, args in checks:
             outcome = self._bridge.check_command(name, args)
             if not outcome.accepted:
@@ -1004,7 +1071,8 @@ class Runner(ServiceComponent, ConnectionSink):
                 # A constraint's reason already opens with the field it names.
                 if not reason.startswith(f"{outcome.field}:"):
                     reason = f"{outcome.field}: {reason}"
-                raise InvalidSessionStartError(f"{key} is refused: {reason}")
+                return f"{key} is refused: {reason}"
+        return None
 
     def stop_session(self, *, moderated: bool = False, reason: str = "") -> None:
         """Close the active session, leaving the model loaded and ready again.
@@ -1124,6 +1192,9 @@ class Runner(ServiceComponent, ConnectionSink):
         loaded. The ``commands`` list is intentionally empty here — a client
         reads the model's command contract from the ``/schema`` endpoint, not
         from the session descriptor.
+
+        ``generation`` names how the live session generates, ``"streamed"`` or
+        ``"stepped"``, and reads ``"streamed"`` outside a session.
         """
         descriptor: dict[str, Any] = {
             "session_id": self._session_id,
@@ -1142,7 +1213,14 @@ class Runner(ServiceComponent, ConnectionSink):
             "step_results": {"enabled": self._cfg.step_results.enabled},
         }
         starting = self._session_start.starting_input
-        if starting is not None and self._sm.current_state in _RUNNING_STATES:
+        running = self._sm.current_state in _RUNNING_STATES
+        # Always present, so a client can tell a runtime that honours the
+        # start's ``generation`` from one that ignores the key. Outside a
+        # session it names the mode a start without the key gets.
+        descriptor["generation"] = (
+            self._session_start.generation.value if running else Generation.STREAMED.value
+        )
+        if starting is not None and running:
             descriptor["starting_input"] = {"applied": len(starting.as_commands())}
         if self._bridge is None:
             return descriptor
@@ -1236,18 +1314,12 @@ class Runner(ServiceComponent, ConnectionSink):
         if self._bridge is None:
             return None
         label = self._command_label(command.name)
-        args = dict(command.args)
-        inline = self._inline_upload_fields(command.name, args)
+        inline = self._inline_upload_fields(command.name, command.args)
         resolve_started = time.monotonic()
         try:
-            for param, upload_id in command.uploads.items():
-                args[param] = await self._fetch_upload(upload_id, upload_wait)
-
-            async def fetch(upload_id: str) -> UploadedFile:
-                return await self._fetch_upload(upload_id, upload_wait)
-
-            for param, spec in inline.items():
-                args[param] = await resolve_uploads(spec, args[param], fetch)
+            args = await self._resolve_command_uploads(
+                command.name, command.args, command.uploads, upload_wait
+            )
         except UnknownUploadError:
             self._command_metrics.unresolved_upload(label)
             refusal = f"command {command.name!r} references an unresolved upload"
@@ -1289,6 +1361,185 @@ class Runner(ServiceComponent, ConnectionSink):
                 outcome.reason or "command rejected",
             )
         return refusal
+
+    async def _resolve_command_uploads(
+        self,
+        name: str,
+        raw_args: Mapping[str, Any],
+        uploads: Mapping[str, str],
+        upload_wait: float,
+    ) -> dict[str, Any]:
+        """Return command *name*'s arguments with every upload it references resolved to a file.
+
+        A command that references no upload returns without waiting.
+
+        Raises:
+            UnknownUploadError: An upload's bytes did not arrive within
+                *upload_wait* seconds.
+        """
+        args = dict(raw_args)
+        inline = self._inline_upload_fields(name, args)
+        for param, upload_id in uploads.items():
+            args[param] = await self._fetch_upload(upload_id, upload_wait)
+
+        async def fetch(upload_id: str) -> UploadedFile:
+            return await self._fetch_upload(upload_id, upload_wait)
+
+        for param, spec in inline.items():
+            args[param] = await resolve_uploads(spec, args[param], fetch)
+        return args
+
+    async def _submit_client_step(self, step: InboundStep) -> None:
+        """Submit a client's step request once the session's starting input is submitted.
+
+        A request waits behind the starting input as a client's command does,
+        so the model sees the starting input, and its ``StartingInputApplied``,
+        before the first requested step.
+        """
+        await self._starting_input_done.wait()
+        await self._submit_step(step)
+
+    async def _submit_step(
+        self, step: InboundStep, *, upload_wait: float = _UPLOAD_RESOLVE_TIMEOUT_SECONDS
+    ) -> None:
+        """Check a step request whole and hand it to the model, or refuse it.
+
+        The request is refused, with nothing reaching the model, when the
+        session does not step, when a command references an upload that does
+        not arrive, when any command fails the contract, or when an input frame
+        names a track the model does not take or cannot be decoded. A refusal
+        answers with ``step_refused``. An admitted step reaches the model after
+        every command admitted before it; a request whose commands reference no
+        upload is admitted without waiting, so it keeps its place among the
+        commands sent around it. Each of its commands is journalled as a
+        client's command is.
+        """
+        if self._bridge is None:
+            return
+        if (
+            self._session_start.generation is not Generation.STEPPED
+            or self._sm.current_state not in _RUNNING_STATES
+        ):
+            self._refuse_step(
+                step.conn_id,
+                step.request_id,
+                "this session is not stepped; start it with generation 'stepped' to request steps",
+            )
+            return
+        entries = [
+            (f"state.{key}", f"set_{key}", {key: value}, {}) for key, value in step.state.items()
+        ]
+        entries += [
+            (f"commands[{index}]", command.name, dict(command.args), dict(command.uploads))
+            for index, command in enumerate(step.commands)
+        ]
+        resolved: list[tuple[str, dict[str, Any]]] = []
+        for key, name, args, uploads in entries:
+            try:
+                resolved.append(
+                    (name, await self._resolve_command_uploads(name, args, uploads, upload_wait))
+                )
+            except UnknownUploadError:
+                self._refuse_step(
+                    step.conn_id, step.request_id, f"{key} references an unresolved upload"
+                )
+                return
+        refusal = self._first_refusal([(key, name, args) for key, name, args, _ in entries])
+        if refusal is None:
+            try:
+                inputs = self._decode_step_inputs(step.inputs)
+            except _StepInputError as error:
+                refusal = str(error)
+        if refusal is not None:
+            self._refuse_step(step.conn_id, step.request_id, refusal)
+            return
+        outcome = self._bridge.submit_step(
+            resolved, inputs, conn_id=step.conn_id, request_id=step.request_id
+        )
+        if not outcome.accepted:
+            self._refuse_step(step.conn_id, step.request_id, f"{outcome.field}: {outcome.reason}")
+            return
+        for _, name, args, _ in entries:
+            self._sm.send(SessionEvent.COMMAND, name=name, args=args, conn_id=step.conn_id)
+
+    def _decode_step_inputs(
+        self, inputs: tuple[step_pb2.TrackFrames, ...]
+    ) -> dict[str, list[InputFrame]]:
+        """Decode a step request's frames, by the input track each belongs to.
+
+        Raises:
+            _StepInputError: An entry names a track the model does not take, a
+                track twice, or a kind the track is not, or a frame cannot be
+                decoded.
+        """
+        assert self._bridge is not None
+        tracks = {
+            name: info
+            for name, info in self._bridge.contract.tracks.items()
+            if info.direction is TrackDirection.IN
+        }
+        decoded: dict[str, list[InputFrame]] = {}
+        for index, entry in enumerate(inputs):
+            where = f"inputs[{index}]"
+            info = tracks.get(entry.track)
+            if info is None:
+                raise _StepInputError(
+                    f"{where} names {entry.track!r}, which is not an input track of the model"
+                )
+            if entry.track in decoded:
+                raise _StepInputError(f"{where} names {entry.track!r} a second time")
+            kind = _WIRE_TRACK_KINDS.get(entry.kind)
+            if entry.kind != platform_pb2.TRACK_KIND_UNSPECIFIED and kind is not info.kind:
+                raise _StepInputError(f"{where} says {entry.track!r} is not a {info.kind} track")
+            frames: list[InputFrame] = []
+            for position, frame in enumerate(entry.frames):
+                try:
+                    frames.append(decode_frame(frame, info.kind))
+                except FrameEncodingError as error:
+                    raise _StepInputError(f"{where}.frames[{position}]: {error}") from None
+            decoded[entry.track] = frames
+        return decoded
+
+    def _refuse_step(self, conn_id: ConnId, request_id: str, reason: str) -> None:
+        """Answer a step request with ``step_refused`` on the data channel."""
+        logger.debug("step request refused", conn_id=conn_id, reason=reason)
+        self._connections.send_step_reply(
+            conn_id,
+            lambda version: self._codec_for(version).encode_command_error(
+                request_id, STEP_REFUSED, reason
+            ),
+        )
+
+    def _on_step_verdict(self, verdict: StepVerdict) -> None:
+        """Tell the client whether the model took its requested step.
+
+        Called on the model's thread and sent from it, so an accepted step's
+        notice goes out ahead of any message the model sends while the step
+        runs, and ahead of the step's result. A verdict from an earlier
+        session is dropped.
+        """
+        if verdict.session != self._sessions_posted:
+            return
+        if verdict.refusal is not None:
+            self._refuse_step(verdict.conn_id, verdict.request_id, verdict.refusal)
+            return
+        index = verdict.index or 0
+        self._connections.send_step_reply(
+            verdict.conn_id,
+            lambda version: self._codec_for(version).encode_step_accepted(
+                verdict.request_id, index
+            ),
+        )
+
+    def _send_step_result(self, step: CompletedStep, index: int) -> None:
+        """Answer a requested step with its result, on the data channel."""
+        request = step.request
+        assert request is not None
+        result = step_pb2.StepResult(index=index)
+        self._connections.send_step_reply(
+            request.conn_id,
+            lambda version: self._codec_for(version).encode_step_result(request.request_id, result),
+        )
 
     def _inline_upload_fields(self, name: str, args: Mapping[str, Any]) -> dict[str, TypeSpec]:
         """Return the present arguments of command *name* whose type carries an upload.
@@ -1368,7 +1619,12 @@ class Runner(ServiceComponent, ConnectionSink):
         the recorder's wait is bounded instead, because an encoder can stall
         outright. Feeding the recorder second keeps that bounded stall off the
         live path, and leaves its queue the whole broadcast to drain into.
+
+        A stepped session streams nothing: its media reaches the client in each
+        step's result, so a chunk emitted during one goes to no consumer.
         """
+        if self._session_start.generation is Generation.STEPPED:
+            return
         for track in chunk.bundle.tracks:
             self._model_metrics.emitted(track, chunk.n_frames)
             # A chunk the model emitted for an earlier session (from its
@@ -1645,7 +1901,11 @@ class Runner(ServiceComponent, ConnectionSink):
         self._events.emit(TransitionEvent(transition))
         if self._bridge is not None:
             self._dispatch_reactor_events(transition, self._bridge)
-        if transition.is_session_start and self._bridge is not None:
+        if (
+            transition.is_session_start
+            and self._bridge is not None
+            and self._session_start.generation is Generation.STREAMED
+        ):
             self._start_recorder()
         entered = transition.from_state is not transition.to_state
         if entered:
@@ -1813,6 +2073,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 SessionStarted(
                     self._session_id,
                     starting_input=self._session_start.starting_input is not None,
+                    stepped=self._session_start.generation is Generation.STEPPED,
                 )
             )
         if transition.is_session_end:

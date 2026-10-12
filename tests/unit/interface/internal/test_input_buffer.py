@@ -104,3 +104,18 @@ async def test_read_rejects_more_than_capacity() -> None:
     buffer = InputBuffer(maxlen=4)
     with pytest.raises(ValueError, match="at most"):
         await buffer.read(5)
+
+
+def test_restore_puts_back_the_frames_and_count_a_snapshot_took() -> None:
+    buffer = InputBuffer()
+    first = InputFrame(data=np.zeros((1, 1, 3), dtype=np.uint8))
+    buffer.push(first)
+    saved = buffer.snapshot()
+
+    buffer.push(InputFrame(data=np.ones((1, 1, 3), dtype=np.uint8)))
+    buffer.try_read(2)
+    buffer.restore(saved)
+
+    assert buffer.available == 1
+    assert buffer.total_received == 1
+    assert buffer.try_read(1) == [first]
