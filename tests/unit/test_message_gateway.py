@@ -5,12 +5,25 @@ from typing import Any
 import pytest
 
 from reactor_runtime.core import ClientStatsBatch, Connection, ConnId, InputFrame, ReplyRoute
-from reactor_runtime.message_gateway import InboundCommand, MessageGateway
+from reactor_runtime.message_gateway import (
+    InboundCommand,
+    InboundStep,
+    MessageGateway,
+    StepCommand,
+)
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.protocol.common import dict_to_struct
 from reactor_runtime.protocol.v0.codec import V0Codec
 from reactor_runtime.protocol.v1.codec import V1Codec
-from reactor_wire.v1 import common_pb2, control_pb2, data_pb2, model_pb2, platform_pb2, track_pb2
+from reactor_wire.v1 import (
+    common_pb2,
+    control_pb2,
+    data_pb2,
+    model_pb2,
+    platform_pb2,
+    step_pb2,
+    track_pb2,
+)
 
 
 class FakeSink:
@@ -341,3 +354,47 @@ async def test_unpublish_notification_routes_to_the_sink() -> None:
     )
     await gateway.handle(ConnId(6), frame, channel, ProtocolVersion.V0, received_at=_ARRIVED)
     assert sink.unpublished == [(ConnId(6), "webcam")]
+
+
+async def test_a_step_request_is_decoded_and_handed_to_the_step_handler() -> None:
+    steps: list[InboundStep] = []
+    commands: list[InboundCommand] = []
+
+    async def on_command(command: InboundCommand) -> None:
+        commands.append(command)
+
+    async def on_step(step: InboundStep) -> None:
+        steps.append(step)
+
+    gateway = MessageGateway(sink=FakeSink(), on_command=on_command, on_step=on_step)
+    command = model_pb2.Command(type="edit", data=dict_to_struct({"strength": 0.5}))
+    command.uploads["image"].upload_id = "u-1"
+    track = step_pb2.TrackFrames(track="webcam", frames=[step_pb2.Frame(dtype="uint8")])
+    message = data_pb2.DataClientMessage(
+        request_id="s-1",
+        request_step=step_pb2.RequestStep(
+            state=dict_to_struct({"prompt": "hi"}), commands=[command], inputs=[track]
+        ),
+    )
+    _, frame = V1Codec().encode(message)
+    await gateway.handle(ConnId(4), frame, Channel.DATA, ProtocolVersion.V1, received_at=_ARRIVED)
+
+    assert commands == []
+    assert steps == [
+        InboundStep(
+            state={"prompt": "hi"},
+            commands=(StepCommand(name="edit", args={"strength": 0.5}, uploads={"image": "u-1"}),),
+            inputs=(track,),
+            conn_id=ConnId(4),
+            request_id="s-1",
+            received_at=_ARRIVED,
+        )
+    ]
+
+
+async def test_a_step_request_without_a_step_handler_is_dropped() -> None:
+    gateway, _, received = _gateway()
+    message = data_pb2.DataClientMessage(request_step=step_pb2.RequestStep())
+    _, frame = V1Codec().encode(message)
+    await gateway.handle(ConnId(4), frame, Channel.DATA, ProtocolVersion.V1, received_at=_ARRIVED)
+    assert received == []

@@ -1,0 +1,428 @@
+"""The runner in a stepped session: step requests in, their replies out on the data channel."""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Callable, Sequence
+from typing import Any, cast
+
+import numpy as np
+import pytest
+
+from reactor_runtime import (
+    ApplicationError,
+    InputField,
+    InputState,
+    MediaInput,
+    Output,
+    ReactorApp,
+    ReadMode,
+    Video,
+    event,
+    protocol,
+)
+from reactor_runtime.codes import STEP_REFUSED
+from reactor_runtime.core import (
+    ConnectionCapabilities,
+    ConnId,
+    MediaBundle,
+    MediaChunk,
+    RuntimeConfig,
+    SessionEvent,
+    SessionState,
+)
+from reactor_runtime.interface.internal.input_buffer import InputBuffer
+from reactor_runtime.protocol.common import dict_to_struct
+from reactor_runtime.runner.runner import Runner
+from reactor_runtime.runner.session_start import InvalidSessionStartError
+from reactor_wire.v1 import common_pb2, control_pb2, data_pb2, model_pb2, platform_pb2, step_pb2
+
+V1 = protocol.ProtocolVersion.V1
+DATA = protocol.Channel.DATA
+CONTROL = protocol.Channel.CONTROL
+SERVER = protocol.Direction.SERVER
+K = common_pb2.MessageKind
+
+
+class Out(Output):
+    main_video: Video
+
+
+class Camera(MediaInput):
+    webcam: Video
+
+
+class State(InputState):
+    prompt: str = InputField(default="a forest", min_length=1)
+
+
+class StepModel(ReactorApp):
+    state: State
+    camera: Camera
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.notes: list[str] = []
+        self.inputs: list[tuple[str, list[str], list[int]]] = []
+        models.append(self)
+
+    @event(name="note")
+    def note(self, text: str) -> None:
+        self.notes.append(text)
+
+    async def process_input(self) -> tuple[str, list[str], list[int]]:
+        if self.state.prompt == "refuse":
+            raise ApplicationError("not now")
+        webcam = cast(InputBuffer, self.camera.webcam)
+        frames = webcam.try_read(webcam.available, mode=ReadMode.FIFO)
+        return self.state.prompt, list(self.notes), [int(f.data[0, 0, 0]) for f in frames or []]
+
+    def generate(self, input: tuple[str, list[str], list[int]]) -> Out:
+        self.inputs.append(input)
+        return Out(main_video=np.zeros((2, 2, 3), dtype=np.uint8))
+
+
+class OwnLoop(StepModel):
+    async def run(self) -> None:
+        await asyncio.sleep(60)
+
+
+models: list[StepModel] = []
+
+
+class V1Connection:
+    """A v1 connection that records what is sent down each channel."""
+
+    def __init__(self, cid: int) -> None:
+        self.id = ConnId(cid)
+        self.capabilities = ConnectionCapabilities(carries_video=True)
+        self.protocol_version = V1
+        self.sent: list[bytes | str] = []
+        self.control: list[bytes | str] = []
+        self.media: list[MediaChunk] = []
+
+    def send_message(self, payload: bytes | str) -> None:
+        self.sent.append(payload)
+
+    def send_control(self, payload: bytes | str) -> None:
+        self.control.append(payload)
+
+    def send_media(self, chunk: MediaChunk) -> None:
+        self.media.append(chunk)
+
+    def flush_media(self) -> None: ...
+
+    def set_media_rate(self, fps: float) -> None: ...
+
+    def set_media_depth(self, depth: int) -> None: ...
+
+    def resume_track(self, name: str) -> None: ...
+
+    def pause_track(self, name: str) -> None: ...
+
+    async def close(self) -> None: ...
+
+    def replies(self) -> list[data_pb2.DataServerMessage]:
+        codec = protocol.select(V1)
+        replies: list[data_pb2.DataServerMessage] = []
+        for frame in self.sent:
+            message = codec.decode(frame, DATA, SERVER)
+            assert isinstance(message, data_pb2.DataServerMessage)
+            replies.append(message)
+        return replies
+
+
+@pytest.fixture(autouse=True)
+def _seed_registries(
+    isolate_interface_registries: None, register_model: Callable[[type], None]
+) -> None:
+    register_model(StepModel)
+
+
+async def _runner(monkeypatch: pytest.MonkeyPatch, model: type = StepModel) -> Runner:
+    models.clear()
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: model)
+    runner = Runner(RuntimeConfig(model_ref="fake:Model"))
+    await runner.start()
+    return runner
+
+
+@pytest.fixture
+async def runner(monkeypatch: pytest.MonkeyPatch) -> Any:
+    runner = await _runner(monkeypatch)
+    try:
+        yield runner
+    finally:
+        await runner.stop()
+
+
+def _frame(value: int) -> step_pb2.Frame:
+    return step_pb2.Frame(
+        encoding=step_pb2.FRAME_ENCODING_RAW,
+        dtype="uint8",
+        shape=[2, 2, 3],
+        data=np.full((2, 2, 3), value, dtype=np.uint8).tobytes(),
+    )
+
+
+def _request_step(
+    request_id: str,
+    *,
+    state: dict[str, Any] | None = None,
+    commands: Sequence[tuple[str, dict[str, Any]]] = (),
+    inputs: Sequence[step_pb2.TrackFrames] = (),
+) -> bytes:
+    message = data_pb2.DataClientMessage(
+        request_id=request_id,
+        kind=K.MESSAGE_KIND_REQUEST,
+        request_step=step_pb2.RequestStep(
+            state=dict_to_struct(state or {}),
+            commands=[
+                model_pb2.Command(type=name, data=dict_to_struct(args)) for name, args in commands
+            ],
+            inputs=inputs,
+        ),
+    )
+    return message.SerializeToString()
+
+
+def _command(request_id: str, name: str, **args: Any) -> bytes:
+    return data_pb2.DataClientMessage(
+        request_id=request_id,
+        kind=K.MESSAGE_KIND_REQUEST,
+        command=model_pb2.Command(type=name, data=dict_to_struct(args)),
+    ).SerializeToString()
+
+
+async def _until(predicate: Callable[[], bool]) -> None:
+    for _ in range(400):
+        if predicate():
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError("condition not reached within 2 s")
+
+
+async def _stepped(runner: Runner, **params: Any) -> V1Connection:
+    runner.start_session({"generation": "stepped", **params})
+    conn = V1Connection(1002)
+    runner.connection_opened(conn)
+    return conn
+
+
+def _send(runner: Runner, conn: V1Connection, payload: bytes) -> None:
+    runner.message_received(conn.id, payload, V1, DATA)
+
+
+# -- starting a stepped session ------------------------------------------------
+
+
+async def test_the_descriptor_echoes_the_generation_always(runner: Runner) -> None:
+    assert runner.descriptor()["generation"] == "streamed"
+    runner.start_session({"generation": "stepped"})
+    assert runner.descriptor()["generation"] == "stepped"
+    runner.stop_session()
+    await _until(lambda: runner._sm.current_state is SessionState.READY)
+    runner.start_session({})
+    assert runner.descriptor()["generation"] == "streamed"
+
+
+async def test_an_unknown_generation_is_refused_and_the_session_stays_ready(
+    runner: Runner,
+) -> None:
+    with pytest.raises(InvalidSessionStartError, match="generation must be one of"):
+        runner.start_session({"generation": "batch"})
+    assert runner._sm.current_state is SessionState.READY
+
+
+async def test_a_model_with_its_own_loop_cannot_start_a_stepped_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = await _runner(monkeypatch, OwnLoop)
+    try:
+        with pytest.raises(InvalidSessionStartError, match="drives its own run"):
+            runner.start_session({"generation": "stepped"})
+        assert runner._sm.current_state is SessionState.READY
+        runner.start_session({})
+        assert runner._sm.current_state is SessionState.WAITING
+    finally:
+        await runner.stop()
+
+
+# -- one step, end to end ------------------------------------------------------
+
+
+async def test_a_requested_step_is_accepted_then_answered_on_the_data_channel(
+    runner: Runner,
+) -> None:
+    conn = await _stepped(runner)
+    _send(
+        runner,
+        conn,
+        _request_step(
+            "r1",
+            state={"prompt": "a lake"},
+            inputs=[
+                step_pb2.TrackFrames(
+                    track="webcam",
+                    kind=platform_pb2.TRACK_KIND_VIDEO,
+                    frames=[_frame(7), _frame(9)],
+                )
+            ],
+        ),
+    )
+    await _until(lambda: len(conn.sent) == 2)
+
+    accepted, result = conn.replies()
+    assert accepted.request_id == result.request_id == "r1"
+    assert accepted.kind == K.MESSAGE_KIND_NOTIFICATION
+    assert accepted.step_accepted.index == 1
+    assert result.kind == K.MESSAGE_KIND_RESPONSE
+    assert result.WhichOneof("payload") == "step_result"
+    assert result.step_result.index == 1
+    assert conn.control == []
+    assert models[-1].inputs == [("a lake", [], [7, 9])]
+    assert conn.media == []
+
+
+async def test_a_command_sent_before_a_step_is_applied_before_it(runner: Runner) -> None:
+    conn = await _stepped(runner)
+    _send(runner, conn, _command("c1", "note", text="first"))
+    _send(runner, conn, _request_step("r1", commands=[("note", {"text": "second"})]))
+    _send(runner, conn, _command("c2", "note", text="third"))
+    await _until(lambda: len(conn.sent) == 4)
+
+    assert models[-1].inputs == [("a forest", ["first", "second"], [])]
+    assert models[-1].notes == ["first", "second", "third"]
+    kinds = [(m.request_id, m.WhichOneof("payload")) for m in conn.replies()]
+    assert kinds == [("c1", None), ("r1", "step_accepted"), ("r1", "step_result"), ("c2", None)]
+
+
+async def test_steps_are_numbered_from_one(runner: Runner) -> None:
+    conn = await _stepped(runner)
+    for request_id in ("r1", "r2", "r3"):
+        _send(runner, conn, _request_step(request_id))
+    await _until(lambda: len(conn.sent) == 6)
+    results = [m for m in conn.replies() if m.WhichOneof("payload") == "step_result"]
+    assert [(m.request_id, m.step_result.index) for m in results] == [
+        ("r1", 1),
+        ("r2", 2),
+        ("r3", 3),
+    ]
+    facts = [
+        t.detail["step"]
+        for _, e in runner.events._history  # type: ignore[attr-defined]
+        if (t := e.transition).event is SessionEvent.STEP_COMPLETED
+    ]
+    assert facts == [1, 2, 3]
+
+
+# -- refusals --------------------------------------------------------------------
+
+
+def _refusal(message: data_pb2.DataServerMessage) -> str:
+    assert message.kind == K.MESSAGE_KIND_RESPONSE
+    assert message.WhichOneof("payload") == "error"
+    assert message.error.code == STEP_REFUSED
+    return message.error.message
+
+
+async def test_a_step_with_an_invalid_command_is_refused_whole(runner: Runner) -> None:
+    conn = await _stepped(runner)
+    _send(
+        runner,
+        conn,
+        _request_step("r1", state={"prompt": "a lake"}, commands=[("note", {"text": 3})]),
+    )
+    await _until(lambda: len(conn.sent) == 1)
+    await asyncio.sleep(0.02)
+
+    [reply] = conn.replies()
+    assert reply.request_id == "r1"
+    assert _refusal(reply).startswith("commands[0] is refused: text")
+    model = models[-1]
+    assert model.state.prompt == "a forest"
+    assert model.inputs == []
+
+
+async def test_a_step_with_an_invalid_state_value_names_the_key(runner: Runner) -> None:
+    conn = await _stepped(runner)
+    _send(runner, conn, _request_step("r1", state={"prompt": ""}))
+    await _until(lambda: len(conn.sent) == 1)
+    assert _refusal(conn.replies()[0]).startswith("state.prompt is refused: prompt")
+
+
+@pytest.mark.parametrize(
+    ("entry", "reason"),
+    [
+        (step_pb2.TrackFrames(track="mic"), "inputs[0] names 'mic', which is not an input track"),
+        (
+            step_pb2.TrackFrames(track="webcam", kind=platform_pb2.TRACK_KIND_AUDIO),
+            "inputs[0] says 'webcam' is not a video track",
+        ),
+        (
+            step_pb2.TrackFrames(track="webcam", frames=[step_pb2.Frame(dtype="uint8")]),
+            "inputs[0].frames[0]: frame encoding FRAME_ENCODING_UNSPECIFIED is not supported",
+        ),
+    ],
+)
+async def test_a_step_whose_frames_do_not_fit_is_refused(
+    runner: Runner, entry: step_pb2.TrackFrames, reason: str
+) -> None:
+    conn = await _stepped(runner)
+    _send(runner, conn, _request_step("r1", inputs=[entry]))
+    await _until(lambda: len(conn.sent) == 1)
+    assert _refusal(conn.replies()[0]).startswith(reason)
+
+
+async def test_a_step_the_model_refuses_is_answered_and_not_counted(runner: Runner) -> None:
+    conn = await _stepped(runner, steps=1)
+    _send(runner, conn, _request_step("r1", state={"prompt": "refuse"}))
+    await _until(lambda: len(conn.sent) == 1)
+    assert _refusal(conn.replies()[0]) == "not now"
+    assert runner._sm.current_state in (SessionState.STREAMING, SessionState.WAITING)
+    assert models[-1].state.prompt == "a forest"
+
+    _send(runner, conn, _request_step("r2"))
+    await _until(lambda: runner._sm.current_state is not SessionState.STREAMING)
+    results = [m for m in conn.replies() if m.WhichOneof("payload") == "step_result"]
+    assert [m.step_result.index for m in results] == [1]
+
+
+async def test_a_stepped_session_closes_after_its_steps(runner: Runner) -> None:
+    conn = await _stepped(runner, steps=2)
+    _send(runner, conn, _request_step("r1"))
+    _send(runner, conn, _request_step("r2"))
+    await _until(lambda: runner._sm.current_state is SessionState.READY)
+    results = [m for m in conn.replies() if m.WhichOneof("payload") == "step_result"]
+    assert [m.step_result.index for m in results] == [1, 2]
+
+
+async def test_a_step_request_in_a_streamed_session_is_refused(runner: Runner) -> None:
+    runner.start_session({})
+    conn = V1Connection(1002)
+    runner.connection_opened(conn)
+    _send(runner, conn, _request_step("r1"))
+    await _until(lambda: len(conn.sent) == 1)
+    assert "not stepped" in _refusal(conn.replies()[0])
+
+
+# -- what a stepped session does not do ------------------------------------------
+
+
+async def test_a_stepped_session_streams_no_media(runner: Runner) -> None:
+    conn = await _stepped(runner)
+    runner._emit_media(MediaChunk(bundle=MediaBundle(), fps=30.0))
+    assert conn.media == []
+
+
+async def test_a_stepped_session_refuses_clips(runner: Runner) -> None:
+    conn = await _stepped(runner)
+    runner.clip_requested(conn.id, 5.0, "c1")
+    runner.recording_requested(conn.id, "c2")
+    codec = protocol.select(V1)
+    reasons = []
+    for frame in conn.control:
+        reply = codec.decode(frame, CONTROL, SERVER)
+        assert isinstance(reply, control_pb2.ControlServerMessage)
+        reasons.append(reply.clip_failed.reason)
+    assert reasons == ["a stepped session is not recorded, so it has no clips"] * 2

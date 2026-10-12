@@ -369,3 +369,16 @@ def test_frames_with_no_samples_are_held_to_the_frame_cap() -> None:
         buffer.push(InputFrame(data=np.zeros((1, 0), dtype=np.int16)))
 
     assert buffer.available == 10
+def test_restore_puts_back_the_frames_and_count_a_snapshot_took() -> None:
+    buffer = InputBuffer()
+    first = InputFrame(data=np.zeros((1, 1, 3), dtype=np.uint8))
+    buffer.push(first)
+    saved = buffer.snapshot()
+
+    buffer.push(InputFrame(data=np.ones((1, 1, 3), dtype=np.uint8)))
+    buffer.try_read(2)
+    buffer.restore(saved)
+
+    assert buffer.available == 1
+    assert buffer.total_received == 1
+    assert buffer.try_read(1) == [first]

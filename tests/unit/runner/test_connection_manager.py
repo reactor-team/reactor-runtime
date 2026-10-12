@@ -1134,3 +1134,22 @@ def test_no_transport_name_can_claim_or_release_the_system_clients_id() -> None:
 
     with pytest.raises(ConnectionIdClaimedError):
         cm.claim_conn_id(ConnId(0), "runtime")
+def test_a_step_reply_rides_the_data_channel_whatever_channel_the_codec_names() -> None:
+    manager, _ = waiting_manager()
+    conn = FakeConnection(1, protocol_version=ProtocolVersion.V1)
+    manager.register(conn)
+
+    manager.send_step_reply(conn.id, lambda version: (Channel.CONTROL, b"reply"))
+
+    assert conn.messages == [b"reply"]
+    assert conn.control == []
+
+
+def test_a_v0_connection_is_sent_no_step_reply() -> None:
+    manager, _ = waiting_manager()
+    conn = FakeConnection(1)
+    manager.register(conn)
+
+    manager.send_step_reply(conn.id, _refuse_to_encode_response)
+
+    assert conn.messages == []

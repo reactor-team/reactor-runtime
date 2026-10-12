@@ -1,11 +1,14 @@
 """The parameters a session starts with, read from the ``/start_session`` body.
 
-Two optional keys shape a session beyond its id. ``starting_input`` holds the
+Three optional keys shape a session beyond its id. ``starting_input`` holds the
 commands the runtime applies before any client connects: ``state`` is a short
 form for one ``set_<field>`` command per key, and ``commands`` is an ordered
 list of ``{"command", "data"}`` pairs, the same pair a client sends. ``steps``
 is how many completed steps the session runs before the runtime closes it, from
-1 to ``MAX_STEPS``.
+1 to ``MAX_STEPS``. ``generation`` is how the session generates:
+``"streamed"``, the default, runs the step loop continuously and streams its
+media; ``"stepped"`` runs one step per client request and answers each with the
+step's result.
 
 This module checks the shape of those keys and nothing else. Whether a command
 exists, and whether its data fits, is the model contract's decision, made later
@@ -17,6 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 
 MAX_STEPS = 10_000
@@ -35,6 +39,21 @@ class InvalidSessionStartError(ValueError):
     contract. Raised before the session moves, so a rejected body leaves the session as
     it was. The message names the key and what is wrong with it.
     """
+
+
+class Generation(StrEnum):
+    """How a session generates.
+
+    Attributes:
+        STREAMED: The step loop runs continuously while a client is connected,
+            and its media streams on the output tracks.
+        STEPPED: The step loop runs one step per client request. Each request
+            carries the step's state, commands, and input frames, and is
+            answered with the step's result; nothing streams.
+    """
+
+    STREAMED = "streamed"
+    STEPPED = "stepped"
 
 
 @dataclass(frozen=True)
@@ -86,10 +105,12 @@ class SessionStart:
             ``None`` when the body names none.
         steps: How many completed steps the session runs before the runtime
             closes it, or ``None`` for no limit.
+        generation: How the session generates.
     """
 
     starting_input: StartingInput | None = None
     steps: int | None = None
+    generation: Generation = Generation.STREAMED
 
 
 def parse_session_start(params: Mapping[str, Any]) -> SessionStart:
@@ -110,6 +131,7 @@ def parse_session_start(params: Mapping[str, Any]) -> SessionStart:
     return SessionStart(
         starting_input=_starting_input(params.get("starting_input")),
         steps=_steps(params.get("steps")),
+        generation=_generation(params.get("generation")),
     )
 
 
@@ -171,3 +193,15 @@ def _steps(raw: Any) -> int | None:
     if raw > MAX_STEPS:
         raise InvalidSessionStartError(f"steps must be at most {MAX_STEPS}")
     return raw
+
+
+def _generation(raw: Any) -> Generation:
+    if raw is None:
+        return Generation.STREAMED
+    try:
+        return Generation(raw)
+    except ValueError:
+        expected = ", ".join(repr(value.value) for value in Generation)
+        raise InvalidSessionStartError(
+            f"generation must be one of {expected}, not {raw!r}"
+        ) from None

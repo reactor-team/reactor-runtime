@@ -4,6 +4,7 @@ import pytest
 
 from reactor_runtime.runner.session_start import (
     MAX_STEPS,
+    Generation,
     InvalidSessionStartError,
     SessionStart,
     StartingCommand,
@@ -119,3 +120,20 @@ def test_a_key_of_the_wrong_shape_is_rejected(body: dict[str, Any], message: str
 
 def test_steps_may_be_as_large_as_the_bound() -> None:
     assert parse_session_start({"steps": MAX_STEPS}).steps == MAX_STEPS
+
+
+def test_a_session_streams_unless_the_body_says_otherwise() -> None:
+    assert parse_session_start({}).generation is Generation.STREAMED
+    assert parse_session_start({"generation": None}).generation is Generation.STREAMED
+    assert parse_session_start({"generation": "streamed"}).generation is Generation.STREAMED
+
+
+def test_a_stepped_generation_is_parsed() -> None:
+    parsed = parse_session_start({"generation": "stepped", "steps": 3})
+    assert parsed == SessionStart(steps=3, generation=Generation.STEPPED)
+
+
+@pytest.mark.parametrize("raw", ["STEPPED", "batch", "", 1, True, ["stepped"], {"mode": "x"}])
+def test_an_unknown_generation_is_refused_naming_the_choices(raw: Any) -> None:
+    with pytest.raises(InvalidSessionStartError, match="generation must be one of 'streamed'"):
+        parse_session_start({"generation": raw})

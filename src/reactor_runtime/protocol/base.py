@@ -15,7 +15,15 @@ from typing import Any
 
 from reactor_runtime.codes import PUBLISH_REFUSED
 from reactor_runtime.protocol.common import dict_to_struct
-from reactor_wire.v1 import common_pb2, control_pb2, data_pb2, model_pb2, platform_pb2, track_pb2
+from reactor_wire.v1 import (
+    common_pb2,
+    control_pb2,
+    data_pb2,
+    model_pb2,
+    platform_pb2,
+    step_pb2,
+    track_pb2,
+)
 
 # A client->runtime message, on either channel.
 ClientMessage = data_pb2.DataClientMessage | control_pb2.ControlClientMessage
@@ -151,6 +159,31 @@ class Codec(ABC):
             request_id=request_id,
             kind=common_pb2.MessageKind.MESSAGE_KIND_RESPONSE,
             error=common_pb2.Error(code=code, message=detail),
+        )
+        return self.encode(message)
+
+    def encode_step_accepted(self, request_id: str, index: int) -> tuple[Channel, bytes | str]:
+        """Encode the notice that a requested step was accepted and is generating.
+
+        A notification carrying the request's *request_id*, sent before the
+        step's result, so a client can tell an accepted step from one still
+        waiting in the queue.
+        """
+        message = data_pb2.DataServerMessage(
+            request_id=request_id,
+            kind=common_pb2.MessageKind.MESSAGE_KIND_NOTIFICATION,
+            step_accepted=step_pb2.StepAccepted(index=index),
+        )
+        return self.encode(message)
+
+    def encode_step_result(
+        self, request_id: str, result: step_pb2.StepResult
+    ) -> tuple[Channel, bytes | str]:
+        """Encode a step's result as the response to its request."""
+        message = data_pb2.DataServerMessage(
+            request_id=request_id,
+            kind=common_pb2.MessageKind.MESSAGE_KIND_RESPONSE,
+            step_result=result,
         )
         return self.encode(message)
 

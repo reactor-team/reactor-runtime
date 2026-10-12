@@ -33,6 +33,8 @@ from reactor_runtime.core.values import (
     InputFrame,
     MediaBundle,
     MediaChunk,
+    RequestedStep,
+    StepVerdict,
     TrackData,
     TrackInfo,
     TrackKind,
@@ -104,6 +106,9 @@ model thread.
 
 FailureSink = Callable[[BaseException], None]
 """Receives the exception that ended :meth:`ReactorCore.run`, on the model thread."""
+
+StepVerdictSink = Callable[[StepVerdict], None]
+"""Receives whether a requested step was taken, on the model thread, before its report."""
 
 
 @dataclass(frozen=True)
@@ -284,8 +289,27 @@ class CommandTimes:
     finished: float
 
 
-Inbound = CommandEnvelope | ReactorEvent
-"""One item of the model's inbound queue: a validated command or a reactor event."""
+@dataclass(frozen=True)
+class StepEnvelope:
+    """A client's request for one step of a stepped session, validated.
+
+    Attributes:
+        commands: The validated commands to apply before the step, in order:
+            the state's setters first, then the request's own commands.
+        inputs: The frames to write to each input track before the step, by
+            track name, in the order the client sent them.
+        conn_id: The connection that asked for the step.
+        request_id: The request id every reply to the step carries.
+    """
+
+    commands: tuple[Command, ...]
+    inputs: Mapping[str, tuple[InputFrame, ...]]
+    conn_id: ConnId
+    request_id: RequestId
+
+
+Inbound = CommandEnvelope | StepEnvelope | ReactorEvent
+"""One item of the model's inbound queue: a command, a step request, or a reactor event."""
 
 
 class ReactorCore:
@@ -327,6 +351,7 @@ class ReactorCore:
         self._out_step: StepSink | None = None
         self._out_command_timing: CommandTimingSink | None = None
         self._out_frame_timing: FrameTimingSink | None = None
+        self._out_step_verdict: StepVerdictSink | None = None
         # How many session starts the model has received, kept by the
         # subclass's dispatcher. A step report carries it, so the runtime can
         # set apart a late report from a session that has ended.
@@ -416,6 +441,7 @@ class ReactorCore:
         session: int,
         fps: float | None = None,
         stages: Mapping[str, float] | None = None,
+        request: RequestedStep | None = None,
     ) -> None:
         """Hand a step report to the bound sink, stamped with *session* and its playout rate.
 
@@ -423,6 +449,8 @@ class ReactorCore:
         report carries the rate of the last emission, or :attr:`fps` before
         any. *stages* is the time the step spent in each of its frame stages,
         in milliseconds, when the step loop timed them.
+        any. *request* is the client request the step answers, in a stepped
+        session.
         """
         if self._out_step is None:
             return
@@ -438,6 +466,7 @@ class ReactorCore:
                 session=session,
                 fps=fps,
                 stages=dict(stages or {}),
+                request=request,
             )
         )
 
@@ -472,6 +501,7 @@ class ReactorCore:
         media: MediaSink,
         media_ops: MediaOps | None = None,
         step: StepSink | None = None,
+        step_verdict: StepVerdictSink | None = None,
     ) -> None:
         """Bind the outbound sinks. Called once before the loop starts.
 
@@ -491,6 +521,7 @@ class ReactorCore:
         self._out_media = media
         self._media_ops = media_ops
         self._out_step = step
+        self._out_step_verdict = step_verdict
         if media_ops is not None:
             if self.buffer_size is not None:
                 media_ops.set_depth(self.buffer_size)
@@ -538,6 +569,13 @@ class ReactorCore:
         self._enqueue(
             CommandEnvelope(command, conn_id, request_id, received_at, time.monotonic(), held_ms)
         )
+    def submit_step(self, step: StepEnvelope) -> None:
+        """Enqueue a validated step request onto the model loop.
+
+        It takes its place in the same queue as commands, so it is handled
+        after every command posted before it.
+        """
+        self._enqueue(step)
 
     def post_reactor_event(self, event: ReactorEvent) -> None:
         """Enqueue a reactor-authoritative event onto the model loop."""
@@ -618,6 +656,15 @@ class ReactorCore:
             self._on_failure(crash)
 
     # -- subclass loop hooks --------------------------------------------------
+
+    @classmethod
+    def supports_stepped(cls) -> bool:
+        """Return whether the model can serve a stepped session.
+
+        Only the default step loop of :class:`ReactorApp` runs a step per
+        request; an engine on its own has no step loop at all.
+        """
+        return False
 
     def _on_loop_ready(self) -> None:
         """Create loop-bound state. Overridden by subclasses."""
