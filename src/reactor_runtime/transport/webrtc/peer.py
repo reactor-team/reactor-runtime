@@ -146,6 +146,7 @@ from reactor_runtime.transport.webrtc.frames import (
 from reactor_runtime.transport.webrtc.sdp import (
     Candidate,
     bump_session_version,
+    declared_dc_chunking,
     deduplicate_bundle_pts,
     embed_ice_candidates,
     set_media_direction,
@@ -215,6 +216,13 @@ _AUDIO_GRACE_TICKS = 300  # 3 s
 # SCTP may move only a few MB a second. Kept well inside the 10 s a crashed
 # model's process gets to exit, since a teardown also runs on that path.
 _CLOSE_DRAIN_S = 5.0
+
+# The largest message a plain data channel carries, and the largest this side
+# accepts on a chunked one: libwebrtc's SCTP limit, and the receive limit the
+# media engine's chunking declares (the binding's default, which _get_factory
+# keeps). A peer that declares chunking without a limit is held to the plain one.
+_PLAIN_MAX_MESSAGE_SIZE = 256 * 1024
+_CHUNKED_MAX_MESSAGE_SIZE = 64 * 1024 * 1024
 
 # Shared media engine: one PeerConnectionFactory per process (libwebrtc requires
 # this). Audio isolation between peers is achieved at the track level via
@@ -1092,6 +1100,37 @@ class WebRTCPeer:
             self._frame_queue.put_nowait((bundle, time.perf_counter()))
         except queue.Full:
             self._dropped_bundles += 1
+
+    @property
+    def message_chunking(self) -> bool:
+        """Whether the data channel carries chunked messages.
+
+        Decided by the media engine once the channel is open, from both sides'
+        declarations; ``False`` before then.
+        """
+        channel = self._data_channel
+        if channel is None:
+            return False
+        try:
+            return channel.is_chunked()
+        except Exception:
+            return False
+
+    @property
+    def max_message_size(self) -> int:
+        """The largest message, in bytes, the data channel delivers to the client.
+
+        On a chunked channel it is the smaller of this side's limit and the one
+        the client's offer declared; on a plain channel it is what one SCTP
+        message takes.
+        """
+        if not self.message_chunking:
+            return _PLAIN_MAX_MESSAGE_SIZE
+        _, declared = declared_dc_chunking(self._offer_sdp)
+        return min(
+            _CHUNKED_MAX_MESSAGE_SIZE,
+            declared if declared is not None else _PLAIN_MAX_MESSAGE_SIZE,
+        )
 
     def send_message(self, payload: bytes | str) -> None:
         """Send an already-encoded frame over the data channel (text or binary)."""

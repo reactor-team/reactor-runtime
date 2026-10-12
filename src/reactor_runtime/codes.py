@@ -22,3 +22,6 @@ INTERNAL_ERROR = "internal_error"
 
 PUBLISH_REFUSED = "publish_refused"
 """The runtime refused a client's request to publish a track."""
+
+STEP_RESULT_TOO_LARGE = "step_result_too_large"
+"""A step ran, but its result is larger than the connection can deliver in one message."""
