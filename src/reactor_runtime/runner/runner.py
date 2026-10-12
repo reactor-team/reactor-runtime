@@ -27,7 +27,12 @@ from collections import deque
 from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
 from typing import Any, Protocol
 
-from reactor_runtime.codes import INVALID_COMMAND, UNRESOLVED_UPLOAD
+from reactor_runtime.codes import (
+    INTERNAL_ERROR,
+    INVALID_COMMAND,
+    STEP_RESULT_TOO_LARGE,
+    UNRESOLVED_UPLOAD,
+)
 from reactor_runtime.core import (
     JOURNAL_EVENTS,
     ClientConnected,
@@ -80,7 +85,12 @@ from reactor_runtime.metrics import (
     RuntimeMetrics,
 )
 from reactor_runtime.protocol import Channel, Codec, ProtocolVersion, select
-from reactor_runtime.protocol.frames import FrameEncodingError, check_frame, decode_frame
+from reactor_runtime.protocol.frames import (
+    FrameEncodingError,
+    check_frame,
+    decode_frame,
+    track_frames,
+)
 from reactor_runtime.recording import ClipResult, Recorder, RecorderError
 from reactor_runtime.runner import client_stats, runtime_stats
 from reactor_runtime.runner.client_stats import ClientStatsGate
@@ -1752,6 +1762,14 @@ class Runner(ServiceComponent, ConnectionSink):
                 "this session is not stepped; start it with generation 'stepped' to request steps",
             )
             return
+        if not self._connections.message_chunking(step.conn_id):
+            self._refuse_step(
+                step.conn_id,
+                step.request_id,
+                "a stepped session needs a connection that negotiated data-channel chunking; "
+                "without it a message is limited to 256 KiB, too small for a step's result",
+            )
+            return
 
         def refuse(entry: str, reason: str) -> None:
             self._sm.send(SessionEvent.ERROR, message=f"step request: {reason}")
@@ -1912,22 +1930,43 @@ class Runner(ServiceComponent, ConnectionSink):
         )
 
     def _send_step_result(self, step: CompletedStep, index: int) -> None:
-        """Answer a requested step with its result, on the data channel.
+        """Answer a requested step with its result, built from the step's report.
 
-        A step the model reported as failed is answered ``FAILED`` with the
-        model's error; it still takes its number.
+        The result is the report's media, one entry per output track, so what
+        the client receives is what the step reported and what a saved step
+        keeps. It goes out as one message. A result larger than the connection
+        negotiated is not sent: the client is answered ``step_result_too_large``
+        and the session goes on. Media that cannot be carried as frames answers
+        ``internal_error``.
         """
         request = step.request
         assert request is not None
-        if step.error is not None:
-            result = step_pb2.StepResult(
-                step=index, failure_code=step_pb2.STEP_FAILURE_CODE_FAILED, error=step.error
+        try:
+            result = step_pb2.StepResult(step=index, tracks=track_frames(step.bundle))
+        except FrameEncodingError as error:
+            logger.error("a step's output could not be encoded", step=index, error=str(error))
+            self._connections.send_step_reply(
+                request.conn_id,
+                lambda version: self._codec_for(version).encode_command_error(
+                    request.request_id, INTERNAL_ERROR, "The step's output could not be encoded."
+                ),
             )
-        else:
-            result = step_pb2.StepResult(step=index)
-        self._connections.send_step_reply(
+            return
+
+        def too_large(
+            version: ProtocolVersion, size: int, limit: int
+        ) -> tuple[Channel, bytes | str]:
+            logger.warning("a step result does not fit one message", step=index, size=size)
+            return self._codec_for(version).encode_command_error(
+                request.request_id,
+                STEP_RESULT_TOO_LARGE,
+                f"step {index}'s result is {size} bytes; this connection takes at most {limit}",
+            )
+
+        self._connections.send_step_result(
             request.conn_id,
             lambda version: self._codec_for(version).encode_step_result(request.request_id, result),
+            too_large,
         )
 
     def _inline_upload_fields(self, name: str, args: Mapping[str, Any]) -> dict[str, TypeSpec]:

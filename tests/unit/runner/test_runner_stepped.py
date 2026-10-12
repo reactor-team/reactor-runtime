@@ -26,6 +26,7 @@ from reactor_runtime import (
     event,
     protocol,
 )
+from reactor_runtime.codes import STEP_RESULT_TOO_LARGE
 from reactor_runtime.core import (
     CompletedStep,
     ConnectionCapabilities,
@@ -126,6 +127,12 @@ class V1Connection:
         self.sent: list[bytes | str] = []
         self.control: list[bytes | str] = []
         self.media: list[MediaChunk] = []
+
+    max_message_size = 64 * 1024 * 1024
+    message_chunking = True
+
+    def send_step_result(self, payload: bytes | str) -> None:
+        self.send_message(payload)
 
     def send_message(self, payload: bytes | str) -> None:
         self.sent.append(payload)
@@ -894,3 +901,55 @@ async def test_a_stepped_session_refuses_clips(runner: Runner) -> None:
         assert isinstance(reply, control_pb2.ControlServerMessage)
         reasons.append(reply.clip_failed.reason)
     assert reasons == ["a stepped session is not recorded, so it has no clips"] * 2
+
+
+# -- the step result on the wire -------------------------------------------------
+
+
+async def test_the_step_result_carries_the_steps_media_per_output_track(runner: Runner) -> None:
+    conn = await _stepped(runner)
+    _send(runner, conn, _request_step("r1"))
+    await _until(lambda: len(conn.sent) == 2)
+
+    result = conn.replies()[1].step_result
+    [track] = result.tracks
+    assert (track.track, track.kind) == ("main_video", platform_pb2.TRACK_KIND_VIDEO)
+    [frame] = track.frames
+    assert (frame.encoding, frame.dtype, list(frame.shape)) == (
+        step_pb2.FRAME_ENCODING_RAW,
+        "uint8",
+        [2, 2, 3],
+    )
+    assert frame.data == bytes(12)
+
+
+async def test_a_result_too_large_for_the_connection_is_refused_and_the_session_goes_on(
+    runner: Runner,
+) -> None:
+    conn = await _stepped(runner)
+    conn.max_message_size = 16
+    _send(runner, conn, _request_step("r1"))
+    await _until(lambda: len(conn.sent) == 2)
+
+    accepted, refused = conn.replies()
+    assert accepted.step_accepted.index == 1
+    assert refused.request_id == "r1"
+    assert refused.error.code == STEP_RESULT_TOO_LARGE
+    assert "this connection takes at most 16" in refused.error.message
+
+    conn.max_message_size = 64 * 1024 * 1024
+    _send(runner, conn, _request_step("r2"))
+    await _until(lambda: len(conn.sent) == 4)
+    assert conn.replies()[3].step_result.index == 2
+    assert runner._sm.current_state is SessionState.STREAMING
+
+
+async def test_a_connection_without_chunking_is_refused_a_step(runner: Runner) -> None:
+    conn = await _stepped(runner)
+    conn.message_chunking = False
+    _send(runner, conn, _request_step("r1"))
+    await _until(lambda: len(conn.sent) == 1)
+    await asyncio.sleep(0.02)
+
+    assert "negotiated data-channel chunking" in _refusal(conn.replies()[0])
+    assert models[-1].inputs == []

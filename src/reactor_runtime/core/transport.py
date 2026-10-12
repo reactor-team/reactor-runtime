@@ -67,6 +67,31 @@ class Connection(Protocol):
         binary frame) — so the connection carries both.
         """
 
+    @property
+    def max_message_size(self) -> int:
+        """The largest message, in bytes, this connection can deliver to its client.
+
+        What the connection negotiated with the client, read once the wire is
+        connected. A step result larger than this is not sent.
+        """
+
+    @property
+    def message_chunking(self) -> bool:
+        """Whether the connection negotiated carrying a large message in chunks.
+
+        Without chunking a message is bounded by what the wire takes in one
+        piece, too small for most step results, so a stepped session refuses
+        the steps a connection without it requests.
+        """
+
+    def send_step_result(self, payload: bytes | str) -> None:
+        """Send an already-encoded step result to this client.
+
+        It travels the channel the step request came in on, after every frame
+        sent before it, so a client reads a step's replies in order. The caller
+        has checked the frame against :attr:`max_message_size`.
+        """
+
     def send_media(self, chunk: MediaChunk) -> None:
         """Hand a media chunk to the connection, or do nothing when it carries no media.
 

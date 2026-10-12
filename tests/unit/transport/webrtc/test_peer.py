@@ -2709,3 +2709,34 @@ def test_a_flush_waits_for_an_audio_frame_the_feeder_is_pushing() -> None:
     assert len(audio.pushed) == 1
     # The second frame was still buffered at the flush, and is gone.
     assert peer._audio_bufs == {}
+
+
+# -- the negotiated message size ---------------------------------------------------
+
+_CHUNKING_OFFER = "v=0\r\na=x-reactor-dc-chunking:1 max-message-size={}\r\nm=application 9\r\n"
+
+
+@pytest.mark.parametrize(
+    ("offer", "chunked", "expected"),
+    [
+        (_CHUNKING_OFFER.format(8 * 1024 * 1024), True, 8 * 1024 * 1024),
+        (_CHUNKING_OFFER.format(1 << 40), True, 64 * 1024 * 1024),
+        ("v=0\r\na=x-reactor-dc-chunking:1\r\n", True, 256 * 1024),
+        (_CHUNKING_OFFER.format(8 * 1024 * 1024), False, 256 * 1024),
+    ],
+)
+def test_the_largest_message_is_what_both_sides_take(
+    offer: str, chunked: bool, expected: int
+) -> None:
+    peer = WebRTCPeer()
+    peer._offer_sdp = offer
+    data: Any = _FakeChannel(chunked=chunked)
+    peer._data_channel = data
+    assert peer.message_chunking is chunked
+    assert peer.max_message_size == expected
+
+
+def test_a_peer_without_a_data_channel_reports_the_plain_limit() -> None:
+    peer = WebRTCPeer()
+    assert peer.message_chunking is False
+    assert peer.max_message_size == 256 * 1024

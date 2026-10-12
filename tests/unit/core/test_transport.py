@@ -26,6 +26,12 @@ class FakeConnection:
         self.paused: list[str] = []
         self.closed = False
 
+    max_message_size = 64 * 1024 * 1024
+    message_chunking = True
+
+    def send_step_result(self, payload: bytes | str) -> None:
+        self.send_message(payload)
+
     def send_message(self, payload: bytes | str) -> None:
         self.sent.append(payload)
 
