@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+package reactor_wire.v1;
+
+import "google/protobuf/struct.proto";
+import "reactor_wire/v1/model.proto";
+import "reactor_wire/v1/platform.proto";
+
+// How a Frame's data bytes are encoded.
+enum FrameEncoding {
+  FRAME_ENCODING_UNSPECIFIED = 0;
+  // Uncompressed samples in row-major order, described by dtype and shape:
+  // uint8 RGB for video, int16 PCM for audio.
+  FRAME_ENCODING_RAW = 1;
+}
+
+// One frame of a track: a video image or a block of audio samples.
+message Frame {
+  FrameEncoding encoding = 1;
+  // Element type of the decoded array, in NumPy notation ("uint8", "int16").
+  string dtype = 2;
+  // Dimensions of the decoded array: (height, width, 3) for video,
+  // (channels, samples) for audio.
+  repeated uint32 shape = 3;
+  bytes data = 4;
+  // What the sender attached to the frame, opaque to the transport.
+  optional bytes metadata = 5;
+  // When the sender says the frame was captured, in microseconds.
+  optional int64 capture_time_us = 6;
+}
+
+// The frames of one track, in the order they were produced.
+message TrackFrames {
+  string track = 1;
+  TrackKind kind = 2;
+  repeated Frame frames = 3;
+}
+
+// Request to run one step of a stepped session. The runtime runs it as one
+// unit, after every message sent before it: it applies state, then commands,
+// writes the input frames to their tracks, and runs the step. No other command
+// reaches the model in between.
+//
+// The response is a StepResult, or an Error: "step_refused" when the request
+// or the model refuses the step, which changes no state, and
+// "step_result_too_large" when the result does not fit in one message.
+message RequestStep {
+  // Values for the model's state fields, keyed by field name. Each key runs as
+  // the model's set_<key> command, before commands.
+  google.protobuf.Struct state = 1;
+  // Commands to run after the state, in order.
+  repeated Command commands = 2;
+  // Frames to write to the model's input tracks, one entry per track.
+  repeated TrackFrames inputs = 3;
+}
+
+// Notification that a step was accepted and is generating. Sent with the
+// request_id of its RequestStep, before the StepResult. A refused step never
+// gets one.
+message StepAccepted {
+  // The step's number in the session, counted from 1.
+  uint64 index = 1;
+}
+
+// The outcome of one step: what the model produced, per output track.
+message StepResult {
+  // The step's number in the session, counted from 1.
+  uint64 index = 1;
+  repeated TrackFrames tracks = 2;
+}

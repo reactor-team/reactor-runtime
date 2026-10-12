@@ -4,25 +4,30 @@ package reactor_wire.v1;
 
 import "reactor_wire/v1/common.proto";
 import "reactor_wire/v1/model.proto";
+import "reactor_wire/v1/step.proto";
 
-// Data channel, client to runtime. Carries only the model's own command
-// traffic; all platform and track messages travel on the control channel.
+// Data channel, client to runtime. Carries the model's own command traffic and,
+// in a stepped session, the step requests; all platform and track messages
+// travel on the control channel.
 message DataClientMessage {
   string request_id = 1;
   MessageKind kind = 2;
   oneof payload {
     Command command = 10;
+    RequestStep request_step = 11;
     Error error = 40;
   }
 }
 
-// Data channel, runtime to client. Carries only the model's own emitted
-// messages.
+// Data channel, runtime to client. Carries the model's own emitted messages
+// and, in a stepped session, the step replies.
 message DataServerMessage {
   string request_id = 1;
   MessageKind kind = 2;
   oneof payload {
     ModelMessage message = 10;
+    StepAccepted step_accepted = 11;
+    StepResult step_result = 12;
     Error error = 40;
   }
 }
