@@ -237,6 +237,60 @@ def test_a_step_that_finds_the_queue_full_is_not_saved(
     assert not (store.root / _SESSION / "3").exists()
 
 
+def test_a_failed_range_is_saved_whole_behind_a_full_queue(
+    make_store: Callable[..., StepStore], saved: _Saved, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    encoding = threading.Event()
+    release = threading.Event()
+    real_write = store_module.write_mp4
+
+    def slow_write(path: Path, *args: Any) -> tuple[VideoUsage, ...]:
+        encoding.set()
+        assert release.wait(timeout=10.0)
+        return real_write(path, *args)
+
+    monkeypatch.setattr(store_module, "write_mp4", slow_write)
+    store = make_store(queue=1)
+    message = {"type": "progress", "data": {"percent": 10}}
+
+    assert store.admit(_SESSION, 1, CompletedStep(bundle=_bundle())) is True
+    assert encoding.wait(timeout=10.0)
+    assert store.admit(_SESSION, 2, CompletedStep(bundle=_bundle())) is True
+    assert store.admit_failed(_SESSION, 3, 20, "invalid image", [message]) is True
+
+    release.set()
+    steps = saved.wait_for(20)
+    assert sorted(step.step for step in steps) == list(range(1, 21))
+    for step in range(3, 21):
+        result = _result(store, step)
+        assert result["error"] == "invalid image"
+        assert result["files"] == []
+        assert result["messages"] == ([message] if step == 3 else [])
+        assert _folder(store, step) == {"result.json"}
+
+
+def test_an_empty_or_unnamed_failed_range_is_not_saved(
+    make_store: Callable[..., StepStore],
+) -> None:
+    store = make_store()
+
+    assert store.admit_failed(_SESSION, 5, 4, "boom") is False
+    assert store.admit_failed("../../etc", 1, 3, "boom") is False
+    store.close()
+    assert store.admit_failed(_SESSION, 1, 3, "boom") is False
+
+
+def test_a_failed_range_admitted_before_close_is_still_saved(
+    make_store: Callable[..., StepStore], saved: _Saved
+) -> None:
+    store = make_store()
+
+    assert store.admit_failed(_SESSION, 1, 50, "boom") is True
+    store.close(drain_seconds=10.0)
+
+    assert sorted(step.step for step in saved.steps) == list(range(1, 51))
+
+
 def test_a_session_id_that_is_not_a_uuid_is_not_saved(
     make_store: Callable[..., StepStore],
 ) -> None:

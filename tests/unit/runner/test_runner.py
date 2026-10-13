@@ -2047,6 +2047,22 @@ async def test_the_failed_remaining_steps_are_saved_with_the_error(
     assert second["messages"] == []
 
 
+async def test_every_failed_remaining_step_is_saved_past_the_save_queue(
+    saving_runner: Runner,
+) -> None:
+    # More steps than the default save queue holds.
+    saving_runner.start_session({"session_id": _SAVING_SESSION_ID, "steps": 20})
+    saving_runner._emit_handler_failure(_REFUSAL, SYSTEM_CONN_ID, _starting_request(saving_runner))
+
+    facts = _step_facts(saving_runner)
+    assert [fact["step"] for fact in facts] == list(range(1, 21))
+    assert all(fact["saved"] for fact in facts)
+    assert sorted(fact["step"] for fact in await _saved_facts(saving_runner, 20)) == list(
+        range(1, 21)
+    )
+    assert _saved_result(saving_runner, 20)["error"] == "The reference image cannot be decoded."
+
+
 async def test_a_message_sent_before_a_failure_survives_a_step_reported_before_the_loop_runs_it(
     saving_runner: Runner,
 ) -> None:

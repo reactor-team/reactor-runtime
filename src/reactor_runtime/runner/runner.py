@@ -841,8 +841,11 @@ class Runner(ServiceComponent, ConnectionSink):
         journalled, and saved like an error step the model reports. Then the
         session stops with :attr:`~reactor_runtime.core.model.EndReason.ERROR`
         and *error* as its close reason. The model is healthy, so the process
-        keeps running and the next session starts as usual. *limit* is bounded
-        by ``MAX_STEPS``, so the loop is short.
+        keeps running and the next session starts as usual.
+
+        The steps go to the store as one range, which a full save queue does
+        not drop, so each of them gets its folder. *limit* is bounded by
+        ``MAX_STEPS``, so journalling one fact per step stays short.
 
         The messages the model broadcast before the failure go with the first
         of these steps: *captured*, taken on the model's thread as it reported
@@ -854,10 +857,13 @@ class Runner(ServiceComponent, ConnectionSink):
                 messages = (*captured, *self._step_messages)
                 self._step_messages.clear()
         self._steps_failed = True
-        while self._steps_completed < limit:
-            failed = CompletedStep(bundle=None, error=error, session=self._sessions_posted)
-            self._save_step(failed, messages)
-            messages = ()
+        first = self._steps_completed + 1
+        saved = self._step_store is not None and self._step_store.admit_failed(
+            self._recording_id, first, limit, error, messages
+        )
+        for step in range(first, limit + 1):
+            self._steps_completed = step
+            self._sm.send(SessionEvent.STEP_COMPLETED, step=step, saved=saved, error=error)
         self._sm.send(SessionEvent.STOP_SESSION, reason=EndReason.ERROR, close_reason=error)
 
     def _on_step_saved(self, saved: SavedStep) -> None:
