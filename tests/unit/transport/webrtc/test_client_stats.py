@@ -132,6 +132,7 @@ def test_the_environment_and_a_video_tracks_codec_decode() -> None:
                     os="macos",
                     os_version="15.1",
                     arch="aarch64",
+                    device_model="MacBookPro18,3",
                 ),
             ),
         )
@@ -143,7 +144,12 @@ def test_the_environment_and_a_video_tracks_codec_decode() -> None:
     assert (audio.codec_implementation, audio.hardware_codec) == ("", None)
     assert batch.connection_stat is not None
     assert batch.connection_stat.environment == ClientEnvironment(
-        sdk_type="python", sdk_version="1.10.0", os="macos", os_version="15.1", arch="aarch64"
+        sdk_type="python",
+        sdk_version="1.10.0",
+        os="macos",
+        os_version="15.1",
+        arch="aarch64",
+        device_model="MacBookPro18,3",
     )
 
 

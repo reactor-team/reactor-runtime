@@ -1,3 +1,4 @@
+from dataclasses import fields
 from typing import Any
 
 import pytest
@@ -186,11 +187,12 @@ def test_a_track_with_more_stages_than_a_client_sends_is_too_large() -> None:
 
 def test_an_environment_value_longer_than_a_name_is_too_large() -> None:
     long = "x" * (MAX_NAME_LENGTH + 1)
-    batch = ClientStatsBatch(
-        track_stats=[_track()],
-        connection_stat=ClientConnectionStat(
-            timestamp=1, metrics={}, environment=ClientEnvironment(os_version=long)
-        ),
-    )
-    assert not fits(batch)
+    for field in fields(ClientEnvironment):
+        batch = ClientStatsBatch(
+            track_stats=[_track()],
+            connection_stat=ClientConnectionStat(
+                timestamp=1, metrics={}, environment=ClientEnvironment(**{field.name: long})
+            ),
+        )
+        assert not fits(batch), field.name
     assert not fits(_batch(_track(codec_implementation=long)))

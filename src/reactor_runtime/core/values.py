@@ -137,6 +137,8 @@ class ClientEnvironment:
             ``"browser"`` for the JavaScript SDK.
         os_version: The operating system's version as the client reads it.
         arch: The CPU architecture, e.g. ``"aarch64"``.
+        device_model: The device's hardware model as the system names it,
+            e.g. ``"iPhone15,2"``.
     """
 
     sdk_type: str = ""
@@ -144,6 +146,7 @@ class ClientEnvironment:
     os: str = ""
     os_version: str = ""
     arch: str = ""
+    device_model: str = ""
 
 
 @dataclass(frozen=True)

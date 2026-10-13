@@ -129,6 +129,7 @@ def _decode_environment(stat: platform_pb2.ClientConnectionStat) -> ClientEnviro
         os=env.os,
         os_version=env.os_version,
         arch=env.arch,
+        device_model=env.device_model,
     )
 
 
