@@ -136,6 +136,14 @@ message ClientTrackStat {
   // Where this track's frames spent their time, stage by stage, over the
   // window since the previous batch. Video tracks only. See FrameStage.
   repeated FrameStage frame_stages = 9;
+  // The codec implementation the client runs for this video track, as the
+  // media engine names it: the encoder for a track the client sends, the
+  // decoder for one it receives, e.g. "libvpx" or "VideoToolbox". Empty until
+  // the first frame is encoded or decoded, and on an audio track.
+  string codec_implementation = 10;
+  // Whether that implementation is the hardware one. Absent when the engine
+  // does not say.
+  optional bool hardware_codec = 11;
 }
 
 // The time a video track's frames spent in one stage of their trip between
@@ -197,6 +205,24 @@ message ClientConnectionStat {
   // Epoch milliseconds, the client's own clock.
   int64 timestamp = 1;
   map<string, double> metrics = 2;
+  // What the client runs on, so readings can be grouped by it. Sent on every
+  // batch; empty when the client does not know a value.
+  ClientEnvironment environment = 3;
+}
+
+// The SDK and the system a client runs on.
+message ClientEnvironment {
+  // The SDK, e.g. "python", "js", "cpp", "swift", "java", "android".
+  string sdk_type = 1;
+  // The SDK's version, e.g. "1.10.0".
+  string sdk_version = 2;
+  // The operating system, e.g. "macos", "linux", "windows", "ios",
+  // "android", or "browser" for the JavaScript SDK.
+  string os = 3;
+  // The operating system's version as the client reads it, e.g. "15.1".
+  string os_version = 4;
+  // The CPU architecture, e.g. "aarch64", "x86_64".
+  string arch = 5;
 }
 
 // A batch of client-observed quality readings for this connection, sent
