@@ -1,0 +1,8 @@
+# Python dependencies installed into the model image, in one pip pass, so a
+# version conflict between them fails the build instead of surfacing at
+# model load.
+#
+# reactor-runtime is the runtime itself, and the model needs nothing else.
+# Stepped sessions need 3.9.0 or later. Bump this line to upgrade, and
+# reactor.yaml's build.runtime_version to match.
+reactor-runtime==3.9.0

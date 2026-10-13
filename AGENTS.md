@@ -47,14 +47,17 @@ them.
 
 ## Examples
 
-`examples/` holds three workspaces, and each shows one shape on purpose.
+`examples/` holds four workspaces, and each shows one shape on purpose.
 `starter` is the smallest complete model: one class that writes `generate()`
 alone, with the runtime's default `process_input()` and `process_output()`.
 It stays that way; a change that adds either hook, or splits it into two
 files, removes the example's reason to exist. `echo` and `waypoint` carry the
 application/model split, and they are where that pattern is taught. Its rules
 live in `skills/application-model-isolation`, which says the split is
-optional and when to make it.
+optional and when to make it. `stepped_echo` is the reference for a stepped
+session: it writes the three step hooks, never `run()`, and reports back
+everything a step carried, so its report is a contract clients and tests rely
+on.
 
 ## Toolchain
 
