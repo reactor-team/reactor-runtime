@@ -140,6 +140,7 @@ def test_to_detail_carries_the_readings_and_leaves_out_values_json_cannot_carry(
                 FrameStage("decode", total_ms=float("inf"), frames=150),
                 FrameStage("delivery", total_ms=3.0, frames=0),
                 FrameStage("", total_ms=3.0, frames=1),
+                FrameStage("submit", total_ms=-2.0, frames=1),
             ),
         ),
         connection_metrics={"connection_rtt_ms": 25.0, "bad": float("-inf")},
@@ -155,7 +156,8 @@ def test_to_detail_carries_the_readings_and_leaves_out_values_json_cannot_carry(
                 "codec": "VP9",
                 "paused": False,
                 "metrics": {"packets_lost": 4.0},
-                # Only a stage with a name, frames and a finite time has an average.
+                # Only a stage with a name, frames, and a finite time that is not
+                # negative has an average.
                 "frame_stages": [{"name": "jitter_buffer", "total_ms": 1500.0, "frames": 150}],
             }
         ],

@@ -113,13 +113,14 @@ def to_detail(batch: ClientStatsBatch) -> dict[str, Any]:
 def frame_stages_detail(stages: Iterable[FrameStage]) -> list[dict[str, Any]]:
     """Shape a track's stage times for a fact's detail.
 
-    A stage with no name or no frames has no average, and a time JSON cannot
-    carry is no measurement, so both are left out.
+    A stage with no name or no frames has no average, and a negative time or
+    one JSON cannot carry is no measurement, so all of them are left out. The
+    runtime's own stages follow the same rule when they are timed.
     """
     return [
         {"name": stage.name, "total_ms": stage.total_ms, "frames": stage.frames}
         for stage in stages
-        if stage.name and stage.frames > 0 and math.isfinite(stage.total_ms)
+        if stage.name and stage.frames > 0 and math.isfinite(stage.total_ms) and stage.total_ms >= 0
     ]
 
 
