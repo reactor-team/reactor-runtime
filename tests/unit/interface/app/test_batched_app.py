@@ -356,3 +356,17 @@ def test_a_single_session_runtime_drives_it_through_the_plain_entrypoints(app: S
 
     _wait(lambda: any(40 <= f < 50 for f in sinks.frames(0)))
     assert app.started == ["only"]
+
+
+def test_a_session_started_right_after_one_ends_on_the_same_key_steps(app: Summing) -> None:
+    sinks = _serve(app)
+    app.post_reactor_event(SessionStarted("first"))
+    app.post_reactor_event(ClientConnected(ConnId(1001), 1))
+    _wait(lambda: bool(sinks.frames(0)))
+    app.post_reactor_event(SessionEnded("first", EndReason.STOPPED))
+    app.post_reactor_event(SessionStarted("second"))
+    app.post_reactor_event(ClientConnected(ConnId(1002), 1))
+
+    _wait(lambda: app.started == ["first", "second"] and app.ended == ["first"])
+    _wait(lambda: bool(app.batches) and app.batches[-1] == ["second"])
+    assert 0 in app._sessions

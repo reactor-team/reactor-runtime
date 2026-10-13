@@ -110,6 +110,7 @@ class _Session:
     connected: int = 0
     joined: bool = False
     failed: bool = False
+    ended: bool = False
     generation: int = 0
     last_refusal: str | None = None
 
@@ -121,9 +122,15 @@ class _Session:
 
 @dataclass(frozen=True)
 class _Scoped:
-    """One inbound item addressed to one session."""
+    """One inbound item addressed to one session.
 
-    key: SessionKey
+    It holds the session the item was posted for, resolved when it was
+    posted, so an item that waits in the queue behind that session's end and
+    the next session's start under the same key still reaches its own
+    session, or none.
+    """
+
+    session: _Session
     item: CommandEnvelope | ReactorEvent
 
 
@@ -448,7 +455,7 @@ class BatchedReactorApp(ReactorApp):
         request_id: RequestId | None,
     ) -> None:
         """Enqueue a validated command for the session *key*."""
-        self._enqueue_scoped(_Scoped(key, CommandEnvelope(command, conn_id, request_id)))
+        self._enqueue_scoped(key, CommandEnvelope(command, conn_id, request_id))
 
     def post_session_event(self, key: SessionKey, event: ReactorEvent) -> None:
         """Enqueue a reactor event for the session *key*.
@@ -459,7 +466,7 @@ class BatchedReactorApp(ReactorApp):
         """
         if isinstance(event, SessionStarted):
             self._sessions[key] = self._new_session(key, event.session_id)
-        self._enqueue_scoped(_Scoped(key, event))
+        self._enqueue_scoped(key, event)
 
     def push_session_media(self, key: SessionKey, track: str, frame: InputFrame) -> None:
         """Route an inbound frame into the session *key*'s buffer for *track*."""
@@ -484,13 +491,15 @@ class BatchedReactorApp(ReactorApp):
         """Route an inbound frame to the one session a single-session runner hosts."""
         self.push_session_media(_SOLE, track, frame)
 
-    def _enqueue_scoped(self, item: _Scoped) -> None:
-        """Thread-safe put of a session-addressed item onto the inbound queue."""
+    def _enqueue_scoped(self, key: SessionKey, item: CommandEnvelope | ReactorEvent) -> None:
+        """Thread-safe put of an item for the session *key* now holds onto the inbound queue."""
         queue = self._inbound_q
-        if queue is None or self._loop.is_closed():
+        session = self._sessions.get(key)
+        if queue is None or session is None or self._loop.is_closed():
             return
+        scoped = _Scoped(session, item)
         with contextlib.suppress(RuntimeError):
-            self._loop.call_soon_threadsafe(queue.put_nowait, item)
+            self._loop.call_soon_threadsafe(queue.put_nowait, scoped)
 
     def _new_session(self, key: SessionKey, session_id: str) -> _Session:
         """Build the record of a session, with input buffers of its own."""
@@ -521,8 +530,8 @@ class BatchedReactorApp(ReactorApp):
             item: Any = await queue.get()
             if not isinstance(item, _Scoped):
                 continue
-            session = self._sessions.get(item.key)
-            if session is None:
+            session = item.session
+            if session.ended:
                 continue
             with self._serving(session):
                 if isinstance(item.item, CommandEnvelope):
@@ -567,7 +576,9 @@ class BatchedReactorApp(ReactorApp):
                 session.state = None
             for buffer in session.buffers.values():
                 buffer.reset()
-            self._sessions.pop(session.key, None)
+            session.ended = True
+            if self._sessions.get(session.key) is session:
+                del self._sessions[session.key]
             release_session_id(event._log_binding)
         elif isinstance(event, FileUploaded):
             await self._invoke_hook(hooks.file_uploaded, event.conn_id, uploaded_file=event.file)
