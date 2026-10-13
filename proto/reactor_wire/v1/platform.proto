@@ -141,12 +141,12 @@ message ClientTrackStat {
 // The time a track's frames spent in one stage of their trip between the
 // client's app and the model, over one window. `total_ms` is the time all
 // `frames` frames spent in the stage together, so the stage's average per
-// frame is total_ms / frames. `total_ms` is never negative and `frames` is
-// at least 1, so a reader drops a reading that breaks either. The stages
-// cover the transport between the client's app and the model, not the
-// model's own time. A window divides at each reading: whoever reads the
-// numbers sums readings to cover a longer window. A stage that saw no frame
-// in a window is left out of that reading.
+// frame is total_ms / frames. `total_ms` is a finite number, never negative
+// (no NaN or infinity), and `frames` is at least 1, so a reader drops a
+// reading that breaks either. The stages cover the transport between the
+// client's app and the model, not the model's own time. A window divides at
+// each reading: whoever reads the numbers sums readings to cover a longer
+// window. A stage that saw no frame in a window is left out of that reading.
 //
 // `name` is one of the stages below, in the order a frame goes through them.
 // The set grows without a schema change, so a consumer must ignore a name it
