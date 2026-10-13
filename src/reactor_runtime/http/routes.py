@@ -23,6 +23,11 @@ from reactor_runtime.metrics import CONTENT_TYPE as METRICS_CONTENT_TYPE
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.recording import ClipManifest, ClipSessionGoneError, Pending
 from reactor_runtime.runner import Runner
+from reactor_runtime.runner.session_host import (
+    NoFreeSlotError,
+    SessionHost,
+    SessionIdRequiredError,
+)
 from reactor_runtime.runner.session_start import InvalidSessionStartError
 from reactor_runtime.transport.router import (
     ErrorDetail,
@@ -37,6 +42,9 @@ from reactor_runtime.upload_store import (
     UploadSizeMismatchError,
 )
 
+type Host = Runner | SessionHost
+"""What the routes drive: a runner hosting one session, or a host of several."""
+
 
 class StopSessionRequest(BaseModel):
     """Optional qualifiers on a session stop.
@@ -46,18 +54,37 @@ class StopSessionRequest(BaseModel):
     ``reason`` is the platform's human-readable description of why the session
     is ending: when set, clients receive a session-ended notice carrying it
     verbatim before their connections close. A moderated stop outranks it —
-    clients see only the moderation notice. The body itself is optional — a
-    bare ``POST /stop_session`` is a plain stop.
+    clients see only the moderation notice. ``session_id`` names the session
+    to stop; a runtime hosting one session takes a stop without it, and one
+    hosting several requires it. The body itself is optional — a bare
+    ``POST /stop_session`` is a plain stop of a single-session runtime.
     """
 
     moderate: bool = False
     reason: str = Field(default="", max_length=64)
+    session_id: str | None = None
+
+
+class Capacity(BaseModel):
+    """How many sessions the process hosts at once, and how many it can still start."""
+
+    slots: int
+    free: int
+
+
+class SessionList(BaseModel):
+    """Every running session, and the capacity they fill."""
+
+    capacity: Capacity
+    sessions: list[dict[str, Any]]
 
 
 # The non-2xx statuses a route can answer, declared so the published contract
 # carries every code a client branches on (FastAPI cannot infer a runtime
 # raise). Bare statuses + the error shape only; the motives live in the code.
 _TRANSITION_RESPONSES: dict[int | str, dict[str, Any]] = {
+    400: {"model": ErrorDetail},
+    404: {"model": ErrorDetail},
     409: {"model": ErrorDetail},
     503: {"model": ErrorDetail},
 }
@@ -79,8 +106,12 @@ def _transition_rejection(error: SessionTransitionError) -> HTTPException:
     ``Retry-After``; a terminated process is a permanent ``503``. Every other
     wrong-state — a session already running, one still closing, or nothing to
     stop — is a ``409`` conflict. The detail names the action and the state, so
-    the caller sees exactly why the transition was refused.
+    the caller sees exactly why the transition was refused. A start that finds
+    every session slot serving is the same ``409`` a busy single-session
+    runtime answers.
     """
+    if isinstance(error, NoFreeSlotError):
+        return HTTPException(status_code=409, detail=str(error))
     state = error.state
     detail = f"cannot {error.action} session while {state.name.lower()}"
     if state is SessionState.CREATED:
@@ -94,7 +125,7 @@ def _transition_rejection(error: SessionTransitionError) -> HTTPException:
     return HTTPException(status_code=409, detail=detail)
 
 
-def _require_session(runner: Runner, sid: str) -> None:
+def _require_session(runner: Host, sid: str) -> None:
     """Admit a request against *sid*, or answer 400 (no session) / 404 (wrong id)."""
     try:
         runner.require_session_running(sid)
@@ -104,10 +135,25 @@ def _require_session(runner: Runner, sid: str) -> None:
         raise HTTPException(status_code=404, detail="Unknown session") from None
 
 
+def _session_id_required() -> HTTPException:
+    return HTTPException(
+        status_code=400, detail="session_id is required: this runtime hosts several sessions"
+    )
+
+
+def _unknown_session() -> HTTPException:
+    return HTTPException(status_code=404, detail="Unknown session")
+
+
+def _capacity(runner: Host) -> Capacity:
+    slots, free = runner.capacity()
+    return Capacity(slots=slots, free=free)
+
+
 class SessionRoutes:
     """Session lifecycle control, driving the runner's session-control face."""
 
-    def __init__(self, runner: Runner) -> None:
+    def __init__(self, runner: Host) -> None:
         """Bind the route group to the runner it drives."""
         self._runner = runner
 
@@ -120,16 +166,25 @@ class SessionRoutes:
             params: Annotated[dict[str, Any] | None, Body()] = None,
         ) -> dict[str, Any]:
             try:
-                runner.start_session(params or {})
+                sid = runner.start_session(params or {})
             except InvalidSessionStartError as invalid:
                 raise HTTPException(status_code=400, detail=str(invalid)) from None
             except SessionTransitionError as rejected:
                 raise _transition_rejection(rejected) from None
-            return runner.descriptor()
+            return runner.descriptor(sid)
 
-        @app.get("/session")
-        async def get_session() -> dict[str, Any]:
-            return runner.descriptor()
+        @app.get("/session", responses=_GUARD_RESPONSES)
+        async def get_session(session_id: str | None = None) -> dict[str, Any]:
+            try:
+                return runner.descriptor(session_id)
+            except SessionIdRequiredError:
+                raise _session_id_required() from None
+            except UnknownSessionError:
+                raise _unknown_session() from None
+
+        @app.get("/sessions")
+        async def list_sessions() -> SessionList:
+            return SessionList(capacity=_capacity(runner), sessions=runner.sessions())
 
         @app.get("/schema")
         async def get_schema() -> dict[str, Any]:
@@ -143,9 +198,14 @@ class SessionRoutes:
                 runner.stop_session(
                     moderated=req.moderate if req else False,
                     reason=req.reason if req else "",
+                    session_id=req.session_id if req else None,
                 )
             except SessionTransitionError as rejected:
                 raise _transition_rejection(rejected) from None
+            except SessionIdRequiredError:
+                raise _session_id_required() from None
+            except UnknownSessionError:
+                raise _unknown_session() from None
             return Response(status_code=200)
 
 
@@ -180,7 +240,7 @@ class UploadRoutes:
     file-uploaded notification references the slot.
     """
 
-    def __init__(self, runner: Runner) -> None:
+    def __init__(self, runner: Host) -> None:
         """Bind the route group to the runner whose upload store it drives."""
         self._runner = runner
 
@@ -204,7 +264,7 @@ class UploadRoutes:
             if req.size <= 0:
                 raise HTTPException(status_code=400, detail="size must be > 0")
             try:
-                upload_id = runner.uploads.create_slot(
+                upload_id = runner.uploads_for(sid).create_slot(
                     req.name, req.mime_type, req.size, req.upload_id
                 )
             except UploadIdTakenError:
@@ -234,8 +294,9 @@ class UploadRoutes:
             # The slot knows the exact byte count it expects, so a write whose
             # declared length is wrong is rejected before the body is read —
             # otherwise an oversized payload is buffered whole only to fail.
+            uploads = runner.upload_store_holding(upload_id)
             try:
-                expected = runner.uploads.expected_size(upload_id)
+                expected = uploads.expected_size(upload_id)
             except UnknownUploadError:
                 raise HTTPException(status_code=404, detail="Upload not found") from None
             except UploadAlreadyCompleteError:
@@ -247,7 +308,7 @@ class UploadRoutes:
                 )
             body = await _read_capped(request, expected)
             try:
-                runner.uploads.put(upload_id, body)
+                uploads.put(upload_id, body)
             except UnknownUploadError:
                 raise HTTPException(status_code=404, detail="Upload not found") from None
             except UploadAlreadyCompleteError:
@@ -286,7 +347,7 @@ class RecordingRoutes:
     the fMP4 segments the manifest points at, straight from local disk.
     """
 
-    def __init__(self, runner: Runner) -> None:
+    def __init__(self, runner: Host) -> None:
         """Bind the route group to the runner whose recorder it reads."""
         self._runner = runner
 
@@ -403,7 +464,7 @@ class StepRoutes:
     step that is half saved.
     """
 
-    def __init__(self, runner: Runner) -> None:
+    def __init__(self, runner: Host) -> None:
         """Bind the route group to the runner whose step store it reads."""
         self._runner = runner
 
@@ -493,12 +554,14 @@ class HealthResponse(BaseModel):
     ``status`` is the machine-checkable verdict a probe branches on; ``state``
     says what the process is doing, which a probe reads to tell a runtime that
     cannot serve yet from one that is finished; ``detail`` explains an unhealthy
-    verdict.
+    verdict; ``capacity`` says how many sessions the process hosts at once and
+    how many more it can start.
     """
 
     status: HealthStatus
     state: RuntimeState
     detail: str | None
+    capacity: Capacity
 
 
 class EgressRoutes:
@@ -506,7 +569,7 @@ class EgressRoutes:
 
     def __init__(
         self,
-        runner: Runner,
+        runner: Host,
         process_health: Callable[[], Health],
         metrics: RuntimeMetrics,
     ) -> None:
@@ -548,11 +611,37 @@ class EgressRoutes:
             resume = since if since is not None else _resume_from(last_event_id)
             return StreamingResponse(_stream_events(runner, resume), media_type="text/event-stream")
 
+        @app.get(
+            "/sessions/{sid}/events",
+            response_class=Response,
+            responses={
+                200: {
+                    "description": "One session's facts from the egress journal, as SSE.",
+                    "content": {"text/event-stream": {"schema": {"type": "string"}}},
+                }
+            },
+        )
+        async def session_events(
+            sid: str,
+            since: int | None = None,
+            last_event_id: Annotated[str | None, Header()] = None,
+        ) -> StreamingResponse:
+            resume = since if since is not None else _resume_from(last_event_id)
+            return StreamingResponse(
+                _stream_events(runner, resume, runner.event_session(sid)),
+                media_type="text/event-stream",
+            )
+
         @app.get("/health", responses={503: {"description": "The process is unhealthy."}})
         async def health(response: Response) -> HealthResponse:
             report = process_health()
             response.status_code = 503 if report.status is HealthStatus.UNHEALTHY else 200
-            return HealthResponse(status=report.status, state=runner.state(), detail=report.detail)
+            return HealthResponse(
+                status=report.status,
+                state=runner.state(),
+                detail=report.detail,
+                capacity=_capacity(runner),
+            )
 
         # A scraper reads this endpoint on its own schedule, and it answers from
         # the moment the socket binds — before the model loads — so a slow load
@@ -591,13 +680,17 @@ def _resume_from(last_event_id: str | None) -> int | None:
     return int(last_event_id)
 
 
-async def _stream_events(runner: Runner, since: int | None) -> AsyncGenerator[str, None]:
+async def _stream_events(
+    runner: Host, since: int | None, session_id: str | None = None
+) -> AsyncGenerator[str, None]:
     """Yield the runner's events as SSE messages, resuming after *since*.
+
+    With *session_id*, only that session's events are yielded.
 
     Each event carries its own sequence number, emitted as the SSE ``id``. The
     journal bounds its memory and may drop events for a consumer that falls
     behind, so the numbers are not necessarily contiguous: a jump is how a
     consumer learns it missed events and should reconcile from ``GET /session``.
     """
-    async for seq, event in runner.events.subscribe(since):
+    async for seq, event in runner.events.subscribe(since, session_id=session_id):
         yield format_sse(seq, event)

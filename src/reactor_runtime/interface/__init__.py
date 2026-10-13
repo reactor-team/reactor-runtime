@@ -26,7 +26,14 @@ from reactor_runtime.core import (
     InputFrame,
     UploadedFile,
 )
-from reactor_runtime.interface.app import InputState, ReactorApp, StepCompleted, StepOutcome
+from reactor_runtime.interface.app import (
+    BatchedReactorApp,
+    InputState,
+    JoinPolicy,
+    ReactorApp,
+    StepCompleted,
+    StepOutcome,
+)
 from reactor_runtime.interface.client import ClientInfo
 from reactor_runtime.interface.events import (
     EVENT_REGISTRY,
@@ -79,6 +86,7 @@ __all__ = [
     "OUTPUT_REGISTRY",
     "ApplicationError",
     "Audio",
+    "BatchedReactorApp",
     "BufferClosed",
     "ClientInfo",
     "Command",
@@ -88,6 +96,7 @@ __all__ = [
     "InputField",
     "InputFrame",
     "InputState",
+    "JoinPolicy",
     "MediaInput",
     "MessageField",
     "Metadata",

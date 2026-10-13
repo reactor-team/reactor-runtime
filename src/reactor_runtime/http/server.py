@@ -28,6 +28,7 @@ from reactor_runtime.http.routes import (
 from reactor_runtime.log import get_logger
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.runner import Runner
+from reactor_runtime.runner.session_host import SessionHost
 from reactor_runtime.transport.router import TransportRouter
 
 logger = get_logger(__name__)
@@ -42,7 +43,7 @@ _HTTP_SHUTDOWN_SECONDS = 2
 
 
 def build_app(
-    runner: Runner,
+    runner: Runner | SessionHost,
     transports: list[TransportRouter],
     process_health: Callable[[], Health],
     metrics: RuntimeMetrics,
@@ -123,7 +124,7 @@ class HttpServer(ServiceComponent):
     def __init__(
         self,
         cfg: RuntimeConfig,
-        runner: Runner,
+        runner: Runner | SessionHost,
         transports: list[TransportRouter],
         process_health: Callable[[], Health],
         metrics: RuntimeMetrics,

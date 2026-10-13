@@ -298,7 +298,12 @@ async def test_health_is_available_once_the_model_is_up(
     response = await http_client.get("/health")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "healthy", "state": "available", "detail": None}
+    assert response.json() == {
+        "status": "healthy",
+        "state": "available",
+        "detail": None,
+        "capacity": {"slots": 1, "free": 1},
+    }
 
 
 async def test_health_is_ok_and_loading_while_the_model_loads() -> None:
@@ -310,7 +315,12 @@ async def test_health_is_ok_and_loading_while_the_model_loads() -> None:
         response = await http_client.get("/health")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "healthy", "state": "loading", "detail": None}
+    assert response.json() == {
+        "status": "healthy",
+        "state": "loading",
+        "detail": None,
+        "capacity": {"slots": 1, "free": 0},
+    }
 
 
 async def test_health_is_serving_while_a_session_is_open(
@@ -371,6 +381,7 @@ async def test_health_status_comes_from_the_injected_process_health(
         "status": "unhealthy",
         "state": "available",
         "detail": "http server not started",
+        "capacity": {"slots": 1, "free": 1},
     }
 
 

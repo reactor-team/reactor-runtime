@@ -33,6 +33,7 @@ from reactor_runtime.http import HttpServer
 from reactor_runtime.manifest import MANIFEST, load_config
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.runner import Runner
+from reactor_runtime.runner.session_host import SessionHost, batched_capacity
 from reactor_runtime.service import Service
 from reactor_runtime.transport.livekit import LiveKitRouter, livekit_available
 from reactor_runtime.transport.router import TransportRouter
@@ -307,6 +308,24 @@ def _log_level_from_env() -> int:
     return logging.getLevelNamesMapping().get(name, logging.INFO)
 
 
+def _session_slots(cfg: RuntimeConfig) -> int:
+    """Return how many sessions this process hosts at once.
+
+    A :class:`~reactor_runtime.BatchedReactorApp` declares its
+    ``max_sessions``, which the model's class is imported to read; every other
+    model hosts one. ``REACTOR_MAX_SESSIONS`` lowers the declared number for a
+    deployment that wants fewer, and never raises it.
+
+    Raises:
+        SystemExit: If ``REACTOR_MAX_SESSIONS`` is set but not a positive integer.
+    """
+    declared = batched_capacity(cfg.model_ref)
+    cap = _int_env("REACTOR_MAX_SESSIONS", declared)
+    if cap < 1:
+        raise SystemExit("REACTOR_MAX_SESSIONS must be at least 1")
+    return min(declared, cap)
+
+
 def _assemble(
     cfg: RuntimeConfig,
     webrtc: WebRtcConfig | None = None,
@@ -324,7 +343,10 @@ def _assemble(
     service so a failed model load or a crashed model loop brings the whole
     process down, inside the exit deadline the service arms from the lifecycle
     timeouts, and the service's aggregate health is wired into the HTTP server
-    so ``/health`` answers for every component of the process. The metrics
+    so ``/health`` answers for every component of the process. A model that
+    declares more than one session is served by a :class:`SessionHost`, which
+    hosts them all on one loaded model; every other model by a :class:`Runner`.
+    The metrics
     registry is created
     here too, the one place that knows the identity of the process, and handed
     both to the runner that observes on it and to the HTTP server that renders
@@ -349,7 +371,10 @@ def _assemble(
         peer_factory = libwebrtc_peer_factory
     service = Service(exit_timeout=cfg.exit_timeout, grace_period=cfg.grace_period)
     metrics = RuntimeMetrics(version=_version(), model=cfg.model_ref)
-    runner = Runner(cfg, metrics)
+    slots = _session_slots(cfg)
+    runner: Runner | SessionHost = (
+        SessionHost(cfg, metrics, slots) if slots > 1 else Runner(cfg, metrics)
+    )
     runner.request_shutdown = service.request_shutdown
     service.add(runner)
     transports: list[TransportRouter] = [

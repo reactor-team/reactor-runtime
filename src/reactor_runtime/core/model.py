@@ -344,6 +344,9 @@ class TransitionEvent:
 
     Attributes:
         transition: The move that was applied.
+        session_id: The id of the session the move belongs to, or ``None`` for
+            a move outside any session, such as the model loading.
     """
 
     transition: Transition
+    session_id: str | None = None

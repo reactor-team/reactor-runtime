@@ -210,12 +210,15 @@ class SessionControl(ConnectionSink, Protocol):
             sid: The session id the request addressed.
         """
 
-    def new_conn_id(self, transport: str) -> ConnId:
+    def new_conn_id(self, transport: str, sid: str | None = None) -> ConnId:
         """Mint a fresh connection id, unique within the session, and claim it for *transport*.
 
         For a connection no caller chose an id for. The id comes from the
         runtime's own range, :data:`MINTED_CONN_ID_MIN` to :data:`CONN_ID_MAX`
-        (see the connection id notes at the top of this module).
+        (see the connection id notes at the top of this module). *sid* names
+        the session the connection joins: a runtime hosting several sessions
+        mints within that session's id space and requires it, and one hosting
+        a single session reads no more than its own.
 
         Raises:
             ConnectionsExhaustedError: If the session's id space is used up.

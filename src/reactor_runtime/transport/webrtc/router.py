@@ -293,7 +293,7 @@ class WebRtcRouter(TransportRouter):
         async def register(sid: str) -> RegisterConnectionResponse:
             runner.require_session_running(sid)
             return RegisterConnectionResponse(
-                connection_id=runner.new_conn_id(self.protocol),
+                connection_id=runner.new_conn_id(self.protocol, sid),
                 track_map=dict(runner.track_map()),
             )
 
