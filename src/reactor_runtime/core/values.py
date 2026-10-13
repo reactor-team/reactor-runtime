@@ -509,24 +509,21 @@ class RequestedStep:
 
 
 @dataclass(frozen=True)
-class StepVerdict:
-    """Whether the model took a step a client requested.
+class StepRefusal:
+    """A step a client requested that the model refused.
 
     Attributes:
         conn_id: The connection that asked for the step.
         request_id: The id the client sent the request with.
         session: The session the request was handled in, counted the way
             :attr:`CompletedStep.session` is.
-        index: The accepted step's number in its session, counted from 1, or
-            ``None`` for a refused step, which takes none.
-        refusal: Why the step was refused, or ``None`` when it was accepted.
+        reason: Why the step was refused.
     """
 
     conn_id: ConnId
     request_id: str
     session: int
-    index: int | None = None
-    refusal: str | None = None
+    reason: str
 
 
 @dataclass(frozen=True)

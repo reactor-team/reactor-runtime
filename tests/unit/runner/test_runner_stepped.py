@@ -251,7 +251,7 @@ async def test_a_model_with_its_own_loop_cannot_start_a_stepped_session(
 # -- one step, end to end ------------------------------------------------------
 
 
-async def test_a_requested_step_is_accepted_then_answered_on_the_data_channel(
+async def test_a_requested_step_is_answered_with_its_result_on_the_data_channel(
     runner: Runner,
 ) -> None:
     conn = await _stepped(runner)
@@ -270,12 +270,11 @@ async def test_a_requested_step_is_accepted_then_answered_on_the_data_channel(
             ],
         ),
     )
-    await _until(lambda: len(conn.sent) == 2)
+    await _until(lambda: len(conn.sent) == 1)
+    await asyncio.sleep(0.02)
 
-    accepted, result = conn.replies()
-    assert accepted.request_id == result.request_id == "r1"
-    assert accepted.kind == K.MESSAGE_KIND_NOTIFICATION
-    assert accepted.step_accepted.index == 1
+    [result] = conn.replies()
+    assert result.request_id == "r1"
     assert result.kind == K.MESSAGE_KIND_RESPONSE
     assert result.WhichOneof("payload") == "step_result"
     assert result.step_result.index == 1
@@ -289,19 +288,19 @@ async def test_a_command_sent_before_a_step_is_applied_before_it(runner: Runner)
     _send(runner, conn, _command("c1", "note", text="first"))
     _send(runner, conn, _request_step("r1", commands=[("note", {"text": "second"})]))
     _send(runner, conn, _command("c2", "note", text="third"))
-    await _until(lambda: len(conn.sent) == 4)
+    await _until(lambda: len(conn.sent) == 3)
 
     assert models[-1].inputs == [("a forest", ["first", "second"], [])]
     assert models[-1].notes == ["first", "second", "third"]
     kinds = [(m.request_id, m.WhichOneof("payload")) for m in conn.replies()]
-    assert kinds == [("c1", None), ("r1", "step_accepted"), ("r1", "step_result"), ("c2", None)]
+    assert kinds == [("c1", None), ("r1", "step_result"), ("c2", None)]
 
 
 async def test_steps_are_numbered_from_one(runner: Runner) -> None:
     conn = await _stepped(runner)
     for request_id in ("r1", "r2", "r3"):
         _send(runner, conn, _request_step(request_id))
-    await _until(lambda: len(conn.sent) == 6)
+    await _until(lambda: len(conn.sent) == 3)
     results = [m for m in conn.replies() if m.WhichOneof("payload") == "step_result"]
     assert [(m.request_id, m.step_result.index) for m in results] == [
         ("r1", 1),

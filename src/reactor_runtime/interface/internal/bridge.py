@@ -30,8 +30,8 @@ from reactor_runtime.interface.internal.reactor_core import (
     ReactorCore,
     RequestId,
     StepEnvelope,
+    StepRefusalSink,
     StepSink,
-    StepVerdictSink,
 )
 from reactor_runtime.interface.model.contract import ContractError, ModelContract
 
@@ -220,7 +220,7 @@ class ModelBridge:
         media_ops: MediaOps | None = None,
         failure: FailureSink | None = None,
         step: StepSink | None = None,
-        step_verdict: StepVerdictSink | None = None,
+        step_refusal: StepRefusalSink | None = None,
     ) -> None:
         """Wire the model's outbound paths down into the runner. Call once.
 
@@ -236,8 +236,8 @@ class ModelBridge:
         loop, at most once, on the model thread — it is how the owner learns
         the model died rather than idled. ``step`` receives each
         :class:`~reactor_runtime.core.CompletedStep` the model reports, on the
-        model thread. ``step_verdict`` receives, on the model thread, whether
-        each step a client requested was taken, before that step's report.
+        model thread. ``step_refusal`` receives, on the model thread, each
+        step a client requested that the model refused.
 
         Args:
             broadcast: Sink for a message sent to all clients.
@@ -247,7 +247,7 @@ class ModelBridge:
                 the model's ``output`` handle.
             failure: Sink for an unrecoverable crash of the model's run loop.
             step: Sink for each step the model reports finished.
-            step_verdict: Sink for whether a requested step was taken.
+            step_refusal: Sink for each requested step the model refused.
 
         Raises:
             RuntimeError: If outbound has already been bound.
@@ -260,7 +260,7 @@ class ModelBridge:
             media=media,
             media_ops=media_ops,
             step=step,
-            step_verdict=step_verdict,
+            step_refusal=step_refusal,
         )
         if failure is not None:
             self._model.bind_failure(failure)

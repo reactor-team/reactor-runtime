@@ -50,7 +50,7 @@ from reactor_runtime.core import (
     SessionStarted,
     SessionState,
     StartingInputApplied,
-    StepVerdict,
+    StepRefusal,
     TrackDirection,
     TrackKind,
     Transition,
@@ -397,7 +397,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 ),
                 failure=self._on_model_failure,
                 step=self._on_step_completed,
-                step_verdict=self._on_step_verdict,
+                step_refusal=self._on_step_refusal,
             )
             bridge.start()
         except Exception:
@@ -813,8 +813,8 @@ class Runner(ServiceComponent, ConnectionSink):
         saved.
 
         A step a client requested keeps the number the model gave it when it
-        accepted it, the number its ``StepAccepted`` carried, and is answered
-        with its result once journalled.
+        accepted it, and is answered with its result, carrying that number,
+        once journalled.
         """
         if step.session != self._sessions_posted:
             logger.debug(
@@ -849,8 +849,8 @@ class Runner(ServiceComponent, ConnectionSink):
 
     def _save_step(self, step: CompletedStep, messages: tuple[dict[str, Any], ...] = ()) -> None:
         """Number a step of the current session, offer it to the store, and journal it."""
-        # A requested step was numbered when the model accepted it, and the
-        # client was told that number then; its report carries it.
+        # A requested step was numbered when the model accepted it; its report
+        # carries that number.
         if step.request is not None:
             self._steps_completed = step.request.index
         else:
@@ -1510,26 +1510,16 @@ class Runner(ServiceComponent, ConnectionSink):
             ),
         )
 
-    def _on_step_verdict(self, verdict: StepVerdict) -> None:
-        """Tell the client whether the model took its requested step.
+    def _on_step_refusal(self, refusal: StepRefusal) -> None:
+        """Answer a step request the model refused with ``step_refused``.
 
-        Called on the model's thread and sent from it, so an accepted step's
-        notice goes out ahead of any message the model sends while the step
-        runs, and ahead of the step's result. A verdict from an earlier
-        session is dropped.
+        Called on the model's thread and sent from it, so the refusal goes out
+        behind any message the model sent while it applied the request's
+        commands. A refusal from an earlier session is dropped.
         """
-        if verdict.session != self._sessions_posted:
+        if refusal.session != self._sessions_posted:
             return
-        if verdict.refusal is not None:
-            self._refuse_step(verdict.conn_id, verdict.request_id, verdict.refusal)
-            return
-        index = verdict.index or 0
-        self._connections.send_step_reply(
-            verdict.conn_id,
-            lambda version: self._codec_for(version).encode_step_accepted(
-                verdict.request_id, index
-            ),
-        )
+        self._refuse_step(refusal.conn_id, refusal.request_id, refusal.reason)
 
     def _send_step_result(self, step: CompletedStep, index: int) -> None:
         """Answer a requested step with its result, on the data channel."""

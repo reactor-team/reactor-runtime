@@ -32,7 +32,7 @@ from reactor_runtime.core.model import (
     SessionEnded,
     SessionStarted,
 )
-from reactor_runtime.core.values import CompletedStep, ConnId, InputFrame, StepVerdict
+from reactor_runtime.core.values import CompletedStep, ConnId, InputFrame, StepRefusal
 from reactor_runtime.interface.internal.input_buffer import InputBuffer
 from reactor_runtime.interface.internal.reactor_core import CommandEnvelope, StepEnvelope
 from reactor_runtime.interface.model.contract import ModelContract
@@ -108,7 +108,7 @@ class Harness:
 
     def __init__(self, app: Stepper) -> None:
         self.app = app
-        self.verdicts: list[StepVerdict] = []
+        self.refusals: list[StepRefusal] = []
         self.reports: list[CompletedStep] = []
         app._on_loop_ready()
         app.bind_output(
@@ -116,7 +116,7 @@ class Harness:
             addressed=lambda *args: None,
             media=lambda chunk: None,
             step=self.reports.append,
-            step_verdict=self.verdicts.append,
+            step_refusal=self.refusals.append,
         )
         self.queue: asyncio.Queue[Any] = asyncio.Queue()
         app._inbound_q = self.queue
@@ -197,7 +197,7 @@ async def test_a_requested_step_applies_its_commands_then_its_frames_then_runs_o
     await harness.settle()
 
     assert harness.app.inputs == [("a lake", ["x"], 1)]
-    assert harness.verdicts == [StepVerdict(CLIENT, "r1", 1, index=1)]
+    assert harness.refusals == []
     assert len(harness.reports) == 1
     report = harness.reports[0]
     assert report.request is not None
@@ -215,12 +215,11 @@ async def test_steps_are_numbered_from_one_and_a_refused_step_takes_no_number(
     harness.step("r3")
     await harness.settle()
 
-    assert [(v.request_id, v.index, v.refusal) for v in harness.verdicts] == [
-        ("r1", 1, None),
-        ("r2", None, "not now"),
-        ("r3", 2, None),
+    assert harness.refusals == [StepRefusal(CLIENT, "r2", 1, "not now")]
+    assert [(r.request.request_id, r.request.index) for r in harness.reports if r.request] == [
+        ("r1", 1),
+        ("r3", 2),
     ]
-    assert [r.request.index for r in harness.reports if r.request] == [1, 2]
 
 
 async def test_a_step_process_input_refuses_puts_the_state_and_frames_back(
@@ -230,7 +229,7 @@ async def test_a_step_process_input_refuses_puts_the_state_and_frames_back(
     harness.step("r1", ("set_prompt", {"prompt": "refuse"}), frames=2)
     await harness.settle()
 
-    assert harness.verdicts[0].refusal == "not now"
+    assert harness.refusals[0].reason == "not now"
     assert harness.app.state.prompt == "a forest"
     assert webcam(harness.app).available == 0
     assert harness.reports == []
@@ -250,9 +249,8 @@ async def test_a_failing_command_refuses_the_step_and_stops_the_commands_after_i
     )
     await harness.settle()
 
-    [verdict] = harness.verdicts
-    assert verdict.index is None
-    assert verdict.refusal == "command 'reject' failed (rejected): not this one"
+    [refusal] = harness.refusals
+    assert refusal.reason == "command 'reject' failed (rejected): not this one"
     assert harness.app.state.prompt == "a forest"
     assert harness.app.notes == []
     assert webcam(harness.app).available == 0
@@ -289,8 +287,8 @@ async def test_a_step_requested_outside_a_stepped_session_is_refused(harness: Ha
     harness.step("r1")
     await harness.settle()
 
-    [verdict] = harness.verdicts
-    assert verdict.refusal == "no stepped session is running"
+    [refusal] = harness.refusals
+    assert refusal.reason == "no stepped session is running"
 
 
 async def test_the_end_of_a_stepped_session_empties_the_input_tracks(harness: Harness) -> None:
@@ -314,7 +312,7 @@ async def test_a_model_failure_in_a_requested_step_ends_the_loop() -> None:
     assert run.done()
     with pytest.raises(RuntimeError, match="model blew up"):
         run.result()
-    assert [v.index for v in h.verdicts] == [1]
+    assert h.refusals == []
     assert h.reports == []
     await h.stop()
 

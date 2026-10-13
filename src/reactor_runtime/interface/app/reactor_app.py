@@ -72,7 +72,7 @@ from reactor_runtime.core.values import (
     ConnId,
     InputFrame,
     RequestedStep,
-    StepVerdict,
+    StepRefusal,
 )
 from reactor_runtime.interface.app.input_state import InputState
 from reactor_runtime.interface.app.outcome import StepOutcome
@@ -443,8 +443,8 @@ class ReactorApp(ReactorCore):
         handler fails, or an :class:`ApplicationError` from ``process_input()``,
         refuses the step: ``self.state`` and the input tracks are put back as
         they were before the request, and the client is told why. Anything
-        else a handler changed is the handler's to undo. An accepted step is
-        announced before ``generate()`` runs, and reported once
+        else a handler changed is the handler's to undo. An accepted step takes
+        the next number in the session, and is reported with it once
         ``process_output()`` returns, with the request it answers.
         """
         async with self._step_lock:
@@ -468,9 +468,6 @@ class ReactorApp(ReactorCore):
                 return
             self._steps_accepted += 1
             accepted = RequestedStep(request.conn_id, request.request_id, self._steps_accepted)
-            self._send_step_verdict(
-                StepVerdict(request.conn_id, request.request_id, session, index=accepted.index)
-            )
             outcome = self._generate(input)
             returned = await self.process_output(outcome)
         self._report_step(_step_report(returned, outcome), session, request=accepted)
@@ -516,14 +513,10 @@ class ReactorApp(ReactorCore):
     def _refuse_step(self, request: StepEnvelope, session: int, reason: str) -> None:
         """Tell the client its step was refused, and why."""
         logger.debug("requested step refused", reason=reason)
-        self._send_step_verdict(
-            StepVerdict(request.conn_id, request.request_id, session, refusal=reason)
-        )
-
-    def _send_step_verdict(self, verdict: StepVerdict) -> None:
-        """Hand a step verdict to the bound sink, if one is bound."""
-        if self._out_step_verdict is not None:
-            self._out_step_verdict(verdict)
+        if self._out_step_refusal is not None:
+            self._out_step_refusal(
+                StepRefusal(request.conn_id, request.request_id, session, reason)
+            )
 
     # -- engine hooks ---------------------------------------------------------
 
