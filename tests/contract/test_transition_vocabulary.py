@@ -107,6 +107,7 @@ def test_the_end_reason_wire_values_are_locked() -> None:
         "evicted",
         "moderated",
         "error",
+        "start_refused",
     }
 
 

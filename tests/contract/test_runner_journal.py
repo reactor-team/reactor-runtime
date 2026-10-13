@@ -265,6 +265,38 @@ async def test_no_step_runs_before_the_starting_input_has_landed() -> None:
     assert names.index("stop_session") > names.index("step_completed")
 
 
+async def test_a_starting_upload_that_never_arrives_ends_the_session_as_start_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("reactor_runtime.runner.runner._UPLOAD_RESOLVE_TIMEOUT_SECONDS", 0.05)
+    cfg = RuntimeConfig(model_ref="contract:Model", orphan_timeout=0.05)
+    async with running_runtime(model_cls=ImageModel, cfg=cfg) as harness:
+        journal = JournalReader(harness.runner)
+        upload_id = str(uuid.uuid4())
+        try:
+            response = await harness.client.post(
+                "/start_session",
+                json={"starting_input": {"state": {"image": {"upload_id": upload_id}}}, "steps": 2},
+            )
+            assert response.status_code == 200
+
+            seen: list[dict[str, Any]] = []
+            while not seen or seen[-1]["event"] != "cleanup_complete":
+                seen.append(await journal.next())
+        finally:
+            await journal.aclose()
+
+    names = [envelope["event"] for envelope in seen]
+    assert "step_completed" not in names
+    assert "command" not in names
+    stop = seen[names.index("stop_session")]
+    assert stop["detail"] == {
+        "reason": "start_refused",
+        "close_reason": "command 'set_image' references an unresolved upload",
+    }
+    assert seen[-1]["to"] == "ready"
+
+
 async def test_a_clientless_session_times_out_and_unwinds() -> None:
     cfg = RuntimeConfig(model_ref="contract:Model", orphan_timeout=0.05)
     async with running_runtime(model_cls=ContractModel, cfg=cfg) as harness:

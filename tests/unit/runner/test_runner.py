@@ -1189,6 +1189,77 @@ async def test_a_starting_command_that_fails_when_it_runs_is_journalled_and_the_
     assert _journalled_commands(started_runner) == [("set_mode", {"mode": "ok"}, SYSTEM_CONN_ID)]
 
 
+async def test_with_steps_a_starting_upload_that_never_arrives_refuses_the_start(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = _record_reactor_events(started_runner, monkeypatch)
+
+    async def never_arrives(upload_id: str, **kwargs: Any) -> UploadedFile:
+        raise UnknownUploadError(upload_id)
+
+    monkeypatch.setattr(started_runner._uploads, "fetch", never_arrives)
+    started_runner.start_session(
+        {
+            "starting_input": {
+                "commands": [
+                    {"command": "set_image", "data": {"image": {"upload_id": "never"}}},
+                    {"command": "set_mode", "data": {"mode": "ok"}},
+                ],
+            },
+            "steps": 2,
+        }
+    )
+    await started_runner._starting_input_done.wait()
+
+    stops = _moves(started_runner, SessionEvent.STOP_SESSION)
+    assert [stop.detail for stop in stops] == [
+        {
+            "reason": EndReason.START_REFUSED,
+            "close_reason": "command 'set_image' references an unresolved upload",
+        }
+    ]
+    # The rest of the list is not sent, and the step loop never opens.
+    assert _journalled_commands(started_runner) == []
+    assert StartingInputApplied() not in events
+    await started_runner._drain_teardown()
+    _expect_state(started_runner, SessionState.READY)
+
+
+async def test_with_steps_a_starting_command_the_contract_refuses_refuses_the_start(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bridge = started_runner._bridge
+    assert bridge is not None
+    submitted: list[str] = []
+
+    async def refuse(name: str, args: dict[str, Any], **kwargs: Any) -> CommandOutcome:
+        submitted.append(name)
+        return CommandOutcome.reject("mode", "must not be empty")
+
+    monkeypatch.setattr(bridge, "submit_command", refuse)
+    started_runner.start_session(
+        {
+            "starting_input": {
+                "commands": [
+                    {"command": "set_mode", "data": {"mode": "a"}},
+                    {"command": "set_mode", "data": {"mode": "b"}},
+                ],
+            },
+            "steps": 1,
+        }
+    )
+    await started_runner._starting_input_done.wait()
+
+    assert submitted == ["set_mode"]
+    stops = _moves(started_runner, SessionEvent.STOP_SESSION)
+    assert [stop.detail for stop in stops] == [
+        {
+            "reason": EndReason.START_REFUSED,
+            "close_reason": "command 'set_mode' rejected (mode: must not be empty)",
+        }
+    ]
+
+
 async def test_a_client_command_waits_behind_the_starting_input(started_runner: Runner) -> None:
     started_runner.start_session(
         {
