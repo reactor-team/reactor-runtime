@@ -4,6 +4,7 @@ import pytest
 
 from reactor_runtime.core import (
     ClientConnectionStat,
+    ClientEnvironment,
     ClientStatsBatch,
     ClientTrackDirection,
     ClientTrackStat,
@@ -159,9 +160,15 @@ def test_to_detail_carries_the_readings_and_leaves_out_values_json_cannot_carry(
                 # Only a stage with a name, frames, and a finite time that is not
                 # negative has an average.
                 "frame_stages": [{"name": "jitter_buffer", "total_ms": 1500.0, "frames": 150}],
+                "codec_implementation": "",
+                "hardware_codec": None,
             }
         ],
-        "connection_stat": {"timestamp": 1_700_000_000_000, "metrics": {"connection_rtt_ms": 25.0}},
+        "connection_stat": {
+            "timestamp": 1_700_000_000_000,
+            "metrics": {"connection_rtt_ms": 25.0},
+            "environment": None,
+        },
     }
 
 
@@ -175,3 +182,15 @@ def test_a_track_with_more_stages_than_a_client_sends_is_too_large() -> None:
     assert not fits(_batch(_track(frame_stages=(stage,) * (MAX_FRAME_STAGES + 1))))
     long_name = FrameStage("x" * (MAX_NAME_LENGTH + 1), total_ms=1.0, frames=1)
     assert not fits(_batch(_track(frame_stages=(long_name,))))
+
+
+def test_an_environment_value_longer_than_a_name_is_too_large() -> None:
+    long = "x" * (MAX_NAME_LENGTH + 1)
+    batch = ClientStatsBatch(
+        track_stats=[_track()],
+        connection_stat=ClientConnectionStat(
+            timestamp=1, metrics={}, environment=ClientEnvironment(os_version=long)
+        ),
+    )
+    assert not fits(batch)
+    assert not fits(_batch(_track(codec_implementation=long)))

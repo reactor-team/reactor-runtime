@@ -9,10 +9,13 @@ it to the sink as plain values, next to the peer stats it samples on its own
 
 from __future__ import annotations
 
+from typing import Any
+
 from google.protobuf.message import DecodeError
 
 from reactor_runtime.core import (
     ClientConnectionStat,
+    ClientEnvironment,
     ClientStatsBatch,
     ClientTrackDirection,
     ClientTrackStat,
@@ -105,6 +108,30 @@ def _decode_frame_stages(stat: platform_pb2.ClientTrackStat) -> tuple[FrameStage
     )
 
 
+def _decode_codec_implementation(stat: platform_pb2.ClientTrackStat) -> dict[str, Any]:
+    """Read which encoder or decoder a video track runs; an audio track has none."""
+    if stat.kind != platform_pb2.TrackKind.TRACK_KIND_VIDEO:
+        return {}
+    return {
+        "codec_implementation": stat.codec_implementation,
+        "hardware_codec": stat.hardware_codec if stat.HasField("hardware_codec") else None,
+    }
+
+
+def _decode_environment(stat: platform_pb2.ClientConnectionStat) -> ClientEnvironment | None:
+    """Read what the client runs on, or ``None`` from a client that does not say."""
+    if not stat.HasField("environment"):
+        return None
+    env = stat.environment
+    return ClientEnvironment(
+        sdk_type=env.sdk_type,
+        sdk_version=env.sdk_version,
+        os=env.os,
+        os_version=env.os_version,
+        arch=env.arch,
+    )
+
+
 def _decode_client_stats(message: platform_pb2.ClientStats) -> ClientStatsBatch:
     """Convert a decoded ``ClientStats`` batch into plain values."""
     track_stats = [
@@ -117,6 +144,7 @@ def _decode_client_stats(message: platform_pb2.ClientStats) -> ClientStatsBatch:
             paused=stat.paused,
             metrics=dict(stat.metrics),
             frame_stages=_decode_frame_stages(stat),
+            **_decode_codec_implementation(stat),
         )
         for stat in message.track_stats
     ]
@@ -125,5 +153,6 @@ def _decode_client_stats(message: platform_pb2.ClientStats) -> ClientStatsBatch:
         connection_stat = ClientConnectionStat(
             timestamp=message.connection_stat.timestamp,
             metrics=dict(message.connection_stat.metrics),
+            environment=_decode_environment(message.connection_stat),
         )
     return ClientStatsBatch(track_stats=track_stats, connection_stat=connection_stat)

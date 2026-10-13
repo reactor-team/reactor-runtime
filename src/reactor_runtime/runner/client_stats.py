@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import asdict, astuple
 from typing import Any
 
 from reactor_runtime.core import ClientStatsBatch, ConnId, FrameStage
@@ -75,7 +76,13 @@ def fits(batch: ClientStatsBatch) -> bool:
         return False
     names = [name for metrics in readings for name in metrics]
     names += [stage.name for stat in batch.track_stats for stage in stat.frame_stages]
-    names += [field for stat in batch.track_stats for field in (stat.track_name, stat.codec)]
+    names += [
+        field
+        for stat in batch.track_stats
+        for field in (stat.track_name, stat.codec, stat.codec_implementation)
+    ]
+    if batch.connection_stat is not None and batch.connection_stat.environment is not None:
+        names += list(astuple(batch.connection_stat.environment))
     return all(len(name) <= MAX_NAME_LENGTH for name in names)
 
 
@@ -96,6 +103,8 @@ def to_detail(batch: ClientStatsBatch) -> dict[str, Any]:
                 "paused": stat.paused,
                 "metrics": _finite(stat.metrics),
                 "frame_stages": frame_stages_detail(stat.frame_stages),
+                "codec_implementation": stat.codec_implementation,
+                "hardware_codec": stat.hardware_codec,
             }
             for stat in batch.track_stats
         ],
@@ -103,6 +112,11 @@ def to_detail(batch: ClientStatsBatch) -> dict[str, Any]:
             {
                 "timestamp": batch.connection_stat.timestamp,
                 "metrics": _finite(batch.connection_stat.metrics),
+                "environment": (
+                    asdict(batch.connection_stat.environment)
+                    if batch.connection_stat.environment is not None
+                    else None
+                ),
             }
             if batch.connection_stat is not None
             else None

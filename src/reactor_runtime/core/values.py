@@ -105,6 +105,11 @@ class ClientTrackStat:
             query time.
         frame_stages: Where the track's frames spent their time since the
             client's previous batch, stage by stage.
+        codec_implementation: The encoder (a track the client sends) or
+            decoder (one it receives) the client runs for a video track, as
+            its media engine names it, e.g. ``"libvpx"``; empty when unknown.
+        hardware_codec: Whether that implementation is the hardware one;
+            ``None`` when the client does not say.
     """
 
     timestamp: int
@@ -115,6 +120,30 @@ class ClientTrackStat:
     paused: bool
     metrics: Mapping[str, float]
     frame_stages: tuple[FrameStage, ...] = ()
+    codec_implementation: str = ""
+    hardware_codec: bool | None = None
+
+
+@dataclass(frozen=True)
+class ClientEnvironment:
+    """The SDK and the system a client runs on, as it describes them.
+
+    Every field is empty when the client does not know it.
+
+    Attributes:
+        sdk_type: The SDK, e.g. ``"python"``, ``"js"``, ``"cpp"``.
+        sdk_version: The SDK's version, e.g. ``"1.10.0"``.
+        os: The operating system, e.g. ``"macos"``, ``"linux"``, or
+            ``"browser"`` for the JavaScript SDK.
+        os_version: The operating system's version as the client reads it.
+        arch: The CPU architecture, e.g. ``"aarch64"``.
+    """
+
+    sdk_type: str = ""
+    sdk_version: str = ""
+    os: str = ""
+    os_version: str = ""
+    arch: str = ""
 
 
 @dataclass(frozen=True)
@@ -132,10 +161,13 @@ class ClientConnectionStat:
         timestamp: When the client took this reading, on its own clock, in
             epoch milliseconds.
         metrics: The reading's measurements, by name.
+        environment: What the client runs on, sent on every batch; ``None``
+            from a client that does not send it.
     """
 
     timestamp: int
     metrics: Mapping[str, float]
+    environment: ClientEnvironment | None = None
 
 
 @dataclass(frozen=True)

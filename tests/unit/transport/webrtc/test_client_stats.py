@@ -1,5 +1,6 @@
 from reactor_runtime.core import (
     ClientConnectionStat,
+    ClientEnvironment,
     ClientStatsBatch,
     ClientTrackDirection,
     ClientTrackStat,
@@ -104,6 +105,63 @@ def test_frame_stages_on_an_audio_track_are_dropped() -> None:
     )
 
     assert batch.track_stats[0].frame_stages == ()
+
+
+def test_the_environment_and_a_video_tracks_codec_decode() -> None:
+    batch = _read(
+        platform_pb2.ClientStats(
+            track_stats=[
+                platform_pb2.ClientTrackStat(
+                    track_name="main_video",
+                    kind=platform_pb2.TrackKind.TRACK_KIND_VIDEO,
+                    codec_implementation="VideoToolbox",
+                    hardware_codec=True,
+                ),
+                platform_pb2.ClientTrackStat(
+                    track_name="main_audio",
+                    kind=platform_pb2.TrackKind.TRACK_KIND_AUDIO,
+                    codec_implementation="opus",
+                    hardware_codec=False,
+                ),
+            ],
+            connection_stat=platform_pb2.ClientConnectionStat(
+                timestamp=1_700_000_000_000,
+                environment=platform_pb2.ClientEnvironment(
+                    sdk_type="python",
+                    sdk_version="1.10.0",
+                    os="macos",
+                    os_version="15.1",
+                    arch="aarch64",
+                ),
+            ),
+        )
+    )
+
+    video, audio = batch.track_stats
+    assert (video.codec_implementation, video.hardware_codec) == ("VideoToolbox", True)
+    # Only a video track has a codec implementation.
+    assert (audio.codec_implementation, audio.hardware_codec) == ("", None)
+    assert batch.connection_stat is not None
+    assert batch.connection_stat.environment == ClientEnvironment(
+        sdk_type="python", sdk_version="1.10.0", os="macos", os_version="15.1", arch="aarch64"
+    )
+
+
+def test_a_client_that_does_not_say_has_no_environment_or_hardware_flag() -> None:
+    batch = _read(
+        platform_pb2.ClientStats(
+            track_stats=[
+                platform_pb2.ClientTrackStat(
+                    track_name="main_video", kind=platform_pb2.TrackKind.TRACK_KIND_VIDEO
+                )
+            ],
+            connection_stat=platform_pb2.ClientConnectionStat(timestamp=1),
+        )
+    )
+
+    assert batch.track_stats[0].hardware_codec is None
+    assert batch.connection_stat is not None
+    assert batch.connection_stat.environment is None
 
 
 def test_a_batch_with_no_connection_stat_decodes_to_none() -> None:
