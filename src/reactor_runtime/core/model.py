@@ -189,13 +189,19 @@ def _build_command(cls: type[Command]) -> None:
 
 
 class EndReason(StrEnum):
-    """Why a session ended."""
+    """Why a session ended.
+
+    ``START_REFUSED`` ends a session with a step count whose starting input
+    cannot be applied: a starting command names an upload whose bytes never
+    arrive, or the contract refuses its arguments.
+    """
 
     STOPPED = "stopped"
     TIMED_OUT = "timed_out"
     EVICTED = "evicted"
     MODERATED = "moderated"
     ERROR = "error"
+    START_REFUSED = "start_refused"
 
 
 @dataclass(frozen=True)

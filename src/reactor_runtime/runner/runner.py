@@ -1143,7 +1143,7 @@ class Runner(ServiceComponent, ConnectionSink):
         command: InboundCommand,
         *,
         upload_wait: float = _UPLOAD_RESOLVE_TIMEOUT_SECONDS,
-    ) -> None:
+    ) -> str | None:
         """Submit a decoded command to the model through the bridge.
 
         Each upload the command references is resolved to its bytes through the
@@ -1171,9 +1171,13 @@ class Runner(ServiceComponent, ConnectionSink):
         connection, a connection needs a running session, and a session needs a
         loaded model, so a client cannot reach this method before the bridge
         exists.
+
+        Returns:
+            Why the command was refused before it reached the model, or
+            ``None`` when the model received it.
         """
         if self._bridge is None:
-            return
+            return None
         label = self._command_label(command.name)
         args = dict(command.args)
         inline = self._inline_upload_fields(command.name, args)
@@ -1189,18 +1193,13 @@ class Runner(ServiceComponent, ConnectionSink):
                 args[param] = await resolve_uploads(spec, args[param], fetch)
         except UnknownUploadError:
             self._command_metrics.unresolved_upload(label)
-            self._sm.send(
-                SessionEvent.ERROR,
-                message=f"command {command.name!r} references an unresolved upload",
-            )
+            refusal = f"command {command.name!r} references an unresolved upload"
+            self._sm.send(SessionEvent.ERROR, message=refusal)
             if command.conn_id is not None:
                 self._reject_command(
-                    command.conn_id,
-                    command.request_id,
-                    UNRESOLVED_UPLOAD,
-                    f"command {command.name!r} references an unresolved upload",
+                    command.conn_id, command.request_id, UNRESOLVED_UPLOAD, refusal
                 )
-            return
+            return refusal
         # The wait for a client's bytes is the client's latency, so ingress starts
         # again where that wait ended. Counted whole, one command with a file
         # parameter reports the upload and hides the runtime's own cost.
@@ -1221,19 +1220,18 @@ class Runner(ServiceComponent, ConnectionSink):
                 args=dict(command.args),
                 conn_id=command.conn_id,
             )
-        else:
-            self._command_metrics.rejected(label, since=started_at)
-            self._sm.send(
-                SessionEvent.ERROR,
-                message=f"command {command.name!r} rejected ({outcome.field}: {outcome.reason})",
+            return None
+        self._command_metrics.rejected(label, since=started_at)
+        refusal = f"command {command.name!r} rejected ({outcome.field}: {outcome.reason})"
+        self._sm.send(SessionEvent.ERROR, message=refusal)
+        if command.conn_id is not None:
+            self._reject_command(
+                command.conn_id,
+                command.request_id,
+                INVALID_COMMAND,
+                outcome.reason or "command rejected",
             )
-            if command.conn_id is not None:
-                self._reject_command(
-                    command.conn_id,
-                    command.request_id,
-                    INVALID_COMMAND,
-                    outcome.reason or "command rejected",
-                )
+        return refusal
 
     def _inline_upload_fields(self, name: str, args: Mapping[str, Any]) -> dict[str, TypeSpec]:
         """Return the present arguments of command *name* whose type carries an upload.
@@ -1618,8 +1616,12 @@ class Runner(ServiceComponent, ConnectionSink):
         its uploads resolved, and is journalled exactly as a client's command
         is. Its arguments were checked against the contract when the session
         started, so what can still fail here is what only running it shows,
-        such as an upload whose bytes never arrive: that command is journalled
-        as an error and the rest still run.
+        such as an upload whose bytes never arrive. In a session without a step
+        count, that command is journalled as an error and the rest still run.
+        A session with a step count has no client to wait for a correction, so
+        the first such command ends it with
+        :attr:`~reactor_runtime.core.model.EndReason.START_REFUSED`, the
+        refusal as its close reason, and the rest are not sent.
         One that names an upload waits up to the orphan timeout for the bytes,
         because the caller seeds them only after the session has started. The
         list stops when its session ends.
@@ -1639,7 +1641,7 @@ class Runner(ServiceComponent, ConnectionSink):
                     return
                 if self._sm.current_state not in _RUNNING_STATES:
                     return
-                await self._submit_command(
+                refusal = await self._submit_command(
                     InboundCommand(
                         name=command.command,
                         args=dict(command.data),
@@ -1650,6 +1652,21 @@ class Runner(ServiceComponent, ConnectionSink):
                     ),
                     upload_wait=upload_wait,
                 )
+                if (
+                    refusal is not None
+                    and self._session_start.steps is not None
+                    and self._starting_input_done is done
+                    and self._sm.current_state in _RUNNING_STATES
+                ):
+                    logger.info(
+                        "a starting command was refused; ending the session", reason=refusal
+                    )
+                    self._sm.send(
+                        SessionEvent.STOP_SESSION,
+                        reason=EndReason.START_REFUSED,
+                        close_reason=refusal,
+                    )
+                    return
         finally:
             if self._starting_input_done is done and self._sm.current_state in _RUNNING_STATES:
                 if self._session_start.steps is None:

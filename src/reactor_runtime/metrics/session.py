@@ -29,7 +29,7 @@ def _reason_label(detail: Mapping[str, Any]) -> str:
 
     The runtime authors every reason, and a move that names none is a plain stop —
     the same reading the runner's own dispatch takes. The type guard holds the
-    label to the five :class:`EndReason` values whatever a caller puts in the
+    label to the :class:`EndReason` values whatever a caller puts in the
     detail, because one unbounded label value costs a series forever.
     """
     reason = detail.get("reason", EndReason.STOPPED)
