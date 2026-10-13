@@ -374,28 +374,51 @@ class StepStore:
 
     def _work(self) -> None:
         while not self._abandon.is_set():
-            entry = self._next()
-            if entry is None:
+            try:
+                failed = self._failed.get_nowait()
+            except queue.Empty:
+                failed = None
+            if failed is not None:
+                if not self._save_range(failed):
+                    return
+                continue
+            try:
+                pending = self._queue.get(timeout=_IDLE_POLL_SECONDS)
+            except queue.Empty:
                 # A range admitted while the queue was being waited on is
                 # still saved: close() lets no admission in after closing.
                 if self._closing.is_set() and self._failed.empty():
                     return
                 continue
-            for pending in entry.steps():
-                if self._abandon.is_set():
-                    return
-                self._save_and_announce(pending)
+            if self._abandon.is_set():
+                return
+            self._save_and_announce(pending)
 
-    def _next(self) -> _Pending | None:
-        """Return the next entry to save, a failed range first, or ``None`` after an idle poll."""
-        try:
-            return self._failed.get_nowait()
-        except queue.Empty:
-            pass
-        try:
-            return self._queue.get(timeout=_IDLE_POLL_SECONDS)
-        except queue.Empty:
-            return None
+    def _save_range(self, failed: _Pending) -> bool:
+        """Save a failed range after the steps admitted before it.
+
+        The session's earlier steps were admitted before the range, so they
+        are in the queue; saving what it holds first keeps the session's
+        folders, and their ``on_saved`` calls, in step order. Only the entries
+        there now are taken, so a later session that keeps the queue full
+        cannot hold the range back.
+
+        Returns:
+            ``False`` when the store is abandoned partway.
+        """
+        for _ in range(self._queue.qsize()):
+            try:
+                pending = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            if self._abandon.is_set():
+                return False
+            self._save_and_announce(pending)
+        for pending in failed.steps():
+            if self._abandon.is_set():
+                return False
+            self._save_and_announce(pending)
+        return True
 
     def _save_and_announce(self, pending: _Pending) -> None:
         try:

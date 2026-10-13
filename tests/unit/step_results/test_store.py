@@ -260,7 +260,9 @@ def test_a_failed_range_is_saved_whole_behind_a_full_queue(
 
     release.set()
     steps = saved.wait_for(20)
-    assert sorted(step.step for step in steps) == list(range(1, 21))
+    assert [step.step for step in steps] == list(range(1, 21)), (
+        "the step still queued is saved before the range"
+    )
     for step in range(3, 21):
         result = _result(store, step)
         assert result["error"] == "invalid image"
