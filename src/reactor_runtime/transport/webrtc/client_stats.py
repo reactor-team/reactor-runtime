@@ -16,6 +16,7 @@ from reactor_runtime.core import (
     ClientStatsBatch,
     ClientTrackDirection,
     ClientTrackStat,
+    FrameStage,
     TrackKind,
 )
 from reactor_runtime.protocol import Channel, Codec, ProtocolVersion, select
@@ -91,6 +92,19 @@ def _decode_codec(stat: platform_pb2.ClientTrackStat) -> str:
     return ""
 
 
+def _decode_frame_stages(stat: platform_pb2.ClientTrackStat) -> tuple[FrameStage, ...]:
+    """Read a track's frame stages, which only a video track carries.
+
+    On an audio track libwebrtc's jitter buffer counters count samples, not
+    frames, so stages sent with one are dropped rather than read as frames.
+    """
+    if stat.kind != platform_pb2.TrackKind.TRACK_KIND_VIDEO:
+        return ()
+    return tuple(
+        FrameStage(name=s.name, total_ms=s.total_ms, frames=s.frames) for s in stat.frame_stages
+    )
+
+
 def _decode_client_stats(message: platform_pb2.ClientStats) -> ClientStatsBatch:
     """Convert a decoded ``ClientStats`` batch into plain values."""
     track_stats = [
@@ -102,6 +116,7 @@ def _decode_client_stats(message: platform_pb2.ClientStats) -> ClientStatsBatch:
             codec=_decode_codec(stat),
             paused=stat.paused,
             metrics=dict(stat.metrics),
+            frame_stages=_decode_frame_stages(stat),
         )
         for stat in message.track_stats
     ]

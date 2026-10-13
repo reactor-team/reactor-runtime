@@ -134,14 +134,14 @@ message ClientTrackStat {
   bool paused = 7;
   map<string, double> metrics = 8;
   // Where this track's frames spent their time, stage by stage, over the
-  // window since the previous batch. See FrameStage.
+  // window since the previous batch. Video tracks only. See FrameStage.
   repeated FrameStage frame_stages = 9;
 }
 
-// The time a track's frames spent in one stage of their trip between the
-// client's app and the model, over one window. `total_ms` is the time all
-// `frames` frames spent in the stage together, so the stage's average per
-// frame is total_ms / frames. `total_ms` is a finite number, never negative
+// The time a video track's frames spent in one stage of their trip between
+// the client's app and the model, over one window. `frames` is how many
+// frames the reading counted in the stage and `total_ms` the time they spent
+// in it together, so the stage's average per frame is total_ms / frames. `total_ms` is a finite number, never negative
 // (no NaN or infinity), and `frames` is at least 1, so a reader drops a
 // reading that breaks either. The stages cover the transport between the
 // client's app and the model, not the model's own time. A window divides at
@@ -173,9 +173,13 @@ message ClientTrackStat {
 // encode_wait, packetize and pacer come from libwebrtc's timing frames, a
 // sample: libwebrtc marks about one frame every 200 ms, the receiver reports
 // the slowest marked frame of the last second, and each time is in whole
-// milliseconds. Their average leans toward the slow frames, so when adding
-// stages along the trip, treat it as an upper bound rather than a mean.
-// Every other stage counts every frame, and its average is a mean.
+// milliseconds. For these three, `frames` counts the sampled frames, not
+// every frame, and their average leans toward the slow frames, so when
+// adding stages along the trip, treat it as an upper bound rather than a
+// mean. Every other stage counts every frame, and its average is a mean.
+//
+// Only video tracks carry frame stages: on an audio track libwebrtc's
+// jitterBufferDelay and jitterBufferEmittedCount count samples, not frames.
 message FrameStage {
   string name = 1;
   double total_ms = 2;

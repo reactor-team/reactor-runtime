@@ -3,6 +3,7 @@ from reactor_runtime.core import (
     ClientStatsBatch,
     ClientTrackDirection,
     ClientTrackStat,
+    FrameStage,
     TrackKind,
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion
@@ -61,6 +62,48 @@ def test_a_client_stats_frame_decodes_to_plain_values() -> None:
             metrics={"available_outgoing_bitrate_bps": 2_000_000, "time_to_connect_ms": 850},
         ),
     )
+
+
+def test_a_tracks_frame_stages_decode_in_the_order_sent() -> None:
+    batch = _read(
+        platform_pb2.ClientStats(
+            track_stats=[
+                platform_pb2.ClientTrackStat(
+                    track_name="main_video",
+                    kind=platform_pb2.TrackKind.TRACK_KIND_VIDEO,
+                    frame_stages=[
+                        platform_pb2.FrameStage(name="jitter_buffer", total_ms=1_980.5, frames=148),
+                        platform_pb2.FrameStage(name="decode", total_ms=213.1, frames=148),
+                    ],
+                )
+            ]
+        )
+    )
+
+    assert batch.track_stats[0].frame_stages == (
+        FrameStage("jitter_buffer", total_ms=1_980.5, frames=148),
+        FrameStage("decode", total_ms=213.1, frames=148),
+    )
+
+
+def test_frame_stages_on_an_audio_track_are_dropped() -> None:
+    batch = _read(
+        platform_pb2.ClientStats(
+            track_stats=[
+                platform_pb2.ClientTrackStat(
+                    track_name="main_audio",
+                    kind=platform_pb2.TrackKind.TRACK_KIND_AUDIO,
+                    frame_stages=[
+                        platform_pb2.FrameStage(
+                            name="jitter_buffer", total_ms=900.0, frames=240_000
+                        )
+                    ],
+                )
+            ]
+        )
+    )
+
+    assert batch.track_stats[0].frame_stages == ()
 
 
 def test_a_batch_with_no_connection_stat_decodes_to_none() -> None:
