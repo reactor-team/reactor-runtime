@@ -5,7 +5,8 @@ tracks first, as H.264 or H.265 streams, then the audio tracks, each in the
 order the output declares them. The file is written once, from a whole step,
 so it needs none of the recorder's segmenting or timeline work: each video
 stream plays its frames at the step's frame rate from the start of the file,
-and each audio stream plays its samples at the track's own rate.
+and each audio stream plays its samples at the track's own rate. The writer
+reports each video stream it wrote as a :class:`VideoUsage`.
 """
 
 from __future__ import annotations
@@ -22,12 +23,15 @@ import numpy.typing as npt
 
 from reactor_runtime.core import MediaBundle, StepResultsConfig, TrackData, TrackKind
 from reactor_runtime.recording.chunk_encoder import _PIXEL_FORMAT, _PROFILE
+from reactor_runtime.step_results.usage import VideoUsage
 
 # The rate an audio track plays at when its track declares none.
 _DEFAULT_SAMPLE_RATE = 48_000
 
 
-def write_mp4(path: Path, bundle: MediaBundle, fps: float, config: StepResultsConfig) -> None:
+def write_mp4(
+    path: Path, bundle: MediaBundle, fps: float, config: StepResultsConfig
+) -> tuple[VideoUsage, ...]:
     """Encode every track of *bundle* into one MP4 file at *path*.
 
     A video track's payload is one ``(H, W, 3)`` ``uint8`` frame or a batch of
@@ -46,6 +50,11 @@ def write_mp4(path: Path, bundle: MediaBundle, fps: float, config: StepResultsCo
         fps: The rate the video frames play at, in frames per second.
         config: The codec and quality settings.
 
+    Returns:
+        One entry per video stream, in the order the file holds them, each as
+        the file holds it: its frame count, its padded size, and the rate it
+        plays at. Audio streams have no entry.
+
     Raises:
         ValueError: If *fps* is not positive, *bundle* has no tracks, or a
             video payload is not an RGB frame or a batch of them.
@@ -62,11 +71,12 @@ def write_mp4(path: Path, bundle: MediaBundle, fps: float, config: StepResultsCo
         if track.info.kind is TrackKind.VIDEO
     ]
     audios = [track for track in bundle.tracks.values() if track.info.kind is TrackKind.AUDIO]
+    rate = Fraction(fps).limit_denominator(1001)
     container = av.open(str(path), mode="w", format="mp4", options={"movflags": "+faststart"})
     try:
         # The muxer writes the file header with the first packet, so every
         # stream is added before any is encoded.
-        video_streams = [_add_video(container, frames, fps, config) for _, frames in videos]
+        video_streams = [_add_video(container, frames, rate, config) for _, frames in videos]
         audio_streams = [_add_audio(container, track, config) for track in audios]
         encoded = [
             *(
@@ -88,15 +98,26 @@ def write_mp4(path: Path, bundle: MediaBundle, fps: float, config: StepResultsCo
             container.close()
         path.unlink(missing_ok=True)
         raise
+    return tuple(
+        VideoUsage(
+            track=track.info.name,
+            file=path.name,
+            duration_s=float(len(frames) / rate),
+            frames=len(frames),
+            fps=float(rate),
+            width=stream.width,
+            height=stream.height,
+        )
+        for (track, frames), stream in zip(videos, video_streams, strict=True)
+    )
 
 
 def _add_video(
     container: av.container.OutputContainer,
     frames: npt.NDArray[Any],
-    fps: float,
+    rate: Fraction,
     config: StepResultsConfig,
 ) -> av.VideoStream:
-    rate = Fraction(fps).limit_denominator(1001)
     stream = container.add_stream(
         "libx264" if config.video_codec == "h264" else "libx265",
         rate=rate,

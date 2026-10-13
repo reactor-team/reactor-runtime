@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from reactor_runtime.core import Health, HealthStatus, RuntimeState, SessionState
 from reactor_runtime.http.events import format_sse
+from reactor_runtime.http.step_usage import StepUsage
 from reactor_runtime.metrics import CONTENT_TYPE as METRICS_CONTENT_TYPE
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.recording import ClipManifest, ClipSessionGoneError, Pending
@@ -380,6 +381,9 @@ class StepResult(BaseModel):
     step: int
     session_id: str
     files: list[StepFile] = Field(description="The files beside result.json.")
+    usage: list[StepUsage] = Field(
+        description="One entry per video track the step wrote; empty when it wrote none."
+    )
     messages: list[StepMessage] = Field(
         description="The messages the model broadcast since the step before."
     )
