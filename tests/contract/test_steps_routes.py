@@ -89,6 +89,7 @@ async def test_each_saved_step_is_announced_and_served(tmp_path: Path) -> None:
         assert (usage["kind"], usage["track"], usage["file"]) == ("video", "frames", "output.mp4")
         assert (usage["frames"], usage["width"], usage["height"]) == (2, 32, 32)
         assert usage["fps"] > 0
+        assert usage["duration_s"] == pytest.approx(usage["frames"] / usage["fps"])
         assert body["error"] is None
         assert body["save_error"] is None
         assert set(body["timings"]) == {"generate_s", "encode_s"}
