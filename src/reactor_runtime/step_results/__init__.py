@@ -7,7 +7,7 @@ lists them, with the measured facts of each video track it wrote.
 """
 
 from reactor_runtime.step_results.mp4 import write_mp4
-from reactor_runtime.step_results.store import SavedStep, StepStore
+from reactor_runtime.step_results.store import SavedStep, StepStore, content_type_of
 from reactor_runtime.step_results.usage import VideoUsage
 
-__all__ = ["SavedStep", "StepStore", "VideoUsage", "write_mp4"]
+__all__ = ["SavedStep", "StepStore", "VideoUsage", "content_type_of", "write_mp4"]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
@@ -38,6 +39,7 @@ from reactor_runtime.core import (
     RuntimeConfig,
     SessionEvent,
     SessionState,
+    StepResultsConfig,
 )
 from reactor_runtime.interface.internal.input_buffer import InputBuffer
 from reactor_runtime.message_gateway import InboundStep
@@ -103,10 +105,18 @@ class StepModel(ReactorApp):
             raise RuntimeError("the model ran out of memory")
         return Out(main_video=np.zeros((2, 2, 3), dtype=np.uint8))
 
-    async def process_output(self, outcome: StepOutcome) -> Output | StepCompleted | None:
+    async def process_output(self, outcome: StepOutcome, /) -> Output | StepCompleted | None:
         if outcome.error is not None:
             return StepCompleted(error=str(outcome.error))
-        return await super().process_output(outcome)
+        output = outcome.to_output()
+        if self.state.prompt == "keep files":
+            return StepCompleted(output=output, files=_KEPT_FILES)
+        if self.state.prompt == "fail":
+            return StepCompleted(output=output, files=_KEPT_FILES, error="the step went dark")
+        return output
+
+
+_KEPT_FILES = {"depth.png": b"\x89PNG....", "notes.bin": b"abc"}
 
 
 class OwnLoop(StepModel):
@@ -172,10 +182,20 @@ def _seed_registries(
     register_model(StepModel)
 
 
-async def _runner(monkeypatch: pytest.MonkeyPatch, model: type = StepModel) -> Runner:
+async def _runner(
+    monkeypatch: pytest.MonkeyPatch, model: type = StepModel, *, steps_root: Path | None = None
+) -> Runner:
     models.clear()
     monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: model)
-    runner = Runner(RuntimeConfig(model_ref="fake:Model"))
+    runner = Runner(
+        RuntimeConfig(
+            model_ref="fake:Model",
+            step_results=StepResultsConfig(enabled=steps_root is not None),
+        )
+    )
+    if steps_root is not None:
+        assert runner.step_store is not None
+        runner.step_store._root = steps_root
     await runner.start()
     return runner
 
@@ -183,6 +203,15 @@ async def _runner(monkeypatch: pytest.MonkeyPatch, model: type = StepModel) -> R
 @pytest.fixture
 async def runner(monkeypatch: pytest.MonkeyPatch) -> Any:
     runner = await _runner(monkeypatch)
+    try:
+        yield runner
+    finally:
+        await runner.stop()
+
+
+@pytest.fixture
+async def saving_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
+    runner = await _runner(monkeypatch, steps_root=tmp_path / "steps")
     try:
         yield runner
     finally:
@@ -909,9 +938,9 @@ async def test_a_stepped_session_refuses_clips(runner: Runner) -> None:
 async def test_the_step_result_carries_the_steps_media_per_output_track(runner: Runner) -> None:
     conn = await _stepped(runner)
     _send(runner, conn, _request_step("r1"))
-    await _until(lambda: len(conn.sent) == 2)
+    await _until(lambda: len(conn.sent) == 1)
 
-    result = conn.replies()[1].step_result
+    result = conn.replies()[0].step_result
     [track] = result.tracks
     assert (track.track, track.kind) == ("main_video", platform_pb2.TRACK_KIND_VIDEO)
     [frame] = track.frames
@@ -922,6 +951,51 @@ async def test_the_step_result_carries_the_steps_media_per_output_track(runner: 
     )
     assert frame.data == bytes(12)
     assert result.elapsed > 0
+    assert not result.HasField("error")
+    assert list(result.files) == []
+
+
+async def test_the_step_result_references_the_files_a_saved_step_keeps(
+    saving_runner: Runner,
+) -> None:
+    conn = await _stepped(saving_runner)
+    _send(saving_runner, conn, _request_step("r1", state={"prompt": "keep files"}))
+    await _until(lambda: len(conn.sent) == 1)
+
+    [reply] = conn.replies()
+    result = reply.step_result
+    assert [(f.name, f.content_type, f.size) for f in result.files] == [
+        ("depth.png", "image/png", len(_KEPT_FILES["depth.png"])),
+        ("notes.bin", "application/octet-stream", 3),
+    ]
+    assert not result.HasField("error")
+
+
+async def test_the_step_result_references_no_files_when_step_results_are_off(
+    runner: Runner,
+) -> None:
+    conn = await _stepped(runner)
+    _send(runner, conn, _request_step("r1", state={"prompt": "keep files"}))
+    await _until(lambda: len(conn.sent) == 1)
+
+    [reply] = conn.replies()
+    assert reply.WhichOneof("payload") == "step_result"
+    assert list(reply.step_result.files) == []
+
+
+async def test_a_failed_step_is_answered_with_its_error_and_no_files(
+    saving_runner: Runner,
+) -> None:
+    conn = await _stepped(saving_runner)
+    _send(saving_runner, conn, _request_step("r1", state={"prompt": "fail"}))
+    await _until(lambda: len(conn.sent) == 1)
+    await asyncio.sleep(0.02)
+
+    [reply] = conn.replies()
+    assert reply.kind == K.MESSAGE_KIND_RESPONSE
+    result = reply.step_result
+    assert (result.index, result.error) == (1, "the step went dark")
+    assert list(result.files) == []
 
 
 async def test_a_result_too_large_for_the_connection_is_refused_and_the_session_goes_on(
@@ -930,18 +1004,17 @@ async def test_a_result_too_large_for_the_connection_is_refused_and_the_session_
     conn = await _stepped(runner)
     conn.max_message_size = 16
     _send(runner, conn, _request_step("r1"))
-    await _until(lambda: len(conn.sent) == 2)
+    await _until(lambda: len(conn.sent) == 1)
 
-    accepted, refused = conn.replies()
-    assert accepted.step_accepted.index == 1
+    [refused] = conn.replies()
     assert refused.request_id == "r1"
     assert refused.error.code == STEP_RESULT_TOO_LARGE
     assert "this connection takes at most 16" in refused.error.message
 
     conn.max_message_size = 64 * 1024 * 1024
     _send(runner, conn, _request_step("r2"))
-    await _until(lambda: len(conn.sent) == 4)
-    assert conn.replies()[3].step_result.index == 2
+    await _until(lambda: len(conn.sent) == 2)
+    assert conn.replies()[1].step_result.index == 2
     assert runner._sm.current_state is SessionState.STREAMING
 
 
