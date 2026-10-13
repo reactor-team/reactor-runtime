@@ -797,7 +797,12 @@ class Runner(ServiceComponent, ConnectionSink):
             )
             return
         if self._steps_failed:
-            logger.debug("dropping a step report after the session's remaining steps failed")
+            # The failure took the messages sent before it, so these were sent
+            # after it, and no step is left for them.
+            logger.debug(
+                "dropping a step report after the session's remaining steps failed",
+                messages=len(messages),
+            )
             return
         self._save_step(step, messages)
         limit = self._session_start.steps
@@ -826,7 +831,9 @@ class Runner(ServiceComponent, ConnectionSink):
             error=step.error,
         )
 
-    def _fail_remaining_steps(self, limit: int, error: str) -> None:
+    def _fail_remaining_steps(
+        self, limit: int, error: str, captured: tuple[dict[str, Any], ...] = ()
+    ) -> None:
         """End a session with a step count whose starting command failed in its handler.
 
         The session cannot do what its starting input asked, so every step from
@@ -834,15 +841,17 @@ class Runner(ServiceComponent, ConnectionSink):
         journalled, and saved like an error step the model reports. Then the
         session stops with :attr:`~reactor_runtime.core.model.EndReason.ERROR`
         and *error* as its close reason. The model is healthy, so the process
-        keeps running and the next session starts as usual.
+        keeps running and the next session starts as usual. *limit* is bounded
+        by ``MAX_STEPS``, so the loop is short.
 
-        The messages the model broadcast since its last report go with the
-        first of these steps.
+        The messages the model broadcast before the failure go with the first
+        of these steps: *captured*, taken on the model's thread as it reported
+        the failure, then any still pending.
         """
-        messages: tuple[dict[str, Any], ...] = ()
+        messages = captured
         if self._step_store is not None:
             with self._step_messages_lock:
-                messages = tuple(self._step_messages)
+                messages = (*captured, *self._step_messages)
                 self._step_messages.clear()
         self._steps_failed = True
         while self._steps_completed < limit:
@@ -1447,13 +1456,42 @@ class Runner(ServiceComponent, ConnectionSink):
         The model reports the failure from its own thread, so the journal move is
         scheduled on the runtime loop, where the state machine and the egress
         journal are single-writer.
+
+        A failure that may fail the session's remaining steps takes the
+        messages the model broadcast before it here, on the model's thread, so
+        a step the model reports before the loop runs the failure cannot take
+        them with it.
         """
+        captured: tuple[dict[str, Any], ...] = ()
+        if self._step_store is not None and self._fails_remaining_steps(conn_id, request_id):
+            with self._step_messages_lock:
+                captured = tuple(self._step_messages)
+                self._step_messages.clear()
         loop = self._loop
         if loop is not None:
-            loop.call_soon_threadsafe(self._emit_handler_failure, failure, conn_id, request_id)
+            loop.call_soon_threadsafe(
+                self._emit_handler_failure, failure, conn_id, request_id, captured
+            )
+
+    def _fails_remaining_steps(self, conn_id: ConnId, request_id: str | None) -> bool:
+        """Whether a failure of this command ends a session with a step count.
+
+        Only one of the live session's own starting commands does: a real
+        client's failed command, or one from an earlier session, only answers
+        its caller.
+        """
+        return (
+            self._session_start.steps is not None
+            and conn_id == SYSTEM_CONN_ID
+            and request_id in self._starting_request_ids
+        )
 
     def _emit_handler_failure(
-        self, failure: CommandFailure, conn_id: ConnId, request_id: str | None
+        self,
+        failure: CommandFailure,
+        conn_id: ConnId,
+        request_id: str | None,
+        captured: tuple[dict[str, Any], ...] = (),
     ) -> None:
         """Journal a handler failure as a self-loop move on the session machine.
 
@@ -1478,15 +1516,14 @@ class Runner(ServiceComponent, ConnectionSink):
         limit = self._session_start.steps
         if (
             limit is not None
-            and conn_id == SYSTEM_CONN_ID
-            and request_id in self._starting_request_ids
+            and self._fails_remaining_steps(conn_id, request_id)
             and self._sm.current_state in _RUNNING_STATES
         ):
             logger.info(
                 "a starting command's handler failed; failing the remaining steps",
                 code=failure.code,
             )
-            self._fail_remaining_steps(limit, failure.message)
+            self._fail_remaining_steps(limit, failure.message, captured)
 
     def _reject_command(self, conn_id: ConnId, request_id: str, code: str, detail: str) -> None:
         """Answer a command with an error, correlated by *request_id*.

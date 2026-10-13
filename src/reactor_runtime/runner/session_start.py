@@ -4,7 +4,8 @@ Two optional keys shape a session beyond its id. ``starting_input`` holds the
 commands the runtime applies before any client connects: ``state`` is a short
 form for one ``set_<field>`` command per key, and ``commands`` is an ordered
 list of ``{"command", "data"}`` pairs, the same pair a client sends. ``steps``
-is how many completed steps the session runs before the runtime closes it.
+is how many completed steps the session runs before the runtime closes it, from
+1 to ``MAX_STEPS``.
 
 This module checks the shape of those keys and nothing else. Whether a command
 exists, and whether its data fits, is the model contract's decision, made later
@@ -17,6 +18,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
+
+MAX_STEPS = 10_000
+"""The largest ``steps`` a session can start with.
+
+A session whose starting input fails records every step it has not reached
+with the failure, so the bound keeps that work, and the step results it
+writes, finite.
+"""
 
 
 class InvalidSessionStartError(ValueError):
@@ -159,4 +168,6 @@ def _steps(raw: Any) -> int | None:
     # A bool is an int to Python, and `true` is never a step count.
     if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
         raise InvalidSessionStartError("steps must be a positive integer")
+    if raw > MAX_STEPS:
+        raise InvalidSessionStartError(f"steps must be at most {MAX_STEPS}")
     return raw

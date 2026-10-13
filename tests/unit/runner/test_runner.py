@@ -2047,6 +2047,30 @@ async def test_the_failed_remaining_steps_are_saved_with_the_error(
     assert second["messages"] == []
 
 
+async def test_a_message_sent_before_a_failure_survives_a_step_reported_before_the_loop_runs_it(
+    saving_runner: Runner,
+) -> None:
+    saving_runner.start_session({"session_id": _SAVING_SESSION_ID, "steps": 2})
+    request_id = _starting_request(saving_runner)
+
+    def model_thread() -> None:
+        # The handler broadcasts and fails, then the model reports a step, all
+        # before the loop has run the failure it scheduled.
+        saving_runner._broadcast_message(Greeting(text="before the failure"))
+        saving_runner._on_handler_failure(_REFUSAL, SYSTEM_CONN_ID, request_id)
+        saving_runner._on_step_completed(_step(saving_runner))
+
+    await asyncio.to_thread(model_thread)
+
+    assert [fact["step"] for fact in await _saved_facts(saving_runner, 2)] == [1, 2]
+    first = _saved_result(saving_runner, 1)
+    assert first["error"] == "The reference image cannot be decoded."
+    assert first["messages"] == [{"type": "greeting", "data": {"text": "before the failure"}}]
+    assert [fact["step"] for fact in _step_facts(saving_runner)] == [1, 2], (
+        "the late report is dropped"
+    )
+
+
 class RefusingModel(FakeModel):
     """A model whose commands fail in their handler: one refuses, one breaks."""
 

@@ -98,6 +98,14 @@ async def test_a_malformed_session_shape_is_400_and_leaves_the_session_ready(
     assert (await harness.client.get("/session")).json()["state"] == "ready"
 
 
+async def test_a_step_count_above_the_bound_is_400(harness: Harness) -> None:
+    response = await harness.client.post("/start_session", json={"steps": 10_001})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "steps must be at most 10000"
+    assert (await harness.client.get("/session")).json()["state"] == "ready"
+
+
 async def test_a_starting_command_the_model_refuses_is_400_and_leaves_the_session_ready(
     harness: Harness,
 ) -> None:
