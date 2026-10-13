@@ -102,9 +102,9 @@ enum TrackDirection {
   TRACK_DIRECTION_SENDONLY = 2;
 }
 
-// One WebRTC quality reading the client took for one of its tracks, from the
-// browser's own getStats() — the runtime has no other vantage point onto a
-// client's receive-side experience. `kind`/`direction`/`codec` are fixed,
+// One WebRTC quality reading the client took for one of its tracks, from its
+// own media engine's statistics (getStats() in a browser) — the runtime has no
+// other vantage point onto a client's receive-side experience. `kind`/`direction`/`codec` are fixed,
 // structural facts about the track (never a new value at runtime), so they
 // stay typed; `metrics` is where the actual measurements live (e.g.
 // "bitrate_bps", "frames_per_second", "packets_lost", "packets_received",
@@ -136,6 +136,21 @@ message ClientTrackStat {
   // Where this track's frames spent their time, stage by stage, over the
   // window since the previous batch. Video tracks only. See FrameStage.
   repeated FrameStage frame_stages = 9;
+  // The codec implementation the client runs for this video track, as the
+  // media engine names it: the encoder for a track the client sends, the
+  // decoder for one it receives, e.g. "libvpx" or "VideoToolbox". Empty until
+  // the first frame is encoded or decoded, and on an audio track. This is the
+  // implementation at the time of the reading: the engine can switch it
+  // mid-session (e.g. falling back from hardware to software after an encoder
+  // error), so group by it per reading, not per session.
+  string codec_implementation = 10;
+  // Whether that implementation is power efficient, as WebRTC's
+  // powerEfficientEncoder / powerEfficientDecoder stats report it, which in
+  // practice means hardware accelerated. Absent when the engine does not say.
+  // Browsers expose this and `codec_implementation` only to a page that holds
+  // camera or microphone permission, so a receive-only browser client
+  // usually leaves both unset.
+  optional bool hardware_codec = 11;
 }
 
 // The time a video track's frames spent in one stage of their trip between
@@ -197,6 +212,35 @@ message ClientConnectionStat {
   // Epoch milliseconds, the client's own clock.
   int64 timestamp = 1;
   map<string, double> metrics = 2;
+  // What the client runs on, so readings can be grouped by it. Sent on every
+  // batch. Each field is empty when the client does not know it; a client
+  // that predates this field does not send `environment` at all.
+  ClientEnvironment environment = 3;
+}
+
+// The SDK and the system a client runs on. `os` and `arch` are canonical
+// lowercase values, so the same machine groups under one key whatever
+// language the client is written in: a client normalizes what its platform
+// reports to them (e.g. "Darwin" or "darwin" to "macos", "arm64" to
+// "aarch64", "x64" or "amd64" to "x86_64").
+message ClientEnvironment {
+  // The SDK, as the same identifier the SDK reports as `client_info.sdk_type`
+  // when it creates a session, e.g. "python", "js", "cpp", "swift", "java".
+  string sdk_type = 1;
+  // The SDK's version, e.g. "1.10.0".
+  string sdk_version = 2;
+  // The operating system, e.g. "macos", "linux", "windows", "ios",
+  // "android", or "browser" for the JavaScript SDK.
+  string os = 3;
+  // The operating system's version as the client reads it, e.g. "15.1".
+  string os_version = 4;
+  // The CPU architecture, e.g. "aarch64", "x86_64".
+  string arch = 5;
+  // The device's hardware model as the system names it, e.g. "iPhone15,2",
+  // "Pixel 8" or "MacBookPro18,3". On a phone, decode and encode times track
+  // the device more than the operating system's version. Empty when the
+  // system does not expose it, as in a browser.
+  string device_model = 6;
 }
 
 // A batch of client-observed quality readings for this connection, sent
