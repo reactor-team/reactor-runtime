@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from batch import Batch, NumpyNetwork, build_network
+from batch import Batch, NumpyNetwork, build_network, draw_weights
 from reactor_runtime import BatchedReactorApp
 from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.manifest import import_model_class, load_config
@@ -63,6 +63,11 @@ def test_frames_are_the_configured_size_and_differ_by_seed() -> None:
     assert frames.shape == (2, 32, 48, 3)
     assert frames.dtype == np.uint8
     assert not np.array_equal(frames[0], frames[1])
+
+
+def test_the_weights_are_float32() -> None:
+    hidden, out = draw_weights(channels=4, layers=2)
+    assert {weight.dtype for weight in (*hidden, out)} == {np.dtype(np.float32)}
 
 
 def test_the_numpy_backend_is_chosen_on_request() -> None:

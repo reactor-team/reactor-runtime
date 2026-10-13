@@ -202,7 +202,7 @@ def draw_weights(channels: int, layers: int) -> tuple[list[np.ndarray], np.ndarr
         (rng.standard_normal((channels, channels, 3, 3)) * scale).astype(np.float32)
         for _ in range(layers)
     ]
-    out = rng.standard_normal((3, channels)).astype(np.float32) / np.sqrt(channels)
+    out = (rng.standard_normal((3, channels)) / np.sqrt(channels)).astype(np.float32)
     return hidden, out
 
 

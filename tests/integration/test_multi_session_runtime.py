@@ -159,6 +159,6 @@ async def test_concurrent_sessions_each_get_the_frames_they_get_alone(workspace:
         async with httpx.AsyncClient(base_url=base, timeout=10) as client:
             health = (await client.get("/health")).json()
             assert health["capacity"] == {"slots": 1, "free": 1}
-            single = await _run_session(client, _SEEDS[0])
+            single = [await _run_session(client, seed) for seed in _SEEDS[:2]]
 
-    assert single == together[0]
+    assert single == together[:2]
