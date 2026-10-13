@@ -11,7 +11,7 @@ proto/
 │   ├── common.proto       ← framing shared by every channel message
 │   ├── data.proto         ← data channel: model Command / ModelMessage, step traffic
 │   ├── control.proto      ← control channel: platform + track traffic
-│   ├── step.proto         ← stepped generation: RequestStep, StepAccepted, StepResult
+│   ├── step.proto         ← stepped generation: RequestStep, StepResult
 │   ├── model.proto, platform.proto, track.proto
 └── packaging/
     └── pyproject.toml      ← template for the published reactor-wire wheel
