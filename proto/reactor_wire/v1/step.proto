@@ -67,4 +67,7 @@ message StepResult {
   // The step's number in the session, counted from 1.
   uint64 index = 1;
   repeated TrackFrames tracks = 2;
+  // Seconds the step's generate() took, or the time the model reported for the
+  // step.
+  double elapsed = 3;
 }
