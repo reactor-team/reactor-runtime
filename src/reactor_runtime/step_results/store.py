@@ -8,7 +8,9 @@ store writes ``result.json`` last, so a folder that has one is complete, and a
 reader never sees a step that is half written.
 
 Saving never makes the model wait. A step is offered to the store as it is
-reported; one that finds the queue full is not saved. Each folder is deleted a
+reported; one that finds the queue full is not saved. The steps a session
+records as failed together are admitted as one range that the queue bound does
+not apply to, so each of them gets its folder. Each folder is deleted a
 fixed time after its ``result.json`` is written, whether or not the session is
 still running, so disk use follows the step rate rather than the session's
 length.
@@ -85,6 +87,21 @@ class _Pending:
     step: int
     completed: CompletedStep
     messages: tuple[Mapping[str, Any], ...]
+    # The last step of a failed range, which saves every step from step to
+    # last with completed's error and messages on the first; equal to step
+    # for one step.
+    last: int = 0
+
+    def steps(self) -> list[_Pending]:
+        """Return one pending save per step this entry covers."""
+        if self.last <= self.step:
+            return [self]
+        return [
+            _Pending(
+                self.session_id, step, self.completed, self.messages if step == self.step else ()
+            )
+            for step in range(self.step, self.last + 1)
+        ]
 
 
 class StepStore:
@@ -117,6 +134,10 @@ class StepStore:
         self._on_saved = on_saved
         self._root = root
         self._queue: queue.Queue[_Pending] = queue.Queue(maxsize=config.queue)
+        # Failed ranges, outside the queue bound. A session records its
+        # remaining steps as failed once, so this holds at most one entry per
+        # session the worker has not reached.
+        self._failed: queue.SimpleQueue[_Pending] = queue.SimpleQueue()
         # Orders the worker's creation of a step folder against the reaper's
         # removal of an empty session folder, so neither undoes the other.
         self._layout_lock = threading.Lock()
@@ -178,6 +199,54 @@ class StepStore:
                 return False
             return True
 
+    def admit_failed(
+        self,
+        session_id: str,
+        first: int,
+        last: int,
+        error: str,
+        messages: Sequence[Mapping[str, Any]] = (),
+    ) -> bool:
+        """Offer a range of steps that failed together for saving, without waiting.
+
+        Each step from *first* to *last* is saved like an error step the model
+        reports: a folder holding only its ``result.json``, with *error*. The
+        range takes one admission, and the queue bound does not apply to it,
+        so a full queue never drops one of its steps.
+
+        Args:
+            session_id: The session the steps belong to. Only a lowercase UUID
+                is saved.
+            first: The number of the first failed step.
+            last: The number of the last failed step.
+            error: Why the steps failed.
+            messages: The messages for the first step's ``result.json``, each
+                in its ``{"type", "data"}`` wire form.
+
+        Returns:
+            Whether the steps will be saved. ``True`` means a folder with a
+            ``result.json`` follows for each of them; ``False`` means the store
+            is closed, the session id cannot name a folder, or the range is
+            empty.
+        """
+        if last < first:
+            return False
+        if not _SESSION_ID_RE.match(session_id):
+            logger.warning(
+                "not saving failed steps for a session id that is not a UUID",
+                session_id=session_id,
+                first=first,
+                last=last,
+            )
+            return False
+        failed = CompletedStep(bundle=None, error=error)
+        with self._admit_lock:
+            if self._closed:
+                return False
+            self._ensure_started()
+            self._failed.put(_Pending(session_id, first, failed, tuple(messages), last=last))
+            return True
+
     def close(self, drain_seconds: float = _DRAIN_SECONDS) -> None:
         """Stop taking steps, let pending saves finish, and stop the reaper.
 
@@ -198,7 +267,7 @@ class StepStore:
                 self._abandon.set()
                 logger.warning(
                     "abandoning step results still waiting to be saved",
-                    pending=self._queue.qsize(),
+                    pending=self._queue.qsize() + self._failed.qsize(),
                 )
         self._reaper_stop.set()
         reaper = self._reaper
@@ -306,26 +375,65 @@ class StepStore:
     def _work(self) -> None:
         while not self._abandon.is_set():
             try:
+                failed = self._failed.get_nowait()
+            except queue.Empty:
+                failed = None
+            if failed is not None:
+                if not self._save_range(failed):
+                    return
+                continue
+            try:
                 pending = self._queue.get(timeout=_IDLE_POLL_SECONDS)
             except queue.Empty:
-                if self._closing.is_set():
+                # A range admitted while the queue was being waited on is
+                # still saved: close() lets no admission in after closing.
+                if self._closing.is_set() and self._failed.empty():
                     return
                 continue
             if self._abandon.is_set():
                 return
+            self._save_and_announce(pending)
+
+    def _save_range(self, failed: _Pending) -> bool:
+        """Save a failed range after the steps admitted before it.
+
+        The session's earlier steps were admitted before the range, so they
+        are in the queue; saving what it holds first keeps the session's
+        folders, and their ``on_saved`` calls, in step order. Only the entries
+        there now are taken, so a later session that keeps the queue full
+        cannot hold the range back.
+
+        Returns:
+            ``False`` when the store is abandoned partway.
+        """
+        for _ in range(self._queue.qsize()):
             try:
-                saved = self._save(pending)
-            except Exception:
-                logger.exception(
-                    "failed to write a step result",
-                    session_id=pending.session_id,
-                    step=pending.step,
-                )
-                continue
-            try:
-                self._on_saved(saved)
-            except Exception:
-                logger.exception("step result callback failed", step=pending.step)
+                pending = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            if self._abandon.is_set():
+                return False
+            self._save_and_announce(pending)
+        for pending in failed.steps():
+            if self._abandon.is_set():
+                return False
+            self._save_and_announce(pending)
+        return True
+
+    def _save_and_announce(self, pending: _Pending) -> None:
+        try:
+            saved = self._save(pending)
+        except Exception:
+            logger.exception(
+                "failed to write a step result",
+                session_id=pending.session_id,
+                step=pending.step,
+            )
+            return
+        try:
+            self._on_saved(saved)
+        except Exception:
+            logger.exception("step result callback failed", step=pending.step)
 
     def _save(self, pending: _Pending) -> SavedStep:
         """Write one step's folder, ``result.json`` last, and put it in place whole.

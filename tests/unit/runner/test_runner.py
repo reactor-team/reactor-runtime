@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from reactor_runtime import (
+    CommandError,
     InputField,
     ModelMessage,
     Output,
@@ -1682,6 +1683,107 @@ async def test_a_late_step_from_the_previous_session_cannot_close_the_next(
     _expect_state(started_runner, SessionState.CLOSING)
 
 
+_REFUSAL = CommandFailure("bad_input", "The reference image cannot be decoded.")
+
+
+def _starting_request(runner: Runner) -> str:
+    """Mark a request id as one of the live session's starting commands."""
+    runner._starting_request_ids.add("r-start")
+    return "r-start"
+
+
+async def test_a_starting_command_failure_fails_the_remaining_steps(
+    started_runner: Runner,
+) -> None:
+    called: list[bool] = []
+    started_runner.request_shutdown = lambda *, failure=False: called.append(failure)
+    started_runner.start_session({"steps": 4})
+    started_runner._record_step(_step(started_runner))
+    started_runner._record_step(_step(started_runner))
+
+    started_runner._emit_handler_failure(
+        _REFUSAL, SYSTEM_CONN_ID, _starting_request(started_runner)
+    )
+
+    message = "The reference image cannot be decoded."
+    assert _step_facts(started_runner) == [
+        {"step": 1, "saved": False, "error": None},
+        {"step": 2, "saved": False, "error": None},
+        {"step": 3, "saved": False, "error": message},
+        {"step": 4, "saved": False, "error": message},
+    ]
+    stops = _moves(started_runner, SessionEvent.STOP_SESSION)
+    assert [stop.detail for stop in stops] == [{"reason": EndReason.ERROR, "close_reason": message}]
+    # An application-level failure: the session unwinds and the process stays up.
+    await started_runner._drain_teardown()
+    _expect_state(started_runner, SessionState.READY)
+    assert called == []
+
+
+async def test_a_starting_command_failure_before_any_step_fails_every_step(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({"steps": 1})
+    started_runner._emit_handler_failure(
+        _REFUSAL, SYSTEM_CONN_ID, _starting_request(started_runner)
+    )
+
+    assert _step_facts(started_runner) == [
+        {"step": 1, "saved": False, "error": "The reference image cannot be decoded."}
+    ]
+    assert len(_moves(started_runner, SessionEvent.STOP_SESSION)) == 1
+
+
+async def test_a_step_reported_after_the_remaining_steps_failed_is_dropped(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({"steps": 2})
+    started_runner._emit_handler_failure(
+        _REFUSAL, SYSTEM_CONN_ID, _starting_request(started_runner)
+    )
+    started_runner._record_step(_step(started_runner))
+
+    assert [fact["step"] for fact in _step_facts(started_runner)] == [1, 2]
+
+
+async def test_a_real_clients_command_failure_does_not_end_a_session_with_steps(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({"steps": 2})
+    started_runner._emit_handler_failure(_REFUSAL, ConnId(1002), "r-client")
+
+    assert _step_facts(started_runner) == []
+    assert _moves(started_runner, SessionEvent.STOP_SESSION) == []
+    _expect_state(started_runner, SessionState.STREAMING)
+
+
+async def test_a_failure_of_an_earlier_sessions_starting_command_does_not_end_this_one(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({"steps": 2})
+    stale = _starting_request(started_runner)
+    started_runner.stop_session()
+    await started_runner._drain_teardown()
+    started_runner.start_session({"steps": 2})
+
+    started_runner._emit_handler_failure(_REFUSAL, SYSTEM_CONN_ID, stale)
+
+    assert _step_facts(started_runner) == []
+    _expect_state(started_runner, SessionState.STREAMING)
+
+
+async def test_without_steps_a_starting_command_failure_only_answers(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    started_runner._emit_handler_failure(
+        _REFUSAL, SYSTEM_CONN_ID, _starting_request(started_runner)
+    )
+
+    assert _step_facts(started_runner) == []
+    assert _moves(started_runner, SessionEvent.STOP_SESSION) == []
+
+
 async def test_each_session_start_posted_to_the_model_is_counted(started_runner: Runner) -> None:
     assert started_runner._sessions_posted == 0
     started_runner.start_session({})
@@ -1927,6 +2029,128 @@ async def test_a_step_after_the_steps_stop_is_saved_too(saving_runner: Runner) -
 
     assert [fact["saved"] for fact in _step_facts(saving_runner)] == [True, True]
     assert [fact["step"] for fact in await _saved_facts(saving_runner, 2)] == [1, 2]
+
+
+async def test_the_failed_remaining_steps_are_saved_with_the_error(
+    saving_runner: Runner,
+) -> None:
+    saving_runner.start_session({"session_id": _SAVING_SESSION_ID, "steps": 2})
+    saving_runner._broadcast_message(Greeting(text="before the failure"))
+    saving_runner._emit_handler_failure(_REFUSAL, SYSTEM_CONN_ID, _starting_request(saving_runner))
+
+    assert [fact["step"] for fact in await _saved_facts(saving_runner, 2)] == [1, 2]
+    first, second = _saved_result(saving_runner, 1), _saved_result(saving_runner, 2)
+    assert first["error"] == second["error"] == "The reference image cannot be decoded."
+    assert first["files"] == second["files"] == []
+    # The messages the model sent before the failure go with the first step.
+    assert first["messages"] == [{"type": "greeting", "data": {"text": "before the failure"}}]
+    assert second["messages"] == []
+
+
+async def test_every_failed_remaining_step_is_saved_past_the_save_queue(
+    saving_runner: Runner,
+) -> None:
+    # More steps than the default save queue holds.
+    saving_runner.start_session({"session_id": _SAVING_SESSION_ID, "steps": 20})
+    saving_runner._emit_handler_failure(_REFUSAL, SYSTEM_CONN_ID, _starting_request(saving_runner))
+
+    facts = _step_facts(saving_runner)
+    assert [fact["step"] for fact in facts] == list(range(1, 21))
+    assert all(fact["saved"] for fact in facts)
+    assert sorted(fact["step"] for fact in await _saved_facts(saving_runner, 20)) == list(
+        range(1, 21)
+    )
+    assert _saved_result(saving_runner, 20)["error"] == "The reference image cannot be decoded."
+
+
+async def test_a_message_sent_before_a_failure_survives_a_step_reported_before_the_loop_runs_it(
+    saving_runner: Runner,
+) -> None:
+    saving_runner.start_session({"session_id": _SAVING_SESSION_ID, "steps": 2})
+    request_id = _starting_request(saving_runner)
+
+    def model_thread() -> None:
+        # The handler broadcasts and fails, then the model reports a step, all
+        # before the loop has run the failure it scheduled.
+        saving_runner._broadcast_message(Greeting(text="before the failure"))
+        saving_runner._on_handler_failure(_REFUSAL, SYSTEM_CONN_ID, request_id)
+        saving_runner._on_step_completed(_step(saving_runner))
+
+    await asyncio.to_thread(model_thread)
+
+    assert [fact["step"] for fact in await _saved_facts(saving_runner, 2)] == [1, 2]
+    first = _saved_result(saving_runner, 1)
+    assert first["error"] == "The reference image cannot be decoded."
+    assert first["messages"] == [{"type": "greeting", "data": {"text": "before the failure"}}]
+    assert [fact["step"] for fact in _step_facts(saving_runner)] == [1, 2], (
+        "the late report is dropped"
+    )
+
+
+class RefusingModel(FakeModel):
+    """A model whose commands fail in their handler: one refuses, one breaks."""
+
+    @event(name="refuse")
+    async def refuse(self) -> None:
+        raise CommandError("bad_input", "The reference image cannot be decoded.")
+
+    @event(name="explode")
+    async def explode(self) -> None:
+        raise KeyError("missing")
+
+
+@pytest.fixture
+async def refusing_runner(
+    monkeypatch: pytest.MonkeyPatch, register_model: Callable[[type], None]
+) -> Any:
+    created_models.clear()
+    register_model(RefusingModel)
+    monkeypatch.setattr(
+        "reactor_runtime.runner.runner.import_model_class", lambda ref: RefusingModel
+    )
+    runner = _runner()
+    await runner.start()
+    try:
+        yield runner
+    finally:
+        await runner.stop()
+
+
+async def _wait_for_stop(runner: Runner) -> Transition:
+    for _ in range(500):
+        stops = _moves(runner, SessionEvent.STOP_SESSION)
+        if stops:
+            return stops[0]
+        await asyncio.sleep(0.01)
+    raise AssertionError("expected the session to stop")
+
+
+@pytest.mark.parametrize(
+    ("command", "message"),
+    [
+        ("refuse", "The reference image cannot be decoded."),
+        ("explode", "The handler raised an unexpected error."),
+    ],
+)
+async def test_a_starting_command_whose_handler_fails_ends_the_session_with_steps(
+    refusing_runner: Runner, command: str, message: str
+) -> None:
+    called: list[bool] = []
+    refusing_runner.request_shutdown = lambda *, failure=False: called.append(failure)
+    refusing_runner.start_session(
+        {"starting_input": {"commands": [{"command": command, "data": {}}]}, "steps": 2}
+    )
+
+    stop = await _wait_for_stop(refusing_runner)
+
+    assert stop.detail == {"reason": EndReason.ERROR, "close_reason": message}
+    assert _step_facts(refusing_runner) == [
+        {"step": 1, "saved": False, "error": message},
+        {"step": 2, "saved": False, "error": message},
+    ]
+    await refusing_runner._drain_teardown()
+    _expect_state(refusing_runner, SessionState.READY)
+    assert called == []
 
 
 async def test_a_session_whose_id_is_not_a_uuid_saves_nothing(saving_runner: Runner) -> None:

@@ -3,6 +3,7 @@ from typing import Any
 import pytest
 
 from reactor_runtime.runner.session_start import (
+    MAX_STEPS,
     InvalidSessionStartError,
     SessionStart,
     StartingCommand,
@@ -106,9 +107,15 @@ def test_an_empty_starting_input_runs_nothing() -> None:
         ({"steps": "1"}, "steps must be a positive integer"),
         ({"steps": 1.0}, "steps must be a positive integer"),
         ({"steps": True}, "steps must be a positive integer"),
+        ({"steps": MAX_STEPS + 1}, f"steps must be at most {MAX_STEPS}"),
+        ({"steps": 1_000_000_000}, f"steps must be at most {MAX_STEPS}"),
     ],
 )
 def test_a_key_of_the_wrong_shape_is_rejected(body: dict[str, Any], message: str) -> None:
     with pytest.raises(InvalidSessionStartError) as raised:
         parse_session_start(body)
     assert message in str(raised.value)
+
+
+def test_steps_may_be_as_large_as_the_bound() -> None:
+    assert parse_session_start({"steps": MAX_STEPS}).steps == MAX_STEPS
