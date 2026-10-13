@@ -332,17 +332,33 @@ def test_chunk_ready_detail_names_the_recording_and_segment_index() -> None:
     assert isinstance(payload["detail"]["idx"], int)
 
 
-def test_step_result_ready_detail_names_the_session_step_and_files() -> None:
+def test_step_result_ready_detail_names_the_session_step_files_and_usage() -> None:
+    usage = [
+        {
+            "kind": "video",
+            "track": "main_video",
+            "file": "output.mp4",
+            "duration_s": 10.0,
+            "frames": 240,
+            "fps": 24.0,
+            "width": 1344,
+            "height": 768,
+        }
+    ]
     payload = _apply(
         _machine("closing"),
         SessionEvent.STEP_RESULT_READY,
         session_id="7d9f5c1e-0000-0000-0000-000000000042",
         step=2,
         files=["output.mp4", "prompt.txt"],
+        usage=usage,
+        generate_s=9.6,
     )
     assert payload is not None
     assert payload["detail"] == {
         "session_id": "7d9f5c1e-0000-0000-0000-000000000042",
         "step": 2,
         "files": ["output.mp4", "prompt.txt"],
+        "usage": usage,
+        "generate_s": 9.6,
     }

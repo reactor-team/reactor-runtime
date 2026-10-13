@@ -66,10 +66,12 @@ async def test_each_saved_step_is_announced_and_served(tmp_path: Path) -> None:
     async with running_runtime(model_cls=SavingModel, cfg=_saving_config()) as harness:
         ready = await _run_two_saved_steps(harness, tmp_path)
 
-        assert [envelope["detail"] for envelope in ready] == [
-            {"session_id": _SESSION_ID, "step": 1, "files": ["output.mp4", "note.txt"]},
-            {"session_id": _SESSION_ID, "step": 2, "files": ["output.mp4", "note.txt"]},
+        details = [envelope["detail"] for envelope in ready]
+        assert [(detail["session_id"], detail["step"], detail["files"]) for detail in details] == [
+            (_SESSION_ID, 1, ["output.mp4", "note.txt"]),
+            (_SESSION_ID, 2, ["output.mp4", "note.txt"]),
         ]
+        assert set(details[0]) == {"session_id", "step", "files", "usage", "generate_s"}
 
         listed = await harness.client.get(f"/sessions/{_SESSION_ID}/steps")
         assert listed.status_code == 200
@@ -90,6 +92,9 @@ async def test_each_saved_step_is_announced_and_served(tmp_path: Path) -> None:
         assert (usage["frames"], usage["width"], usage["height"]) == (2, 32, 32)
         assert usage["fps"] > 0
         assert usage["duration_s"] == pytest.approx(usage["frames"] / usage["fps"])
+        # The event announces what the folder's result.json records.
+        assert details[0]["usage"] == body["usage"]
+        assert details[0]["generate_s"] == body["timings"]["generate_s"]
         assert body["error"] is None
         assert body["save_error"] is None
         assert set(body["timings"]) == {"generate_s", "encode_s"}

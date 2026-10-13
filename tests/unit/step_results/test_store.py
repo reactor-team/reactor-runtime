@@ -92,7 +92,23 @@ def test_a_step_is_saved_as_a_folder_with_its_output_files_and_result(
     assert store.admit(_SESSION, 1, step, messages) is True
 
     assert saved.wait_for(1) == [
-        SavedStep(session_id=_SESSION, step=1, files=("output.mp4", "prompt.txt"))
+        SavedStep(
+            session_id=_SESSION,
+            step=1,
+            files=("output.mp4", "prompt.txt"),
+            usage=(
+                VideoUsage(
+                    track="main_video",
+                    file="output.mp4",
+                    duration_s=0.25,
+                    frames=3,
+                    fps=12.0,
+                    width=32,
+                    height=32,
+                ),
+            ),
+            generate_s=0.25,
+        )
     ]
     assert _folder(store, 1) == {"output.mp4", "prompt.txt", "result.json"}
     result = _result(store, 1)
