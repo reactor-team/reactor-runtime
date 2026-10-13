@@ -81,6 +81,17 @@ class TrackStat:
             or ``None`` before the first. Video only.
         target_bitrate_bps: The bitrate congestion control currently asks the
             encoder for, or ``None`` before the encoder runs. Outbound only.
+        frames_encoded: Video frames the encoder produced. Outbound only.
+        encode_seconds: The time the encoder spent on *frames_encoded*,
+            summed. Outbound only.
+        decode_seconds: The time the decoder spent on *frames_decoded*,
+            summed. Inbound only.
+        jitter_buffer_frames: Video frames that left the jitter buffer.
+            Inbound only.
+        jitter_buffer_seconds: The time *jitter_buffer_frames* spent in the
+            jitter buffer, summed. Inbound only.
+        timing_frame: The sender's stages for the slowest timing frame of the
+            last second, or ``None`` before the first. Inbound video only.
     """
 
     name: str
@@ -105,6 +116,34 @@ class TrackStat:
     frame_width: int | None = None
     frame_height: int | None = None
     target_bitrate_bps: float | None = None
+    frames_encoded: int | None = None
+    encode_seconds: float | None = None
+    decode_seconds: float | None = None
+    jitter_buffer_frames: int | None = None
+    jitter_buffer_seconds: float | None = None
+    timing_frame: SenderTiming | None = None
+
+
+@dataclass(frozen=True)
+class SenderTiming:
+    """The sender's stages for one timing frame, in milliseconds.
+
+    The sender stamps a timing frame at each stage and the stamps travel with
+    the frame, so these are the far end's stages, not this side's. Each is the
+    difference between two of the sender's stamps, in whole milliseconds.
+
+    Attributes:
+        rtp_timestamp: The frame's RTP timestamp, which tells one timing frame
+            from the next.
+        encode_wait_ms: From capture to the start of the encode.
+        packetize_ms: From the end of the encode to the last RTP packet.
+        pacer_ms: From the last RTP packet to the pacer sending it.
+    """
+
+    rtp_timestamp: int
+    encode_wait_ms: float
+    packetize_ms: float
+    pacer_ms: float
 
 
 @dataclass(frozen=True)
