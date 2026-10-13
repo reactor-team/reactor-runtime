@@ -312,6 +312,13 @@ class Runner(ServiceComponent, ConnectionSink):
         # How many steps the model has reported in the current session, which
         # numbers each step_completed fact. Reset when a session starts.
         self._steps_completed = 0
+        # The request ids of the current session's starting commands, so a
+        # handler failure is tied to the session that sent the command.
+        self._starting_request_ids: set[str] = set()
+        # Set once a starting command's handler failed in a session with a step
+        # count and the runtime recorded the remaining steps as errors; later
+        # reports from the model in that session are dropped.
+        self._steps_failed = False
         # How many session starts have been posted to the model. A step report
         # carries the model's own count, so one from an earlier session is
         # recognised and dropped.
@@ -777,7 +784,10 @@ class Runner(ServiceComponent, ConnectionSink):
 
         A report from an earlier session, one that arrives after a quick stop
         and restart, is dropped: it is neither journalled nor counted, so it
-        cannot close the session that followed.
+        cannot close the session that followed. So is a report that arrives
+        after the runtime recorded the session's remaining steps as errors
+        (see :meth:`_fail_remaining_steps`), so no step past ``steps`` is
+        saved.
         """
         if step.session != self._sessions_posted:
             logger.debug(
@@ -786,16 +796,10 @@ class Runner(ServiceComponent, ConnectionSink):
                 current_session=self._sessions_posted,
             )
             return
-        self._steps_completed += 1
-        saved = self._step_store is not None and self._step_store.admit(
-            self._recording_id, self._steps_completed, step, messages
-        )
-        self._sm.send(
-            SessionEvent.STEP_COMPLETED,
-            step=self._steps_completed,
-            saved=saved,
-            error=step.error,
-        )
+        if self._steps_failed:
+            logger.debug("dropping a step report after the session's remaining steps failed")
+            return
+        self._save_step(step, messages)
         limit = self._session_start.steps
         if (
             limit is not None
@@ -808,6 +812,44 @@ class Runner(ServiceComponent, ConnectionSink):
                 reason=EndReason.STOPPED,
                 close_reason=_STEPS_CLOSE_REASON,
             )
+
+    def _save_step(self, step: CompletedStep, messages: tuple[dict[str, Any], ...] = ()) -> None:
+        """Number a step of the current session, offer it to the store, and journal it."""
+        self._steps_completed += 1
+        saved = self._step_store is not None and self._step_store.admit(
+            self._recording_id, self._steps_completed, step, messages
+        )
+        self._sm.send(
+            SessionEvent.STEP_COMPLETED,
+            step=self._steps_completed,
+            saved=saved,
+            error=step.error,
+        )
+
+    def _fail_remaining_steps(self, limit: int, error: str) -> None:
+        """End a session with a step count whose starting command failed in its handler.
+
+        The session cannot do what its starting input asked, so every step from
+        the next one up to *limit* is recorded with *error*: numbered,
+        journalled, and saved like an error step the model reports. Then the
+        session stops with :attr:`~reactor_runtime.core.model.EndReason.ERROR`
+        and *error* as its close reason. The model is healthy, so the process
+        keeps running and the next session starts as usual.
+
+        The messages the model broadcast since its last report go with the
+        first of these steps.
+        """
+        messages: tuple[dict[str, Any], ...] = ()
+        if self._step_store is not None:
+            with self._step_messages_lock:
+                messages = tuple(self._step_messages)
+                self._step_messages.clear()
+        self._steps_failed = True
+        while self._steps_completed < limit:
+            failed = CompletedStep(bundle=None, error=error, session=self._sessions_posted)
+            self._save_step(failed, messages)
+            messages = ()
+        self._sm.send(SessionEvent.STOP_SESSION, reason=EndReason.ERROR, close_reason=error)
 
     def _on_step_saved(self, saved: SavedStep) -> None:
         """Journal a step whose folder is complete, hopping onto the loop.
@@ -1418,6 +1460,14 @@ class Runner(ServiceComponent, ConnectionSink):
         Carries the connection and the request id so the entry lines up with the
         :attr:`SessionEvent.COMMAND` move that admitted the command, rather than
         leaving an operator to match the two by timestamp.
+
+        In a session with a step count, a failure of one of its own starting
+        commands, whether the handler raised
+        :class:`~reactor_runtime.CommandError` or any other
+        exception, means the session cannot do what it was started for: its
+        remaining steps are recorded with the failure's message and the session
+        ends (see :meth:`_fail_remaining_steps`). A failure of a command a real
+        client sent only answers that client.
         """
         self._sm.send(
             SessionEvent.ERROR,
@@ -1425,6 +1475,18 @@ class Runner(ServiceComponent, ConnectionSink):
             conn_id=conn_id,
             request_id=request_id,
         )
+        limit = self._session_start.steps
+        if (
+            limit is not None
+            and conn_id == SYSTEM_CONN_ID
+            and request_id in self._starting_request_ids
+            and self._sm.current_state in _RUNNING_STATES
+        ):
+            logger.info(
+                "a starting command's handler failed; failing the remaining steps",
+                code=failure.code,
+            )
+            self._fail_remaining_steps(limit, failure.message)
 
     def _reject_command(self, conn_id: ConnId, request_id: str, code: str, detail: str) -> None:
         """Answer a command with an error, correlated by *request_id*.
@@ -1593,6 +1655,8 @@ class Runner(ServiceComponent, ConnectionSink):
         done = asyncio.Event()
         self._starting_input_done = done
         self._steps_completed = 0
+        self._starting_request_ids = set()
+        self._steps_failed = False
         start = self._session_start
         if start.starting_input is not None or start.steps is not None:
             self._connections.register(
@@ -1641,13 +1705,15 @@ class Runner(ServiceComponent, ConnectionSink):
                     return
                 if self._sm.current_state not in _RUNNING_STATES:
                     return
+                request_id = uuid.uuid4().hex
+                self._starting_request_ids.add(request_id)
                 refusal = await self._submit_command(
                     InboundCommand(
                         name=command.command,
                         args=dict(command.data),
                         uploads={},
                         conn_id=SYSTEM_CONN_ID,
-                        request_id=uuid.uuid4().hex,
+                        request_id=request_id,
                         received_at=time.monotonic(),
                     ),
                     upload_wait=upload_wait,

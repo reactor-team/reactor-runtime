@@ -8,6 +8,7 @@ folders stay readable after the session ends.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import shutil
 from pathlib import Path
@@ -18,7 +19,7 @@ import numpy as np
 import pytest
 from contract_helpers import Harness, JournalReader, SteppingState, running_runtime
 
-from reactor_runtime import ReactorApp, StepCompleted, StepOutcome
+from reactor_runtime import CommandError, ReactorApp, StepCompleted, StepOutcome, event
 from reactor_runtime.core import RuntimeConfig, StepResultsConfig
 from reactor_runtime.interface.tracks import Output, Video
 
@@ -60,6 +61,64 @@ async def _run_two_saved_steps(harness: Harness, root: Path) -> list[dict[str, A
 
 def _saving_config() -> RuntimeConfig:
     return RuntimeConfig(model_ref="contract:Model", step_results=StepResultsConfig(enabled=True))
+
+
+class RefusingModel(ReactorApp):
+    """A model whose one command refuses, and which never takes a step on its own."""
+
+    def load(self, config_path: Path | None) -> None: ...
+
+    async def run(self) -> None:
+        await asyncio.sleep(60)
+
+    @event(name="refuse")
+    async def refuse(self) -> None:
+        raise CommandError("bad_input", "The reference image cannot be decoded.")
+
+
+async def test_a_failed_starting_command_saves_the_remaining_steps_with_its_error(
+    tmp_path: Path,
+) -> None:
+    async with running_runtime(model_cls=RefusingModel, cfg=_saving_config()) as harness:
+        assert harness.runner.step_store is not None
+        harness.runner.step_store._root = tmp_path
+        journal = JournalReader(harness.runner)
+        try:
+            response = await harness.client.post(
+                "/start_session",
+                json={
+                    "session_id": _SESSION_ID,
+                    "starting_input": {"commands": [{"command": "refuse", "data": {}}]},
+                    "steps": 2,
+                },
+            )
+            assert response.status_code == 200
+            # A folder can finish after its session has stopped, so read until both are seen.
+            seen: list[dict[str, Any]] = []
+            names: list[str] = []
+            while names.count("step_result_ready") < 2 or "stop_session" not in names:
+                seen.append(await journal.next())
+                names.append(seen[-1]["event"])
+        finally:
+            await journal.aclose()
+
+        message = "The reference image cannot be decoded."
+        assert seen[names.index("stop_session")]["detail"] == {
+            "reason": "error",
+            "close_reason": message,
+        }
+        ready = [
+            envelope["detail"] for envelope in seen if envelope["event"] == "step_result_ready"
+        ]
+        assert [(detail["step"], detail["files"], detail["usage"]) for detail in ready] == [
+            (1, [], []),
+            (2, [], []),
+        ]
+
+        for step in (1, 2):
+            result = await harness.client.get(f"/sessions/{_SESSION_ID}/steps/{step}")
+            assert result.status_code == 200
+            assert result.json()["error"] == message
 
 
 async def test_each_saved_step_is_announced_and_served(tmp_path: Path) -> None:
