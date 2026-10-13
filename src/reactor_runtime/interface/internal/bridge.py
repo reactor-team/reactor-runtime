@@ -32,8 +32,8 @@ from reactor_runtime.interface.internal.reactor_core import (
     ReactorCore,
     RequestId,
     StepEnvelope,
+    StepRefusalSink,
     StepSink,
-    StepVerdictSink,
 )
 from reactor_runtime.interface.model.contract import ContractError, ModelContract
 
@@ -239,7 +239,7 @@ class ModelBridge:
         step: StepSink | None = None,
         command_timing: CommandTimingSink | None = None,
         frame_timing: FrameTimingSink | None = None,
-        step_verdict: StepVerdictSink | None = None,
+        step_refusal: StepRefusalSink | None = None,
     ) -> None:
         """Wire the model's outbound paths down into the runner. Call once.
 
@@ -255,8 +255,8 @@ class ModelBridge:
         loop, at most once, on the model thread — it is how the owner learns
         the model died rather than idled. ``step`` receives each
         :class:`~reactor_runtime.core.CompletedStep` the model reports, on the
-        model thread. ``step_verdict`` receives, on the model thread, whether
-        each step a client requested was taken, before that step's report.
+        model thread. ``step_refusal`` receives, on the model thread, each
+        step a client requested that the model refused.
 
         Args:
             broadcast: Sink for a message sent to all clients.
@@ -269,7 +269,7 @@ class ModelBridge:
             command_timing: Sink for how long each command waited and ran.
             frame_timing: Sink for a frame's time in a stage only the model
                 sees, for the connection that sent the frame.
-            step_verdict: Sink for whether a requested step was taken.
+            step_refusal: Sink for each requested step the model refused.
 
         Raises:
             RuntimeError: If outbound has already been bound.
@@ -282,7 +282,7 @@ class ModelBridge:
             media=media,
             media_ops=media_ops,
             step=step,
-            step_verdict=step_verdict,
+            step_refusal=step_refusal,
         )
         self._model._bind_timing(command_timing=command_timing, frame_timing=frame_timing)
         if failure is not None:

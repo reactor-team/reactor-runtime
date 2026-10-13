@@ -34,7 +34,7 @@ from reactor_runtime.core.values import (
     MediaBundle,
     MediaChunk,
     RequestedStep,
-    StepVerdict,
+    StepRefusal,
     TrackData,
     TrackInfo,
     TrackKind,
@@ -107,8 +107,8 @@ model thread.
 FailureSink = Callable[[BaseException], None]
 """Receives the exception that ended :meth:`ReactorCore.run`, on the model thread."""
 
-StepVerdictSink = Callable[[StepVerdict], None]
-"""Receives whether a requested step was taken, on the model thread, before its report."""
+StepRefusalSink = Callable[[StepRefusal], None]
+"""Receives each step a client requested that the model refused, on the model thread."""
 
 
 @dataclass(frozen=True)
@@ -351,7 +351,7 @@ class ReactorCore:
         self._out_step: StepSink | None = None
         self._out_command_timing: CommandTimingSink | None = None
         self._out_frame_timing: FrameTimingSink | None = None
-        self._out_step_verdict: StepVerdictSink | None = None
+        self._out_step_refusal: StepRefusalSink | None = None
         # How many session starts the model has received, kept by the
         # subclass's dispatcher. A step report carries it, so the runtime can
         # set apart a late report from a session that has ended.
@@ -501,7 +501,7 @@ class ReactorCore:
         media: MediaSink,
         media_ops: MediaOps | None = None,
         step: StepSink | None = None,
-        step_verdict: StepVerdictSink | None = None,
+        step_refusal: StepRefusalSink | None = None,
     ) -> None:
         """Bind the outbound sinks. Called once before the loop starts.
 
@@ -521,7 +521,7 @@ class ReactorCore:
         self._out_media = media
         self._media_ops = media_ops
         self._out_step = step
-        self._out_step_verdict = step_verdict
+        self._out_step_refusal = step_refusal
         if media_ops is not None:
             if self.buffer_size is not None:
                 media_ops.set_depth(self.buffer_size)

@@ -162,20 +162,6 @@ class Codec(ABC):
         )
         return self.encode(message)
 
-    def encode_step_accepted(self, request_id: str, index: int) -> tuple[Channel, bytes | str]:
-        """Encode the notice that a requested step was accepted and is generating.
-
-        A notification carrying the request's *request_id*, sent before the
-        step's result, so a client can tell an accepted step from one still
-        waiting in the queue.
-        """
-        message = data_pb2.DataServerMessage(
-            request_id=request_id,
-            kind=common_pb2.MessageKind.MESSAGE_KIND_NOTIFICATION,
-            step_accepted=step_pb2.StepAccepted(index=index),
-        )
-        return self.encode(message)
-
     def encode_step_result(
         self, request_id: str, result: step_pb2.StepResult
     ) -> tuple[Channel, bytes | str]:
