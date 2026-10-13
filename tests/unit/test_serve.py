@@ -102,6 +102,7 @@ def test_assemble_answers_health_with_the_process_aggregate() -> None:
         "status": "unhealthy",
         "state": "loading",
         "detail": "http server not started",
+        "capacity": {"slots": 1, "free": 0},
     }
 
 

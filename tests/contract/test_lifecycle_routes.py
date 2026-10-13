@@ -148,9 +148,10 @@ async def test_health_reports_status_state_and_detail(harness: Harness) -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert set(body) == {"status", "state", "detail"}
+    assert set(body) == {"status", "state", "detail", "capacity"}
     assert body["status"] == "healthy"
     assert body["state"] == "available"
+    assert body["capacity"] == {"slots": 1, "free": 1}
 
 
 async def test_health_is_200_and_loading_while_the_model_loads() -> None:
@@ -174,6 +175,7 @@ async def test_health_is_serving_while_a_session_is_open(harness: Harness) -> No
     body = response.json()
     assert body["status"] == "healthy"
     assert body["state"] == "serving"
+    assert body["capacity"] == {"slots": 1, "free": 0}
 
 
 async def test_health_is_503_once_terminated() -> None:
@@ -182,7 +184,7 @@ async def test_health_is_503_once_terminated() -> None:
 
     assert response.status_code == 503
     body = response.json()
-    assert set(body) == {"status", "state", "detail"}
+    assert set(body) == {"status", "state", "detail", "capacity"}
     assert body["status"] == "unhealthy"
     assert body["state"] == "terminated"
 

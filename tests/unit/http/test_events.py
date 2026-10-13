@@ -24,6 +24,7 @@ def test_transition_event_renders_named_states_ts_and_detail() -> None:
         "from": "ready",
         "to": "waiting",
         "ts": 123,
+        "session_id": None,
         "detail": {},
     }
 
@@ -53,6 +54,7 @@ def test_transition_carries_connection_detail() -> None:
         "from": "waiting",
         "to": "streaming",
         "ts": 123,
+        "session_id": None,
         "detail": {"conn_id": 3},
     }
 
@@ -73,6 +75,7 @@ def test_transition_carries_the_negotiation_answer() -> None:
         "from": "waiting",
         "to": "waiting",
         "ts": 123,
+        "session_id": None,
         "detail": {"conn_id": 4, "answer": {"type": "answer", "sdp": "v=0..."}},
     }
 
@@ -97,6 +100,7 @@ def test_command_rides_a_self_loop_envelope() -> None:
         "from": "streaming",
         "to": "streaming",
         "ts": 123,
+        "session_id": None,
         "detail": {"name": "set_mode", "args": {"mode": "turbo"}, "conn_id": 2},
     }
 
@@ -126,6 +130,7 @@ def test_chunk_ready_rides_a_self_loop_envelope() -> None:
         "from": "closing",
         "to": "closing",
         "ts": 123,
+        "session_id": None,
         "detail": {"recording_id": "rec-1", "idx": -1},
     }
 
@@ -150,3 +155,11 @@ def test_format_sse_frames_id_and_data() -> None:
     body = json.loads(message.split("data: ", 1)[1].strip())
     assert body["type"] == "transition"
     assert body["ts"] == 123
+
+
+def test_a_session_move_names_its_session() -> None:
+    move = TransitionEvent(
+        Transition(SessionEvent.START_SESSION, SessionState.READY, SessionState.WAITING, ts_ms=1),
+        "sess-a",
+    )
+    assert runner_event_to_dict(move)["session_id"] == "sess-a"

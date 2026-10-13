@@ -130,8 +130,8 @@ class SessionControl(ConnectionSink, Protocol):
             sid: The session id the request addressed.
         """
 
-    def new_conn_id(self) -> ConnId:
-        """Mint a fresh connection id, unique within the session."""
+    def new_conn_id(self, sid: str) -> ConnId:
+        """Mint a fresh connection id for the session *sid*, unique within the runtime."""
 
     def offer_admitted(self, conn_id: ConnId) -> None:
         """Stamp an admitted connection offer with the live session.

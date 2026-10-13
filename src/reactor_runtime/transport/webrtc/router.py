@@ -312,7 +312,7 @@ class WebRtcRouter(TransportRouter):
         async def register(sid: str) -> RegisterConnectionResponse:
             runner.require_session_running(sid)
             return RegisterConnectionResponse(
-                connection_id=runner.new_conn_id(), track_map=dict(runner.track_map())
+                connection_id=runner.new_conn_id(sid), track_map=dict(runner.track_map())
             )
 
         # One handler, registered once per method: a POST opens a connection's
