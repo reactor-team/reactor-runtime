@@ -18,6 +18,7 @@ Reactor Runtime turns an inference pipeline into a real-time, interactive media 
 - 🎮 **Live interaction.** Clients send commands mid-generation: change a prompt, move a camera, adjust a parameter. The next frame reflects it.
 - 🔌 **No transport code.** You never import a WebRTC library, manage a WebSocket, or encode video. The runtime ships its own media engine as a wheel, so a plain Python container is all a model needs.
 - ✅ **Typed, validated commands.** Declare the commands your model accepts with standard Python types and constraints. The runtime validates every payload before your handler runs and compiles the surface into an OpenAPI schema that drives typed client SDKs.
+- 🧮 **Batched sessions.** A `BatchedReactorApp` serves several sessions from one process and runs one forward pass for all of them, each session keeping its own state, commands, and stream.
 - 🔎 **Traceable logs.** `get_logger()` writes structured records — readable `key=value` in a terminal, JSON for a log pipeline. Every record a session writes carries that session's id automatically, so one filter recovers everything a single run logged.
 - 📦 **One container, anywhere.** The `reactor` CLI scaffolds a workspace, builds a small image, and runs it locally. The same image deploys to [Reactor](https://reactor.inc)'s GPU cloud unchanged.
 
@@ -114,6 +115,34 @@ Every track of the step's output becomes its own stream in one `output.mp4`, bes
 
 When step results are on, `GET /sessions/{id}/steps` lists a session's saved folders by the session's own id; each stays readable for five minutes after it is written, after the session ends too.
 
+A model that can step several sessions in one forward pass subclasses `BatchedReactorApp` instead, declares how many it serves, and writes `generate_batch()` in place of `generate()`:
+
+```python
+from reactor_runtime import BatchedReactorApp, session_ended, session_started
+
+
+class MyBatchedModel(BatchedReactorApp):
+    state: MyState
+    max_sessions = 4
+
+    @session_started
+    def begin(self) -> None:
+        self.latents[self.session_id] = self.pipe.initial_latent()
+
+    @session_ended
+    def end(self) -> None:
+        self.latents.pop(self.session_id, None)
+
+    def generate_batch(self, inputs: dict[str, MyState]) -> dict[str, MyOutput]:
+        ids = list(inputs)
+        frames = self.pipe.forward_batch([self.latents[sid] for sid in ids], [inputs[sid].prompt for sid in ids])
+        return {sid: MyOutput(main_video=frame) for sid, frame in zip(ids, frames)}
+```
+
+The runtime then hosts up to `max_sessions` sessions in the one process. Everything else reads as it does in a `ReactorApp`, per session: a handler, a hook, `process_input()`, and `process_output()` run for one session at a time, with `self.state`, `self.session_id`, the media tracks, `emit()`, and `send()` bound to it. Each step calls `process_input()` for every live session, `generate_batch()` once with their inputs by session id, and `process_output()` for each with its own result. `join_policy = JoinPolicy.BOUNDARY` with an `at_step_boundary()` holds a new session out of the batch until the model is ready to take it. A failure stays with its session: an exception from one session's `process_input()` or `process_output()`, or an exception `generate_batch()` returns as a session's result, ends that session with the reason `error` while the others keep stepping. An exception `generate_batch()` raises is the model's, and ends every session as a crash of a `ReactorApp` does.
+
+A runtime hosting several sessions takes the id of each in `POST /start_session` (`session_id` in the body, minted when absent and returned in the descriptor), addresses every `/sessions/{id}/...` route by it, and needs it in `POST /stop_session` and `GET /session?session_id=`. `GET /sessions` lists the running sessions, `GET /health` reports `capacity: {slots, free}` and stays `available` while a slot is free, and every `/events` fact names its `session_id`, with `GET /sessions/{id}/events` following one session. A start with every slot serving answers `409`, as a busy single-session runtime does. `REACTOR_MAX_SESSIONS` lowers the number a deployment hosts.
+
 Scaffold, build, and run it with the CLI:
 
 ```sh
@@ -155,6 +184,7 @@ Not on macOS, or pinning a release in CI? See [Install the CLI](https://docs.rea
 - [Starter example](./examples/starter/README.md): the model `reactor init` scaffolds: one class, `generate()` alone, the smallest complete `ReactorApp`
 - [Echo example](./examples/echo/README.md): the client's webcam and microphone in, an effect applied, both sent back, in batches
 - [Waypoint example](./examples/waypoint/README.md): a world model on a GPU, seeded from an upload and steered live
+- [Batch example](./examples/batch/README.md): one network painting a video for up to four sessions in one forward pass, a `BatchedReactorApp`
 
 ## Development
 

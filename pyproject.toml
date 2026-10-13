@@ -137,6 +137,7 @@ extra-paths = [
     "examples/starter",
     "examples/echo",
     "examples/waypoint",
+    "examples/batch",
     "tests/unit/transport/webrtc",
     "tests/contract",
 ]
