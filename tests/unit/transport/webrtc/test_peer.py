@@ -372,6 +372,18 @@ async def test_video_sink_times_a_frames_trip_from_the_decoder() -> None:
     assert (delivery.name, delivery.frames) == ("delivery", 1)
 
 
+async def test_delivery_covers_handing_the_frame_to_the_model_input() -> None:
+    peer = WebRTCPeer()
+    peer._loop = asyncio.get_running_loop()
+    peer.on_media(lambda _name, _frame: time.sleep(0.01))
+
+    peer._make_video_sink("cam")(bytes(2 * 2 * 4), 2, 2, None)
+    await asyncio.sleep(0.05)
+
+    [delivery] = peer.frame_stages.take()["cam"]
+    assert delivery.total_ms >= 10.0
+
+
 async def test_video_sink_surfaces_the_capture_stamp_beside_the_metadata() -> None:
     peer = WebRTCPeer()
     peer._loop = asyncio.get_running_loop()

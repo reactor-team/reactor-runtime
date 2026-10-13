@@ -743,10 +743,10 @@ class WebRTCPeer:
         return sink
 
     def _deliver_video(self, name: str, frame: InputFrame, decoded_at: float) -> None:
-        """Hand a decoded frame on, timing its trip from the decoder."""
-        self.frame_stages.add(name, "delivery", (time.perf_counter() - decoded_at) * 1000.0)
+        """Hand a decoded frame on, timing its trip from the decoder to the model's input."""
         if self._cb_media is not None:
             self._cb_media(name, frame)
+        self.frame_stages.add(name, "delivery", (time.perf_counter() - decoded_at) * 1000.0)
 
     def _make_audio_sink(self, name: str) -> Callable[[bytes, int, int, int], None]:
         def sink(pcm: bytes, sample_rate: int, channels: int, frames: int) -> None:

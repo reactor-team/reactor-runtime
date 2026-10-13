@@ -430,14 +430,14 @@ async def test_stage_times_add_up_across_samples_until_taken(
     peer.fire_connected()
     await asyncio.sleep(0.08)
     await conn.close()
-    stages = conn.take_frame_stages()
+    stages = conn.take_frame_stages(["main_video"])
 
     [encode] = stages["main_video"]
     assert encode.name == "encode"
     # Every sample after the first adds its window, so the take holds several.
     assert encode.frames >= 60
     assert encode.total_ms == pytest.approx(encode.frames * 2.0)
-    assert conn.take_frame_stages() == {}
+    assert conn.take_frame_stages(["main_video"]) == {}
 
 
 async def test_stats_carry_the_frames_the_pacer_dropped(

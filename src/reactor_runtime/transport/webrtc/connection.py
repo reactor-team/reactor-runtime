@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import replace
 
 from reactor_runtime.core import (
@@ -168,9 +168,9 @@ class WebRTCConnection:
         """
         return self._latest_reading
 
-    def take_frame_stages(self) -> dict[str, tuple[FrameStage, ...]]:
-        """Return each track's stage times since the previous take, and start a new window."""
-        return self._peer.frame_stages.take()
+    def take_frame_stages(self, tracks: Collection[str]) -> dict[str, tuple[FrameStage, ...]]:
+        """Return the stage times of *tracks* since their previous take, and start them again."""
+        return self._peer.frame_stages.take(tracks)
 
     @property
     def protocol_version(self) -> ProtocolVersion:

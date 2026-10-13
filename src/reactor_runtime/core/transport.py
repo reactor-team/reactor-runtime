@@ -11,7 +11,7 @@ transport measures its wire.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from typing import Protocol, runtime_checkable
 
 from reactor_runtime.core.stats import TransportReading
@@ -125,15 +125,16 @@ class FrameStageSource(Protocol):
     """A connection whose transport times each frame's stages on its side of the wire.
 
     Optional, beside :class:`TransportStatsSource`, and checked for the same
-    way. The times add up between takes, so each take covers the window since
-    the previous one.
+    way. A track's times add up until they are taken, so each take covers the
+    window since that track's previous one.
     """
 
-    def take_frame_stages(self) -> Mapping[str, tuple[FrameStage, ...]]:
-        """Return each track's stage times since the previous take, and start a new window.
+    def take_frame_stages(self, tracks: Collection[str]) -> Mapping[str, tuple[FrameStage, ...]]:
+        """Return the stage times of *tracks* since their previous take, and start them again.
 
-        Keyed by track name. A track with no frames in the window is left out,
-        and so is a stage of a track with no frames in it.
+        Keyed by track name. A track with no frames in its window is left out,
+        and so is a stage with no frames in it. Tracks not named keep their
+        times for a later take.
         """
 
 

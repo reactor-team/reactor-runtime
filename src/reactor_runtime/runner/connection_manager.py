@@ -41,7 +41,7 @@ replaced rather than edited.
 from __future__ import annotations
 
 import random
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
 
 from reactor_runtime.core import (
@@ -143,37 +143,47 @@ class ConnectionManager:
         """The number of connections currently registered."""
         return len(self._by_id)
 
-    def take_transport_readings(self) -> list[tuple[ConnId, TransportReading]]:
+    def transport_readings(self) -> list[tuple[ConnId, TransportReading]]:
         """The latest transport reading of every connection that has one.
 
         A connection whose transport has not taken a reading yet, or does not
         measure its wire (it is not a :class:`TransportStatsSource`), is left
-        out. A connection that also times its frames (a
-        :class:`FrameStageSource`) has each track's stage times since the
-        previous call added to the track's reading, and its window starts
-        again, so call this once per report. A connection left out keeps its
-        stage times for the next call.
+        out. Reading them changes nothing, so any number of callers can.
         """
-        readings: list[tuple[ConnId, TransportReading]] = []
-        for cid, conn in self._by_id.items():
-            if not isinstance(conn, TransportStatsSource):
-                continue
-            reading = conn.latest_reading
-            # Without a reading there is nothing to report the stages on, so
-            # they stay in the window for the first report that has one.
-            if reading is None:
-                continue
-            stages = conn.take_frame_stages() if isinstance(conn, FrameStageSource) else {}
-            if stages:
-                reading = replace(
-                    reading,
-                    tracks=tuple(
-                        replace(track, frame_stages=stages.get(track.track_name, ()))
-                        for track in reading.tracks
-                    ),
-                )
-            readings.append((cid, reading))
-        return readings
+        return [
+            (cid, reading)
+            for cid, conn in self._by_id.items()
+            if isinstance(conn, TransportStatsSource)
+            and (reading := conn.latest_reading) is not None
+        ]
+
+    def take_frame_stages(
+        self, readings: Iterable[tuple[ConnId, TransportReading]]
+    ) -> list[tuple[ConnId, TransportReading]]:
+        """Add each connection's stage times since the previous take to its *readings*.
+
+        For a connection that times its frames (a :class:`FrameStageSource`),
+        each track in its reading gets the stage times the connection held for
+        it, and those are taken: the next call gets only what was timed after
+        this one, so the runner calls this once per report. Stages of a track
+        the reading does not carry yet stay with the connection until a
+        reading does. A connection with no reading here keeps all its stages.
+        """
+        out: list[tuple[ConnId, TransportReading]] = []
+        for cid, reading in readings:
+            conn = self._by_id.get(cid)
+            if isinstance(conn, FrameStageSource) and reading.tracks:
+                stages = conn.take_frame_stages([t.track_name for t in reading.tracks])
+                if stages:
+                    reading = replace(
+                        reading,
+                        tracks=tuple(
+                            replace(track, frame_stages=stages.get(track.track_name, ()))
+                            for track in reading.tracks
+                        ),
+                    )
+            out.append((cid, reading))
+        return out
 
     def new_conn_id(self) -> ConnId:
         """Mint a fresh random connection id, unique within the session.
