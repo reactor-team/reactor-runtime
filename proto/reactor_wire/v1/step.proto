@@ -41,9 +41,11 @@ message TrackFrames {
 // writes the input frames to their tracks, and runs the step. No other command
 // reaches the model in between.
 //
-// The response is a StepResult, or an Error: "step_refused" when the request
-// or the model refuses the step, which changes no state, and
-// "step_result_too_large" when the result does not fit in one message.
+// Every request ends in exactly one response, with its request_id: a
+// StepResult once the step has run, whether it worked or failed, or an Error:
+// "step_refused" when the request or the model refuses the step, which changes
+// no state, and "step_result_too_large" when the result does not fit in one
+// message.
 message RequestStep {
   // Values for the model's state fields, keyed by field name. Each key runs as
   // the model's set_<key> command, before commands.
@@ -54,15 +56,21 @@ message RequestStep {
   repeated TrackFrames inputs = 3;
 }
 
-// Notification that a step was accepted and is generating. Sent with the
-// request_id of its RequestStep, before the StepResult. A refused step never
-// gets one.
-message StepAccepted {
-  // The step's number in the session, counted from 1.
-  uint64 index = 1;
+// A file the model kept with a step, beside its media. The bytes are not in
+// the message: the step's result is saved with the file, and a client reads it
+// from the step results of the session, by the step's index and the file's
+// name.
+message StepFileRef {
+  // The file's name, one path segment.
+  string name = 1;
+  // The file's media type, guessed from its name.
+  string content_type = 2;
+  // The file's size in bytes.
+  uint64 size = 3;
 }
 
-// The outcome of one step: what the model produced, per output track.
+// The outcome of one step: what the model produced, per output track. The
+// response to a RequestStep.
 message StepResult {
   // The step's number in the session, counted from 1.
   uint64 index = 1;
@@ -70,4 +78,11 @@ message StepResult {
   // Seconds the step's generate() took, or the time the model reported for the
   // step.
   double elapsed = 3;
+  // The extra files the model kept with the step. Empty when the step kept
+  // none, or when its result is not saved.
+  repeated StepFileRef files = 4;
+  // Why the step failed, when it ran and reported a failure; unset when it
+  // worked. A step the request or the model refuses never runs, so it is
+  // answered with an Error and gets no result.
+  optional string error = 5;
 }

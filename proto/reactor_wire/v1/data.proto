@@ -20,14 +20,13 @@ message DataClientMessage {
 }
 
 // Data channel, runtime to client. Carries the model's own emitted messages
-// and, in a stepped session, the step replies.
+// and, in a stepped session, the step results.
 message DataServerMessage {
   string request_id = 1;
   MessageKind kind = 2;
   oneof payload {
     ModelMessage message = 10;
-    StepAccepted step_accepted = 11;
-    StepResult step_result = 12;
+    StepResult step_result = 11;
     Error error = 40;
   }
 }
