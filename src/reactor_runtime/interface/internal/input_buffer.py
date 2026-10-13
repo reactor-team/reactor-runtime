@@ -49,10 +49,6 @@ class _Entry(NamedTuple):
     """The connection that sent the frame, or ``None``."""
 
 
-BufferSnapshot = tuple[tuple[_Entry, ...], int]
-"""What :meth:`InputBuffer.snapshot` returns and :meth:`InputBuffer.restore` takes."""
-
-
 class InputBuffer:
     """A bounded, thread-safe frame buffer for one inbound track.
 
@@ -267,20 +263,6 @@ class InputBuffer:
             self._samples = sum(_sample_count(entry.frame) for entry in self._buffer)
             self._read_waits.clear()
             self._total_received = len(self._buffer)
-
-    def snapshot(self) -> BufferSnapshot:
-        """Return the buffered frames and the received count, for :meth:`restore`."""
-        with self._lock:
-            return tuple(self._buffer), self._total_received
-
-    def restore(self, snapshot: BufferSnapshot) -> None:
-        """Put back the frames and the received count a :meth:`snapshot` returned."""
-        entries, total_received = snapshot
-        with self._condition:
-            self._buffer.clear()
-            self._buffer.extend(entries)
-            self._samples = sum(_sample_count(entry.frame) for entry in self._buffer)
-            self._total_received = total_received
 
     def push(self, frame: InputFrame, source: ConnId | None = None, session: int = 0) -> int:
         """Append a frame from the runtime thread, waking a blocked reader.

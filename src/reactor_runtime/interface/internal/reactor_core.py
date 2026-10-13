@@ -291,18 +291,18 @@ class CommandTimes:
 
 @dataclass(frozen=True)
 class StepEnvelope:
-    """A client's request for one step of a stepped session, validated.
+    """A client's request for one step of a stepped session, decoded.
+
+    The request's state values and commands reach the model as ordinary
+    commands, posted ahead of it.
 
     Attributes:
-        commands: The validated commands to apply before the step, in order:
-            the state's setters first, then the request's own commands.
         inputs: The frames to write to each input track before the step, by
             track name, in the order the client sent them.
         conn_id: The connection that asked for the step.
         request_id: The request id every reply to the step carries.
     """
 
-    commands: tuple[Command, ...]
     inputs: Mapping[str, tuple[InputFrame, ...]]
     conn_id: ConnId
     request_id: RequestId
