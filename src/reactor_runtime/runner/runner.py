@@ -1617,7 +1617,8 @@ class Runner(ServiceComponent, ConnectionSink):
 
         The result is the report's media, one entry per output track, so what
         the client receives is what the step reported and what a saved step
-        keeps. It goes out as one message. A result larger than the connection
+        keeps, with the seconds its ``generate()`` took (or what the model
+        reported). It goes out as one message. A result larger than the connection
         negotiated is not sent: the client is answered ``step_result_too_large``
         and the session goes on. Media that cannot be carried as frames answers
         ``internal_error``.
@@ -1625,7 +1626,11 @@ class Runner(ServiceComponent, ConnectionSink):
         request = step.request
         assert request is not None
         try:
-            result = step_pb2.StepResult(index=index, tracks=track_frames(step.bundle))
+            # The default loop, the only one a stepped session runs, always
+            # measures the step, so a missing time does not happen in practice.
+            result = step_pb2.StepResult(
+                index=index, tracks=track_frames(step.bundle), elapsed=step.elapsed or 0.0
+            )
         except FrameEncodingError as error:
             logger.error("a step's output could not be encoded", step=index, error=str(error))
             self._connections.send_step_reply(

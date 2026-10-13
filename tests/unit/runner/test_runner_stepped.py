@@ -759,6 +759,7 @@ async def test_the_step_result_carries_the_steps_media_per_output_track(runner: 
         [2, 2, 3],
     )
     assert frame.data == bytes(12)
+    assert result.elapsed > 0
 
 
 async def test_a_result_too_large_for_the_connection_is_refused_and_the_session_goes_on(
