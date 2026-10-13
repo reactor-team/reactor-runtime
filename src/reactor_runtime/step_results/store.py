@@ -67,7 +67,7 @@ class SavedStep:
         step: The step's number within the session.
         files: The names of the files in the folder beside ``result.json``.
         usage: The measured facts of each video track the folder holds, as
-            ``result.json`` lists them.
+            ``result.json`` lists them. Empty when it holds no video.
         generate_s: The time the step took to generate, as ``result.json``
             records it, or ``None`` when the model did not measure it.
     """
@@ -75,8 +75,8 @@ class SavedStep:
     session_id: str
     step: int
     files: tuple[str, ...]
-    usage: tuple[VideoUsage, ...]
-    generate_s: float | None
+    usage: tuple[VideoUsage, ...] = ()
+    generate_s: float | None = None
 
 
 @dataclass(frozen=True)

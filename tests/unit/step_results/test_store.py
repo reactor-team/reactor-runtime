@@ -141,6 +141,12 @@ def test_a_step_is_saved_as_a_folder_with_its_output_files_and_result(
         assert container.streams.video[0].average_rate == 12
 
 
+def test_a_saved_step_built_from_its_folder_alone_has_no_usage() -> None:
+    saved_step = SavedStep(session_id=_SESSION, step=1, files=("note.txt",))
+
+    assert (saved_step.usage, saved_step.generate_s) == ((), None)
+
+
 def test_result_json_is_written_after_every_other_file(
     make_store: Callable[..., StepStore], saved: _Saved, monkeypatch: pytest.MonkeyPatch
 ) -> None:
