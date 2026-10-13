@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncGenerator, Callable, Iterator
-from typing import Annotated, Any, BinaryIO
+from typing import Annotated, Any, BinaryIO, Literal
 
 from fastapi import Body, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
@@ -360,6 +360,19 @@ class StepFile(BaseModel):
     size: int = Field(description="Size in bytes.")
 
 
+class StepVideoUsage(BaseModel):
+    """The measured facts of one video track the step wrote, as the file holds it."""
+
+    kind: Literal["video"]
+    track: str = Field(description="The output track the stream holds.")
+    file: str = Field(description="The file the stream is in.")
+    duration_s: float = Field(description="How long the stream plays, in seconds.")
+    frames: int = Field(description="How many frames the stream holds.")
+    fps: float = Field(description="The rate the stream plays at, in frames per second.")
+    width: int = Field(description="The stream's width in pixels.")
+    height: int = Field(description="The stream's height in pixels.")
+
+
 class StepMessage(BaseModel):
     """A message the model broadcast during the step, in its wire form."""
 
@@ -380,6 +393,9 @@ class StepResult(BaseModel):
     step: int
     session_id: str
     files: list[StepFile] = Field(description="The files beside result.json.")
+    usage: list[StepVideoUsage] = Field(
+        description="One entry per video track the step wrote; empty when it wrote none."
+    )
     messages: list[StepMessage] = Field(
         description="The messages the model broadcast since the step before."
     )

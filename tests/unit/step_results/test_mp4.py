@@ -13,7 +13,7 @@ from reactor_runtime.core import (
     TrackInfo,
     TrackKind,
 )
-from reactor_runtime.step_results import write_mp4
+from reactor_runtime.step_results import VideoUsage, write_mp4
 
 _CONFIG = StepResultsConfig(enabled=True)
 
@@ -71,10 +71,22 @@ def _decoded(path: Path) -> list[dict[str, Any]]:
 def test_a_video_and_an_audio_track_become_two_streams(tmp_path: Path) -> None:
     path = tmp_path / "output.mp4"
     samples = np.zeros((1, 24_000), dtype=np.int16)
-    write_mp4(
+    usage = write_mp4(
         path, _bundle(_video("main_video", _frames(10)), _audio("main_audio", samples)), 24, _CONFIG
     )
 
+    # The audio stream is in the file but has no entry.
+    assert usage == (
+        VideoUsage(
+            track="main_video",
+            file="output.mp4",
+            duration_s=10 / 24,
+            frames=10,
+            fps=24.0,
+            width=64,
+            height=48,
+        ),
+    )
     video, audio = _decoded(path)
     assert video["type"] == "video"
     assert video["codec"] == "h264"
@@ -117,35 +129,44 @@ def test_each_video_track_is_its_own_stream_at_its_own_size(tmp_path: Path) -> N
         _video("main_video", _frames(4, 48, 64)),
         _video("depth", _frames(2, 32, 32)),
     )
-    write_mp4(path, bundle, 24, _CONFIG)
+    usage = write_mp4(path, bundle, 24, _CONFIG)
 
     main, depth = _decoded(path)
     assert (main["frames"], main["size"]) == (4, (64, 48))
     assert (depth["frames"], depth["size"]) == (2, (32, 32))
+    assert [(entry.track, entry.frames, entry.width, entry.height) for entry in usage] == [
+        ("main_video", 4, 64, 48),
+        ("depth", 2, 32, 32),
+    ]
 
 
 def test_a_single_frame_payload_is_one_frame(tmp_path: Path) -> None:
     path = tmp_path / "output.mp4"
-    write_mp4(path, _bundle(_video("main_video", _frames(1)[0])), 24, _CONFIG)
+    (entry,) = write_mp4(path, _bundle(_video("main_video", _frames(1)[0])), 24, _CONFIG)
 
     (video,) = _decoded(path)
     assert video["frames"] == 1
+    assert (entry.frames, entry.duration_s) == (1, 1 / 24)
 
 
 def test_an_odd_frame_size_is_padded_to_even(tmp_path: Path) -> None:
     path = tmp_path / "output.mp4"
-    write_mp4(path, _bundle(_video("main_video", _frames(2, 21, 33))), 24, _CONFIG)
+    (entry,) = write_mp4(path, _bundle(_video("main_video", _frames(2, 21, 33))), 24, _CONFIG)
 
     (video,) = _decoded(path)
     assert video["size"] == (34, 22)
+    assert (entry.width, entry.height) == (34, 22)
 
 
 def test_a_fractional_frame_rate_is_kept(tmp_path: Path) -> None:
     path = tmp_path / "output.mp4"
-    write_mp4(path, _bundle(_video("main_video", _frames(3))), 30000 / 1001, _CONFIG)
+    (entry,) = write_mp4(path, _bundle(_video("main_video", _frames(3))), 30000 / 1001, _CONFIG)
 
     (video,) = _decoded(path)
     assert float(video["rate"]) == pytest.approx(29.97, abs=0.01)
+    # The entry reports the rate the stream holds, not the float it was given.
+    assert entry.fps == float(video["rate"])
+    assert entry.duration_s == pytest.approx(3 * 1001 / 30000)
 
 
 def test_h265_is_used_when_configured(tmp_path: Path) -> None:

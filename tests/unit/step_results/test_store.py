@@ -17,7 +17,7 @@ from reactor_runtime.core import (
     TrackInfo,
     TrackKind,
 )
-from reactor_runtime.step_results import SavedStep, StepStore
+from reactor_runtime.step_results import SavedStep, StepStore, VideoUsage
 from reactor_runtime.step_results import store as store_module
 
 _SESSION = "7d9f5c1e-0000-4000-8000-000000000042"
@@ -103,6 +103,18 @@ def test_a_step_is_saved_as_a_folder_with_its_output_files_and_result(
         ("prompt.txt", "text/plain"),
     ]
     assert result["files"][1]["size"] == len(b"a red door")
+    assert result["usage"] == [
+        {
+            "kind": "video",
+            "track": "main_video",
+            "file": "output.mp4",
+            "duration_s": 0.25,
+            "frames": 3,
+            "fps": 12.0,
+            "width": 32,
+            "height": 32,
+        }
+    ]
     assert result["messages"] == messages
     assert result["error"] is None
     assert result["save_error"] is None
@@ -120,9 +132,9 @@ def test_result_json_is_written_after_every_other_file(
     seen_before_output: list[bool] = []
     real_write = store_module.write_mp4
 
-    def write_and_look(path: Path, *args: Any) -> None:
+    def write_and_look(path: Path, *args: Any) -> tuple[VideoUsage, ...]:
         seen_before_output.append((path.parent / "result.json").exists())
-        real_write(path, *args)
+        return real_write(path, *args)
 
     monkeypatch.setattr(store_module, "write_mp4", write_and_look)
     store.admit(_SESSION, 1, CompletedStep(bundle=_bundle()))
@@ -142,6 +154,7 @@ def test_a_step_that_failed_keeps_only_its_result(
     assert _folder(store, 1) == {"result.json"}
     result = _result(store, 1)
     assert result["files"] == []
+    assert result["usage"] == []
     assert result["error"] == "ApplicationError: no seed image"
 
 
@@ -154,6 +167,7 @@ def test_a_step_that_produced_nothing_is_still_saved(
     assert saved.wait_for(1)[0].files == ()
     assert _folder(store, 1) == {"result.json"}
     assert _result(store, 1)["error"] is None
+    assert _result(store, 1)["usage"] == []
 
 
 def test_a_step_that_cannot_be_saved_keeps_its_result_with_the_reason(
@@ -171,6 +185,7 @@ def test_a_step_that_cannot_be_saved_keeps_its_result_with_the_reason(
     assert _folder(store, 1) == {"result.json"}
     result = _result(store, 1)
     assert result["files"] == []
+    assert result["usage"] == []
     assert result["save_error"] == "RuntimeError: encoder exploded"
 
 
@@ -181,10 +196,10 @@ def test_a_step_that_finds_the_queue_full_is_not_saved(
     release = threading.Event()
     real_write = store_module.write_mp4
 
-    def slow_write(path: Path, *args: Any) -> None:
+    def slow_write(path: Path, *args: Any) -> tuple[VideoUsage, ...]:
         encoding.set()
         assert release.wait(timeout=10.0)
-        real_write(path, *args)
+        return real_write(path, *args)
 
     monkeypatch.setattr(store_module, "write_mp4", slow_write)
     store = make_store(queue=1)
@@ -243,10 +258,10 @@ def test_close_abandons_saves_still_waiting_after_the_drain(
     release = threading.Event()
     real_write = store_module.write_mp4
 
-    def slow_write(path: Path, *args: Any) -> None:
+    def slow_write(path: Path, *args: Any) -> tuple[VideoUsage, ...]:
         encoding.set()
         assert release.wait(timeout=10.0)
-        real_write(path, *args)
+        return real_write(path, *args)
 
     monkeypatch.setattr(store_module, "write_mp4", slow_write)
     store = make_store()
@@ -309,6 +324,7 @@ def test_a_failed_step_keeps_only_its_result_whatever_its_report_carried(
     assert saved.wait_for(1)[0].files == ()
     assert _folder(store, 1) == {"result.json"}
     assert _result(store, 1)["error"] == "RuntimeError: oom"
+    assert _result(store, 1)["usage"] == []
 
 
 def test_a_reused_session_id_never_shows_a_step_while_it_is_rewritten(
@@ -322,10 +338,10 @@ def test_a_reused_session_id_never_shows_a_step_while_it_is_rewritten(
     release = threading.Event()
     real_write = store_module.write_mp4
 
-    def slow_write(path: Path, *args: Any) -> None:
+    def slow_write(path: Path, *args: Any) -> tuple[VideoUsage, ...]:
         encoding.set()
         assert release.wait(timeout=10.0)
-        real_write(path, *args)
+        return real_write(path, *args)
 
     monkeypatch.setattr(store_module, "write_mp4", slow_write)
     # A later session under the same id reaches its own step 1.

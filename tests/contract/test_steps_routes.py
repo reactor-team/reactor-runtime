@@ -82,6 +82,13 @@ async def test_each_saved_step_is_announced_and_served(tmp_path: Path) -> None:
         assert body["step"] == 1
         assert body["session_id"] == _SESSION_ID
         assert [entry["name"] for entry in body["files"]] == ["output.mp4", "note.txt"]
+        (usage,) = body["usage"]
+        assert set(usage) == {
+            "kind", "track", "file", "duration_s", "frames", "fps", "width", "height"
+        }  # fmt: skip
+        assert (usage["kind"], usage["track"], usage["file"]) == ("video", "frames", "output.mp4")
+        assert (usage["frames"], usage["width"], usage["height"]) == (2, 32, 32)
+        assert usage["fps"] > 0
         assert body["error"] is None
         assert body["save_error"] is None
         assert set(body["timings"]) == {"generate_s", "encode_s"}

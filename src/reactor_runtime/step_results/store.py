@@ -2,7 +2,8 @@
 
 A step result is everything one step produced, kept together under
 ``<root>/<session_id>/<step>/``: the step's output as one ``output.mp4``, the
-extra files the model kept with it, and ``result.json``, which lists them. The
+extra files the model kept with it, and ``result.json``, which lists them and
+the measured facts of each video track ``output.mp4`` holds. The
 store writes ``result.json`` last, so a folder that has one is complete, and a
 reader never sees a step that is half written.
 
@@ -34,6 +35,7 @@ from typing import Any
 from reactor_runtime.core import CompletedStep, StepResultsConfig
 from reactor_runtime.log import get_logger
 from reactor_runtime.step_results.mp4 import write_mp4
+from reactor_runtime.step_results.usage import VideoUsage
 
 logger = get_logger(__name__)
 
@@ -329,6 +331,8 @@ class StepStore:
         whatever its report carried. A step that cannot be encoded or written
         still gets its ``result.json``, holding the reason in ``save_error``
         and no files, so an admitted step always ends in a complete folder.
+        ``usage`` describes only the video the folder holds, so it is empty
+        for a step that failed, produced no output, or could not be saved.
         """
         assert self._root is not None
         session_dir = self._root / pending.session_id
@@ -338,11 +342,12 @@ class StepStore:
         completed = pending.completed
         started = time.perf_counter()
         files: list[dict[str, Any]] = []
+        usage: tuple[VideoUsage, ...] = ()
         save_error: str | None = None
         try:
             if completed.error is None and completed.bundle is not None and completed.bundle.tracks:
                 path = step_dir / OUTPUT_FILE
-                write_mp4(path, completed.bundle, completed.fps, self._config)
+                usage = write_mp4(path, completed.bundle, completed.fps, self._config)
                 files.append(_file_entry(path))
             for name, data in completed.files.items() if completed.error is None else ():
                 path = step_dir / name
@@ -358,10 +363,12 @@ class StepStore:
             for name in (OUTPUT_FILE, *completed.files):
                 (step_dir / name).unlink(missing_ok=True)
             files = []
+            usage = ()
         result = {
             "step": pending.step,
             "session_id": pending.session_id,
             "files": files,
+            "usage": [entry.to_dict() for entry in usage],
             "messages": list(pending.messages),
             "error": completed.error,
             "save_error": save_error,

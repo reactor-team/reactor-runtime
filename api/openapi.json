@@ -482,12 +482,21 @@
           },
           "timings": {
             "$ref": "#/components/schemas/StepTimings"
+          },
+          "usage": {
+            "description": "One entry per video track the step wrote; empty when it wrote none.",
+            "items": {
+              "$ref": "#/components/schemas/StepVideoUsage"
+            },
+            "title": "Usage",
+            "type": "array"
           }
         },
         "required": [
           "step",
           "session_id",
           "files",
+          "usage",
           "messages",
           "error",
           "save_error",
@@ -522,6 +531,63 @@
           "encode_s"
         ],
         "title": "StepTimings",
+        "type": "object"
+      },
+      "StepVideoUsage": {
+        "description": "The measured facts of one video track the step wrote, as the file holds it.",
+        "properties": {
+          "duration_s": {
+            "description": "How long the stream plays, in seconds.",
+            "title": "Duration S",
+            "type": "number"
+          },
+          "file": {
+            "description": "The file the stream is in.",
+            "title": "File",
+            "type": "string"
+          },
+          "fps": {
+            "description": "The rate the stream plays at, in frames per second.",
+            "title": "Fps",
+            "type": "number"
+          },
+          "frames": {
+            "description": "How many frames the stream holds.",
+            "title": "Frames",
+            "type": "integer"
+          },
+          "height": {
+            "description": "The stream's height in pixels.",
+            "title": "Height",
+            "type": "integer"
+          },
+          "kind": {
+            "const": "video",
+            "title": "Kind",
+            "type": "string"
+          },
+          "track": {
+            "description": "The output track the stream holds.",
+            "title": "Track",
+            "type": "string"
+          },
+          "width": {
+            "description": "The stream's width in pixels.",
+            "title": "Width",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "track",
+          "file",
+          "duration_s",
+          "frames",
+          "fps",
+          "width",
+          "height"
+        ],
+        "title": "StepVideoUsage",
         "type": "object"
       },
       "StopSessionRequest": {
