@@ -823,13 +823,18 @@ class Runner(ServiceComponent, ConnectionSink):
         """Journal a step-result-ready fact as a self-loop move on the session machine.
 
         The detail names the session, because a folder can finish after its
-        session has ended.
+        session has ended. It also carries what the folder's ``result.json``
+        records about the step: the measured facts of each video track, and
+        the time the step took to generate, so a consumer has them without
+        reading the folder.
         """
         self._sm.send(
             SessionEvent.STEP_RESULT_READY,
             session_id=saved.session_id,
             step=saved.step,
             files=list(saved.files),
+            usage=[entry.to_dict() for entry in saved.usage],
+            generate_s=saved.generate_s,
         )
 
     def _on_model_failure(self, error: BaseException) -> None:

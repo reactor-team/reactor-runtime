@@ -1743,9 +1743,60 @@ async def test_a_saved_step_is_journalled_saved_then_ready(saving_runner: Runner
 
     assert _step_facts(saving_runner) == [{"step": 1, "saved": True, "error": None}]
     assert await _saved_facts(saving_runner, 1) == [
-        {"session_id": _SAVING_SESSION_ID, "step": 1, "files": []}
+        {
+            "session_id": _SAVING_SESSION_ID,
+            "step": 1,
+            "files": [],
+            "usage": [],
+            "generate_s": None,
+        }
     ]
     assert _saved_result(saving_runner, 1)["step"] == 1
+
+
+async def test_a_saved_step_announces_what_its_result_records(saving_runner: Runner) -> None:
+    saving_runner.start_session({"session_id": _SAVING_SESSION_ID})
+    saving_runner._record_step(
+        CompletedStep(
+            bundle=_video_bundle(), elapsed=1.5, fps=24.0, session=saving_runner._sessions_posted
+        )
+    )
+
+    (fact,) = await _saved_facts(saving_runner, 1)
+    result = _saved_result(saving_runner, 1)
+    assert fact["files"] == ["output.mp4"]
+    assert (
+        fact["usage"]
+        == result["usage"]
+        == [
+            {
+                "kind": "video",
+                "track": "main",
+                "file": "output.mp4",
+                "duration_s": 1 / 24,
+                "frames": 1,
+                "fps": 24.0,
+                "width": 2,
+                "height": 2,
+            }
+        ]
+    )
+    assert fact["generate_s"] == result["timings"]["generate_s"] == 1.5
+
+
+async def test_a_failed_step_announces_no_usage(saving_runner: Runner) -> None:
+    saving_runner.start_session({"session_id": _SAVING_SESSION_ID})
+    saving_runner._record_step(
+        CompletedStep(
+            bundle=None,
+            error="RuntimeError: out of memory",
+            elapsed=0.5,
+            session=saving_runner._sessions_posted,
+        )
+    )
+
+    (fact,) = await _saved_facts(saving_runner, 1)
+    assert (fact["files"], fact["usage"], fact["generate_s"]) == ([], [], 0.5)
 
 
 async def test_a_saved_step_keeps_the_messages_broadcast_since_the_step_before(
