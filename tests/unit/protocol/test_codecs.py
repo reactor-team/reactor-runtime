@@ -440,6 +440,9 @@ def test_every_payload_variant_is_covered() -> None:
         ("DataServerMessage", "error"),
         ("ControlClientMessage", "error"),
         ("ControlClientMessage", "client_stats"),
+        # Stepped generation is v1-only: no legacy client ever requested a step.
+        ("DataClientMessage", "request_step"),
+        ("DataServerMessage", "step_result"),
     }
     message_types: list[Any] = [
         data_pb2.DataClientMessage,
