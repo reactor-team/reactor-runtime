@@ -60,7 +60,7 @@ from reactor_runtime.core import (
 )
 from reactor_runtime.event_stream import EventStream
 from reactor_runtime.interface.events.messages import ModelMessage
-from reactor_runtime.interface.internal.bridge import ModelBridge
+from reactor_runtime.interface.internal.bridge import CommandOutcome, ModelBridge
 from reactor_runtime.interface.internal.reactor_core import MediaOps
 from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.log import get_logger, set_session_id, set_state
@@ -191,6 +191,15 @@ _WIRE_TRACK_KINDS = {
 
 class _StepInputError(ValueError):
     """A step request's input frames cannot be written to the model's tracks."""
+
+
+def _refused(key: str, outcome: CommandOutcome) -> str:
+    """Return why the command written under *key* failed the contract."""
+    reason = str(outcome.reason)
+    # A constraint's reason already opens with the field it names.
+    if not reason.startswith(f"{outcome.field}:"):
+        reason = f"{outcome.field}: {reason}"
+    return f"{key} is refused: {reason}"
 
 
 def _server_version() -> str:
@@ -1067,11 +1076,7 @@ class Runner(ServiceComponent, ConnectionSink):
         for key, name, args in checks:
             outcome = self._bridge.check_command(name, args)
             if not outcome.accepted:
-                reason = str(outcome.reason)
-                # A constraint's reason already opens with the field it names.
-                if not reason.startswith(f"{outcome.field}:"):
-                    reason = f"{outcome.field}: {reason}"
-                return f"{key} is refused: {reason}"
+                return _refused(key, outcome)
         return None
 
     def stop_session(self, *, moderated: bool = False, reason: str = "") -> None:
@@ -1402,17 +1407,24 @@ class Runner(ServiceComponent, ConnectionSink):
     async def _submit_step(
         self, step: InboundStep, *, upload_wait: float = _UPLOAD_RESOLVE_TIMEOUT_SECONDS
     ) -> None:
-        """Check a step request whole and hand it to the model, or refuse it.
+        """Hand a step request to the model as plain calls, then its step, or refuse it.
 
-        The request is refused, with nothing reaching the model, when the
-        session does not step, when a command references an upload that does
-        not arrive, when any command fails the contract, or when an input frame
-        names a track the model does not take or cannot be decoded. A refusal
-        answers with ``step_refused``. An admitted step reaches the model after
-        every command admitted before it; a request whose commands reference no
-        upload is admitted without waiting, so it keeps its place among the
-        commands sent around it. Each of its commands is journalled as a
-        client's command is.
+        Each ``state`` key becomes the model's ``set_<key>`` command, then each
+        of the request's commands follows, in order. Each is submitted as a
+        client's own command is: its uploads resolved, whether referenced in
+        its ``uploads`` map or inline in an argument (a ``state`` value of an
+        upload-typed field carries its file as an inline ``{"upload_id": ...}``
+        reference), checked against the contract, and journalled. A handler
+        that fails is answered as a standalone command is, and the step still
+        runs. The request's frames are then decoded and the step is submitted
+        behind its commands.
+
+        The request is refused with ``step_refused``, naming the entry, when
+        the session does not step, when an entry's upload does not arrive or
+        it fails the contract, or when an input frame names a track the model
+        does not take or cannot be decoded. The entries submitted before the
+        refused one stay applied. A request with no entries and no frames runs
+        a step on the model's current state.
         """
         if self._bridge is None:
             return
@@ -1433,34 +1445,27 @@ class Runner(ServiceComponent, ConnectionSink):
             (f"commands[{index}]", command.name, dict(command.args), dict(command.uploads))
             for index, command in enumerate(step.commands)
         ]
-        resolved: list[tuple[str, dict[str, Any]]] = []
         for key, name, args, uploads in entries:
             try:
-                resolved.append(
-                    (name, await self._resolve_command_uploads(name, args, uploads, upload_wait))
-                )
+                resolved = await self._resolve_command_uploads(name, args, uploads, upload_wait)
             except UnknownUploadError:
                 self._refuse_step(
                     step.conn_id, step.request_id, f"{key} references an unresolved upload"
                 )
                 return
-        refusal = self._first_refusal([(key, name, args) for key, name, args, _ in entries])
-        if refusal is None:
-            try:
-                inputs = self._decode_step_inputs(step.inputs)
-            except _StepInputError as error:
-                refusal = str(error)
-        if refusal is not None:
-            self._refuse_step(step.conn_id, step.request_id, refusal)
-            return
-        outcome = self._bridge.submit_step(
-            resolved, inputs, conn_id=step.conn_id, request_id=step.request_id
-        )
-        if not outcome.accepted:
-            self._refuse_step(step.conn_id, step.request_id, f"{outcome.field}: {outcome.reason}")
-            return
-        for _, name, args, _ in entries:
+            outcome = await self._bridge.submit_command(
+                name, resolved, conn_id=step.conn_id, request_id=None
+            )
+            if not outcome.accepted:
+                self._refuse_step(step.conn_id, step.request_id, _refused(key, outcome))
+                return
             self._sm.send(SessionEvent.COMMAND, name=name, args=args, conn_id=step.conn_id)
+        try:
+            inputs = self._decode_step_inputs(step.inputs)
+        except _StepInputError as error:
+            self._refuse_step(step.conn_id, step.request_id, str(error))
+            return
+        self._bridge.submit_step(inputs, conn_id=step.conn_id, request_id=step.request_id)
 
     def _decode_step_inputs(
         self, inputs: tuple[step_pb2.TrackFrames, ...]
@@ -1514,8 +1519,8 @@ class Runner(ServiceComponent, ConnectionSink):
         """Answer a step request the model refused with ``step_refused``.
 
         Called on the model's thread and sent from it, so the refusal goes out
-        behind any message the model sent while it applied the request's
-        commands. A refusal from an earlier session is dropped.
+        behind any reply to the commands the model handled before the step. A
+        refusal from an earlier session is dropped.
         """
         if refusal.session != self._sessions_posted:
             return

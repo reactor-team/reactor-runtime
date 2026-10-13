@@ -105,7 +105,7 @@ class ModelBridge:
         raw_args: dict[str, Any],
         *,
         conn_id: ConnId | None,
-        request_id: RequestId,
+        request_id: RequestId | None,
     ) -> CommandOutcome:
         """Validate a client command against the contract and admit it.
 
@@ -117,7 +117,8 @@ class ModelBridge:
             name: The command name from the wire.
             raw_args: The raw argument mapping from the wire.
             conn_id: The connection that sent it, when known.
-            request_id: The request id to correlate a reply against.
+            request_id: The request id to correlate a reply against, or ``None``
+                for a command no reply answers, such as one a step request carries.
 
         Returns:
             An accepted outcome when the command was valid and enqueued, else a
@@ -153,44 +154,28 @@ class ModelBridge:
 
     def submit_step(
         self,
-        commands: Sequence[tuple[str, dict[str, Any]]],
         inputs: Mapping[str, Sequence[InputFrame]],
         *,
         conn_id: ConnId,
         request_id: RequestId,
-    ) -> CommandOutcome:
-        """Validate a step request's commands against the contract and admit the step.
+    ) -> None:
+        """Admit a step whose state values and commands were submitted ahead of it.
 
-        The step is admitted whole or not at all: when any command fails the
-        contract, nothing is enqueued and the model never sees the request.
-        An admitted step reaches the model after every command admitted before
-        it, and the model applies its commands and frames and runs it as one
-        unit.
+        The step reaches the model after every command submitted before it;
+        the model writes *inputs* to its input tracks and runs the step.
 
         Args:
-            commands: The ``(name, arguments)`` of each command to apply before
-                the step, in order.
             inputs: The decoded frames to write to each input track, by name.
             conn_id: The connection that asked for the step.
-            request_id: The request id every reply to the step carries.
-
-        Returns:
-            An accepted outcome when every command was valid and the step was
-            enqueued, else a rejected one carrying the first failing field.
+            request_id: The request id the step's response carries.
         """
-        try:
-            validated = tuple(self._contract.validate(name, args) for name, args in commands)
-        except ContractError as error:
-            return CommandOutcome.reject(error.field, error.reason)
         self._model.submit_step(
             StepEnvelope(
-                commands=validated,
                 inputs={track: tuple(frames) for track, frames in inputs.items()},
                 conn_id=conn_id,
                 request_id=request_id,
             )
         )
-        return CommandOutcome.accept()
 
     # -- inbound: reactor-authoritative, trusted --------------------------
 

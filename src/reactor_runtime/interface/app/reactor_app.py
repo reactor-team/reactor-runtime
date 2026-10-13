@@ -39,13 +39,12 @@ emits the media the step produced and reports the step with
 stays, the three hooks are never called for that class, and the loop calls
 :meth:`complete_step` itself when it finishes a unit of work.
 
-A stepped session drives the same loop one step per client request. The request
-waits in the inbound queue behind every command sent before it; when it reaches
-the front it is handled as one unit, with nothing else dispatched in between:
-its commands are applied, its frames written to the input tracks, and the three
-hooks run once. A step ``process_input()`` refuses is undone: ``self.state`` and
-the input tracks go back to what they were before the request. Nothing is
-emitted in a stepped session; the step's report is its result.
+A stepped session drives the same loop one step per client request. The
+request's state values and commands reach the model as ordinary commands ahead
+of it; when the request reaches the front of the inbound queue, its frames are
+written to the input tracks and the three hooks run once, with nothing else
+dispatched in between. Nothing is emitted in a stepped session; the step's
+report is its result.
 """
 
 from __future__ import annotations
@@ -67,13 +66,7 @@ from reactor_runtime.core.model import (
     SessionStarted,
     StartingInputApplied,
 )
-from reactor_runtime.core.values import (
-    CommandFailure,
-    ConnId,
-    InputFrame,
-    RequestedStep,
-    StepRefusal,
-)
+from reactor_runtime.core.values import CommandFailure, ConnId, RequestedStep, StepRefusal
 from reactor_runtime.interface.app.input_state import InputState
 from reactor_runtime.interface.app.outcome import StepOutcome
 from reactor_runtime.interface.app.step_completed import StepCompleted
@@ -195,8 +188,8 @@ class ReactorApp(ReactorCore):
         return the step input ``generate()`` receives. Raise
         :class:`ApplicationError` with the reason to refuse the step; the model
         is not called and the loop asks again. In a stepped session the reason
-        answers the client's request, and the request's state and frames are
-        undone.
+        answers the client's request; the state and frames the request set stay
+        as they are.
 
         Runs under the step lock. Does not call the model, ``emit()``,
         ``send()``, or ``flush()``.
@@ -292,10 +285,10 @@ class ReactorApp(ReactorCore):
         request, so a paused application does not spin a core.
 
         In a stepped session the loop takes a step only when a client requests
-        one, and runs it as one unit: the request's commands, then its input
-        frames, then the three hooks. Nothing is emitted; the step's report
-        carries its media to the client that asked. A refused step is answered
-        with its reason and is not reported.
+        one: it writes the request's input frames, then runs the three hooks.
+        Nothing is emitted; the step's report carries its media to the client
+        that asked. A refused step is answered with its reason and is not
+        reported.
 
         Playout is paced from the measured ``generate()`` time unless the author
         declares ``fps`` on the class. Whether ``fps`` is pinned is read when
@@ -436,25 +429,16 @@ class ReactorApp(ReactorCore):
             posted.cancel()
 
     async def _run_requested_step(self, request: StepEnvelope) -> None:
-        """Apply a step request and run its step, as one unit under the step lock.
+        """Write a step request's frames and run its step, under the step lock.
 
-        The request's commands run first, in order, then its frames are written
-        to their input tracks, then ``process_input()`` decides. A command whose
-        handler fails, or an :class:`ApplicationError` from ``process_input()``,
-        refuses the step: ``self.state`` and the input tracks are put back as
-        they were before the request, and the client is told why. Anything
-        else a handler changed is the handler's to undo. An accepted step takes
-        the next number in the session, and is reported with it once
+        The frames go to their input tracks, then ``process_input()`` decides.
+        An :class:`ApplicationError` from it refuses the step and the client is
+        told why; the frames stay buffered. An accepted step takes the next
+        number in the session, and is reported with it once
         ``process_output()`` returns, with the request it answers.
         """
         async with self._step_lock:
             session = self._sessions_started
-            saved = self._save_step_inputs()
-            failure = await self._apply_step_commands(request)
-            if failure is not None:
-                self._restore_step_inputs(saved)
-                self._refuse_step(request, session, failure)
-                return
             for track, frames in request.inputs.items():
                 buffer = self._input_buffers.get(track)
                 if buffer is not None:
@@ -463,7 +447,6 @@ class ReactorApp(ReactorCore):
             try:
                 input = await self.process_input()
             except ApplicationError as refused:
-                self._restore_step_inputs(saved)
                 self._refuse_step(request, session, str(refused) or type(refused).__name__)
                 return
             self._steps_accepted += 1
@@ -471,44 +454,6 @@ class ReactorApp(ReactorCore):
             outcome = self._generate(input)
             returned = await self.process_output(outcome)
         self._report_step(_step_report(returned, outcome), session, request=accepted)
-
-    async def _apply_step_commands(self, request: StepEnvelope) -> str | None:
-        """Run a step request's commands in order. Caller holds the step lock.
-
-        Returns:
-            Why the first failing command failed, or ``None`` when every one
-            ran. The commands after a failing one do not run.
-        """
-        for command in request.commands:
-            result = await self._call_handler(CommandEnvelope(command, request.conn_id, None))
-            if isinstance(result, CommandFailure):
-                return f"command {type(command).name!r} failed ({result.code}): {result.message}"
-            if isinstance(result, ModelMessage):
-                self._reply(request.conn_id, result, None)
-        return None
-
-    def _save_step_inputs(
-        self,
-    ) -> tuple[Any, dict[str, Any] | None, dict[str, tuple[tuple[InputFrame, ...], int]]]:
-        """Capture what a refused step puts back: the state and the input tracks."""
-        state = self.state if self.__app_state__ is not None else None
-        fields = dict(vars(state)) if state is not None else None
-        tracks = {name: buffer.snapshot() for name, buffer in self._input_buffers.items()}
-        return state, fields, tracks
-
-    def _restore_step_inputs(
-        self,
-        saved: tuple[Any, dict[str, Any] | None, dict[str, tuple[tuple[InputFrame, ...], int]]],
-    ) -> None:
-        """Put back what :meth:`_save_step_inputs` captured."""
-        state, fields, tracks = saved
-        if self.__app_state__ is not None:
-            self.state = state
-            if state is not None and fields is not None:
-                vars(state).clear()
-                vars(state).update(fields)
-        for name, snapshot in tracks.items():
-            self._input_buffers[name].restore(snapshot)
 
     def _refuse_step(self, request: StepEnvelope, session: int, reason: str) -> None:
         """Tell the client its step was refused, and why."""
@@ -545,7 +490,7 @@ class ReactorApp(ReactorCore):
         Commands, step requests, and reactor events are handled one at a time
         in the order they were posted, so a command never runs ahead of a
         session start or a client connection posted before it, and a step
-        request runs after every command sent before it. A handler or hook
+        request runs after every command posted before it. A handler or hook
         therefore must not wait for a later reactor event: that event is queued
         behind it.
         """
@@ -563,10 +508,9 @@ class ReactorApp(ReactorCore):
     async def _dispatch_step(self, request: StepEnvelope) -> None:
         """Hand a step request to the step loop and wait until the step is over.
 
-        Waiting here is what makes the request one unit: the queue is not
-        drained while the step runs, so no command, lifecycle hook, or later
-        request is dispatched between its commands, its frames, and its step.
-        A request that arrives outside a stepped session is refused at once.
+        The queue is not drained while the step runs, so no command, lifecycle
+        hook, or later request is dispatched between its frames and its step. A
+        request that arrives outside a stepped session is refused at once.
         """
         if not (self._session_active and self._stepped):
             self._refuse_step(request, self._sessions_started, "no stepped session is running")
@@ -603,29 +547,10 @@ class ReactorApp(ReactorCore):
 
     async def _run_command(self, envelope: CommandEnvelope) -> None:
         """Call the handler and answer the sender. Caller holds the step lock."""
-        result = await self._call_handler(envelope)
-        if isinstance(result, CommandFailure):
-            self._fail(envelope, result)
-            return
-        if envelope.conn_id is None:
-            return
-        if isinstance(result, ModelMessage):
-            self._reply(envelope.conn_id, result, envelope.request_id)
-        elif envelope.request_id is not None:
-            self._reply(envelope.conn_id, None, envelope.request_id)
-
-    async def _call_handler(self, envelope: CommandEnvelope) -> Any:
-        """Call a command's handler and return what it returned. Caller holds the step lock.
-
-        A handler that raises returns a :class:`CommandFailure` instead. A
-        :class:`CommandError` carries the author's own code and message. Any
-        other exception becomes ``internal_error`` and keeps its detail in the
-        log. A command the contract does not know returns ``None``.
-        """
         command = envelope.command
         spec = self.__reactor_contract__.commands.get(type(command).name)
         if spec is None:
-            return None
+            return
         kwargs: dict[str, Any] = {
             name: getattr(command, name) for name in type(command).__command_fields__
         }
@@ -633,18 +558,30 @@ class ReactorApp(ReactorCore):
             kwargs[name] = self._reserved(name, envelope.conn_id)
         try:
             if spec.is_async:
-                return await spec.handler(self, **kwargs)
-            return spec.handler(self, **kwargs)
+                result = await spec.handler(self, **kwargs)
+            else:
+                result = spec.handler(self, **kwargs)
         except CommandError as exc:
             logger.warning(
                 "command handler reported a failure",
                 command=spec.name,
                 code=exc.code,
             )
-            return CommandFailure(exc.code, exc.message)
+            self._fail(envelope, CommandFailure(exc.code, exc.message))
+            return
         except Exception:
             logger.exception("error in command handler", command=spec.name)
-            return CommandFailure(INTERNAL_ERROR, "The handler raised an unexpected error.")
+            self._fail(
+                envelope,
+                CommandFailure(INTERNAL_ERROR, "The handler raised an unexpected error."),
+            )
+            return
+        if envelope.conn_id is None:
+            return
+        if isinstance(result, ModelMessage):
+            self._reply(envelope.conn_id, result, envelope.request_id)
+        elif envelope.request_id is not None:
+            self._reply(envelope.conn_id, None, envelope.request_id)
 
     # -- reactor-event dispatch -----------------------------------------------
 

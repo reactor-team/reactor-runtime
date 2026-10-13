@@ -110,10 +110,11 @@ class Harness:
         self.app = app
         self.refusals: list[StepRefusal] = []
         self.reports: list[CompletedStep] = []
+        self.addressed: list[tuple[Any, ...]] = []
         app._on_loop_ready()
         app.bind_output(
             broadcast=lambda message: None,
-            addressed=lambda *args: None,
+            addressed=lambda *args: self.addressed.append(args),
             media=lambda chunk: None,
             step=self.reports.append,
             step_refusal=self.refusals.append,
@@ -143,6 +144,9 @@ class Harness:
         *commands: tuple[str, dict[str, Any]],
         frames: int = 0,
     ) -> None:
+        # The runtime posts a request's commands ahead of it, as a client's own.
+        for name, args in commands:
+            self.command(name, **args)
         inputs = {
             "webcam": tuple(
                 InputFrame(data=np.full((2, 2, 3), i, dtype=np.uint8)) for i in range(frames)
@@ -150,7 +154,6 @@ class Harness:
         }
         self.post(
             StepEnvelope(
-                commands=tuple(self._validate(name, args) for name, args in commands),
                 inputs=inputs if frames else {},
                 conn_id=CLIENT,
                 request_id=request_id,
@@ -189,7 +192,7 @@ async def test_a_stepped_session_runs_no_step_until_one_is_requested(harness: Ha
     assert harness.app.inputs == []
 
 
-async def test_a_requested_step_applies_its_commands_then_its_frames_then_runs_once(
+async def test_a_requested_step_writes_its_frames_then_runs_once_after_its_commands(
     harness: Harness,
 ) -> None:
     await harness.start()
@@ -212,7 +215,7 @@ async def test_steps_are_numbered_from_one_and_a_refused_step_takes_no_number(
     await harness.start()
     harness.step("r1")
     harness.step("r2", ("set_prompt", {"prompt": "refuse"}))
-    harness.step("r3")
+    harness.step("r3", ("set_prompt", {"prompt": "a lake"}))
     await harness.settle()
 
     assert harness.refusals == [StepRefusal(CLIENT, "r2", 1, "not now")]
@@ -222,7 +225,7 @@ async def test_steps_are_numbered_from_one_and_a_refused_step_takes_no_number(
     ]
 
 
-async def test_a_step_process_input_refuses_puts_the_state_and_frames_back(
+async def test_a_step_process_input_refuses_leaves_the_state_and_frames_it_was_given(
     harness: Harness,
 ) -> None:
     await harness.start()
@@ -230,13 +233,13 @@ async def test_a_step_process_input_refuses_puts_the_state_and_frames_back(
     await harness.settle()
 
     assert harness.refusals[0].reason == "not now"
-    assert harness.app.state.prompt == "a forest"
-    assert webcam(harness.app).available == 0
+    assert harness.app.state.prompt == "refuse"
+    assert webcam(harness.app).available == 2
     assert harness.reports == []
     assert harness.app.inputs == []
 
 
-async def test_a_failing_command_refuses_the_step_and_stops_the_commands_after_it(
+async def test_a_failing_command_is_answered_alone_and_the_step_still_runs(
     harness: Harness,
 ) -> None:
     await harness.start()
@@ -244,17 +247,25 @@ async def test_a_failing_command_refuses_the_step_and_stops_the_commands_after_i
         "r1",
         ("set_prompt", {"prompt": "a lake"}),
         ("reject", {}),
-        ("note", {"text": "never"}),
+        ("note", {"text": "after"}),
         frames=1,
     )
     await harness.settle()
 
-    [refusal] = harness.refusals
-    assert refusal.reason == "command 'reject' failed (rejected): not this one"
-    assert harness.app.state.prompt == "a forest"
-    assert harness.app.notes == []
-    assert webcam(harness.app).available == 0
-    assert harness.reports == []
+    assert harness.refusals == []
+    [(conn_id, failure, request_id)] = harness.addressed
+    assert (conn_id, failure.code, request_id) == (CLIENT, "rejected", None)
+    assert harness.app.inputs == [("a lake", ["after"], 1)]
+
+
+async def test_an_empty_request_runs_a_step_on_the_current_state(harness: Harness) -> None:
+    await harness.start()
+    harness.command("set_prompt", prompt="a lake")
+    harness.step("r1")
+    await harness.settle()
+
+    assert harness.app.inputs == [("a lake", [], 0)]
+    assert [r.request.index for r in harness.reports if r.request] == [1]
 
 
 async def test_a_step_runs_after_the_commands_sent_before_it_and_before_those_after(

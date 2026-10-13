@@ -17,6 +17,7 @@ from reactor_runtime import (
     Output,
     ReactorApp,
     ReadMode,
+    UploadedFile,
     Video,
     event,
     protocol,
@@ -35,6 +36,7 @@ from reactor_runtime.interface.internal.input_buffer import InputBuffer
 from reactor_runtime.protocol.common import dict_to_struct
 from reactor_runtime.runner.runner import Runner
 from reactor_runtime.runner.session_start import InvalidSessionStartError
+from reactor_runtime.upload_store import UnknownUploadError
 from reactor_wire.v1 import common_pb2, control_pb2, data_pb2, model_pb2, platform_pb2, step_pb2
 
 V1 = protocol.ProtocolVersion.V1
@@ -54,6 +56,7 @@ class Camera(MediaInput):
 
 class State(InputState):
     prompt: str = InputField(default="a forest", min_length=1)
+    image: UploadedFile = InputField(default=None)
 
 
 class StepModel(ReactorApp):
@@ -315,6 +318,59 @@ async def test_steps_are_numbered_from_one(runner: Runner) -> None:
     assert facts == [1, 2, 3]
 
 
+async def test_an_empty_request_runs_a_step_on_the_current_state(runner: Runner) -> None:
+    conn = await _stepped(runner)
+    _send(runner, conn, _request_step("r1"))
+    await _until(lambda: len(conn.sent) == 1)
+
+    [reply] = conn.replies()
+    assert (reply.request_id, reply.WhichOneof("payload")) == ("r1", "step_result")
+    assert reply.step_result.index == 1
+    assert models[-1].inputs == [("a forest", [], [])]
+
+
+async def test_a_standalone_command_before_an_empty_request_reaches_its_step(
+    runner: Runner,
+) -> None:
+    conn = await _stepped(runner)
+    _send(runner, conn, _command("c1", "set_prompt", prompt="a lake"))
+    _send(runner, conn, _request_step("r1"))
+    await _until(lambda: len(conn.sent) == 2)
+
+    assert models[-1].inputs == [("a lake", [], [])]
+    kinds = [(m.request_id, m.WhichOneof("payload")) for m in conn.replies()]
+    assert kinds == [("c1", None), ("r1", "step_result")]
+
+
+async def test_a_state_value_carries_a_file_by_inline_upload_reference(runner: Runner) -> None:
+    conn = await _stepped(runner)
+    upload_id = runner.uploads.create_slot("cat.png", "image/png", 3)
+    runner.uploads.put(upload_id, b"cat")
+    _send(runner, conn, _request_step("r1", state={"image": {"upload_id": upload_id}}))
+    await _until(lambda: len(conn.sent) == 1)
+
+    assert conn.replies()[0].WhichOneof("payload") == "step_result"
+    assert models[-1].state.image == UploadedFile(
+        name="cat.png", mime_type="image/png", data=b"cat"
+    )
+
+
+async def test_a_state_value_whose_upload_never_arrives_refuses_the_step(
+    runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = await _stepped(runner)
+
+    async def never_arrives(upload_id: str, wait_seconds: float = 0.0) -> UploadedFile:
+        raise UnknownUploadError(upload_id)
+
+    monkeypatch.setattr(runner._uploads, "fetch", never_arrives)
+    _send(runner, conn, _request_step("r1", state={"image": {"upload_id": "missing"}}))
+    await _until(lambda: len(conn.sent) == 1)
+
+    assert _refusal(conn.replies()[0]) == "state.image references an unresolved upload"
+    assert models[-1].inputs == []
+
+
 # -- refusals --------------------------------------------------------------------
 
 
@@ -325,12 +381,18 @@ def _refusal(message: data_pb2.DataServerMessage) -> str:
     return message.error.message
 
 
-async def test_a_step_with_an_invalid_command_is_refused_whole(runner: Runner) -> None:
+async def test_a_step_with_an_invalid_command_is_refused_and_keeps_what_came_before(
+    runner: Runner,
+) -> None:
     conn = await _stepped(runner)
     _send(
         runner,
         conn,
-        _request_step("r1", state={"prompt": "a lake"}, commands=[("note", {"text": 3})]),
+        _request_step(
+            "r1",
+            state={"prompt": "a lake"},
+            commands=[("note", {"text": 3}), ("note", {"text": "never"})],
+        ),
     )
     await _until(lambda: len(conn.sent) == 1)
     await asyncio.sleep(0.02)
@@ -339,7 +401,8 @@ async def test_a_step_with_an_invalid_command_is_refused_whole(runner: Runner) -
     assert reply.request_id == "r1"
     assert _refusal(reply).startswith("commands[0] is refused: text")
     model = models[-1]
-    assert model.state.prompt == "a forest"
+    assert model.state.prompt == "a lake"
+    assert model.notes == []
     assert model.inputs == []
 
 
@@ -379,9 +442,9 @@ async def test_a_step_the_model_refuses_is_answered_and_not_counted(runner: Runn
     await _until(lambda: len(conn.sent) == 1)
     assert _refusal(conn.replies()[0]) == "not now"
     assert runner._sm.current_state in (SessionState.STREAMING, SessionState.WAITING)
-    assert models[-1].state.prompt == "a forest"
+    assert models[-1].state.prompt == "refuse"
 
-    _send(runner, conn, _request_step("r2"))
+    _send(runner, conn, _request_step("r2", state={"prompt": "a lake"}))
     await _until(lambda: runner._sm.current_state is not SessionState.STREAMING)
     results = [m for m in conn.replies() if m.WhichOneof("payload") == "step_result"]
     assert [m.step_result.index for m in results] == [1]
