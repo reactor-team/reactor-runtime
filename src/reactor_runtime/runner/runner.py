@@ -1791,7 +1791,9 @@ class Runner(ServiceComponent, ConnectionSink):
                 observed_at_ms=int(time.time() * 1000),
                 model_output=self._model_output.take(),
                 output_kinds=self._output_kinds,
-                readings=self._connections.transport_readings(),
+                readings=self._connections.take_frame_stages(
+                    self._connections.transport_readings()
+                ),
             ),
         )
 

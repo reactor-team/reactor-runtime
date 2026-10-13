@@ -13,6 +13,7 @@ from reactor_runtime.transport.webrtc import (
     WebRtcConfig,
     WebRtcPeerFactory,
 )
+from reactor_runtime.transport.webrtc.frame_stages import FrameStageWindow
 from reactor_runtime.transport.webrtc.signaling import IceCandidate
 
 
@@ -30,6 +31,7 @@ class FakePeer:
         self.protocol_version = ProtocolVersion.V0
         self.last_config: WebRtcConfig | None = None
         self.stats_fail_times = 0
+        self.frame_stages = FrameStageWindow()
         self._stats = stats if stats is not None else PeerStats(rtt_seconds=0.1)
         self._on_message: Callable[[bytes | str, ProtocolVersion, Channel], None] | None = None
         self._on_media: Callable[[str, InputFrame], None] | None = None

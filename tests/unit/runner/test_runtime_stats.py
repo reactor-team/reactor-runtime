@@ -8,6 +8,7 @@ import pytest
 from reactor_runtime.core import (
     ClientTrackDirection,
     ConnId,
+    FrameStage,
     TrackKind,
     TransportReading,
     TransportTrackReading,
@@ -164,6 +165,10 @@ def _reading() -> TransportReading:
                 direction=ClientTrackDirection.RECVONLY,
                 codec="VP9",
                 metrics={"bitrate_bps": 1_000_000.0, "frames_per_second": 30.0},
+                frame_stages=(
+                    FrameStage("encode", total_ms=60.0, frames=30),
+                    FrameStage("output_pacing", total_ms=float("nan"), frames=30),
+                ),
             ),
             TransportTrackReading(
                 track_name="mic",
@@ -207,6 +212,8 @@ def test_a_reading_is_shaped_like_a_client_reading() -> None:
                     "direction": "recvonly",
                     "codec": "VP9",
                     "metrics": {"bitrate_bps": 1_000_000.0, "frames_per_second": 30.0},
+                    # A time JSON cannot carry is left out.
+                    "frame_stages": [{"name": "encode", "total_ms": 60.0, "frames": 30}],
                 },
                 {
                     "track_name": "mic",
@@ -214,6 +221,7 @@ def test_a_reading_is_shaped_like_a_client_reading() -> None:
                     "direction": "sendonly",
                     "codec": "",
                     "metrics": {},
+                    "frame_stages": [],
                 },
             ],
         }

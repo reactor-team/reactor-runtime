@@ -4,13 +4,14 @@ The two structural protocols that form the seam between a transport and the
 runner, pointing opposite ways. ``Connection`` carries commands down to one
 client; ``ConnectionSink`` carries facts up from the transport. Both are
 ``Protocol``s, so a transport author or a test fake conforms by shape and
-signaling never reaches the runner. ``TransportStatsSource`` is an optional
-capability a connection adds when its transport measures its wire.
+signaling never reaches the runner. ``TransportStatsSource`` and
+``FrameStageSource`` are optional capabilities a connection adds when its
+transport measures its wire.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from typing import Protocol, runtime_checkable
 
 from reactor_runtime.core.stats import TransportReading
@@ -18,6 +19,7 @@ from reactor_runtime.core.values import (
     ClientStatsBatch,
     ConnectionCapabilities,
     ConnId,
+    FrameStage,
     InputFrame,
     MediaChunk,
 )
@@ -115,6 +117,24 @@ class TransportStatsSource(Protocol):
         ``None`` before the transport has taken its first. The reading is
         replaced as the transport takes new ones, so reading it never waits on
         the wire.
+        """
+
+
+@runtime_checkable
+class FrameStageSource(Protocol):
+    """A connection whose transport times each frame's stages on its side of the wire.
+
+    Optional, beside :class:`TransportStatsSource`, and checked for the same
+    way. A track's times add up until they are taken, so each take covers the
+    window since that track's previous one.
+    """
+
+    def take_frame_stages(self, tracks: Collection[str]) -> Mapping[str, tuple[FrameStage, ...]]:
+        """Return the stage times of *tracks* since their previous take, and start them again.
+
+        Keyed by track name. A track with no frames in its window is left out,
+        and so is a stage with no frames in it. Tracks not named keep their
+        times for a later take.
         """
 
 

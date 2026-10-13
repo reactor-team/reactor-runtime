@@ -1,21 +1,25 @@
 import logging
 import sys
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 
 import pytest
 
 from reactor_runtime.core import (
+    ClientTrackDirection,
     Connection,
     ConnectionCapabilities,
     ConnId,
+    FrameStage,
     MediaBundle,
     MediaChunk,
     SessionEvent,
     SessionState,
+    TrackKind,
     Transition,
     TransportReading,
     TransportStatsSource,
+    TransportTrackReading,
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.runner import ConnectionManager, SessionStateMachine
@@ -142,6 +146,87 @@ def test_transport_readings_come_from_connections_that_measure_their_wire() -> N
 
     assert not isinstance(FakeConnection(1), TransportStatsSource)
     assert cm.transport_readings() == [(ConnId(2), reading)]
+
+
+class TimedConnection(MeasuredConnection):
+    """A fake whose transport also times each frame's stages."""
+
+    def __init__(
+        self, cid: int, reading: TransportReading, stages: dict[str, tuple[FrameStage, ...]]
+    ) -> None:
+        super().__init__(cid, reading)
+        self.stages = stages
+        self.takes = 0
+
+    def take_frame_stages(self, tracks: Collection[str]) -> dict[str, tuple[FrameStage, ...]]:
+        self.takes += 1
+        taken = {t: s for t, s in self.stages.items() if t in tracks}
+        self.stages = {t: s for t, s in self.stages.items() if t not in tracks}
+        return taken
+
+
+def test_reading_transport_readings_leaves_the_stage_window_alone() -> None:
+    cm, _ = waiting_manager()
+    video = TransportTrackReading("main_video", TrackKind.VIDEO, ClientTrackDirection.RECVONLY)
+    pacing = FrameStage("output_pacing", total_ms=300.0, frames=10)
+    conn = TimedConnection(2, TransportReading(tracks=(video,)), {"main_video": (pacing,)})
+    cm.register(conn)
+
+    cm.transport_readings()
+    cm.transport_readings()
+
+    assert conn.takes == 0
+
+
+def test_each_tracks_stages_are_taken_once_onto_its_reading() -> None:
+    cm, _ = waiting_manager()
+    webcam = TransportTrackReading("webcam", TrackKind.VIDEO, ClientTrackDirection.SENDONLY)
+    video = TransportTrackReading("main_video", TrackKind.VIDEO, ClientTrackDirection.RECVONLY)
+    reading = TransportReading(tracks=(webcam, video))
+    pacing = FrameStage("output_pacing", total_ms=300.0, frames=10)
+    cm.register(TimedConnection(2, reading, {"main_video": (pacing,)}))
+
+    [(cid, first)] = cm.take_frame_stages(cm.transport_readings())
+    [(_, second)] = cm.take_frame_stages(cm.transport_readings())
+
+    assert cid == ConnId(2)
+    assert first.tracks[0].frame_stages == ()
+    assert first.tracks[1].frame_stages == (pacing,)
+    # The window started again with the first report.
+    assert second == reading
+
+
+def test_a_tracks_stages_wait_until_a_reading_carries_the_track() -> None:
+    cm, _ = waiting_manager()
+    video = TransportTrackReading("main_video", TrackKind.VIDEO, ClientTrackDirection.RECVONLY)
+    webcam = TransportTrackReading("webcam", TrackKind.VIDEO, ClientTrackDirection.SENDONLY)
+    delivery = FrameStage("delivery", total_ms=8.0, frames=10)
+    conn = TimedConnection(2, TransportReading(tracks=(video,)), {"webcam": (delivery,)})
+    cm.register(conn)
+
+    [(_, before)] = cm.take_frame_stages(cm.transport_readings())
+    assert before.tracks[0].frame_stages == ()
+
+    # A later sample matches the track; its stages were kept for it.
+    conn.latest_reading = TransportReading(tracks=(video, webcam))
+    [(_, after)] = cm.take_frame_stages(cm.transport_readings())
+    assert after.tracks[1].frame_stages == (delivery,)
+
+
+def test_a_connection_without_a_reading_keeps_its_stages() -> None:
+    cm, _ = waiting_manager()
+    video = TransportTrackReading("main_video", TrackKind.VIDEO, ClientTrackDirection.RECVONLY)
+    pacing = FrameStage("output_pacing", total_ms=300.0, frames=10)
+    conn = TimedConnection(2, TransportReading(tracks=(video,)), {"main_video": (pacing,)})
+    conn.latest_reading = None
+    cm.register(conn)
+
+    assert cm.take_frame_stages(cm.transport_readings()) == []
+    assert conn.takes == 0
+
+    conn.latest_reading = TransportReading(tracks=(video,))
+    [(_, reading)] = cm.take_frame_stages(cm.transport_readings())
+    assert reading.tracks[0].frame_stages == (pacing,)
 
 
 def test_new_conn_id_is_random_in_range_and_unique() -> None:

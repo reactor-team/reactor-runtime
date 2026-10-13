@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 import threading
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 
 from reactor_runtime.core import FrameStage, TrackDirection
 from reactor_runtime.transport.webrtc.stats import PeerStats, TrackStat
@@ -94,10 +94,20 @@ class FrameStageWindow:
                 )
                 self._add_timing_frame(track)
 
-    def take(self) -> dict[str, tuple[FrameStage, ...]]:
-        """Return each track's stages, in trip order, and start a new window."""
+    def take(self, tracks: Collection[str] | None = None) -> dict[str, tuple[FrameStage, ...]]:
+        """Return the stages of *tracks*, in trip order, and start them again.
+
+        Every track when *tracks* is ``None``. A track not named keeps its
+        times for a later take.
+        """
         with self._lock:
-            totals, self._totals = self._totals, {}
+            if tracks is None:
+                totals, self._totals = self._totals, {}
+            else:
+                wanted = set(tracks)
+                totals = {key: v for key, v in self._totals.items() if key[0] in wanted}
+                for key in totals:
+                    del self._totals[key]
         stages: dict[str, list[FrameStage]] = {}
         for (track, stage), (total, count) in totals.items():
             stages.setdefault(track, []).append(FrameStage(stage, total_ms=total, frames=count))

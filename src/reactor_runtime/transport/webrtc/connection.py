@@ -13,13 +13,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import replace
 
 from reactor_runtime.core import (
     ClientStatsBatch,
     ConnectionCapabilities,
     ConnId,
+    FrameStage,
     InputFrame,
     MediaChunk,
     TrackDirection,
@@ -91,7 +92,9 @@ class WebRTCConnection:
         self._ping_timeout = ping_timeout
         video_tracks = video_tracks or {}
         initial_fps = max((t.rate for t in video_tracks.values() if t.rate > 0), default=30.0)
-        self._pacer = MediaPacer(video_tracks, self._peer.send_media, fps=initial_fps)
+        self._pacer = MediaPacer(
+            video_tracks, self._peer.send_media, fps=initial_fps, stages=self._peer.frame_stages
+        )
 
         self._on_message: Callable[[bytes | str, ProtocolVersion, Channel], None] | None = None
         self._on_media: Callable[[str, InputFrame], None] | None = None
@@ -164,6 +167,10 @@ class WebRTCConnection:
         it, so the reading of a connection's first sample has none.
         """
         return self._latest_reading
+
+    def take_frame_stages(self, tracks: Collection[str]) -> dict[str, tuple[FrameStage, ...]]:
+        """Return the stage times of *tracks* since their previous take, and start them again."""
+        return self._peer.frame_stages.take(tracks)
 
     @property
     def protocol_version(self) -> ProtocolVersion:
@@ -381,6 +388,7 @@ class WebRTCConnection:
                 now = time.monotonic()
                 elapsed = now - self._sampled_at if self._sampled_at is not None else None
                 self._latest_reading = transport_reading(stats, self._latest_stats, elapsed)
+                self._peer.frame_stages.fold(stats, self._latest_stats)
                 self._latest_stats = stats
                 self._sampled_at = now
                 if self._on_stats is not None:

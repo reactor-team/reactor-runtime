@@ -147,3 +147,17 @@ def test_frames_timed_from_several_threads_all_count() -> None:
     assert window.take() == {
         "main_video": (FrameStage("output_queue", total_ms=4_000.0, frames=4_000),)
     }
+
+
+def test_a_take_of_some_tracks_leaves_the_others() -> None:
+    window = FrameStageWindow()
+    window.add("main_video", "output_queue", 1.0)
+    window.add("webcam", "delivery", 2.0)
+
+    assert window.take(["main_video"]) == {
+        "main_video": (FrameStage("output_queue", total_ms=1.0, frames=1),)
+    }
+    assert window.take(["webcam", "absent"]) == {
+        "webcam": (FrameStage("delivery", total_ms=2.0, frames=1),)
+    }
+    assert window.take() == {}

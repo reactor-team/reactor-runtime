@@ -41,11 +41,13 @@ replaced rather than edited.
 from __future__ import annotations
 
 import random
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import replace
 
 from reactor_runtime.core import (
     Connection,
     ConnId,
+    FrameStageSource,
     MediaChunk,
     SessionEvent,
     TransportReading,
@@ -146,7 +148,7 @@ class ConnectionManager:
 
         A connection whose transport has not taken a reading yet, or does not
         measure its wire (it is not a :class:`TransportStatsSource`), is left
-        out.
+        out. Reading them changes nothing, so any number of callers can.
         """
         return [
             (cid, reading)
@@ -154,6 +156,34 @@ class ConnectionManager:
             if isinstance(conn, TransportStatsSource)
             and (reading := conn.latest_reading) is not None
         ]
+
+    def take_frame_stages(
+        self, readings: Iterable[tuple[ConnId, TransportReading]]
+    ) -> list[tuple[ConnId, TransportReading]]:
+        """Add each connection's stage times since the previous take to its *readings*.
+
+        For a connection that times its frames (a :class:`FrameStageSource`),
+        each track in its reading gets the stage times the connection held for
+        it, and those are taken: the next call gets only what was timed after
+        this one, so the runner calls this once per report. Stages of a track
+        the reading does not carry yet stay with the connection until a
+        reading does. A connection with no reading here keeps all its stages.
+        """
+        out: list[tuple[ConnId, TransportReading]] = []
+        for cid, reading in readings:
+            conn = self._by_id.get(cid)
+            if isinstance(conn, FrameStageSource) and reading.tracks:
+                stages = conn.take_frame_stages([t.track_name for t in reading.tracks])
+                if stages:
+                    reading = replace(
+                        reading,
+                        tracks=tuple(
+                            replace(track, frame_stages=stages.get(track.track_name, ()))
+                            for track in reading.tracks
+                        ),
+                    )
+            out.append((cid, reading))
+        return out
 
     def new_conn_id(self) -> ConnId:
         """Mint a fresh random connection id, unique within the session.

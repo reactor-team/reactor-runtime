@@ -35,6 +35,7 @@ from reactor_runtime.core.values import (
     TrackInfo,
     TrackKind,
 )
+from reactor_runtime.transport.webrtc.frame_stages import FrameStageWindow
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,8 @@ class MediaPacer:
             wire — the buffered-latency bound. Never applied below one chunk,
             so a model that batches always fits a whole chunk.
         fps: The initial pacing rate, used until the first chunk sets its own.
+        stages: Where each video frame's wait for its tick is added up, as the
+            ``output_pacing`` stage, or ``None`` to not time it.
     """
 
     def __init__(
@@ -71,16 +74,19 @@ class MediaPacer:
         *,
         queue_depth: int = 10,
         fps: float = 30.0,
+        stages: FrameStageWindow | None = None,
     ) -> None:
         self._video_tracks = {
             name: info for name, info in video_tracks.items() if info.kind is TrackKind.VIDEO
         }
         self._on_frame = on_frame
+        self._stages = stages
 
         # The queue is unbounded in itself; the depth is the bound, checked on
         # submit. The effective capacity never sits below one chunk, so a
         # batching model always fits a whole chunk regardless of the depth.
-        self._queue: queue.Queue[MediaBundle] = queue.Queue()
+        # Each frame carries the time it was queued, to time its wait for its tick.
+        self._queue: queue.Queue[tuple[MediaBundle, float]] = queue.Queue()
         self._depth = queue_depth
         # Signalled by the pacing thread after each dequeue so a blocking
         # submit (chunk.wait) can sleep until room opens instead of polling.
@@ -164,7 +170,7 @@ class MediaPacer:
                     break
                 if self._queue.qsize() >= capacity:
                     break
-            self._queue.put_nowait(frame)
+            self._queue.put_nowait((frame, time.perf_counter()))
             enqueued += 1
         if enqueued < chunk.n_frames and not chunk.wait and not aborted:
             dropped = chunk.n_frames - enqueued
@@ -273,12 +279,17 @@ class MediaPacer:
         new media arrives.
         """
         try:
-            item = self._queue.get_nowait()
+            item, queued_at = self._queue.get_nowait()
         except queue.Empty:
             item = None
         else:
             with self._room:
                 self._room.notify_all()
+            if self._stages is not None:
+                waited_ms = (time.perf_counter() - queued_at) * 1000.0
+                for data in item.tracks.values():
+                    if data.info.kind is TrackKind.VIDEO:
+                        self._stages.add(data.info.name, "output_pacing", waited_ms)
 
         if item is not None:
             video = item.get_tracks_by_kind(TrackKind.VIDEO)
