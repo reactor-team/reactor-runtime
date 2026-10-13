@@ -236,6 +236,11 @@ message ClientEnvironment {
   string os_version = 4;
   // The CPU architecture, e.g. "aarch64", "x86_64".
   string arch = 5;
+  // The device's hardware model as the system names it, e.g. "iPhone15,2",
+  // "Pixel 8" or "MacBookPro18,3". On a phone, decode and encode times track
+  // the device more than the operating system's version. Empty when the
+  // system does not expose it, as in a browser.
+  string device_model = 6;
 }
 
 // A batch of client-observed quality readings for this connection, sent
