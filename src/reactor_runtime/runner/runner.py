@@ -97,7 +97,7 @@ from reactor_runtime.runner.session_start import (
 from reactor_runtime.runner.state_machine import SessionStateMachine
 from reactor_runtime.runner.system_client import SYSTEM_CONN_ID, SystemConnection
 from reactor_runtime.runner.upload_resolution import declares_upload, resolve_uploads
-from reactor_runtime.step_results import SavedStep, StepStore
+from reactor_runtime.step_results import SavedStep, StepStore, content_type_of
 from reactor_runtime.transport.router import (
     SessionNotRunningError,
     SessionTransitionError,
@@ -213,6 +213,19 @@ def _refused(key: str, outcome: CommandOutcome) -> str:
     if not reason.startswith(f"{outcome.field}:"):
         reason = f"{outcome.field}: {reason}"
     return f"{key} is refused: {reason}"
+
+
+def _step_file_refs(step: CompletedStep) -> list[step_pb2.StepFileRef]:
+    """Reference each extra file a saved step keeps, as its step result is saved.
+
+    A failed step keeps no files, so its result references none.
+    """
+    if step.error is not None:
+        return []
+    return [
+        step_pb2.StepFileRef(name=name, content_type=content_type_of(name), size=len(data))
+        for name, data in step.files.items()
+    ]
 
 
 def _server_version() -> str:
@@ -857,9 +870,9 @@ class Runner(ServiceComponent, ConnectionSink):
             if step.request is not None:
                 self._end_step_request(step.request.conn_id, step.request.request_id)
             return
-        self._save_step(step, messages)
+        saved = self._save_step(step, messages)
         if step.request is not None:
-            self._send_step_result(step, self._steps_completed)
+            self._send_step_result(step, self._steps_completed, saved=saved)
         limit = self._session_start.steps
         if (
             limit is not None
@@ -873,8 +886,12 @@ class Runner(ServiceComponent, ConnectionSink):
                 close_reason=_STEPS_CLOSE_REASON,
             )
 
-    def _save_step(self, step: CompletedStep, messages: tuple[dict[str, Any], ...] = ()) -> None:
-        """Number a step of the current session, offer it to the store, and journal it."""
+    def _save_step(self, step: CompletedStep, messages: tuple[dict[str, Any], ...] = ()) -> bool:
+        """Number a step of the current session, offer it to the store, and journal it.
+
+        Returns:
+            Whether the store took the step, so a folder follows for it.
+        """
         # A requested step was numbered when the model accepted it; its report
         # carries that number.
         if step.request is not None:
@@ -890,6 +907,7 @@ class Runner(ServiceComponent, ConnectionSink):
             saved=saved,
             error=step.error,
         )
+        return saved
 
     def _fail_remaining_steps(
         self, limit: int, error: str, captured: tuple[dict[str, Any], ...] = ()
@@ -1612,13 +1630,18 @@ class Runner(ServiceComponent, ConnectionSink):
             failure_code=step_pb2.STEP_FAILURE_CODE_SESSION_ENDED,
         )
 
-    def _send_step_result(self, step: CompletedStep, index: int) -> None:
+    def _send_step_result(self, step: CompletedStep, index: int, *, saved: bool) -> None:
         """Answer a requested step with its result, built from the step's report.
 
         The result is the report's media, one entry per output track, so what
         the client receives is what the step reported and what a saved step
         keeps, with the seconds its ``generate()`` took (or what the model
-        reported). It goes out as one message. A result larger than the connection
+        reported), and the step's error when it failed. When the step store
+        took the step (*saved*), the result names each extra file the model
+        kept with it, which the client reads from the session's step results;
+        the bytes stay out of the message, so a file counts toward the
+        message's size only by its name, media type, and size. It goes out as
+        one message. A result larger than the connection
         negotiated is not sent: the client is answered ``step_result_too_large``
         and the session goes on. Media that cannot be carried as frames answers
         ``internal_error``.
@@ -1629,7 +1652,11 @@ class Runner(ServiceComponent, ConnectionSink):
             # The default loop, the only one a stepped session runs, always
             # measures the step, so a missing time does not happen in practice.
             result = step_pb2.StepResult(
-                index=index, tracks=track_frames(step.bundle), elapsed=step.elapsed or 0.0
+                index=index,
+                tracks=track_frames(step.bundle),
+                elapsed=step.elapsed or 0.0,
+                files=_step_file_refs(step) if saved else (),
+                error=step.error,
             )
         except FrameEncodingError as error:
             logger.error("a step's output could not be encoded", step=index, error=str(error))
