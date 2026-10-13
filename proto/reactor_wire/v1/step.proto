@@ -36,16 +36,17 @@ message TrackFrames {
   repeated Frame frames = 3;
 }
 
-// Request to run one step of a stepped session. The runtime runs it as one
-// unit, after every message sent before it: it applies state, then commands,
-// writes the input frames to their tracks, and runs the step. No other command
-// reaches the model in between.
+// Request to run one step of a stepped session. Every field is optional: an
+// empty request runs the step on the model's current state, which commands
+// sent before it may have changed. The runtime applies the request as
+// individual calls, in order: the state, then the commands, then the input
+// frames, and then runs the step. A call that fails refuses the step; the calls
+// applied before it stay applied.
 //
 // Every request ends in exactly one response, with its request_id: a
 // StepResult once the step has run, whether it worked or failed, or an Error:
-// "step_refused" when the request or the model refuses the step, which changes
-// no state, and "step_result_too_large" when the result does not fit in one
-// message.
+// "step_refused" when the request or the model refuses the step, and
+// "step_result_too_large" when the result does not fit in one message.
 message RequestStep {
   // Values for the model's state fields, keyed by field name. Each key runs as
   // the model's set_<key> command, before commands.
