@@ -1683,19 +1683,21 @@ class Runner(ServiceComponent, ConnectionSink):
         """
         if self._bridge is None:
             return
-        if self._session_start.generation is not Generation.STEPPED:
-            self._refuse_step(
-                step.conn_id,
-                step.request_id,
-                "this session is not stepped; start it with generation 'stepped' to request steps",
-            )
-            return
+        # The session's state first: the start it would read the mode from
+        # outlives its session, so outside one it is the previous session's.
         if self._sm.current_state not in _RUNNING_STATES:
             self._refuse_step(
                 step.conn_id,
                 step.request_id,
                 "the session is not running a step yet",
                 failure_code=step_pb2.STEP_FAILURE_CODE_NOT_READY,
+            )
+            return
+        if self._session_start.generation is not Generation.STEPPED:
+            self._refuse_step(
+                step.conn_id,
+                step.request_id,
+                "this session is not stepped; start it with generation 'stepped' to request steps",
             )
             return
         entries = [
