@@ -77,7 +77,9 @@ enum StepFailureCode {
   // The step ran and worked.
   STEP_FAILURE_CODE_UNSPECIFIED = 0;
   // The request, one of its calls, or the model's process_input() refused the
-  // step. The step did not run and takes no number.
+  // step: the session does not step, a call does not fit the model's
+  // contract, an upload never arrived, or a frame cannot be decoded. The step
+  // did not run and takes no number.
   STEP_FAILURE_CODE_REFUSED = 1;
   // The session cannot run a step yet. The step did not run and takes no
   // number.
@@ -87,6 +89,13 @@ enum StepFailureCode {
   // The step ran, but its result does not fit in one message on this
   // connection. It takes a number, and the result carries no media.
   STEP_FAILURE_CODE_RESULT_TOO_LARGE = 4;
+  // The handler of one of the request's state keys or commands failed. The
+  // calls before it stay applied, the ones after it are skipped, and the step
+  // did not run and takes no number.
+  STEP_FAILURE_CODE_COMMAND_FAILED = 5;
+  // The session ended before the step's result could be sent. Whether the step
+  // ran is unknown to the client.
+  STEP_FAILURE_CODE_SESSION_ENDED = 6;
 }
 
 // The outcome of one step request: what the model produced, per output track,
