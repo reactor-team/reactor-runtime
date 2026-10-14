@@ -34,11 +34,18 @@ def test_a_raw_video_frame_decodes_to_the_rgb_array_it_carried() -> None:
     assert frame.capture_time_us is None
 
 
-def test_a_raw_audio_frame_keeps_its_channels() -> None:
-    pcm = np.array([[1, -2, 300], [4, 5, -32768]], dtype=np.int16)
+def test_a_raw_mono_audio_frame_decodes_to_the_samples_it_carried() -> None:
+    pcm = np.array([[1, -2, 300]], dtype=np.int16)
     frame = decode_frame(_raw(pcm), TrackKind.AUDIO)
     assert frame.data.dtype == np.int16
     np.testing.assert_array_equal(frame.data, pcm)
+
+
+def test_a_raw_audio_frame_with_several_channels_is_mixed_down_to_mono() -> None:
+    pcm = np.array([[1, -2, 300], [5, 6, -32768]], dtype=np.int16)
+    frame = decode_frame(_raw(pcm), TrackKind.AUDIO)
+    assert frame.data.dtype == np.int16
+    np.testing.assert_array_equal(frame.data, np.array([[3, 2, -16234]], dtype=np.int16))
 
 
 def test_a_decoded_frame_is_writable_and_owns_its_samples() -> None:

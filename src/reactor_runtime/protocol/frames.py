@@ -51,7 +51,11 @@ class RawFrames:
     """The uncompressed encoding: the samples as they are, row-major and little-endian."""
 
     def decode(self, frame: step_pb2.Frame, kind: TrackKind) -> npt.NDArray[Any]:
-        """Return the frame's samples, checked against the track kind's layout."""
+        """Return the frame's samples, checked against the track kind's layout.
+
+        Audio with several channels is mixed down to ``(1, M)`` mono, the shape
+        a model reads audio in from any transport.
+        """
         dtype, rank = _RAW_LAYOUT[kind]
         if frame.dtype != dtype:
             raise FrameEncodingError(f"a raw {kind} frame is {dtype}, not {frame.dtype!r}")
@@ -71,7 +75,10 @@ class RawFrames:
                 f"a raw {kind} frame of shape {list(shape)} is {expected} bytes, "
                 f"got {len(frame.data)}"
             )
-        return np.frombuffer(frame.data, dtype=wire).reshape(shape).astype(dtype)
+        samples = np.frombuffer(frame.data, dtype=wire).reshape(shape).astype(dtype)
+        if kind is TrackKind.AUDIO and shape[0] > 1:
+            samples = samples.mean(axis=0, keepdims=True).round().astype(np.int16)
+        return samples
 
 
 FRAME_CODECS: dict[int, FrameCodec] = {step_pb2.FRAME_ENCODING_RAW: RawFrames()}
