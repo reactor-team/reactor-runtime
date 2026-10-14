@@ -16,13 +16,19 @@ network runs once.
 `process_input()`, and `self.session_id` names the session. Every other
 attribute of the class is shared by all its sessions and outlives each one, so
 the class keeps each session's latent in a dict keyed by `self.session_id`,
-made in `@session_started` and dropped in `@session_ended`. `process_output()` keeps a fingerprint of each frame,
-`frame.sha256`, beside the step's `output.mp4`, so a client can check that a
-session's frames are the ones the same seed gives when it runs alone.
+made in `@session_started` and dropped in `@session_ended`.
+`process_output()` keeps a fingerprint of each frame, `frame.sha256`, beside
+the step's `output.mp4`, so a client can compare a session's frames with the
+ones the same seed gives when it runs alone.
 
 The network's weights are drawn from a fixed seed, so a session's frames
 depend only on its own `seed` and `tint`. It runs on PyTorch when it is
-installed, on the GPU when there is one, and on NumPy otherwise.
+installed, on the GPU when there is one, and on NumPy otherwise. On NumPy a
+session's frames are the same bytes alone or batched. On PyTorch they can
+differ by a level or so in a few pixels, as the kernels picked for a batch's
+size, and TF32 maths on a GPU, round differently; turning TF32 off and
+setting `torch.backends.cudnn.deterministic` makes them match again, at a
+cost in speed.
 
 ## Run
 
