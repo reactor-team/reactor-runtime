@@ -228,7 +228,12 @@ class MediaPacer:
             self._thread.start()
 
     def stop(self) -> None:
-        """Stop the pacing thread and wait for it to finish.
+        """Stop the pacing thread, wait for it to finish, and release held media.
+
+        Once the thread has stopped, the queued frames and the last delivered
+        frame are dropped. A frame is a view into the model's whole output
+        array, so a stopped pacer that kept one would keep that array alive
+        for as long as the pacer itself is reachable.
 
         Raises:
             RuntimeError: If the thread does not stop within two seconds.
@@ -247,6 +252,13 @@ class MediaPacer:
             thread.join(timeout=2.0)
             if thread.is_alive():
                 raise RuntimeError("media pacer thread did not stop within 2s")
+        with self._room:
+            while True:
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    break
+            self._last_frame = None
 
     def _pacing_loop(self) -> None:
         """Deliver one frame per tick at a steady cadence until stopped."""
