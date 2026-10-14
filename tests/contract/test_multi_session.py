@@ -36,6 +36,16 @@ pytestmark = pytest.mark.asyncio
 
 _SLOTS = 3
 
+# Session ids are lowercase UUIDs; these name the sessions each test starts.
+ALPHA = "00000001-0000-4000-8000-000000000000"
+BETA = "00000002-0000-4000-8000-000000000000"
+GAMMA = "00000003-0000-4000-8000-000000000000"
+GOOD = "00000004-0000-4000-8000-000000000000"
+BAD = "00000005-0000-4000-8000-000000000000"
+WATCHED = "00000006-0000-4000-8000-000000000000"
+ABANDONED = "00000007-0000-4000-8000-000000000000"
+NOPE = "00000008-0000-4000-8000-000000000000"
+
 
 class Picture(Output):
     main_video: Video
@@ -157,7 +167,7 @@ async def test_a_start_with_every_slot_serving_is_the_busy_conflict() -> None:
 
 async def test_a_draining_host_refuses_starts_and_reports_no_free_slot() -> None:
     async with hosting() as rt:
-        await _start(rt.client, session_id="alpha")
+        await _start(rt.client, session_id=ALPHA)
 
         await rt.host.drain()
 
@@ -172,19 +182,41 @@ async def test_a_draining_host_refuses_starts_and_reports_no_free_slot() -> None
 
 async def test_a_start_takes_the_callers_id_or_mints_one() -> None:
     async with hosting() as rt:
-        chosen = (await _start(rt.client, session_id="alpha")).json()
+        chosen = (await _start(rt.client, session_id=ALPHA)).json()
         minted = (await _start(rt.client)).json()
 
-        assert chosen["session_id"] == "alpha"
-        assert minted["session_id"] not in ("alpha", "00000000-0000-0000-0000-000000000000")
-        assert set(_states(rt.host)) == {"alpha", minted["session_id"]}
+        assert chosen["session_id"] == ALPHA
+        assert minted["session_id"] not in (ALPHA, "00000000-0000-0000-0000-000000000000")
+        assert set(_states(rt.host)) == {ALPHA, minted["session_id"]}
+
+
+@pytest.mark.parametrize(
+    "session_id",
+    [
+        "alpha",
+        "../etc",
+        "a/b",
+        "x" * 5000,
+        5,
+        ["list"],
+        "0000000A-0000-4000-8000-00000000000B",
+        "{" + ALPHA + "}",
+    ],
+)
+async def test_a_start_refuses_an_id_that_is_not_a_lowercase_uuid(session_id: Any) -> None:
+    async with hosting() as rt:
+        response = await _start(rt.client, session_id=session_id)
+
+        assert response.status_code == 400
+        assert "session_id" in response.json()["detail"]
+        assert rt.host.capacity() == (_SLOTS, _SLOTS)
 
 
 async def test_starting_a_running_id_again_conflicts() -> None:
     async with hosting() as rt:
-        await _start(rt.client, session_id="alpha")
+        await _start(rt.client, session_id=ALPHA)
 
-        response = await _start(rt.client, session_id="alpha")
+        response = await _start(rt.client, session_id=ALPHA)
 
         assert response.status_code == 409
         assert rt.host.capacity() == (_SLOTS, _SLOTS - 1)
@@ -192,25 +224,23 @@ async def test_starting_a_running_id_again_conflicts() -> None:
 
 async def test_session_reads_and_stops_are_addressed_by_id() -> None:
     async with hosting() as rt:
-        await _start(rt.client, session_id="alpha")
-        await _start(rt.client, session_id="beta")
+        await _start(rt.client, session_id=ALPHA)
+        await _start(rt.client, session_id=BETA)
 
         assert (await rt.client.get("/session")).status_code == 400
-        assert (await rt.client.get("/session", params={"session_id": "nope"})).status_code == 404
-        beta = (await rt.client.get("/session", params={"session_id": "beta"})).json()
-        assert beta["session_id"] == "beta"
+        assert (await rt.client.get("/session", params={"session_id": NOPE})).status_code == 404
+        beta = (await rt.client.get("/session", params={"session_id": BETA})).json()
+        assert beta["session_id"] == BETA
         listed = (await rt.client.get("/sessions")).json()
         assert listed["capacity"] == {"slots": _SLOTS, "free": _SLOTS - 2}
-        assert {entry["session_id"] for entry in listed["sessions"]} == {"alpha", "beta"}
+        assert {entry["session_id"] for entry in listed["sessions"]} == {ALPHA, BETA}
 
         assert (await rt.client.post("/stop_session", json={})).status_code == 400
+        assert (await rt.client.post("/stop_session", json={"session_id": NOPE})).status_code == 404
         assert (
-            await rt.client.post("/stop_session", json={"session_id": "nope"})
-        ).status_code == 404
-        assert (
-            await rt.client.post("/stop_session", json={"session_id": "alpha"})
+            await rt.client.post("/stop_session", json={"session_id": ALPHA})
         ).status_code == 200
-        await _until(lambda: set(_states(rt.host)) == {"beta"})
+        await _until(lambda: set(_states(rt.host)) == {BETA})
         await _until(lambda: rt.host.capacity() == (_SLOTS, _SLOTS - 1))
 
 
@@ -222,40 +252,40 @@ async def test_the_shared_journal_keeps_a_runtimes_worth_of_history_per_slot() -
 
 async def test_a_closing_session_is_listed_as_it_is_described() -> None:
     async with hosting() as rt:
-        await _start(rt.client, session_id="alpha")
-        await _start(rt.client, session_id="beta")
+        await _start(rt.client, session_id=ALPHA)
+        await _start(rt.client, session_id=BETA)
 
-        rt.host.stop_session(session_id="alpha")
+        rt.host.stop_session(session_id=ALPHA)
 
-        assert _states(rt.host) == {"alpha": "closing", "beta": "waiting"}
-        described = rt.host.descriptor("alpha")
+        assert _states(rt.host) == {ALPHA: "closing", BETA: "waiting"}
+        described = rt.host.descriptor(ALPHA)
         assert described["state"] == "closing"
 
 
 async def test_transport_routes_resolve_the_addressed_session() -> None:
     async with hosting() as rt:
-        await _start(rt.client, session_id="alpha")
-        await _start(rt.client, session_id="beta")
+        await _start(rt.client, session_id=ALPHA)
+        await _start(rt.client, session_id=BETA)
         prefix = "/sessions/{}/transport/webrtc/connections"
 
-        assert (await rt.client.post(prefix.format("nope"))).status_code == 404
-        alpha = (await rt.client.post(prefix.format("alpha"))).json()["connection_id"]
-        beta = (await rt.client.post(prefix.format("beta"))).json()["connection_id"]
+        assert (await rt.client.post(prefix.format(NOPE))).status_code == 404
+        alpha = (await rt.client.post(prefix.format(ALPHA))).json()["connection_id"]
+        beta = (await rt.client.post(prefix.format(BETA))).json()["connection_id"]
         assert alpha != beta
-        for sid, cid in (("alpha", alpha), ("beta", beta)):
+        for sid, cid in ((ALPHA, alpha), (BETA, beta)):
             offer = {"sdp_offer": f"offer-{sid}", "track_mapping": []}
             response = await rt.client.post(f"{prefix.format(sid)}/{cid}/sdp_params", json=offer)
             assert response.status_code == 202
-        await _until(lambda: "offer-alpha" in rt.peers)
-        rt.peers["offer-alpha"].fire_connected()
+        await _until(lambda: f"offer-{ALPHA}" in rt.peers)
+        rt.peers[f"offer-{ALPHA}"].fire_connected()
 
-        await _until(lambda: _states(rt.host).get("alpha") == "streaming")
-        assert _states(rt.host)["beta"] == "waiting"
+        await _until(lambda: _states(rt.host).get(ALPHA) == "streaming")
+        assert _states(rt.host)[BETA] == "waiting"
 
 
 async def test_each_session_gets_its_own_steps_and_one_stopping_leaves_the_others() -> None:
     async with hosting() as rt:
-        for sid, value in (("alpha", 1), ("beta", 2), ("gamma", 3)):
+        for sid, value in ((ALPHA, 1), (BETA, 2), (GAMMA, 3)):
             response = await _start(
                 rt.client,
                 session_id=sid,
@@ -273,37 +303,35 @@ async def test_each_session_gets_its_own_steps_and_one_stopping_leaves_the_other
 
         reader = asyncio.create_task(follow())
         try:
-            await _until(lambda: all(counts.get(sid, 0) >= 3 for sid in ("alpha", "beta", "gamma")))
-            await rt.client.post("/stop_session", json={"session_id": "beta"})
-            await _until(lambda: "beta" not in _states(rt.host))
+            await _until(lambda: all(counts.get(sid, 0) >= 3 for sid in (ALPHA, BETA, GAMMA)))
+            await rt.client.post("/stop_session", json={"session_id": BETA})
+            await _until(lambda: BETA not in _states(rt.host))
             before = dict(counts)
             await _until(
-                lambda: (
-                    counts["alpha"] > before["alpha"] + 3 and counts["gamma"] > before["gamma"] + 3
-                )
+                lambda: counts[ALPHA] > before[ALPHA] + 3 and counts[GAMMA] > before[GAMMA] + 3
             )
-            assert _states(rt.host) == {"alpha": "streaming", "gamma": "streaming"}
+            assert _states(rt.host) == {ALPHA: "streaming", GAMMA: "streaming"}
         finally:
             reader.cancel()
 
 
 async def test_a_session_whose_step_fails_ends_alone_with_an_error() -> None:
     async with hosting() as rt:
-        await _start(rt.client, session_id="good", steps=10_000)
+        await _start(rt.client, session_id=GOOD, steps=10_000)
         await _start(
             rt.client,
-            session_id="bad",
+            session_id=BAD,
             steps=10_000,
             starting_input={"state": {"value": 13}},
         )
 
-        await _until(lambda: "bad" not in _states(rt.host))
-        assert _states(rt.host) == {"good": "streaming"}
+        await _until(lambda: BAD not in _states(rt.host))
+        assert _states(rt.host) == {GOOD: "streaming"}
         assert rt.host.health().status.value == "healthy"
         ended = [
             event
             for _, event in list(rt.host.events._history)
-            if event.session_id == "bad" and event.transition.event.name == "STOP_SESSION"
+            if event.session_id == BAD and event.transition.event.name == "STOP_SESSION"
         ]
         assert ended
         assert ended[0].transition.detail["close_reason"] == "unlucky dial"
@@ -311,27 +339,27 @@ async def test_a_session_whose_step_fails_ends_alone_with_an_error() -> None:
 
 async def test_an_orphaned_session_times_out_alone() -> None:
     async with hosting(RuntimeConfig(model_ref="multi:Painter", orphan_timeout=0.2)) as rt:
-        await _start(rt.client, session_id="watched", steps=10_000)
-        await _start(rt.client, session_id="abandoned")
+        await _start(rt.client, session_id=WATCHED, steps=10_000)
+        await _start(rt.client, session_id=ABANDONED)
 
-        await _until(lambda: "abandoned" not in _states(rt.host))
-        assert _states(rt.host) == {"watched": "streaming"}
+        await _until(lambda: ABANDONED not in _states(rt.host))
+        assert _states(rt.host) == {WATCHED: "streaming"}
 
 
 async def test_every_event_names_its_session_and_a_session_stream_filters_to_it() -> None:
     async with hosting() as rt:
-        await _start(rt.client, session_id="alpha")
-        await _start(rt.client, session_id="beta")
-        await rt.client.post("/stop_session", json={"session_id": "beta"})
-        await _until(lambda: "beta" not in _states(rt.host))
+        await _start(rt.client, session_id=ALPHA)
+        await _start(rt.client, session_id=BETA)
+        await rt.client.post("/stop_session", json={"session_id": BETA})
+        await _until(lambda: BETA not in _states(rt.host))
 
         everything = await read_sse(rt.app, "/events?since=0", count=8)
-        beta_only = await read_sse(rt.app, "/sessions/beta/events?since=0", count=3)
+        beta_only = await read_sse(rt.app, f"/sessions/{BETA}/events?since=0", count=3)
 
         assert all("session_id" in frame.payload for frame in everything)
         named = {frame.payload["session_id"] for frame in everything}
-        assert {"alpha", "beta"} <= named
-        assert [frame.payload["session_id"] for frame in beta_only] == ["beta"] * 3
+        assert {ALPHA, BETA} <= named
+        assert [frame.payload["session_id"] for frame in beta_only] == [BETA] * 3
         assert [frame.payload["event"] for frame in beta_only] == [
             "start_session",
             "stop_session",
@@ -341,22 +369,22 @@ async def test_every_event_names_its_session_and_a_session_stream_filters_to_it(
 
 async def test_uploads_land_in_the_addressed_session() -> None:
     async with hosting() as rt:
-        await _start(rt.client, session_id="alpha")
-        await _start(rt.client, session_id="beta")
+        await _start(rt.client, session_id=ALPHA)
+        await _start(rt.client, session_id=BETA)
 
         reserved = await rt.client.post(
-            "/sessions/beta/uploads",
+            f"/sessions/{BETA}/uploads",
             json={"name": "a.bin", "size": 3, "mime_type": "application/octet-stream"},
         )
         upload_id = reserved.json()["presigned_id"]
         written = await rt.client.put(f"/uploads/{upload_id}", content=b"abc")
 
         assert written.status_code == 200
-        assert rt.host.uploads_for("beta").expected_size is not None
-        assert (await rt.host.uploads_for("beta").fetch(upload_id, wait_seconds=0)).data == b"abc"
+        assert rt.host.uploads_for(BETA).expected_size is not None
+        assert (await rt.host.uploads_for(BETA).fetch(upload_id, wait_seconds=0)).data == b"abc"
         assert (
             await rt.client.post(
-                "/sessions/nope/uploads",
+                f"/sessions/{NOPE}/uploads",
                 json={"name": "a.bin", "size": 3, "mime_type": "application/octet-stream"},
             )
         ).status_code == 404
@@ -407,15 +435,15 @@ async def test_sessions_on_two_slots_connect_on_the_same_unregistered_connection
 
 async def test_a_callers_upload_id_is_reserved_in_one_session_only() -> None:
     async with hosting() as rt:
-        await _start(rt.client, session_id="alpha")
-        await _start(rt.client, session_id="beta")
+        await _start(rt.client, session_id=ALPHA)
+        await _start(rt.client, session_id=BETA)
         slot = {"name": "a.bin", "size": 3, "mime_type": "application/octet-stream"}
 
-        first = await rt.client.post("/sessions/alpha/uploads", json={**slot, "upload_id": "u1"})
-        second = await rt.client.post("/sessions/beta/uploads", json={**slot, "upload_id": "u1"})
+        first = await rt.client.post(f"/sessions/{ALPHA}/uploads", json={**slot, "upload_id": "u1"})
+        second = await rt.client.post(f"/sessions/{BETA}/uploads", json={**slot, "upload_id": "u1"})
         written = await rt.client.put("/uploads/u1", content=b"abc")
 
         assert first.status_code == 201
         assert second.status_code == 409
         assert written.status_code == 200
-        assert (await rt.host.uploads_for("alpha").fetch("u1", wait_seconds=0)).data == b"abc"
+        assert (await rt.host.uploads_for(ALPHA).fetch("u1", wait_seconds=0)).data == b"abc"
