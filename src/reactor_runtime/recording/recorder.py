@@ -912,6 +912,12 @@ class Recorder:
 
     # -- HTTP serving ---------------------------------------------------------
 
+    def holds(self, session_id: str) -> bool:
+        """Return whether a recording of *session_id* is on disk under this recorder."""
+        if self._root is None or not _SESSION_ID_RE.match(session_id):
+            return False
+        return (self._root / session_id).is_dir()
+
     def manifest(self, session_id: str, start: float, end: float) -> ClipManifest | Pending | Gone:
         """Resolve a marker range into an HLS manifest, a pending hint, or gone.
 

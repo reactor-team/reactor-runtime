@@ -113,6 +113,8 @@ class EventStream:
         self._history: deque[tuple[int, TransitionEvent]] = deque(maxlen=history_limit)
         self._subscriber_limit = subscriber_limit
         self._subscribers: set[_SubscriberQueue] = set()
+        # The session a filtered subscriber follows, by its queue.
+        self._filters: dict[_SubscriberQueue, str] = {}
         self._state: SessionState | None = None
         self._connections = 0
 
@@ -135,7 +137,9 @@ class EventStream:
         self._history.append(item)
         self._fold(event)
         for queue in self._subscribers:
-            self._offer(queue, item)
+            wanted = self._filters.get(queue)
+            if wanted is None or wanted == event.session_id:
+                self._offer(queue, item)
 
     def _offer(self, queue: _SubscriberQueue, item: tuple[int, TransitionEvent]) -> None:
         """Hand *item* to a subscriber, shedding its oldest event if the queue is full.
@@ -154,7 +158,9 @@ class EventStream:
                 queue.get_nowait()
             queue.put_nowait(item)
 
-    def subscribe(self, since: int | None = None) -> AsyncIterator[tuple[int, TransitionEvent]]:
+    def subscribe(
+        self, since: int | None = None, *, session_id: str | None = None
+    ) -> AsyncIterator[tuple[int, TransitionEvent]]:
         """Return an iterator over ``(seq, event)`` pairs after *since*, then live ones.
 
         Registers immediately — before the first iteration — so an event emitted
@@ -166,11 +172,20 @@ class EventStream:
         in the yielded sequence numbers. With *since* ``None``, delivery starts
         from the next event. The iterator runs until the caller stops consuming
         it.
+
+        With *session_id* set, only the events of that session are yielded.
+        Sequence numbers stay the journal's own, so the ones a filtered
+        subscriber sees jump wherever another session's events fall; a
+        filtered consumer tells a drop from a filtered-out event by reading
+        the unfiltered stream.
         """
         start = self._seq if since is None else since
         queue: _SubscriberQueue = asyncio.Queue(self._subscriber_limit)
         self._subscribers.add(queue)
         backlog = [item for item in self._history if item[0] > start]
+        if session_id is not None:
+            self._filters[queue] = session_id
+            backlog = [item for item in backlog if item[1].session_id == session_id]
         return self._stream(queue, backlog)
 
     async def _stream(
@@ -190,6 +205,7 @@ class EventStream:
                 yield await queue.get()
         finally:
             self._subscribers.discard(queue)
+            self._filters.pop(queue, None)
 
     def snapshot(self) -> SessionSnapshot:
         """Return the current session state for a consumer to reconcile against."""

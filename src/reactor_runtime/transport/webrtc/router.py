@@ -19,7 +19,6 @@ from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
-from reactor_runtime.core import ConnId
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.transport.router import (
     ConnectionsExhaustedError,
@@ -312,7 +311,7 @@ class WebRtcRouter(TransportRouter):
         async def register(sid: str) -> RegisterConnectionResponse:
             runner.require_session_running(sid)
             return RegisterConnectionResponse(
-                connection_id=runner.new_conn_id(), track_map=dict(runner.track_map())
+                connection_id=runner.new_conn_id(sid), track_map=dict(runner.track_map())
             )
 
         # One handler, registered once per method: a POST opens a connection's
@@ -328,7 +327,7 @@ class WebRtcRouter(TransportRouter):
         ) -> OfferAccepted:
             runner.require_session_running(sid)
             tracks = TrackMap.from_client(entry.model_dump() for entry in req.track_mapping)
-            conn_id = ConnId(cid)
+            conn_id = runner.claim_conn_id(sid, cid)
             runner.offer_admitted(conn_id)
             try:
                 acceptor.start_offer(
@@ -361,7 +360,7 @@ class WebRtcRouter(TransportRouter):
         )
         async def sdp_answer(sid: str, cid: int) -> Response:
             runner.require_session_running(sid)
-            answer = acceptor.take_answer(ConnId(cid))
+            answer = acceptor.take_answer(runner.claim_conn_id(sid, cid))
             if answer is None:
                 return Response(status_code=202)
             payload = SdpAnswerResponse(sdp_answer=answer.sdp, connection_id=cid)
@@ -374,9 +373,10 @@ class WebRtcRouter(TransportRouter):
         )
         async def ice(sid: str, cid: int, req: IceCandidatesRequest) -> Response:
             runner.require_session_running(sid)
+            conn_id = runner.claim_conn_id(sid, cid)
             for entry in req.candidates:
                 await acceptor.add_ice(
-                    ConnId(cid),
+                    conn_id,
                     IceCandidate(entry.candidate, entry.sdp_mid, entry.sdp_mline_index),
                 )
             return Response(status_code=202)

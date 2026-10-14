@@ -68,7 +68,7 @@ from reactor_runtime.transport.webrtc.signaling import IceCandidate
 FIXED_SESSION_ID = "00000000-0000-0000-0000-000000000000"
 
 # The exact key set of the single envelope type `/events` carries.
-ENVELOPE_KEYS = frozenset({"type", "event", "from", "to", "ts", "detail"})
+ENVELOPE_KEYS = frozenset({"type", "event", "from", "to", "ts", "session_id", "detail"})
 
 
 # -- fixture models -----------------------------------------------------------

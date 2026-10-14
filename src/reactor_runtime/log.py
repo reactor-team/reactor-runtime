@@ -31,9 +31,12 @@ produced it without model code threading any of it through its call sites.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import logging
 import os
+from collections.abc import Iterator
 from typing import IO, Any
 
 LOG_DATEFMT = "%Y-%m-%dT%H:%M:%S%z"
@@ -52,8 +55,8 @@ _QUOTE_TRIGGERS = (" ", "=", '"', "\n", "\r", "\t")
 
 # The live session's id, stamped on every record while it is set. A module global
 # rather than a ContextVar because a session fans its work across plain worker
-# threads, which do not inherit context; the runtime hosts one session at a time,
-# so a single value is unambiguous.
+# threads, which do not inherit context; a runtime hosting one session at a time
+# finds a single value unambiguous. One hosting several uses session_scope.
 _session_id: str | None = None
 
 # Counts bindings, so a release can name the one it retires. Two sessions may
@@ -103,7 +106,34 @@ def release_session_id(binding: int) -> None:
 
 def get_session_id() -> str | None:
     """Return the id currently being stamped, or ``None`` between sessions."""
-    return _session_id
+    scoped = _scoped_session_id.get()
+    return scoped if scoped is not None else _session_id
+
+
+# The session a unit of work belongs to, in a runtime that hosts several at
+# once. Scoped to the current context, so it reaches the coroutines and the
+# ``asyncio.to_thread`` calls that unit spawns, and it takes precedence over the
+# process-wide binding above, which a multi-session runtime leaves unset.
+_scoped_session_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "reactor_log_session_id", default=None
+)
+
+
+@contextlib.contextmanager
+def session_scope(session_id: str | None) -> Iterator[None]:
+    """Stamp *session_id* on every record written in the current context, for the block.
+
+    For a runtime hosting several sessions in one process, where no single
+    process-wide id is true. Nested scopes restore the outer one on exit.
+
+    Args:
+        session_id: The id of the session the enclosed work belongs to.
+    """
+    token = _scoped_session_id.set(session_id)
+    try:
+        yield
+    finally:
+        _scoped_session_id.reset(token)
 
 
 # The runtime's lifecycle, stamped on every record while set: the state
@@ -180,8 +210,9 @@ class SessionContextFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         """Merge the ambient context into *record*'s structured fields."""
+        scoped = _scoped_session_id.get()
         stamped = {
-            "session_id": _session_id,
+            "session_id": scoped if scoped is not None else _session_id,
             "state": _state,
             "runtime_state": _runtime_state,
         }
@@ -327,6 +358,7 @@ __all__ = [
     "get_session_id",
     "get_state",
     "release_session_id",
+    "session_scope",
     "set_session_id",
     "set_state",
 ]

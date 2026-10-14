@@ -20,11 +20,14 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import errno
 import importlib.metadata
 import logging
 import math
 import os
+import socket
 import sys
+import time
 from pathlib import Path
 
 from reactor_runtime import log
@@ -33,6 +36,7 @@ from reactor_runtime.http import HttpServer
 from reactor_runtime.manifest import MANIFEST, load_config
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.runner import Runner
+from reactor_runtime.runner.session_host import SessionHost, batched_capacity
 from reactor_runtime.service import Service
 from reactor_runtime.transport.webrtc.config import (
     CodecEntry,
@@ -305,11 +309,61 @@ def _log_level_from_env() -> int:
     return logging.getLevelNamesMapping().get(name, logging.INFO)
 
 
+def _listen(cfg: RuntimeConfig) -> list[socket.socket]:
+    """Bind the HTTP address and listen on it, for the HTTP server to take over.
+
+    The host is bound as the HTTP server binds it itself: on every address it
+    resolves to, so ``localhost`` answers on both loopbacks and an empty host
+    on every interface of each family. An address whose family the machine
+    has disabled is skipped, as long as another one binds.
+
+    Raises:
+        SystemExit: If the address cannot be bound.
+    """
+    sockets: list[socket.socket] = []
+    try:
+        resolved = socket.getaddrinfo(
+            cfg.host or None, cfg.port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE
+        )
+        for family, _, _, _, address in dict.fromkeys(resolved):
+            try:
+                sockets.append(socket.create_server(address, family=family, backlog=2048))
+            except OSError as exc:
+                if exc.errno not in (errno.EADDRNOTAVAIL, errno.EAFNOSUPPORT):
+                    raise
+        if not sockets:
+            raise OSError(errno.EADDRNOTAVAIL, "no address it resolves to can be bound")
+    except OSError as exc:
+        for sock in sockets:
+            sock.close()
+        raise SystemExit(f"cannot listen on {cfg.host}:{cfg.port}: {exc}") from exc
+    return sockets
+
+
+def _session_slots(cfg: RuntimeConfig) -> int:
+    """Return how many sessions this process hosts at once.
+
+    A :class:`~reactor_runtime.BatchedReactorApp` declares its
+    ``max_sessions``, which the model's class is imported to read; every other
+    model hosts one. ``REACTOR_MAX_SESSIONS`` lowers the declared number for a
+    deployment that wants fewer, and never raises it.
+
+    Raises:
+        SystemExit: If ``REACTOR_MAX_SESSIONS`` is set but not a positive integer.
+    """
+    declared = batched_capacity(cfg.model_ref)
+    cap = _int_env("REACTOR_MAX_SESSIONS", declared)
+    if cap < 1:
+        raise SystemExit("REACTOR_MAX_SESSIONS must be at least 1")
+    return min(declared, cap)
+
+
 def _assemble(
     cfg: RuntimeConfig,
     webrtc: WebRtcConfig | None = None,
     *,
     peer_factory: WebRtcPeerFactory | None = None,
+    listeners: list[socket.socket] | None = None,
 ) -> Service:
     """Assemble the service from the runtime's components.
 
@@ -320,7 +374,10 @@ def _assemble(
     service so a failed model load or a crashed model loop brings the whole
     process down, inside the exit deadline the service arms from the lifecycle
     timeouts, and the service's aggregate health is wired into the HTTP server
-    so ``/health`` answers for every component of the process. The metrics
+    so ``/health`` answers for every component of the process. A model that
+    declares more than one session is served by a :class:`SessionHost`, which
+    hosts them all on one loaded model; every other model by a :class:`Runner`.
+    The metrics
     registry is created
     here too, the one place that knows the identity of the process, and handed
     both to the runner that observes on it and to the HTTP server that renders
@@ -332,6 +389,8 @@ def _assemble(
             ``WebRtcConfig`` when omitted (as in tests that don't exercise it).
         peer_factory: The media engine to mount; defaults to the libwebrtc
             engine when omitted.
+        listeners: The bound sockets the HTTP server serves on; it binds
+            its own when omitted.
 
     Returns:
         A service with the runner and the HTTP server hooked on.
@@ -345,7 +404,13 @@ def _assemble(
         peer_factory = libwebrtc_peer_factory
     service = Service(exit_timeout=cfg.exit_timeout, grace_period=cfg.grace_period)
     metrics = RuntimeMetrics(version=_version(), model=cfg.model_ref)
-    runner = Runner(cfg, metrics)
+    load_started = time.monotonic()
+    slots = _session_slots(cfg)
+    runner: Runner | SessionHost = (
+        SessionHost(cfg, metrics, slots, load_started=load_started)
+        if slots > 1
+        else Runner(cfg, metrics, load_started=load_started)
+    )
     runner.request_shutdown = service.request_shutdown
     service.add(runner)
     transport = WebRtcRouter(webrtc or WebRtcConfig(), peer_factory, metrics)
@@ -356,6 +421,7 @@ def _assemble(
             transports=[transport],
             process_health=service.health,
             metrics=metrics,
+            listeners=listeners,
         )
     )
     return service
@@ -381,13 +447,25 @@ async def serve(
         asked for or a model that refused to load, non-zero for a model loop
         that crashed.
 
+    Raises:
+        SystemExit: If the HTTP address cannot be bound.
+
     The service's wind-down is bounded by the deadline the shutdown request
     armed. The teardown that follows this coroutine — the loop joining its
     worker threads, the interpreter joining every thread still alive — is
     bounded by a second one armed here, so the caller's exit cannot be held
     up by a thread the runtime does not own.
     """
-    service = _assemble(cfg, webrtc, peer_factory=peer_factory)
+    # Choosing the runner imports the model's class. The address is bound
+    # first, as the HTTP server binds before the model loads, so a probe that
+    # connects during the import waits in the backlog rather than being refused.
+    listeners = _listen(cfg)
+    try:
+        service = _assemble(cfg, webrtc, peer_factory=peer_factory, listeners=listeners)
+    except BaseException:
+        for listener in listeners:
+            listener.close()
+        raise
     await service.run()
     service.bound_process_exit()
     return service.exit_code

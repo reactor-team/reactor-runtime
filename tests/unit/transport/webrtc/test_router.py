@@ -40,9 +40,12 @@ class FakeRunner:
         if sid != self._session_id:
             raise UnknownSessionError
 
-    def new_conn_id(self) -> ConnId:
+    def new_conn_id(self, sid: str | None = None) -> ConnId:
         self._next += 1
         return ConnId(self._next)
+
+    def claim_conn_id(self, sid: str, cid: int) -> ConnId:
+        return ConnId(cid)
 
     def offer_admitted(self, conn_id: ConnId) -> None:
         self.admitted.append(conn_id)
@@ -418,7 +421,7 @@ def test_register_reports_503_when_the_id_pool_is_exhausted(
     factory_for: Callable[..., WebRtcPeerFactory],
 ) -> None:
     class ExhaustedRunner(FakeRunner):
-        def new_conn_id(self) -> ConnId:
+        def new_conn_id(self, sid: str | None = None) -> ConnId:
             raise ConnectionsExhaustedError
 
     client = _client(ExhaustedRunner(), fake_peer, factory_for)

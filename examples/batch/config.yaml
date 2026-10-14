@@ -1,0 +1,20 @@
+# Read by Batch.load(). The runtime passes this file's path through and does
+# not parse it.
+
+# The frame each session receives.
+width: 256
+height: 256
+
+# The network: a latent of `latent` x `latent` cells with `channels` channels,
+# advanced by `layers` 3x3 convolutions per step. Raise them to give a GPU
+# enough work per step for batching to show.
+latent: 32
+channels: 16
+layers: 2
+
+# auto: PyTorch when it is installed (on the GPU when there is one), NumPy
+# otherwise. torch / numpy pick one outright.
+backend: auto
+
+# Keep a SHA-256 of each frame with its step, as frame.sha256.
+fingerprint: true
