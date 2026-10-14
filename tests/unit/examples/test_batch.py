@@ -39,6 +39,7 @@ def test_the_manifest_serves_the_batched_app() -> None:
     assert issubclass(model_cls, BatchedReactorApp)
     assert batched_capacity(cfg.model_ref) == 4
     assert cfg.step_results.enabled
+    assert cfg.step_results.queue == 64 * batched_capacity(cfg.model_ref)
 
 
 def test_commands_are_the_state_setters() -> None:
