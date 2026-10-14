@@ -1,8 +1,9 @@
-"""Failure-path tests for the secret loader: value rules and value hygiene.
+"""Failure-path tests for the secret loader: value rules, value hygiene, and races.
 
 A failure must name keys and the failure, and never carry a value, a byte of a
 value, or an exception chain that does. A failed load keeps no value alive in
-its traceback.
+its traceback. A path that changes after the check never leads the read out of
+the mount.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import errno
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -18,6 +20,8 @@ from reactor_runtime import secrets
 from reactor_runtime.secrets import EXPECTED_KEYS_ENV, load_expected_secrets
 
 _GOOD = b"synth-value-3c6d6c03"
+
+_POSIX_ONLY = pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="POSIX file types")
 
 
 def _env(names: list[str]) -> dict[str, str]:
@@ -28,9 +32,14 @@ def _write(root: Path, name: str, data: bytes) -> None:
     (root / name).write_bytes(data)
 
 
-def _mount(root: Path, files: dict[str, bytes]) -> None:
+def _mount_atomic_writer(root: Path, files: dict[str, bytes]) -> None:
+    stamp = root / "..2026_10_13_04_00_00.123456789"
+    stamp.mkdir()
     for name, data in files.items():
-        _write(root, name, data)
+        _write(stamp, name, data)
+    (root / "..data").symlink_to(stamp.name)
+    for name in files:
+        (root / name).symlink_to(f"..data/{name}")
 
 
 def _assert_no_value_leak(
@@ -81,7 +90,7 @@ def test_a_bad_value_in_a_later_file_blocks_with_a_names_only_message(
     data: bytes,
     failure: str,
 ) -> None:
-    _mount(tmp_path, {"AAA_FIRST": _GOOD, "ZZZ_LAST": data})
+    _mount_atomic_writer(tmp_path, {"AAA_FIRST": _GOOD, "ZZZ_LAST": data})
 
     with pytest.raises(SystemExit, match=f"'ZZZ_LAST' {failure}") as raised:
         load_expected_secrets(_env(["AAA_FIRST", "ZZZ_LAST"]), tmp_path)
@@ -98,7 +107,7 @@ def test_a_bad_value_in_a_later_file_blocks_with_a_names_only_message(
     ids=["nul", "utf8", "oversize"],
 )
 def test_a_failed_load_keeps_no_value_in_its_traceback(tmp_path: Path, data: bytes) -> None:
-    _mount(tmp_path, {"AAA_FIRST": _GOOD, "ZZZ_LAST": data})
+    _mount_atomic_writer(tmp_path, {"AAA_FIRST": _GOOD, "ZZZ_LAST": data})
 
     with pytest.raises(SystemExit) as raised:
         load_expected_secrets(_env(["AAA_FIRST", "ZZZ_LAST"]), tmp_path)
@@ -109,7 +118,7 @@ def test_a_failed_load_keeps_no_value_in_its_traceback(tmp_path: Path, data: byt
 def test_a_failed_metadata_check_names_the_key_and_keeps_no_value(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _mount(tmp_path, {"AAA_FIRST": _GOOD, "ZZZ_LAST": _GOOD})
+    _mount_atomic_writer(tmp_path, {"AAA_FIRST": _GOOD, "ZZZ_LAST": _GOOD})
     fstat = os.fstat
     calls: list[int] = []
 
@@ -125,3 +134,53 @@ def test_a_failed_metadata_check_names_the_key_and_keeps_no_value(
         load_expected_secrets(_env(["AAA_FIRST", "ZZZ_LAST"]), tmp_path)
 
     _assert_no_value_in_loader_frames(raised.value)
+
+
+@_POSIX_ONLY
+def test_a_symlink_swapped_after_the_check_blocks_the_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = tmp_path / "..store"
+    store.mkdir()
+    _write(store, "payload", _GOOD)
+    (tmp_path / "API_TOKEN").symlink_to("..store/payload")
+    (store / "swapped").symlink_to("payload")
+    realpath = os.path.realpath
+
+    def stale(path: Any) -> str:
+        # The check sees the payload. The open then meets a symlink in its place.
+        resolved = realpath(path)
+        return str(store / "swapped") if Path(resolved).name == "payload" else resolved
+
+    monkeypatch.setattr(secrets.os.path, "realpath", stale)
+
+    with pytest.raises(SystemExit, match="not a regular file"):
+        load_expected_secrets(_env(["API_TOKEN"]), tmp_path)
+
+
+@_POSIX_ONLY
+def test_a_directory_swapped_after_the_check_blocks_the_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "secrets"
+    store = root / "..store"
+    store.mkdir(parents=True)
+    _write(store, "payload", _GOOD)
+    (root / "API_TOKEN").symlink_to("..store/payload")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _write(outside, "payload", b"synth-outside")
+    realpath = os.path.realpath
+
+    def swap_after_check(path: Any) -> str:
+        # The check sees the mount. The read then meets a directory link to the outside.
+        resolved = realpath(path)
+        if Path(resolved).name == "payload" and not (root / "..old").exists():
+            store.rename(root / "..old")
+            store.symlink_to(outside, target_is_directory=True)
+        return resolved
+
+    monkeypatch.setattr(secrets.os.path, "realpath", swap_after_check)
+
+    with pytest.raises(SystemExit, match="'API_TOKEN' is not a regular file inside the mount"):
+        load_expected_secrets(_env(["API_TOKEN"]), root)

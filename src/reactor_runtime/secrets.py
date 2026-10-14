@@ -85,7 +85,7 @@ def load_expected_secrets(env: Mapping[str, str], root: Path) -> dict[str, str]:
                 f"the secret files in {root} do not match {EXPECTED_KEYS_ENV}: "
                 f"{'; '.join(problems)}"
             )
-        return _read_secrets(root_fd, sorted(expected))
+        return _read_secrets(root_fd, root, sorted(expected))
     finally:
         os.close(root_fd)
 
@@ -141,13 +141,17 @@ def _listing(root_fd: int, root: Path) -> list[str]:
         raise SystemExit(f"the secret directory {root} is unreadable") from None
 
 
-def _read_secrets(root_fd: int, names: list[str]) -> dict[str, str]:
+def _read_secrets(root_fd: int, root: Path, names: list[str]) -> dict[str, str]:
     """Read every expected file, keeping no value alive when one of them fails."""
+    try:
+        real_root = os.path.realpath(root)
+    except OSError:
+        raise SystemExit(f"the secret directory {root} is unreadable") from None
     values: dict[str, str] = {}
     name = ""
     try:
         for name in names:
-            values[name] = _read_secret(root_fd, name)
+            values[name] = _read_secret(root_fd, real_root, name)
     except OSError:
         values.clear()
         raise SystemExit(f"secret file {_display(name)} is unreadable") from None
@@ -157,7 +161,7 @@ def _read_secrets(root_fd: int, names: list[str]) -> dict[str, str]:
     return values
 
 
-def _read_secret(root_fd: int, name: str) -> str:
+def _read_secret(root_fd: int, real_root: str, name: str) -> str:
     """Read and validate one expected file, returning its decoded value.
 
     Raises:
@@ -169,10 +173,15 @@ def _read_secret(root_fd: int, name: str) -> str:
         raise SystemExit(f"secret file {_display(name)} is missing") from None
     except OSError:
         raise SystemExit(f"secret file {_display(name)} is unreadable") from None
-    if not stat.S_ISREG(info.st_mode):
+    is_link = stat.S_ISLNK(info.st_mode)
+    if is_link:
+        relative = _resolve_link(real_root, name)
+    elif stat.S_ISREG(info.st_mode):
+        relative = name
+    else:
         # Refused before any open, so a FIFO or a device can never block the boot.
         raise SystemExit(f"secret file {_display(name)} is not a regular file")
-    data = _open_and_read(root_fd, name)
+    data = _open_and_read(root_fd, relative, name, is_link=is_link)
     has_nul = b"\x00" in data
     text = None if has_nul else _decode(data)
     # A failure must not keep the value alive in this frame's traceback.
@@ -183,24 +192,60 @@ def _read_secret(root_fd: int, name: str) -> str:
     return text
 
 
-def _open_and_read(root_fd: int, name: str) -> bytes:
-    """Open the regular file *name* in the open mount directory and read it fully.
-
-    ``O_NOFOLLOW`` refuses an entry that became a symlink after the check.
-    ``O_NONBLOCK`` keeps the open instant for a special file, and ``fstat``
-    confirms a regular file.
+def _resolve_link(real_root: str, name: str) -> str:
+    """Return the resolved target of the symlink *name*, relative to the mount.
 
     Raises:
-        SystemExit: If the file is missing, not a regular file, unreadable,
-            empty, or larger than the value limit.
+        SystemExit: If the link cannot be resolved or escapes the mount.
     """
+    resolved: str | None = None
+    with contextlib.suppress(OSError, RuntimeError):
+        resolved = os.path.realpath(os.path.join(real_root, name))
+    if resolved is None:
+        raise SystemExit(f"secret file {_display(name)} is a symlink that cannot be resolved")
+    inside = False
+    with contextlib.suppress(ValueError):
+        inside = os.path.commonpath((real_root, resolved)) == real_root
+    if not inside:
+        raise SystemExit(f"secret file {_display(name)} is a symlink that escapes the mount")
+    return os.path.relpath(resolved, real_root)
+
+
+def _open_and_read(root_fd: int, relative: str, name: str, *, is_link: bool) -> bytes:
+    """Open *relative* below the open mount directory and read it fully.
+
+    Every step opens one path component with ``O_NOFOLLOW`` from the directory
+    opened before it, so a component that became a symlink after the check
+    stops the read, and the file read is always inside the mount. ``O_NONBLOCK``
+    keeps the open instant for a special file, and ``fstat`` confirms a regular
+    file.
+
+    Raises:
+        SystemExit: If the target is missing, not a regular file inside the
+            mount, unreadable, empty, or larger than the value limit.
+    """
+    *parents, leaf = relative.split(os.sep)
+    directory = root_fd
     try:
-        descriptor = os.open(name, os.O_RDONLY | _O_NONBLOCK | _O_NOFOLLOW, dir_fd=root_fd)
+        for part in parents:
+            step = os.open(part, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW, dir_fd=directory)
+            if directory != root_fd:
+                os.close(directory)
+            directory = step
+        descriptor = os.open(leaf, os.O_RDONLY | _O_NONBLOCK | _O_NOFOLLOW, dir_fd=directory)
     except FileNotFoundError:
-        raise SystemExit(f"secret file {_display(name)} is missing") from None
-    except OSError as error:
-        kind = "not a regular file" if error.errno == errno.ELOOP else "unreadable"
+        kind = "a dangling symlink" if is_link else "missing"
         raise SystemExit(f"secret file {_display(name)} is {kind}") from None
+    except OSError as error:
+        kind = (
+            "not a regular file inside the mount"
+            if error.errno in (errno.ELOOP, errno.ENOTDIR)
+            else "unreadable"
+        )
+        raise SystemExit(f"secret file {_display(name)} is {kind}") from None
+    finally:
+        if directory != root_fd:
+            os.close(directory)
     try:
         mode: int | None = None
         with contextlib.suppress(OSError):
