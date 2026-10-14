@@ -24,7 +24,9 @@ from reactor_runtime import (
     JoinPolicy,
     MediaInput,
     Output,
+    StepCompleted,
     StepOutcome,
+    TrackPayload,
     Video,
     session_ended,
     session_started,
@@ -237,6 +239,34 @@ def test_a_per_session_error_fails_that_session_alone(
 
         _wait(lambda: bool(sinks.failed))
         assert sinks.failed[0] == (2, "bad latent")
+        frames_after_failure = len(sinks.frames(1))
+        _wait(lambda: len(sinks.frames(1)) > frames_after_failure + 3)
+        assert not sinks.crashed
+        assert app.batches[-1] == ["good"]
+    finally:
+        app.stop()
+
+
+class EmitsBadMetadata(Summing):
+    async def process_output(self, outcome: StepOutcome) -> Output | StepCompleted | None:
+        if self.session_id == "bad":
+            frame = np.zeros((2, 2, 3), dtype=np.uint8)
+            return Frame(main_video=TrackPayload(frame, metadata={"latent": object()}))
+        return await super().process_output(outcome)
+
+
+def test_an_emit_error_fails_that_session_alone(
+    register_model: Callable[[type], None],
+) -> None:
+    register_model(EmitsBadMetadata)
+    app = EmitsBadMetadata()
+    try:
+        sinks = _serve(app)
+        _open(app, 1, "good")
+        _open(app, 2, "bad")
+
+        _wait(lambda: bool(sinks.failed))
+        assert [key for key, _ in sinks.failed] == [2]
         frames_after_failure = len(sinks.frames(1))
         _wait(lambda: len(sinks.frames(1)) > frames_after_failure + 3)
         assert not sinks.crashed
