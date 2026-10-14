@@ -22,11 +22,12 @@ from contract_helpers import FakePeer, read_sse
 from fastapi import FastAPI
 
 from reactor_runtime import BatchedReactorApp, InputField, InputState, Output, Video
-from reactor_runtime.core import RuntimeConfig
+from reactor_runtime.core import RecordingConfig, RuntimeConfig
 from reactor_runtime.http.server import build_app
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.runner.session_host import SessionHost
+from reactor_runtime.step_results import SavedStep
 from reactor_runtime.transport.webrtc import WebRtcConfig, WebRtcRouter
 from reactor_runtime.transport.webrtc.config import WebRtcConfig as _Config
 from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
@@ -447,3 +448,44 @@ async def test_a_callers_upload_id_is_reserved_in_one_session_only() -> None:
         assert second.status_code == 409
         assert written.status_code == 200
         assert (await rt.host.uploads_for(ALPHA).fetch("u1", wait_seconds=0)).data == b"abc"
+
+
+async def test_an_ended_sessions_recording_stays_reachable_after_its_slot_moves_on() -> None:
+    cfg = RuntimeConfig(model_ref="multi:Painter", recording=RecordingConfig(enabled=True))
+    async with hosting(cfg) as rt:
+        await _start(rt.client, session_id=WATCHED)
+        await _start(rt.client, session_id=ALPHA)
+        await rt.client.post("/stop_session", json={"session_id": ALPHA})
+        await _until(lambda: ALPHA not in _states(rt.host))
+        await _start(rt.client, session_id=BETA)
+
+        for sid in (WATCHED, BETA, ALPHA):
+            response = await rt.client.get(f"/clips/chunks/{sid}/chunk_99999.m4s")
+            assert response.status_code == 404, sid
+
+
+async def test_a_step_saved_after_its_slot_moves_on_is_journaled_under_its_own_session() -> None:
+    async with hosting() as rt:
+        await _start(rt.client, session_id=WATCHED)
+        await _start(rt.client, session_id=ALPHA)
+        await rt.client.post("/stop_session", json={"session_id": ALPHA})
+        await _until(lambda: ALPHA not in _states(rt.host))
+        await _start(rt.client, session_id=BETA)
+
+        rt.host._on_step_saved(SavedStep(session_id=ALPHA, step=7, files=("result.json",)))
+
+        await _until(
+            lambda: any(
+                event.transition.event.name == "STEP_RESULT_READY"
+                for _, event in rt.host.events._history
+            )
+        )
+        saved = [
+            event
+            for _, event in rt.host.events._history
+            if event.transition.event.name == "STEP_RESULT_READY"
+        ]
+        assert [(event.session_id, event.transition.detail["step"]) for event in saved] == [
+            (ALPHA, 7)
+        ]
+        assert _states(rt.host) == {WATCHED: "waiting", BETA: "waiting"}
