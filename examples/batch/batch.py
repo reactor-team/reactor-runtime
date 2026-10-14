@@ -16,8 +16,10 @@ in ``@session_started`` and dropped in ``@session_ended``.
 The network runs on PyTorch when it is installed, on the GPU when there is
 one, and on NumPy otherwise, so the example also runs where neither PyTorch
 nor a GPU is present. The weights are drawn from a fixed seed, so a session's
-frames depend only on its own ``seed`` and ``tint``: the same session yields
-the same frames whether it runs alone or batched with others.
+frames depend only on its own ``seed`` and ``tint``. On NumPy a session yields
+the same bytes whether it runs alone or batched with others; on PyTorch the
+kernels chosen for a batch's size, and TF32 maths on a GPU, can move a pixel
+by a level or so.
 """
 
 from __future__ import annotations
@@ -153,7 +155,7 @@ class Batch(BatchedReactorApp):
     async def process_output(self, outcome: StepOutcome) -> StepCompleted:
         """Emit the frame, and keep its fingerprint with the step.
 
-        ``frame.sha256`` lets a client check that a session's frames are the
+        ``frame.sha256`` lets a client compare a session's frames with the
         ones it gets when it runs alone. Hashing a frame costs a little time
         per session per step, so ``fingerprint: false`` turns it off.
         """
