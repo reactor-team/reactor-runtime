@@ -395,14 +395,14 @@ class ConnectionManager:
         encode: Callable[[ProtocolVersion], tuple[Channel, bytes | str]],
         too_large: Callable[[ProtocolVersion, int, int], tuple[Channel, bytes | str]],
     ) -> None:
-        """Send a step's result to one connection, or say why it does not fit.
+        """Send a step's result to one connection, or a small one that says it does not fit.
 
         The encoded result is measured against the largest message the
         connection negotiated. One that fits goes out whole through the
         connection's step-result send; one that does not is never sent, and
         *too_large*, given the version, the result's size, and the limit,
-        renders the reply that goes on the data channel instead. A v0 client
-        cannot request a step, so it is sent nothing.
+        renders the media-free result that goes on the data channel instead.
+        A v0 client cannot request a step, so it is sent nothing.
         """
         conn = self._by_id.get(cid)
         if conn is None or conn.protocol_version is ProtocolVersion.V0:
@@ -410,8 +410,8 @@ class ConnectionManager:
         _, frame = encode(conn.protocol_version)
         limit = conn.max_message_size
         if len(frame) > limit:
-            _, refusal = too_large(conn.protocol_version, len(frame), limit)
-            conn.send_message(refusal)
+            _, answer = too_large(conn.protocol_version, len(frame), limit)
+            conn.send_message(answer)
             return
         conn.send_step_result(frame)
 

@@ -25,12 +25,7 @@ from collections import deque
 from collections.abc import Callable, Coroutine, Mapping
 from typing import Any, Protocol
 
-from reactor_runtime.codes import (
-    INTERNAL_ERROR,
-    INVALID_COMMAND,
-    STEP_RESULT_TOO_LARGE,
-    UNRESOLVED_UPLOAD,
-)
+from reactor_runtime.codes import INVALID_COMMAND, UNRESOLVED_UPLOAD
 from reactor_runtime.core import (
     JOURNAL_EVENTS,
     ClientConnected,
@@ -1457,8 +1452,9 @@ class Runner(ServiceComponent, ConnectionSink):
 
         A request that does not run is answered with a ``StepResult`` that
         takes no number. It is ``NOT_READY`` when the session is not running.
-        It is ``REFUSED``, naming the entry, when the session does not step,
-        when an entry's upload does not arrive or it fails the contract, or
+        It is ``REFUSED`` when the session does not step or the connection did
+        not negotiate data-channel chunking, and, naming the entry, when an
+        entry's upload does not arrive or it fails the contract, or
         when a media input frame names a track the model does not take or
         cannot be decoded; the entries submitted before the refused one stay
         applied. Neither is journalled or counted toward the session's steps.
@@ -1637,34 +1633,48 @@ class Runner(ServiceComponent, ConnectionSink):
         the client receives is what the step reported and what a saved step
         keeps, with the seconds its ``generate()`` took (or what the model
         reported), the same measurement a saved step records as
-        ``generate_s``, and the step's error when it failed. When the step store
-        took the step (*saved*), the result names each extra file the model
-        kept with it, which the client reads from the session's step results;
-        the bytes stay out of the message, so a file counts toward the
-        message's size only by its name, media type, and size. It goes out as
-        one message. A result larger than the connection
-        negotiated is not sent: the client is answered ``step_result_too_large``
-        and the session goes on. Media that cannot be carried as frames answers
-        ``internal_error``.
+        ``generate_s``. When the step store took the step (*saved*), the
+        result names each extra file the model kept with it, which the client
+        reads from the session's step results; the bytes stay out of the
+        message, so a file counts toward the message's size only by its name,
+        media type, and size. It goes out as one message.
+
+        A step that ran always answers with its number and elapsed time. One
+        whose model reported a failure answers ``FAILED`` with the model's
+        message, as does one whose media cannot be carried as frames. One whose
+        result is larger than the connection negotiated answers
+        ``RESULT_TOO_LARGE`` with no media or files, and the session goes on.
         """
         request = step.request
         assert request is not None
+        # The default loop, the only one a stepped session runs, always
+        # measures the step, so a missing time does not happen in practice.
+        elapsed = step.elapsed or 0.0
         try:
-            # The default loop, the only one a stepped session runs, always
-            # measures the step, so a missing time does not happen in practice.
             result = step_pb2.StepResult(
                 index=index,
                 tracks=track_frames(step.bundle),
-                elapsed=step.elapsed or 0.0,
+                elapsed=elapsed,
                 files=_step_file_refs(step) if saved else (),
                 error=step.error,
+                failure_code=(
+                    step_pb2.STEP_FAILURE_CODE_FAILED
+                    if step.error is not None
+                    else step_pb2.STEP_FAILURE_CODE_UNSPECIFIED
+                ),
             )
         except FrameEncodingError as error:
             logger.error("a step's output could not be encoded", step=index, error=str(error))
+            failed = step_pb2.StepResult(
+                index=index,
+                elapsed=elapsed,
+                failure_code=step_pb2.STEP_FAILURE_CODE_FAILED,
+                error=f"step {index}'s output could not be encoded: {error}",
+            )
             self._connections.send_step_reply(
                 request.conn_id,
-                lambda version: self._codec_for(version).encode_command_error(
-                    request.request_id, INTERNAL_ERROR, "The step's output could not be encoded."
+                lambda version: self._codec_for(version).encode_step_result(
+                    request.request_id, failed
                 ),
             )
             return
@@ -1673,10 +1683,17 @@ class Runner(ServiceComponent, ConnectionSink):
             version: ProtocolVersion, size: int, limit: int
         ) -> tuple[Channel, bytes | str]:
             logger.warning("a step result does not fit one message", step=index, size=size)
-            return self._codec_for(version).encode_command_error(
+            return self._codec_for(version).encode_step_result(
                 request.request_id,
-                STEP_RESULT_TOO_LARGE,
-                f"step {index}'s result is {size} bytes; this connection takes at most {limit}",
+                step_pb2.StepResult(
+                    index=index,
+                    elapsed=elapsed,
+                    failure_code=step_pb2.STEP_FAILURE_CODE_RESULT_TOO_LARGE,
+                    error=(
+                        f"step {index}'s result is {size} bytes; "
+                        f"this connection takes at most {limit}"
+                    ),
+                ),
             )
 
         self._connections.send_step_result(

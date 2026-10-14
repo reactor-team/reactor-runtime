@@ -860,7 +860,9 @@ def test_a_step_result_that_fits_goes_out_whole() -> None:
     assert conn.messages == [b"result"]
 
 
-def test_a_step_result_larger_than_the_connection_takes_is_replaced_by_the_refusal() -> None:
+def test_a_step_result_larger_than_the_connection_takes_is_replaced_by_its_too_large_answer() -> (
+    None
+):
     manager, _ = waiting_manager()
     conn = FakeConnection(1, protocol_version=ProtocolVersion.V1)
     conn.max_message_size = 5
