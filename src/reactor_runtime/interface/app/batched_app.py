@@ -19,7 +19,8 @@ a step for every session that takes one. Each turn of the step loop calls
 session with that session's result.
 
 A failure is scoped to what failed. An exception out of one session's
-``process_input()`` or ``process_output()`` ends that session with an error and
+``process_input()`` or ``process_output()``, or out of emitting what that
+session's ``process_output()`` returned, ends that session with an error and
 the rest keep stepping; ``generate_batch()`` reports one session's failure by
 returning the exception as that session's result, which reaches its
 ``process_output()`` as ``outcome.error``. An exception raised by
@@ -415,19 +416,22 @@ class BatchedReactorApp(ReactorApp):
     async def _deliver(
         self, session: _Session, report: StepCompleted, outcome: StepOutcome, fps_pinned: bool
     ) -> None:
-        """Emit one session's step media and report its step, as that session."""
+        """Emit one session's step media and report its step, failing it alone on an error."""
         with self._serving(session):
-            rate = None
-            if report.output is not None:
-                pace = None if fps_pinned else outcome.elapsed
-                token = STEP_SESSION.set(session.generation)
-                try:
-                    await self.emit(report.output, compute_time=pace)
-                finally:
-                    STEP_SESSION.reset(token)
-                frames = self._to_bundle(report.output).frame_count
-                rate = self._playout_rate(frames, pace)
-            self._report_step(report, session.generation, rate)
+            try:
+                rate = None
+                if report.output is not None:
+                    pace = None if fps_pinned else outcome.elapsed
+                    token = STEP_SESSION.set(session.generation)
+                    try:
+                        await self.emit(report.output, compute_time=pace)
+                    finally:
+                        STEP_SESSION.reset(token)
+                    frames = self._to_bundle(report.output).frame_count
+                    rate = self._playout_rate(frames, pace)
+                self._report_step(report, session.generation, rate)
+            except Exception as error:
+                self._fail_session(session, error, "emit")
 
     def _fail_session(self, session: _Session, error: BaseException, where: str) -> None:
         """Stop stepping *session* and ask the runtime to end it with *error*."""
