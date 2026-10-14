@@ -32,7 +32,13 @@ from reactor_runtime.core.model import (
     SessionEnded,
     SessionStarted,
 )
-from reactor_runtime.core.values import CompletedStep, ConnId, InputFrame, StepRefusal
+from reactor_runtime.core.values import (
+    CompletedStep,
+    ConnId,
+    InputFrame,
+    StepRefusal,
+    StepRefusalKind,
+)
 from reactor_runtime.interface.internal.input_buffer import InputBuffer
 from reactor_runtime.interface.internal.reactor_core import CommandEnvelope, StepEnvelope
 from reactor_runtime.interface.model.contract import ModelContract
@@ -313,7 +319,7 @@ async def test_a_step_requested_with_no_session_running_is_not_ready(harness: Ha
     await harness.settle()
 
     assert harness.refusals == [
-        StepRefusal(CLIENT, "r1", 0, "no session is running", not_ready=True)
+        StepRefusal(CLIENT, "r1", 0, "no session is running", StepRefusalKind.NOT_READY)
     ]
     assert harness.reports == []
 

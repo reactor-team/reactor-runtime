@@ -11,22 +11,27 @@ import pytest
 
 from reactor_runtime import (
     ApplicationError,
+    CommandError,
     InputField,
     InputState,
     MediaInput,
     Output,
     ReactorApp,
     ReadMode,
+    StepCompleted,
+    StepOutcome,
     UploadedFile,
     Video,
     event,
     protocol,
 )
 from reactor_runtime.core import (
+    CompletedStep,
     ConnectionCapabilities,
     ConnId,
     MediaBundle,
     MediaChunk,
+    RequestedStep,
     RuntimeConfig,
     SessionEvent,
     SessionState,
@@ -73,6 +78,14 @@ class StepModel(ReactorApp):
     def note(self, text: str) -> None:
         self.notes.append(text)
 
+    @event(name="reject_note")
+    def reject_note(self) -> None:
+        raise CommandError("no_notes", "notes are closed")
+
+    @event(name="crash")
+    def crash(self) -> None:
+        raise RuntimeError("an unplanned failure with private detail")
+
     async def process_input(self) -> tuple[str, list[str], list[int]]:
         if self.state.prompt == "refuse":
             raise ApplicationError("not now")
@@ -82,7 +95,14 @@ class StepModel(ReactorApp):
 
     def generate(self, input: tuple[str, list[str], list[int]]) -> Out:
         self.inputs.append(input)
+        if input[0] == "explode":
+            raise RuntimeError("the model ran out of memory")
         return Out(main_video=np.zeros((2, 2, 3), dtype=np.uint8))
+
+    async def process_output(self, outcome: StepOutcome) -> Output | StepCompleted | None:
+        if outcome.error is not None:
+            return StepCompleted(error=str(outcome.error))
+        return await super().process_output(outcome)
 
 
 class OwnLoop(StepModel):
@@ -501,6 +521,101 @@ async def test_a_step_the_model_refuses_is_answered_and_not_counted(runner: Runn
     ]
     assert _journalled_steps(runner) == [SessionEvent.STEP_COMPLETED]
     assert store.admitted == [1]
+
+
+async def test_a_failing_command_handler_answers_its_step_and_the_step_does_not_run(
+    runner: Runner,
+) -> None:
+    conn = await _stepped(runner)
+    _send(
+        runner,
+        conn,
+        _request_step(
+            "r1",
+            commands=[
+                ("note", {"text": "kept"}),
+                ("reject_note", {}),
+                ("note", {"text": "skipped"}),
+            ],
+        ),
+    )
+    await _until(lambda: len(conn.sent) == 1)
+    await asyncio.sleep(0.02)
+
+    [reply] = conn.replies()
+    assert reply.request_id == "r1"
+    error = _refusal(reply, step_pb2.STEP_FAILURE_CODE_COMMAND_FAILED)
+    assert error == "reject_note failed (no_notes): notes are closed"
+    assert models[-1].notes == ["kept"]
+    assert models[-1].inputs == []
+    assert _journalled_steps(runner) == []
+
+
+async def test_an_unexpected_handler_error_answers_its_step_without_its_detail(
+    runner: Runner,
+) -> None:
+    conn = await _stepped(runner)
+    _send(runner, conn, _request_step("r1", commands=[("crash", {})]))
+    await _until(lambda: len(conn.sent) == 1)
+
+    error = _refusal(conn.replies()[0], step_pb2.STEP_FAILURE_CODE_COMMAND_FAILED)
+    assert error.startswith("crash failed (internal_error):")
+    assert "private detail" not in error
+    assert models[-1].inputs == []
+
+
+async def test_a_command_failure_answers_only_its_own_step(runner: Runner) -> None:
+    conn = await _stepped(runner)
+    _send(runner, conn, _request_step("r1", commands=[("reject_note", {})]))
+    _send(runner, conn, _request_step("r2", commands=[("note", {"text": "fine"})]))
+    await _until(lambda: len(conn.sent) == 2)
+    await asyncio.sleep(0.02)
+
+    first, second = conn.replies()
+    assert (first.request_id, first.step_result.failure_code) == (
+        "r1",
+        step_pb2.STEP_FAILURE_CODE_COMMAND_FAILED,
+    )
+    assert (second.request_id, second.step_result.failure_code, second.step_result.index) == (
+        "r2",
+        step_pb2.STEP_FAILURE_CODE_UNSPECIFIED,
+        1,
+    )
+    assert models[-1].inputs == [("a forest", ["fine"], [])]
+
+
+async def test_a_step_the_model_reports_as_failed_is_answered_failed_with_its_number(
+    runner: Runner,
+) -> None:
+    conn = await _stepped(runner)
+    _send(runner, conn, _request_step("r1", state={"prompt": "explode"}))
+    await _until(lambda: len(conn.sent) == 1)
+
+    [reply] = conn.replies()
+    result = reply.step_result
+    assert result.failure_code == step_pb2.STEP_FAILURE_CODE_FAILED
+    assert result.index == 1
+    assert result.error == "the model ran out of memory"
+
+
+async def test_a_step_report_from_an_earlier_session_answers_session_ended(
+    runner: Runner,
+) -> None:
+    conn = await _stepped(runner)
+    report = CompletedStep(
+        bundle=None,
+        files={},
+        error=None,
+        elapsed=0.1,
+        session=runner._sessions_posted - 1,
+        fps=24.0,
+        request=RequestedStep(conn.id, "r-old", 1),
+    )
+    runner._record_step(report)
+
+    error = _refusal(conn.replies()[0], step_pb2.STEP_FAILURE_CODE_SESSION_ENDED)
+    assert error == "the session ended before the step's result was sent"
+    assert _journalled_steps(runner) == []
 
 
 async def test_a_stepped_session_closes_after_its_steps(runner: Runner) -> None:

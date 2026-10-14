@@ -508,6 +508,17 @@ class RequestedStep:
     index: int
 
 
+class StepRefusalKind(StrEnum):
+    """Why a requested step did not run."""
+
+    REFUSED = "refused"
+    """The model refused this request, in its session or in ``process_input()``."""
+    NOT_READY = "not_ready"
+    """No session was running to take the step; the same request can succeed later."""
+    COMMAND_FAILED = "command_failed"
+    """The handler of one of the request's state keys or commands failed."""
+
+
 @dataclass(frozen=True)
 class StepRefusal:
     """A step a client requested that the model did not run.
@@ -520,16 +531,14 @@ class StepRefusal:
         session: The session the request was handled in, counted the way
             :attr:`CompletedStep.session` is.
         reason: Why the step did not run.
-        not_ready: ``True`` when the model had no session running to take
-            the step, so the same request can succeed later; ``False`` when
-            the model refused this request.
+        kind: Which kind of refusal it is.
     """
 
     conn_id: ConnId
     request_id: str
     session: int
     reason: str
-    not_ready: bool = False
+    kind: StepRefusalKind = StepRefusalKind.REFUSED
 
 
 @dataclass(frozen=True)

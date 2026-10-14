@@ -216,11 +216,15 @@ class CommandEnvelope:
         command: The validated command to dispatch.
         conn_id: The connection that sent it, when known.
         request_id: The request id to correlate a reply against, when present.
+        step_request_id: The request id of the step request that carries this
+            command, when it is one of a step's state keys or commands. A
+            failure of its handler then answers that step instead.
     """
 
     command: Command
     conn_id: ConnId | None
     request_id: RequestId | None
+    step_request_id: RequestId | None = None
 
 
 @dataclass(frozen=True)
@@ -453,10 +457,15 @@ class ReactorCore:
     # -- thread-safe ingress (called by the bridge from the runtime thread) ---
 
     def submit_command(
-        self, command: Command, conn_id: ConnId | None, request_id: RequestId | None
+        self,
+        command: Command,
+        conn_id: ConnId | None,
+        request_id: RequestId | None,
+        *,
+        step_request_id: RequestId | None = None,
     ) -> None:
         """Enqueue a validated command onto the model loop."""
-        self._enqueue(CommandEnvelope(command, conn_id, request_id))
+        self._enqueue(CommandEnvelope(command, conn_id, request_id, step_request_id))
 
     def submit_step(self, step: StepEnvelope) -> None:
         """Enqueue a validated step request onto the model loop.

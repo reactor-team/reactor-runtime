@@ -106,6 +106,7 @@ class ModelBridge:
         *,
         conn_id: ConnId | None,
         request_id: RequestId | None,
+        step_request_id: RequestId | None = None,
     ) -> CommandOutcome:
         """Validate a client command against the contract and admit it.
 
@@ -119,6 +120,9 @@ class ModelBridge:
             conn_id: The connection that sent it, when known.
             request_id: The request id to correlate a reply against, or ``None``
                 for a command no reply answers, such as one a step request carries.
+            step_request_id: The id of the step request that carries the
+                command, when it is one of a step's state keys or commands. A
+                failure of its handler is then answered in that step's result.
 
         Returns:
             An accepted outcome when the command was valid and enqueued, else a
@@ -128,7 +132,7 @@ class ModelBridge:
             command = self._contract.validate(name, raw_args)
         except ContractError as error:
             return CommandOutcome.reject(error.field, error.reason)
-        self._model.submit_command(command, conn_id, request_id)
+        self._model.submit_command(command, conn_id, request_id, step_request_id=step_request_id)
         return CommandOutcome.accept()
 
     def check_command(self, name: str, raw_args: dict[str, Any]) -> CommandOutcome:

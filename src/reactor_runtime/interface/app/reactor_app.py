@@ -66,7 +66,13 @@ from reactor_runtime.core.model import (
     SessionStarted,
     StartingInputApplied,
 )
-from reactor_runtime.core.values import CommandFailure, ConnId, RequestedStep, StepRefusal
+from reactor_runtime.core.values import (
+    CommandFailure,
+    ConnId,
+    RequestedStep,
+    StepRefusal,
+    StepRefusalKind,
+)
 from reactor_runtime.interface.app.input_state import InputState
 from reactor_runtime.interface.app.outcome import StepOutcome
 from reactor_runtime.interface.app.step_completed import StepCompleted
@@ -158,6 +164,7 @@ class ReactorApp(ReactorCore):
     _stepped: bool
     _steps_accepted: int
     _pending_step: tuple[StepEnvelope, asyncio.Future[None]] | None
+    _failed_step_calls: dict[tuple[ConnId, str], str]
     _step_posted: asyncio.Event
 
     def __init_subclass__(cls, **kwargs: object) -> None:
@@ -456,13 +463,18 @@ class ReactorApp(ReactorCore):
         self._report_step(_step_report(returned, outcome), session, request=accepted)
 
     def _refuse_step(
-        self, request: StepEnvelope, session: int, reason: str, *, not_ready: bool = False
+        self,
+        request: StepEnvelope,
+        session: int,
+        reason: str,
+        *,
+        kind: StepRefusalKind = StepRefusalKind.REFUSED,
     ) -> None:
         """Tell the client its step did not run, and why."""
-        logger.debug("requested step refused", reason=reason, not_ready=not_ready)
+        logger.debug("requested step refused", reason=reason, kind=kind)
         if self._out_step_refusal is not None:
             self._out_step_refusal(
-                StepRefusal(request.conn_id, request.request_id, session, reason, not_ready)
+                StepRefusal(request.conn_id, request.request_id, session, reason, kind)
             )
 
     # -- engine hooks ---------------------------------------------------------
@@ -481,6 +493,7 @@ class ReactorApp(ReactorCore):
         self._steps_accepted = 0
         self._pending_step = None
         self._step_posted = asyncio.Event()
+        self._failed_step_calls = {}
 
     def _background_coros(self) -> list[Coroutine[Any, Any, None]]:
         """Run the inbound drain loop alongside ``run()``."""
@@ -513,11 +526,22 @@ class ReactorApp(ReactorCore):
         The queue is not drained while the step runs, so no command, lifecycle
         hook, or later request is dispatched between its frames and its step. A
         request that arrives while no session is running is answered not ready,
-        and one in a session that does not step is refused, both at once.
+        and one in a session that does not step is refused, both at once. One
+        whose state key or command handler failed is refused with that failure,
+        and its step does not run.
         """
+        failed = self._failed_step_calls.pop((request.conn_id, request.request_id), None)
+        if failed is not None:
+            self._refuse_step(
+                request, self._sessions_started, failed, kind=StepRefusalKind.COMMAND_FAILED
+            )
+            return
         if not self._session_active:
             self._refuse_step(
-                request, self._sessions_started, "no session is running", not_ready=True
+                request,
+                self._sessions_started,
+                "no session is running",
+                kind=StepRefusalKind.NOT_READY,
             )
             return
         if not self._stepped:
@@ -549,7 +573,21 @@ class ReactorApp(ReactorCore):
 
         The handler runs under the step lock, so it lands between two units of
         a ``run()`` loop that holds the same lock, never inside one.
+
+        One of a step request's calls is skipped once an earlier call of the
+        same request failed, so a request stops at its first failure.
         """
+        step = envelope.step_request_id
+        if (
+            step is not None
+            and envelope.conn_id is not None
+            and (envelope.conn_id, step) in self._failed_step_calls
+        ):
+            logger.debug(
+                "skipping a step request's call after an earlier one failed",
+                command=type(envelope.command).name,
+            )
+            return
         async with self._step_lock:
             await self._run_command(envelope)
 
@@ -653,6 +691,7 @@ class ReactorApp(ReactorCore):
         elif isinstance(event, SessionEnded):
             self._session_active = False
             self._starting_input_pending = False
+            self._failed_step_calls.clear()
             self._set_connected(0)
             async with self._step_lock:
                 await self._call_hook(hooks.session_ended, None)
@@ -777,6 +816,13 @@ class ReactorApp(ReactorCore):
         """
         if envelope.conn_id is None:
             return
+        if envelope.step_request_id is not None:
+            # The step request's result carries the first failure; the calls
+            # after it are skipped, so there is no later one to report.
+            self._failed_step_calls.setdefault(
+                (envelope.conn_id, envelope.step_request_id),
+                f"{type(envelope.command).name} failed ({failure.code}): {failure.message}",
+            )
         self._reply(envelope.conn_id, failure, envelope.request_id)
 
     def _reply(
