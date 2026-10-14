@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterator
+import threading
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,10 @@ from reactor_runtime.secrets import EXPECTED_KEYS_ENV, load_expected_secrets
 
 _GOOD = b"synth-value-3c6d6c03"
 _IMAGE_DEFAULT = "synth-image-default-7712"
+
+_POSIX_ONLY = pytest.mark.skipif(
+    not hasattr(os, "mkfifo") or not hasattr(os, "O_NOFOLLOW"), reason="POSIX file types"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -51,6 +56,25 @@ def _mount_atomic_writer(root: Path, files: dict[str, bytes]) -> None:
     (root / "..data").symlink_to(stamp.name)
     for name in files:
         (root / name).symlink_to(f"..data/{name}")
+
+
+def _run_with_deadline(call: Callable[[], Any], seconds: float = 10.0) -> Any:
+    """Run *call* on a thread, fail when it blocks, and re-raise its exception here."""
+    outcome: list[Any] = []
+
+    def runner() -> None:
+        try:
+            outcome.append(call())
+        except BaseException as exc:  # re-raised on the test thread below
+            outcome.append(exc)
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    assert not thread.is_alive(), "the loader blocked"
+    if isinstance(outcome[0], BaseException):
+        raise outcome[0]
+    return outcome[0]
 
 
 def _case_sensitive(root: Path) -> bool:
@@ -252,8 +276,27 @@ def test_an_unreadable_root_blocks_the_start(tmp_path: Path) -> None:
         root.chmod(0o700)
 
 
+@_POSIX_ONLY
+def test_a_fifo_blocks_the_start_without_blocking(tmp_path: Path) -> None:
+    os.mkfifo(tmp_path / "API_TOKEN")
+
+    with pytest.raises(SystemExit, match="not a regular file"):
+        _run_with_deadline(lambda: load_expected_secrets(_env(["API_TOKEN"]), tmp_path))
+
+
 def test_a_directory_named_as_a_secret_blocks_the_start(tmp_path: Path) -> None:
     (tmp_path / "API_TOKEN").mkdir()
 
     with pytest.raises(SystemExit, match="'API_TOKEN' is not a regular file"):
         load_expected_secrets(_env(["API_TOKEN"]), tmp_path)
+
+
+def test_an_unreadable_file_blocks_the_start(tmp_path: Path) -> None:
+    _skip_as_root()
+    _write(tmp_path, "API_TOKEN", _GOOD)
+    (tmp_path / "API_TOKEN").chmod(0)
+    try:
+        with pytest.raises(SystemExit, match="'API_TOKEN' is unreadable"):
+            load_expected_secrets(_env(["API_TOKEN"]), tmp_path)
+    finally:
+        (tmp_path / "API_TOKEN").chmod(0o600)

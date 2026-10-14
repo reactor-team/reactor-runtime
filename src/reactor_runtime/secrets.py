@@ -5,7 +5,7 @@ directory (:data:`SECRETS_ROOT`) and names the files it mounted in the reserved
 environment variable ``REACTOR_SECRETS_EXPECTED_KEYS``. The value is a strict
 JSON array of names, and ``[]`` when the deployment has no secrets.
 :func:`load_expected_secrets` checks that the mounted files match the expected
-set exactly, reads every file, and returns the decoded values by name.
+set exactly, validates every value, and returns the values by name.
 
 When the variable is absent, the loader does nothing and touches no file.
 
@@ -29,12 +29,14 @@ from typing import Any
 EXPECTED_KEYS_ENV = "REACTOR_SECRETS_EXPECTED_KEYS"
 SECRETS_ROOT = Path("/run/secrets")
 
+_MAX_BYTES = 32768
 _NAME_MAX = 255
 _NAME_PATTERN = "[A-Za-z_][A-Za-z0-9_]*"
 _NAME_RE = re.compile(_NAME_PATTERN)
 _DISPLAY_MAX = 64
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 
 _FAILED = object()
 
@@ -57,9 +59,9 @@ def load_expected_secrets(env: Mapping[str, str], root: Path) -> dict[str, str]:
     Raises:
         SystemExit: If the variable holds invalid JSON or an invalid name
             list, if the mounted entries do not match the expected set
-            exactly, if an entry is not a readable regular file, or if a
-            value is not valid UTF-8. The message names the keys and the
-            failure, never a value.
+            exactly, if an entry is not a usable regular file, or if a value
+            is empty, larger than 32 KiB, not valid UTF-8, or contains a NUL
+            byte. The message names the keys and the failure, never a value.
     """
     raw = env.get(EXPECTED_KEYS_ENV)
     if raw is None:
@@ -140,8 +142,19 @@ def _listing(root_fd: int, root: Path) -> list[str]:
 
 
 def _read_secrets(root_fd: int, names: list[str]) -> dict[str, str]:
-    """Read every expected file."""
-    return {name: _read_secret(root_fd, name) for name in names}
+    """Read every expected file, keeping no value alive when one of them fails."""
+    values: dict[str, str] = {}
+    name = ""
+    try:
+        for name in names:
+            values[name] = _read_secret(root_fd, name)
+    except OSError:
+        values.clear()
+        raise SystemExit(f"secret file {_display(name)} is unreadable") from None
+    except BaseException:
+        values.clear()
+        raise
+    return values
 
 
 def _read_secret(root_fd: int, name: str) -> str:
@@ -159,9 +172,14 @@ def _read_secret(root_fd: int, name: str) -> str:
     if not stat.S_ISREG(info.st_mode):
         # Refused before any open, so a FIFO or a device can never block the boot.
         raise SystemExit(f"secret file {_display(name)} is not a regular file")
-    text = _decode(_open_and_read(root_fd, name))
+    data = _open_and_read(root_fd, name)
+    has_nul = b"\x00" in data
+    text = None if has_nul else _decode(data)
+    # A failure must not keep the value alive in this frame's traceback.
+    del data
     if text is None:
-        raise SystemExit(f"secret file {_display(name)} is not valid UTF-8")
+        failure = "contains a NUL byte" if has_nul else "is not valid UTF-8"
+        raise SystemExit(f"secret file {_display(name)} {failure}")
     return text
 
 
@@ -169,26 +187,60 @@ def _open_and_read(root_fd: int, name: str) -> bytes:
     """Open the regular file *name* in the open mount directory and read it fully.
 
     ``O_NOFOLLOW`` refuses an entry that became a symlink after the check.
+    ``O_NONBLOCK`` keeps the open instant for a special file, and ``fstat``
+    confirms a regular file.
 
     Raises:
-        SystemExit: If the file is missing, not a regular file, or unreadable.
+        SystemExit: If the file is missing, not a regular file, unreadable,
+            empty, or larger than the value limit.
     """
     try:
-        descriptor = os.open(name, os.O_RDONLY | _O_NOFOLLOW, dir_fd=root_fd)
+        descriptor = os.open(name, os.O_RDONLY | _O_NONBLOCK | _O_NOFOLLOW, dir_fd=root_fd)
     except FileNotFoundError:
         raise SystemExit(f"secret file {_display(name)} is missing") from None
     except OSError as error:
         kind = "not a regular file" if error.errno == errno.ELOOP else "unreadable"
         raise SystemExit(f"secret file {_display(name)} is {kind}") from None
     try:
-        chunks: list[bytes] = []
-        while chunk := os.read(descriptor, 65536):
-            chunks.append(chunk)
-    except OSError:
-        raise SystemExit(f"secret file {_display(name)} is unreadable") from None
+        mode: int | None = None
+        with contextlib.suppress(OSError):
+            mode = os.fstat(descriptor).st_mode
+        if mode is None:
+            raise SystemExit(f"secret file {_display(name)} is unreadable")
+        if not stat.S_ISREG(mode):
+            raise SystemExit(f"secret file {_display(name)} is not a regular file")
+        return _read_all(descriptor, name)
     finally:
         os.close(descriptor)
-    return b"".join(chunks)
+
+
+def _read_all(descriptor: int, name: str) -> bytes:
+    """Read the descriptor to the end, enforcing the size rules.
+
+    Raises:
+        SystemExit: If the value is empty, unreadable, or over the limit.
+    """
+    buffer = bytearray()
+    failure: str | None = None
+    try:
+        while len(buffer) <= _MAX_BYTES:
+            chunk = os.read(descriptor, _MAX_BYTES + 1 - len(buffer))
+            if not chunk:
+                break
+            buffer += chunk
+    except OSError:
+        failure = "is unreadable"
+    chunk = b""
+    if failure is None and len(buffer) > _MAX_BYTES:
+        failure = f"is larger than {_MAX_BYTES} bytes"
+    elif failure is None and not buffer:
+        failure = "is empty"
+    data = bytes(buffer) if failure is None else b""
+    # A failure must not keep the value alive in this frame's traceback.
+    buffer.clear()
+    if failure is not None:
+        raise SystemExit(f"secret file {_display(name)} {failure}")
+    return data
 
 
 def _decode(data: bytes) -> str | None:
