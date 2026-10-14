@@ -78,7 +78,7 @@ from reactor_runtime.transport.router import (
     SessionTransitionError,
     UnknownSessionError,
 )
-from reactor_runtime.upload_store import UnknownUploadError, UploadAlreadyCompleteError, UploadStore
+from reactor_runtime.upload_store import UploadIdTakenError, UploadStore
 
 logger = get_logger(__name__)
 
@@ -772,17 +772,31 @@ class SessionHost:
         """
         return self._require_slot(sid).upload_store
 
+    def reserve_upload(
+        self, sid: str, name: str, mime_type: str, size: int, upload_id: str | None = None
+    ) -> str:
+        """Reserve an upload slot in *sid*'s session, under *upload_id* or a minted id.
+
+        A caller's id is reserved in one session at a time, so the write that
+        names it reaches exactly one session.
+
+        Raises:
+            UnknownSessionError: If no running session has that id.
+            UploadIdTakenError: If any session holds *upload_id* already.
+        """
+        uploads = self.uploads_for(sid)
+        if upload_id is not None and any(
+            slot.upload_store.holds(upload_id) for slot in self._slots
+        ):
+            raise UploadIdTakenError(upload_id)
+        return uploads.create_slot(name, mime_type, size, upload_id)
+
     def upload_store_holding(self, upload_id: str) -> UploadStore:
-        """Return the upload store a slot named *upload_id* is reserved in."""
-        for slot in self._slots:
-            try:
-                slot.upload_store.expected_size(upload_id)
-            except UnknownUploadError:
-                continue
-            except UploadAlreadyCompleteError:
-                pass
-            return slot.upload_store
-        return self._slots[0].upload_store
+        """Return the upload store of the session *upload_id* is reserved in."""
+        return next(
+            (slot.upload_store for slot in self._slots if slot.upload_store.holds(upload_id)),
+            self._slots[0].upload_store,
+        )
 
     # -- SessionControl -----------------------------------------------------------
 

@@ -403,3 +403,19 @@ async def test_sessions_on_two_slots_connect_on_the_same_unregistered_connection
                     ("connection_closed", {"conn_id": 1001}),
                 ][: count - 1]
             )
+
+
+async def test_a_callers_upload_id_is_reserved_in_one_session_only() -> None:
+    async with hosting() as rt:
+        await _start(rt.client, session_id="alpha")
+        await _start(rt.client, session_id="beta")
+        slot = {"name": "a.bin", "size": 3, "mime_type": "application/octet-stream"}
+
+        first = await rt.client.post("/sessions/alpha/uploads", json={**slot, "upload_id": "u1"})
+        second = await rt.client.post("/sessions/beta/uploads", json={**slot, "upload_id": "u1"})
+        written = await rt.client.put("/uploads/u1", content=b"abc")
+
+        assert first.status_code == 201
+        assert second.status_code == 409
+        assert written.status_code == 200
+        assert (await rt.host.uploads_for("alpha").fetch("u1", wait_seconds=0)).data == b"abc"

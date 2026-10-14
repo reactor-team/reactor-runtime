@@ -1560,9 +1560,15 @@ class Runner(ServiceComponent, ConnectionSink):
             return []
         return [self.descriptor()]
 
-    def uploads_for(self, sid: str) -> UploadStore:
-        """Return the upload store of the session *sid* addresses."""
-        return self._uploads
+    def reserve_upload(
+        self, sid: str, name: str, mime_type: str, size: int, upload_id: str | None = None
+    ) -> str:
+        """Reserve an upload slot in the session's store, under *upload_id* or a minted id.
+
+        Raises:
+            UploadIdTakenError: If *upload_id* is already reserved.
+        """
+        return self._uploads.create_slot(name, mime_type, size, upload_id)
 
     def upload_store_holding(self, upload_id: str) -> UploadStore:
         """Return the upload store a slot named *upload_id* would be reserved in."""
