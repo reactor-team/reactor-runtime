@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import itertools
+import re
 import uuid
 from collections.abc import Callable, Collection, Mapping
 from pathlib import Path
@@ -72,6 +73,7 @@ from reactor_runtime.runner.runner import (
     ShutdownHook,
     _no_shutdown,
 )
+from reactor_runtime.runner.session_start import InvalidSessionStartError
 from reactor_runtime.step_results import StepStore
 from reactor_runtime.transport.router import (
     SessionNotRunningError,
@@ -81,6 +83,10 @@ from reactor_runtime.transport.router import (
 from reactor_runtime.upload_store import UploadIdTakenError, UploadStore
 
 logger = get_logger(__name__)
+
+# A session id is a lowercase UUID: the one shape its recording and its step
+# results are kept under, and safe as a path segment of every route.
+_SESSION_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 # The states of a slot that holds no session. Every other state, closing
 # included, is a session the host still answers for by id.
@@ -126,6 +132,20 @@ def batched_capacity(model_ref: str) -> int:
     if isinstance(model_cls, type) and issubclass(model_cls, BatchedReactorApp):
         return model_cls.max_sessions
     return 1
+
+
+def _session_id_from(params: Mapping[str, Any]) -> str:
+    """Return the caller's ``session_id`` from *params*, or a minted one when absent.
+
+    Raises:
+        InvalidSessionStartError: If the id is not a lowercase UUID.
+    """
+    chosen = params.get("session_id")
+    if chosen is None or chosen == "":
+        return str(uuid.uuid4())
+    if not isinstance(chosen, str) or not _SESSION_ID_RE.match(chosen):
+        raise InvalidSessionStartError("session_id must be a lowercase UUID")
+    return chosen
 
 
 @dataclasses.dataclass(frozen=True)
@@ -685,7 +705,8 @@ class SessionHost:
             The session's id, which also addresses its transport routes.
 
         Raises:
-            InvalidSessionStartError: If the body or a starting command is refused.
+            InvalidSessionStartError: If the body or a starting command is
+                refused, or ``session_id`` is not a lowercase UUID.
             SessionTransitionError: If the id is already running, the model
                 is loading or terminated, or the host is draining, which is
                 refused as a start against a closing session.
@@ -693,7 +714,7 @@ class SessionHost:
         """
         if self._draining:
             raise SessionTransitionError("start", SessionState.CLOSING)
-        sid = str(params.get("session_id") or uuid.uuid4())
+        sid = _session_id_from(params)
         running = self._running_slot(sid)
         if running is not None:
             raise SessionTransitionError("start", running.sm_state)

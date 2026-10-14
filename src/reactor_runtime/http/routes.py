@@ -161,7 +161,16 @@ class SessionRoutes:
         """Register the session-control routes against *app*."""
         runner = self._runner
 
-        @app.post("/start_session", responses=_START_RESPONSES)
+        @app.post(
+            "/start_session",
+            responses=_START_RESPONSES,
+            description=(
+                "Start a session. The body may name a `session_id`; absent, one is minted, "
+                "and the descriptor returned carries it. A runtime hosting several sessions "
+                "takes it as the session's id, which must be a lowercase UUID "
+                "(`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`); any other value is a 400."
+            ),
+        )
         async def start_session(
             params: Annotated[dict[str, Any] | None, Body()] = None,
         ) -> dict[str, Any]:

@@ -2274,6 +2274,7 @@
     },
     "/start_session": {
       "post": {
+        "description": "Start a session. The body may name a `session_id`; absent, one is minted, and the descriptor returned carries it. A runtime hosting several sessions takes it as the session's id, which must be a lowercase UUID (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`); any other value is a 400.",
         "operationId": "start_session_start_session_post",
         "requestBody": {
           "content": {
