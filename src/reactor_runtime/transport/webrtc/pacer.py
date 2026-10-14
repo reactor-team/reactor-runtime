@@ -231,7 +231,8 @@ class MediaPacer:
         """Stop the pacing thread, wait for it to finish, and release held media.
 
         Once the thread has stopped, the queued frames and the last delivered
-        frame are dropped. A frame is a view into the model's whole output
+        frame are dropped, also on a pacer that was never started or is
+        already stopped. A frame is a view into the model's whole output
         array, so a stopped pacer that kept one would keep that array alive
         for as long as the pacer itself is reachable.
 
@@ -239,8 +240,6 @@ class MediaPacer:
             RuntimeError: If the thread does not stop within two seconds.
         """
         with self._lifecycle_lock:
-            if self._stop.is_set():
-                return
             self._stop.set()
             thread = self._thread
             self._thread = None

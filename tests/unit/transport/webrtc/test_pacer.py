@@ -334,6 +334,30 @@ def test_stop_releases_the_model_output_it_was_pacing() -> None:
     assert output() is None
 
 
+def test_stop_releases_frames_queued_while_the_pacer_never_ran() -> None:
+    # A connection can close before its pacer starts, after frames were
+    # already submitted; stopping it must still let the output go.
+    frames = batch(10, side=8)
+    output = weakref.ref(frames)
+    pacer = MediaPacer({"main": video_info()}, lambda bundle: None)
+    pacer.submit(chunk(video_bundle(frames), n_frames=10))
+    del frames
+    pacer.stop()
+    assert output() is None
+
+
+def test_stop_releases_frames_submitted_after_an_earlier_stop() -> None:
+    pacer = MediaPacer({"main": video_info()}, lambda bundle: None)
+    pacer.start()
+    pacer.stop()
+    frames = batch(10, side=8)
+    output = weakref.ref(frames)
+    pacer.submit(chunk(video_bundle(frames), n_frames=10))
+    del frames
+    pacer.stop()
+    assert output() is None
+
+
 def test_a_batching_model_keeps_the_wire_in_fresh_frames() -> None:
     """Every frame of every batch reaches the sink, in order and exactly once.
 
