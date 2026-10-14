@@ -2,15 +2,21 @@
 
 A :class:`ReactorApp` serves one session. A batched app serves up to
 :attr:`BatchedReactorApp.max_sessions` sessions from one process and one
-model, so the model can run a single forward pass for all of them. Everything
-an author writes for a :class:`ReactorApp` keeps its meaning, per session:
+model, so the model can run a single forward pass for all of them. A command
+handler, a lifecycle hook, ``process_input()``, and ``process_output()`` each
+run for one session, and these are bound to it:
 
-* ``self.state`` is the state of the session the code runs for. A command
-  handler, a lifecycle hook, ``process_input()``, and ``process_output()`` each
-  run for one session, and :attr:`BatchedReactorApp.session_id` names it.
+* ``self.state`` is the state of that session, and
+  :attr:`BatchedReactorApp.session_id` names it.
 * The declared :class:`MediaInput` holder reads that session's own buffers.
-* ``emit()``, ``send()``, ``flush()``, and a client handle's ``send()`` reach
-  that session's clients only.
+* The connected clients are that session's clients, and ``emit()``,
+  ``send()``, ``flush()``, and a client handle's ``send()`` reach them only.
+
+Every other attribute of ``self`` is one object all sessions share, and it
+outlives a session into the next one hosted after it. Data that belongs to one
+session is kept in a mapping keyed by ``self.session_id`` and dropped in a
+:func:`~reactor_runtime.session_ended` hook. A lifecycle hook that raises is
+logged and its session carries on.
 
 The one new hook is :meth:`BatchedReactorApp.generate_batch`, the model half of
 a step for every session that takes one. Each turn of the step loop calls
@@ -27,6 +33,8 @@ returning the exception as that session's result, which reaches its
 ``generate_batch()`` itself is the model's failure, not a session's: every
 session's ``process_output()`` receives it, and one that re-raises it crashes
 the model loop and ends every session, as a crash of a :class:`ReactorApp` does.
+Where the process hosts one session, that session's failure ends the model
+loop, and with it the process, as a failing step of a :class:`ReactorApp` does.
 """
 
 from __future__ import annotations
@@ -203,7 +211,7 @@ class BatchedReactorApp(ReactorApp):
     A batched app also runs where one session is hosted, as when the
     deployment caps the process at one with ``REACTOR_MAX_SESSIONS=1``: each
     step is then a batch of one, and a failure of that one session ends the
-    model loop, as it does for a :class:`ReactorApp`.
+    model loop and the process, as it does for a :class:`ReactorApp`.
 
     Class attributes:
         max_sessions: How many sessions the process hosts at once. The runtime

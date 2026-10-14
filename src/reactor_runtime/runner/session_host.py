@@ -16,7 +16,8 @@ session id the caller chose at the start, or the id the host minted for it.
 Every slot journals onto one egress stream, each fact tagged with its session.
 
 Isolation follows the slots. A session that is stopped, times out, or fails in
-its own hooks ends alone. A model loop that crashes ends every session and the
+its own ``process_input()``, ``process_output()``, or batch result ends
+alone. A model loop that crashes ends every session and the
 process, as it does under a runner.
 """
 
