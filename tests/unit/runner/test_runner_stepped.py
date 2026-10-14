@@ -296,7 +296,12 @@ async def test_a_command_sent_before_a_step_is_applied_before_it(runner: Runner)
     assert models[-1].inputs == [("a forest", ["first", "second"], [])]
     assert models[-1].notes == ["first", "second", "third"]
     kinds = [(m.request_id, m.WhichOneof("payload")) for m in conn.replies()]
-    assert kinds == [("c1", None), ("r1", "step_result"), ("c2", None)]
+    # The model acknowledges a command from its own thread as it applies it,
+    # and the step's result is sent once the runtime has journalled the step,
+    # so c1's acknowledgement precedes the result. A command applied after the
+    # step may be acknowledged before or after the step's result goes out.
+    assert sorted(kinds, key=str) == [("c1", None), ("c2", None), ("r1", "step_result")]
+    assert kinds.index(("c1", None)) < kinds.index(("r1", "step_result"))
 
 
 async def test_steps_are_numbered_from_one(runner: Runner) -> None:
