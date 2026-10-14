@@ -77,7 +77,8 @@ message StepResult {
   uint64 index = 1;
   repeated TrackFrames tracks = 2;
   // Seconds the step's generate() took, or the time the model reported for the
-  // step.
+  // step. A saved step records the same value as generate_s in its
+  // result.json.
   double elapsed = 3;
   // The extra files the model kept with the step. Empty when the step kept
   // none, or when its result is not saved.
