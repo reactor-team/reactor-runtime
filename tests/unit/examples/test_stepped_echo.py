@@ -132,8 +132,10 @@ class Harness:
         """Post a step request the way the runtime does: its commands, then the step."""
         for name, args in commands:
             self.command(name, **args)
-        inputs = {"webcam": tuple(frames)} if frames else {}
-        self.queue.put_nowait(StepEnvelope(inputs=inputs, conn_id=CLIENT, request_id=request_id))
+        media_input = {"webcam": tuple(frames)} if frames else {}
+        self.queue.put_nowait(
+            StepEnvelope(media_input=media_input, conn_id=CLIENT, request_id=request_id)
+        )
 
     async def settle(self) -> None:
         for _ in range(40):
@@ -181,7 +183,7 @@ async def test_a_step_sends_back_its_last_webcam_frame_untouched(harness: Harnes
     [step] = harness.reports
     frame, metadata = _video(step)
     np.testing.assert_array_equal(frame, last)
-    assert metadata["inputs"] == 2
+    assert metadata["media_input"] == 2
     assert metadata["input_metadata"] == '{"seq": 2, "note": "é"}'
     assert step.error is None
 
@@ -194,7 +196,7 @@ async def test_a_step_without_webcam_frames_sends_a_black_frame(harness: Harness
     assert frame.shape == (16, 16, 3)
     assert frame.dtype == np.uint8
     assert not frame.any()
-    assert (metadata["inputs"], metadata["input_metadata"]) == (0, None)
+    assert (metadata["media_input"], metadata["input_metadata"]) == (0, None)
 
 
 async def test_a_last_frame_without_metadata_reports_null(harness: Harness) -> None:
@@ -219,7 +221,7 @@ async def test_the_report_holds_exactly_what_the_step_saw(harness: Harness) -> N
     assert metadata == {
         "label": "hello",
         "tags": ["a", "b"],
-        "inputs": 1,
+        "media_input": 1,
         "input_metadata": "m",
         "overlay": None,
         "error": None,
@@ -328,9 +330,9 @@ async def test_a_streamed_turn_sends_what_arrived_since_the_last_one_or_black() 
     app._input_buffers["webcam"].push(InputFrame(data=_frame(1)))
     app._input_buffers["webcam"].push(InputFrame(data=_frame(2)))
     frame, metadata = await turn()
-    assert (int(frame[0, 0, 0]), metadata["inputs"]) == (2, 2)
+    assert (int(frame[0, 0, 0]), metadata["media_input"]) == (2, 2)
     frame, metadata = await turn()
-    assert (frame.shape, metadata["inputs"]) == ((16, 16, 3), 0)
+    assert (frame.shape, metadata["media_input"]) == ((16, 16, 3), 0)
 
 
 async def test_output_is_one_frame_on_main_video() -> None:
@@ -421,9 +423,9 @@ def _request_step(
     commands: Sequence[tuple[str, dict[str, Any]]] = (),
     frames: Sequence[tuple[np.ndarray, bytes | None]] = (),
 ) -> bytes:
-    inputs = []
+    media_input = []
     if frames:
-        inputs.append(
+        media_input.append(
             step_pb2.TrackFrames(
                 track="webcam",
                 kind=platform_pb2.TRACK_KIND_VIDEO,
@@ -447,7 +449,7 @@ def _request_step(
             commands=[
                 model_pb2.Command(type=name, data=dict_to_struct(args)) for name, args in commands
             ],
-            inputs=inputs,
+            media_input=media_input,
         ),
     ).SerializeToString()
 
@@ -482,6 +484,7 @@ async def test_a_client_step_is_answered_with_the_frame_its_report_and_report_js
     [reply] = conn.results()
     result = reply.step_result
     assert (reply.request_id, result.index) == ("r1", 1)
+    assert result.failure_code == step_pb2.STEP_FAILURE_CODE_UNSPECIFIED
     assert not result.HasField("error")
     [track] = result.tracks
     [sent] = track.frames
@@ -490,7 +493,7 @@ async def test_a_client_step_is_answered_with_the_frame_its_report_and_report_js
     expected = {
         "label": "hi",
         "tags": ["t"],
-        "inputs": 2,
+        "media_input": 2,
         "input_metadata": "seq-2",
         "overlay": {"name": "cat.png", "mime_type": "image/png", "size": 3},
         "error": None,
@@ -512,6 +515,10 @@ async def test_a_failed_client_step_carries_its_error_and_no_files(runner: Runne
     await _until(lambda: len(conn.sent) == 1)
 
     result = conn.results()[0].step_result
-    assert (result.index, result.error) == (1, "nope")
+    assert (result.index, result.failure_code, result.error) == (
+        1,
+        step_pb2.STEP_FAILURE_CODE_FAILED,
+        "nope",
+    )
     assert list(result.files) == []
     assert len(result.tracks[0].frames) == 1
