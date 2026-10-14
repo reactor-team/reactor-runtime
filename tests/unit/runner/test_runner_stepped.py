@@ -677,6 +677,30 @@ async def test_a_step_request_after_the_session_stops_is_not_ready(runner: Runne
     assert _journalled_steps(runner) == []
 
 
+async def test_a_step_request_after_a_streamed_session_stops_is_not_ready(
+    runner: Runner,
+) -> None:
+    runner.start_session({})
+    conn = V1Connection(1002)
+    runner.connection_opened(conn)
+    runner.stop_session()
+    await runner._submit_step(
+        InboundStep(
+            state={},
+            commands=(),
+            media_input=(),
+            conn_id=conn.id,
+            request_id="r1",
+            received_at=0.0,
+        )
+    )
+
+    [reply] = conn.replies()
+    assert _refusal(reply, step_pb2.STEP_FAILURE_CODE_NOT_READY) == (
+        "the session is not running a step yet"
+    )
+
+
 # -- what a stepped session does not do ------------------------------------------
 
 
