@@ -1953,7 +1953,8 @@ class Runner(ServiceComponent, ConnectionSink):
         The result is the report's media, one entry per output track, so what
         the client receives is what the step reported and what a saved step
         keeps, with the seconds its ``generate()`` took (or what the model
-        reported), and the step's error when it failed. When the step store
+        reported), the same measurement a saved step records as
+        ``generate_s``, and the step's error when it failed. When the step store
         took the step (*saved*), the result names each extra file the model
         kept with it, which the client reads from the session's step results;
         the bytes stay out of the message, so a file counts toward the
