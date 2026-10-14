@@ -51,7 +51,11 @@ from reactor_runtime.core import (
     TransportStatsSource,
 )
 from reactor_runtime.core.model import ReactorEvent, SessionStarted
-from reactor_runtime.event_stream import EventStream
+from reactor_runtime.event_stream import (
+    DEFAULT_HISTORY_LIMIT,
+    DEFAULT_SUBSCRIBER_LIMIT,
+    EventStream,
+)
 from reactor_runtime.interface.app.batched_app import BatchedReactorApp, current_session_key
 from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.bridge import CommandOutcome, ModelBridge
@@ -439,7 +443,13 @@ class SessionHost:
                 class, as for :class:`Runner`.
         """
         self._cfg = cfg
-        self._events = EventStream()
+        # Every slot journals here, so the journal fills once per slot: each
+        # session keeps as much replayable history, and a subscriber as much
+        # slack, as it would on a runtime of its own.
+        self._events = EventStream(
+            history_limit=DEFAULT_HISTORY_LIMIT * slots,
+            subscriber_limit=DEFAULT_SUBSCRIBER_LIMIT * slots,
+        )
         self._step_store = (
             StepStore(cfg.step_results, self._on_step_saved) if cfg.step_results.enabled else None
         )
