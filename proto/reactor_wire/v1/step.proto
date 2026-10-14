@@ -10,7 +10,7 @@ import "reactor_wire/v1/platform.proto";
 enum FrameEncoding {
   FRAME_ENCODING_UNSPECIFIED = 0;
   // Uncompressed samples in row-major order, described by dtype and shape:
-  // uint8 RGB for video, int16 PCM for audio.
+  // uint8 RGB for video, little-endian int16 PCM for audio.
   FRAME_ENCODING_RAW = 1;
 }
 
@@ -47,7 +47,7 @@ message TrackFrames {
 // request_id.
 message RequestStep {
   // Values for the model's state fields, keyed by field name. Each key runs as
-  // the model's set_<key> command, before commands.
+  // the model's set_<key> command, in ascending key order, before commands.
   google.protobuf.Struct state = 1;
   // Commands to run after the state, in order.
   repeated Command commands = 2;
@@ -95,7 +95,7 @@ message StepResult {
   // Seconds the step's generate() took, or the time the model reported for the
   // step. A saved step records the same value as generate_s in its
   // result.json. Zero when the step did not run.
-  double elapsed = 3;
+  double elapsed_seconds = 3;
   // The extra files the model kept with the step. Empty when the step kept
   // none, failed, or is not saved.
   repeated StepFileRef files = 4;
