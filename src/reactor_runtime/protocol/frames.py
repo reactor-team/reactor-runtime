@@ -182,13 +182,19 @@ _WIRE_KINDS = {
 }
 
 
-def track_frames(bundle: MediaBundle | None) -> list[step_pb2.TrackFrames]:
+def track_frames(
+    bundle: MediaBundle | None, *, video_fps: float | None = None
+) -> list[step_pb2.TrackFrames]:
     """Encode a step's media as one entry per output track, in the bundle's order.
 
     A batched video track, ``(N, H, W, 3)``, becomes its ``N`` frames in order,
     each with its own metadata; a single value of metadata goes on every one.
     An unbatched video track and an audio track are one frame each. A step
     without media has no tracks.
+
+    Each entry carries the rate its frames play at: *video_fps*, the step's own
+    rate, for a video track, falling back to the track's declared rate, and
+    the track's sample rate for audio.
 
     Raises:
         FrameEncodingError: A track's payload cannot be carried as frames of
@@ -204,6 +210,9 @@ def track_frames(bundle: MediaBundle | None) -> list[step_pb2.TrackFrames]:
                 encode_frame(data, track.info.kind, metadata=metadata)
                 for data, metadata in _frames_of(track)
             ],
+            rate=(
+                video_fps if track.info.kind is TrackKind.VIDEO and video_fps else track.info.rate
+            ),
         )
         for name, track in bundle.tracks.items()
     ]
