@@ -44,6 +44,9 @@ class FakeRunner:
         self._next += 1
         return ConnId(self._next)
 
+    def claim_conn_id(self, sid: str, cid: int) -> ConnId:
+        return ConnId(cid)
+
     def offer_admitted(self, conn_id: ConnId) -> None:
         self.admitted.append(conn_id)
 

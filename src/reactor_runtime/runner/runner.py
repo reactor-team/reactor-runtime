@@ -1090,6 +1090,10 @@ class Runner(ServiceComponent, ConnectionSink):
         """
         return self._connections.new_conn_id()
 
+    def claim_conn_id(self, sid: str, cid: int) -> ConnId:
+        """Return *cid* as the transport's key: a runner's one session owns every id."""
+        return ConnId(cid)
+
     def offer_admitted(self, conn_id: ConnId) -> None:
         """Stamp an admitted offer with the session it was admitted into.
 

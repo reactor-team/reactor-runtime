@@ -133,6 +133,17 @@ class SessionControl(ConnectionSink, Protocol):
     def new_conn_id(self, sid: str) -> ConnId:
         """Mint a fresh connection id for the session *sid*, unique within the runtime."""
 
+    def claim_conn_id(self, sid: str, cid: int) -> ConnId:
+        """Return the id the transport keys the connection *cid* of session *sid* by.
+
+        *cid* is the id the client addresses its connection with, whether the
+        runtime minted it or the caller chose it. It is unique within its
+        session only, so a runtime hosting several sessions binds each
+        ``(sid, cid)`` pair to an id of its own and reports every later fact
+        about that connection back to *sid*'s session under *cid*. A runtime
+        hosting one session keys the connection by *cid* itself.
+        """
+
     def offer_admitted(self, conn_id: ConnId) -> None:
         """Stamp an admitted connection offer with the live session.
 
