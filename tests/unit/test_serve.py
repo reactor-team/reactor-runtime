@@ -188,7 +188,7 @@ async def test_serve_reports_the_service_exit_status_and_bounds_the_exit(
 ) -> None:
     stub = _ServiceStub(exit_code=1)
     monkeypatch.setattr("reactor_runtime.serve._assemble", lambda *a, **k: stub)
-    monkeypatch.setattr("reactor_runtime.serve._listen", lambda cfg: None)
+    monkeypatch.setattr("reactor_runtime.serve._listen", lambda cfg: [])
 
     code = await serve(RuntimeConfig(model_ref="fake:Model"), peer_factory=_UNUSED)
 
@@ -203,10 +203,10 @@ async def test_serve_listens_before_it_imports_the_model(
     order: list[str] = []
     listening: list[socket.socket] = []
 
-    def listen(cfg: RuntimeConfig) -> socket.socket:
+    def listen(cfg: RuntimeConfig) -> list[socket.socket]:
         order.append("listen")
-        listening.append(_listen(cfg))
-        return listening[0]
+        listening.extend(_listen(cfg))
+        return listening
 
     def capacity(ref: str) -> int:
         order.append("import")
@@ -230,6 +230,40 @@ async def test_serve_listens_before_it_imports_the_model(
     # A probe that connects while the model's class imports is queued on the
     # bound socket and answered once the server runs, rather than refused.
     assert order == ["listen", "import"]
+
+
+def _free_port() -> int:
+    with socket.create_server(("127.0.0.1", 0)) as probe:
+        return probe.getsockname()[1]
+
+
+@pytest.mark.parametrize("host", ["localhost", ""])
+def test_listen_binds_every_address_the_host_resolves_to(host: str) -> None:
+    port = _free_port()
+    expected = {
+        (family, address[0])
+        for family, _, _, _, address in socket.getaddrinfo(
+            host or None, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE
+        )
+    }
+
+    sockets = _listen(RuntimeConfig(model_ref="fake:Model", host=host, port=port))
+    try:
+        bound = {(sock.family, sock.getsockname()[0]) for sock in sockets}
+        assert bound == expected
+        assert socket.AF_INET in {family for family, _ in bound}
+        with socket.create_connection(("127.0.0.1", port), timeout=5.0):
+            pass
+    finally:
+        for sock in sockets:
+            sock.close()
+
+
+def test_listen_exits_when_the_address_is_taken() -> None:
+    with socket.create_server(("127.0.0.1", 0)) as taken:
+        port = taken.getsockname()[1]
+        with pytest.raises(SystemExit, match=f"cannot listen on 127.0.0.1:{port}"):
+            _listen(RuntimeConfig(model_ref="fake:Model", host="127.0.0.1", port=port))
 
 
 def _fake_main_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int) -> None:
