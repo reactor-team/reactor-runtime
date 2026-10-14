@@ -419,6 +419,14 @@ def _refusal(
     return result.error
 
 
+def _journalled_errors(runner: Runner) -> list[str]:
+    return [
+        t.detail["message"]
+        for _, e in runner.events._history  # type: ignore[attr-defined]
+        if (t := e.transition).event is SessionEvent.ERROR
+    ]
+
+
 def _journalled_steps(runner: Runner) -> list[SessionEvent]:
     return [
         t.event
@@ -451,6 +459,8 @@ async def test_a_step_with_an_invalid_command_is_refused_and_keeps_what_came_bef
     assert model.state.prompt == "a lake"
     assert model.notes == []
     assert model.inputs == []
+    [error] = _journalled_errors(runner)
+    assert error.startswith("step request: commands[0] is refused: text")
 
 
 async def test_a_step_with_an_invalid_state_value_names_the_key(runner: Runner) -> None:
@@ -675,6 +685,7 @@ async def test_a_step_request_after_the_session_stops_is_not_ready(runner: Runne
     )
     assert models[-1].inputs == []
     assert _journalled_steps(runner) == []
+    assert _journalled_errors(runner) == []
 
 
 async def test_a_step_request_after_a_streamed_session_stops_is_not_ready(

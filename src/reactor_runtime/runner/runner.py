@@ -1709,13 +1709,22 @@ class Runner(ServiceComponent, ConnectionSink):
             for index, command in enumerate(step.commands)
         ]
         for key, name, args, uploads in entries:
+            # Counted and journalled as a client's own command is, so a step's
+            # calls show up in the same metrics and errors.
+            label = self._command_label(name)
+            inline = self._inline_upload_fields(name, args)
+            resolve_started = time.monotonic()
             try:
                 resolved = await self._resolve_command_uploads(name, args, uploads, upload_wait)
             except UnknownUploadError:
-                self._refuse_step(
-                    step.conn_id, step.request_id, f"{key} references an unresolved upload"
-                )
+                self._command_metrics.unresolved_upload(label)
+                refusal = f"{key} references an unresolved upload"
+                self._sm.send(SessionEvent.ERROR, message=f"step request: {refusal}")
+                self._refuse_step(step.conn_id, step.request_id, refusal)
                 return
+            started_at = step.received_at
+            if uploads or inline:
+                started_at += time.monotonic() - resolve_started
             outcome = await self._bridge.submit_command(
                 name,
                 resolved,
@@ -1724,8 +1733,12 @@ class Runner(ServiceComponent, ConnectionSink):
                 step_request_id=step.request_id,
             )
             if not outcome.accepted:
-                self._refuse_step(step.conn_id, step.request_id, _refused(key, outcome))
+                self._command_metrics.rejected(label, since=started_at)
+                refusal = _refused(key, outcome)
+                self._sm.send(SessionEvent.ERROR, message=f"step request: {refusal}")
+                self._refuse_step(step.conn_id, step.request_id, refusal)
                 return
+            self._command_metrics.accepted(label, since=started_at)
             self._sm.send(SessionEvent.COMMAND, name=name, args=args, conn_id=step.conn_id)
         try:
             media_input = self._decode_media_input(step.media_input)
