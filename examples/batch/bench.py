@@ -21,9 +21,14 @@ import argparse
 import json
 import threading
 import time
+import urllib.error
 import urllib.request
 import uuid
 from typing import Any
+
+# How long --digests keeps asking for a step's fingerprint. Steps are saved
+# off the model's thread, so the last ones can land after the session ends.
+_DIGEST_WAIT_S = 30.0
 
 
 def _post(url: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -44,64 +49,102 @@ def _get(url: str) -> bytes:
         return body
 
 
+def _get_once_saved(url: str, deadline: float) -> str | None:
+    """Fetch a step file, waiting for it to be saved until *deadline*; ``None`` if never."""
+    while True:
+        try:
+            return _get(url).decode()
+        except urllib.error.HTTPError as error:
+            if error.code != 404 or time.monotonic() >= deadline:
+                return None
+        time.sleep(0.2)
+
+
 def follow(base: str, sid: str, steps: int, out: dict[str, Any], ready: threading.Event) -> None:
     """Read *sid*'s event stream until it ends, recording each step's timestamp."""
     times: list[int] = []
     ended = False
-    with urllib.request.urlopen(f"{base}/sessions/{sid}/events?since=0", timeout=600) as stream:
+    try:
+        with urllib.request.urlopen(f"{base}/sessions/{sid}/events?since=0", timeout=600) as stream:
+            ready.set()
+            for raw in stream:
+                line = raw.decode().strip()
+                if not line.startswith("data:"):
+                    continue
+                event = json.loads(line[5:])
+                if event["event"] == "step_completed" and len(times) < steps:
+                    times.append(event["ts"])
+                if event["event"] == "cleanup_complete":
+                    ended = True
+                    break
+    except OSError as error:
+        out[sid] = {"times_ms": times, "ended": False, "error": str(error)}
+        return
+    finally:
         ready.set()
-        for raw in stream:
-            line = raw.decode().strip()
-            if not line.startswith("data:"):
-                continue
-            event = json.loads(line[5:])
-            if event["event"] == "step_completed" and len(times) < steps:
-                times.append(event["ts"])
-            if event["event"] == "cleanup_complete":
-                ended = True
-                break
     out[sid] = {"times_ms": times, "ended": ended}
 
 
 def run(base: str, sessions: int, steps: int, *, digests: bool = False) -> dict[str, Any]:
-    """Run *sessions* step sessions of *steps* steps at once and measure them."""
+    """Run *sessions* step sessions of *steps* steps at once and measure them.
+
+    A session the runtime refuses to start is reported with the reason, and
+    the others are measured without it.
+    """
     sids = [str(uuid.uuid4()) for _ in range(sessions)]
     results: dict[str, Any] = {}
-    threads = []
+    threads: dict[str, threading.Thread] = {}
     for sid in sids:
         ready = threading.Event()
-        thread = threading.Thread(target=follow, args=(base, sid, steps, results, ready))
+        # A daemon, so a stream whose session never starts cannot hold the exit.
+        thread = threading.Thread(
+            target=follow, args=(base, sid, steps, results, ready), daemon=True
+        )
         thread.start()
         ready.wait(timeout=10)
-        threads.append(thread)
+        threads[sid] = thread
+    refused: dict[str, str] = {}
     for index, sid in enumerate(sids):
-        _post(
-            f"{base}/start_session",
-            {"session_id": sid, "steps": steps, "starting_input": {"state": {"seed": index + 1}}},
-        )
-    for thread in threads:
-        thread.join()
+        try:
+            _post(
+                f"{base}/start_session",
+                {
+                    "session_id": sid,
+                    "steps": steps,
+                    "starting_input": {"state": {"seed": index + 1}},
+                },
+            )
+        except urllib.error.HTTPError as error:
+            refused[sid] = f"{error.code}: {error.read().decode(errors='replace')}"
+        except OSError as error:
+            refused[sid] = str(error)
+    for sid, thread in threads.items():
+        if sid not in refused:
+            thread.join()
     per_session = []
+    deadline = time.monotonic() + _DIGEST_WAIT_S
     for index, sid in enumerate(sids):
-        times = results[sid]["times_ms"]
+        entry: dict[str, Any] = {"session_id": sid, "seed": index + 1}
+        if sid in refused:
+            entry["error"] = f"not started: {refused[sid]}"
+            per_session.append(entry)
+            continue
+        times = results.get(sid, {}).get("times_ms", [])
         span = (times[-1] - times[0]) / 1000 if len(times) > 1 else 0.0
-        entry: dict[str, Any] = {
-            "session_id": sid,
-            "seed": index + 1,
-            "steps": len(times),
-            "steps_per_s": (len(times) - 1) / span if span > 0 else None,
-        }
+        entry["steps"] = len(times)
+        entry["steps_per_s"] = (len(times) - 1) / span if span > 0 else None
+        if "error" in results.get(sid, {}):
+            entry["error"] = results[sid]["error"]
         if digests:
             entry["digests"] = [
-                _get(f"{base}/sessions/{sid}/steps/{step}/frame.sha256").decode()
-                for step in range(1, steps + 1)
+                _get_once_saved(f"{base}/sessions/{sid}/steps/{step}/frame.sha256", deadline)
+                for step in range(1, len(times) + 1)
             ]
         per_session.append(entry)
-    first = min(results[sid]["times_ms"][0] for sid in sids)
-    last = max(results[sid]["times_ms"][-1] for sid in sids)
-    total = sum(len(results[sid]["times_ms"]) for sid in sids)
-    span = (last - first) / 1000
-    rates = [entry["steps_per_s"] for entry in per_session if entry["steps_per_s"] is not None]
+    stepped = [results[sid]["times_ms"] for sid in sids if results.get(sid, {}).get("times_ms")]
+    span = (max(t[-1] for t in stepped) - min(t[0] for t in stepped)) / 1000 if stepped else 0.0
+    total = sum(len(times) for times in stepped)
+    rates = [entry["steps_per_s"] for entry in per_session if entry.get("steps_per_s") is not None]
     return {
         "sessions": per_session,
         "aggregate_steps_per_s": total / span if span > 0 else None,
