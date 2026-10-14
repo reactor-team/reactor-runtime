@@ -12,11 +12,11 @@ the input of every session that takes the step, keyed by session id, and
 returns each one's output. The latents are stacked into one batch and the
 network runs once.
 
-Everything per session lives where a single-session model keeps it.
 `self.state` is the calling session's `BatchState` in a handler, a hook, and
-`process_input()`; `self.session_id` names the session, and the class keeps
-each session's latent by it, made in `@session_started` and dropped in
-`@session_ended`. `process_output()` keeps a fingerprint of each frame,
+`process_input()`, and `self.session_id` names the session. Every other
+attribute of the class is shared by all its sessions and outlives each one, so
+the class keeps each session's latent in a dict keyed by `self.session_id`,
+made in `@session_started` and dropped in `@session_ended`. `process_output()` keeps a fingerprint of each frame,
 `frame.sha256`, beside the step's `output.mp4`, so a client can check that a
 session's frames are the ones the same seed gives when it runs alone.
 
