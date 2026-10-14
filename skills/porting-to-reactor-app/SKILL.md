@@ -310,9 +310,10 @@ through each `@event` and each lifecycle hook:
   the caller on its own request, tells no other client, and lets the runtime
   end a session started with a step count when a starting command fails. A
   sent message does none of that: the runtime acknowledges the command as a
-  success. Catch what a check inside the handler raises (a decoder's
-  `ValueError`) and raise a `CommandError` with a code of its own; any other
-  exception reaches the client as an internal error with a fixed message.
+  success. Catch exactly what a check inside the handler raises for bad
+  input (a decoder's `ValueError`), never a bare `Exception`, and raise a
+  `CommandError` with a code of its own; any other exception reaches the
+  client as an internal error with a fixed message.
 
   One case keeps the message for a while. When the model's published schema
   already declares that error message, clients generated from it listen for

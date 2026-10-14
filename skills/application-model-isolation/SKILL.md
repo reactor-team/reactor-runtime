@@ -336,11 +336,16 @@ async def set_image(self, image: UploadedFile = InputField(...)) -> WaypointStat
     if not image.mime_type.startswith("image/"):
         raise CommandError("unsupported_media", f"{image.name} is not an image.")
     try:
-        seed = await asyncio.to_thread(_fit, image.data)
-    except Exception as exc:
+        decoded = await asyncio.to_thread(_decode, image.data)
+    except UNDECODABLE as exc:  # (OSError, ValueError, Image.DecompressionBombError)
         raise CommandError("undecodable_image", "The file is not a decodable image.") from exc
+    seed = await asyncio.to_thread(_fit, decoded)
     ...
 ```
+
+The `try` holds only the decode, and catches only what Pillow raises for
+bytes it cannot decode. A failure anywhere else, a bug in `_fit` included,
+is not the upload's fault and must not be reported as one.
 
 The runtime answers the command's request with a failure that carries the
 code and the message, for three reasons:
@@ -359,9 +364,10 @@ that as success: it acknowledges the command, the caller resolves as if the
 command took effect, every other client receives a message about a command
 it never sent, and a session started with a step count keeps running. Any
 exception other than `CommandError` reaches the client as an internal error
-with a fixed message, so catch what a check raises (a decoder's
-`ValueError`) and raise a `CommandError` with a code of its own, as
-`set_image` does. `CommandError` is for command handlers; `process_input()`
+with a fixed message, so catch exactly what a check raises for bad input (a
+decoder's `ValueError`) and raise a `CommandError` with a code of its own, as
+`set_image` does. Never catch a bare `Exception` there: it turns a bug into a
+refusal that blames the client. `CommandError` is for command handlers; `process_input()`
 refuses a step with `ApplicationError` (rule 6).
 
 ### 8. The model does nothing unprompted
