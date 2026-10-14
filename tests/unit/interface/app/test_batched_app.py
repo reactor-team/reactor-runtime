@@ -38,7 +38,7 @@ from reactor_runtime.core.model import (
     SessionStarted,
 )
 from reactor_runtime.core.values import CompletedStep, ConnId, InputFrame, MediaChunk
-from reactor_runtime.interface.app.batched_app import current_session_key
+from reactor_runtime.interface.app.batched_app import _Session, current_session_key
 from reactor_runtime.interface.model.contract import ModelContract
 
 
@@ -400,3 +400,27 @@ def test_a_session_started_right_after_one_ends_on_the_same_key_steps(app: Summi
     _wait(lambda: app.started == ["first", "second"] and app.ended == ["first"])
     _wait(lambda: bool(app.batches) and app.batches[-1] == ["second"])
     assert 0 in app._sessions
+
+
+def test_a_session_registered_while_the_loop_scans_the_table_keeps_it_running(
+    app: Summing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sinks = _serve(app)
+    _open(app, 1, "a")
+    _wait(lambda: bool(sinks.frames(1)))
+    live = _Session.live
+    registered: list[int] = []
+
+    # A start posted from the runtime thread registers its session while the
+    # model thread walks the table; this lands one inside that walk.
+    def live_with_a_start_racing_in(session: _Session) -> bool:
+        if not registered:
+            registered.append(2)
+            app.post_session_event(2, SessionStarted("b"))
+            app.post_session_event(2, ClientConnected(ConnId(1002), 1))
+        return live.fget(session)
+
+    monkeypatch.setattr(_Session, "live", property(live_with_a_start_racing_in))
+
+    _wait(lambda: bool(sinks.frames(2)))
+    assert not sinks.crashed

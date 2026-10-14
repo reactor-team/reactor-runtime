@@ -317,7 +317,7 @@ class BatchedReactorApp(ReactorApp):
         """
         fps_pinned = _fps_is_author_pinned(type(self))
         while True:
-            live = [session for session in self._sessions.values() if session.live]
+            live = [session for session in self._session_snapshot() if session.live]
             if not live:
                 self._roster_changed.clear()
                 await self._roster_changed.wait()
@@ -589,6 +589,15 @@ class BatchedReactorApp(ReactorApp):
 
     # -- internals ---------------------------------------------------------------
 
+    def _session_snapshot(self) -> list[_Session]:
+        """Return the hosted sessions as they stand, safe to walk on the model thread.
+
+        A start registers its session from the runtime thread, so the table
+        can grow while the model thread reads it; the copy is taken in one
+        step the other thread cannot interleave with.
+        """
+        return list(self._sessions.values())
+
     @contextlib.contextmanager
     def _serving(self, session: _Session) -> Iterator[None]:
         """Bind *session* as the one the enclosed code serves, logs included."""
@@ -606,7 +615,7 @@ class BatchedReactorApp(ReactorApp):
 
     def _sync_connected(self) -> None:
         """Hold :attr:`connected` set while any session has a client."""
-        if any(session.connected > 0 for session in self._sessions.values()):
+        if any(session.connected > 0 for session in self._session_snapshot()):
             self.connected.set()
         else:
             self.connected.clear()
