@@ -50,7 +50,8 @@ Commands:
   two steps lands on the next.
 - `fail` with `reason: str`: the step it is sent with fails with `reason` as
   its error. The step still runs, counts, and sends its frame, and the client
-  receives a result whose `error` is `reason`.
+  receives a result whose `failure_code` is `FAILED` and whose `error` is
+  `reason`.
 
 Each step sends exactly one frame on `main_video`. When the step carried
 `webcam` frames, it is the last of them, pixels unchanged; when it carried
@@ -61,7 +62,7 @@ report, as UTF-8 JSON:
 {
   "label": "the label in force",
   "tags": ["this step's tags, in the order sent"],
-  "inputs": 2,
+  "media_input": 2,
   "input_metadata": "the last webcam frame's metadata as text, or null",
   "overlay": {"name": "cat.png", "mime_type": "image/png", "size": 1024},
   "error": null
@@ -98,7 +99,7 @@ result = await reactor.step(
 )
 [out] = result.track("main_video").frames
 out.array                  # the frame pushed above, unchanged
-out.metadata               # b'{"label": "first", "tags": ["a"], "inputs": 1, ...}'
+out.metadata               # b'{"label": "first", "tags": ["a"], "media_input": 1, ...}'
 [report] = result.files    # report.json, application/json
 
 await reactor.step()       # label and overlay hold, tags are empty, a black frame

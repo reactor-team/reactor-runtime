@@ -187,8 +187,8 @@ class SteppedEcho(ReactorApp):
 def build_report(input: StepInput, last_metadata: bytes | None) -> bytes:
     """Return the step's report as UTF-8 JSON.
 
-    The keys are ``label``, ``tags``, ``inputs`` (how many webcam frames the
-    step carried), ``input_metadata`` (the last frame's metadata as text, or
+    The keys are ``label``, ``tags``, ``media_input`` (how many webcam frames
+    the step carried), ``input_metadata`` (the last frame's metadata as text, or
     ``null``), ``overlay`` (the uploaded file's ``name``, ``mime_type``, and
     ``size``, or ``null``), and ``error`` (the reason ``fail`` gave, or
     ``null``).
@@ -203,7 +203,7 @@ def build_report(input: StepInput, last_metadata: bytes | None) -> bytes:
     report = {
         "label": input.label,
         "tags": list(input.tags),
-        "inputs": len(input.frames),
+        "media_input": len(input.frames),
         "input_metadata": (
             None if last_metadata is None else last_metadata.decode("utf-8", errors="replace")
         ),
