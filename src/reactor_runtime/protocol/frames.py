@@ -1,7 +1,7 @@
 """Media frames on the wire, keyed by their ``FrameEncoding``.
 
-A stepped session carries its input frames inside a ``RequestStep`` message,
-each tagged with the encoding its bytes use. Each encoding has one codec here,
+A stepped session carries its input frames in a ``RequestStep`` message's
+``media_input``, each tagged with the encoding its bytes use. Each encoding has one codec here,
 in a registry keyed by the ``FrameEncoding`` value, so a compressed encoding is
 added as one more entry without touching the callers.
 

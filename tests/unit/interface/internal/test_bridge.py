@@ -149,7 +149,7 @@ def test_submit_step_enqueues_the_step_with_its_frames(monkeypatch: pytest.Monke
     bridge.submit_step({"camera": [camera]}, conn_id=ConnId(1002), request_id="s1")
 
     [step] = admitted
-    assert step.inputs == {"camera": (camera,)}
+    assert step.media_input == {"camera": (camera,)}
     assert (step.conn_id, step.request_id) == (ConnId(1002), "s1")
 
 

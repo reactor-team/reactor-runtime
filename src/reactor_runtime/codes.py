@@ -22,6 +22,3 @@ INTERNAL_ERROR = "internal_error"
 
 PUBLISH_REFUSED = "publish_refused"
 """The runtime refused a client's request to publish a track."""
-
-STEP_REFUSED = "step_refused"
-"""A requested step did not run: the request or the model refused it, and no state changed."""

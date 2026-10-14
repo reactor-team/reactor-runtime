@@ -22,7 +22,6 @@ from reactor_runtime import (
     event,
     protocol,
 )
-from reactor_runtime.codes import STEP_REFUSED
 from reactor_runtime.core import (
     ConnectionCapabilities,
     ConnId,
@@ -33,6 +32,7 @@ from reactor_runtime.core import (
     SessionState,
 )
 from reactor_runtime.interface.internal.input_buffer import InputBuffer
+from reactor_runtime.message_gateway import InboundStep
 from reactor_runtime.protocol.common import dict_to_struct
 from reactor_runtime.runner.runner import Runner
 from reactor_runtime.runner.session_start import InvalidSessionStartError
@@ -173,7 +173,7 @@ def _request_step(
     *,
     state: dict[str, Any] | None = None,
     commands: Sequence[tuple[str, dict[str, Any]]] = (),
-    inputs: Sequence[step_pb2.TrackFrames] = (),
+    media_input: Sequence[step_pb2.TrackFrames] = (),
 ) -> bytes:
     message = data_pb2.DataClientMessage(
         request_id=request_id,
@@ -183,7 +183,7 @@ def _request_step(
             commands=[
                 model_pb2.Command(type=name, data=dict_to_struct(args)) for name, args in commands
             ],
-            inputs=inputs,
+            media_input=media_input,
         ),
     )
     return message.SerializeToString()
@@ -264,7 +264,7 @@ async def test_a_requested_step_is_answered_with_its_result_on_the_data_channel(
         _request_step(
             "r1",
             state={"prompt": "a lake"},
-            inputs=[
+            media_input=[
                 step_pb2.TrackFrames(
                     track="webcam",
                     kind=platform_pb2.TRACK_KIND_VIDEO,
@@ -281,6 +281,8 @@ async def test_a_requested_step_is_answered_with_its_result_on_the_data_channel(
     assert result.kind == K.MESSAGE_KIND_RESPONSE
     assert result.WhichOneof("payload") == "step_result"
     assert result.step_result.index == 1
+    assert result.step_result.failure_code == step_pb2.STEP_FAILURE_CODE_UNSPECIFIED
+    assert not result.step_result.HasField("error")
     assert conn.control == []
     assert models[-1].inputs == [("a lake", [], [7, 9])]
     assert conn.media == []
@@ -374,16 +376,36 @@ async def test_a_state_value_whose_upload_never_arrives_refuses_the_step(
 
     assert _refusal(conn.replies()[0]) == "state.image references an unresolved upload"
     assert models[-1].inputs == []
+    assert _journalled_steps(runner) == []
 
 
 # -- refusals --------------------------------------------------------------------
 
 
-def _refusal(message: data_pb2.DataServerMessage) -> str:
+def _refusal(
+    message: data_pb2.DataServerMessage,
+    failure_code: step_pb2.StepFailureCode = step_pb2.STEP_FAILURE_CODE_REFUSED,
+) -> str:
     assert message.kind == K.MESSAGE_KIND_RESPONSE
-    assert message.WhichOneof("payload") == "error"
-    assert message.error.code == STEP_REFUSED
-    return message.error.message
+    assert message.WhichOneof("payload") == "step_result"
+    result = message.step_result
+    assert result.failure_code == failure_code
+    assert (result.index, result.elapsed, list(result.tracks), list(result.files)) == (
+        0,
+        0.0,
+        [],
+        [],
+    )
+    return result.error
+
+
+def _journalled_steps(runner: Runner) -> list[SessionEvent]:
+    return [
+        t.event
+        for _, e in runner.events._history  # type: ignore[attr-defined]
+        if (t := e.transition).event
+        in (SessionEvent.STEP_COMPLETED, SessionEvent.STEP_RESULT_READY)
+    ]
 
 
 async def test_a_step_with_an_invalid_command_is_refused_and_keeps_what_came_before(
@@ -421,14 +443,17 @@ async def test_a_step_with_an_invalid_state_value_names_the_key(runner: Runner) 
 @pytest.mark.parametrize(
     ("entry", "reason"),
     [
-        (step_pb2.TrackFrames(track="mic"), "inputs[0] names 'mic', which is not an input track"),
+        (
+            step_pb2.TrackFrames(track="mic"),
+            "media_input[0] names 'mic', which is not an input track",
+        ),
         (
             step_pb2.TrackFrames(track="webcam", kind=platform_pb2.TRACK_KIND_AUDIO),
-            "inputs[0] says 'webcam' is not a video track",
+            "media_input[0] says 'webcam' is not a video track",
         ),
         (
             step_pb2.TrackFrames(track="webcam", frames=[step_pb2.Frame(dtype="uint8")]),
-            "inputs[0].frames[0]: frame encoding FRAME_ENCODING_UNSPECIFIED is not supported",
+            "media_input[0].frames[0]: frame encoding FRAME_ENCODING_UNSPECIFIED is not supported",
         ),
     ],
 )
@@ -436,23 +461,46 @@ async def test_a_step_whose_frames_do_not_fit_is_refused(
     runner: Runner, entry: step_pb2.TrackFrames, reason: str
 ) -> None:
     conn = await _stepped(runner)
-    _send(runner, conn, _request_step("r1", inputs=[entry]))
+    _send(runner, conn, _request_step("r1", media_input=[entry]))
     await _until(lambda: len(conn.sent) == 1)
     assert _refusal(conn.replies()[0]).startswith(reason)
+    assert _journalled_steps(runner) == []
+
+
+class _RecordingStore:
+    """A step store that records the step numbers it is offered and saves none."""
+
+    def __init__(self) -> None:
+        self.admitted: list[int] = []
+
+    def admit(self, recording_id: str, step: int, *args: Any) -> bool:
+        self.admitted.append(step)
+        return False
+
+    def close(self) -> None: ...
 
 
 async def test_a_step_the_model_refuses_is_answered_and_not_counted(runner: Runner) -> None:
+    store = _RecordingStore()
+    runner._step_store = cast(Any, store)
     conn = await _stepped(runner, steps=1)
     _send(runner, conn, _request_step("r1", state={"prompt": "refuse"}))
     await _until(lambda: len(conn.sent) == 1)
     assert _refusal(conn.replies()[0]) == "not now"
     assert runner._sm.current_state in (SessionState.STREAMING, SessionState.WAITING)
     assert models[-1].state.prompt == "refuse"
+    assert _journalled_steps(runner) == []
+    assert store.admitted == []
 
     _send(runner, conn, _request_step("r2", state={"prompt": "a lake"}))
     await _until(lambda: runner._sm.current_state is not SessionState.STREAMING)
-    results = [m for m in conn.replies() if m.WhichOneof("payload") == "step_result"]
-    assert [m.step_result.index for m in results] == [1]
+    results = [m.step_result for m in conn.replies()]
+    assert [(r.index, r.failure_code) for r in results] == [
+        (0, step_pb2.STEP_FAILURE_CODE_REFUSED),
+        (1, step_pb2.STEP_FAILURE_CODE_UNSPECIFIED),
+    ]
+    assert _journalled_steps(runner) == [SessionEvent.STEP_COMPLETED]
+    assert store.admitted == [1]
 
 
 async def test_a_stepped_session_closes_after_its_steps(runner: Runner) -> None:
@@ -471,6 +519,29 @@ async def test_a_step_request_in_a_streamed_session_is_refused(runner: Runner) -
     _send(runner, conn, _request_step("r1"))
     await _until(lambda: len(conn.sent) == 1)
     assert "not stepped" in _refusal(conn.replies()[0])
+
+
+async def test_a_step_request_after_the_session_stops_is_not_ready(runner: Runner) -> None:
+    conn = await _stepped(runner)
+    runner.stop_session()
+    await runner._submit_step(
+        InboundStep(
+            state={},
+            commands=(),
+            media_input=(),
+            conn_id=conn.id,
+            request_id="r1",
+            received_at=0.0,
+        )
+    )
+
+    [reply] = conn.replies()
+    assert reply.request_id == "r1"
+    assert _refusal(reply, step_pb2.STEP_FAILURE_CODE_NOT_READY) == (
+        "the session is not running a step yet"
+    )
+    assert models[-1].inputs == []
+    assert _journalled_steps(runner) == []
 
 
 # -- what a stepped session does not do ------------------------------------------

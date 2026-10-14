@@ -26,7 +26,7 @@ from collections import deque
 from collections.abc import Callable, Coroutine, Mapping
 from typing import Any, Protocol
 
-from reactor_runtime.codes import INVALID_COMMAND, STEP_REFUSED, UNRESOLVED_UPLOAD
+from reactor_runtime.codes import INVALID_COMMAND, UNRESOLVED_UPLOAD
 from reactor_runtime.core import (
     JOURNAL_EVENTS,
     ClientConnected,
@@ -1658,23 +1658,31 @@ class Runner(ServiceComponent, ConnectionSink):
         runs. The request's frames are then decoded and the step is submitted
         behind its commands.
 
-        The request is refused with ``step_refused``, naming the entry, when
-        the session does not step, when an entry's upload does not arrive or
-        it fails the contract, or when an input frame names a track the model
-        does not take or cannot be decoded. The entries submitted before the
-        refused one stay applied. A request with no entries and no frames runs
-        a step on the model's current state.
+        A request that does not run is answered with a ``StepResult`` that
+        takes no number. It is ``NOT_READY`` when the session is not running.
+        It is ``REFUSED``, naming the entry, when the session does not step,
+        when an entry's upload does not arrive or it fails the contract, or
+        when a media input frame names a track the model does not take or
+        cannot be decoded; the entries submitted before the refused one stay
+        applied. Neither is journalled or counted toward the session's steps.
+        A request with no entries and no frames runs a step on the model's
+        current state.
         """
         if self._bridge is None:
             return
-        if (
-            self._session_start.generation is not Generation.STEPPED
-            or self._sm.current_state not in _RUNNING_STATES
-        ):
+        if self._session_start.generation is not Generation.STEPPED:
             self._refuse_step(
                 step.conn_id,
                 step.request_id,
                 "this session is not stepped; start it with generation 'stepped' to request steps",
+            )
+            return
+        if self._sm.current_state not in _RUNNING_STATES:
+            self._refuse_step(
+                step.conn_id,
+                step.request_id,
+                "the session is not running a step yet",
+                failure_code=step_pb2.STEP_FAILURE_CODE_NOT_READY,
             )
             return
         entries = [
@@ -1700,16 +1708,16 @@ class Runner(ServiceComponent, ConnectionSink):
                 return
             self._sm.send(SessionEvent.COMMAND, name=name, args=args, conn_id=step.conn_id)
         try:
-            inputs = self._decode_step_inputs(step.inputs)
+            media_input = self._decode_media_input(step.media_input)
         except _StepInputError as error:
             self._refuse_step(step.conn_id, step.request_id, str(error))
             return
-        self._bridge.submit_step(inputs, conn_id=step.conn_id, request_id=step.request_id)
+        self._bridge.submit_step(media_input, conn_id=step.conn_id, request_id=step.request_id)
 
-    def _decode_step_inputs(
-        self, inputs: tuple[step_pb2.TrackFrames, ...]
+    def _decode_media_input(
+        self, media_input: tuple[step_pb2.TrackFrames, ...]
     ) -> dict[str, list[InputFrame]]:
-        """Decode a step request's frames, by the input track each belongs to.
+        """Decode a step request's media input, by the input track each entry belongs to.
 
         Raises:
             _StepInputError: An entry names a track the model does not take, a
@@ -1723,8 +1731,8 @@ class Runner(ServiceComponent, ConnectionSink):
             if info.direction is TrackDirection.IN
         }
         decoded: dict[str, list[InputFrame]] = {}
-        for index, entry in enumerate(inputs):
-            where = f"inputs[{index}]"
+        for index, entry in enumerate(media_input):
+            where = f"media_input[{index}]"
             info = tracks.get(entry.track)
             if info is None:
                 raise _StepInputError(
@@ -1744,26 +1752,51 @@ class Runner(ServiceComponent, ConnectionSink):
             decoded[entry.track] = frames
         return decoded
 
-    def _refuse_step(self, conn_id: ConnId, request_id: str, reason: str) -> None:
-        """Answer a step request with ``step_refused`` on the data channel."""
-        logger.debug("step request refused", conn_id=conn_id, reason=reason)
+    def _refuse_step(
+        self,
+        conn_id: ConnId,
+        request_id: str,
+        reason: str,
+        *,
+        failure_code: step_pb2.StepFailureCode = step_pb2.STEP_FAILURE_CODE_REFUSED,
+    ) -> None:
+        """Answer a step request that did not run, on the data channel.
+
+        The answer is a ``StepResult`` with no number, no elapsed time, and no
+        media, carrying *failure_code* and *reason* as its error. Nothing is
+        journalled or counted for it.
+        """
+        logger.debug(
+            "step request did not run",
+            conn_id=conn_id,
+            reason=reason,
+            failure_code=step_pb2.StepFailureCode.Name(failure_code),
+        )
+        result = step_pb2.StepResult(index=0, failure_code=failure_code, error=reason)
         self._connections.send_step_reply(
             conn_id,
-            lambda version: self._codec_for(version).encode_command_error(
-                request_id, STEP_REFUSED, reason
-            ),
+            lambda version: self._codec_for(version).encode_step_result(request_id, result),
         )
 
     def _on_step_refusal(self, refusal: StepRefusal) -> None:
-        """Answer a step request the model refused with ``step_refused``.
+        """Answer a step request the model did not run.
 
-        Called on the model's thread and sent from it, so the refusal goes out
+        Called on the model's thread and sent from it, so the answer goes out
         behind any reply to the commands the model handled before the step. A
         refusal from an earlier session is dropped.
         """
         if refusal.session != self._sessions_posted:
             return
-        self._refuse_step(refusal.conn_id, refusal.request_id, refusal.reason)
+        self._refuse_step(
+            refusal.conn_id,
+            refusal.request_id,
+            refusal.reason,
+            failure_code=(
+                step_pb2.STEP_FAILURE_CODE_NOT_READY
+                if refusal.not_ready
+                else step_pb2.STEP_FAILURE_CODE_REFUSED
+            ),
+        )
 
     def _send_step_result(self, step: CompletedStep, index: int) -> None:
         """Answer a requested step with its result, on the data channel."""
