@@ -102,13 +102,15 @@ class Batch(BatchedReactorApp):
 
         Args:
             config_path: ``config.yaml``: the frame size, the latent's size,
-                channel count, and depth, and the backend (``auto``,
-                ``torch``, or ``numpy``).
+                channel count, and depth, the backend (``auto``, ``torch``,
+                or ``numpy``), and whether each step keeps its frame's
+                fingerprint.
         """
         config: dict[str, Any] = {}
         if config_path is not None:
             config = yaml.safe_load(config_path.read_text()) or {}
         self.net = build_network(config)
+        self.fingerprint = bool(config.get("fingerprint", True))
         self.latents: dict[str, Any] = {}
         self.steps: dict[str, int] = {}
         self.seeds: dict[str, int] = {}
@@ -152,11 +154,14 @@ class Batch(BatchedReactorApp):
         """Emit the frame, and keep its fingerprint with the step.
 
         ``frame.sha256`` lets a client check that a session's frames are the
-        ones it gets when it runs alone.
+        ones it gets when it runs alone. Hashing a frame costs a little time
+        per session per step, so ``fingerprint: false`` turns it off.
         """
         if outcome.error is not None:
             raise outcome.error
         output = outcome.result
+        if not self.fingerprint:
+            return StepCompleted(output=output)
         digest = hashlib.sha256(np.ascontiguousarray(output.main_video).tobytes()).hexdigest()
         return StepCompleted(output=output, files={"frame.sha256": digest.encode()})
 
