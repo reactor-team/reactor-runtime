@@ -116,7 +116,7 @@ class Sinks:
         ]
 
 
-def _serve(app: BatchedReactorApp) -> Sinks:
+def _serve(app: BatchedReactorApp, *, hosted: bool = True) -> Sinks:
     sinks = Sinks()
     app.bind_output(
         broadcast=lambda message: None,
@@ -127,7 +127,8 @@ def _serve(app: BatchedReactorApp) -> Sinks:
         step=lambda step: sinks.steps.append((current_session_key(), step)),
     )
     app.bind_failure(sinks.crashed.append)
-    app.bind_session_failure(lambda key, error: sinks.failed.append((key, error)))
+    if hosted:
+        app.bind_session_failure(lambda key, error: sinks.failed.append((key, error)))
     app.start_thread()
     _wait(lambda: app._inbound_q is not None)
     return sinks
@@ -271,6 +272,22 @@ def test_an_emit_error_fails_that_session_alone(
         _wait(lambda: len(sinks.frames(1)) > frames_after_failure + 3)
         assert not sinks.crashed
         assert app.batches[-1] == ["good"]
+    finally:
+        app.stop()
+
+
+def test_a_session_failure_under_a_single_session_runner_ends_the_model_loop(
+    register_model: Callable[[type], None],
+) -> None:
+    register_model(FailsOne)
+    app = FailsOne()
+    try:
+        sinks = _serve(app, hosted=False)
+        app.post_reactor_event(SessionStarted("bad"))
+        app.post_reactor_event(ClientConnected(ConnId(1001), 1))
+
+        _wait(lambda: bool(sinks.crashed))
+        assert str(sinks.crashed[0]) == "bad latent"
     finally:
         app.stop()
 

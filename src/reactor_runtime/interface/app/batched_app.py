@@ -202,7 +202,8 @@ class BatchedReactorApp(ReactorApp):
 
     A batched app also runs where one session is hosted, as when the
     deployment caps the process at one with ``REACTOR_MAX_SESSIONS=1``: each
-    step is then a batch of one.
+    step is then a batch of one, and a failure of that one session ends the
+    model loop, as it does for a :class:`ReactorApp`.
 
     Class attributes:
         max_sessions: How many sessions the process hosts at once. The runtime
@@ -434,7 +435,15 @@ class BatchedReactorApp(ReactorApp):
                 self._fail_session(session, error, "emit")
 
     def _fail_session(self, session: _Session, error: BaseException, where: str) -> None:
-        """Stop stepping *session* and ask the runtime to end it with *error*."""
+        """Stop stepping *session* and ask the runtime to end it with *error*.
+
+        With no failure sink bound, as under a single-session runner, the
+        session is the only one there is: *error* is raised to end the model
+        loop, and the runner ends the session as it does a crashed
+        :class:`ReactorApp`.
+        """
+        if self._on_session_failure is None:
+            raise error
         logger.error(
             "session failed; ending it",
             where=where,
@@ -442,8 +451,7 @@ class BatchedReactorApp(ReactorApp):
             exc_info=error,
         )
         session.failed = True
-        if self._on_session_failure is not None:
-            self._on_session_failure(session.key, str(error) or type(error).__name__)
+        self._on_session_failure(session.key, str(error) or type(error).__name__)
 
     # -- binding and ingress (called by the runtime) ---------------------------
 
