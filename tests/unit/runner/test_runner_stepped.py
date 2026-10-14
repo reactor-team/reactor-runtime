@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import threading
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -27,7 +28,6 @@ from reactor_runtime import (
     event,
     protocol,
 )
-from reactor_runtime.codes import STEP_RESULT_TOO_LARGE
 from reactor_runtime.core import (
     CompletedStep,
     ConnectionCapabilities,
@@ -44,6 +44,7 @@ from reactor_runtime.core import (
 from reactor_runtime.interface.internal.input_buffer import InputBuffer
 from reactor_runtime.message_gateway import InboundStep
 from reactor_runtime.protocol.common import dict_to_struct
+from reactor_runtime.protocol.frames import FrameEncodingError
 from reactor_runtime.runner import runner as runner_module
 from reactor_runtime.runner.runner import Runner
 from reactor_runtime.runner.session_start import InvalidSessionStartError
@@ -994,11 +995,16 @@ async def test_a_failed_step_is_answered_with_its_error_and_no_files(
     [reply] = conn.replies()
     assert reply.kind == K.MESSAGE_KIND_RESPONSE
     result = reply.step_result
-    assert (result.index, result.error) == (1, "the step went dark")
+    assert (result.index, result.failure_code, result.error) == (
+        1,
+        step_pb2.STEP_FAILURE_CODE_FAILED,
+        "the step went dark",
+    )
     assert list(result.files) == []
+    assert _journalled_steps(saving_runner)[0] is SessionEvent.STEP_COMPLETED
 
 
-async def test_a_result_too_large_for_the_connection_is_refused_and_the_session_goes_on(
+async def test_a_result_too_large_for_the_connection_is_answered_without_media_and_counted(
     runner: Runner,
 ) -> None:
     conn = await _stepped(runner)
@@ -1006,10 +1012,16 @@ async def test_a_result_too_large_for_the_connection_is_refused_and_the_session_
     _send(runner, conn, _request_step("r1"))
     await _until(lambda: len(conn.sent) == 1)
 
-    [refused] = conn.replies()
-    assert refused.request_id == "r1"
-    assert refused.error.code == STEP_RESULT_TOO_LARGE
-    assert "this connection takes at most 16" in refused.error.message
+    [reply] = conn.replies()
+    assert (reply.request_id, reply.kind) == ("r1", K.MESSAGE_KIND_RESPONSE)
+    result = reply.step_result
+    assert (result.index, result.failure_code) == (1, step_pb2.STEP_FAILURE_CODE_RESULT_TOO_LARGE)
+    assert result.elapsed > 0
+    assert re.fullmatch(
+        r"step 1's result is \d+ bytes; this connection takes at most 16", result.error
+    )
+    assert (list(result.tracks), list(result.files)) == ([], [])
+    assert _journalled_steps(runner) == [SessionEvent.STEP_COMPLETED]
 
     conn.max_message_size = 64 * 1024 * 1024
     _send(runner, conn, _request_step("r2"))
@@ -1027,3 +1039,26 @@ async def test_a_connection_without_chunking_is_refused_a_step(runner: Runner) -
 
     assert "negotiated data-channel chunking" in _refusal(conn.replies()[0])
     assert models[-1].inputs == []
+    assert _journalled_steps(runner) == []
+
+
+async def test_a_step_whose_output_cannot_be_encoded_is_answered_failed(
+    runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unencodable(bundle: Any) -> list[step_pb2.TrackFrames]:
+        raise FrameEncodingError("float64 video is not supported")
+
+    monkeypatch.setattr("reactor_runtime.runner.runner.track_frames", unencodable)
+    conn = await _stepped(runner)
+    _send(runner, conn, _request_step("r1"))
+    await _until(lambda: len(conn.sent) == 1)
+
+    result = conn.replies()[0].step_result
+    assert (result.index, result.failure_code, result.error) == (
+        1,
+        step_pb2.STEP_FAILURE_CODE_FAILED,
+        "step 1's output could not be encoded: float64 video is not supported",
+    )
+    assert result.elapsed > 0
+    assert (list(result.tracks), list(result.files)) == ([], [])
+    assert _journalled_steps(runner) == [SessionEvent.STEP_COMPLETED]
