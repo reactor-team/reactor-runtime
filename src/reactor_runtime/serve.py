@@ -24,7 +24,9 @@ import importlib.metadata
 import logging
 import math
 import os
+import socket
 import sys
+import time
 from pathlib import Path
 
 from reactor_runtime import log
@@ -306,6 +308,19 @@ def _log_level_from_env() -> int:
     return logging.getLevelNamesMapping().get(name, logging.INFO)
 
 
+def _listen(cfg: RuntimeConfig) -> socket.socket:
+    """Bind the HTTP address and listen on it, for the HTTP server to take over.
+
+    Raises:
+        SystemExit: If the address cannot be bound.
+    """
+    try:
+        family = socket.getaddrinfo(cfg.host, cfg.port, type=socket.SOCK_STREAM)[0][0]
+        return socket.create_server((cfg.host, cfg.port), family=family, backlog=2048)
+    except OSError as exc:
+        raise SystemExit(f"cannot listen on {cfg.host}:{cfg.port}: {exc}") from exc
+
+
 def _session_slots(cfg: RuntimeConfig) -> int:
     """Return how many sessions this process hosts at once.
 
@@ -329,6 +344,7 @@ def _assemble(
     webrtc: WebRtcConfig | None = None,
     *,
     peer_factory: WebRtcPeerFactory | None = None,
+    listener: socket.socket | None = None,
 ) -> Service:
     """Assemble the service from the runtime's components.
 
@@ -354,6 +370,8 @@ def _assemble(
             ``WebRtcConfig`` when omitted (as in tests that don't exercise it).
         peer_factory: The media engine to mount; defaults to the libwebrtc
             engine when omitted.
+        listener: The bound socket the HTTP server serves on; it binds its
+            own when omitted.
 
     Returns:
         A service with the runner and the HTTP server hooked on.
@@ -367,9 +385,12 @@ def _assemble(
         peer_factory = libwebrtc_peer_factory
     service = Service(exit_timeout=cfg.exit_timeout, grace_period=cfg.grace_period)
     metrics = RuntimeMetrics(version=_version(), model=cfg.model_ref)
+    load_started = time.monotonic()
     slots = _session_slots(cfg)
     runner: Runner | SessionHost = (
-        SessionHost(cfg, metrics, slots) if slots > 1 else Runner(cfg, metrics)
+        SessionHost(cfg, metrics, slots, load_started=load_started)
+        if slots > 1
+        else Runner(cfg, metrics, load_started=load_started)
     )
     runner.request_shutdown = service.request_shutdown
     service.add(runner)
@@ -381,6 +402,7 @@ def _assemble(
             transports=[transport],
             process_health=service.health,
             metrics=metrics,
+            listener=listener,
         )
     )
     return service
@@ -406,13 +428,24 @@ async def serve(
         asked for or a model that refused to load, non-zero for a model loop
         that crashed.
 
+    Raises:
+        SystemExit: If the HTTP address cannot be bound.
+
     The service's wind-down is bounded by the deadline the shutdown request
     armed. The teardown that follows this coroutine — the loop joining its
     worker threads, the interpreter joining every thread still alive — is
     bounded by a second one armed here, so the caller's exit cannot be held
     up by a thread the runtime does not own.
     """
-    service = _assemble(cfg, webrtc, peer_factory=peer_factory)
+    # Choosing the runner imports the model's class. The address is bound
+    # first, as the HTTP server binds before the model loads, so a probe that
+    # connects during the import waits in the backlog rather than being refused.
+    listener = _listen(cfg)
+    try:
+        service = _assemble(cfg, webrtc, peer_factory=peer_factory, listener=listener)
+    except BaseException:
+        listener.close()
+        raise
     await service.run()
     service.bound_process_exit()
     return service.exit_code
