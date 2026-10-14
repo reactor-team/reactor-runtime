@@ -4,7 +4,8 @@ A worker is one GPU's worth of a model: a class with ``load()``,
 ``generate()``, and ``reset()``. The runner constructs it in its own process,
 sets ``rank``, ``world_size``, and ``device`` on the instance, calls ``load()``
 once, and then ``generate()`` per call and ``reset()`` when asked. Every rank
-runs every call; only rank 0's result reaches the caller.
+runs every call; only rank 0's result reaches the caller. A rank's process
+inherits the environment of the runtime process, managed secrets included.
 
 Nothing checks ancestry. A class that has the three methods is accepted;
 :class:`DistributedWorker` only names the injected attributes with types and

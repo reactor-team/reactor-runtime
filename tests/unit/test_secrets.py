@@ -9,7 +9,10 @@ never carry a value, a byte of a value, or an exception chain that does.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import subprocess
+import sys
 import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -18,7 +21,7 @@ from typing import Any
 import pytest
 
 from reactor_runtime import secrets
-from reactor_runtime.secrets import EXPECTED_KEYS_ENV, load_expected_secrets
+from reactor_runtime.secrets import EXPECTED_KEYS_ENV, export_secrets, load_expected_secrets
 
 _GOOD = b"synth-value-3c6d6c03"
 _IMAGE_DEFAULT = "synth-image-default-7712"
@@ -56,6 +59,11 @@ def _mount_atomic_writer(root: Path, files: dict[str, bytes]) -> None:
     (root / "..data").symlink_to(stamp.name)
     for name in files:
         (root / name).symlink_to(f"..data/{name}")
+
+
+def _export_from(root: Path, names: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(secrets, "SECRETS_ROOT", root)
+    monkeypatch.setenv(EXPECTED_KEYS_ENV, json.dumps(names))
 
 
 def _run_with_deadline(call: Callable[[], Any], seconds: float = 10.0) -> Any:
@@ -353,3 +361,106 @@ def test_an_unreadable_file_blocks_the_start(tmp_path: Path) -> None:
             load_expected_secrets(_env(["API_TOKEN"]), tmp_path)
     finally:
         (tmp_path / "API_TOKEN").chmod(0o600)
+
+
+# -- Export ------------------------------------------------------------------------
+
+
+def test_export_sets_the_exact_bytes_over_an_image_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = "synth-café\n".encode()
+    _mount_atomic_writer(tmp_path, {"API_TOKEN": data})
+    _export_from(tmp_path, ["API_TOKEN"], monkeypatch)
+    os.environ["API_TOKEN"] = _IMAGE_DEFAULT
+
+    export_secrets()
+
+    assert os.environ["API_TOKEN"] == data.decode()
+    if os.supports_bytes_environ:
+        assert os.environb[b"API_TOKEN"] == data
+
+
+def test_export_without_a_bytes_environment_keeps_the_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path, "API_TOKEN", b"synth-text\n")
+    _export_from(tmp_path, ["API_TOKEN"], monkeypatch)
+    monkeypatch.setattr(secrets.os, "supports_bytes_environ", False)
+
+    export_secrets()
+
+    assert os.environ["API_TOKEN"] == "synth-text\n"
+
+
+def test_an_image_default_never_masks_a_missing_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _export_from(tmp_path, ["API_TOKEN"], monkeypatch)
+    os.environ["API_TOKEN"] = _IMAGE_DEFAULT
+
+    with pytest.raises(SystemExit, match="missing 'API_TOKEN'"):
+        export_secrets()
+
+    assert os.environ["API_TOKEN"] == _IMAGE_DEFAULT
+
+
+def test_a_nul_in_a_later_file_leaves_the_environment_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _mount_atomic_writer(tmp_path, {"AAA_FIRST": _GOOD, "ZZZ_LAST": b"synth\x00"})
+    _export_from(tmp_path, ["AAA_FIRST", "ZZZ_LAST"], monkeypatch)
+    os.environ["AAA_FIRST"] = _IMAGE_DEFAULT
+    snapshot = dict(os.environ)
+
+    with pytest.raises(SystemExit, match="'ZZZ_LAST' contains a NUL byte"):
+        export_secrets()
+
+    assert dict(os.environ) == snapshot
+
+
+def test_export_is_a_noop_when_the_variable_is_absent(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO)
+    snapshot = dict(os.environ)
+
+    export_secrets()
+
+    assert dict(os.environ) == snapshot
+    assert not [record for record in caplog.records if record.name == secrets.__name__]
+
+
+@pytest.mark.skipif(not os.supports_bytes_environ, reason="bytes environment is POSIX")
+@pytest.mark.parametrize("locale", ["inherited", "ascii"])
+def test_a_child_process_sees_the_exact_bytes(tmp_path: Path, locale: str) -> None:
+    # The export runs in the child. Under an ASCII locale, the bytes still land exactly.
+    data = "synth-café-bytes\r\n".encode()
+    _write(tmp_path, "API_TOKEN", data)
+    child = (
+        "import os, sys\n"
+        "from pathlib import Path\n"
+        "from reactor_runtime import secrets\n"
+        "secrets.SECRETS_ROOT = Path(sys.argv[1])\n"
+        "secrets.export_secrets()\n"
+        "import subprocess\n"
+        "probe = \"import os, sys; sys.stdout.write(os.environb[b'API_TOKEN'].hex())\"\n"
+        "text = os.environ['API_TOKEN'] == bytes.fromhex(sys.argv[2]).decode()\n"
+        "print(sys.getfilesystemencoding(), text)\n"
+        "sys.stdout.write(subprocess.check_output([sys.executable, '-c', probe], text=True))\n"
+    )
+    env = {**os.environ, EXPECTED_KEYS_ENV: '["API_TOKEN"]'}
+    if locale == "ascii":
+        env.update(LC_ALL="C", PYTHONUTF8="0", PYTHONCOERCECLOCALE="0")
+
+    result = subprocess.run(
+        [sys.executable, "-c", child, str(tmp_path), data.hex()],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    encoding, text_matches, seen = result.stdout.split()
+    assert seen == data.hex()
+    # The text view equals the strict decode only under a UTF-8 file-system encoding.
+    assert text_matches == str(encoding == "utf-8")
