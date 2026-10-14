@@ -264,8 +264,8 @@ class UploadRoutes:
             if req.size <= 0:
                 raise HTTPException(status_code=400, detail="size must be > 0")
             try:
-                upload_id = runner.uploads_for(sid).create_slot(
-                    req.name, req.mime_type, req.size, req.upload_id
+                upload_id = runner.reserve_upload(
+                    sid, req.name, req.mime_type, req.size, req.upload_id
                 )
             except UploadIdTakenError:
                 raise HTTPException(status_code=409, detail="Upload id already reserved") from None

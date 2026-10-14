@@ -123,6 +123,10 @@ class UploadStore:
         )
         return upload_id
 
+    def holds(self, upload_id: UploadId) -> bool:
+        """Return whether a slot is reserved under *upload_id*, written or not."""
+        return upload_id in self._slots
+
     def expected_size(self, upload_id: UploadId) -> int:
         """Return the exact byte count a reserved slot's write must match.
 
