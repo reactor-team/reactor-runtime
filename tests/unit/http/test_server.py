@@ -104,7 +104,7 @@ async def test_serves_a_connection_queued_on_a_listener_bound_before_it_started(
         [],
         Health.healthy,
         _metrics(),
-        listener=listener,
+        listeners=[listener],
     )
     # A probe that connects before the server runs waits in the backlog.
     reader, writer = await asyncio.open_connection("127.0.0.1", port)

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import errno
 import importlib.metadata
 import logging
 import math
@@ -310,17 +311,35 @@ def _log_level_from_env() -> int:
     return logging.getLevelNamesMapping().get(name, logging.INFO)
 
 
-def _listen(cfg: RuntimeConfig) -> socket.socket:
+def _listen(cfg: RuntimeConfig) -> list[socket.socket]:
     """Bind the HTTP address and listen on it, for the HTTP server to take over.
+
+    The host is bound as the HTTP server binds it itself: on every address it
+    resolves to, so ``localhost`` answers on both loopbacks and an empty host
+    on every interface of each family. An address whose family the machine
+    has disabled is skipped, as long as another one binds.
 
     Raises:
         SystemExit: If the address cannot be bound.
     """
+    sockets: list[socket.socket] = []
     try:
-        family = socket.getaddrinfo(cfg.host, cfg.port, type=socket.SOCK_STREAM)[0][0]
-        return socket.create_server((cfg.host, cfg.port), family=family, backlog=2048)
+        resolved = socket.getaddrinfo(
+            cfg.host or None, cfg.port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE
+        )
+        for family, _, _, _, address in dict.fromkeys(resolved):
+            try:
+                sockets.append(socket.create_server(address, family=family, backlog=2048))
+            except OSError as exc:
+                if exc.errno not in (errno.EADDRNOTAVAIL, errno.EAFNOSUPPORT):
+                    raise
+        if not sockets:
+            raise OSError(errno.EADDRNOTAVAIL, "no address it resolves to can be bound")
     except OSError as exc:
+        for sock in sockets:
+            sock.close()
         raise SystemExit(f"cannot listen on {cfg.host}:{cfg.port}: {exc}") from exc
+    return sockets
 
 
 def _session_slots(cfg: RuntimeConfig) -> int:
@@ -346,7 +365,7 @@ def _assemble(
     webrtc: WebRtcConfig | None = None,
     *,
     peer_factory: WebRtcPeerFactory | None = None,
-    listener: socket.socket | None = None,
+    listeners: list[socket.socket] | None = None,
 ) -> Service:
     """Assemble the service from the runtime's components.
 
@@ -374,8 +393,8 @@ def _assemble(
             ``WebRtcConfig`` when omitted (as in tests that don't exercise it).
         peer_factory: The media engine to mount; defaults to the libwebrtc
             engine when omitted.
-        listener: The bound socket the HTTP server serves on; it binds its
-            own when omitted.
+        listeners: The bound sockets the HTTP server serves on; it binds
+            its own when omitted.
 
     Returns:
         A service with the runner and the HTTP server hooked on.
@@ -410,7 +429,7 @@ def _assemble(
             transports=transports,
             process_health=service.health,
             metrics=metrics,
-            listener=listener,
+            listeners=listeners,
         )
     )
     return service
@@ -448,11 +467,12 @@ async def serve(
     # Choosing the runner imports the model's class. The address is bound
     # first, as the HTTP server binds before the model loads, so a probe that
     # connects during the import waits in the backlog rather than being refused.
-    listener = _listen(cfg)
+    listeners = _listen(cfg)
     try:
-        service = _assemble(cfg, webrtc, peer_factory=peer_factory, listener=listener)
+        service = _assemble(cfg, webrtc, peer_factory=peer_factory, listeners=listeners)
     except BaseException:
-        listener.close()
+        for listener in listeners:
+            listener.close()
         raise
     await service.run()
     service.bound_process_exit()
