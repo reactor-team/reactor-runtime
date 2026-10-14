@@ -74,7 +74,7 @@ from reactor_runtime.runner.runner import (
     _no_shutdown,
 )
 from reactor_runtime.runner.session_start import InvalidSessionStartError
-from reactor_runtime.step_results import StepStore
+from reactor_runtime.step_results import SavedStep, StepStore
 from reactor_runtime.transport.router import (
     SessionNotRunningError,
     SessionTransitionError,
@@ -87,6 +87,10 @@ logger = get_logger(__name__)
 # A session id is a lowercase UUID: the one shape its recording and its step
 # results are kept under, and safe as a path segment of every route.
 _SESSION_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+# How many of the latest sessions the host remembers the slot of, for the
+# step results and recordings that outlive them.
+_REMEMBERED_SESSIONS = 4096
 
 # The states of a slot that holds no session. Every other state, closing
 # included, is a session the host still answers for by id.
@@ -331,6 +335,20 @@ class _SessionSlot(Runner):
             self._session_id = previous
             raise
 
+    def _emit_step_saved(self, saved: SavedStep) -> None:
+        """Journal a saved step under the session it belongs to.
+
+        A step's folder can finish after its session ended and the slot took
+        the next one, so the fact is tagged with the step's own session rather
+        than the one the slot runs now.
+        """
+        current = self._event_session_id
+        self._event_session_id = saved.session_id
+        try:
+            super()._emit_step_saved(saved)
+        finally:
+            self._event_session_id = current
+
     async def stop(self) -> None:
         """Release the slot; the shared step store is the host's to close."""
         self._step_store = None
@@ -415,7 +433,12 @@ class _RecorderFanout:
         self._host = host
 
     def _recorder_for(self, session_id: str) -> Recorder:
-        return self._host.slot_for_any(session_id).slot_recorder
+        """Return the recorder holding *session_id*'s recording, else its slot's."""
+        recorders = [slot.slot_recorder for slot in self._host.slots]
+        return next(
+            (recorder for recorder in recorders if recorder.holds(session_id)),
+            self._host.slot_that_ran(session_id).slot_recorder,
+        )
 
     def manifest(self, session_id: str, start: float, end: float) -> ClipManifest | Pending | Gone:
         """Resolve a clip of *session_id* through the recorder that wrote it."""
@@ -497,6 +520,7 @@ class SessionHost:
         self._transport_ids = itertools.count(1)
         self._claimed: dict[tuple[str, int], ConnId] = {}
         self._conn_routes: dict[ConnId, _ConnRoute] = {}
+        self._ran: dict[str, _SessionSlot] = {}
         self._recorders = _RecorderFanout(self)
         self._draining = False
         self.request_shutdown: ShutdownHook = _no_shutdown
@@ -670,8 +694,8 @@ class SessionHost:
         if route is not None:
             route.slot.session_failed(route.generation, error)
 
-    def _on_step_saved(self, saved: Any) -> None:
-        self.slot_for_any(saved.session_id)._on_step_saved(saved)
+    def _on_step_saved(self, saved: SavedStep) -> None:
+        self.slot_that_ran(saved.session_id)._on_step_saved(saved)
 
     # -- session control (driven by the HTTP routes) --------------------------
 
@@ -688,9 +712,18 @@ class SessionHost:
                 return slot
         return None
 
-    def slot_for_any(self, session_id: str) -> _SessionSlot:
-        """Return the slot that runs or last ran *session_id*, else the first slot."""
-        return next((s for s in self._slots if s.hosted_id == session_id), self._slots[0])
+    @property
+    def slots(self) -> tuple[_SessionSlot, ...]:
+        """Every session slot, in the order sessions are placed in them."""
+        return tuple(self._slots)
+
+    def slot_that_ran(self, session_id: str) -> _SessionSlot:
+        """Return the slot that runs or ran *session_id*, else the first slot.
+
+        Only the most recent sessions are remembered; one older than that, or
+        never started here, resolves to the first slot.
+        """
+        return self._ran.get(session_id, self._slots[0])
 
     def _require_slot(self, sid: str) -> _SessionSlot:
         slot = self._running_slot(sid)
@@ -727,6 +760,10 @@ class SessionHost:
             raise NoFreeSlotError(len(self._slots))
         with session_scope(sid):
             slot.start_session({**params, "session_id": sid})
+        self._ran.pop(sid, None)
+        self._ran[sid] = slot
+        while len(self._ran) > _REMEMBERED_SESSIONS:
+            self._ran.pop(next(iter(self._ran)))
         return sid
 
     def stop_session(
