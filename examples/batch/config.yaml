@@ -15,3 +15,6 @@ layers: 2
 # auto: PyTorch when it is installed (on the GPU when there is one), NumPy
 # otherwise. torch / numpy pick one outright.
 backend: auto
+
+# Keep a SHA-256 of each frame with its step, as frame.sha256.
+fingerprint: true
