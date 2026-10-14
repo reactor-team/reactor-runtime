@@ -4,6 +4,8 @@
 #
 # reactor-runtime is the runtime itself. Its version is pinned here; bump
 # this line to upgrade, and reactor.yaml's build.runtime_version to match.
+# BatchedReactorApp first ships in the release after 3.8.2: this example
+# needs the pin moved to that release before it builds.
 reactor-runtime==3.8.2
 
 # PyTorch runs the network on a GPU. Optional: without it the model runs on
