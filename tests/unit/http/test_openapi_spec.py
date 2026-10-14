@@ -47,3 +47,17 @@ def test_spec_json_is_canonical() -> None:
     rendered = render_spec_json()
     assert rendered.endswith("}\n")
     assert rendered == json.dumps(json.loads(rendered), indent=2, sort_keys=True) + "\n"
+
+
+def test_session_control_declares_only_the_statuses_it_answers() -> None:
+    """A start never answers 404, since it addresses no existing session; a stop does."""
+    paths = render_openapi()["paths"]
+    start = set(paths["/start_session"]["post"]["responses"])
+    stop = set(paths["/stop_session"]["post"]["responses"])
+    assert start == {"200", "400", "409", "422", "503"}
+    assert stop == {"200", "400", "404", "409", "422", "503"}
+
+
+def test_a_session_event_stream_says_an_unknown_id_streams_nothing() -> None:
+    operation = render_openapi()["paths"]["/sessions/{sid}/events"]["get"]
+    assert "unknown" in operation["description"]

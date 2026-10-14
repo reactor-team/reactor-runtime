@@ -82,15 +82,14 @@ class SessionList(BaseModel):
 # The non-2xx statuses a route can answer, declared so the published contract
 # carries every code a client branches on (FastAPI cannot infer a runtime
 # raise). Bare statuses + the error shape only; the motives live in the code.
-_TRANSITION_RESPONSES: dict[int | str, dict[str, Any]] = {
+_START_RESPONSES: dict[int | str, dict[str, Any]] = {
     400: {"model": ErrorDetail},
-    404: {"model": ErrorDetail},
     409: {"model": ErrorDetail},
     503: {"model": ErrorDetail},
 }
-_START_RESPONSES: dict[int | str, dict[str, Any]] = {
-    400: {"model": ErrorDetail},
-    **_TRANSITION_RESPONSES,
+_STOP_RESPONSES: dict[int | str, dict[str, Any]] = {
+    **_START_RESPONSES,
+    404: {"model": ErrorDetail},
 }
 _GUARD_RESPONSES: dict[int | str, dict[str, Any]] = {
     400: {"model": ErrorDetail},
@@ -199,7 +198,7 @@ class SessionRoutes:
         async def get_schema() -> dict[str, Any]:
             return runner.schema()
 
-        @app.post("/stop_session", responses=_TRANSITION_RESPONSES)
+        @app.post("/stop_session", responses=_STOP_RESPONSES)
         async def stop_session(
             req: Annotated[StopSessionRequest | None, Body()] = None,
         ) -> Response:
@@ -623,6 +622,12 @@ class EgressRoutes:
         @app.get(
             "/sessions/{sid}/events",
             response_class=Response,
+            description=(
+                "Stream the facts of the session `sid` from the egress journal, replayed "
+                "from `since` or `Last-Event-ID`. The id is not checked against the sessions "
+                "the runtime knows: an unknown id is answered 200 with a stream that stays "
+                "open and carries no event until a session of that id is journaled."
+            ),
             responses={
                 200: {
                     "description": "One session's facts from the egress journal, as SSE.",
