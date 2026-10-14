@@ -148,6 +148,13 @@ class MessageStageSource(Protocol):
     the previous one.
     """
 
+    def add_message_stage(self, stage: str, ms: float, messages: int = 1) -> None:
+        """Add *messages* messages that spent *ms* milliseconds in *stage*, together.
+
+        For the stages the runner times itself, ``dispatch`` and ``handler``,
+        which the transport cannot see.
+        """
+
     def take_message_stages(self) -> tuple[MessageStage, ...]:
         """Return the message stage times since the previous take, and start them again."""
 

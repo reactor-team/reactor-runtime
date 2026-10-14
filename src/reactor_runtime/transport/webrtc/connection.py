@@ -173,6 +173,10 @@ class WebRTCConnection:
         """Return the stage times of *tracks* since their previous take, and start them again."""
         return self._peer.frame_stages.take(tracks)
 
+    def add_message_stage(self, stage: str, ms: float, messages: int = 1) -> None:
+        """Add a message stage the runner timed, ``dispatch`` or ``handler``."""
+        self._peer.message_stages.add(stage, ms, messages)
+
     def take_message_stages(self) -> tuple[MessageStage, ...]:
         """Return the message stage times since the previous take, and start them again."""
         return self._peer.message_stages.take()

@@ -80,6 +80,14 @@ MediaSink = Callable[[MediaChunk], None]
 StepSink = Callable[[CompletedStep], None]
 """Receives each step the model reports finished, on the model thread."""
 
+CommandTimingSink = Callable[[ConnId, float, float], None]
+"""Receives how long a command waited and ran, on the model thread.
+
+The arguments are the connection that sent the command, the milliseconds from
+its arrival at the runtime to the start of its handler (``dispatch``), and the
+milliseconds its handler ran (``handler``).
+"""
+
 FailureSink = Callable[[BaseException], None]
 """Receives the exception that ended :meth:`ReactorCore.run`, on the model thread."""
 
@@ -211,11 +219,14 @@ class CommandEnvelope:
         command: The validated command to dispatch.
         conn_id: The connection that sent it, when known.
         request_id: The request id to correlate a reply against, when present.
+        received_at: When the command reached the runtime, on the monotonic
+            clock, when known.
     """
 
     command: Command
     conn_id: ConnId | None
     request_id: RequestId | None
+    received_at: float | None = None
 
 
 Inbound = CommandEnvelope | ReactorEvent
@@ -259,6 +270,7 @@ class ReactorCore:
         self._out_addressed: AddressedSink | None = None
         self._out_media: MediaSink | None = None
         self._out_step: StepSink | None = None
+        self._out_command_timing: CommandTimingSink | None = None
         # How many session starts the model has received, kept by the
         # subclass's dispatcher. A step report carries it, so the runtime can
         # set apart a late report from a session that has ended.
@@ -381,6 +393,7 @@ class ReactorCore:
         media: MediaSink,
         media_ops: MediaOps | None = None,
         step: StepSink | None = None,
+        command_timing: CommandTimingSink | None = None,
     ) -> None:
         """Bind the outbound sinks. Called once before the loop starts.
 
@@ -400,6 +413,7 @@ class ReactorCore:
         self._out_media = media
         self._media_ops = media_ops
         self._out_step = step
+        self._out_command_timing = command_timing
         if media_ops is not None:
             if self.buffer_size is not None:
                 media_ops.set_depth(self.buffer_size)
@@ -418,10 +432,18 @@ class ReactorCore:
     # -- thread-safe ingress (called by the bridge from the runtime thread) ---
 
     def submit_command(
-        self, command: Command, conn_id: ConnId | None, request_id: RequestId | None
+        self,
+        command: Command,
+        conn_id: ConnId | None,
+        request_id: RequestId | None,
+        received_at: float | None = None,
     ) -> None:
-        """Enqueue a validated command onto the model loop."""
-        self._enqueue(CommandEnvelope(command, conn_id, request_id))
+        """Enqueue a validated command onto the model loop.
+
+        *received_at* is when the command reached the runtime, on the monotonic
+        clock; with it, the dispatcher reports how long the command waited.
+        """
+        self._enqueue(CommandEnvelope(command, conn_id, request_id, received_at))
 
     def post_reactor_event(self, event: ReactorEvent) -> None:
         """Enqueue a reactor-authoritative event onto the model loop."""

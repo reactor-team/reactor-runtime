@@ -428,10 +428,29 @@ class ReactorApp(ReactorCore):
         and the client resolves rather than waits.
 
         The handler runs under the step lock, so it lands between two units of
-        a ``run()`` loop that holds the same lock, never inside one.
+        a ``run()`` loop that holds the same lock, never inside one. The time a
+        command waited for the lock and the time its handler ran go to the
+        runtime's command timing sink.
         """
         async with self._step_lock:
-            await self._run_command(envelope)
+            started = time.monotonic()
+            try:
+                await self._run_command(envelope)
+            finally:
+                self._report_command_timing(envelope, started, time.monotonic())
+
+    def _report_command_timing(
+        self, envelope: CommandEnvelope, started: float, finished: float
+    ) -> None:
+        """Report how long *envelope* waited before its handler started, and how long it ran."""
+        sink = self._out_command_timing
+        if sink is None or envelope.conn_id is None or envelope.received_at is None:
+            return
+        sink(
+            envelope.conn_id,
+            (started - envelope.received_at) * 1000.0,
+            (finished - started) * 1000.0,
+        )
 
     async def _run_command(self, envelope: CommandEnvelope) -> None:
         """Call the handler and answer the sender. Caller holds the step lock."""

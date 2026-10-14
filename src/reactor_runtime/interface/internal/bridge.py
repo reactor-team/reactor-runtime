@@ -23,6 +23,7 @@ from reactor_runtime.core.values import ConnId, InputFrame
 from reactor_runtime.interface.internal.reactor_core import (
     AddressedSink,
     BroadcastSink,
+    CommandTimingSink,
     FailureSink,
     MediaOps,
     MediaSink,
@@ -93,6 +94,7 @@ class ModelBridge:
         *,
         conn_id: ConnId | None,
         request_id: RequestId,
+        received_at: float | None = None,
     ) -> CommandOutcome:
         """Validate a client command against the contract and admit it.
 
@@ -105,6 +107,8 @@ class ModelBridge:
             raw_args: The raw argument mapping from the wire.
             conn_id: The connection that sent it, when known.
             request_id: The request id to correlate a reply against.
+            received_at: When the command reached the runtime, on the
+                monotonic clock, so the model can report how long it waited.
 
         Returns:
             An accepted outcome when the command was valid and enqueued, else a
@@ -114,7 +118,7 @@ class ModelBridge:
             command = self._contract.validate(name, raw_args)
         except ContractError as error:
             return CommandOutcome.reject(error.field, error.reason)
-        self._model.submit_command(command, conn_id, request_id)
+        self._model.submit_command(command, conn_id, request_id, received_at)
         return CommandOutcome.accept()
 
     def check_command(self, name: str, raw_args: dict[str, Any]) -> CommandOutcome:
@@ -166,6 +170,7 @@ class ModelBridge:
         media_ops: MediaOps | None = None,
         failure: FailureSink | None = None,
         step: StepSink | None = None,
+        command_timing: CommandTimingSink | None = None,
     ) -> None:
         """Wire the model's outbound paths down into the runner. Call once.
 
@@ -191,6 +196,7 @@ class ModelBridge:
                 the model's ``output`` handle.
             failure: Sink for an unrecoverable crash of the model's run loop.
             step: Sink for each step the model reports finished.
+            command_timing: Sink for how long each command waited and ran.
 
         Raises:
             RuntimeError: If outbound has already been bound.
@@ -198,7 +204,12 @@ class ModelBridge:
         if self._outbound_bound:
             raise RuntimeError("bind_outbound must be called once")
         self._model.bind_output(
-            broadcast=broadcast, addressed=addressed, media=media, media_ops=media_ops, step=step
+            broadcast=broadcast,
+            addressed=addressed,
+            media=media,
+            media_ops=media_ops,
+            step=step,
+            command_timing=command_timing,
         )
         if failure is not None:
             self._model.bind_failure(failure)

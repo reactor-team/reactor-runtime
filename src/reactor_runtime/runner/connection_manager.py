@@ -191,6 +191,12 @@ class ConnectionManager:
             out.append((cid, reading))
         return out
 
+    def add_message_stage(self, conn_id: ConnId, stage: str, ms: float) -> None:
+        """Add one message's time in *stage* to connection *conn_id*, if it times messages."""
+        conn = self._by_id.get(conn_id)
+        if isinstance(conn, MessageStageSource):
+            conn.add_message_stage(stage, ms)
+
     def new_conn_id(self) -> ConnId:
         """Mint a fresh random connection id, unique within the session.
 

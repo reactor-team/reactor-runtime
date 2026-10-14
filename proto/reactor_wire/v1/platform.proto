@@ -226,8 +226,8 @@ message ClientConnectionStat {
 // trip, over one window. The average per message is total_ms / messages. Only
 // the data channel that carries commands is timed, not the control channel.
 //
-// The stages are the engine's chunked data channel's, in the order a message
-// goes through them. The side that reports a stage is the side that times it:
+// The stages, in the order a command goes through them. The side that
+// reports a stage is the side that times it:
 //
 //   queue_wait  The message waits in the sender's chunk queue until its first
 //               chunk leaves it. Sender.
@@ -236,8 +236,12 @@ message ClientConnectionStat {
 //   stall       The time the sender's chunk pump stopped because SCTP's buffer
 //               was full, per message sent. Sender.
 //   reassembly  From the message's first chunk arriving to its last. Receiver.
+//   dispatch    The command reaches the runtime until its handler starts,
+//               including the wait for the model's step. Runtime.
+//   handler     The command handler runs. Runtime.
 //
-// A channel without chunking reports none of them.
+// queue_wait, send, stall and reassembly come from the chunked channel; a
+// channel without chunking reports none of them.
 message MessageStage {
   string name = 1;
   double total_ms = 2;

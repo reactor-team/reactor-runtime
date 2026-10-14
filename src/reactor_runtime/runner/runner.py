@@ -381,6 +381,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 ),
                 failure=self._on_model_failure,
                 step=self._on_step_completed,
+                command_timing=self._on_command_timing,
             )
             bridge.start()
         except Exception:
@@ -744,6 +745,21 @@ class Runner(ServiceComponent, ConnectionSink):
             predicted_ready_at_ms=clip.predicted_ready_at_ms,
             playlist_url=clip.playlist_url,
         )
+
+    def _on_command_timing(self, conn_id: ConnId, dispatch_ms: float, handler_ms: float) -> None:
+        """Add a command's ``dispatch`` and ``handler`` times to its connection, on the loop.
+
+        The model reports from its own thread; the connections are the loop's.
+        """
+        loop = self._loop
+        if loop is None:
+            return
+
+        def add() -> None:
+            self._connections.add_message_stage(conn_id, "dispatch", dispatch_ms)
+            self._connections.add_message_stage(conn_id, "handler", handler_ms)
+
+        loop.call_soon_threadsafe(add)
 
     def _on_step_completed(self, step: CompletedStep) -> None:
         """Record a step the model reported finished, hopping onto the loop.
@@ -1268,6 +1284,7 @@ class Runner(ServiceComponent, ConnectionSink):
             args,
             conn_id=command.conn_id,
             request_id=command.request_id,
+            received_at=started_at,
         )
         if outcome.accepted:
             self._command_metrics.accepted(label, since=started_at)
