@@ -214,6 +214,12 @@ async def test_session_reads_and_stops_are_addressed_by_id() -> None:
         await _until(lambda: rt.host.capacity() == (_SLOTS, _SLOTS - 1))
 
 
+async def test_the_shared_journal_keeps_a_runtimes_worth_of_history_per_slot() -> None:
+    async with hosting() as rt:
+        assert rt.host.events._history.maxlen == 4096 * _SLOTS
+        assert rt.host.events._subscriber_limit == 4096 * _SLOTS
+
+
 async def test_a_closing_session_is_listed_as_it_is_described() -> None:
     async with hosting() as rt:
         await _start(rt.client, session_id="alpha")
