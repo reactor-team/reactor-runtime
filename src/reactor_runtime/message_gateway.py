@@ -85,7 +85,7 @@ class InboundStep:
     Attributes:
         state: Values for the model's state fields, keyed by field name.
         commands: The commands to run after the state, in order.
-        inputs: The frames for each input track, still encoded.
+        media_input: The frames for each input track, still encoded.
         conn_id: The connection the request arrived on.
         request_id: The correlation id, carried from the client when supplied
             and minted here when absent.
@@ -95,7 +95,7 @@ class InboundStep:
 
     state: Mapping[str, Any]
     commands: tuple[StepCommand, ...]
-    inputs: tuple[step_pb2.TrackFrames, ...]
+    media_input: tuple[step_pb2.TrackFrames, ...]
     conn_id: ConnId
     request_id: str
     received_at: float
@@ -215,7 +215,7 @@ class MessageGateway:
                         )
                         for command in request.commands
                     ),
-                    inputs=tuple(request.inputs),
+                    media_input=tuple(request.media_input),
                     conn_id=conn_id,
                     request_id=message.request_id or _new_request_id(),
                     received_at=received_at,

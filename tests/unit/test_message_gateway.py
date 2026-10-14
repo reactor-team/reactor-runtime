@@ -359,7 +359,7 @@ async def test_a_step_request_is_decoded_and_handed_to_the_step_handler() -> Non
     message = data_pb2.DataClientMessage(
         request_id="s-1",
         request_step=step_pb2.RequestStep(
-            state=dict_to_struct({"prompt": "hi"}), commands=[command], inputs=[track]
+            state=dict_to_struct({"prompt": "hi"}), commands=[command], media_input=[track]
         ),
     )
     _, frame = V1Codec().encode(message)
@@ -370,7 +370,7 @@ async def test_a_step_request_is_decoded_and_handed_to_the_step_handler() -> Non
         InboundStep(
             state={"prompt": "hi"},
             commands=(StepCommand(name="edit", args={"strength": 0.5}, uploads={"image": "u-1"}),),
-            inputs=(track,),
+            media_input=(track,),
             conn_id=ConnId(4),
             request_id="s-1",
             received_at=_ARRIVED,

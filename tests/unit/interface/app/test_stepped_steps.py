@@ -147,14 +147,14 @@ class Harness:
         # The runtime posts a request's commands ahead of it, as a client's own.
         for name, args in commands:
             self.command(name, **args)
-        inputs = {
+        media_input = {
             "webcam": tuple(
                 InputFrame(data=np.full((2, 2, 3), i, dtype=np.uint8)) for i in range(frames)
             )
         }
         self.post(
             StepEnvelope(
-                inputs=inputs if frames else {},
+                media_input=media_input if frames else {},
                 conn_id=CLIENT,
                 request_id=request_id,
             )
@@ -293,13 +293,29 @@ async def test_frames_follow_the_models_read_mode_across_steps(harness: Harness)
     assert webcam(harness.app).available == 0
 
 
-async def test_a_step_requested_outside_a_stepped_session_is_refused(harness: Harness) -> None:
+async def test_a_step_requested_in_a_session_that_does_not_step_is_refused(
+    harness: Harness,
+) -> None:
     await harness.start(stepped=False)
     harness.step("r1")
     await harness.settle()
 
-    [refusal] = harness.refusals
-    assert refusal.reason == "no stepped session is running"
+    assert harness.refusals == [StepRefusal(CLIENT, "r1", 1, "the session is not stepped")]
+    assert [r for r in harness.reports if r.request is not None] == []
+
+
+async def test_a_step_requested_with_no_session_running_is_not_ready(harness: Harness) -> None:
+    harness.tasks = [
+        asyncio.create_task(harness.app._inbound_loop()),
+        asyncio.create_task(harness.app.run()),
+    ]
+    harness.step("r1")
+    await harness.settle()
+
+    assert harness.refusals == [
+        StepRefusal(CLIENT, "r1", 0, "no session is running", not_ready=True)
+    ]
+    assert harness.reports == []
 
 
 async def test_the_end_of_a_stepped_session_empties_the_input_tracks(harness: Harness) -> None:

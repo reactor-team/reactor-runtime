@@ -510,20 +510,26 @@ class RequestedStep:
 
 @dataclass(frozen=True)
 class StepRefusal:
-    """A step a client requested that the model refused.
+    """A step a client requested that the model did not run.
+
+    A refused step takes no number and is not recorded as a step.
 
     Attributes:
         conn_id: The connection that asked for the step.
         request_id: The id the client sent the request with.
         session: The session the request was handled in, counted the way
             :attr:`CompletedStep.session` is.
-        reason: Why the step was refused.
+        reason: Why the step did not run.
+        not_ready: ``True`` when the model had no session running to take
+            the step, so the same request can succeed later; ``False`` when
+            the model refused this request.
     """
 
     conn_id: ConnId
     request_id: str
     session: int
     reason: str
+    not_ready: bool = False
 
 
 @dataclass(frozen=True)

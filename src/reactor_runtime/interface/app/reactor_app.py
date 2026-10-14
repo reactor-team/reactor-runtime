@@ -439,7 +439,7 @@ class ReactorApp(ReactorCore):
         """
         async with self._step_lock:
             session = self._sessions_started
-            for track, frames in request.inputs.items():
+            for track, frames in request.media_input.items():
                 buffer = self._input_buffers.get(track)
                 if buffer is not None:
                     for frame in frames:
@@ -455,12 +455,14 @@ class ReactorApp(ReactorCore):
             returned = await self.process_output(outcome)
         self._report_step(_step_report(returned, outcome), session, request=accepted)
 
-    def _refuse_step(self, request: StepEnvelope, session: int, reason: str) -> None:
-        """Tell the client its step was refused, and why."""
-        logger.debug("requested step refused", reason=reason)
+    def _refuse_step(
+        self, request: StepEnvelope, session: int, reason: str, *, not_ready: bool = False
+    ) -> None:
+        """Tell the client its step did not run, and why."""
+        logger.debug("requested step refused", reason=reason, not_ready=not_ready)
         if self._out_step_refusal is not None:
             self._out_step_refusal(
-                StepRefusal(request.conn_id, request.request_id, session, reason)
+                StepRefusal(request.conn_id, request.request_id, session, reason, not_ready)
             )
 
     # -- engine hooks ---------------------------------------------------------
@@ -510,10 +512,16 @@ class ReactorApp(ReactorCore):
 
         The queue is not drained while the step runs, so no command, lifecycle
         hook, or later request is dispatched between its frames and its step. A
-        request that arrives outside a stepped session is refused at once.
+        request that arrives while no session is running is answered not ready,
+        and one in a session that does not step is refused, both at once.
         """
-        if not (self._session_active and self._stepped):
-            self._refuse_step(request, self._sessions_started, "no stepped session is running")
+        if not self._session_active:
+            self._refuse_step(
+                request, self._sessions_started, "no session is running", not_ready=True
+            )
+            return
+        if not self._stepped:
+            self._refuse_step(request, self._sessions_started, "the session is not stepped")
             return
         done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self._pending_step = (request, done)

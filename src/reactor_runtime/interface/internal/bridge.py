@@ -154,7 +154,7 @@ class ModelBridge:
 
     def submit_step(
         self,
-        inputs: Mapping[str, Sequence[InputFrame]],
+        media_input: Mapping[str, Sequence[InputFrame]],
         *,
         conn_id: ConnId,
         request_id: RequestId,
@@ -162,16 +162,17 @@ class ModelBridge:
         """Admit a step whose state values and commands were submitted ahead of it.
 
         The step reaches the model after every command submitted before it;
-        the model writes *inputs* to its input tracks and runs the step.
+        the model writes *media_input* to its input tracks and runs the step.
 
         Args:
-            inputs: The decoded frames to write to each input track, by name.
+            media_input: The decoded frames to write to each input track, by
+                name.
             conn_id: The connection that asked for the step.
             request_id: The request id the step's response carries.
         """
         self._model.submit_step(
             StepEnvelope(
-                inputs={track: tuple(frames) for track, frames in inputs.items()},
+                media_input={track: tuple(frames) for track, frames in media_input.items()},
                 conn_id=conn_id,
                 request_id=request_id,
             )
