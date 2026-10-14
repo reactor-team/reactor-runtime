@@ -951,7 +951,8 @@ async def test_the_step_result_carries_the_steps_media_per_output_track(runner: 
         [2, 2, 3],
     )
     assert frame.data == bytes(12)
-    assert result.elapsed > 0
+    assert track.rate > 0
+    assert result.elapsed_seconds > 0
     assert not result.HasField("error")
     assert list(result.files) == []
 
@@ -1016,7 +1017,7 @@ async def test_a_result_too_large_for_the_connection_is_answered_without_media_a
     assert (reply.request_id, reply.kind) == ("r1", K.MESSAGE_KIND_RESPONSE)
     result = reply.step_result
     assert (result.index, result.failure_code) == (1, step_pb2.STEP_FAILURE_CODE_RESULT_TOO_LARGE)
-    assert result.elapsed > 0
+    assert result.elapsed_seconds > 0
     assert re.fullmatch(
         r"step 1's result is \d+ bytes; this connection takes at most 16", result.error
     )
@@ -1045,7 +1046,7 @@ async def test_a_connection_without_chunking_is_refused_a_step(runner: Runner) -
 async def test_a_step_whose_output_cannot_be_encoded_is_answered_failed(
     runner: Runner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def unencodable(bundle: Any) -> list[step_pb2.TrackFrames]:
+    def unencodable(bundle: Any, **_: Any) -> list[step_pb2.TrackFrames]:
         raise FrameEncodingError("float64 video is not supported")
 
     monkeypatch.setattr("reactor_runtime.runner.runner.track_frames", unencodable)
@@ -1059,6 +1060,6 @@ async def test_a_step_whose_output_cannot_be_encoded_is_answered_failed(
         step_pb2.STEP_FAILURE_CODE_FAILED,
         "step 1's output could not be encoded: float64 video is not supported",
     )
-    assert result.elapsed > 0
+    assert result.elapsed_seconds > 0
     assert (list(result.tracks), list(result.files)) == ([], [])
     assert _journalled_steps(runner) == [SessionEvent.STEP_COMPLETED]

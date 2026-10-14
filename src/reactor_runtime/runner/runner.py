@@ -1970,8 +1970,8 @@ class Runner(ServiceComponent, ConnectionSink):
         try:
             result = step_pb2.StepResult(
                 step=index,
-                tracks=track_frames(step.bundle),
-                elapsed=elapsed,
+                tracks=track_frames(step.bundle, video_fps=step.fps),
+                elapsed_seconds=elapsed,
                 files=_step_file_refs(step) if saved else (),
                 error=step.error,
                 failure_code=(
@@ -1984,7 +1984,7 @@ class Runner(ServiceComponent, ConnectionSink):
             logger.error("a step's output could not be encoded", step=index, error=str(error))
             failed = step_pb2.StepResult(
                 index=index,
-                elapsed=elapsed,
+                elapsed_seconds=elapsed,
                 failure_code=step_pb2.STEP_FAILURE_CODE_FAILED,
                 error=f"step {index}'s output could not be encoded: {error}",
             )
@@ -2004,7 +2004,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 request.request_id,
                 step_pb2.StepResult(
                     index=index,
-                    elapsed=elapsed,
+                    elapsed_seconds=elapsed,
                     failure_code=step_pb2.STEP_FAILURE_CODE_RESULT_TOO_LARGE,
                     error=(
                         f"step {index}'s result is {size} bytes; "

@@ -138,7 +138,7 @@ def test_encoded_audio_keeps_its_channels_and_scales_floats() -> None:
     frame = encode_frame(stereo, TrackKind.AUDIO)
     assert list(frame.shape) == [2, 2]
     np.testing.assert_array_equal(
-        decode_frame(frame, TrackKind.AUDIO).data, [[16383, -32767], [32767, 0]]
+        np.frombuffer(frame.data, dtype="<i2").reshape(2, 2), [[16383, -32767], [32767, 0]]
     )
 
 
@@ -189,6 +189,23 @@ def test_each_output_track_is_its_own_entry() -> None:
         ("v", platform_pb2.TRACK_KIND_VIDEO, 1),
         ("a", platform_pb2.TRACK_KIND_AUDIO, 1),
     ]
+
+
+def test_each_entry_carries_the_rate_its_frames_play_at() -> None:
+    bundle = MediaBundle(
+        tracks={
+            "v": TrackData(
+                info=TrackInfo(name="v", kind=TrackKind.VIDEO, rate=30.0),
+                data=np.zeros((2, 2, 3), dtype=np.uint8),
+            ),
+            "a": TrackData(
+                info=TrackInfo(name="a", kind=TrackKind.AUDIO, rate=48000.0),
+                data=np.zeros((1, 480), dtype=np.int16),
+            ),
+        }
+    )
+    assert [e.rate for e in track_frames(bundle, video_fps=24.0)] == [24.0, 48000.0]
+    assert [e.rate for e in track_frames(bundle)] == [30.0, 48000.0]
 
 
 def test_a_step_without_media_has_no_tracks() -> None:
