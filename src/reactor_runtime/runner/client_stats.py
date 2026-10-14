@@ -13,10 +13,9 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import asdict, astuple
 from typing import Any
 
-from reactor_runtime.core import ClientStatsBatch, ConnId, FrameStage
+from reactor_runtime.core import ClientEnvironment, ClientStatsBatch, ConnId, FrameStage
 
 # The SDK sends a batch every few seconds, with a few tracks and a few dozen
 # metrics each; these limits are far above that.
@@ -82,7 +81,7 @@ def fits(batch: ClientStatsBatch) -> bool:
         for field in (stat.track_name, stat.codec, stat.codec_implementation)
     ]
     if batch.connection_stat is not None and batch.connection_stat.environment is not None:
-        names += list(astuple(batch.connection_stat.environment))
+        names += list(environment_detail(batch.connection_stat.environment).values())
     return all(len(name) <= MAX_NAME_LENGTH for name in names)
 
 
@@ -113,7 +112,7 @@ def to_detail(batch: ClientStatsBatch) -> dict[str, Any]:
                 "timestamp": batch.connection_stat.timestamp,
                 "metrics": _finite(batch.connection_stat.metrics),
                 "environment": (
-                    asdict(batch.connection_stat.environment)
+                    environment_detail(batch.connection_stat.environment)
                     if batch.connection_stat.environment is not None
                     else None
                 ),
@@ -121,6 +120,18 @@ def to_detail(batch: ClientStatsBatch) -> dict[str, Any]:
             if batch.connection_stat is not None
             else None
         ),
+    }
+
+
+def environment_detail(environment: ClientEnvironment) -> dict[str, str]:
+    """Shape what a client runs on for a fact's detail."""
+    return {
+        "sdk_type": environment.sdk_type,
+        "sdk_version": environment.sdk_version,
+        "os": environment.os,
+        "os_version": environment.os_version,
+        "arch": environment.arch,
+        "device_model": environment.device_model,
     }
 
 

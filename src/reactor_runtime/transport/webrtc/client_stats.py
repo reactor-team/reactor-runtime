@@ -131,25 +131,26 @@ def _decode_environment(stat: platform_pb2.ClientConnectionStat) -> ClientEnviro
     )
 
 
+def _decode_track_stat(stat: platform_pb2.ClientTrackStat) -> ClientTrackStat:
+    """Convert one decoded ``ClientTrackStat`` into a plain value."""
+    codec_implementation, hardware_codec = _decode_codec_implementation(stat)
+    return ClientTrackStat(
+        timestamp=stat.timestamp,
+        track_name=stat.track_name,
+        kind=_TRACK_KINDS.get(stat.kind),
+        direction=_TRACK_DIRECTIONS.get(stat.direction),
+        codec=_decode_codec(stat),
+        paused=stat.paused,
+        metrics=dict(stat.metrics),
+        frame_stages=_decode_frame_stages(stat),
+        codec_implementation=codec_implementation,
+        hardware_codec=hardware_codec,
+    )
+
+
 def _decode_client_stats(message: platform_pb2.ClientStats) -> ClientStatsBatch:
     """Convert a decoded ``ClientStats`` batch into plain values."""
-    track_stats: list[ClientTrackStat] = []
-    for stat in message.track_stats:
-        codec_implementation, hardware_codec = _decode_codec_implementation(stat)
-        track_stats.append(
-            ClientTrackStat(
-                timestamp=stat.timestamp,
-                track_name=stat.track_name,
-                kind=_TRACK_KINDS.get(stat.kind),
-                direction=_TRACK_DIRECTIONS.get(stat.direction),
-                codec=_decode_codec(stat),
-                paused=stat.paused,
-                metrics=dict(stat.metrics),
-                frame_stages=_decode_frame_stages(stat),
-                codec_implementation=codec_implementation,
-                hardware_codec=hardware_codec,
-            )
-        )
+    track_stats = [_decode_track_stat(stat) for stat in message.track_stats]
     connection_stat = None
     if message.HasField("connection_stat"):
         connection_stat = ClientConnectionStat(

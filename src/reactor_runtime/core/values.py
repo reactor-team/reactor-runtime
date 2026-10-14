@@ -78,10 +78,13 @@ class ClientTrackStat:
     connection identity itself rather than trusting anything the payload might
     claim, because the payload carries none.
 
-    ``kind``/``direction``/``codec`` are fixed, structural facts about the
-    track — never a new value at runtime — so they stay their own fields;
-    :attr:`metrics` is where the actual measurements live, because that set
-    grows as new stats become worth reporting, without a schema change.
+    The typed fields carry the facts about the track that are not numbers:
+    ``kind``/``direction``/``codec`` are fixed for the track, and
+    ``codec_implementation``/``hardware_codec`` describe it at the time of
+    the reading, since the client's engine can switch implementation
+    mid-session. :attr:`metrics` is where the actual measurements live,
+    because that set grows as new stats become worth reporting, without a
+    schema change.
 
     Attributes:
         timestamp: When the client took this reading, on its own clock, in
@@ -108,8 +111,9 @@ class ClientTrackStat:
         codec_implementation: The encoder (a track the client sends) or
             decoder (one it receives) the client runs for a video track, as
             its media engine names it, e.g. ``"libvpx"``; empty when unknown.
-        hardware_codec: Whether that implementation is the hardware one;
-            ``None`` when the client does not say.
+        hardware_codec: Whether the client's media engine reports that
+            implementation as power efficient, which in practice means
+            hardware accelerated; ``None`` when the client does not say.
     """
 
     timestamp: int
