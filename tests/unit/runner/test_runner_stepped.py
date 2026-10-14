@@ -627,6 +627,24 @@ async def test_a_stepped_session_closes_after_its_steps(runner: Runner) -> None:
     assert [m.step_result.index for m in results] == [1, 2]
 
 
+async def test_a_stepped_session_with_steps_waits_for_a_client(runner: Runner) -> None:
+    runner.start_session({"generation": "stepped", "steps": 2})
+    await asyncio.sleep(0.02)
+
+    assert runner._sm.current_state is SessionState.WAITING
+
+
+async def test_a_stepped_session_with_steps_waits_again_after_its_client_leaves(
+    runner: Runner,
+) -> None:
+    conn = await _stepped(runner, steps=2)
+    await _until(lambda: runner._sm.current_state is SessionState.STREAMING)
+    runner.connection_closed(conn.id)
+    await asyncio.sleep(0.02)
+
+    assert runner._sm.current_state is not SessionState.STREAMING
+
+
 async def test_a_step_request_in_a_streamed_session_is_refused(runner: Runner) -> None:
     runner.start_session({})
     conn = V1Connection(1002)
