@@ -26,7 +26,7 @@ import asyncio
 import dataclasses
 import itertools
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +37,8 @@ from reactor_runtime.core import (
     Connection,
     ConnId,
     EndReason,
+    FrameStage,
+    FrameStageSource,
     Health,
     HealthStatus,
     InputFrame,
@@ -45,6 +47,8 @@ from reactor_runtime.core import (
     RuntimeState,
     SessionEvent,
     SessionState,
+    TransportReading,
+    TransportStatsSource,
 )
 from reactor_runtime.core.model import ReactorEvent, SessionStarted
 from reactor_runtime.event_stream import EventStream
@@ -73,9 +77,6 @@ from reactor_runtime.transport.router import (
 from reactor_runtime.upload_store import UnknownUploadError, UploadAlreadyCompleteError, UploadStore
 
 logger = get_logger(__name__)
-
-# The most times a connection id is redrawn because another slot holds it.
-_MAX_CONN_ID_DRAWS = 100
 
 
 class SessionIdRequiredError(RuntimeError):
@@ -117,6 +118,80 @@ def batched_capacity(model_ref: str) -> int:
     if isinstance(model_cls, type) and issubclass(model_cls, BatchedReactorApp):
         return model_cls.max_sessions
     return 1
+
+
+@dataclasses.dataclass(frozen=True)
+class _ConnRoute:
+    """Where a transport's connection belongs: its slot, and the id its session knows it by."""
+
+    slot: _SessionSlot
+    conn_id: ConnId
+
+
+class _SessionConnection:
+    """A transport's connection as its session's slot sees it: under the client's own id.
+
+    The transport keys every connection of the process by an id the host
+    issued; the slot keys it by the id the client addressed, which is what the
+    session journals and replies under.
+    """
+
+    def __init__(self, conn: Connection, conn_id: ConnId) -> None:
+        self._conn = conn
+        self.id = conn_id
+        self.capabilities = conn.capabilities
+
+    @property
+    def protocol_version(self) -> ProtocolVersion:
+        """The wire codec the connection negotiated."""
+        return self._conn.protocol_version
+
+    @property
+    def latest_reading(self) -> TransportReading | None:
+        """The transport's latest reading of the wire, if it measures one."""
+        conn = self._conn
+        return conn.latest_reading if isinstance(conn, TransportStatsSource) else None
+
+    def take_frame_stages(self, tracks: Collection[str]) -> Mapping[str, tuple[FrameStage, ...]]:
+        """Take the transport's frame stage times, if it times its frames."""
+        conn = self._conn
+        return conn.take_frame_stages(tracks) if isinstance(conn, FrameStageSource) else {}
+
+    def send_message(self, payload: bytes | str) -> None:
+        """Send an encoded frame to the client."""
+        self._conn.send_message(payload)
+
+    def send_media(self, chunk: MediaChunk) -> None:
+        """Hand a media chunk to the wire."""
+        self._conn.send_media(chunk)
+
+    def flush_media(self) -> None:
+        """Drop the wire's queued media."""
+        self._conn.flush_media()
+
+    def set_media_rate(self, fps: float) -> None:
+        """Re-pace the wire's queued media."""
+        self._conn.set_media_rate(fps)
+
+    def set_media_depth(self, depth: int) -> None:
+        """Bound the wire's media queue."""
+        self._conn.set_media_depth(depth)
+
+    def resume_track(self, name: str) -> None:
+        """Resume an outbound track."""
+        self._conn.resume_track(name)
+
+    def pause_track(self, name: str) -> None:
+        """Pause an outbound track."""
+        self._conn.pause_track(name)
+
+    def send_control(self, payload: bytes | str) -> None:
+        """Send an encoded control frame to the client."""
+        self._conn.send_control(payload)
+
+    async def close(self) -> None:
+        """Tear the wire down."""
+        await self._conn.close()
 
 
 @dataclasses.dataclass
@@ -383,7 +458,11 @@ class SessionHost:
         self._keys = itertools.count(1)
         self._routes: dict[int, _Route] = {}
         self._slot_keys: dict[int, int] = {}
-        self._conn_slots: dict[ConnId, _SessionSlot] = {}
+        # A client's connection id is unique within its session only, so the
+        # transport keys each (session, id) pair by an id the host issues.
+        self._transport_ids = itertools.count(1)
+        self._claimed: dict[tuple[str, int], ConnId] = {}
+        self._conn_routes: dict[ConnId, _ConnRoute] = {}
         self._recorders = _RecorderFanout(self)
         self._draining = False
         self.request_shutdown: ShutdownHook = _no_shutdown
@@ -492,8 +571,11 @@ class SessionHost:
             self._routes.pop(old, None)
         self._slot_keys[id(slot)] = key
         self._routes[key] = _Route(slot, slot.generation)
-        self._conn_slots = {
-            cid: owner for cid, owner in self._conn_slots.items() if owner is not slot
+        self._conn_routes = {
+            tid: route for tid, route in self._conn_routes.items() if route.slot is not slot
+        }
+        self._claimed = {
+            pair: tid for pair, tid in self._claimed.items() if tid in self._conn_routes
         }
         return key
 
@@ -704,111 +786,117 @@ class SessionHost:
             raise SessionNotRunningError
 
     def new_conn_id(self, sid: str | None = None) -> ConnId:
-        """Mint a connection id for *sid*'s session that no other slot holds."""
+        """Mint a connection id within *sid*'s session."""
         if sid is None:
             raise SessionIdRequiredError
+        return self._require_slot(sid).new_conn_id()
+
+    def transport_conn_id(self, sid: str, cid: int) -> ConnId:
+        """Return the transport's id for connection *cid* of *sid*, binding it to its slot.
+
+        Raises:
+            UnknownSessionError: If no slot runs *sid*.
+        """
         slot = self._require_slot(sid)
-        for _ in range(_MAX_CONN_ID_DRAWS):
-            conn_id = slot.new_conn_id()
-            owner = self._conn_slots.get(conn_id)
-            if owner is None or owner is slot:
-                self._conn_slots[conn_id] = slot
-                return conn_id
-        return slot.new_conn_id()
+        claimed = self._claimed.get((sid, cid))
+        if claimed is not None:
+            return claimed
+        transport_id = ConnId(next(self._transport_ids))
+        self._claimed[(sid, cid)] = transport_id
+        self._conn_routes[transport_id] = _ConnRoute(slot, ConnId(cid))
+        return transport_id
 
     def track_map(self) -> Mapping[str, Any]:
         """Return the model's declared track manifest."""
         return self._slots[0].track_map()
 
-    def _slot_of(self, conn_id: ConnId) -> _SessionSlot | None:
-        return self._conn_slots.get(conn_id)
-
-    def _to_slot(self, conn_id: ConnId, act: Callable[[_SessionSlot], None]) -> None:
-        slot = self._slot_of(conn_id)
-        if slot is None:
+    def _to_slot(self, conn_id: ConnId, act: Callable[[_SessionSlot, ConnId], None]) -> None:
+        """Hand a fact about transport connection *conn_id* to its slot, under the client's id."""
+        route = self._conn_routes.get(conn_id)
+        if route is None:
             logger.debug("dropping a fact for a connection no slot holds", conn_id=conn_id)
             return
-        with session_scope(slot.hosted_id):
-            act(slot)
+        with session_scope(route.slot.hosted_id):
+            act(route.slot, route.conn_id)
 
     def offer_admitted(self, conn_id: ConnId) -> None:
-        """Stamp an admitted offer in the slot that minted its id."""
-        self._to_slot(conn_id, lambda slot: slot.offer_admitted(conn_id))
+        """Stamp an admitted offer in its session's slot."""
+        self._to_slot(conn_id, lambda slot, cid: slot.offer_admitted(cid))
 
     def connection_opened(self, conn: Connection) -> None:
         """Register a live connection with its session's slot."""
-        slot = self._slot_of(conn.id)
-        if slot is None:
-            logger.warning("refusing a connection no session minted", conn_id=conn.id)
+        route = self._conn_routes.get(conn.id)
+        if route is None:
+            logger.warning("refusing a connection no session claimed", conn_id=conn.id)
             if self._slots[0]._loop is not None:
                 self._slots[0]._spawn_teardown(conn.close())
             return
-        with session_scope(slot.hosted_id):
-            slot.connection_opened(conn)
+        with session_scope(route.slot.hosted_id):
+            route.slot.connection_opened(_SessionConnection(conn, route.conn_id))
 
     def connection_closed(self, conn_id: ConnId) -> None:
         """Drop a connection from its session's slot."""
-        self._to_slot(conn_id, lambda slot: slot.connection_closed(conn_id))
+        self._to_slot(conn_id, lambda slot, cid: slot.connection_closed(cid))
 
     def connection_answered(self, conn_id: ConnId, answer: Mapping[str, str]) -> None:
         """Record a negotiation answer with its session's slot."""
-        self._to_slot(conn_id, lambda slot: slot.connection_answered(conn_id, answer))
+        self._to_slot(conn_id, lambda slot, cid: slot.connection_answered(cid, answer))
 
     def message_received(
         self, conn_id: ConnId, payload: bytes | str, version: ProtocolVersion, channel: Channel
     ) -> None:
         """Hand an inbound frame to its session's slot."""
         self._to_slot(
-            conn_id, lambda slot: slot.message_received(conn_id, payload, version, channel)
+            conn_id, lambda slot, cid: slot.message_received(cid, payload, version, channel)
         )
 
     def media_received(self, conn_id: ConnId, track: str, frame: InputFrame) -> None:
         """Route an inbound media frame to its session."""
-        slot = self._slot_of(conn_id)
-        if slot is not None:
-            slot.media_received(conn_id, track, frame)
+        route = self._conn_routes.get(conn_id)
+        if route is not None:
+            route.slot.media_received(route.conn_id, track, frame)
 
     def keepalive(self, conn_id: ConnId) -> None:
         """Note liveness for a connection."""
-        self._to_slot(conn_id, lambda slot: slot.keepalive(conn_id))
+        self._to_slot(conn_id, lambda slot, cid: slot.keepalive(cid))
 
     def resume_track(self, conn_id: ConnId, name: str) -> None:
         """Resume an outbound track for one connection."""
-        self._to_slot(conn_id, lambda slot: slot.resume_track(conn_id, name))
+        self._to_slot(conn_id, lambda slot, cid: slot.resume_track(cid, name))
 
     def pause_track(self, conn_id: ConnId, name: str) -> None:
         """Pause an outbound track for one connection."""
-        self._to_slot(conn_id, lambda slot: slot.pause_track(conn_id, name))
+        self._to_slot(conn_id, lambda slot, cid: slot.pause_track(cid, name))
 
     def publish_requested(self, conn_id: ConnId, name: str, request_id: str) -> None:
         """Arbitrate a publish-track claim within its session."""
-        self._to_slot(conn_id, lambda slot: slot.publish_requested(conn_id, name, request_id))
+        self._to_slot(conn_id, lambda slot, cid: slot.publish_requested(cid, name, request_id))
 
     def unpublish_track(self, conn_id: ConnId, name: str) -> None:
         """Release an inbound track a connection had claimed."""
-        self._to_slot(conn_id, lambda slot: slot.unpublish_track(conn_id, name))
+        self._to_slot(conn_id, lambda slot, cid: slot.unpublish_track(cid, name))
 
     def file_uploaded(self, conn_id: ConnId, upload_id: str) -> None:
         """Hand an out-of-band upload to its session."""
-        self._to_slot(conn_id, lambda slot: slot.file_uploaded(conn_id, upload_id))
+        self._to_slot(conn_id, lambda slot, cid: slot.file_uploaded(cid, upload_id))
 
     def schema_requested(self, conn_id: ConnId, request_id: str) -> None:
         """Answer a client's schema request."""
-        self._to_slot(conn_id, lambda slot: slot.schema_requested(conn_id, request_id))
+        self._to_slot(conn_id, lambda slot, cid: slot.schema_requested(cid, request_id))
 
     def clip_requested(self, conn_id: ConnId, duration_seconds: float, request_id: str) -> None:
         """Resolve a snap-clip request against its session's recorder."""
         self._to_slot(
-            conn_id, lambda slot: slot.clip_requested(conn_id, duration_seconds, request_id)
+            conn_id, lambda slot, cid: slot.clip_requested(cid, duration_seconds, request_id)
         )
 
     def recording_requested(self, conn_id: ConnId, request_id: str) -> None:
         """Resolve a full-session recording request against its session's recorder."""
-        self._to_slot(conn_id, lambda slot: slot.recording_requested(conn_id, request_id))
+        self._to_slot(conn_id, lambda slot, cid: slot.recording_requested(cid, request_id))
 
     def client_stats_received(self, conn_id: ConnId, batch: ClientStatsBatch) -> None:
         """Journal a client quality batch under its session."""
-        self._to_slot(conn_id, lambda slot: slot.client_stats_received(conn_id, batch))
+        self._to_slot(conn_id, lambda slot, cid: slot.client_stats_received(cid, batch))
 
 
 __all__ = [

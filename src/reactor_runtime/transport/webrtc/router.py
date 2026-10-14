@@ -21,7 +21,6 @@ from fastapi import FastAPI, Header, HTTPException, Path, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
-from reactor_runtime.core import ConnId
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.transport.router import (
     CONN_ID_MAX,
@@ -313,7 +312,7 @@ class WebRtcRouter(TransportRouter):
             tracks = TrackMap.from_client(
                 entry.model_dump() for entry in req.track_mapping
             ).with_rates({name: float(entry["rate"]) for name, entry in declared.items()})
-            conn_id = ConnId(cid)
+            conn_id = runner.transport_conn_id(sid, cid)
             try:
                 claimed_now = runner.claim_conn_id(conn_id, self.protocol)
             except ConnectionIdClaimedError as claimed:
@@ -355,7 +354,7 @@ class WebRtcRouter(TransportRouter):
         )
         async def sdp_answer(sid: str, cid: OfferedConnId) -> Response:
             runner.require_session_running(sid)
-            answer = acceptor.take_answer(ConnId(cid))
+            answer = acceptor.take_answer(runner.transport_conn_id(sid, cid))
             if answer is None:
                 return Response(status_code=202)
             payload = SdpAnswerResponse(sdp_answer=answer.sdp, connection_id=cid)
@@ -368,9 +367,10 @@ class WebRtcRouter(TransportRouter):
         )
         async def ice(sid: str, cid: OfferedConnId, req: IceCandidatesRequest) -> Response:
             runner.require_session_running(sid)
+            conn_id = runner.transport_conn_id(sid, cid)
             for entry in req.candidates:
                 await acceptor.add_ice(
-                    ConnId(cid),
+                    conn_id,
                     IceCandidate(entry.candidate, entry.sdp_mid, entry.sdp_mline_index),
                 )
             return Response(status_code=202)

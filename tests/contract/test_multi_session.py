@@ -9,6 +9,7 @@ failure leaves the others running.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -65,10 +66,12 @@ class Host:
     client: httpx.AsyncClient
     app: FastAPI
     host: SessionHost
-    peers: dict[int, FakePeer]
+    peers: dict[str, FakePeer]
 
 
-def _peers(peers: dict[int, FakePeer]) -> WebRtcPeerFactory:
+def _peers(peers: dict[str, FakePeer]) -> WebRtcPeerFactory:
+    """Negotiate each offer instantly, keeping its peer under the offer's SDP."""
+
     async def factory(
         conn_id: int,
         offer: SdpOffer,
@@ -78,8 +81,8 @@ def _peers(peers: dict[int, FakePeer]) -> WebRtcPeerFactory:
     ) -> tuple[FakePeer, SdpAnswer]:
         peer = FakePeer()
         peer.protocol_version = version
-        peers[conn_id] = peer
-        return peer, SdpAnswer("answer-sdp")
+        peers[offer.sdp] = peer
+        return peer, SdpAnswer(f"answer-to-{offer.sdp}")
 
     return cast(WebRtcPeerFactory, factory)
 
@@ -91,7 +94,7 @@ async def hosting(cfg: RuntimeConfig | None = None) -> AsyncIterator[Host]:
         metrics = RuntimeMetrics(version="0.0.0", model="multi:Painter")
         host = SessionHost(cfg or RuntimeConfig(model_ref="multi:Painter"), metrics, _SLOTS)
         await host.start()
-        peers: dict[int, FakePeer] = {}
+        peers: dict[str, FakePeer] = {}
         router = WebRtcRouter(WebRtcConfig(ping_timeout=0.0), _peers(peers), metrics)
         app = build_app(host, [router], host.health, metrics)
         try:
@@ -221,12 +224,12 @@ async def test_transport_routes_resolve_the_addressed_session() -> None:
         alpha = (await rt.client.post(prefix.format("alpha"))).json()["connection_id"]
         beta = (await rt.client.post(prefix.format("beta"))).json()["connection_id"]
         assert alpha != beta
-        offer = {"sdp_offer": "v=0", "track_mapping": []}
         for sid, cid in (("alpha", alpha), ("beta", beta)):
+            offer = {"sdp_offer": f"offer-{sid}", "track_mapping": []}
             response = await rt.client.post(f"{prefix.format(sid)}/{cid}/sdp_params", json=offer)
             assert response.status_code == 202
-        await _until(lambda: alpha in rt.peers)
-        rt.peers[alpha].fire_connected()
+        await _until(lambda: "offer-alpha" in rt.peers)
+        rt.peers["offer-alpha"].fire_connected()
 
         await _until(lambda: _states(rt.host).get("alpha") == "streaming")
         assert _states(rt.host)["beta"] == "waiting"
@@ -339,3 +342,46 @@ async def test_uploads_land_in_the_addressed_session() -> None:
                 json={"name": "a.bin", "size": 3, "mime_type": "application/octet-stream"},
             )
         ).status_code == 404
+
+
+async def test_sessions_on_two_slots_connect_on_the_same_unregistered_connection_id() -> None:
+    """The relaying caller's sequence: no registration, the same id in two sessions.
+
+    A caller that mints connection ids itself offers straight to
+    ``/connections/{cid}/sdp_params`` and trickles ICE there, and its ids are
+    only unique within a session. Each session must get its own answer, its
+    own open wire, and its own close, all journaled under the id it used.
+    """
+    first, second = str(uuid.uuid4()), str(uuid.uuid4())
+    async with hosting() as rt:
+        for sid in (first, second):
+            assert (await _start(rt.client, session_id=sid)).status_code == 200
+        for sid in (first, second):
+            path = f"/sessions/{sid}/transport/webrtc/connections/1001"
+            offer = {"sdp_offer": f"offer-{sid}", "track_mapping": []}
+            assert (await rt.client.post(f"{path}/sdp_params", json=offer)).status_code == 202
+            ice = {"candidates": [{"candidate": f"candidate-{sid}"}], "is_final": True}
+            assert (await rt.client.post(f"{path}/ice_candidates", json=ice)).status_code == 202
+
+        await _until(lambda: {f"offer-{first}", f"offer-{second}"} <= set(rt.peers))
+        for sid in (first, second):
+            peer = rt.peers[f"offer-{sid}"]
+            await _until(lambda peer=peer: len(peer.ice) == 1)
+            assert peer.ice[0].candidate == f"candidate-{sid}"
+            peer.fire_connected()
+        await _until(lambda: _states(rt.host) == {first: "streaming", second: "streaming"})
+        rt.peers[f"offer-{first}"].fire_disconnect()
+        await _until(lambda: _states(rt.host) == {first: "orphaned", second: "streaming"})
+
+        for sid, count in ((first, 4), (second, 3)):
+            frames = await read_sse(rt.app, f"/sessions/{sid}/events?since=0", count=count)
+            moves = [(frame.payload["event"], frame.payload["detail"]) for frame in frames]
+            answer = {"type": "answer", "sdp": f"answer-to-offer-{sid}"}
+            assert (
+                moves[1:]
+                == [
+                    ("connection_answered", {"conn_id": 1001, "answer": answer}),
+                    ("connection_opened", {"conn_id": 1001}),
+                    ("connection_closed", {"conn_id": 1001}),
+                ][: count - 1]
+            )

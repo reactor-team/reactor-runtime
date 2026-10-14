@@ -67,6 +67,9 @@ class FakeRunner:
     def session_epoch(self) -> int:
         return self.epoch
 
+    def transport_conn_id(self, sid: str, cid: int) -> ConnId:
+        return ConnId(cid)
+
     def offer_admitted(self, conn_id: ConnId) -> None:
         self.admitted.append(conn_id)
 

@@ -1511,6 +1511,10 @@ class Runner(ServiceComponent, ConnectionSink):
         """Return the number of the live session's epoch, which changes at every session start."""
         return self._offer_epochs.current
 
+    def transport_conn_id(self, sid: str, cid: int) -> ConnId:
+        """Return *cid* as the transport's key: a runner's one session owns every id."""
+        return ConnId(cid)
+
     def offer_admitted(self, conn_id: ConnId) -> None:
         """Stamp an admitted offer with the session it was admitted into.
 
