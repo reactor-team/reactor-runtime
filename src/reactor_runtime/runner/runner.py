@@ -55,6 +55,7 @@ from reactor_runtime.core import (
     SessionState,
     StartingInputApplied,
     StepRefusal,
+    StepRefusalKind,
     TrackDirection,
     TrackKind,
     Transition,
@@ -156,6 +157,13 @@ def _recording_id_from(params: Mapping[str, Any]) -> str:
 # generous enough to cover that delivery yet bounded so a genuinely-missing upload
 # fails in reasonable time.
 _UPLOAD_RESOLVE_TIMEOUT_SECONDS = 10.0
+
+# The wire code a step the model did not run is answered with, by why it did not.
+_REFUSAL_CODES: dict[StepRefusalKind, step_pb2.StepFailureCode] = {
+    StepRefusalKind.REFUSED: step_pb2.STEP_FAILURE_CODE_REFUSED,
+    StepRefusalKind.NOT_READY: step_pb2.STEP_FAILURE_CODE_NOT_READY,
+    StepRefusalKind.COMMAND_FAILED: step_pb2.STEP_FAILURE_CODE_COMMAND_FAILED,
+}
 
 # A runtime process hosts exactly one session, so its id is fixed rather than
 # minted: an all-zero UUID every client addresses. Routes still carry and
@@ -988,6 +996,8 @@ class Runner(ServiceComponent, ConnectionSink):
                 reported_session=step.session,
                 current_session=self._sessions_posted,
             )
+            if step.request is not None:
+                self._end_step_request(step.request.conn_id, step.request.request_id)
             return
         if self._steps_failed:
             # The failure took the messages sent before it, so these were sent
@@ -996,6 +1006,8 @@ class Runner(ServiceComponent, ConnectionSink):
                 "dropping a step report after the session's remaining steps failed",
                 messages=len(messages),
             )
+            if step.request is not None:
+                self._end_step_request(step.request.conn_id, step.request.request_id)
             return
         self._save_step(step, messages)
         if step.stages and step.bundle is not None:
@@ -1648,15 +1660,16 @@ class Runner(ServiceComponent, ConnectionSink):
     ) -> None:
         """Hand a step request to the model as plain calls, then its step, or refuse it.
 
-        Each ``state`` key becomes the model's ``set_<key>`` command, then each
-        of the request's commands follows, in order. Each is submitted as a
-        client's own command is: its uploads resolved, whether referenced in
-        its ``uploads`` map or inline in an argument (a ``state`` value of an
-        upload-typed field carries its file as an inline ``{"upload_id": ...}``
-        reference), checked against the contract, and journalled. A handler
-        that fails is answered as a standalone command is, and the step still
-        runs. The request's frames are then decoded and the step is submitted
-        behind its commands.
+        Each ``state`` key becomes the model's ``set_<key>`` command, in
+        ascending key order, then each of the request's commands follows, in
+        order. Each is submitted as a client's own command is: its uploads
+        resolved, whether referenced in its ``uploads`` map or inline in an
+        argument (a ``state`` value of an upload-typed field carries its file as
+        an inline ``{"upload_id": ...}`` reference), checked against the
+        contract, and journalled. Each carries the step's request id, so a
+        handler that fails answers the step with ``COMMAND_FAILED``: the calls
+        after it are skipped and the step does not run. The request's frames
+        are then decoded and the step is submitted behind its commands.
 
         A request that does not run is answered with a ``StepResult`` that
         takes no number. It is ``NOT_READY`` when the session is not running.
@@ -1702,7 +1715,11 @@ class Runner(ServiceComponent, ConnectionSink):
                 )
                 return
             outcome = await self._bridge.submit_command(
-                name, resolved, conn_id=step.conn_id, request_id=None
+                name,
+                resolved,
+                conn_id=step.conn_id,
+                request_id=None,
+                step_request_id=step.request_id,
             )
             if not outcome.accepted:
                 self._refuse_step(step.conn_id, step.request_id, _refused(key, outcome))
@@ -1784,26 +1801,42 @@ class Runner(ServiceComponent, ConnectionSink):
 
         Called on the model's thread and sent from it, so the answer goes out
         behind any reply to the commands the model handled before the step. A
-        refusal from an earlier session is dropped.
+        refusal from an earlier session is answered as a session that ended,
+        since that session's state is gone.
         """
         if refusal.session != self._sessions_posted:
+            self._end_step_request(refusal.conn_id, refusal.request_id)
             return
         self._refuse_step(
             refusal.conn_id,
             refusal.request_id,
             refusal.reason,
-            failure_code=(
-                step_pb2.STEP_FAILURE_CODE_NOT_READY
-                if refusal.not_ready
-                else step_pb2.STEP_FAILURE_CODE_REFUSED
-            ),
+            failure_code=_REFUSAL_CODES[refusal.kind],
+        )
+
+    def _end_step_request(self, conn_id: ConnId, request_id: str) -> None:
+        """Answer a step request whose session ended before its result could go out."""
+        self._refuse_step(
+            conn_id,
+            request_id,
+            "the session ended before the step's result was sent",
+            failure_code=step_pb2.STEP_FAILURE_CODE_SESSION_ENDED,
         )
 
     def _send_step_result(self, step: CompletedStep, index: int) -> None:
-        """Answer a requested step with its result, on the data channel."""
+        """Answer a requested step with its result, on the data channel.
+
+        A step the model reported as failed is answered ``FAILED`` with the
+        model's error; it still takes its number.
+        """
         request = step.request
         assert request is not None
-        result = step_pb2.StepResult(index=index)
+        if step.error is not None:
+            result = step_pb2.StepResult(
+                index=index, failure_code=step_pb2.STEP_FAILURE_CODE_FAILED, error=step.error
+            )
+        else:
+            result = step_pb2.StepResult(index=index)
         self._connections.send_step_reply(
             request.conn_id,
             lambda version: self._codec_for(version).encode_step_result(request.request_id, result),

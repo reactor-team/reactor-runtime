@@ -255,6 +255,9 @@ class CommandEnvelope:
             clock, when known.
         held_ms: How long it was held for the session's starting input before
             it was validated, in milliseconds.
+        step_request_id: The request id of the step request that carries this
+            command, when it is one of a step's state keys or commands. A
+            failure of its handler then answers that step instead.
     """
 
     command: Command
@@ -263,6 +266,7 @@ class CommandEnvelope:
     received_at: float | None = None
     submitted_at: float | None = None
     held_ms: float = 0.0
+    step_request_id: RequestId | None = None
 
 
 @dataclass(frozen=True)
@@ -540,10 +544,17 @@ class ReactorCore:
     # -- thread-safe ingress (called by the bridge from the runtime thread) ---
 
     def submit_command(
-        self, command: Command, conn_id: ConnId | None, request_id: RequestId | None
+        self,
+        command: Command,
+        conn_id: ConnId | None,
+        request_id: RequestId | None,
+        *,
+        step_request_id: RequestId | None = None,
     ) -> None:
         """Enqueue a validated command onto the model loop."""
-        self._enqueue(CommandEnvelope(command, conn_id, request_id))
+        self._enqueue(
+            CommandEnvelope(command, conn_id, request_id, step_request_id=step_request_id)
+        )
 
     def _submit_command_at(
         self,
@@ -552,6 +563,8 @@ class ReactorCore:
         request_id: RequestId | None,
         received_at: float | None = None,
         held_ms: float = 0.0,
+        *,
+        step_request_id: RequestId | None = None,
     ) -> None:
         """Enqueue a validated command with when it reached the runtime. Called by the bridge.
 
@@ -564,11 +577,23 @@ class ReactorCore:
         override, untimed.
         """
         if type(self).submit_command is not ReactorCore.submit_command:
-            self.submit_command(command, conn_id, request_id)
+            if step_request_id is None:
+                self.submit_command(command, conn_id, request_id)
+            else:
+                self.submit_command(command, conn_id, request_id, step_request_id=step_request_id)
             return
         self._enqueue(
-            CommandEnvelope(command, conn_id, request_id, received_at, time.monotonic(), held_ms)
+            CommandEnvelope(
+                command,
+                conn_id,
+                request_id,
+                received_at,
+                time.monotonic(),
+                held_ms,
+                step_request_id,
+            )
         )
+
     def submit_step(self, step: StepEnvelope) -> None:
         """Enqueue a validated step request onto the model loop.
 
