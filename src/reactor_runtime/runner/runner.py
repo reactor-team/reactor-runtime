@@ -1686,7 +1686,8 @@ class Runner(ServiceComponent, ConnectionSink):
             )
             return
         entries = [
-            (f"state.{key}", f"set_{key}", {key: value}, {}) for key, value in step.state.items()
+            (f"state.{key}", f"set_{key}", {key: value}, {})
+            for key, value in sorted(step.state.items())
         ]
         entries += [
             (f"commands[{index}]", command.name, dict(command.args), dict(command.uploads))
