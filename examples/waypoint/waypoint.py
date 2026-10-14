@@ -191,7 +191,9 @@ class Waypoint(ReactorApp):
         name="set_image",
         description=(
             "Upload the seed frame. The next step starts a new world from it. "
-            "PNG or JPEG; the image is fitted to 1280x720."
+            "PNG or JPEG; the image is fitted to 1280x720. Fails with "
+            "`unsupported_media` when the upload is not an image, or "
+            "`undecodable_image` when it cannot be decoded."
         ),
     )
     async def set_image(
@@ -201,9 +203,10 @@ class Waypoint(ReactorApp):
         if not image.mime_type.startswith("image/"):
             raise CommandError("unsupported_media", f"{image.name} is not an image.")
         try:
-            seed = await asyncio.to_thread(_fit, image.data)
-        except Exception as exc:
+            decoded = await asyncio.to_thread(_decode, image.data)
+        except UNDECODABLE as exc:
             raise CommandError("undecodable_image", "The file is not a decodable image.") from exc
+        seed = await asyncio.to_thread(_fit, decoded)
         self.state._seed = seed
         self.state._seed_id += 1
         self.output.flush()
@@ -232,8 +235,17 @@ class Waypoint(ReactorApp):
         self.last_index = -1
 
 
-def _fit(data: bytes) -> np.ndarray:
-    """Decode an upload, honour its EXIF orientation, and fit it to the world's size."""
-    image = ImageOps.exif_transpose(Image.open(io.BytesIO(data))).convert("RGB")
-    fitted = ImageOps.fit(image, (WIDTH, HEIGHT))
-    return np.asarray(fitted, dtype=np.uint8)
+# What Pillow raises for bytes it cannot decode: not an image, truncated or
+# corrupt data, or an image too large to decode safely. Anything else is a
+# fault, and reaches the client as an internal error.
+UNDECODABLE = (OSError, ValueError, Image.DecompressionBombError)
+
+
+def _decode(data: bytes) -> Image.Image:
+    """Decode an upload to RGB, honouring its EXIF orientation."""
+    return ImageOps.exif_transpose(Image.open(io.BytesIO(data))).convert("RGB")
+
+
+def _fit(image: Image.Image) -> np.ndarray:
+    """Fit a decoded image to the world's size."""
+    return np.asarray(ImageOps.fit(image, (WIDTH, HEIGHT)), dtype=np.uint8)

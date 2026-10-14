@@ -319,6 +319,57 @@ attribute the schema advertises is worse than one command. Private fields
 (leading underscore) are session scratch the application owns, such as the
 fitted seed, its id, and the id the model last reported.
 
+A hand-written command refuses by raising `CommandError(code, message)`.
+`code` is a short, stable `snake_case` token the client branches on;
+`message` crosses the wire unchanged, so write it for the client. The
+command's description names each code and when it applies:
+
+```python
+@event(
+    name="set_image",
+    description=(
+        "Upload the seed frame. ... Fails with `unsupported_media` when the "
+        "upload is not an image, or `undecodable_image` when it cannot be decoded."
+    ),
+)
+async def set_image(self, image: UploadedFile = InputField(...)) -> WaypointStatus:
+    if not image.mime_type.startswith("image/"):
+        raise CommandError("unsupported_media", f"{image.name} is not an image.")
+    try:
+        decoded = await asyncio.to_thread(_decode, image.data)
+    except UNDECODABLE as exc:  # (OSError, ValueError, Image.DecompressionBombError)
+        raise CommandError("undecodable_image", "The file is not a decodable image.") from exc
+    seed = await asyncio.to_thread(_fit, decoded)
+    ...
+```
+
+The `try` holds only the decode, and catches only what Pillow raises for
+bytes it cannot decode. A failure anywhere else, a bug in `_fit` included,
+is not the upload's fault and must not be reported as one.
+
+The runtime answers the command's request with a failure that carries the
+code and the message, for three reasons:
+
+- **The caller learns on its own call.** The failure is correlated with the
+  request, so an awaiting client gets the code instead of a reply.
+- **Only the caller is told.** Other clients in the session, a viewer or a
+  second tab, never hear about a command they did not send.
+- **The runtime knows the command failed.** It journals the failure, and in
+  a session started with a step count, a starting command that raises ends
+  the session and fails its remaining steps instead of leaving it to run
+  with nothing to do.
+
+Never refuse by sending an error message and returning. The runtime counts
+that as success: it acknowledges the command, the caller resolves as if the
+command took effect, every other client receives a message about a command
+it never sent, and a session started with a step count keeps running. Any
+exception other than `CommandError` reaches the client as an internal error
+with a fixed message, so catch exactly what a check raises for bad input (a
+decoder's `ValueError`) and raise a `CommandError` with a code of its own, as
+`set_image` does. Never catch a bare `Exception` there: it turns a bug into a
+refusal that blames the client. `CommandError` is for command handlers; `process_input()`
+refuses a step with `ApplicationError` (rule 6).
+
 ### 8. The model does nothing unprompted
 
 Three things the model must not do, each with its correct form:
@@ -476,7 +527,9 @@ Ask one question: could a client observe it?
 3. The step input and the step result are dataclasses; the app never reads a
    model attribute.
 4. Every client-settable fact is a public `InputState` field; hand-written
-   commands exist only for decisions the state cannot carry.
+   commands exist only for decisions the state cannot carry. A command
+   refuses by raising `CommandError(code, message)`, never by sending an
+   error message and returning, and its description names each code.
 5. `process_input()` refuses with `ApplicationError("reason")`; the model half
    raises its own exception type and never `ApplicationError`.
 6. The model invents no default input and never resets itself.

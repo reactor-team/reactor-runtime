@@ -19,6 +19,7 @@ import pytest
 from PIL import Image
 from waypoint_model import NotSeeded, WaypointInput, WaypointModel, WaypointResult
 
+import waypoint
 from reactor_runtime import ApplicationError, StepOutcome, UploadedFile
 from reactor_runtime.core.model import EndReason, SessionEnded, SessionStarted
 from reactor_runtime.interface.model.contract import ModelContract
@@ -363,9 +364,62 @@ async def test_set_image_rejects_a_file_that_is_not_an_image() -> None:
     app, _, _ = _app()
     await app._dispatch_reactor_event(SessionStarted("s"))
     upload = UploadedFile(name="notes.txt", mime_type="text/plain", data=b"hello")
-    with pytest.raises(CommandError):
+    with pytest.raises(CommandError) as refused:
         await app.set_image(upload)
+    assert refused.value.code == "unsupported_media"
     assert app.state._seed is None
+
+
+async def test_set_image_rejects_an_image_it_cannot_decode() -> None:
+    from reactor_runtime import CommandError
+
+    app, _, _ = _app()
+    await app._dispatch_reactor_event(SessionStarted("s"))
+    upload = UploadedFile(name="seed.png", mime_type="image/png", data=b"not a png")
+    with pytest.raises(CommandError) as refused:
+        await app.set_image(upload)
+    assert refused.value.code == "undecodable_image"
+    assert app.state._seed is None
+
+
+async def test_a_fault_while_fitting_the_image_is_not_blamed_on_the_upload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from reactor_runtime import CommandError
+
+    def broken_fit(image: Image.Image) -> np.ndarray:
+        raise ValueError("a bug in the fitting code")
+
+    monkeypatch.setattr(waypoint, "_fit", broken_fit)
+    app, _, _ = _app()
+    await app._dispatch_reactor_event(SessionStarted("s"))
+    buffer = io.BytesIO()
+    Image.new("RGB", (64, 32)).save(buffer, format="PNG")
+    upload = UploadedFile(name="seed.png", mime_type="image/png", data=buffer.getvalue())
+    with pytest.raises(ValueError, match="a bug in the fitting code") as raised:
+        await app.set_image(upload)
+    assert not isinstance(raised.value, CommandError)
+    assert app.state._seed is None
+
+
+async def test_a_fault_while_decoding_that_is_not_a_decode_error_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken_decode(data: bytes) -> Image.Image:
+        raise RuntimeError("the decoder crashed")
+
+    monkeypatch.setattr(waypoint, "_decode", broken_decode)
+    app, _, _ = _app()
+    await app._dispatch_reactor_event(SessionStarted("s"))
+    upload = UploadedFile(name="seed.png", mime_type="image/png", data=b"\x89PNG")
+    with pytest.raises(RuntimeError, match="the decoder crashed"):
+        await app.set_image(upload)
+
+
+def test_set_image_names_its_failure_codes() -> None:
+    description = ModelContract.of(Waypoint).commands["set_image"].description
+    assert "`unsupported_media`" in description
+    assert "`undecodable_image`" in description
 
 
 async def test_reset_and_session_end_reach_the_model_half() -> None:
