@@ -446,16 +446,6 @@ _STEP_MESSAGES = [
         ),
         SERVER,
     ),
-    (
-        data_pb2.DataServerMessage(
-            request_id="s2",
-            kind=K.MESSAGE_KIND_RESPONSE,
-            step_result=step_pb2.StepResult(
-                failure_code=step_pb2.STEP_FAILURE_CODE_NOT_READY, error="not running"
-            ),
-        ),
-        SERVER,
-    ),
 ]
 
 

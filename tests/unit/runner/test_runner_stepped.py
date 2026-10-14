@@ -390,7 +390,7 @@ def _refusal(
     assert message.WhichOneof("payload") == "step_result"
     result = message.step_result
     assert result.failure_code == failure_code
-    assert (result.index, result.elapsed, list(result.tracks), list(result.files)) == (
+    assert (result.index, result.elapsed_seconds, list(result.tracks), list(result.files)) == (
         0,
         0.0,
         [],
