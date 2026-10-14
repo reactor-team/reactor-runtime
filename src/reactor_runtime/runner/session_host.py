@@ -374,6 +374,7 @@ class SessionHost:
         self._slot_keys: dict[int, int] = {}
         self._conn_slots: dict[ConnId, _SessionSlot] = {}
         self._recorders = _RecorderFanout(self)
+        self._draining = False
         self.request_shutdown: ShutdownHook = _no_shutdown
 
     # -- lifecycle (ServiceComponent) -----------------------------------------
@@ -426,7 +427,8 @@ class SessionHost:
         return await asyncio.shield(self._loaded)
 
     async def drain(self) -> None:
-        """Let every running session end on grace."""
+        """Refuse new sessions, and let every running session end on grace."""
+        self._draining = True
         await asyncio.gather(*(slot.drain() for slot in self._slots))
 
     async def stop(self) -> None:
@@ -444,13 +446,13 @@ class SessionHost:
         return Health.healthy()
 
     def state(self) -> RuntimeState:
-        """Report ``available`` while a slot is free and ``serving`` when none is."""
+        """Report ``available`` while a slot is free, ``serving`` when none is or while draining."""
         states = [slot.sm_state for slot in self._slots]
         if SessionState.TERMINATED in states:
             return RuntimeState.TERMINATED
         if SessionState.CREATED in states:
             return RuntimeState.LOADING
-        if SessionState.READY in states:
+        if SessionState.READY in states and not self._draining:
             return RuntimeState.AVAILABLE
         return RuntimeState.SERVING
 
@@ -547,7 +549,9 @@ class SessionHost:
     # -- session control (driven by the HTTP routes) --------------------------
 
     def capacity(self) -> tuple[int, int]:
-        """Return how many sessions the process hosts at once, and how many are free."""
+        """Return how many sessions the process hosts at once, and how many it will start."""
+        if self._draining:
+            return len(self._slots), 0
         free = sum(slot.sm_state is SessionState.READY for slot in self._slots)
         return len(self._slots), free
 
@@ -579,10 +583,13 @@ class SessionHost:
 
         Raises:
             InvalidSessionStartError: If the body or a starting command is refused.
-            SessionTransitionError: If the id is already running, or the model
-                is loading or terminated.
+            SessionTransitionError: If the id is already running, the model
+                is loading or terminated, or the host is draining, which is
+                refused as a start against a closing session.
             NoFreeSlotError: If every slot is serving.
         """
+        if self._draining:
+            raise SessionTransitionError("start", SessionState.CLOSING)
         sid = str(params.get("session_id") or uuid.uuid4())
         running = self._running_slot(sid)
         if running is not None:

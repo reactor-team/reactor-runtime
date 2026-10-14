@@ -152,6 +152,21 @@ async def test_a_start_with_every_slot_serving_is_the_busy_conflict() -> None:
         )
 
 
+async def test_a_draining_host_refuses_starts_and_reports_no_free_slot() -> None:
+    async with hosting() as rt:
+        await _start(rt.client, session_id="alpha")
+
+        await rt.host.drain()
+
+        assert _states(rt.host) == {}
+        response = await _start(rt.client)
+        assert response.status_code == 409
+        assert response.json()["detail"] == "cannot start session while closing"
+        body = (await rt.client.get("/health")).json()
+        assert body["state"] == "serving"
+        assert body["capacity"] == {"slots": _SLOTS, "free": 0}
+
+
 async def test_a_start_takes_the_callers_id_or_mints_one() -> None:
     async with hosting() as rt:
         chosen = (await _start(rt.client, session_id="alpha")).json()
