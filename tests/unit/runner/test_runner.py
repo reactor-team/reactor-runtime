@@ -3878,11 +3878,14 @@ async def test_client_stats_are_journalled_as_a_metric_with_the_session_and_conn
                 "paused": False,
                 "metrics": {"frames_per_second": 30.0},
                 "frame_stages": [],
+                "codec_implementation": "",
+                "hardware_codec": None,
             }
         ],
         "connection_stat": {
             "timestamp": 1_700_000_000_000,
             "metrics": {"connection_rtt_ms": 25.0},
+            "environment": None,
         },
     }
 

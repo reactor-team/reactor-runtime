@@ -43,6 +43,7 @@ from reactor_runtime.core.transport import (
 from reactor_runtime.core.typespec import TypeSpec
 from reactor_runtime.core.values import (
     ClientConnectionStat,
+    ClientEnvironment,
     ClientStatsBatch,
     ClientTrackDirection,
     ClientTrackStat,
@@ -68,6 +69,7 @@ __all__ = [
     "ClientConnected",
     "ClientConnectionStat",
     "ClientDisconnected",
+    "ClientEnvironment",
     "ClientStatsBatch",
     "ClientTrackDirection",
     "ClientTrackStat",

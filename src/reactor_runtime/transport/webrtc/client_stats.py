@@ -13,6 +13,7 @@ from google.protobuf.message import DecodeError
 
 from reactor_runtime.core import (
     ClientConnectionStat,
+    ClientEnvironment,
     ClientStatsBatch,
     ClientTrackDirection,
     ClientTrackStat,
@@ -105,25 +106,56 @@ def _decode_frame_stages(stat: platform_pb2.ClientTrackStat) -> tuple[FrameStage
     )
 
 
+def _decode_codec_implementation(
+    stat: platform_pb2.ClientTrackStat,
+) -> tuple[str, bool | None]:
+    """Read which encoder or decoder a video track runs; an audio track has none."""
+    if stat.kind != platform_pb2.TrackKind.TRACK_KIND_VIDEO:
+        return "", None
+    hardware = stat.hardware_codec if stat.HasField("hardware_codec") else None
+    return stat.codec_implementation, hardware
+
+
+def _decode_environment(stat: platform_pb2.ClientConnectionStat) -> ClientEnvironment | None:
+    """Read what the client runs on, or ``None`` from a client that does not say."""
+    if not stat.HasField("environment"):
+        return None
+    env = stat.environment
+    return ClientEnvironment(
+        sdk_type=env.sdk_type,
+        sdk_version=env.sdk_version,
+        os=env.os,
+        os_version=env.os_version,
+        arch=env.arch,
+        device_model=env.device_model,
+    )
+
+
+def _decode_track_stat(stat: platform_pb2.ClientTrackStat) -> ClientTrackStat:
+    """Convert one decoded ``ClientTrackStat`` into a plain value."""
+    codec_implementation, hardware_codec = _decode_codec_implementation(stat)
+    return ClientTrackStat(
+        timestamp=stat.timestamp,
+        track_name=stat.track_name,
+        kind=_TRACK_KINDS.get(stat.kind),
+        direction=_TRACK_DIRECTIONS.get(stat.direction),
+        codec=_decode_codec(stat),
+        paused=stat.paused,
+        metrics=dict(stat.metrics),
+        frame_stages=_decode_frame_stages(stat),
+        codec_implementation=codec_implementation,
+        hardware_codec=hardware_codec,
+    )
+
+
 def _decode_client_stats(message: platform_pb2.ClientStats) -> ClientStatsBatch:
     """Convert a decoded ``ClientStats`` batch into plain values."""
-    track_stats = [
-        ClientTrackStat(
-            timestamp=stat.timestamp,
-            track_name=stat.track_name,
-            kind=_TRACK_KINDS.get(stat.kind),
-            direction=_TRACK_DIRECTIONS.get(stat.direction),
-            codec=_decode_codec(stat),
-            paused=stat.paused,
-            metrics=dict(stat.metrics),
-            frame_stages=_decode_frame_stages(stat),
-        )
-        for stat in message.track_stats
-    ]
+    track_stats = [_decode_track_stat(stat) for stat in message.track_stats]
     connection_stat = None
     if message.HasField("connection_stat"):
         connection_stat = ClientConnectionStat(
             timestamp=message.connection_stat.timestamp,
             metrics=dict(message.connection_stat.metrics),
+            environment=_decode_environment(message.connection_stat),
         )
     return ClientStatsBatch(track_stats=track_stats, connection_stat=connection_stat)

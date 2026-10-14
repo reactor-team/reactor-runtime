@@ -78,10 +78,13 @@ class ClientTrackStat:
     connection identity itself rather than trusting anything the payload might
     claim, because the payload carries none.
 
-    ``kind``/``direction``/``codec`` are fixed, structural facts about the
-    track — never a new value at runtime — so they stay their own fields;
-    :attr:`metrics` is where the actual measurements live, because that set
-    grows as new stats become worth reporting, without a schema change.
+    The typed fields carry the facts about the track that are not numbers:
+    ``kind``/``direction``/``codec`` are fixed for the track, and
+    ``codec_implementation``/``hardware_codec`` describe it at the time of
+    the reading, since the client's engine can switch implementation
+    mid-session. :attr:`metrics` is where the actual measurements live,
+    because that set grows as new stats become worth reporting, without a
+    schema change.
 
     Attributes:
         timestamp: When the client took this reading, on its own clock, in
@@ -105,6 +108,12 @@ class ClientTrackStat:
             query time.
         frame_stages: Where the track's frames spent their time since the
             client's previous batch, stage by stage.
+        codec_implementation: The encoder (a track the client sends) or
+            decoder (one it receives) the client runs for a video track, as
+            its media engine names it, e.g. ``"libvpx"``; empty when unknown.
+        hardware_codec: Whether the client's media engine reports that
+            implementation as power efficient, which in practice means
+            hardware accelerated; ``None`` when the client does not say.
     """
 
     timestamp: int
@@ -115,6 +124,33 @@ class ClientTrackStat:
     paused: bool
     metrics: Mapping[str, float]
     frame_stages: tuple[FrameStage, ...] = ()
+    codec_implementation: str = ""
+    hardware_codec: bool | None = None
+
+
+@dataclass(frozen=True)
+class ClientEnvironment:
+    """The SDK and the system a client runs on, as it describes them.
+
+    Every field is empty when the client does not know it.
+
+    Attributes:
+        sdk_type: The SDK, e.g. ``"python"``, ``"js"``, ``"cpp"``.
+        sdk_version: The SDK's version, e.g. ``"1.10.0"``.
+        os: The operating system, e.g. ``"macos"``, ``"linux"``, or
+            ``"browser"`` for the JavaScript SDK.
+        os_version: The operating system's version as the client reads it.
+        arch: The CPU architecture, e.g. ``"aarch64"``.
+        device_model: The device's hardware model as the system names it,
+            e.g. ``"iPhone15,2"``.
+    """
+
+    sdk_type: str = ""
+    sdk_version: str = ""
+    os: str = ""
+    os_version: str = ""
+    arch: str = ""
+    device_model: str = ""
 
 
 @dataclass(frozen=True)
@@ -124,18 +160,21 @@ class ClientConnectionStat:
     e.g. ``"available_outgoing_bitrate_bps"`` (the client engine's own
     estimate of outgoing headroom — the encoder's own belief, not a
     measurement of the user's internet) or ``"time_to_connect_ms"`` (how long
-    this connection waited to establish, start to "ready") — the latter a
-    one-time fact a client reports once rather than repeating on every batch,
-    which is why :class:`ClientStatsBatch` carries this as optional.
+    this connection waited to establish, start to "ready"). A client sends
+    this reading on every batch; a one-time fact like ``"time_to_connect_ms"``
+    is in ``metrics`` only on the first batch after connecting.
 
     Attributes:
         timestamp: When the client took this reading, on its own clock, in
             epoch milliseconds.
         metrics: The reading's measurements, by name.
+        environment: What the client runs on, sent on every batch; ``None``
+            from a client that does not send it.
     """
 
     timestamp: int
     metrics: Mapping[str, float]
+    environment: ClientEnvironment | None = None
 
 
 @dataclass(frozen=True)
@@ -144,15 +183,14 @@ class ClientStatsBatch:
 
     Mirrors the wire's ``ClientStats`` message: per-track readings alongside
     a fact set that applies to the whole connection rather than any one
-    track. A client typically sends ``connection_stat`` once, on its first
-    batch after connecting, and omits it on every batch after — most batches
-    therefore carry ``track_stats`` only.
+    track. A client sends ``connection_stat`` on every batch; a client that
+    predates it sends none.
 
     Attributes:
         track_stats: One reading per track this batch reports on. Empty on a
             batch that carries only ``connection_stat``.
-        connection_stat: This batch's connection-wide reading, or ``None`` on
-            a batch that doesn't carry one — the common case.
+        connection_stat: This batch's connection-wide reading, or ``None``
+            from a client that does not send one.
     """
 
     track_stats: Sequence[ClientTrackStat]

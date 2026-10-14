@@ -1,9 +1,11 @@
+from dataclasses import fields
 from typing import Any
 
 import pytest
 
 from reactor_runtime.core import (
     ClientConnectionStat,
+    ClientEnvironment,
     ClientStatsBatch,
     ClientTrackDirection,
     ClientTrackStat,
@@ -159,9 +161,61 @@ def test_to_detail_carries_the_readings_and_leaves_out_values_json_cannot_carry(
                 # Only a stage with a name, frames, and a finite time that is not
                 # negative has an average.
                 "frame_stages": [{"name": "jitter_buffer", "total_ms": 1500.0, "frames": 150}],
+                "codec_implementation": "",
+                "hardware_codec": None,
             }
         ],
-        "connection_stat": {"timestamp": 1_700_000_000_000, "metrics": {"connection_rtt_ms": 25.0}},
+        "connection_stat": {
+            "timestamp": 1_700_000_000_000,
+            "metrics": {"connection_rtt_ms": 25.0},
+            "environment": None,
+        },
+    }
+
+
+def test_to_detail_carries_the_environment_and_a_video_tracks_codec() -> None:
+    environment = ClientEnvironment(
+        sdk_type="swift",
+        sdk_version="1.4.0",
+        os="ios",
+        os_version="18.1",
+        arch="aarch64",
+        device_model="iPhone15,2",
+    )
+    batch = ClientStatsBatch(
+        track_stats=[_track(codec_implementation="VideoToolbox", hardware_codec=True)],
+        connection_stat=ClientConnectionStat(
+            timestamp=1_700_000_000_000, metrics={}, environment=environment
+        ),
+    )
+
+    assert to_detail(batch) == {
+        "track_stats": [
+            {
+                "timestamp": 1_700_000_000_000,
+                "track_name": "main_video",
+                "kind": "video",
+                "direction": "recvonly",
+                "codec": "VP9",
+                "paused": False,
+                "metrics": {"frames_per_second": 30.0},
+                "frame_stages": [],
+                "codec_implementation": "VideoToolbox",
+                "hardware_codec": True,
+            }
+        ],
+        "connection_stat": {
+            "timestamp": 1_700_000_000_000,
+            "metrics": {},
+            "environment": {
+                "sdk_type": "swift",
+                "sdk_version": "1.4.0",
+                "os": "ios",
+                "os_version": "18.1",
+                "arch": "aarch64",
+                "device_model": "iPhone15,2",
+            },
+        },
     }
 
 
@@ -175,3 +229,16 @@ def test_a_track_with_more_stages_than_a_client_sends_is_too_large() -> None:
     assert not fits(_batch(_track(frame_stages=(stage,) * (MAX_FRAME_STAGES + 1))))
     long_name = FrameStage("x" * (MAX_NAME_LENGTH + 1), total_ms=1.0, frames=1)
     assert not fits(_batch(_track(frame_stages=(long_name,))))
+
+
+def test_an_environment_value_longer_than_a_name_is_too_large() -> None:
+    long = "x" * (MAX_NAME_LENGTH + 1)
+    for field in fields(ClientEnvironment):
+        batch = ClientStatsBatch(
+            track_stats=[_track()],
+            connection_stat=ClientConnectionStat(
+                timestamp=1, metrics={}, environment=ClientEnvironment(**{field.name: long})
+            ),
+        )
+        assert not fits(batch), field.name
+    assert not fits(_batch(_track(codec_implementation=long)))
