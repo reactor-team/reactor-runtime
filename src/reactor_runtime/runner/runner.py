@@ -1555,8 +1555,8 @@ class Runner(ServiceComponent, ConnectionSink):
         return 1, 1 if self._sm.current_state is SessionState.READY else 0
 
     def sessions(self) -> list[dict[str, Any]]:
-        """Describe every running session: the one this runner hosts, while it runs."""
-        if self._sm.current_state not in _RUNNING_STATES:
+        """Describe the session this runner hosts while it runs or closes, as a list."""
+        if self._sm.current_state not in _RUNNING_STATES | {SessionState.CLOSING}:
             return []
         return [self.descriptor()]
 

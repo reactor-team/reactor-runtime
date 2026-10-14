@@ -214,6 +214,18 @@ async def test_session_reads_and_stops_are_addressed_by_id() -> None:
         await _until(lambda: rt.host.capacity() == (_SLOTS, _SLOTS - 1))
 
 
+async def test_a_closing_session_is_listed_as_it_is_described() -> None:
+    async with hosting() as rt:
+        await _start(rt.client, session_id="alpha")
+        await _start(rt.client, session_id="beta")
+
+        rt.host.stop_session(session_id="alpha")
+
+        assert _states(rt.host) == {"alpha": "closing", "beta": "waiting"}
+        described = rt.host.descriptor("alpha")
+        assert described["state"] == "closing"
+
+
 async def test_transport_routes_resolve_the_addressed_session() -> None:
     async with hosting() as rt:
         await _start(rt.client, session_id="alpha")

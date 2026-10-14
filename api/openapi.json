@@ -487,7 +487,7 @@
         "type": "object"
       },
       "SessionList": {
-        "description": "Every running session, and the capacity they fill.",
+        "description": "Every session the process holds, running or closing, and the capacity they fill.",
         "properties": {
           "capacity": {
             "$ref": "#/components/schemas/Capacity"
