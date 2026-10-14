@@ -156,9 +156,9 @@ class ClientConnectionStat:
     e.g. ``"available_outgoing_bitrate_bps"`` (the client engine's own
     estimate of outgoing headroom — the encoder's own belief, not a
     measurement of the user's internet) or ``"time_to_connect_ms"`` (how long
-    this connection waited to establish, start to "ready") — the latter a
-    one-time fact a client reports once rather than repeating on every batch,
-    which is why :class:`ClientStatsBatch` carries this as optional.
+    this connection waited to establish, start to "ready"). A client sends
+    this reading on every batch; a one-time fact like ``"time_to_connect_ms"``
+    is in ``metrics`` only on the first batch after connecting.
 
     Attributes:
         timestamp: When the client took this reading, on its own clock, in
@@ -179,15 +179,14 @@ class ClientStatsBatch:
 
     Mirrors the wire's ``ClientStats`` message: per-track readings alongside
     a fact set that applies to the whole connection rather than any one
-    track. A client typically sends ``connection_stat`` once, on its first
-    batch after connecting, and omits it on every batch after — most batches
-    therefore carry ``track_stats`` only.
+    track. A client sends ``connection_stat`` on every batch; a client that
+    predates it sends none.
 
     Attributes:
         track_stats: One reading per track this batch reports on. Empty on a
             batch that carries only ``connection_stat``.
-        connection_stat: This batch's connection-wide reading, or ``None`` on
-            a batch that doesn't carry one — the common case.
+        connection_stat: This batch's connection-wide reading, or ``None``
+            from a client that does not send one.
     """
 
     track_stats: Sequence[ClientTrackStat]

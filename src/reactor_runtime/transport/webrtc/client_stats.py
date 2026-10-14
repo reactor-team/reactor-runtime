@@ -9,8 +9,6 @@ it to the sink as plain values, next to the peer stats it samples on its own
 
 from __future__ import annotations
 
-from typing import Any
-
 from google.protobuf.message import DecodeError
 
 from reactor_runtime.core import (
@@ -108,14 +106,14 @@ def _decode_frame_stages(stat: platform_pb2.ClientTrackStat) -> tuple[FrameStage
     )
 
 
-def _decode_codec_implementation(stat: platform_pb2.ClientTrackStat) -> dict[str, Any]:
+def _decode_codec_implementation(
+    stat: platform_pb2.ClientTrackStat,
+) -> tuple[str, bool | None]:
     """Read which encoder or decoder a video track runs; an audio track has none."""
     if stat.kind != platform_pb2.TrackKind.TRACK_KIND_VIDEO:
-        return {}
-    return {
-        "codec_implementation": stat.codec_implementation,
-        "hardware_codec": stat.hardware_codec if stat.HasField("hardware_codec") else None,
-    }
+        return "", None
+    hardware = stat.hardware_codec if stat.HasField("hardware_codec") else None
+    return stat.codec_implementation, hardware
 
 
 def _decode_environment(stat: platform_pb2.ClientConnectionStat) -> ClientEnvironment | None:
@@ -135,20 +133,23 @@ def _decode_environment(stat: platform_pb2.ClientConnectionStat) -> ClientEnviro
 
 def _decode_client_stats(message: platform_pb2.ClientStats) -> ClientStatsBatch:
     """Convert a decoded ``ClientStats`` batch into plain values."""
-    track_stats = [
-        ClientTrackStat(
-            timestamp=stat.timestamp,
-            track_name=stat.track_name,
-            kind=_TRACK_KINDS.get(stat.kind),
-            direction=_TRACK_DIRECTIONS.get(stat.direction),
-            codec=_decode_codec(stat),
-            paused=stat.paused,
-            metrics=dict(stat.metrics),
-            frame_stages=_decode_frame_stages(stat),
-            **_decode_codec_implementation(stat),
+    track_stats: list[ClientTrackStat] = []
+    for stat in message.track_stats:
+        codec_implementation, hardware_codec = _decode_codec_implementation(stat)
+        track_stats.append(
+            ClientTrackStat(
+                timestamp=stat.timestamp,
+                track_name=stat.track_name,
+                kind=_TRACK_KINDS.get(stat.kind),
+                direction=_TRACK_DIRECTIONS.get(stat.direction),
+                codec=_decode_codec(stat),
+                paused=stat.paused,
+                metrics=dict(stat.metrics),
+                frame_stages=_decode_frame_stages(stat),
+                codec_implementation=codec_implementation,
+                hardware_codec=hardware_codec,
+            )
         )
-        for stat in message.track_stats
-    ]
     connection_stat = None
     if message.HasField("connection_stat"):
         connection_stat = ClientConnectionStat(

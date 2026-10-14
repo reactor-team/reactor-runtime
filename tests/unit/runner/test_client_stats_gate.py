@@ -173,6 +173,52 @@ def test_to_detail_carries_the_readings_and_leaves_out_values_json_cannot_carry(
     }
 
 
+def test_to_detail_carries_the_environment_and_a_video_tracks_codec() -> None:
+    environment = ClientEnvironment(
+        sdk_type="swift",
+        sdk_version="1.4.0",
+        os="ios",
+        os_version="18.1",
+        arch="aarch64",
+        device_model="iPhone15,2",
+    )
+    batch = ClientStatsBatch(
+        track_stats=[_track(codec_implementation="VideoToolbox", hardware_codec=True)],
+        connection_stat=ClientConnectionStat(
+            timestamp=1_700_000_000_000, metrics={}, environment=environment
+        ),
+    )
+
+    assert to_detail(batch) == {
+        "track_stats": [
+            {
+                "timestamp": 1_700_000_000_000,
+                "track_name": "main_video",
+                "kind": "video",
+                "direction": "recvonly",
+                "codec": "VP9",
+                "paused": False,
+                "metrics": {"frames_per_second": 30.0},
+                "frame_stages": [],
+                "codec_implementation": "VideoToolbox",
+                "hardware_codec": True,
+            }
+        ],
+        "connection_stat": {
+            "timestamp": 1_700_000_000_000,
+            "metrics": {},
+            "environment": {
+                "sdk_type": "swift",
+                "sdk_version": "1.4.0",
+                "os": "ios",
+                "os_version": "18.1",
+                "arch": "aarch64",
+                "device_model": "iPhone15,2",
+            },
+        },
+    }
+
+
 def test_to_detail_without_a_connection_reading() -> None:
     assert to_detail(_batch())["connection_stat"] is None
 
