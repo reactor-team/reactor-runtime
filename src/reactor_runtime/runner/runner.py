@@ -2071,6 +2071,19 @@ class Runner(ServiceComponent, ConnectionSink):
                 self._emit_handler_failure, failure, conn_id, request_id, captured
             )
 
+    @property
+    def _runs_unattended(self) -> bool:
+        """Whether the session generates its steps with no client of its own.
+
+        A streamed session with a step count does: the system client occupies
+        it and the model streams until the steps are done. A stepped session
+        steps only when a client asks, so with or without a step count it
+        waits for a client, and its orphan timer runs, as any live session's
+        does.
+        """
+        start = self._session_start
+        return start.steps is not None and start.generation is not Generation.STEPPED
+
     def _fails_remaining_steps(self, conn_id: ConnId, request_id: str | None) -> bool:
         """Whether a failure of this command ends a session with a step count.
 
@@ -2079,7 +2092,7 @@ class Runner(ServiceComponent, ConnectionSink):
         its caller.
         """
         return (
-            self._session_start.steps is not None
+            self._runs_unattended
             and conn_id == SYSTEM_CONN_ID
             and request_id in self._starting_request_ids
         )
@@ -2297,10 +2310,10 @@ class Runner(ServiceComponent, ConnectionSink):
         been submitted. Only a start calls this, so a client that joins or
         reconnects later does not apply the list again.
 
-        The system client occupies the session only when the session has a step
-        count, because it is then the session's only client and the session
-        must stream until its steps are done. A session without a step count
-        waits for a client: applying its starting input leaves it waiting, and
+        The system client occupies the session only when a streamed session has
+        a step count, because it is then the session's only client and the
+        session must stream until its steps are done. Any other session, a
+        stepped one included, waits for a client: applying its starting input leaves it waiting, and
         its orphan timer keeps running from the start, as it does for any
         session that no client has joined yet.
         """
@@ -2310,9 +2323,9 @@ class Runner(ServiceComponent, ConnectionSink):
         self._starting_request_ids = set()
         self._steps_failed = False
         start = self._session_start
-        if start.starting_input is not None or start.steps is not None:
+        if start.starting_input is not None or self._runs_unattended:
             self._connections.register(
-                SystemConnection(), system=True, occupies=start.steps is not None
+                SystemConnection(), system=True, occupies=self._runs_unattended
             )
         if start.starting_input is None or self._loop is None:
             done.set()
@@ -2332,10 +2345,10 @@ class Runner(ServiceComponent, ConnectionSink):
         its uploads resolved, and is journalled exactly as a client's command
         is. Its arguments were checked against the contract when the session
         started, so what can still fail here is what only running it shows,
-        such as an upload whose bytes never arrive. In a session without a step
-        count, that command is journalled as an error and the rest still run.
-        A session with a step count has no client to wait for a correction, so
-        the first such command ends it with
+        such as an upload whose bytes never arrive. In a session that waits for
+        a client, that command is journalled as an error and the rest still
+        run. A streamed session with a step count has no client to wait for a
+        correction, so the first such command ends it with
         :attr:`~reactor_runtime.core.model.EndReason.START_REFUSED`, the
         refusal as its close reason, and the rest are not sent.
         One that names an upload waits up to the orphan timeout for the bytes,
@@ -2343,8 +2356,8 @@ class Runner(ServiceComponent, ConnectionSink):
         list stops when its session ends.
 
         Once the list is submitted, the system client leaves a session that
-        has no step count, so the session waits for a client of its own as any
-        live session does. A session with a step count keeps it until the end.
+        waits for a client, so it waits for one of its own as any live session
+        does. A streamed session with a step count keeps it until the end.
         Then :class:`StartingInputApplied` follows the last command into the
         model, which opens its step loop: no step runs before the starting
         input has landed, and a live session takes its first step only once a
@@ -2372,7 +2385,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 )
                 if (
                     refusal is not None
-                    and self._session_start.steps is not None
+                    and self._runs_unattended
                     and self._starting_input_done is done
                     and self._sm.current_state in _RUNNING_STATES
                 ):
@@ -2387,7 +2400,7 @@ class Runner(ServiceComponent, ConnectionSink):
                     return
         finally:
             if self._starting_input_done is done and self._sm.current_state in _RUNNING_STATES:
-                if self._session_start.steps is None:
+                if not self._runs_unattended:
                     self._connections.drop(SYSTEM_CONN_ID)
                 if self._bridge is not None:
                     self._bridge.dispatch_reactor_event(StartingInputApplied())

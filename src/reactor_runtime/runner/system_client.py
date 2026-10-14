@@ -1,11 +1,12 @@
 """The system client — the connection the runtime opens to a session itself.
 
-A session started with a starting input or a step count gets one. It is the
-sender of the starting commands, so a handler addresses a real client instead
-of none. In a session with a step count it occupies the session for its whole
-run, so the model generates with no other client connected and the session
-streams. In a session without one it does not occupy the session: its open and
-close leave the session waiting for a client. It takes connection id ``0``, which
+A session started with a starting input, or a streamed session with a step
+count, gets one. It is the sender of the starting commands, so a handler
+addresses a real client instead of none. In a streamed session with a step
+count it occupies the session for its whole run, so the model generates with no
+other client connected and the session streams. In any other session, a stepped
+one included, it does not occupy the session: its open and close leave the
+session waiting for a client. It takes connection id ``0``, which
 no transport mints, and carries no media, so the media fan-out skips it and a
 model is never held to a playout rate nobody is watching. Anything sent to it
 is dropped.
