@@ -34,6 +34,10 @@ message TrackFrames {
   string track = 1;
   TrackKind kind = 2;
   repeated Frame frames = 3;
+  // The rate the frames play at: frames per second for video, samples per
+  // second for audio. A step's video rate is that step's own and can differ
+  // between steps. Zero when the sender does not say.
+  double rate = 4;
 }
 
 // Request to run one step of a stepped session. Every field is optional: an

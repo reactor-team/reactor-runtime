@@ -431,7 +431,7 @@ _STEP_MESSAGES = [
             request_id="s1",
             kind=K.MESSAGE_KIND_RESPONSE,
             step_result=step_pb2.StepResult(
-                index=1, tracks=[step_pb2.TrackFrames(track="main_video")]
+                index=1, tracks=[step_pb2.TrackFrames(track="main_video", rate=24.0)]
             ),
         ),
         SERVER,
