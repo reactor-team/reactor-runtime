@@ -1299,6 +1299,7 @@
     },
     "/sessions/{sid}/events": {
       "get": {
+        "description": "Stream the facts of the session `sid` from the egress journal, replayed from `since` or `Last-Event-ID`. The id is not checked against the sessions the runtime knows: an unknown id is answered 200 with a stream that stays open and carries no event until a session of that id is journaled.",
         "operationId": "session_events_sessions__sid__events_get",
         "parameters": [
           {
@@ -1992,16 +1993,6 @@
               }
             },
             "description": "Bad Request"
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
-                }
-              }
-            },
-            "description": "Not Found"
           },
           "409": {
             "content": {
