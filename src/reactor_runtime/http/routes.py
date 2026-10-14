@@ -73,7 +73,7 @@ class Capacity(BaseModel):
 
 
 class SessionList(BaseModel):
-    """Every running session, and the capacity they fill."""
+    """Every session the process holds, running or closing, and the capacity they fill."""
 
     capacity: Capacity
     sessions: list[dict[str, Any]]

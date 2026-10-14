@@ -27,6 +27,14 @@ async def test_sessions_lists_the_running_session_and_the_capacity(harness: Harn
     assert [entry["session_id"] for entry in listed["sessions"]] == [SESSION_ID]
 
 
+async def test_sessions_lists_the_session_while_it_closes(harness: Harness) -> None:
+    await harness.client.post("/start_session", json={})
+
+    harness.runner.stop_session()
+
+    assert [entry["state"] for entry in harness.runner.sessions()] == ["closing"]
+
+
 async def test_session_reads_by_either_id_and_refuses_another(harness: Harness) -> None:
     await harness.client.post("/start_session", json={"session_id": "own-id"})
 

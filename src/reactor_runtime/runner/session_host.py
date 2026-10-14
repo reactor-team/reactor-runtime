@@ -78,6 +78,10 @@ from reactor_runtime.upload_store import UnknownUploadError, UploadAlreadyComple
 
 logger = get_logger(__name__)
 
+# The states of a slot that holds no session. Every other state, closing
+# included, is a session the host still answers for by id.
+_UNOCCUPIED_STATES = frozenset({SessionState.READY, SessionState.CREATED, SessionState.TERMINATED})
+
 
 class SessionIdRequiredError(RuntimeError):
     """Raised when a request that must name a session does not.
@@ -650,11 +654,7 @@ class SessionHost:
 
     def _running_slot(self, sid: str) -> _SessionSlot | None:
         for slot in self._slots:
-            if slot.hosted_id == sid and slot.sm_state not in (
-                SessionState.READY,
-                SessionState.CREATED,
-                SessionState.TERMINATED,
-            ):
+            if slot.hosted_id == sid and slot.sm_state not in _UNOCCUPIED_STATES:
                 return slot
         return None
 
@@ -726,8 +726,10 @@ class SessionHost:
         return self._require_slot(session_id).descriptor()
 
     def sessions(self) -> list[dict[str, Any]]:
-        """Describe every running session."""
-        return [slot.descriptor() for slot in self._slots if slot.sm_state in _RUNNING_STATES]
+        """Describe every session a slot holds: each running or closing one."""
+        return [
+            slot.descriptor() for slot in self._slots if slot.sm_state not in _UNOCCUPIED_STATES
+        ]
 
     def schema(self) -> dict[str, Any]:
         """Return the model's command contract as an OpenAPI document."""
