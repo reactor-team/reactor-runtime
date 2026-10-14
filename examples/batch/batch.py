@@ -8,10 +8,10 @@ The runtime hosts up to ``max_sessions`` sessions in this one process and hands
 network runs once for all of them: the latents are stacked into one batch, and
 the frames come back split per session.
 
-Everything per session lives where a single-session model keeps it.
 ``self.state`` is the calling session's state in a handler, a hook, and
-``process_input``; the session's latent is kept by its id, made in
-``@session_started`` and dropped in ``@session_ended``.
+``process_input``. Every other attribute is shared by all sessions and
+outlives each one, so the session's latent is kept in a dict by its id, made
+in ``@session_started`` and dropped in ``@session_ended``.
 
 The network runs on PyTorch when it is installed, on the GPU when there is
 one, and on NumPy otherwise, so the example also runs where neither PyTorch
