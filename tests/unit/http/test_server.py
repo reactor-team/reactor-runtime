@@ -1,4 +1,5 @@
 import asyncio
+import socket
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -91,6 +92,32 @@ async def test_start_drain_stop_lifecycle() -> None:
         await server.drain()
         assert server._server is not None
         assert server._server.should_exit is True
+        await asyncio.wait_for(server.stop(), timeout=5.0)
+
+
+async def test_serves_a_connection_queued_on_a_listener_bound_before_it_started() -> None:
+    listener = socket.create_server(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    server = HttpServer(
+        RuntimeConfig(model_ref="fake:Model", host="127.0.0.1", port=port),
+        _runner(),
+        [],
+        Health.healthy,
+        _metrics(),
+        listener=listener,
+    )
+    # A probe that connects before the server runs waits in the backlog.
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    writer.write(b"GET /health HTTP/1.1\r\nHost: runtime\r\nConnection: close\r\n\r\n")
+    await writer.drain()
+
+    await server.start()
+    try:
+        response = await asyncio.wait_for(reader.read(), timeout=5.0)
+        assert response.startswith(b"HTTP/1.1 200")
+    finally:
+        writer.close()
+        await server.drain()
         await asyncio.wait_for(server.stop(), timeout=5.0)
 
 

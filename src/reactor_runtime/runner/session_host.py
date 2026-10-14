@@ -200,8 +200,9 @@ class _SessionSlot(Runner):
         host: SessionHost,
         events: EventStream,
         step_store: StepStore | None,
+        load_started: float | None,
     ) -> None:
-        super().__init__(cfg, metrics)
+        super().__init__(cfg, metrics, load_started=load_started)
         self._host = host
         self._events = events
         self._step_store = step_store
@@ -338,7 +339,14 @@ class SessionHost:
     name = "runner"
     depends_on: tuple[str, ...] = ()
 
-    def __init__(self, cfg: RuntimeConfig, metrics: RuntimeMetrics, slots: int) -> None:
+    def __init__(
+        self,
+        cfg: RuntimeConfig,
+        metrics: RuntimeMetrics,
+        slots: int,
+        *,
+        load_started: float | None = None,
+    ) -> None:
         """Build *slots* session slots over one shared journal and step store.
 
         The first slot observes on *metrics*, the registry the process serves;
@@ -348,6 +356,8 @@ class SessionHost:
             cfg: The configuration for this runtime process.
             metrics: The registry the process serves.
             slots: How many sessions to host at once, at least two.
+            load_started: When the assembly began importing the model's
+                class, as for :class:`Runner`.
         """
         self._cfg = cfg
         self._events = EventStream()
@@ -361,6 +371,7 @@ class SessionHost:
                 host=self,
                 events=self._events,
                 step_store=self._step_store,
+                load_started=load_started,
             )
             for index in range(slots)
         ]

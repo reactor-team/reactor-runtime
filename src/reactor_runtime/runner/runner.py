@@ -295,7 +295,13 @@ class Runner(ServiceComponent, ConnectionSink):
     name = "runner"
     depends_on: tuple[str, ...] = ()
 
-    def __init__(self, cfg: RuntimeConfig, metrics: RuntimeMetrics | None = None) -> None:
+    def __init__(
+        self,
+        cfg: RuntimeConfig,
+        metrics: RuntimeMetrics | None = None,
+        *,
+        load_started: float | None = None,
+    ) -> None:
         """Wire the session machinery and local components that need no model.
 
         The bridge is built later, in :meth:`start`, once the model class is
@@ -307,8 +313,13 @@ class Runner(ServiceComponent, ConnectionSink):
                 built without one records on a registry of its own, so the
                 instruments are always live and only the assembled process
                 serves them.
+            load_started: The :func:`time.monotonic` reading at which the
+                assembly began importing the model's class ahead of
+                :meth:`start`, so the measured load includes that import.
+                ``None`` measures from :meth:`start`.
         """
         self._cfg = cfg
+        self._load_started = load_started
         self._metrics = metrics or RuntimeMetrics(version=_server_version(), model=cfg.model_ref)
         self._sm = SessionStateMachine()
         # The log's state context starts at the machine's starting state, so the
@@ -471,7 +482,7 @@ class Runner(ServiceComponent, ConnectionSink):
         # window rather than nothing until READY. A self-loop on CREATED: no
         # state change, no side effect (the bridge is not built yet).
         self._sm.send(SessionEvent.INITIALIZING)
-        started_at = time.monotonic()
+        started_at = self._load_started if self._load_started is not None else time.monotonic()
 
         def load_failed() -> None:
             self._model_metrics.load_failed(since=started_at)

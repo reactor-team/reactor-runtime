@@ -1,4 +1,5 @@
 import logging
+import socket
 from pathlib import Path
 from typing import cast
 
@@ -12,6 +13,7 @@ from reactor_runtime.runner import Runner
 from reactor_runtime.serve import (
     _apply_env,
     _assemble,
+    _listen,
     _log_level_from_env,
     _port_range_from_env,
     _version,
@@ -221,12 +223,48 @@ async def test_serve_reports_the_service_exit_status_and_bounds_the_exit(
 ) -> None:
     stub = _ServiceStub(exit_code=1)
     monkeypatch.setattr("reactor_runtime.serve._assemble", lambda *a, **k: stub)
+    monkeypatch.setattr("reactor_runtime.serve._listen", lambda cfg: None)
 
     code = await serve(RuntimeConfig(model_ref="fake:Model"), peer_factory=_UNUSED)
 
     assert code == 1
     # The teardown after the loop is the caller's; serve arms its deadline.
     assert stub.bounded
+
+
+async def test_serve_listens_before_it_imports_the_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order: list[str] = []
+    listening: list[socket.socket] = []
+
+    def listen(cfg: RuntimeConfig) -> socket.socket:
+        order.append("listen")
+        listening.append(_listen(cfg))
+        return listening[0]
+
+    def capacity(ref: str) -> int:
+        order.append("import")
+        return 1
+
+    async def run(self: Service) -> None: ...
+
+    monkeypatch.setattr("reactor_runtime.serve._listen", listen)
+    monkeypatch.setattr("reactor_runtime.serve.batched_capacity", capacity)
+    monkeypatch.setattr(Service, "run", run)
+    monkeypatch.setattr(Service, "bound_process_exit", lambda self: None)
+
+    try:
+        await serve(
+            RuntimeConfig(model_ref="fake:Model", host="127.0.0.1", port=0), peer_factory=_UNUSED
+        )
+    finally:
+        for sock in listening:
+            sock.close()
+
+    # A probe that connects while the model's class imports is queued on the
+    # bound socket and answered once the server runs, rather than refused.
+    assert order == ["listen", "import"]
 
 
 def _fake_main_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int) -> None:

@@ -11,6 +11,7 @@ routers and acceptors it mounts.
 from __future__ import annotations
 
 import asyncio
+import socket
 from collections.abc import Callable
 
 import uvicorn
@@ -128,6 +129,8 @@ class HttpServer(ServiceComponent):
         transports: list[TransportRouter],
         process_health: Callable[[], Health],
         metrics: RuntimeMetrics,
+        *,
+        listener: socket.socket | None = None,
     ) -> None:
         """Assemble the app from the route groups and each transport's routes.
 
@@ -140,8 +143,12 @@ class HttpServer(ServiceComponent):
                 process rather than any one component.
             metrics: The registry ``/metrics`` renders, injected by the assembly
                 that also hands it to the components which observe on it.
+            listener: A socket already bound to the configured address and
+                listening, which the server takes over instead of binding
+                one; connections queued on it are answered once it serves.
         """
         self._cfg = cfg
+        self._listener = listener
         self._app = build_app(runner, transports, process_health, metrics)
         self._server: uvicorn.Server | None = None
         self._serve_task: asyncio.Task[None] | None = None
@@ -167,7 +174,8 @@ class HttpServer(ServiceComponent):
             timeout_graceful_shutdown=_HTTP_SHUTDOWN_SECONDS,
         )
         self._server = _ServerWithoutSignals(config)
-        self._serve_task = asyncio.create_task(self._server.serve())
+        sockets = [self._listener] if self._listener is not None else None
+        self._serve_task = asyncio.create_task(self._server.serve(sockets))
         await self._await_bound(self._server, self._serve_task)
 
     @staticmethod
