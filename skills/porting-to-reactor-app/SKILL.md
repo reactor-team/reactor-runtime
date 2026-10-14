@@ -304,6 +304,37 @@ through each `@event` and each lifecycle hook:
   application does, when the session that used it ends.
 - Any handler that read `self.engine.<attribute>` reads it off the last step
   result instead, or asks the model class for a method that returns it.
+- A handler that refused by sending its own error message and returning
+  raises `CommandError(code, message)` instead, with a stable `snake_case`
+  code per reason, and its description names the codes. The raise answers
+  the caller on its own request, tells no other client, and lets the runtime
+  end a session started with a step count when a starting command fails. A
+  sent message does none of that: the runtime acknowledges the command as a
+  success. Catch what a check inside the handler raises (a decoder's
+  `ValueError`) and raise a `CommandError` with a code of its own; any other
+  exception reaches the client as an internal error with a fixed message.
+
+  One case keeps the message for a while. When the model's published schema
+  already declares that error message, clients generated from it listen for
+  it, and removing a message is a breaking change. Keep sending it before
+  the raise until the next major release, then delete it:
+
+  ```python
+  from reactor_runtime import CommandError
+
+  async def _refuse(self, command: str, code: str, reason: str) -> CommandError:
+      # The published contract carries this message until the next major release.
+      await self.send(CommandErrorMessage(command=command, reason=reason))
+      return CommandError(code, reason)
+
+  # in a handler:
+  raise await self._refuse("enqueue", "queue_full", "The generation queue is full.")
+  ```
+
+  `CommandErrorMessage` is the model's own `ModelMessage` class, imported
+  under another name so it does not shadow the runtime's `CommandError`; its
+  wire name stays what the schema publishes. A model that publishes no such
+  message raises and sends nothing.
 
 Counters the old loop kept on the state (`_step_idx`, `_frames_generated`)
 usually belong to the model, which counts its own steps and exposes the count
@@ -331,6 +362,8 @@ If any of these survive, the port is not done:
 
 - `Idle`, `yield`, and `inference()` itself.
 - `_start_requested`, `_do_reset`, or any flag a handler sets for the loop.
+- A handler that refuses by sending an error message and returning, except
+  the send-then-raise a published error message needs (Step 5).
 - Hand-written `pause` / `resume` over a private flag.
 - `await self.connected.wait()` and `while self.connected.is_set()`.
 - `asyncio.sleep` used to yield the loop.

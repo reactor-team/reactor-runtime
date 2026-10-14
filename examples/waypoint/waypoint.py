@@ -191,7 +191,9 @@ class Waypoint(ReactorApp):
         name="set_image",
         description=(
             "Upload the seed frame. The next step starts a new world from it. "
-            "PNG or JPEG; the image is fitted to 1280x720."
+            "PNG or JPEG; the image is fitted to 1280x720. Fails with "
+            "`unsupported_media` when the upload is not an image, or "
+            "`undecodable_image` when it cannot be decoded."
         ),
     )
     async def set_image(

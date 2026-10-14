@@ -283,6 +283,32 @@ worth having; a stamp minus a local clock reading is mostly the offset
 between two clocks that drift apart, so a latency computed that way
 measures the wrong thing.
 
+## A refused command raises `CommandError`
+
+A handler refuses a command by raising `CommandError(code, message)` from
+`reactor_runtime`. The runtime answers that command's request with the code
+and the message, so the caller learns on its own call and no other client in
+the session hears about it. A handler that sends its own error message and
+returns is acknowledged as a success: the caller resolves as if the command
+took effect, every other client gets a message about a command it never
+sent, and a session started with a step count keeps running. Any other
+exception reaches the client as an internal error with a fixed message.
+
+```python
+from reactor_runtime import CommandError
+
+@event(name="pause", description="Pause generation. Fails with `not_generating` when nothing runs.")
+async def pause(self) -> GenerationPaused:
+    if not self.state._started:
+        raise CommandError("not_generating", "Not generating.")
+    return GenerationPaused(chunk_index=self.state._current_chunk_idx)
+```
+
+When the published schema already declares the error message the handler
+used to send, keep sending it before the raise until the next major release;
+[`porting-to-reactor-app`](../porting-to-reactor-app/SKILL.md) (Step 5) shows
+the pattern.
+
 ## What did not change
 
 A model that writes its own `async def run()` driving `await self.emit(...)`

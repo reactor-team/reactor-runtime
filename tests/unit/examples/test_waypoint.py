@@ -363,9 +363,28 @@ async def test_set_image_rejects_a_file_that_is_not_an_image() -> None:
     app, _, _ = _app()
     await app._dispatch_reactor_event(SessionStarted("s"))
     upload = UploadedFile(name="notes.txt", mime_type="text/plain", data=b"hello")
-    with pytest.raises(CommandError):
+    with pytest.raises(CommandError) as refused:
         await app.set_image(upload)
+    assert refused.value.code == "unsupported_media"
     assert app.state._seed is None
+
+
+async def test_set_image_rejects_an_image_it_cannot_decode() -> None:
+    from reactor_runtime import CommandError
+
+    app, _, _ = _app()
+    await app._dispatch_reactor_event(SessionStarted("s"))
+    upload = UploadedFile(name="seed.png", mime_type="image/png", data=b"not a png")
+    with pytest.raises(CommandError) as refused:
+        await app.set_image(upload)
+    assert refused.value.code == "undecodable_image"
+    assert app.state._seed is None
+
+
+def test_set_image_names_its_failure_codes() -> None:
+    description = ModelContract.of(Waypoint).commands["set_image"].description
+    assert "`unsupported_media`" in description
+    assert "`undecodable_image`" in description
 
 
 async def test_reset_and_session_end_reach_the_model_half() -> None:
