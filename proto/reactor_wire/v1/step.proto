@@ -39,14 +39,12 @@ message TrackFrames {
 // Request to run one step of a stepped session. Every field is optional: an
 // empty request runs the step on the model's current state, which commands
 // sent before it may have changed. The runtime applies the request as
-// individual calls, in order: the state, then the commands, then the input
-// frames, and then runs the step. A call that fails refuses the step; the calls
+// individual calls, in order: the state, then the commands, then the media
+// input, and then runs the step. A call that fails refuses the step; the calls
 // applied before it stay applied.
 //
-// Every request ends in exactly one response, with its request_id: a
-// StepResult once the step has run, whether it worked or failed, or an Error:
-// "step_refused" when the request or the model refuses the step, and
-// "step_result_too_large" when the result does not fit in one message.
+// Every request ends in exactly one response, a StepResult with the request's
+// request_id.
 message RequestStep {
   // Values for the model's state fields, keyed by field name. Each key runs as
   // the model's set_<key> command, before commands.
@@ -54,7 +52,7 @@ message RequestStep {
   // Commands to run after the state, in order.
   repeated Command commands = 2;
   // Frames to write to the model's input tracks, one entry per track.
-  repeated TrackFrames inputs = 3;
+  repeated TrackFrames media_input = 3;
 }
 
 // A file the model kept with a step, beside its media. The bytes are not in
@@ -70,21 +68,39 @@ message StepFileRef {
   uint64 size = 3;
 }
 
-// The outcome of one step: what the model produced, per output track. The
-// response to a RequestStep.
+// Why a step has no usable result.
+enum StepFailureCode {
+  // The step ran and worked.
+  STEP_FAILURE_CODE_UNSPECIFIED = 0;
+  // The request, one of its calls, or the model's process_input() refused the
+  // step. The step did not run and takes no number.
+  STEP_FAILURE_CODE_REFUSED = 1;
+  // The session cannot run a step yet. The step did not run and takes no
+  // number.
+  STEP_FAILURE_CODE_NOT_READY = 2;
+  // The step ran, and the model reported a failure. It takes a number.
+  STEP_FAILURE_CODE_FAILED = 3;
+  // The step ran, but its result does not fit in one message on this
+  // connection. It takes a number, and the result carries no media.
+  STEP_FAILURE_CODE_RESULT_TOO_LARGE = 4;
+}
+
+// The outcome of one step request: what the model produced, per output track,
+// or why it produced nothing. The response to a RequestStep.
 message StepResult {
-  // The step's number in the session, counted from 1.
+  // The step's number in the session, counted from 1. Zero when the step did
+  // not run.
   uint64 index = 1;
   repeated TrackFrames tracks = 2;
   // Seconds the step's generate() took, or the time the model reported for the
   // step. A saved step records the same value as generate_s in its
-  // result.json.
+  // result.json. Zero when the step did not run.
   double elapsed = 3;
   // The extra files the model kept with the step. Empty when the step kept
-  // none, or when its result is not saved.
+  // none, failed, or is not saved.
   repeated StepFileRef files = 4;
-  // Why the step failed, when it ran and reported a failure; unset when it
-  // worked. A step the request or the model refuses never runs, so it is
-  // answered with an Error and gets no result.
+  // Why the step failed, in words; unset when it worked.
   optional string error = 5;
+  // What kind of failure error describes; unspecified when the step worked.
+  StepFailureCode failure_code = 6;
 }
