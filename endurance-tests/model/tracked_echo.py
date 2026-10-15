@@ -63,10 +63,21 @@ def alive_batches() -> int:
         return len(_batches)
 
 
-def tracked_ids() -> set[int]:
-    """The ids of the emitted batches still alive."""
+def track(batch: np.ndarray) -> None:
+    """Keep a weak reference to *batch*, counted as freed by a collection or not."""
     with _lock:
-        return {id(batch) for ref in _batches.values() if (batch := ref()) is not None}
+        ref = weakref.ref(batch, _on_freed)
+        _batches[id(ref)] = ref
+
+
+def tracked_batches() -> list[np.ndarray]:
+    """Return the emitted batches still alive.
+
+    The list holds them strongly, so their ids stay theirs while the caller
+    has it; drop it before a collection whose frees should count.
+    """
+    with _lock:
+        return [batch for ref in _batches.values() if (batch := ref()) is not None]
 
 
 def freed_by_gc() -> int:
@@ -92,7 +103,5 @@ class TrackedEcho(Echo):
             batch = video
         else:
             return output
-        with _lock:
-            ref = weakref.ref(batch, _on_freed)
-            _batches[id(ref)] = ref
+        track(batch)
         return output

@@ -1,9 +1,10 @@
 """Boot the runtime the way ``reactor-runtime`` does, plus a probe route.
 
-Run with the model directory as the working directory. It wraps
-``build_app`` so the served app also mounts ``GET /_endurance/probe``, then
-hands over to ``serve.main()``. The published package is not changed: the
-route exists only in a runtime started from here.
+Run as a script with the model directory as the working directory. It wraps
+``build_app`` so the served app also mounts ``GET /_endurance/probe``, checks
+every media pacer as it stops, then hands over to ``serve.main()``. The
+published package is not changed, and importing this module changes nothing:
+the route and the check exist only in a runtime started from here.
 """
 
 from __future__ import annotations
@@ -28,9 +29,6 @@ from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.runner import Runner
 from reactor_runtime.transport.router import TransportRouter
 
-# examples/echo, which the tracked model subclasses.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "examples" / "echo"))
-
 _build_app = http_server.build_app
 
 # Pacers that have been stopped, weakly: a probe re-checks the ones still alive.
@@ -52,12 +50,14 @@ _OPAQUE = (
 )
 
 
-def _reaches_output(root: object, batch_ids: set[int]) -> bool:
-    """Whether *root*'s own data reaches one of the model's output batches.
+def reaches_output(root: object, batches: list[np.ndarray]) -> bool:
+    """Return whether *root*'s own data reaches one of *batches*.
 
     Walks what *root* refers to, following an array view to the array it views,
-    and never through code, frames, modules or threads.
+    and never through code, frames, modules or threads. *batches* is held for
+    the walk, so an id cannot be freed and reused by another object meanwhile.
     """
+    batch_ids = {id(batch) for batch in batches}
     if not batch_ids:
         return False
     seen: set[int] = set()
@@ -89,7 +89,7 @@ def _install_pacer_check() -> None:
         import tracked_echo
 
         _stopped_pacers.add(self)
-        if _reaches_output(self, tracked_echo.tracked_ids()):
+        if reaches_output(self, tracked_echo.tracked_batches()):
             _holding_after_stop += 1
 
     MediaPacer.stop = checked_stop
@@ -124,10 +124,13 @@ def build_app(
     async def probe() -> dict[str, Any]:
         import tracked_echo
 
-        batch_ids = tracked_echo.tracked_ids()
+        batches = tracked_echo.tracked_batches()
         stopped_holding = sum(
-            1 for pacer in list(_stopped_pacers) if _reaches_output(pacer, batch_ids)
+            1 for pacer in list(_stopped_pacers) if reaches_output(pacer, batches)
         )
+        # Released before collecting: a batch this list held would be freed by
+        # its refcount afterwards, not by the collection, and go uncounted.
+        del batches
         # Collect, so garbage from this cycle is counted in this cycle's
         # reading rather than whenever the next collection runs.
         gc.collect()
@@ -144,9 +147,15 @@ def build_app(
     return app
 
 
-# Swapping in the wrapper is the point; ty refuses any assignment to a module function.
-http_server.build_app = build_app  # ty: ignore[invalid-assignment]
-_install_pacer_check()
+def main() -> None:
+    """Install the probe and the pacer check, then run the runtime."""
+    # examples/echo, which the tracked model subclasses.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "examples" / "echo"))
+    # Swapping in the wrapper is the point; ty refuses any assignment to a module function.
+    http_server.build_app = build_app  # ty: ignore[invalid-assignment]
+    _install_pacer_check()
+    serve.main()
+
 
 if __name__ == "__main__":
-    serve.main()
+    main()

@@ -9,6 +9,7 @@ signaling and the v0 control messages itself, so no client SDK is involved.
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import os
 import socket
@@ -16,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -89,6 +91,9 @@ class RuntimeProcess:
                 raise RuntimeError(f"the runtime exited with {self._proc.returncode} on startup")
             try:
                 return self.get("/session")
+            # An answer that is an error is a broken runtime, not a slow one.
+            except urllib.error.HTTPError:
+                raise
             # The server accepts before the runtime can answer, so a read that
             # times out is as much "not ready yet" as a refused connection.
             except OSError:
@@ -205,7 +210,9 @@ class BareClient:
     async def _connect(self) -> None:
         _, registered = self._runtime.request("POST", f"{self._base}/connections")
         cid = registered["connection_id"]
-        ice: list[rw.IceCandidate] = []
+        # Appended from a libwebrtc thread and drained here; a deque's append and
+        # popleft are each atomic, so no candidate falls between the two.
+        ice: collections.deque[rw.IceCandidate] = collections.deque()
         control_open = threading.Event()
 
         observer = rw.PeerConnectionObserver()
@@ -265,7 +272,7 @@ class BareClient:
         while not control_open.is_set():
             if time.monotonic() > deadline:
                 raise TimeoutError("the control channel never opened")
-            pending, ice[:] = ice[:], []
+            pending = [ice.popleft() for _ in range(len(ice))]
             if pending:
                 self._runtime.request(
                     "POST",

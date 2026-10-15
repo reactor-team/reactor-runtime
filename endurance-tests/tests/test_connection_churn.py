@@ -6,7 +6,7 @@ import os
 
 from harness import BareClient, ResourceSampler, RuntimeProcess, assert_full_streams, gray_frame
 from report import LiveReporter, MetricResult, finish_and_check, now_iso
-from trends import ENDURANCE_DURATION_SECONDS, exact_metrics, trend_metrics
+from trends import ENDURANCE_DURATION_SECONDS, exact_metrics, retained_cycles, trend_metrics
 
 TEST_NAME = "connection-churn"
 DESCRIPTION = (
@@ -36,11 +36,19 @@ async def test_connection_churn(runtime: RuntimeProcess) -> None:
             received.append(await BareClient(runtime, session["session_id"]).run(frame))
             reading, _ = runtime.settled_probe()
             sampler.sample(cycle=cycle, reading=reading)
-            live.update(sampler.samples)
+            live.update(sampler.samples, retained=retained_cycles(sampler.samples))
             cycle += 1
+        if not sampler.samples:
+            raise AssertionError(
+                f"no cycle completed in {ENDURANCE_DURATION_SECONDS:g}s: "
+                "raise ENDURANCE_DURATION_SECONDS"
+            )
         metrics = [assert_full_streams(received), *exact_metrics(sampler.samples)]
         metrics += trend_metrics(sampler.samples)
     finally:
+        # A run cut short still reports the cycles it finished.
+        if not metrics and sampler.samples:
+            metrics = [assert_full_streams(received), *exact_metrics(sampler.samples)]
         finish_and_check(
             test_name=TEST_NAME,
             subject="reactor-runtime",
