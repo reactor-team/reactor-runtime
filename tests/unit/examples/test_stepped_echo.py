@@ -9,6 +9,7 @@ requests in on the data channel, step results out, and saved steps on disk.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -138,15 +139,17 @@ class Harness:
         )
 
     async def settle(self) -> None:
-        for _ in range(40):
-            await asyncio.sleep(0.005)
-            if self.queue.empty() and self.app._pending_step is None:
-                return
+        await asyncio.sleep(0.005)
+        await _until(lambda: self.queue.empty() and self.app._pending_step is None)
 
     async def stop(self) -> None:
         for task in self.tasks:
             task.cancel()
-        await asyncio.gather(*self.tasks, return_exceptions=True)
+        results = await asyncio.gather(*self.tasks, return_exceptions=True)
+        # Cancelling is how these end; anything else is a failure the test must show.
+        for result in results:
+            if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                raise result
 
 
 @pytest.fixture
@@ -188,6 +191,17 @@ async def test_a_step_sends_back_its_last_webcam_frame_untouched(harness: Harnes
     assert step.error is None
 
 
+async def test_media_input_counts_what_the_input_buffer_held(harness: Harness) -> None:
+    # The buffer holds 128 frames and drops the oldest past that, so a step
+    # carrying more reports 128, and still sends back the last one.
+    harness.step("r1", frames=[InputFrame(data=_frame(i % 256)) for i in range(130)])
+    await harness.settle()
+
+    frame, metadata = _video(harness.reports[0])
+    assert metadata["media_input"] == 128
+    np.testing.assert_array_equal(frame, _frame(129))
+
+
 async def test_a_step_without_webcam_frames_sends_a_black_frame(harness: Harness) -> None:
     harness.step("r1")
     await harness.settle()
@@ -207,6 +221,16 @@ async def test_a_last_frame_without_metadata_reports_null(harness: Harness) -> N
     assert metadata["input_metadata"] is None
 
 
+async def test_metadata_that_is_not_utf8_comes_back_exactly_in_base64(harness: Harness) -> None:
+    raw = b"\xff\x00\xfe"
+    harness.step("r1", frames=[InputFrame(data=_frame(1), metadata=raw)])
+    await harness.settle()
+
+    _, metadata = _video(harness.reports[0])
+    assert base64.b64decode(metadata["input_metadata_base64"]) == raw
+    assert metadata["input_metadata"] == raw.decode("utf-8", errors="replace")
+
+
 async def test_the_report_holds_exactly_what_the_step_saw(harness: Harness) -> None:
     harness.step(
         "r1",
@@ -223,6 +247,7 @@ async def test_the_report_holds_exactly_what_the_step_saw(harness: Harness) -> N
         "tags": ["a", "b"],
         "media_input": 1,
         "input_metadata": "m",
+        "input_metadata_base64": "bQ==",
         "overlay": None,
         "error": None,
     }
@@ -495,6 +520,7 @@ async def test_a_client_step_is_answered_with_the_frame_its_report_and_report_js
         "tags": ["t"],
         "media_input": 2,
         "input_metadata": "seq-2",
+        "input_metadata_base64": "c2VxLTI=",
         "overlay": {"name": "cat.png", "mime_type": "image/png", "size": 3},
         "error": None,
     }

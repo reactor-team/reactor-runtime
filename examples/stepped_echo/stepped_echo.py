@@ -16,6 +16,7 @@ that finds none sends the black frame.
 
 from __future__ import annotations
 
+import base64
 import json
 from dataclasses import dataclass
 from typing import Any, cast
@@ -92,7 +93,7 @@ class StepInput:
 
 
 @dataclass(frozen=True)
-class StepResult:
+class EchoResult:
     """What one step produced.
 
     Attributes:
@@ -157,7 +158,7 @@ class SteppedEcho(ReactorApp):
         self.failure = None
         return step
 
-    def generate(self, input: StepInput) -> StepResult:
+    def generate(self, input: StepInput) -> EchoResult:
         """Pick the frame to send back and write the report."""
         if input.frames:
             frame = input.frames[-1].data
@@ -166,7 +167,7 @@ class SteppedEcho(ReactorApp):
             frame = np.zeros((BLACK_SIZE, BLACK_SIZE, 3), dtype=np.uint8)
             last_metadata = None
         report = build_report(input, last_metadata)
-        return StepResult(frame=frame, report=report, failure=input.failure)
+        return EchoResult(frame=frame, report=report, failure=input.failure)
 
     async def process_output(self, outcome: StepOutcome) -> StepCompleted:
         """Send the frame with the report on it, and keep the report as a file.
@@ -177,7 +178,7 @@ class SteppedEcho(ReactorApp):
         """
         if outcome.error is not None:
             raise outcome.error
-        result: StepResult = outcome.result
+        result: EchoResult = outcome.result
         output = SteppedEchoOutput(main_video=TrackPayload(result.frame, metadata=result.report))
         if result.failure is not None:
             return StepCompleted(output=output, error=result.failure)
@@ -204,8 +205,13 @@ def build_report(input: StepInput, last_metadata: bytes | None) -> bytes:
         "label": input.label,
         "tags": list(input.tags),
         "media_input": len(input.frames),
+        # Text to read at a glance, and the exact bytes to compare: metadata is
+        # opaque, and the text replaces bytes that are not UTF-8.
         "input_metadata": (
             None if last_metadata is None else last_metadata.decode("utf-8", errors="replace")
+        ),
+        "input_metadata_base64": (
+            None if last_metadata is None else base64.b64encode(last_metadata).decode("ascii")
         ),
         "overlay": overlay,
         "error": input.failure,
