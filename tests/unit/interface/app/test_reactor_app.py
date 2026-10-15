@@ -372,8 +372,34 @@ async def test_a_command_reports_the_parts_of_its_wait() -> None:
     )
 
     [split] = parts
+    assert split["start_wait"] == 0.0
     assert split["decode"] == pytest.approx(30.0, abs=1.0)
     assert split["model_queue"] >= 20.0
     assert split["lock_wait"] >= 0.0
     total = split["decode"] + split["model_queue"] + split["lock_wait"]
     assert total == pytest.approx(split["dispatch"], abs=0.01)
+
+
+async def test_a_command_held_for_the_starting_input_reports_the_hold_apart_from_decode() -> None:
+    model = Model()
+    model._on_loop_ready()
+    parts: list[dict[str, float]] = []
+    model.bind_output(
+        broadcast=lambda message: None,
+        addressed=lambda conn_id, message, request_id: None,
+        media=lambda chunk: None,
+    )
+    model._bind_timing(
+        command_timing=lambda conn_id, dispatch_ms, handler_ms, split: parts.append(dict(split)),
+    )
+    now = time.monotonic()
+
+    await model._dispatch_command(
+        CommandEnvelope(
+            _cmd("set_value", value=1), ConnId(1001), "req-h", now - 0.05, now - 0.02, 25.0
+        )
+    )
+
+    [split] = parts
+    assert split["start_wait"] == 25.0
+    assert split["decode"] == pytest.approx(5.0, abs=1.0)

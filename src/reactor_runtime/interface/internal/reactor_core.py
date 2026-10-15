@@ -100,10 +100,11 @@ in (counted as the model counts session starts, so a report that lands after
 its session ended can be told apart), the milliseconds from its arrival at the
 runtime to the start of its handler (``dispatch``), the milliseconds its
 handler ran and its reply or failure was written (``handler``), and the parts
-of ``dispatch`` in milliseconds: ``decode`` (arrival until the command,
-decoded and validated, is put on the model's queue), ``model_queue`` (on that
-queue until the model loop takes it) and ``lock_wait`` (the wait for the step
-lock, which a running step holds). A part not timed is left out.
+of ``dispatch`` in milliseconds: ``start_wait`` (held for the session's
+starting input), ``decode`` (arrival until the command, decoded and
+validated, is put on the model's queue, less ``start_wait``), ``model_queue``
+(on that queue until the model loop takes it) and ``lock_wait`` (the wait for
+the step lock, which a running step holds). A part not timed is left out.
 """
 
 FailureSink = Callable[[BaseException], None]
@@ -243,6 +244,8 @@ class CommandEnvelope:
             clock, when known.
         submitted_at: When it was put on the model's queue, on the monotonic
             clock, when known.
+        held_ms: How long it was held for the session's starting input before
+            it was validated, in milliseconds.
     """
 
     command: Command
@@ -250,6 +253,7 @@ class CommandEnvelope:
     request_id: RequestId | None
     received_at: float | None = None
     submitted_at: float | None = None
+    held_ms: float = 0.0
 
 
 Inbound = CommandEnvelope | ReactorEvent
@@ -488,11 +492,14 @@ class ReactorCore:
         conn_id: ConnId | None,
         request_id: RequestId | None,
         received_at: float | None = None,
+        held_ms: float = 0.0,
     ) -> None:
         """Enqueue a validated command with when it reached the runtime. Called by the bridge.
 
         *received_at* is on the monotonic clock; with it, the dispatcher
-        reports how long the command waited. Kept apart from
+        reports how long the command waited. *held_ms* is how long it was held
+        for the session's starting input before validation, which the
+        dispatcher reports apart from parsing. Kept apart from
         :meth:`submit_command`, which a model may override with the signature
         it was written against: a command for such a model goes through its
         override, untimed.
@@ -501,7 +508,7 @@ class ReactorCore:
             self.submit_command(command, conn_id, request_id)
             return
         self._enqueue(
-            CommandEnvelope(command, conn_id, request_id, received_at, time.monotonic())
+            CommandEnvelope(command, conn_id, request_id, received_at, time.monotonic(), held_ms)
         )
 
     def post_reactor_event(self, event: ReactorEvent) -> None:

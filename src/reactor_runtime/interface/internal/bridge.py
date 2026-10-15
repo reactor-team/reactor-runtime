@@ -96,6 +96,7 @@ class ModelBridge:
         conn_id: ConnId | None,
         request_id: RequestId,
         received_at: float | None = None,
+        held_ms: float = 0.0,
     ) -> CommandOutcome:
         """Validate a client command against the contract and admit it.
 
@@ -110,6 +111,8 @@ class ModelBridge:
             request_id: The request id to correlate a reply against.
             received_at: When the command reached the runtime, on the
                 monotonic clock, so the model can report how long it waited.
+            held_ms: How long the command was held for the session's starting
+                input after it arrived, so the model reports that wait apart.
 
         Returns:
             An accepted outcome when the command was valid and enqueued, else a
@@ -119,7 +122,7 @@ class ModelBridge:
             command = self._contract.validate(name, raw_args)
         except ContractError as error:
             return CommandOutcome.reject(error.field, error.reason)
-        self._model._submit_command_at(command, conn_id, request_id, received_at)
+        self._model._submit_command_at(command, conn_id, request_id, received_at, held_ms)
         return CommandOutcome.accept()
 
     def check_command(self, name: str, raw_args: dict[str, Any]) -> CommandOutcome:

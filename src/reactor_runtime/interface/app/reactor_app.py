@@ -496,7 +496,10 @@ class ReactorApp(ReactorCore):
             return
         parts = {"lock_wait": (started - taken) * 1000.0}
         if envelope.submitted_at is not None:
-            parts["decode"] = (envelope.submitted_at - envelope.received_at) * 1000.0
+            parts["start_wait"] = envelope.held_ms
+            parts["decode"] = (
+                envelope.submitted_at - envelope.received_at
+            ) * 1000.0 - envelope.held_ms
             parts["model_queue"] = (taken - envelope.submitted_at) * 1000.0
         sink(
             envelope.conn_id,

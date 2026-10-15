@@ -1275,14 +1275,16 @@ class Runner(ServiceComponent, ConnectionSink):
         example while a starting command waits for its upload, has its commands
         held until the list is done, so the model sees the starting input first.
         """
+        held_from = time.monotonic()
         await self._starting_input_done.wait()
-        await self._submit_command(command)
+        await self._submit_command(command, held_ms=(time.monotonic() - held_from) * 1000.0)
 
     async def _submit_command(
         self,
         command: InboundCommand,
         *,
         upload_wait: float = _UPLOAD_RESOLVE_TIMEOUT_SECONDS,
+        held_ms: float = 0.0,
     ) -> str | None:
         """Submit a decoded command to the model through the bridge.
 
@@ -1352,6 +1354,7 @@ class Runner(ServiceComponent, ConnectionSink):
             conn_id=command.conn_id,
             request_id=command.request_id,
             received_at=started_at,
+            held_ms=held_ms,
         )
         if outcome.accepted:
             self._command_metrics.accepted(label, since=started_at)
