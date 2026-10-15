@@ -1893,7 +1893,7 @@ class Runner(ServiceComponent, ConnectionSink):
         code: str | None = None,
         entry: str | None = None,
     ) -> None:
-        """Answer a step request that did not run, on the data channel.
+        """Answer a step request without a result, on the data channel.
 
         The answer is a ``StepResult`` with no number, no elapsed time, and no
         media, carrying *failure_code* and *reason* as its error, the failing

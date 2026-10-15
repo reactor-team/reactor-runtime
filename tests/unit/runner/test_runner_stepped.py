@@ -508,6 +508,8 @@ def _refusal(
         [],
         [],
     )
+    # Zero says the step did not run; a session that ended first leaves it unknown.
+    assert result.HasField("index") is (failure_code != step_pb2.STEP_FAILURE_CODE_SESSION_ENDED)
     return result.error
 
 
