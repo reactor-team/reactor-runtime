@@ -102,6 +102,10 @@ class MediaPacer:
         self._stop = threading.Event()
         self._stop.set()
         self._lifecycle_lock = threading.Lock()
+        # Set once by stop(), under ``_room``: a stopped pacer is finished and
+        # takes no more media. ``_stop`` cannot mark this, because it is also
+        # set before start(), when submissions are still accepted.
+        self._closed = False
 
         # One black frame marks a boundary (start of the connection, or a
         # flush); after it the pacer repeats the last metadata-carrying frame
@@ -151,26 +155,32 @@ class MediaPacer:
             # chunk so a batching model's whole chunk always fits. Re-read
             # each iteration so a concurrent set_depth applies mid-chunk.
             capacity = max(self._depth, chunk.n_frames)
-            if chunk.wait:
-                with self._room:
+            # The checks and the put share one critical section with stop(),
+            # so a frame either lands before stop() drains the queue or is
+            # refused.
+            with self._room:
+                if self._closed:
+                    aborted = True
+                    break
+                if chunk.wait:
                     while (
                         not self._stop.is_set()
                         and self._epoch == epoch
                         and self._queue.qsize() >= capacity
                     ):
                         self._room.wait(timeout=0.1)
-                if self._stop.is_set() or self._epoch != epoch:
-                    aborted = True
-                    break
-            else:
-                # A flush mid-chunk abandons the rest of it on this path too;
-                # the flushed run's tail must not trickle in after the cut.
-                if self._epoch != epoch:
-                    aborted = True
-                    break
-                if self._queue.qsize() >= capacity:
-                    break
-            self._queue.put_nowait((frame, time.perf_counter()))
+                    if self._stop.is_set() or self._epoch != epoch:
+                        aborted = True
+                        break
+                else:
+                    # A flush mid-chunk abandons the rest of it on this path too;
+                    # the flushed run's tail must not trickle in after the cut.
+                    if self._epoch != epoch:
+                        aborted = True
+                        break
+                    if self._queue.qsize() >= capacity:
+                        break
+                self._queue.put_nowait((frame, time.perf_counter()))
             enqueued += 1
         if enqueued < chunk.n_frames and not chunk.wait and not aborted:
             dropped = chunk.n_frames - enqueued
@@ -219,9 +229,9 @@ class MediaPacer:
             self._room.notify_all()
 
     def start(self) -> None:
-        """Start the pacing thread, idempotently."""
+        """Start the pacing thread, idempotently. A stopped pacer stays stopped."""
         with self._lifecycle_lock:
-            if not self._stop.is_set():
+            if not self._stop.is_set() or self._closed:
                 return
             self._stop.clear()
             self._thread = threading.Thread(target=self._pacing_loop, name="media-pacer")
@@ -230,9 +240,10 @@ class MediaPacer:
     def stop(self) -> None:
         """Stop the pacing thread, wait for it to finish, and release held media.
 
-        Once the thread has stopped, the queued frames and the last delivered
-        frame are dropped, also on a pacer that was never started or is
-        already stopped. A frame is a view into the model's whole output
+        Stopping is final: from then on :meth:`submit` enqueues nothing and
+        :meth:`start` does nothing. Once the thread has stopped, the queued
+        frames and the last delivered frame are dropped, also on a pacer that
+        was never started. A frame is a view into the model's whole output
         array, so a stopped pacer that kept one would keep that array alive
         for as long as the pacer itself is reachable.
 
@@ -243,9 +254,10 @@ class MediaPacer:
             self._stop.set()
             thread = self._thread
             self._thread = None
-        # Wake any producer blocked in a backpressure submit, so teardown
-        # cannot deadlock behind a queue nobody will drain.
+        # Refuse further media, and wake any producer blocked in a backpressure
+        # submit, so teardown cannot deadlock behind a queue nobody will drain.
         with self._room:
+            self._closed = True
             self._room.notify_all()
         if thread is not None:
             thread.join(timeout=2.0)
