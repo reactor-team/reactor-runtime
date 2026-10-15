@@ -593,9 +593,14 @@ class ConnectionManager:
         limit = conn.max_message_size
         if len(frame) > limit:
             _, answer = too_large(conn.protocol_version, len(frame), limit)
-            conn.send_message(answer)
+            conn.send_step_result(answer)
             return
         conn.send_step_result(frame)
+
+    def max_message_size(self, cid: ConnId) -> int | None:
+        """Return the largest message a registered connection takes; ``None`` when unknown."""
+        conn = self._by_id.get(cid)
+        return None if conn is None else conn.max_message_size
 
     def message_chunking(self, cid: ConnId) -> bool:
         """Whether a registered connection negotiated chunked messages; ``False`` when unknown."""

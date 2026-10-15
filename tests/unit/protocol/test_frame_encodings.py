@@ -167,6 +167,22 @@ def test_an_empty_frame_cannot_be_encoded(data: np.ndarray, kind: TrackKind) -> 
         encode_frame(data, kind)
 
 
+@pytest.mark.parametrize(
+    ("data", "kind"),
+    [
+        (np.full((1, 1, 3), "red"), TrackKind.VIDEO),
+        (np.array(["loud", "quiet"], dtype=object), TrackKind.AUDIO),
+    ],
+)
+def test_a_payload_that_does_not_convert_is_a_frame_encoding_error(
+    data: np.ndarray, kind: TrackKind
+) -> None:
+    # Not a bare numpy error: the runtime answers a step whose media fails this
+    # way as FAILED, and only knows to through FrameEncodingError.
+    with pytest.raises(FrameEncodingError, match="cannot be carried"):
+        encode_frame(data, kind)
+
+
 def _track(
     name: str, kind: TrackKind, data: np.ndarray, metadata: bytes | list[bytes] | None = None
 ) -> TrackData:

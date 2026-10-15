@@ -123,10 +123,15 @@ class RawFrames:
         ``[-1, 1]`` are scaled to ``int16``.
         """
         dtype, rank = _RAW_LAYOUT[kind]
-        if kind is TrackKind.AUDIO:
-            samples = _int16_audio(data)
-        else:
-            samples = np.asarray(data).astype(np.uint8, copy=False)
+        try:
+            if kind is TrackKind.AUDIO:
+                samples = _int16_audio(data)
+            else:
+                samples = np.asarray(data).astype(np.uint8, copy=False)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise FrameEncodingError(
+                f"a {kind} frame of dtype {np.asarray(data).dtype} cannot be carried: {error}"
+            ) from error
         if (
             samples.ndim != rank
             or 0 in samples.shape
@@ -265,6 +270,20 @@ def track_frames(
         )
         for name, track in bundle.tracks.items()
     ]
+
+
+def media_size(bundle: MediaBundle | None) -> int:
+    """Return the bytes a step's media takes as frames, at least, without copying it.
+
+    Video travels as one byte per element and audio as two, so this is the
+    frames' data alone: a result is never smaller.
+    """
+    if bundle is None:
+        return 0
+    return sum(
+        track.data.size * (1 if track.info.kind is TrackKind.VIDEO else 2)
+        for track in bundle.tracks.values()
+    )
 
 
 def _frames_of(track: TrackData) -> list[tuple[npt.NDArray[Any], bytes | None]]:
