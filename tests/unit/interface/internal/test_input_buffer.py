@@ -1,3 +1,5 @@
+import time
+
 import numpy as np
 import pytest
 
@@ -104,3 +106,26 @@ async def test_read_rejects_more_than_capacity() -> None:
     buffer = InputBuffer(maxlen=4)
     with pytest.raises(ValueError, match="at most"):
         await buffer.read(5)
+
+
+def test_a_read_notes_how_long_its_frames_waited() -> None:
+    buf = InputBuffer(maxlen=4)
+    buf.push(frame(1))
+    buf.push(frame(2))
+    time.sleep(0.005)
+
+    assert buf.try_read(1) is not None
+
+    [wait] = buf.take_read_waits()
+    assert wait >= 5.0
+    assert buf.take_read_waits() == []
+
+
+def test_a_fifo_read_notes_each_frame_it_took() -> None:
+    buf = InputBuffer(maxlen=4)
+    for value in range(3):
+        buf.push(frame(value))
+
+    buf.try_read(2, mode=ReadMode.FIFO)
+
+    assert len(buf.take_read_waits()) == 2

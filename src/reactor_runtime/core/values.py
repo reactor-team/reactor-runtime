@@ -48,10 +48,14 @@ class CommandFailure:
 class FrameStage:
     """The time a track's frames spent in one stage of their trip, over one window.
 
-    The stages cover the transport between the client's app and the model:
+    The stages cover the trip between the client's app and the model:
     ``submit``, ``encode_wait``, ``encode``, ``packetize``, ``pacer``,
-    ``jitter_buffer``, ``decode``, ``delivery``, ``output_pacing`` and
-    ``output_queue``, in the order a frame goes through them. Each side
+    ``jitter_buffer``, ``decode``, ``sink_convert``, ``handoff``,
+    ``delivery`` (with its parts ``to_rgb`` and ``loop_wait``),
+    ``input_wait``, ``process_input``, ``generate``, ``process_output``,
+    ``emit``, ``output_pacing`` and ``output_queue`` (with its parts
+    ``feed_wait``, ``to_bgra`` and ``ingest``), in the order a frame goes
+    through them. A part is inside its stage, so the two are not added. Each side
     reports the stages it can see. The set grows, so a reader ignores a name
     it does not know.
 
@@ -501,6 +505,14 @@ class MediaChunk:
             the chunk, counted on the model's side, or ``None`` when the
             emitter does not count sessions. A consumer compares it with its
             own count to tell a late chunk of an earlier session apart.
+        stages: The frame stages the step that made the chunk timed before it
+            emitted, as ``(track, stage, ms)``: ``input_wait`` on each input
+            track it read, and ``process_input``, ``generate`` and
+            ``process_output`` on the track ``"*"``, which stands for each
+            video track of the chunk. A consumer that times frames adds them.
+        emitted_at: When the model called ``emit`` for the chunk, on
+            :func:`time.perf_counter`, or ``None`` when not timed. A consumer
+            times its ``emit`` stage from it.
     """
 
     bundle: MediaBundle
@@ -508,6 +520,8 @@ class MediaChunk:
     n_frames: int = 1
     wait: bool = False
     session: int | None = None
+    stages: tuple[tuple[str, str, float], ...] = ()
+    emitted_at: float | None = None
 
     def frames(self) -> list[MediaBundle]:
         """Split the chunk into one single-frame bundle per carried frame."""

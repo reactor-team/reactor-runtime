@@ -16,6 +16,7 @@ import contextvars
 import json
 import logging
 import threading
+import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,6 +55,13 @@ _Holder = TypeVar("_Holder")
 STEP_SESSION: contextvars.ContextVar[int | None] = contextvars.ContextVar(
     "reactor_step_session", default=None
 )
+STEP_STAGES: contextvars.ContextVar[tuple[tuple[str, str, float], ...]] = contextvars.ContextVar(
+    "reactor_step_stages", default=()
+)
+"""The frame stages the step being emitted timed, set by the step loop around its emit.
+
+They ride the chunk (:attr:`MediaChunk.stages`) to the consumers that time frames.
+"""
 """The session the step being emitted began in, set by the step loop around its emit.
 
 A step reports the session it began in, and its media is stamped with the
@@ -183,6 +191,7 @@ class OutputStream:
             compute_time: Wall-clock seconds spent producing it, if measured.
             drop: Discard overflow downstream instead of waiting for room.
         """
+        emitted_at = time.perf_counter()
         core = self._core
         bundle = core._to_bundle(output)
         n_frames = bundle.frame_count
@@ -196,6 +205,8 @@ class OutputStream:
                 n_frames=n_frames,
                 wait=not drop,
                 session=core._sessions_started if session is None else session,
+                stages=STEP_STAGES.get(),
+                emitted_at=emitted_at,
             )
             await asyncio.to_thread(core._out_media, chunk)
         await asyncio.sleep(0)

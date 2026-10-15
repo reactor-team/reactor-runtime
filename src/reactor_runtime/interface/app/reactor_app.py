@@ -75,6 +75,7 @@ from reactor_runtime.interface.events.errors import ApplicationError, CommandErr
 from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.reactor_core import (
     STEP_SESSION,
+    STEP_STAGES,
     CommandEnvelope,
     ReactorCore,
     RequestId,
@@ -311,6 +312,7 @@ class ReactorApp(ReactorCore):
                         # that session ends while it emits.
                         session = self._sessions_started
                         # 2. The application gate.
+                        input_started = time.perf_counter()
                         try:
                             input = await self.process_input()
                         except ApplicationError as refused:
@@ -327,6 +329,7 @@ class ReactorApp(ReactorCore):
                             outcome = None
                         else:
                             last_refusal = None
+                            input_ms = (time.perf_counter() - input_started) * 1000.0
                             # 3. The model. Synchronous on purpose: nothing changes
                             #    under it. This is the one place a StepOutcome is
                             #    built.
@@ -345,7 +348,13 @@ class ReactorApp(ReactorCore):
                             # 4. The application collects the outcome into media,
                             #    sends its messages, or recovers. A raise ends the
                             #    loop.
+                            output_started = time.perf_counter()
                             returned = await self.process_output(outcome)
+                            stages = self._step_stages(
+                                input_ms,
+                                outcome.elapsed,
+                                (time.perf_counter() - output_started) * 1000.0,
+                            )
 
                     # 5. Emit outside the lock, so a handler can run while the
                     #    wire is full, then report the step that ran.
@@ -357,9 +366,11 @@ class ReactorApp(ReactorCore):
                             # The media is the step's, so it carries the
                             # session the step began in, as the report does.
                             token = STEP_SESSION.set(session)
+                            stages_token = STEP_STAGES.set(stages)
                             try:
                                 await self.emit(report.output, compute_time=pace)
                             finally:
+                                STEP_STAGES.reset(stages_token)
                                 STEP_SESSION.reset(token)
                             frames = self._to_bundle(report.output).frame_count
                             rate = self._playout_rate(frames, pace)
@@ -373,6 +384,26 @@ class ReactorApp(ReactorCore):
             finally:
                 for buffer in self._input_buffers.values():
                     buffer.reset()
+
+    def _step_stages(
+        self, input_ms: float, generate_s: float | None, output_ms: float
+    ) -> tuple[tuple[str, str, float], ...]:
+        """The frame stages of one step, for its chunk (:attr:`MediaChunk.stages`).
+
+        ``input_wait`` is each frame the step read, on its input track: from its
+        arrival in the buffer until the read took it. The step's own parts are
+        on ``"*"``, each video track the step emits.
+        """
+        stages: list[tuple[str, str, float]] = [
+            (track, "input_wait", ms)
+            for track, buffer in self._input_buffers.items()
+            for ms in buffer.take_read_waits()
+        ]
+        stages.append(("*", "process_input", input_ms))
+        if generate_s is not None:
+            stages.append(("*", "generate", generate_s * 1000.0))
+        stages.append(("*", "process_output", output_ms))
+        return tuple(stages)
 
     # -- engine hooks ---------------------------------------------------------
 

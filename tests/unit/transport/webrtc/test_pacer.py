@@ -454,3 +454,23 @@ def test_a_video_frames_wait_for_its_tick_is_timed() -> None:
     [pacing] = stages.take()["main"]
     assert (pacing.name, pacing.frames) == ("output_pacing", 1)
     assert pacing.total_ms >= 10.0
+
+
+def test_a_chunk_adds_the_stages_its_step_timed_and_its_emit() -> None:
+    stages = FrameStageWindow()
+    pacer = MediaPacer({"main": video_info("main")}, Sink(), stages=stages)
+    base = chunk(video_bundle(np.zeros((4, 4, 3), dtype=np.uint8)))
+    pacer.submit(
+        MediaChunk(
+            bundle=base.bundle,
+            fps=base.fps,
+            stages=(("cam", "input_wait", 3.0), ("*", "generate", 2.0)),
+            emitted_at=time.perf_counter() - 0.005,
+        )
+    )
+
+    taken = stages.take()
+    assert [(s.name, s.total_ms) for s in taken["cam"]] == [("input_wait", 3.0)]
+    main = {s.name: s for s in taken["main"]}
+    assert main["generate"].total_ms == 2.0
+    assert main["emit"].total_ms >= 5.0

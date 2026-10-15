@@ -44,6 +44,9 @@ class FakePeer:
     async def add_ice(self, candidate: IceCandidate) -> None:
         self.ice.append(candidate)
 
+    def fold_handoffs(self) -> None:
+        pass
+
     def send_message(self, payload: bytes | str) -> None:
         self.messages.append(payload)
 

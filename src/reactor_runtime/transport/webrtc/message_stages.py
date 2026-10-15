@@ -22,6 +22,7 @@ STAGES = (
     "send",
     "stall",
     "reassembly",
+    "loop_wait",
 )
 """Every stage, in the order a message goes through them."""
 

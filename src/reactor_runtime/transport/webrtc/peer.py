@@ -416,6 +416,9 @@ class WebRTCPeer:
         # binding stops delivering frames once a track is dropped, so a receiver
         # that is only referenced from its own frame callback would go silent.
         self._in_tracks: dict[str, rw.Track] = {}
+        # The engine's handoff totals at the previous fold, per inbound video
+        # track and for the data channel (see fold_handoffs).
+        self._handoff_seen: dict[str, tuple[float, ...]] = {}
         # Counters that match inbound tracks to IN track metadata by arrival order.
         self._in_video_seen = 0
         self._in_audio_seen = 0
@@ -716,6 +719,45 @@ class WebRTCPeer:
             return matching[seen].name
         return f"{kind.value}-{seen + 1}"
 
+    def fold_handoffs(self) -> None:
+        """Add the engine's own stages, from the decoder or the channel to this peer's sinks.
+
+        The engine keeps running totals: on each inbound video track,
+        ``sink_convert`` (its sink converting the decoded frame) and
+        ``handoff`` (the wait for the GIL and the copy into Python), and
+        ``handoff`` on the data channel for each message. A window's worth is
+        the difference since the previous fold. An engine without the totals
+        adds nothing.
+        """
+        for name, track in list(self._in_tracks.items()):
+            totals = getattr(track, "handoff_totals", None)
+            if totals is None or track.kind() != rw.MediaKind.Video:
+                continue
+            try:
+                convert_s, handoff_s, frames = totals()
+            except Exception:
+                continue
+            before = self._handoff_seen.get(name)
+            self._handoff_seen[name] = (convert_s, handoff_s, frames)
+            if before is None or frames <= before[2]:
+                continue
+            count = int(frames - before[2])
+            self.frame_stages.add(name, "sink_convert", (convert_s - before[0]) * 1000.0, count)
+            self.frame_stages.add(name, "handoff", (handoff_s - before[1]) * 1000.0, count)
+        totals = getattr(self._data_channel, "handoff_totals", None)
+        if totals is None:
+            return
+        try:
+            handoff_s, messages = totals()
+        except Exception:
+            return
+        before = self._handoff_seen.get("\0data")
+        self._handoff_seen["\0data"] = (handoff_s, messages)
+        if before is not None and messages > before[1]:
+            self.message_stages.add(
+                "handoff", (handoff_s - before[0]) * 1000.0, int(messages - before[1])
+            )
+
     def _make_video_sink(
         self, name: str
     ) -> Callable[[bytes, int, int, rw.FrameMetadata | None], None]:
@@ -734,23 +776,35 @@ class WebRTCPeer:
                 return
             decoded_at = time.perf_counter()
             metadata = bytes(meta.user_data) if meta is not None else b""
+            rgb = bgra_to_rgb(bgra, width, height)
+            converted_at = time.perf_counter()
             # Zero is the trailer's "unset", and it is not a clock reading: a frame
             # captured at the epoch is not what a sender means by it.
             capture_us = meta.capture_time_us if meta is not None else 0
             frame = InputFrame(
-                data=bgra_to_rgb(bgra, width, height),
+                data=rgb,
                 # An empty trailer is a frame the sender attached nothing to.
                 metadata=metadata or None,
                 capture_time_us=capture_us or None,
             )
-            self._fire(self._deliver_video, name, frame, decoded_at)
+            self._fire(self._deliver_video, name, frame, decoded_at, converted_at)
 
         return sink
 
-    def _deliver_video(self, name: str, frame: InputFrame, decoded_at: float) -> None:
-        """Hand a decoded frame on, timing its trip from the decoder to the model's input."""
+    def _deliver_video(
+        self, name: str, frame: InputFrame, decoded_at: float, converted_at: float
+    ) -> None:
+        """Hand a decoded frame on, timing its trip from the decoder to the model's input.
+
+        ``delivery`` holds two parts, timed too: ``to_rgb``, the conversion of
+        the engine's BGRA, and ``loop_wait``, the wait for the event loop to
+        run this.
+        """
+        started = time.perf_counter()
         if self._cb_media is not None:
             self._cb_media(name, frame)
+        self.frame_stages.add(name, "to_rgb", (converted_at - decoded_at) * 1000.0)
+        self.frame_stages.add(name, "loop_wait", (started - converted_at) * 1000.0)
         self.frame_stages.add(name, "delivery", (time.perf_counter() - decoded_at) * 1000.0)
 
     def _make_audio_sink(self, name: str) -> Callable[[bytes, int, int, int], None]:
@@ -821,6 +875,7 @@ class WebRTCPeer:
         def sink(data: bytes, binary: bool) -> None:
             if self._stop_event.is_set():
                 return
+            arrived_at = time.perf_counter()
             payload: bytes | str = bytes(data) if binary else data.decode("utf-8", "replace")
             if not self._protocol_sniffed:
                 self.protocol_version = sniff(payload)
@@ -829,7 +884,7 @@ class WebRTCPeer:
                 if not self._connected.is_set():
                     self._hold(payload, channel)
                     return
-                self._deliver(payload, self.protocol_version, channel)
+                self._deliver(payload, self.protocol_version, channel, arrived_at)
 
         return sink
 
@@ -847,10 +902,33 @@ class WebRTCPeer:
             return
         self._early_frames.append((payload, self.protocol_version, channel))
 
-    def _deliver(self, payload: bytes | str, version: ProtocolVersion, channel: Channel) -> None:
+    def _deliver(
+        self,
+        payload: bytes | str,
+        version: ProtocolVersion,
+        channel: Channel,
+        arrived_at: float | None = None,
+    ) -> None:
         """Hand one inbound frame to the message sink and note the client's liveness."""
-        self._fire(self._cb_message, payload, version, channel)
+        self._fire(self._message_on_loop, payload, version, channel, arrived_at)
         self._fire(self._cb_ping)
+
+    def _message_on_loop(
+        self,
+        payload: bytes | str,
+        version: ProtocolVersion,
+        channel: Channel,
+        arrived_at: float | None,
+    ) -> None:
+        """Pass a frame to the message sink, on the loop, timing its ``loop_wait``.
+
+        ``loop_wait`` runs from the frame reaching this peer's sink until the
+        event loop runs this, for the channel whose messages are timed.
+        """
+        if arrived_at is not None and channel is Channel.DATA:
+            self.message_stages.add("loop_wait", (time.perf_counter() - arrived_at) * 1000.0)
+        if self._cb_message is not None:
+            self._cb_message(payload, version, channel)
 
     def _report_loss(self) -> None:
         """Release the wire and report an involuntary loss, exactly once.
@@ -947,16 +1025,26 @@ class WebRTCPeer:
             if name is None:
                 continue
             if info.kind is TrackKind.VIDEO:
+                started = time.perf_counter()
                 bgra, width, height = rgb_to_bgra(data.data)
+                converted_at = time.perf_counter()
                 # A bundle reaching the wire holds one frame, so it holds one
                 # metadata value: a batch's list is resolved when it is split.
                 metadata = data.metadata if isinstance(data.metadata, bytes) else None
                 # Deliberately unstamped: see the module's Audio/video sync note.
                 self._out_tracks[name].push_video_frame(bgra, width, height, user_data=metadata)
                 if queued_at is not None:
-                    self.frame_stages.add(
-                        name, "output_queue", (time.perf_counter() - queued_at) * 1000.0
-                    )
+                    pushed_at = time.perf_counter()
+                    # output_queue holds three parts: the wait for this thread,
+                    # the conversion to the engine's BGRA, and the engine
+                    # taking the frame.
+                    for stage, ms in (
+                        ("feed_wait", started - queued_at),
+                        ("to_bgra", converted_at - started),
+                        ("ingest", pushed_at - converted_at),
+                        ("output_queue", pushed_at - queued_at),
+                    ):
+                        self.frame_stages.add(name, stage, ms * 1000.0)
             else:
                 self._enqueue_audio(name, to_int16_mono(data.data))
 
