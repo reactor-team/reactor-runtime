@@ -85,7 +85,7 @@ CommandTimingSink = Callable[[ConnId, float, float], None]
 
 The arguments are the connection that sent the command, the milliseconds from
 its arrival at the runtime to the start of its handler (``dispatch``), and the
-milliseconds its handler ran (``handler``).
+milliseconds its handler ran and its reply or failure was written (``handler``).
 """
 
 FailureSink = Callable[[BaseException], None]

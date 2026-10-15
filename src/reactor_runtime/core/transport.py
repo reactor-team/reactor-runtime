@@ -148,15 +148,24 @@ class MessageStageSource(Protocol):
     the previous one.
     """
 
+    def take_message_stages(self) -> tuple[MessageStage, ...]:
+        """Return the message stage times since the previous take, and start them again."""
+
+
+@runtime_checkable
+class MessageStageSink(Protocol):
+    """A connection that also takes the message stages the runner times itself.
+
+    Optional, beside :class:`MessageStageSource`, and checked for the same way,
+    so a transport that only reports its own stages keeps matching that one.
+    """
+
     def add_message_stage(self, stage: str, ms: float, messages: int = 1) -> None:
         """Add *messages* messages that spent *ms* milliseconds in *stage*, together.
 
         For the stages the runner times itself, ``dispatch`` and ``handler``,
         which the transport cannot see.
         """
-
-    def take_message_stages(self) -> tuple[MessageStage, ...]:
-        """Return the message stage times since the previous take, and start them again."""
 
 
 @runtime_checkable

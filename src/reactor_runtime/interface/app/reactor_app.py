@@ -442,7 +442,10 @@ class ReactorApp(ReactorCore):
     def _report_command_timing(
         self, envelope: CommandEnvelope, started: float, finished: float
     ) -> None:
-        """Report how long *envelope* waited before its handler started, and how long it ran."""
+        """Report how long *envelope* waited before its handler started, and how long it ran.
+
+        The run includes writing the reply or the failure back to the sender.
+        """
         sink = self._out_command_timing
         if sink is None or envelope.conn_id is None or envelope.received_at is None:
             return

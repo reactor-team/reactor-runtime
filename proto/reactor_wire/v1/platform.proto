@@ -238,7 +238,7 @@ message ClientConnectionStat {
 //   reassembly  From the message's first chunk arriving to its last. Receiver.
 //   dispatch    The command reaches the runtime until its handler starts,
 //               including the wait for the model's step. Runtime.
-//   handler     The command handler runs. Runtime.
+//   handler     The command's handler runs and its reply is written. Runtime.
 //
 // queue_wait, send, stall and reassembly come from the chunked channel; a
 // channel without chunking reports none of them.

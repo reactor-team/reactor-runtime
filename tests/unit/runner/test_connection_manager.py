@@ -894,3 +894,29 @@ def test_a_runner_timed_stage_reaches_its_connection_and_not_an_untimed_one() ->
     cm.add_message_stage(ConnId(9), "handler", 1.0)
 
     assert conn.stages == (MessageStage("dispatch", total_ms=3.0, messages=1),)
+
+
+class ReportOnlyConnection(MeasuredConnection):
+    """A transport that reports its own message stages and takes none from the runner."""
+
+    def __init__(self, cid: int, reading: TransportReading | None) -> None:
+        super().__init__(cid, reading)
+        self.stages: tuple[MessageStage, ...] = (
+            MessageStage("queue_wait", total_ms=0.3, messages=3),
+        )
+
+    def take_message_stages(self) -> tuple[MessageStage, ...]:
+        taken, self.stages = self.stages, ()
+        return taken
+
+
+def test_a_transport_that_only_reports_its_message_stages_still_has_them_taken() -> None:
+    cm, _ = waiting_manager()
+    conn = ReportOnlyConnection(2, TransportReading())
+    stages = conn.stages
+    cm.register(conn)
+
+    cm.add_message_stage(ConnId(2), "dispatch", 3.0)
+    [(_, reading)] = cm.take_message_stages(cm.transport_readings())
+
+    assert reading.message_stages == stages

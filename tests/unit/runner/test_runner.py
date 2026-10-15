@@ -4137,3 +4137,12 @@ async def test_client_stats_limits_are_cleared_when_the_session_closes(
     started_runner.stop_session()
 
     assert started_runner._client_stats._accepted_at == {}
+
+
+def test_a_command_timing_reported_after_the_loop_closed_is_dropped() -> None:
+    runner = _runner()
+    loop = asyncio.new_event_loop()
+    loop.close()
+    runner._loop = loop
+
+    runner._on_command_timing(ConnId(1001), 1.0, 2.0)

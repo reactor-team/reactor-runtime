@@ -17,6 +17,7 @@ declared ready.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.metadata
 import threading
 import time
@@ -750,6 +751,7 @@ class Runner(ServiceComponent, ConnectionSink):
         """Add a command's ``dispatch`` and ``handler`` times to its connection, on the loop.
 
         The model reports from its own thread; the connections are the loop's.
+        A report that arrives after the loop closed, at shutdown, is dropped.
         """
         loop = self._loop
         if loop is None:
@@ -759,7 +761,8 @@ class Runner(ServiceComponent, ConnectionSink):
             self._connections.add_message_stage(conn_id, "dispatch", dispatch_ms)
             self._connections.add_message_stage(conn_id, "handler", handler_ms)
 
-        loop.call_soon_threadsafe(add)
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(add)
 
     def _on_step_completed(self, step: CompletedStep) -> None:
         """Record a step the model reported finished, hopping onto the loop.
