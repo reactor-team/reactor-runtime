@@ -4145,4 +4145,22 @@ def test_a_command_timing_reported_after_the_loop_closed_is_dropped() -> None:
     loop.close()
     runner._loop = loop
 
-    runner._on_command_timing(ConnId(1001), 1.0, 2.0)
+    runner._on_command_timing(ConnId(1001), 0, 1.0, 2.0)
+
+
+async def test_a_command_timing_from_an_earlier_session_is_dropped() -> None:
+    runner = _runner()
+    runner._loop = asyncio.get_running_loop()
+    added: list[tuple[ConnId, str]] = []
+    setattr(  # noqa: B010
+        runner._connections,
+        "add_message_stage",
+        lambda conn_id, stage, ms: added.append((conn_id, stage)),
+    )
+    runner._sessions_posted = 2
+
+    runner._on_command_timing(ConnId(1001), 1, 1.0, 2.0)
+    runner._on_command_timing(ConnId(1001), 2, 1.0, 2.0)
+    await asyncio.sleep(0)
+
+    assert added == [(ConnId(1001), "dispatch"), (ConnId(1001), "handler")]

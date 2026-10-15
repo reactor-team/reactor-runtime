@@ -80,12 +80,14 @@ MediaSink = Callable[[MediaChunk], None]
 StepSink = Callable[[CompletedStep], None]
 """Receives each step the model reports finished, on the model thread."""
 
-CommandTimingSink = Callable[[ConnId, float, float], None]
+CommandTimingSink = Callable[[ConnId, int, float, float], None]
 """Receives how long a command waited and ran, on the model thread.
 
-The arguments are the connection that sent the command, the milliseconds from
-its arrival at the runtime to the start of its handler (``dispatch``), and the
-milliseconds its handler ran and its reply or failure was written (``handler``).
+The arguments are the connection that sent the command, the session it ran
+in (counted as the model counts session starts, so a report that lands after
+its session ended can be told apart), the milliseconds from its arrival at the
+runtime to the start of its handler (``dispatch``), and the milliseconds its
+handler ran and its reply or failure was written (``handler``).
 """
 
 FailureSink = Callable[[BaseException], None]

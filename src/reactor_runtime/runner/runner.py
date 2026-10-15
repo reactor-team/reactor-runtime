@@ -747,17 +747,23 @@ class Runner(ServiceComponent, ConnectionSink):
             playlist_url=clip.playlist_url,
         )
 
-    def _on_command_timing(self, conn_id: ConnId, dispatch_ms: float, handler_ms: float) -> None:
+    def _on_command_timing(
+        self, conn_id: ConnId, session: int, dispatch_ms: float, handler_ms: float
+    ) -> None:
         """Add a command's ``dispatch`` and ``handler`` times to its connection, on the loop.
 
         The model reports from its own thread; the connections are the loop's.
-        A report that arrives after the loop closed, at shutdown, is dropped.
+        A report that arrives after the loop closed, at shutdown, is dropped,
+        and so is one from an earlier session: its connection id may already
+        belong to a connection of the current one.
         """
         loop = self._loop
         if loop is None:
             return
 
         def add() -> None:
+            if session != self._sessions_posted:
+                return
             self._connections.add_message_stage(conn_id, "dispatch", dispatch_ms)
             self._connections.add_message_stage(conn_id, "handler", handler_ms)
 

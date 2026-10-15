@@ -433,14 +433,15 @@ class ReactorApp(ReactorCore):
         runtime's command timing sink.
         """
         async with self._step_lock:
+            session = self._sessions_started
             started = time.monotonic()
             try:
                 await self._run_command(envelope)
             finally:
-                self._report_command_timing(envelope, started, time.monotonic())
+                self._report_command_timing(envelope, session, started, time.monotonic())
 
     def _report_command_timing(
-        self, envelope: CommandEnvelope, started: float, finished: float
+        self, envelope: CommandEnvelope, session: int, started: float, finished: float
     ) -> None:
         """Report how long *envelope* waited before its handler started, and how long it ran.
 
@@ -451,6 +452,7 @@ class ReactorApp(ReactorCore):
             return
         sink(
             envelope.conn_id,
+            session,
             (started - envelope.received_at) * 1000.0,
             (finished - started) * 1000.0,
         )

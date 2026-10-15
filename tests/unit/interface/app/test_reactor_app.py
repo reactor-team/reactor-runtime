@@ -304,7 +304,7 @@ def _timed(model: Model) -> list[tuple[ConnId, float, float]]:
         media=lambda chunk: None,
     )
     model._bind_timing(
-        command_timing=lambda conn_id, dispatch_ms, handler_ms: timings.append(
+        command_timing=lambda conn_id, _session, dispatch_ms, handler_ms: timings.append(
             (conn_id, dispatch_ms, handler_ms)
         ),
     )
