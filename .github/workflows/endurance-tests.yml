@@ -89,8 +89,15 @@ jobs:
         run: |
           set -euo pipefail
           # Resolved first, so a value that is not a commit fails here by name
-          # and none is ever read as an option.
-          if ! sha=$(git rev-parse --verify --quiet --end-of-options "${RUNTIME_REF}^{commit}"); then
+          # and none is ever read as an option. The checkout keeps only this
+          # ref's branch locally; every other branch is origin/<name>.
+          sha=""
+          for candidate in "$RUNTIME_REF" "origin/$RUNTIME_REF"; do
+            if sha=$(git rev-parse --verify --quiet --end-of-options "${candidate}^{commit}"); then
+              break
+            fi
+          done
+          if [ -z "$sha" ]; then
             echo "::error::runtime_ref '$RUNTIME_REF' is not a tag, branch or commit of this repository"
             exit 1
           fi
