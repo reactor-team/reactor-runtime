@@ -62,6 +62,12 @@ class FakeConnection:
         if self._on_outbound is not None:
             self._on_outbound()
 
+    max_message_size = 64 * 1024 * 1024
+    message_chunking = True
+
+    def send_step_result(self, payload: bytes | str) -> None:
+        self.send_message(payload)
+
     def send_message(self, payload: bytes | str) -> None:
         self._outbound()
         self.messages.append(payload)
@@ -102,6 +108,12 @@ class SilentConnection(FakeConnection):
     The recording fake accumulates one entry per call, which a fan-out spinning
     for the length of a churn loop turns into millions of them.
     """
+
+    max_message_size = 64 * 1024 * 1024
+    message_chunking = True
+
+    def send_step_result(self, payload: bytes | str) -> None:
+        self.send_message(payload)
 
     def send_message(self, payload: bytes | str) -> None:
         pass
@@ -831,3 +843,44 @@ def test_a_v0_connection_is_sent_no_step_reply() -> None:
     manager.send_step_reply(conn.id, _refuse_to_encode_response)
 
     assert conn.messages == []
+
+
+def _too_large(version: ProtocolVersion, size: int, limit: int) -> tuple[Channel, bytes | str]:
+    return Channel.DATA, f"too large: {size} > {limit}".encode()
+
+
+def test_a_step_result_that_fits_goes_out_whole() -> None:
+    manager, _ = waiting_manager()
+    conn = FakeConnection(1, protocol_version=ProtocolVersion.V1)
+    conn.max_message_size = 6
+    manager.register(conn)
+
+    manager.send_step_result(conn.id, lambda version: (Channel.DATA, b"result"), _too_large)
+
+    assert conn.messages == [b"result"]
+
+
+def test_a_step_result_larger_than_the_connection_takes_is_replaced_by_its_too_large_answer() -> (
+    None
+):
+    manager, _ = waiting_manager()
+    conn = FakeConnection(1, protocol_version=ProtocolVersion.V1)
+    conn.max_message_size = 5
+    manager.register(conn)
+
+    manager.send_step_result(conn.id, lambda version: (Channel.DATA, b"result"), _too_large)
+
+    assert conn.messages == [b"too large: 6 > 5"]
+
+
+def test_message_chunking_reads_the_connection_and_is_false_for_an_unknown_one() -> None:
+    manager, _ = waiting_manager()
+    conn = FakeConnection(1, protocol_version=ProtocolVersion.V1)
+    conn.message_chunking = False
+    manager.register(conn)
+    chunked = FakeConnection(2, protocol_version=ProtocolVersion.V1)
+    manager.register(chunked)
+
+    assert manager.message_chunking(conn.id) is False
+    assert manager.message_chunking(chunked.id) is True
+    assert manager.message_chunking(ConnId(3)) is False

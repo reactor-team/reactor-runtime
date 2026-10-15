@@ -1,7 +1,8 @@
 """Media frames on the wire, keyed by their ``FrameEncoding``.
 
 A stepped session carries its input frames in a ``RequestStep`` message's
-``media_input``, each tagged with the encoding its bytes use. Each encoding has one codec here,
+``media_input`` and its output frames inside a ``StepResult``, each tagged with
+the encoding its bytes use. Each encoding has one codec here,
 in a registry keyed by the ``FrameEncoding`` value, so a compressed encoding is
 added as one more entry without touching the callers.
 
@@ -18,16 +19,16 @@ from typing import Any, Protocol
 import numpy as np
 import numpy.typing as npt
 
-from reactor_runtime.core.values import InputFrame, TrackKind
-from reactor_wire.v1 import step_pb2
+from reactor_runtime.core.values import InputFrame, MediaBundle, TrackData, TrackKind
+from reactor_wire.v1 import platform_pb2, step_pb2
 
 
 class FrameEncodingError(ValueError):
-    """A frame cannot be decoded: its encoding is unknown, or its bytes do not fit it."""
+    """A frame cannot be carried: its encoding is unknown, or its samples do not fit it."""
 
 
 class FrameCodec(Protocol):
-    """Turns a wire frame of one encoding into the array a model reads."""
+    """Turns a wire frame of one encoding into an array, and an array into one."""
 
     def decode(self, frame: step_pb2.Frame, kind: TrackKind) -> npt.NDArray[Any]:
         """Return the frame's samples as an array of the track kind's shape.
@@ -35,6 +36,15 @@ class FrameCodec(Protocol):
         Raises:
             FrameEncodingError: The frame's dtype, shape, or bytes do not fit
                 the encoding and the track kind.
+        """
+        ...
+
+    def encode(self, data: npt.NDArray[Any], kind: TrackKind) -> step_pb2.Frame:
+        """Return one frame of a *kind* track as a wire frame of this encoding.
+
+        Raises:
+            FrameEncodingError: The array cannot be carried as one frame of
+                the track kind.
         """
         ...
 
@@ -80,6 +90,50 @@ class RawFrames:
             samples = samples.mean(axis=0, keepdims=True).round().astype(np.int16)
         return samples
 
+    def encode(self, data: npt.NDArray[Any], kind: TrackKind) -> step_pb2.Frame:
+        """Return the samples in the track kind's layout, converted the way the media path does.
+
+        Video is taken as ``uint8``, as the streamed path takes it. Audio keeps
+        its channels: a one-dimensional array is one channel, float samples in
+        ``[-1, 1]`` are scaled to ``int16``.
+        """
+        dtype, rank = _RAW_LAYOUT[kind]
+        try:
+            if kind is TrackKind.AUDIO:
+                samples = _int16_audio(data)
+            else:
+                samples = np.asarray(data).astype(np.uint8, copy=False)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise FrameEncodingError(
+                f"a {kind} frame of dtype {np.asarray(data).dtype} cannot be carried: {error}"
+            ) from error
+        if (
+            samples.ndim != rank
+            or 0 in samples.shape
+            or (kind is TrackKind.VIDEO and samples.shape[2] != 3)
+        ):
+            raise FrameEncodingError(f"a {kind} frame cannot be shaped {list(np.shape(data))}")
+        wire = np.dtype(dtype).newbyteorder("<")
+        return step_pb2.Frame(
+            encoding=step_pb2.FRAME_ENCODING_RAW,
+            dtype=dtype,
+            shape=list(samples.shape),
+            data=np.ascontiguousarray(samples, dtype=wire).tobytes(),
+        )
+
+
+_INT16_MAX = 32767.0
+
+
+def _int16_audio(data: npt.NDArray[Any]) -> npt.NDArray[np.int16]:
+    """Return audio as ``(channels, samples)`` ``int16``, keeping every channel."""
+    samples = np.asarray(data)
+    if samples.ndim == 1:
+        samples = samples.reshape(1, -1)
+    if np.issubdtype(samples.dtype, np.floating):
+        return (samples * _INT16_MAX).clip(-_INT16_MAX - 1, _INT16_MAX).astype(np.int16)
+    return np.rint(samples).astype(np.int16)
+
 
 FRAME_CODECS: dict[int, FrameCodec] = {step_pb2.FRAME_ENCODING_RAW: RawFrames()}
 """The codec for each ``FrameEncoding`` the runtime reads, by its enum value."""
@@ -107,3 +161,103 @@ def decode_frame(frame: step_pb2.Frame, kind: TrackKind) -> InputFrame:
 
 def _known(value: int) -> bool:
     return value in step_pb2.FrameEncoding.values()
+
+
+def encode_frame(
+    data: npt.NDArray[Any],
+    kind: TrackKind,
+    *,
+    metadata: bytes | None = None,
+    encoding: int = step_pb2.FRAME_ENCODING_RAW,
+) -> step_pb2.Frame:
+    """Encode one frame of a *kind* track, with the metadata the model attached to it.
+
+    Raises:
+        FrameEncodingError: The encoding is unknown, or the array cannot be
+            carried as one frame of the track kind.
+    """
+    codec = FRAME_CODECS.get(encoding)
+    if codec is None:
+        raise FrameEncodingError(f"frame encoding {encoding} is not supported")
+    frame = codec.encode(data, kind)
+    if metadata is not None:
+        frame.metadata = metadata
+    return frame
+
+
+_WIRE_KINDS = {
+    TrackKind.VIDEO: platform_pb2.TRACK_KIND_VIDEO,
+    TrackKind.AUDIO: platform_pb2.TRACK_KIND_AUDIO,
+}
+
+
+def track_frames(
+    bundle: MediaBundle | None, *, video_fps: float | None = None
+) -> list[step_pb2.TrackFrames]:
+    """Encode a step's media as one entry per output track, in the bundle's order.
+
+    A batched video track, ``(N, H, W, 3)``, becomes its ``N`` frames in order,
+    each with its own metadata; a single value of metadata goes on every one.
+    An unbatched video track and an audio track are one frame each. A step
+    without media has no tracks.
+
+    Each entry carries the rate its frames play at: *video_fps*, the step's own
+    rate, for a video track, falling back to the track's declared rate, and
+    the track's sample rate for audio.
+
+    Raises:
+        FrameEncodingError: A track's payload cannot be carried as frames of
+            its kind.
+    """
+    if bundle is None:
+        return []
+    return [
+        step_pb2.TrackFrames(
+            track=name,
+            kind=_WIRE_KINDS[track.info.kind],
+            frames=[
+                encode_frame(data, track.info.kind, metadata=metadata)
+                for data, metadata in _frames_of(track)
+            ],
+            rate=(
+                video_fps if track.info.kind is TrackKind.VIDEO and video_fps else track.info.rate
+            ),
+        )
+        for name, track in bundle.tracks.items()
+    ]
+
+
+def media_size(bundle: MediaBundle | None) -> int:
+    """Return the bytes a step's media takes as frames, at least, without copying it.
+
+    Video travels as one byte per element and audio as two, so this is the
+    frames' data alone: a result is never smaller.
+    """
+    if bundle is None:
+        return 0
+    return sum(
+        track.data.size * (1 if track.info.kind is TrackKind.VIDEO else 2)
+        for track in bundle.tracks.values()
+    )
+
+
+def _frames_of(track: TrackData) -> list[tuple[npt.NDArray[Any], bytes | None]]:
+    """Split one track's payload into its frames, each with the metadata it carries."""
+    data = track.data
+    if track.info.kind is TrackKind.VIDEO and data.ndim == 4:
+        count = data.shape[0]
+        metadata = track.metadata
+        if isinstance(metadata, list):
+            if len(metadata) != count:
+                raise FrameEncodingError(
+                    f"track {track.info.name!r} carries {len(metadata)} metadata entries "
+                    f"for {count} frames"
+                )
+            return [(data[index], metadata[index]) for index in range(count)]
+        return [(data[index], metadata) for index in range(count)]
+    single = track.metadata
+    if isinstance(single, list):
+        raise FrameEncodingError(
+            f"track {track.info.name!r} carries one frame but {len(single)} metadata entries"
+        )
+    return [(data, single)]

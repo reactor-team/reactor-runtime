@@ -553,11 +553,16 @@ class StepStore:
                 session_dir.rmdir()
 
 
+def content_type_of(name: str) -> str:
+    """Return the media type a saved step's file is served with, guessed from its name."""
+    content_type, _ = mimetypes.guess_type(name)
+    return content_type or "application/octet-stream"
+
+
 def _file_entry(path: Path) -> dict[str, Any]:
-    content_type, _ = mimetypes.guess_type(path.name)
     return {
         "name": path.name,
-        "content_type": content_type or "application/octet-stream",
+        "content_type": content_type_of(path.name),
         "size": path.stat().st_size,
     }
 

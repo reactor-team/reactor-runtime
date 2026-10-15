@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import re
+import threading
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
@@ -35,10 +38,13 @@ from reactor_runtime.core import (
     RuntimeConfig,
     SessionEvent,
     SessionState,
+    StepResultsConfig,
 )
 from reactor_runtime.interface.internal.input_buffer import InputBuffer
 from reactor_runtime.message_gateway import InboundStep
 from reactor_runtime.protocol.common import dict_to_struct
+from reactor_runtime.protocol.frames import FrameEncodingError
+from reactor_runtime.runner import runner as runner_module
 from reactor_runtime.runner.runner import Runner
 from reactor_runtime.runner.session_start import InvalidSessionStartError
 from reactor_runtime.upload_store import UnknownUploadError
@@ -99,10 +105,18 @@ class StepModel(ReactorApp):
             raise RuntimeError("the model ran out of memory")
         return Out(main_video=np.zeros((2, 2, 3), dtype=np.uint8))
 
-    async def process_output(self, outcome: StepOutcome) -> Output | StepCompleted | None:
+    async def process_output(self, outcome: StepOutcome, /) -> Output | StepCompleted | None:
         if outcome.error is not None:
             return StepCompleted(error=str(outcome.error))
-        return await super().process_output(outcome)
+        output = outcome.to_output()
+        if self.state.prompt == "keep files":
+            return StepCompleted(output=output, files=_KEPT_FILES)
+        if self.state.prompt == "fail":
+            return StepCompleted(output=output, files=_KEPT_FILES, error="the step went dark")
+        return output
+
+
+_KEPT_FILES = {"depth.png": b"\x89PNG....", "notes.bin": b"abc"}
 
 
 class OwnLoop(StepModel):
@@ -123,6 +137,12 @@ class V1Connection:
         self.sent: list[bytes | str] = []
         self.control: list[bytes | str] = []
         self.media: list[MediaChunk] = []
+
+    max_message_size = 64 * 1024 * 1024
+    message_chunking = True
+
+    def send_step_result(self, payload: bytes | str) -> None:
+        self.send_message(payload)
 
     def send_message(self, payload: bytes | str) -> None:
         self.sent.append(payload)
@@ -162,10 +182,20 @@ def _seed_registries(
     register_model(StepModel)
 
 
-async def _runner(monkeypatch: pytest.MonkeyPatch, model: type = StepModel) -> Runner:
+async def _runner(
+    monkeypatch: pytest.MonkeyPatch, model: type = StepModel, *, steps_root: Path | None = None
+) -> Runner:
     models.clear()
     monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: model)
-    runner = Runner(RuntimeConfig(model_ref="fake:Model"))
+    runner = Runner(
+        RuntimeConfig(
+            model_ref="fake:Model",
+            step_results=StepResultsConfig(enabled=steps_root is not None),
+        )
+    )
+    if steps_root is not None:
+        assert runner.step_store is not None
+        runner.step_store._root = steps_root
     await runner.start()
     return runner
 
@@ -173,6 +203,15 @@ async def _runner(monkeypatch: pytest.MonkeyPatch, model: type = StepModel) -> R
 @pytest.fixture
 async def runner(monkeypatch: pytest.MonkeyPatch) -> Any:
     runner = await _runner(monkeypatch)
+    try:
+        yield runner
+    finally:
+        await runner.stop()
+
+
+@pytest.fixture
+async def saving_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
+    runner = await _runner(monkeypatch, steps_root=tmp_path / "steps")
     try:
         yield runner
     finally:
@@ -416,6 +455,8 @@ def _refusal(
         [],
         [],
     )
+    # Zero says the step did not run; a session that ended first leaves it unknown.
+    assert result.HasField("index") is (failure_code != step_pb2.STEP_FAILURE_CODE_SESSION_ENDED)
     return result.error
 
 
@@ -732,3 +773,191 @@ async def test_a_stepped_session_refuses_clips(runner: Runner) -> None:
         assert isinstance(reply, control_pb2.ControlServerMessage)
         reasons.append(reply.clip_failed.reason)
     assert reasons == ["a stepped session is not recorded, so it has no clips"] * 2
+
+
+# -- the step result on the wire -------------------------------------------------
+
+
+async def test_the_step_result_carries_the_steps_media_per_output_track(runner: Runner) -> None:
+    conn = await _stepped(runner)
+    _send(runner, conn, _request_step("r1"))
+    await _until(lambda: len(conn.sent) == 1)
+
+    result = conn.replies()[0].step_result
+    [track] = result.tracks
+    assert (track.track, track.kind) == ("main_video", platform_pb2.TRACK_KIND_VIDEO)
+    [frame] = track.frames
+    assert (frame.encoding, frame.dtype, list(frame.shape)) == (
+        step_pb2.FRAME_ENCODING_RAW,
+        "uint8",
+        [2, 2, 3],
+    )
+    assert frame.data == bytes(12)
+    assert track.rate > 0
+    assert result.elapsed_seconds > 0
+    assert not result.HasField("error")
+    assert list(result.files) == []
+
+
+async def test_the_step_result_references_the_files_a_saved_step_keeps(
+    saving_runner: Runner,
+) -> None:
+    conn = await _stepped(saving_runner)
+    _send(saving_runner, conn, _request_step("r1", state={"prompt": "keep files"}))
+    await _until(lambda: len(conn.sent) == 1)
+
+    [reply] = conn.replies()
+    result = reply.step_result
+    assert [(f.name, f.content_type, f.size) for f in result.files] == [
+        ("depth.png", "image/png", len(_KEPT_FILES["depth.png"])),
+        ("notes.bin", "application/octet-stream", 3),
+    ]
+    assert not result.HasField("error")
+
+
+async def test_the_step_result_references_no_files_when_step_results_are_off(
+    runner: Runner,
+) -> None:
+    conn = await _stepped(runner)
+    _send(runner, conn, _request_step("r1", state={"prompt": "keep files"}))
+    await _until(lambda: len(conn.sent) == 1)
+
+    [reply] = conn.replies()
+    assert reply.WhichOneof("payload") == "step_result"
+    assert list(reply.step_result.files) == []
+
+
+async def test_a_failed_step_is_answered_with_its_error_and_no_files(
+    saving_runner: Runner,
+) -> None:
+    conn = await _stepped(saving_runner)
+    _send(saving_runner, conn, _request_step("r1", state={"prompt": "fail"}))
+    await _until(lambda: len(conn.sent) == 1)
+    await asyncio.sleep(0.02)
+
+    [reply] = conn.replies()
+    assert reply.kind == K.MESSAGE_KIND_RESPONSE
+    result = reply.step_result
+    assert (result.index, result.failure_code, result.error) == (
+        1,
+        step_pb2.STEP_FAILURE_CODE_FAILED,
+        "the step went dark",
+    )
+    assert list(result.files) == []
+    assert _journalled_steps(saving_runner)[0] is SessionEvent.STEP_COMPLETED
+
+
+async def test_a_result_too_large_for_the_connection_is_answered_without_media_and_counted(
+    runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runner_module, "_STEP_MIN_MESSAGE_SIZE", 0)
+    conn = await _stepped(runner)
+    conn.max_message_size = 16
+    _send(runner, conn, _request_step("r1"))
+    await _until(lambda: len(conn.sent) == 1)
+
+    [reply] = conn.replies()
+    assert (reply.request_id, reply.kind) == ("r1", K.MESSAGE_KIND_RESPONSE)
+    result = reply.step_result
+    assert (result.index, result.failure_code) == (1, step_pb2.STEP_FAILURE_CODE_RESULT_TOO_LARGE)
+    assert result.elapsed_seconds > 0
+    assert re.fullmatch(
+        r"step 1's result is (at least )?\d+ bytes; this connection takes at most 16", result.error
+    )
+    assert (list(result.tracks), list(result.files)) == ([], [])
+    assert _journalled_steps(runner) == [SessionEvent.STEP_COMPLETED]
+
+    conn.max_message_size = 64 * 1024 * 1024
+    _send(runner, conn, _request_step("r2"))
+    await _until(lambda: len(conn.sent) == 2)
+    assert conn.replies()[1].step_result.index == 2
+    assert runner._sm.current_state is SessionState.STREAMING
+
+
+async def test_media_that_outgrows_the_connection_is_answered_without_encoding_it(
+    runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def must_not_encode(*_: object, **__: object) -> list[step_pb2.TrackFrames]:
+        raise AssertionError("a result whose frames cannot fit was encoded")
+
+    monkeypatch.setattr(runner_module, "track_frames", must_not_encode)
+    monkeypatch.setattr(runner_module, "_STEP_MIN_MESSAGE_SIZE", 0)
+    conn = await _stepped(runner)
+    # The model's 2x2 RGB frame is 12 bytes of media alone.
+    conn.max_message_size = 8
+    _send(runner, conn, _request_step("r1"))
+    await _until(lambda: len(conn.sent) == 1)
+
+    result = conn.replies()[0].step_result
+    assert (result.index, result.failure_code) == (1, step_pb2.STEP_FAILURE_CODE_RESULT_TOO_LARGE)
+    assert re.fullmatch(
+        r"step 1's result is at least \d+ bytes; this connection takes at most 8", result.error
+    )
+
+
+async def test_a_step_result_s_frames_are_encoded_off_the_runtime_loop(
+    runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loop_thread = threading.get_ident()
+    encoded_on: list[int] = []
+    encode = runner_module.track_frames
+
+    def recording(*args: Any, **kwargs: Any) -> list[step_pb2.TrackFrames]:
+        encoded_on.append(threading.get_ident())
+        return encode(*args, **kwargs)
+
+    monkeypatch.setattr(runner_module, "track_frames", recording)
+    conn = await _stepped(runner)
+    _send(runner, conn, _request_step("r1"))
+    await _until(lambda: len(conn.sent) == 1)
+
+    assert conn.replies()[0].step_result.index == 1
+    assert encoded_on
+    assert loop_thread not in encoded_on
+
+
+async def test_a_connection_whose_messages_are_too_small_is_refused_a_step(runner: Runner) -> None:
+    conn = await _stepped(runner)
+    conn.max_message_size = 16
+    _send(runner, conn, _request_step("r1"))
+    await _until(lambda: len(conn.sent) == 1)
+
+    error = _refusal(conn.replies()[0])
+    assert error == (
+        "this connection's data-channel chunking takes at most 16 bytes a message; "
+        "a stepped session needs at least 262144"
+    )
+
+
+async def test_a_connection_without_chunking_is_refused_a_step(runner: Runner) -> None:
+    conn = await _stepped(runner)
+    conn.message_chunking = False
+    _send(runner, conn, _request_step("r1"))
+    await _until(lambda: len(conn.sent) == 1)
+    await asyncio.sleep(0.02)
+
+    assert "negotiated data-channel chunking" in _refusal(conn.replies()[0])
+    assert models[-1].inputs == []
+    assert _journalled_steps(runner) == []
+
+
+async def test_a_step_whose_output_cannot_be_encoded_is_answered_failed(
+    runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unencodable(bundle: Any, **_: Any) -> list[step_pb2.TrackFrames]:
+        raise FrameEncodingError("float64 video is not supported")
+
+    monkeypatch.setattr("reactor_runtime.runner.runner.track_frames", unencodable)
+    conn = await _stepped(runner)
+    _send(runner, conn, _request_step("r1"))
+    await _until(lambda: len(conn.sent) == 1)
+
+    result = conn.replies()[0].step_result
+    assert (result.index, result.failure_code, result.error) == (
+        1,
+        step_pb2.STEP_FAILURE_CODE_FAILED,
+        "step 1's output could not be encoded: float64 video is not supported",
+    )
+    assert result.elapsed_seconds > 0
+    assert (list(result.tracks), list(result.files)) == ([], [])
+    assert _journalled_steps(runner) == [SessionEvent.STEP_COMPLETED]

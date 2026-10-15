@@ -4,6 +4,8 @@ Two string transforms sit on either side of libwebrtc's own SDP handling:
 :func:`deduplicate_bundle_pts` sanitises an inbound offer libwebrtc would
 otherwise reject, and :func:`embed_ice_candidates` folds gathered candidates
 into the outbound answer so it is complete on its own (non-trickle mode).
+:func:`declared_dc_chunking` reads the chunking limit a client's offer
+declares, which libwebrtc drops when it parses the description.
 """
 
 from __future__ import annotations
@@ -239,3 +241,46 @@ def bump_session_version(sdp: str, by: int) -> str:
         lines[index] = " ".join(fields)
         break
     return "\r\n".join(lines)
+
+
+_DC_CHUNKING_PREFIX = "a=x-reactor-dc-chunking:"
+_DC_CHUNKING_VERSION = 1
+
+
+def declared_dc_chunking(sdp: str) -> tuple[bool, int | None]:
+    """Read the data-channel chunking a description declares.
+
+    The attribute is session-level, ``a=x-reactor-dc-chunking:1
+    max-message-size=<bytes>``: a version, then ``key=value`` parameters
+    separated by ``;``, where ``max-message-size`` is the declaring side's
+    receive limit. Unknown parameters are ignored. A line of another version,
+    or one that cannot be read, counts as not declared, the same reading the
+    media engine gives it.
+
+    Args:
+        sdp: The description to read.
+
+    Returns:
+        Whether chunking is declared, and the receive limit it declares, or
+        ``None`` when the limit is left out.
+    """
+    for line in sdp.splitlines():
+        if not line.startswith(_DC_CHUNKING_PREFIX):
+            continue
+        version, _, params = line[len(_DC_CHUNKING_PREFIX) :].strip().partition(" ")
+        if version != str(_DC_CHUNKING_VERSION):
+            return False, None
+        limit: int | None = None
+        for pair in (part.strip() for part in params.split(";")):
+            if not pair:
+                continue
+            key, sep, value = pair.partition("=")
+            if not sep:
+                return False, None
+            if key.strip() == "max-message-size":
+                digits = value.strip()
+                if not digits.isdigit():
+                    return False, None
+                limit = int(digits)
+        return True, limit
+    return False, None
