@@ -390,7 +390,9 @@ async def test_a_command_held_for_the_starting_input_reports_the_hold_apart_from
         media=lambda chunk: None,
     )
     model._bind_timing(
-        command_timing=lambda conn_id, dispatch_ms, handler_ms, split: parts.append(dict(split)),
+        command_timing=lambda conn_id, _session, dispatch_ms, handler_ms, split: parts.append(
+            dict(split)
+        ),
     )
     now = time.monotonic()
 
