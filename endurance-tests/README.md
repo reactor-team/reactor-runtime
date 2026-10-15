@@ -27,6 +27,7 @@ Exact counts, which must be 0 on every cycle:
 
 | Count | What it means |
 |---|---|
+| `short_cycles` | A cycle whose client got fewer than its 60 frames back: it did not exercise what the scenario claims to. |
 | `pacers_holding_output` | A media pacer that still reaches model output after it stopped. Checked the moment it stops, so it does not depend on when garbage collection runs. |
 | `pinned_batches` | Model output the cyclic garbage collector freed: nothing but reference-cycle garbage held it. |
 | `live_connections`, `live_peers`, `live_pacers` | Transport objects still alive after a collection, with no client connected. |

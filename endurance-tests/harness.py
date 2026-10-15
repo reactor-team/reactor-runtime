@@ -24,6 +24,7 @@ from typing import Any
 import numpy as np
 import psutil
 import reactor_webrtc as rw
+from report import MetricResult
 from trends import ENDURANCE_DURATION_SECONDS, Sample
 
 from reactor_runtime.transport.webrtc.config import WebRtcConfig
@@ -310,6 +311,48 @@ class BareClient:
 
     def _count_video(self, *_: Any) -> None:
         self.received_video += 1
+
+
+def assert_full_streams(received: list[int]) -> MetricResult:
+    """Fail when any cycle got fewer than ``FRAMES_PER_CYCLE`` frames back.
+
+    A cycle that did not stream its full burst did not exercise what the
+    scenario claims to, so a run with one is not a pass.
+
+    Args:
+        received: The frames each cycle got back, in cycle order.
+    """
+    short = [(cycle, n) for cycle, n in enumerate(received) if n < FRAMES_PER_CYCLE]
+    if short:
+        cycle, n = short[0]
+        reason = (
+            f"fewer than {FRAMES_PER_CYCLE} frames came back on {len(short)}/{len(received)} "
+            f"cycles (first at cycle {cycle}: {n})"
+        )
+        print(f"[short_cycles] FAILED: {reason}")
+        return MetricResult(
+            name="short_cycles",
+            start=0,
+            end=len(short),
+            change=len(short),
+            unit="count",
+            status="fail",
+            detail=reason,
+            threshold="always 0",
+            first_bad_cycle=cycle,
+        )
+    reason = f"every one of the {len(received)} cycles got its {FRAMES_PER_CYCLE} frames back"
+    print(f"[short_cycles] ok: {reason}")
+    return MetricResult(
+        name="short_cycles",
+        start=0,
+        end=0,
+        change=0,
+        unit="count",
+        status="ok",
+        detail=reason,
+        threshold="always 0",
+    )
 
 
 def gray_frame(width: int = 640, height: int = 480) -> tuple[bytes, int, int]:

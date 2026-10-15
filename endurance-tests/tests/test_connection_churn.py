@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from harness import BareClient, ResourceSampler, RuntimeProcess, gray_frame
+from harness import BareClient, ResourceSampler, RuntimeProcess, assert_full_streams, gray_frame
 from report import LiveReporter, MetricResult, finish_and_check, now_iso
 from trends import ENDURANCE_DURATION_SECONDS, exact_metrics, trend_metrics
 
@@ -29,18 +29,16 @@ async def test_connection_churn(runtime: RuntimeProcess) -> None:
     live = LiveReporter(TEST_NAME, ENDURANCE_DURATION_SECONDS)
     started_at = now_iso()
     cycle = 0
-    no_media_cycles = 0
+    received: list[int] = []
     metrics: list[MetricResult] = []
     try:
         while not sampler.deadline_reached():
-            received = await BareClient(runtime, session["session_id"]).run(frame)
-            if received == 0:
-                no_media_cycles += 1
+            received.append(await BareClient(runtime, session["session_id"]).run(frame))
             reading, _ = runtime.settled_probe()
             sampler.sample(cycle=cycle, reading=reading)
-            live.update(sampler.samples, errors=no_media_cycles)
+            live.update(sampler.samples)
             cycle += 1
-        metrics = exact_metrics(sampler.samples)
+        metrics = [assert_full_streams(received), *exact_metrics(sampler.samples)]
         metrics += trend_metrics(sampler.samples)
     finally:
         finish_and_check(
@@ -54,5 +52,4 @@ async def test_connection_churn(runtime: RuntimeProcess) -> None:
             live=live,
             metrics=metrics,
             iterations=cycle,
-            errors=no_media_cycles,
         )
