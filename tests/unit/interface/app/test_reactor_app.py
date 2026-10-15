@@ -2,6 +2,8 @@ import asyncio
 import time
 from typing import Any
 
+import pytest
+
 from reactor_runtime import (
     ClientInfo,
     CommandError,
@@ -304,7 +306,7 @@ def _timed(model: Model) -> list[tuple[ConnId, float, float]]:
         media=lambda chunk: None,
     )
     model._bind_timing(
-        command_timing=lambda conn_id, _session, dispatch_ms, handler_ms: timings.append(
+        command_timing=lambda conn_id, _session, dispatch_ms, handler_ms, _parts: timings.append(
             (conn_id, dispatch_ms, handler_ms)
         ),
     )
@@ -347,3 +349,31 @@ async def test_a_command_without_an_arrival_time_or_a_connection_reports_nothing
     )
 
     assert timings == []
+
+
+async def test_a_command_reports_the_parts_of_its_wait() -> None:
+    model = Model()
+    model._on_loop_ready()
+    parts: list[dict[str, float]] = []
+    model.bind_output(
+        broadcast=lambda message: None,
+        addressed=lambda conn_id, message, request_id: None,
+        media=lambda chunk: None,
+    )
+    model._bind_timing(
+        command_timing=lambda conn_id, _session, dispatch_ms, handler_ms, split: parts.append(
+            {**split, "dispatch": dispatch_ms}
+        ),
+    )
+    now = time.monotonic()
+
+    await model._dispatch_command(
+        CommandEnvelope(_cmd("set_value", value=1), ConnId(1001), "req-p", now - 0.05, now - 0.02)
+    )
+
+    [split] = parts
+    assert split["decode"] == pytest.approx(30.0, abs=1.0)
+    assert split["model_queue"] >= 20.0
+    assert split["lock_wait"] >= 0.0
+    total = split["decode"] + split["model_queue"] + split["lock_wait"]
+    assert total == pytest.approx(split["dispatch"], abs=0.01)

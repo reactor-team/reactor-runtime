@@ -468,29 +468,42 @@ class ReactorApp(ReactorCore):
         command waited for the lock and the time its handler ran go to the
         runtime's command timing sink.
         """
+        taken = time.monotonic()
         async with self._step_lock:
             session = self._sessions_started
             started = time.monotonic()
             try:
                 await self._run_command(envelope)
             finally:
-                self._report_command_timing(envelope, session, started, time.monotonic())
+                self._report_command_timing(envelope, session, taken, started, time.monotonic())
 
     def _report_command_timing(
-        self, envelope: CommandEnvelope, session: int, started: float, finished: float
+        self,
+        envelope: CommandEnvelope,
+        session: int,
+        taken: float,
+        started: float,
+        finished: float,
     ) -> None:
-        """Report how long *envelope* waited before its handler started, and how long it ran.
+        """Report how long *envelope* waited, in parts, and how long its handler ran.
 
-        The run includes writing the reply or the failure back to the sender.
+        *taken* is when the model loop took it off its queue, *started* when
+        the step lock was held and its handler started. The run includes
+        writing the reply or the failure back to the sender.
         """
         sink = self._out_command_timing
         if sink is None or envelope.conn_id is None or envelope.received_at is None:
             return
+        parts = {"lock_wait": (started - taken) * 1000.0}
+        if envelope.submitted_at is not None:
+            parts["decode"] = (envelope.submitted_at - envelope.received_at) * 1000.0
+            parts["model_queue"] = (taken - envelope.submitted_at) * 1000.0
         sink(
             envelope.conn_id,
             session,
             (started - envelope.received_at) * 1000.0,
             (finished - started) * 1000.0,
+            parts,
         )
 
     async def _run_command(self, envelope: CommandEnvelope) -> None:

@@ -92,14 +92,18 @@ buffer until a step read it. It goes to that connection only, since frames
 from several connections share one input buffer.
 """
 
-CommandTimingSink = Callable[[ConnId, int, float, float], None]
+CommandTimingSink = Callable[[ConnId, int, float, float, Mapping[str, float]], None]
 """Receives how long a command waited and ran, on the model thread.
 
 The arguments are the connection that sent the command, the session it ran
 in (counted as the model counts session starts, so a report that lands after
 its session ended can be told apart), the milliseconds from its arrival at the
-runtime to the start of its handler (``dispatch``), and the milliseconds its
-handler ran and its reply or failure was written (``handler``).
+runtime to the start of its handler (``dispatch``), the milliseconds its
+handler ran and its reply or failure was written (``handler``), and the parts
+of ``dispatch`` in milliseconds: ``decode`` (arrival until the command,
+decoded and validated, is put on the model's queue), ``model_queue`` (on that
+queue until the model loop takes it) and ``lock_wait`` (the wait for the step
+lock, which a running step holds). A part not timed is left out.
 """
 
 FailureSink = Callable[[BaseException], None]
@@ -237,12 +241,15 @@ class CommandEnvelope:
         request_id: The request id to correlate a reply against, when present.
         received_at: When the command reached the runtime, on the monotonic
             clock, when known.
+        submitted_at: When it was put on the model's queue, on the monotonic
+            clock, when known.
     """
 
     command: Command
     conn_id: ConnId | None
     request_id: RequestId | None
     received_at: float | None = None
+    submitted_at: float | None = None
 
 
 Inbound = CommandEnvelope | ReactorEvent
@@ -493,7 +500,9 @@ class ReactorCore:
         if type(self).submit_command is not ReactorCore.submit_command:
             self.submit_command(command, conn_id, request_id)
             return
-        self._enqueue(CommandEnvelope(command, conn_id, request_id, received_at))
+        self._enqueue(
+            CommandEnvelope(command, conn_id, request_id, received_at, time.monotonic())
+        )
 
     def post_reactor_event(self, event: ReactorEvent) -> None:
         """Enqueue a reactor-authoritative event onto the model loop."""

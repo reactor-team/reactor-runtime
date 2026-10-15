@@ -757,7 +757,12 @@ class Runner(ServiceComponent, ConnectionSink):
         )
 
     def _on_command_timing(
-        self, conn_id: ConnId, session: int, dispatch_ms: float, handler_ms: float
+        self,
+        conn_id: ConnId,
+        session: int,
+        dispatch_ms: float,
+        handler_ms: float,
+        parts: Mapping[str, float] | None = None,
     ) -> None:
         """Add a command's ``dispatch`` and ``handler`` times to the runtime's stages, on the loop.
 
