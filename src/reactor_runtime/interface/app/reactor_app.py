@@ -465,8 +465,9 @@ class ReactorApp(ReactorCore):
 
         The handler runs under the step lock, so it lands between two units of
         a ``run()`` loop that holds the same lock, never inside one. The time a
-        command waited for the lock and the time its handler ran go to the
-        runtime's command timing sink.
+        command waited before its handler started, with its parts
+        (``start_wait``, ``decode``, ``model_queue`` and ``lock_wait``), and the
+        time its handler ran go to the runtime's command timing sink.
         """
         taken = time.monotonic()
         async with self._step_lock:
