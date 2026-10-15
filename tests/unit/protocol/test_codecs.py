@@ -459,6 +459,20 @@ def test_v1_roundtrips_step_messages_on_the_data_channel(
     assert codec.decode(frame, out_channel, direction) == message
 
 
+def test_a_step_result_tells_an_unknown_index_from_a_step_that_did_not_run() -> None:
+    codec = protocol.select(protocol.ProtocolVersion.V1)
+    not_run = step_pb2.StepResult(index=0, failure_code=step_pb2.STEP_FAILURE_CODE_REFUSED)
+    ended = step_pb2.StepResult(failure_code=step_pb2.STEP_FAILURE_CODE_SESSION_ENDED)
+    for result, has_index in ((not_run, True), (ended, False)):
+        message = data_pb2.DataServerMessage(
+            request_id="s", kind=K.MESSAGE_KIND_RESPONSE, step_result=result
+        )
+        out_channel, frame = codec.encode(message)
+        decoded = codec.decode(frame, out_channel, SERVER)
+        assert isinstance(decoded, data_pb2.DataServerMessage)
+        assert decoded.step_result.HasField("index") is has_index
+
+
 @pytest.mark.parametrize(("message", "direction"), _STEP_MESSAGES)
 def test_v0_has_no_form_for_step_messages(
     message: protocol.Message, direction: protocol.Direction
