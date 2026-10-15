@@ -1,0 +1,129 @@
+# Endurance tests: the runtime, run from source in its own process, serving a
+# client that connects and leaves over and over for a set duration, while the
+# suite in endurance-tests/ samples the runtime's process and counts what it
+# still holds after each cycle. Every scenario runs, each in its own job on
+# ubuntu-latest, with no secrets: the client, the runtime and the model all
+# run on the runner.
+#
+# Runs on demand. `runtime_ref` tests another tag or commit's runtime source
+# with this ref's suite, which is how a release that predates the suite is
+# tested.
+
+name: Endurance Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: "How long each scenario runs, in minutes"
+        type: string
+        default: "15"
+      runtime_ref:
+        description: "Tag or commit whose runtime source to test (empty: this ref's)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  # Keep this in step with the other workflows.
+  MISE_VERSION: "2026.6.14"
+
+jobs:
+  setup:
+    name: Plan the run
+    runs-on: ubuntu-latest
+    outputs:
+      scenarios: ${{ steps.scenarios.outputs.scenarios }}
+      timeout_minutes: ${{ steps.timeout.outputs.timeout_minutes }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: List the scenarios
+        id: scenarios
+        run: |
+          set -euo pipefail
+          scenarios=$(find endurance-tests/tests -name 'test_*.py' -printf '%f\n' \
+            | sed -e 's/^test_//' -e 's/\.py$//' | sort | jq -R . | jq -cs .)
+          echo "Scenarios: $scenarios"
+          echo "scenarios=$scenarios" >> "$GITHUB_OUTPUT"
+
+      # The duration plus room for setup and the report, inside the 360-minute
+      # cap GitHub Actions puts on a job.
+      - name: Compute the job timeout
+        id: timeout
+        env:
+          DURATION_MINUTES: ${{ inputs.duration_minutes }}
+        run: |
+          set -euo pipefail
+          timeout_minutes=$((10#$DURATION_MINUTES + 20))
+          if (( timeout_minutes > 360 )); then
+            echo "::error::duration_minutes must be at most 340"
+            exit 1
+          fi
+          echo "timeout_minutes=$timeout_minutes" >> "$GITHUB_OUTPUT"
+
+  endurance:
+    name: Endurance (${{ matrix.scenario }})
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJSON(needs.setup.outputs.timeout_minutes) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: ${{ fromJSON(needs.setup.outputs.scenarios) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Use the runtime source of ${{ inputs.runtime_ref }}
+        if: inputs.runtime_ref != ''
+        env:
+          RUNTIME_REF: ${{ inputs.runtime_ref }}
+        run: |
+          set -euo pipefail
+          git rm -rq src/reactor_runtime
+          git checkout "$RUNTIME_REF" -- src/reactor_runtime
+          echo "Testing the runtime from $RUNTIME_REF ($(git rev-parse --short "$RUNTIME_REF"))"
+
+      - uses: jdx/mise-action@v4
+        with:
+          version: ${{ env.MISE_VERSION }}
+
+      - name: Install
+        run: |
+          mise run //proto:gen
+          uv sync --locked
+
+      - name: Run ${{ matrix.scenario }}
+        env:
+          DURATION_MINUTES: ${{ inputs.duration_minutes }}
+          ENDURANCE_RUNTIME_REF: ${{ inputs.runtime_ref }}
+        run: |
+          set -euo pipefail
+          export ENDURANCE_DURATION_SECONDS=$((10#$DURATION_MINUTES * 60))
+          uv run --no-sync pytest -v -s \
+            "endurance-tests/tests/test_${{ matrix.scenario }}.py"
+
+      - name: Publish the report to the job summary
+        if: always()
+        run: |
+          shopt -s nullglob
+          reports=(endurance-results/*-report.md)
+          if [ ${#reports[@]} -eq 0 ]; then
+            echo "No report was written: the run failed before a scenario produced one. See the job log." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          for report in "${reports[@]}"; do
+            cat "$report" >> "$GITHUB_STEP_SUMMARY"
+            echo >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: endurance-${{ matrix.scenario }}${{ inputs.runtime_ref && format('-{0}', inputs.runtime_ref) || '' }}
+          path: endurance-results/
+          if-no-files-found: warn
