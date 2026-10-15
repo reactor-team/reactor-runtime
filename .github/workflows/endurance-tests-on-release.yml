@@ -1,0 +1,68 @@
+# Runs the endurance suite against every release, once it is published.
+#
+# The release workflow tags and publishes with GITHUB_TOKEN, whose events start
+# no other workflow, so this follows the release run itself: when it completes
+# on main and its publish job succeeded, this dispatches Endurance Tests on the
+# new tag. A merge that only ships a pre-release skips that job, and nothing is
+# dispatched.
+
+name: Endurance Tests on Release
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  # How long each scenario runs on a release, from a repository variable so it
+  # can be tuned without a change here.
+  RELEASE_ENDURANCE_DURATION_MINUTES: ${{ vars.RELEASE_ENDURANCE_DURATION_MINUTES || '120' }}
+
+jobs:
+  dispatch:
+    name: Dispatch the endurance suite
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Find the release this run published
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          published=$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID/jobs" --paginate \
+            --jq '[.jobs[] | select(.name == "Build and publish a release")] | last | .conclusion // "missing"')
+          echo "publish job: $published"
+          if [ "$published" != "success" ]; then
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          tag=$(gh api "repos/$GH_REPO/tags" --paginate \
+            --jq ".[] | select(.commit.sha == \"$HEAD_SHA\") | .name" | { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true; } | head -n 1)
+          if [ -z "$tag" ]; then
+            echo "::error::the release run published, but no vX.Y.Z tag points at $HEAD_SHA"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch Endurance Tests on ${{ steps.release.outputs.tag }}
+        if: steps.release.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh workflow run endurance-tests.yml --ref "$TAG" \
+            -f duration_minutes="$RELEASE_ENDURANCE_DURATION_MINUTES"
+          echo "Dispatched Endurance Tests on $TAG for $RELEASE_ENDURANCE_DURATION_MINUTES minutes per scenario"
