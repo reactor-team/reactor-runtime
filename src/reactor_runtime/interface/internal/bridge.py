@@ -209,8 +209,8 @@ class ModelBridge:
             media=media,
             media_ops=media_ops,
             step=step,
-            command_timing=command_timing,
         )
+        self._model._bind_timing(command_timing=command_timing)
         if failure is not None:
             self._model.bind_failure(failure)
         self._outbound_bound = True

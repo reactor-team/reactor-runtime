@@ -66,7 +66,6 @@ from reactor_runtime.interface.internal.bridge import CommandOutcome
 from reactor_runtime.interface.internal.reactor_core import (
     AddressedSink,
     BroadcastSink,
-    CommandTimingSink,
     MediaOps,
     MediaSink,
     StepSink,
@@ -163,7 +162,6 @@ class FakeModel(ReactorApp):
         media: MediaSink,
         media_ops: MediaOps | None = None,
         step: StepSink | None = None,
-        command_timing: CommandTimingSink | None = None,
     ) -> None:
         self.events.append("bind")
         super().bind_output(
@@ -172,7 +170,6 @@ class FakeModel(ReactorApp):
             media=media,
             media_ops=media_ops,
             step=step,
-            command_timing=command_timing,
         )
 
     def start_thread(self) -> None:

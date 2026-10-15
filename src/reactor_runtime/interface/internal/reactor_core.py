@@ -385,6 +385,15 @@ class ReactorCore:
 
     # -- outbound binding (called once by the bridge) -------------------------
 
+    def _bind_timing(self, *, command_timing: CommandTimingSink | None = None) -> None:
+        """Bind the runtime's timing sinks. Called once by the bridge, beside :meth:`bind_output`.
+
+        Kept apart from :meth:`bind_output`, which a model may override with
+        the signature it was written against: a new sink here does not break
+        that override.
+        """
+        self._out_command_timing = command_timing
+
     def bind_output(
         self,
         *,
@@ -393,7 +402,6 @@ class ReactorCore:
         media: MediaSink,
         media_ops: MediaOps | None = None,
         step: StepSink | None = None,
-        command_timing: CommandTimingSink | None = None,
     ) -> None:
         """Bind the outbound sinks. Called once before the loop starts.
 
@@ -413,7 +421,6 @@ class ReactorCore:
         self._out_media = media
         self._media_ops = media_ops
         self._out_step = step
-        self._out_command_timing = command_timing
         if media_ops is not None:
             if self.buffer_size is not None:
                 media_ops.set_depth(self.buffer_size)

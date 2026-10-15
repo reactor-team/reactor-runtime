@@ -22,7 +22,14 @@ from reactor_runtime.core.values import (
     MediaChunk,
 )
 from reactor_runtime.interface.internal.bridge import ModelBridge
-from reactor_runtime.interface.internal.reactor_core import MediaOps, RequestId
+from reactor_runtime.interface.internal.reactor_core import (
+    AddressedSink,
+    BroadcastSink,
+    MediaOps,
+    MediaSink,
+    RequestId,
+    StepSink,
+)
 from reactor_runtime.interface.model.contract import ModelContract
 
 
@@ -235,3 +242,36 @@ def test_bind_outbound_rejects_a_second_call() -> None:
 def test_contract_is_exposed() -> None:
     bridge, _ = make_bridge()
     assert bridge.contract is ModelContract.of(EchoModel)
+
+
+def test_a_model_overriding_bind_output_with_its_old_signature_still_binds() -> None:
+    class OwnBind(EchoModel):
+        def bind_output(
+            self,
+            *,
+            broadcast: BroadcastSink,
+            addressed: AddressedSink,
+            media: MediaSink,
+            media_ops: MediaOps | None = None,
+            step: StepSink | None = None,
+        ) -> None:
+            super().bind_output(
+                broadcast=broadcast,
+                addressed=addressed,
+                media=media,
+                media_ops=media_ops,
+                step=step,
+            )
+
+    model = OwnBind()
+    bridge = ModelBridge(model, ModelContract.of(OwnBind))
+    timing = lambda conn_id, dispatch_ms, handler_ms: None  # noqa: E731
+
+    bridge.bind_outbound(
+        broadcast=lambda m: None,
+        addressed=lambda *a: None,
+        media=lambda c: None,
+        command_timing=timing,
+    )
+
+    assert model._out_command_timing is timing
