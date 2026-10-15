@@ -55,19 +55,20 @@ _Holder = TypeVar("_Holder")
 STEP_SESSION: contextvars.ContextVar[int | None] = contextvars.ContextVar(
     "reactor_step_session", default=None
 )
-STEP_STAGES: contextvars.ContextVar[tuple[tuple[str, str, float], ...]] = contextvars.ContextVar(
-    "reactor_step_stages", default=()
-)
-"""The frame stages the step being emitted timed, set by the step loop around its emit.
-
-They ride the chunk (:attr:`MediaChunk.stages`) to the consumers that time frames.
-"""
 """The session the step being emitted began in, set by the step loop around its emit.
 
 A step reports the session it began in, and its media is stamped with the
 same number, so both count toward one session even when the session changes
 while the step emits. An emit made outside a step leaves it unset and is
 stamped with the session the model is in when it emits.
+"""
+
+STEP_STAGES: contextvars.ContextVar[tuple[tuple[str, str, float], ...]] = contextvars.ContextVar(
+    "reactor_step_stages", default=()
+)
+"""The frame stages the step being emitted timed, set by the step loop around its emit.
+
+They ride the chunk (:attr:`MediaChunk.stages`) to the consumers that time frames.
 """
 
 BroadcastSink = Callable[[ModelMessage], None]

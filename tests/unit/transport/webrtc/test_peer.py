@@ -2377,3 +2377,22 @@ def test_a_fold_counts_only_the_window_and_restarts_from_zero_after_a_reset() ->
     peer.fold_handoffs()
     [convert] = [s for s in peer.frame_stages.take()["cam"] if s.name == "sink_convert"]
     assert (convert.frames, convert.total_ms) == (1, pytest.approx(1.0))
+
+
+async def test_a_message_held_until_the_wire_opens_reports_its_loop_wait() -> None:
+    peer = WebRTCPeer()
+    peer._loop = asyncio.get_running_loop()
+    got: list[Any] = []
+    peer.on_message(lambda payload, _version, _channel: got.append(payload))
+
+    peer._make_message_sink(Channel.DATA)(b"x", True)
+    await asyncio.sleep(0.005)
+    with peer._ready_lock:
+        peer._peer_connected = peer._data_open = peer._control_open = True
+        peer._fire_connected_if_ready()
+    await asyncio.sleep(0.01)
+
+    assert got == [b"x"]
+    [wait] = [s for s in peer.message_stages.take() if s.name == "loop_wait"]
+    assert wait.messages == 1
+    assert wait.total_ms >= 5.0

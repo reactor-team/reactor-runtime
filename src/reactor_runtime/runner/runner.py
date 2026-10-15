@@ -779,11 +779,13 @@ class Runner(ServiceComponent, ConnectionSink):
         """Add a frame's time in a stage the model timed to its sender, on the loop.
 
         The model reports from its own thread; the connections are the loop's.
+        A report that arrives after the loop closed, at shutdown, is dropped.
         """
         loop = self._loop
         if loop is None:
             return
-        loop.call_soon_threadsafe(self._connections.add_frame_stage, conn_id, track, stage, ms)
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(self._connections.add_frame_stage, conn_id, track, stage, ms)
 
     def _on_step_completed(self, step: CompletedStep) -> None:
         """Record a step the model reported finished, hopping onto the loop.

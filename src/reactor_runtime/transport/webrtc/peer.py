@@ -496,7 +496,7 @@ class WebRTCPeer:
         # Inbound frames that arrived before the wire counted as open, in arrival
         # order, each with the codec version and channel it came in on. Guarded
         # by ``_ready_lock`` so a frame is either held or delivered, never both.
-        self._early_frames: list[tuple[bytes | str, ProtocolVersion, Channel]] = []
+        self._early_frames: list[tuple[bytes | str, ProtocolVersion, Channel, float | None]] = []
 
         logger.info("WebRTCPeer initialized")
 
@@ -874,8 +874,8 @@ class WebRTCPeer:
             self._connected.set()
             self._fire(self._cb_connected)
             held, self._early_frames = self._early_frames, []
-            for payload, version, channel in held:
-                self._deliver(payload, version, channel)
+            for payload, version, channel, arrived_at in held:
+                self._deliver(payload, version, channel, arrived_at)
 
     def _make_message_sink(self, channel: Channel) -> Callable[[bytes, bool], None]:
         def sink(data: bytes, binary: bool) -> None:
@@ -888,16 +888,19 @@ class WebRTCPeer:
                 self._protocol_sniffed = True
             with self._ready_lock:
                 if not self._connected.is_set():
-                    self._hold(payload, channel)
+                    self._hold(payload, channel, arrived_at)
                     return
                 self._deliver(payload, self.protocol_version, channel, arrived_at)
 
         return sink
 
-    def _hold(self, payload: bytes | str, channel: Channel) -> None:
+    def _hold(
+        self, payload: bytes | str, channel: Channel, arrived_at: float | None = None
+    ) -> None:
         """Keep a frame that arrived before the wire is open, within the bound.
 
-        Called with ``_ready_lock`` held.
+        *arrived_at* rides with it, so the frame's ``loop_wait`` covers the
+        hold. Called with ``_ready_lock`` held.
         """
         if len(self._early_frames) >= _MAX_EARLY_FRAMES:
             logger.warning(
@@ -906,7 +909,7 @@ class WebRTCPeer:
                 _MAX_EARLY_FRAMES,
             )
             return
-        self._early_frames.append((payload, self.protocol_version, channel))
+        self._early_frames.append((payload, self.protocol_version, channel, arrived_at))
 
     def _deliver(
         self,

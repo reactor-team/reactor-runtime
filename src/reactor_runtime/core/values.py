@@ -508,8 +508,9 @@ class MediaChunk:
         stages: The frame stages the step that made the chunk timed before it
             emitted, as ``(track, stage, ms)``: ``process_input``,
             ``generate`` and ``process_output`` on the track ``"*"``, which
-            stands for each video track of the chunk. A consumer that times
-            frames adds them.
+            stands for each video track of the chunk. Every consumer that
+            times frames adds them, so each connection's stages include the
+            step that made the frames it sends.
         emitted_at: When the model called ``emit`` for the chunk, on
             :func:`time.perf_counter`, or ``None`` when not timed. A consumer
             times its ``emit`` stage from it.
