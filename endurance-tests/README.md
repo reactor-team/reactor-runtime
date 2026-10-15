@@ -51,10 +51,7 @@ ENDURANCE_DURATION_SECONDS=600 uv run pytest endurance-tests/tests/test_connecti
 ```
 
 Each run writes `endurance-results/<scenario>.json`, `-report.md` and
-`-summary.txt`, plus the runtime's log. In CI, the **Endurance Tests**
-workflow runs every scenario on demand: `duration_minutes` sets the length,
-and `runtime_ref` tests another tag or commit's runtime source with the
-current suite.
+`-summary.txt`, plus the runtime's log.
 
 The checks and the reports (`trends.py`, `report.py`) need no runtime, and
 their unit tests under `unit/` run with the rest of the test suite.
@@ -64,5 +61,4 @@ their unit tests under `unit/` run with the rest of the test suite.
 Add `tests/test_<name>.py`. Drive the runtime through the `runtime` fixture
 and `BareClient`, take one `ResourceSampler.sample()` per cycle from
 `runtime.settled_probe()`, and end in a `finally` block with
-`finish_and_check(...)` over `exact_metrics(...) + trend_metrics(...)`. CI
-picks the file up as its own job.
+`finish_and_check(...)` over `exact_metrics(...) + trend_metrics(...)`.
