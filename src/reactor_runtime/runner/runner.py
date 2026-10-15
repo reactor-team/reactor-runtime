@@ -775,17 +775,26 @@ class Runner(ServiceComponent, ConnectionSink):
         with contextlib.suppress(RuntimeError):
             loop.call_soon_threadsafe(add)
 
-    def _on_frame_timing(self, conn_id: ConnId, track: str, stage: str, ms: float) -> None:
+    def _on_frame_timing(
+        self, conn_id: ConnId, session: int, track: str, stage: str, ms: float
+    ) -> None:
         """Add a frame's time in a stage the model timed to its sender, on the loop.
 
         The model reports from its own thread; the connections are the loop's.
-        A report that arrives after the loop closed, at shutdown, is dropped.
+        A report that arrives after the loop closed, at shutdown, is dropped,
+        and so is one from an earlier session: its connection id may already
+        belong to a connection of the current one.
         """
         loop = self._loop
         if loop is None:
             return
+
+        def add() -> None:
+            if session == self._sessions_posted:
+                self._connections.add_frame_stage(conn_id, track, stage, ms)
+
         with contextlib.suppress(RuntimeError):
-            loop.call_soon_threadsafe(self._connections.add_frame_stage, conn_id, track, stage, ms)
+            loop.call_soon_threadsafe(add)
 
     def _on_step_completed(self, step: CompletedStep) -> None:
         """Record a step the model reported finished, hopping onto the loop.

@@ -4164,3 +4164,21 @@ async def test_a_command_timing_from_an_earlier_session_is_dropped() -> None:
     await asyncio.sleep(0)
 
     assert added == [(ConnId(1001), "dispatch"), (ConnId(1001), "handler")]
+
+
+async def test_a_frame_timing_from_an_earlier_session_is_dropped() -> None:
+    runner = _runner()
+    runner._loop = asyncio.get_running_loop()
+    added: list[tuple[ConnId, str]] = []
+    setattr(  # noqa: B010
+        runner._connections,
+        "add_frame_stage",
+        lambda conn_id, track, stage, ms: added.append((conn_id, stage)),
+    )
+    runner._sessions_posted = 2
+
+    runner._on_frame_timing(ConnId(1001), 1, "webcam", "input_wait", 1.0)
+    runner._on_frame_timing(ConnId(1001), 2, "webcam", "input_wait", 1.0)
+    await asyncio.sleep(0)
+
+    assert added == [(ConnId(1001), "input_wait")]

@@ -89,11 +89,13 @@ MediaSink = Callable[[MediaChunk], None]
 StepSink = Callable[[CompletedStep], None]
 """Receives each step the model reports finished, on the model thread."""
 
-FrameTimingSink = Callable[[ConnId, str, str, float], None]
+FrameTimingSink = Callable[[ConnId, int, str, str, float], None]
 """Receives one frame's time in one stage that only the model sees, on the model thread.
 
-The arguments are the connection that sent the frame, the track, the stage
-and the milliseconds: ``input_wait``, the frame's wait in the model's input
+The arguments are the connection that sent the frame, the session of the step
+that read it (counted as the model counts session starts, so a report that
+lands after its session ended can be told apart), the track, the stage and
+the milliseconds: ``input_wait``, the frame's wait in the model's input
 buffer until a step read it. It goes to that connection only, since frames
 from several connections share one input buffer.
 """

@@ -317,7 +317,7 @@ class ReactorApp(ReactorCore):
                             input = await self.process_input()
                         except ApplicationError as refused:
                             # Frames a refused turn read belong to no step.
-                            self._report_input_waits(report=False)
+                            self._report_input_waits(session, report=False)
                             # One record per change of reason, not one per turn.
                             reason = f"{type(refused).__name__}: {refused}"
                             if reason != last_refusal:
@@ -332,7 +332,7 @@ class ReactorApp(ReactorCore):
                         else:
                             last_refusal = None
                             input_ms = (time.perf_counter() - input_started) * 1000.0
-                            self._report_input_waits()
+                            self._report_input_waits(session)
                             # 3. The model. Synchronous on purpose: nothing changes
                             #    under it. This is the one place a StepOutcome is
                             #    built.
@@ -401,7 +401,7 @@ class ReactorApp(ReactorCore):
         stages.append(("*", "process_output", output_ms))
         return tuple(stages)
 
-    def _report_input_waits(self, report: bool = True) -> None:
+    def _report_input_waits(self, session: int, report: bool = True) -> None:
         """Report each frame the step read, as ``input_wait``, to the connection that sent it.
 
         The wait runs from the frame's arrival in the input buffer until the
@@ -413,7 +413,7 @@ class ReactorApp(ReactorCore):
         for track, buffer in self._input_buffers.items():
             for source, ms in buffer.take_read_waits():
                 if report and sink is not None and source is not None:
-                    sink(source, track, "input_wait", ms)
+                    sink(source, session, track, "input_wait", ms)
 
     # -- engine hooks ---------------------------------------------------------
 

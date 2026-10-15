@@ -993,7 +993,9 @@ async def test_a_step_reports_each_frames_input_wait_to_the_connection_that_sent
         media=lambda chunk: None,
     )
     app._bind_timing(
-        frame_timing=lambda conn_id, track, stage, ms: waits.append((conn_id, track, stage)),
+        frame_timing=lambda conn_id, session, track, stage, ms: waits.append(
+            (conn_id, track, stage)
+        ),
     )
     await _go_live(app)
     app.push_media("webcam", InputFrame(data=np.zeros((2, 2, 3), dtype=np.uint8)), ConnId(1002))
@@ -1022,7 +1024,7 @@ async def test_a_refused_step_drops_the_input_waits_of_the_frames_it_read() -> N
         media=lambda chunk: None,
     )
     app._bind_timing(
-        frame_timing=lambda conn_id, track, stage, ms: waits.append(conn_id),
+        frame_timing=lambda conn_id, session, track, stage, ms: waits.append(conn_id),
     )
     await _go_live(app)
     app.state.paused = True
