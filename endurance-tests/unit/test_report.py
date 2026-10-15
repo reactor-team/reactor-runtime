@@ -1,7 +1,15 @@
 import json
 from pathlib import Path
 
-from report import MetricResult, RunResult, finish_run, render_markdown, write_reports
+import pytest
+from report import (
+    LiveReporter,
+    MetricResult,
+    RunResult,
+    finish_run,
+    render_markdown,
+    write_reports,
+)
 from trends import Sample
 
 
@@ -94,3 +102,13 @@ def test_the_reports_are_written_from_one_result(tmp_path: Path) -> None:
     assert len(data["samples"]) == 3
     assert "reactor-runtime 3.8.3" in paths["markdown"].read_text()
     assert "reactor-runtime 3.8.3" in paths["text"].read_text()
+
+
+def test_the_live_status_says_when_a_cycle_left_something_behind(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    live = LiveReporter("churn", 60)
+    live.update(_samples(), retained=2, force=True)
+    assert "2 cycle(s) left something behind" in capsys.readouterr().out
+    live.update(_samples(), retained=0, force=True)
+    assert "Nothing left behind so far" in capsys.readouterr().out

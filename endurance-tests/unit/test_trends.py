@@ -9,6 +9,7 @@ from trends import (
     assert_no_sustained_growth,
     cpu_deltas,
     exact_metrics,
+    retained_cycles,
     trend_metrics,
 )
 
@@ -126,3 +127,17 @@ def test_exact_metrics_cover_every_count() -> None:
         "live_pacers",
         "tasks",
     ]
+
+
+def test_retained_cycles_count_every_cycle_with_any_nonzero_count() -> None:
+    samples = _samples(5)
+    samples[1] = dataclasses.replace(samples[1], pinned_batches=1)
+    samples[3] = dataclasses.replace(samples[3], live_peers=1, live_pacers=1)
+    assert retained_cycles(samples) == 2
+
+
+def test_a_leak_just_over_the_limit_reads_as_over_it() -> None:
+    values = [100.0] * 4 + [100.0] * 4 + [115.4] * 4
+    result = assert_no_sustained_growth(values, name="rss", max_growth_ratio=0.15)
+    assert result.status == "fail"
+    assert "+15.4%" in result.detail

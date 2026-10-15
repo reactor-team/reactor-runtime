@@ -117,6 +117,9 @@ def assert_no_sustained_growth(
     n = len(values)
     if n < MIN_TREND_SAMPLES:
         raise AssertionError(f"only {n} {name} sample(s), {MIN_TREND_SAMPLES} needed for a trend")
+    # Three equal windows, the last one ending at the final sample: when n is
+    # not a multiple of three, the one or two samples between the middle and
+    # last windows are left out, so every window weighs the same.
     third = n // 3
     first, middle, last = values[:third], values[third : 2 * third], values[-third:]
     average = statistics.median if use_median else _mean
@@ -129,7 +132,7 @@ def assert_no_sustained_growth(
 
     if is_leak:
         reason = (
-            f"still climbing: the last third is {tail_ratio:+.0%} over the middle third, "
+            f"still climbing: the last third is {tail_ratio:+.1%} over the middle third, "
             f"above the {max_growth_ratio:.0%} limit"
         )
     elif tail_delta <= min_absolute_delta:
@@ -138,7 +141,7 @@ def assert_no_sustained_growth(
             f"within the {min_absolute_delta:,.3g} noise floor"
         )
     else:
-        reason = f"the last third grew {tail_ratio:+.0%}, under the {max_growth_ratio:.0%} limit"
+        reason = f"the last third grew {tail_ratio:+.1%}, under the {max_growth_ratio:.0%} limit"
     trend = f"{first_avg:,.3f} → {middle_avg:,.3f} → {last_avg:,.3f}"
     print(f"[{name}] {'LEAK?' if is_leak else 'ok'}: {trend}: {reason}")
 
@@ -223,14 +226,25 @@ def assert_never_grows(samples: list[Sample], *, field: str, unit: str = "count"
     )
 
 
+# The counts that must be 0 after every cycle.
+ZERO_FIELDS = (
+    "pacers_holding_output",
+    "pinned_batches",
+    "live_connections",
+    "live_peers",
+    "live_pacers",
+)
+
+
+def retained_cycles(samples: list[Sample]) -> int:
+    """Return how many cycles left something behind, by any count that must stay at 0."""
+    return sum(1 for s in samples if any(getattr(s, field) for field in ZERO_FIELDS))
+
+
 def exact_metrics(samples: list[Sample]) -> list[MetricResult]:
     """Return the exact counts over every cycle: a retained object fails the cycle it shows in."""
     return [
-        assert_always_zero(samples, field="pacers_holding_output"),
-        assert_always_zero(samples, field="pinned_batches"),
-        assert_always_zero(samples, field="live_connections"),
-        assert_always_zero(samples, field="live_peers"),
-        assert_always_zero(samples, field="live_pacers"),
+        *(assert_always_zero(samples, field=field) for field in ZERO_FIELDS),
         assert_never_grows(samples, field="tasks"),
     ]
 

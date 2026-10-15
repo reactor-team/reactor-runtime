@@ -147,9 +147,6 @@ class RunResult:
     metrics: list[MetricResult]
     # One line on what the scenario does, shown under the title.
     description: str | None = None
-    # Cycles that went wrong without stopping the run; None when the scenario
-    # does not count any.
-    errors: int | None = None
     version: str | None = None
     commit_sha: str | None = None
     # Why the run stopped short, when it did.
@@ -235,18 +232,12 @@ def _conclusion_lines(result: RunResult) -> list[str]:
                     f"({_format_value(m.start, m.unit)} → {_format_value(m.end, m.unit)}) "
                     "and held steady."
                 )
-        if result.errors is not None:
-            lines.append(
-                "Every cycle worked."
-                if not result.errors
-                else f"{result.errors} cycle(s) went wrong without affecting the result."
-            )
         return lines
 
     failed = [m for m in result.metrics if m.status == "fail"]
     lines = [f"The run found a problem in: {', '.join(m.name for m in failed)}."]
     for m in failed:
-        if m.threshold == "always 0":
+        if m.first_bad_cycle is not None:
             # How often and since when says more than a start and an end.
             lines.append(f"{m.name}: {m.detail}.")
         else:
@@ -292,9 +283,6 @@ def render_markdown(result: RunResult) -> str:
             "|---|---:|---:|---:|---:|---|",
         ]
         lines += [m.row_markdown() for m in result.metrics]
-        if result.errors is not None:
-            mark = "🟢" if result.errors == 0 else "🟡"
-            lines.append(f"| Errors | {result.errors} | — | {result.errors} | — | {mark} |")
         lines.append("")
 
     if checkpoints := _checkpoints_for(result):
@@ -335,9 +323,6 @@ def render_text(result: RunResult) -> str:
     if result.metrics:
         lines += ["Results", "-------"]
         lines += [m.row_text() for m in result.metrics]
-        if result.errors is not None:
-            mark = "🟢" if result.errors == 0 else "🟡"
-            lines.append(f"  {'Errors':<22} {result.errors:>12}  {mark}")
         lines.append("")
 
     if checkpoints := _checkpoints_for(result):
@@ -382,7 +367,6 @@ def finish_run(
     samples: list[Any],
     metrics: list[MetricResult],
     iterations: int,
-    errors: int | None = None,
     version: str | None = None,
     description: str | None = None,
     out_dir: Path = DEFAULT_OUTPUT_DIR,
@@ -409,16 +393,16 @@ def finish_run(
         started_at=started_at,
         ended_at=now_iso(),
         metrics=metrics,
-        errors=errors,
         version=version,
         description=description,
         commit_sha=git_commit_sha(),
         run_error=run_error,
-        samples=[dataclasses.asdict(s) for s in samples],
     )
+    # Any failure from here on is printed, not raised: the test's own failure
+    # must surface.
     try:
+        result.samples = [dataclasses.asdict(s) for s in samples]
         write_reports(result, out_dir)
-    # Any failure here is printed, not raised: the test's own failure must surface.
     except Exception as e:
         print(f"[finish_run] writing the reports failed: {e!r}")
     return result
@@ -436,7 +420,6 @@ def finish_and_check(
     live: LiveReporter,
     metrics: list[MetricResult],
     iterations: int,
-    errors: int | None = None,
     out_dir: Path = DEFAULT_OUTPUT_DIR,
 ) -> None:
     """End a scenario: print the last status, write the reports, and fail on a failed check.
@@ -448,7 +431,7 @@ def finish_and_check(
         AssertionError: A check failed.
     """
     if sampler.samples:
-        live.update(sampler.samples, errors=errors, force=True)
+        live.update(sampler.samples, force=True)
     result = finish_run(
         test_name=test_name,
         subject=subject,
@@ -457,7 +440,6 @@ def finish_and_check(
         samples=sampler.samples,
         metrics=metrics,
         iterations=iterations,
-        errors=errors,
         version=version,
         description=description,
         out_dir=out_dir,
@@ -479,17 +461,26 @@ class LiveReporter:
         self.interval_s = LIVE_INTERVAL_SECONDS if interval_s is None else interval_s
         self._last_print: float | None = None
 
-    def update(self, samples: list[Any], *, errors: int | None = None, force: bool = False) -> None:
-        """Print the block once the interval has passed since the last one, or when *force*."""
+    def update(
+        self, samples: list[Any], *, retained: int | None = None, force: bool = False
+    ) -> None:
+        """Print the block once the interval has passed since the last one, or when *force*.
+
+        Args:
+            samples: The run's samples so far.
+            retained: How many cycles so far left something behind, for the
+                status line; left out when None.
+            force: Print regardless of the interval.
+        """
         if not samples:
             return
         now = time.monotonic()
         if not force and self._last_print is not None and now - self._last_print < self.interval_s:
             return
         self._last_print = now
-        print(self._format(samples, errors=errors))
+        print(self._format(samples, retained=retained))
 
-    def _format(self, samples: list[Any], *, errors: int | None) -> str:
+    def _format(self, samples: list[Any], *, retained: int | None) -> str:
         first, last = samples[0], samples[-1]
         elapsed = last.elapsed_s
         pct = min(100, int(elapsed / self.duration_s * 100)) if self.duration_s else 0
@@ -506,10 +497,6 @@ class LiveReporter:
             f"Progress       {pct}%",
             "",
             f"Cycles         {last.cycle + 1:,}",
-        ]
-        if errors is not None:
-            lines.append(f"Errors         {errors}")
-        lines += [
             "",
             "Resources",
             f"  RSS          {rss_start_mb:,.0f} MB → {rss_now_mb:,.0f} MB   "
@@ -517,8 +504,13 @@ class LiveReporter:
             f"  CPU          avg {avg_cpu:.1f}%",
             f"  Threads      {first.num_threads} → {last.num_threads}",
             f"  File desc.   {first.num_fds} → {last.num_fds}",
-            "",
-            f"Status         {'🟡 Errors' if errors else '🟢 Healthy'}",
-            bar,
         ]
+        if retained is not None:
+            status = (
+                f"🔴 {retained} cycle(s) left something behind"
+                if retained
+                else "🟢 Nothing left behind so far"
+            )
+            lines += ["", f"Status         {status}"]
+        lines.append(bar)
         return "\n".join(lines)
