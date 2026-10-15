@@ -116,7 +116,10 @@ message StepResult {
   double elapsed_seconds = 3;
   // The extra files the model kept with the step, for a step that worked and
   // was saved. Empty otherwise: when it kept none, is not saved, failed
-  // (FAILED), or did not fit a message (RESULT_TOO_LARGE).
+  // (FAILED), or did not fit a message (RESULT_TOO_LARGE). The step is saved
+  // after its result is sent: its files are readable once the step's
+  // result.json exists, and a save that fails keeps none, saying why in
+  // result.json's save_error.
   repeated StepFileRef files = 4;
   // Why the step failed, in words; unset when it worked.
   optional string error = 5;
