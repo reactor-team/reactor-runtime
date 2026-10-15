@@ -44,11 +44,13 @@ message TrackFrames {
 // empty request runs the step on the model's current state, which commands
 // sent before it may have changed. The runtime applies the request as
 // individual calls, in order: the state, then the commands, then the media
-// input, and then runs the step. A call that fails refuses the step; the calls
-// applied before it stay applied.
+// input, and then runs the step. A call that fails stops the request before
+// the step runs (REFUSED or COMMAND_FAILED); the calls applied before it stay
+// applied.
 //
 // Every request ends in exactly one response, a StepResult with the request's
-// request_id.
+// request_id. Requests are handled in the order they arrive: one sent before
+// the previous one's result runs after it.
 message RequestStep {
   // Values for the model's state fields, keyed by field name. Each key runs as
   // the model's set_<key> command, in ascending key order, before commands.
@@ -72,7 +74,9 @@ message StepFileRef {
   uint64 size = 3;
 }
 
-// Why a step has no usable result.
+// Why a step has no usable result. New codes can be added: a consumer treats
+// any non-zero value, including one it does not know, as a failure, with the
+// reason in error.
 enum StepFailureCode {
   // The step ran and worked.
   STEP_FAILURE_CODE_UNSPECIFIED = 0;
@@ -110,8 +114,9 @@ message StepResult {
   // result.json. Zero when the step did not run, and for SESSION_ENDED, where
   // it says nothing about the step.
   double elapsed_seconds = 3;
-  // The extra files the model kept with the step. Empty when the step kept
-  // none, failed, or is not saved.
+  // The extra files the model kept with the step, for a step that worked and
+  // was saved. Empty otherwise: when it kept none, is not saved, failed
+  // (FAILED), or did not fit a message (RESULT_TOO_LARGE).
   repeated StepFileRef files = 4;
   // Why the step failed, in words; unset when it worked.
   optional string error = 5;
