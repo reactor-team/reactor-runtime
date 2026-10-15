@@ -120,10 +120,22 @@ jobs:
             echo >> "$GITHUB_STEP_SUMMARY"
           done
 
+      # A ref may hold a slash (release/3.8.3, a branch), which an artifact name
+      # cannot; git refuses the other characters upload-artifact rejects.
+      - name: Name the results
+        id: artifact
+        if: always()
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+          RUNTIME_REF: ${{ inputs.runtime_ref }}
+        run: |
+          name="endurance-$SCENARIO${RUNTIME_REF:+-${RUNTIME_REF//\//-}}"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
       - name: Upload the results
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: endurance-${{ matrix.scenario }}${{ inputs.runtime_ref && format('-{0}', inputs.runtime_ref) || '' }}
+          name: ${{ steps.artifact.outputs.name }}
           path: endurance-results/
           if-no-files-found: warn
