@@ -1581,11 +1581,12 @@ class Runner(ServiceComponent, ConnectionSink):
         *,
         failure_code: step_pb2.StepFailureCode = step_pb2.STEP_FAILURE_CODE_REFUSED,
     ) -> None:
-        """Answer a step request that did not run, on the data channel.
+        """Answer a step request without a result, on the data channel.
 
-        The answer is a ``StepResult`` with no number, no elapsed time, and no
-        media, carrying *failure_code* and *reason* as its error. Nothing is
-        journalled or counted for it.
+        The answer is a ``StepResult`` with no elapsed time and no media,
+        carrying *failure_code* and *reason* as its error. Its index is zero, for
+        a step that did not run, or absent for ``SESSION_ENDED``, where whether
+        it ran is unknown. Nothing is journalled or counted for it.
         """
         logger.debug(
             "step request did not run",
@@ -1593,7 +1594,9 @@ class Runner(ServiceComponent, ConnectionSink):
             reason=reason,
             failure_code=step_pb2.StepFailureCode.Name(failure_code),
         )
-        result = step_pb2.StepResult(index=0, failure_code=failure_code, error=reason)
+        result = step_pb2.StepResult(failure_code=failure_code, error=reason)
+        if failure_code != step_pb2.STEP_FAILURE_CODE_SESSION_ENDED:
+            result.index = 0
         self._connections.send_step_reply(
             conn_id,
             lambda version: self._codec_for(version).encode_step_result(request_id, result),
