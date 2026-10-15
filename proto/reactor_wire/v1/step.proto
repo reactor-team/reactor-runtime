@@ -94,7 +94,7 @@ enum StepFailureCode {
   // did not run and takes no number.
   STEP_FAILURE_CODE_COMMAND_FAILED = 5;
   // The session ended before the step's result could be sent. Whether the step
-  // ran is unknown to the client.
+  // ran is unknown to the client, so the result carries no index.
   STEP_FAILURE_CODE_SESSION_ENDED = 6;
 }
 
@@ -102,12 +102,13 @@ enum StepFailureCode {
 // or why it produced nothing. The response to a RequestStep.
 message StepResult {
   // The step's number in the session, counted from 1. Zero when the step did
-  // not run.
-  uint64 index = 1;
+  // not run. Absent for SESSION_ENDED, where whether the step ran is unknown.
+  optional uint64 index = 1;
   repeated TrackFrames tracks = 2;
   // Seconds the step's generate() took, or the time the model reported for the
   // step. A saved step records the same value as generate_s in its
-  // result.json. Zero when the step did not run.
+  // result.json. Zero when the step did not run, and for SESSION_ENDED, where
+  // it says nothing about the step.
   double elapsed_seconds = 3;
   // The extra files the model kept with the step. Empty when the step kept
   // none, failed, or is not saved.
