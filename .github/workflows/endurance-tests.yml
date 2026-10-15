@@ -44,7 +44,7 @@ jobs:
         id: scenarios
         run: |
           set -euo pipefail
-          scenarios=$(find endurance-tests/tests -name 'test_*.py' -printf '%f\n' \
+          scenarios=$(find endurance-tests/tests -maxdepth 1 -name 'test_*.py' -printf '%f\n' \
             | sed -e 's/^test_//' -e 's/\.py$//' | sort | jq -R . | jq -cs .)
           echo "Scenarios: $scenarios"
           echo "scenarios=$scenarios" >> "$GITHUB_OUTPUT"
@@ -57,6 +57,10 @@ jobs:
           DURATION_MINUTES: ${{ inputs.duration_minutes }}
         run: |
           set -euo pipefail
+          if ! [[ "$DURATION_MINUTES" =~ ^[0-9]+$ ]] || (( 10#$DURATION_MINUTES < 1 )); then
+            echo "::error::duration_minutes must be a whole number of minutes, at least 1"
+            exit 1
+          fi
           timeout_minutes=$((10#$DURATION_MINUTES + 20))
           if (( timeout_minutes > 360 )); then
             echo "::error::duration_minutes must be at most 340"
@@ -84,9 +88,15 @@ jobs:
           RUNTIME_REF: ${{ inputs.runtime_ref }}
         run: |
           set -euo pipefail
+          # Resolved first, so a value that is not a commit fails here by name
+          # and none is ever read as an option.
+          if ! sha=$(git rev-parse --verify --quiet --end-of-options "${RUNTIME_REF}^{commit}"); then
+            echo "::error::runtime_ref '$RUNTIME_REF' is not a tag, branch or commit of this repository"
+            exit 1
+          fi
           git rm -rq src/reactor_runtime
-          git checkout "$RUNTIME_REF" -- src/reactor_runtime
-          echo "Testing the runtime from $RUNTIME_REF ($(git rev-parse --short "$RUNTIME_REF"))"
+          git checkout "$sha" -- src/reactor_runtime
+          echo "Testing the runtime from $RUNTIME_REF (${sha:0:7})"
 
       - uses: jdx/mise-action@v4
         with:
@@ -120,17 +130,18 @@ jobs:
             echo >> "$GITHUB_STEP_SUMMARY"
           done
 
-      # A ref may hold a slash (release/3.8.3, a branch), which an artifact name
-      # cannot; git refuses the other characters upload-artifact rejects.
+      # A ref may hold characters an artifact name cannot (release/3.8.3, a
+      # branch), and a re-run attempt cannot reuse an earlier attempt's name.
       - name: Name the results
         id: artifact
         if: always()
         env:
           SCENARIO: ${{ matrix.scenario }}
           RUNTIME_REF: ${{ inputs.runtime_ref }}
+          ATTEMPT: ${{ github.run_attempt }}
         run: |
-          name="endurance-$SCENARIO${RUNTIME_REF:+-${RUNTIME_REF//\//-}}"
-          echo "name=$name" >> "$GITHUB_OUTPUT"
+          ref="${RUNTIME_REF//[\/\"<>|:*?\\]/-}"
+          echo "name=endurance-$SCENARIO${ref:+-$ref}-attempt-$ATTEMPT" >> "$GITHUB_OUTPUT"
 
       - name: Upload the results
         if: always()
