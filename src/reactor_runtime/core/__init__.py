@@ -38,6 +38,7 @@ from reactor_runtime.core.transport import (
     Connection,
     ConnectionSink,
     FrameStageSource,
+    MessageStageSource,
     TransportStatsSource,
 )
 from reactor_runtime.core.typespec import TypeSpec
@@ -57,6 +58,7 @@ from reactor_runtime.core.values import (
     InputFrame,
     MediaBundle,
     MediaChunk,
+    MessageStage,
     RuntimeState,
     TrackData,
     TrackDirection,
@@ -92,6 +94,8 @@ __all__ = [
     "InputFrame",
     "MediaBundle",
     "MediaChunk",
+    "MessageStage",
+    "MessageStageSource",
     "ReactorEvent",
     "RecordingConfig",
     "RuntimeConfig",

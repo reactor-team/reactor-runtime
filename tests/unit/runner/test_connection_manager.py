@@ -13,6 +13,7 @@ from reactor_runtime.core import (
     FrameStage,
     MediaBundle,
     MediaChunk,
+    MessageStage,
     SessionEvent,
     SessionState,
     TrackKind,
@@ -810,3 +811,42 @@ async def test_close_all_does_not_drive_the_session_machine() -> None:
     await cm.close_all()
     assert seen == []
     assert sm.current_state is SessionState.STREAMING
+
+
+class MessageTimedConnection(MeasuredConnection):
+    """A fake whose transport also times its data-channel messages."""
+
+    def __init__(self, cid: int, reading: TransportReading | None) -> None:
+        super().__init__(cid, reading)
+        self.stages: tuple[MessageStage, ...] = (
+            MessageStage("queue_wait", total_ms=0.3, messages=3),
+            MessageStage("reassembly", total_ms=6.0, messages=3),
+        )
+
+    def take_message_stages(self) -> tuple[MessageStage, ...]:
+        taken, self.stages = self.stages, ()
+        return taken
+
+
+def test_a_connections_message_stages_are_taken_once_onto_its_reading() -> None:
+    cm, _ = waiting_manager()
+    reading = TransportReading(metrics={"connection_rtt_ms": 1.0})
+    conn = MessageTimedConnection(2, reading)
+    stages = conn.stages
+    cm.register(conn)
+
+    [(_, first)] = cm.take_message_stages(cm.transport_readings())
+    [(_, second)] = cm.take_message_stages(cm.transport_readings())
+
+    assert first.message_stages == stages
+    # The window started again with the first report.
+    assert second == reading
+
+
+def test_a_connection_without_a_reading_keeps_its_message_stages() -> None:
+    cm, _ = waiting_manager()
+    conn = MessageTimedConnection(2, None)
+    cm.register(conn)
+
+    assert cm.take_message_stages(cm.transport_readings()) == []
+    assert conn.stages != ()

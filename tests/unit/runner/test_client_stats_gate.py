@@ -169,6 +169,7 @@ def test_to_detail_carries_the_readings_and_leaves_out_values_json_cannot_carry(
             "timestamp": 1_700_000_000_000,
             "metrics": {"connection_rtt_ms": 25.0},
             "environment": None,
+            "message_stages": [],
         },
     }
 
@@ -215,6 +216,7 @@ def test_to_detail_carries_the_environment_and_a_video_tracks_codec() -> None:
                 "arch": "aarch64",
                 "device_model": "iPhone15,2",
             },
+            "message_stages": [],
         },
     }
 

@@ -21,7 +21,7 @@ from reactor_runtime.core import (
     TransportReading,
     TransportTrackReading,
 )
-from reactor_runtime.runner.client_stats import frame_stages_detail
+from reactor_runtime.runner.client_stats import frame_stages_detail, message_stages_detail
 
 
 class ModelOutput:
@@ -184,6 +184,7 @@ def to_detail(
                 "conn_id": int(cid),
                 "metrics": _finite(reading.metrics),
                 "track_stats": [_track(track) for track in reading.tracks],
+                "message_stages": message_stages_detail(reading.message_stages),
             }
             for cid, reading in readings
         ],

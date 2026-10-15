@@ -22,6 +22,7 @@ from reactor_runtime.core.values import (
     FrameStage,
     InputFrame,
     MediaChunk,
+    MessageStage,
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion
 
@@ -136,6 +137,19 @@ class FrameStageSource(Protocol):
         and so is a stage with no frames in it. Tracks not named keep their
         times for a later take.
         """
+
+
+@runtime_checkable
+class MessageStageSource(Protocol):
+    """A connection whose transport times its data-channel messages stage by stage.
+
+    Optional, beside :class:`FrameStageSource`, and checked for the same way.
+    The times add up until they are taken, so each take covers the window since
+    the previous one.
+    """
+
+    def take_message_stages(self) -> tuple[MessageStage, ...]:
+        """Return the message stage times since the previous take, and start them again."""
 
 
 @runtime_checkable

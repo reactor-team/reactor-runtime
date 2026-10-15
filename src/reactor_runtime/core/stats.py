@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from reactor_runtime.core.values import ClientTrackDirection, FrameStage, TrackKind
+from reactor_runtime.core.values import ClientTrackDirection, FrameStage, MessageStage, TrackKind
 
 
 @dataclass(frozen=True)
@@ -52,7 +52,10 @@ class TransportReading:
         metrics: Measurements of the connection as a whole, by name, e.g.
             ``"connection_rtt_ms"`` or ``"available_outgoing_bitrate_bps"``.
         tracks: One reading per track the transport measured.
+        message_stages: Where the connection's data-channel messages spent
+            their time on this side of the wire since the previous reading.
     """
 
     metrics: Mapping[str, float] = field(default_factory=dict)
     tracks: tuple[TransportTrackReading, ...] = ()
+    message_stages: tuple[MessageStage, ...] = ()

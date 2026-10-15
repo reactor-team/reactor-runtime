@@ -49,6 +49,7 @@ from reactor_runtime.core import (
     ConnId,
     FrameStageSource,
     MediaChunk,
+    MessageStageSource,
     SessionEvent,
     TransportReading,
     TransportStatsSource,
@@ -182,6 +183,26 @@ class ConnectionManager:
                             for track in reading.tracks
                         ),
                     )
+            out.append((cid, reading))
+        return out
+
+    def take_message_stages(
+        self, readings: Iterable[tuple[ConnId, TransportReading]]
+    ) -> list[tuple[ConnId, TransportReading]]:
+        """Add each connection's message stage times since the previous take to its *readings*.
+
+        For a connection that times its data-channel messages (a
+        :class:`MessageStageSource`), its reading gets the stage times the
+        connection held, and those are taken: the runner calls this once per
+        report. A connection with no reading here keeps its stages.
+        """
+        out: list[tuple[ConnId, TransportReading]] = []
+        for cid, reading in readings:
+            conn = self._by_id.get(cid)
+            if isinstance(conn, MessageStageSource):
+                stages = conn.take_message_stages()
+                if stages:
+                    reading = replace(reading, message_stages=stages)
             out.append((cid, reading))
         return out
 

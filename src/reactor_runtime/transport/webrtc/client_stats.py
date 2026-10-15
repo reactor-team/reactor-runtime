@@ -18,6 +18,7 @@ from reactor_runtime.core import (
     ClientTrackDirection,
     ClientTrackStat,
     FrameStage,
+    MessageStage,
     TrackKind,
 )
 from reactor_runtime.protocol import Channel, Codec, ProtocolVersion, select
@@ -157,5 +158,9 @@ def _decode_client_stats(message: platform_pb2.ClientStats) -> ClientStatsBatch:
             timestamp=message.connection_stat.timestamp,
             metrics=dict(message.connection_stat.metrics),
             environment=_decode_environment(message.connection_stat),
+            message_stages=tuple(
+                MessageStage(name=s.name, total_ms=s.total_ms, messages=s.messages)
+                for s in message.connection_stat.message_stages
+            ),
         )
     return ClientStatsBatch(track_stats=track_stats, connection_stat=connection_stat)

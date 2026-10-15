@@ -4,7 +4,12 @@ import pytest
 
 from reactor_runtime.core import ClientTrackDirection, TrackDirection, TrackKind
 from reactor_runtime.transport.webrtc.reading import transport_reading
-from reactor_runtime.transport.webrtc.stats import OutboundMediaHealth, PeerStats, TrackStat
+from reactor_runtime.transport.webrtc.stats import (
+    OutboundMediaHealth,
+    PeerStats,
+    SctpSample,
+    TrackStat,
+)
 
 
 def _sample(*, sent: int, received: int) -> PeerStats:
@@ -127,3 +132,38 @@ def test_a_track_without_a_codec_reads_an_empty_codec() -> None:
     (track,) = transport_reading(sample, None, None).tracks
 
     assert (track.codec, track.kind) == ("", None)
+
+
+def _sctp(retransmitted: int) -> SctpSample:
+    return SctpSample(
+        smoothed_rtt_ms=30.0,
+        congestion_window_bytes=48_000,
+        unacked_chunks=3,
+        peer_receive_window_bytes=131_072,
+        packets_retransmitted=retransmitted,
+    )
+
+
+def test_the_sctp_association_reads_its_state_and_its_retransmissions_since_the_last_sample() -> (
+    None
+):
+    previous = PeerStats(sctp=_sctp(4))
+
+    reading = transport_reading(PeerStats(sctp=_sctp(9)), previous, 5.0)
+
+    assert {k: v for k, v in reading.metrics.items() if k.startswith("sctp_")} == {
+        "sctp_smoothed_rtt_ms": 30.0,
+        "sctp_congestion_window_bytes": 48_000.0,
+        "sctp_unacked_chunks": 3.0,
+        "sctp_peer_receive_window_bytes": 131_072.0,
+        "sctp_packets_retransmitted": 5.0,
+    }
+
+
+def test_a_first_sctp_sample_has_no_retransmission_count_and_no_association_has_no_keys() -> None:
+    first = transport_reading(PeerStats(sctp=_sctp(9)), None, None)
+    none = transport_reading(PeerStats(), None, None)
+
+    assert "sctp_packets_retransmitted" not in first.metrics
+    assert "sctp_smoothed_rtt_ms" in first.metrics
+    assert not any(k.startswith("sctp_") for k in none.metrics)

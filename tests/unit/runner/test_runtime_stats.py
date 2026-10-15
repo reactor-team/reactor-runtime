@@ -9,6 +9,7 @@ from reactor_runtime.core import (
     ClientTrackDirection,
     ConnId,
     FrameStage,
+    MessageStage,
     TrackKind,
     TransportReading,
     TransportTrackReading,
@@ -224,6 +225,7 @@ def test_a_reading_is_shaped_like_a_client_reading() -> None:
                     "frame_stages": [],
                 },
             ],
+            "message_stages": [],
         }
     ]
 
@@ -241,3 +243,17 @@ def test_values_json_cannot_carry_are_left_out() -> None:
     detail = _detail((ConnId(7), reading))
 
     assert detail["connection_stats"][0]["metrics"] == {"dropped_frames": 2.0}
+
+
+def test_a_connections_message_stages_ride_its_reading() -> None:
+    reading = TransportReading(
+        message_stages=(
+            MessageStage("reassembly", total_ms=60.0, messages=2),
+            MessageStage("send", total_ms=float("nan"), messages=2),
+        )
+    )
+
+    [connection] = _detail((ConnId(7), reading))["connection_stats"]
+
+    # A time JSON cannot carry is left out.
+    assert connection["message_stages"] == [{"name": "reassembly", "total_ms": 60.0, "messages": 2}]
