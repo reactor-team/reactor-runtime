@@ -75,7 +75,12 @@ from reactor_runtime.metrics import (
     RuntimeMetrics,
 )
 from reactor_runtime.protocol import Channel, Codec, ProtocolVersion, select
-from reactor_runtime.protocol.frames import FrameEncodingError, decode_frame, track_frames
+from reactor_runtime.protocol.frames import (
+    FrameEncodingError,
+    decode_frame,
+    media_size,
+    track_frames,
+)
 from reactor_runtime.recording import ClipResult, Recorder, RecorderError
 from reactor_runtime.runner import client_stats, runtime_stats
 from reactor_runtime.runner.client_stats import ClientStatsGate
@@ -102,6 +107,12 @@ from reactor_runtime.upload_store import UnknownUploadError, UploadStore
 from reactor_wire.v1 import platform_pb2, step_pb2
 
 _RUNNING_STATES = frozenset({SessionState.WAITING, SessionState.STREAMING, SessionState.ORPHANED})
+
+# The smallest message a stepped connection may take: what one plain
+# data-channel message carries. Below it, a client's declared chunking limit
+# would not leave room even for the short result that says a step's media did
+# not fit.
+_STEP_MIN_MESSAGE_SIZE = 256 * 1024
 
 # The states a stale wire can land in. An offer is only admitted while a
 # session runs, so a connection whose negotiation completes after the session
@@ -817,11 +828,44 @@ class Runner(ServiceComponent, ConnectionSink):
                 if step.session == self._sessions_posted:
                     messages = tuple(self._step_messages)
                     self._step_messages.clear()
+        tracks = self._encode_step_tracks(step)
         loop = self._loop
         if loop is not None:
-            loop.call_soon_threadsafe(self._record_step, step, messages)
+            loop.call_soon_threadsafe(self._record_step, step, messages, tracks)
 
-    def _record_step(self, step: CompletedStep, messages: tuple[dict[str, Any], ...] = ()) -> None:
+    def _encode_step_tracks(
+        self, step: CompletedStep
+    ) -> list[step_pb2.TrackFrames] | FrameEncodingError | None:
+        """Encode a requested step's media as its result's frames, on the model's thread.
+
+        Copying the media is a step result's heaviest work, so it happens here,
+        before the hop that keeps the step's replies in order, and not on the
+        runtime loop every connection shares. Media that cannot fit the
+        requesting connection's messages is left for the loop to answer as too
+        large; the limit read here only spares the copy, and the loop checks it
+        again.
+
+        Returns:
+            The frames, the reason they cannot be encoded, or ``None`` for a
+            step no client requested or whose media does not fit.
+        """
+        request = step.request
+        if request is None:
+            return None
+        limit = self._connections.max_message_size(request.conn_id)
+        if limit is not None and media_size(step.bundle) > limit:
+            return None
+        try:
+            return track_frames(step.bundle, video_fps=step.fps)
+        except FrameEncodingError as error:
+            return error
+
+    def _record_step(
+        self,
+        step: CompletedStep,
+        messages: tuple[dict[str, Any], ...] = (),
+        tracks: list[step_pb2.TrackFrames] | FrameEncodingError | None = None,
+    ) -> None:
         """Number a reported step, journal it, and close a session that reached its steps.
 
         The detail of the ``step_completed`` fact carries the step's number
@@ -867,7 +911,7 @@ class Runner(ServiceComponent, ConnectionSink):
             return
         saved = self._save_step(step, messages)
         if step.request is not None:
-            self._send_step_result(step, self._steps_completed, saved=saved)
+            self._send_step_result(step, self._steps_completed, saved=saved, tracks=tracks)
         limit = self._session_start.steps
         if (
             limit is not None
@@ -1453,7 +1497,8 @@ class Runner(ServiceComponent, ConnectionSink):
         A request that does not run is answered with a ``StepResult`` that
         takes no number. It is ``NOT_READY`` when the session is not running.
         It is ``REFUSED`` when the session does not step or the connection did
-        not negotiate data-channel chunking, and, naming the entry, when an
+        not negotiate data-channel chunking, or takes less than one plain
+        message (256 KiB) a message, and, naming the entry, when an
         entry's upload does not arrive or it fails the contract, or
         when a media input frame names a track the model does not take or
         cannot be decoded; the entries submitted before the refused one stay
@@ -1486,6 +1531,15 @@ class Runner(ServiceComponent, ConnectionSink):
                 step.request_id,
                 "a stepped session needs a connection that negotiated data-channel chunking; "
                 "without it a message is limited to 256 KiB, too small for a step's result",
+            )
+            return
+        limit = self._connections.max_message_size(step.conn_id)
+        if limit is not None and limit < _STEP_MIN_MESSAGE_SIZE:
+            self._refuse_step(
+                step.conn_id,
+                step.request_id,
+                f"this connection's data-channel chunking takes at most {limit} bytes a "
+                f"message; a stepped session needs at least {_STEP_MIN_MESSAGE_SIZE}",
             )
             return
         entries = [
@@ -1629,7 +1683,14 @@ class Runner(ServiceComponent, ConnectionSink):
             failure_code=step_pb2.STEP_FAILURE_CODE_SESSION_ENDED,
         )
 
-    def _send_step_result(self, step: CompletedStep, index: int, *, saved: bool) -> None:
+    def _send_step_result(
+        self,
+        step: CompletedStep,
+        index: int,
+        *,
+        saved: bool,
+        tracks: list[step_pb2.TrackFrames] | FrameEncodingError | None = None,
+    ) -> None:
         """Answer a requested step with its result, built from the step's report.
 
         The result is the report's media, one entry per output track, so what
@@ -1640,33 +1701,60 @@ class Runner(ServiceComponent, ConnectionSink):
         result names each extra file the model kept with it, which the client
         reads from the session's step results; the bytes stay out of the
         message, so a file counts toward the message's size only by its name,
-        media type, and size. It goes out as one message.
+        media type, and size. It goes out as one message, before the store has
+        written the step: the files are readable once the step's
+        ``result.json`` is, and a save that fails keeps none, saying why in
+        ``save_error``.
 
         A step that ran always answers with its number and elapsed time. One
         whose model reported a failure answers ``FAILED`` with the model's
         message, as does one whose media cannot be carried as frames. One whose
         result is larger than the connection negotiated answers
         ``RESULT_TOO_LARGE`` with no media or files, and the session goes on.
+
+        *tracks* are the frames the model's thread already encoded (see
+        :meth:`_encode_step_tracks`); without them they are encoded here.
         """
         request = step.request
         assert request is not None
         # The default loop, the only one a stepped session runs, always
         # measures the step, so a missing time does not happen in practice.
         elapsed = step.elapsed or 0.0
-        try:
-            result = step_pb2.StepResult(
-                index=index,
-                tracks=track_frames(step.bundle, video_fps=step.fps),
-                elapsed_seconds=elapsed,
-                files=_step_file_refs(step) if saved else (),
-                error=step.error,
-                failure_code=(
-                    step_pb2.STEP_FAILURE_CODE_FAILED
-                    if step.error is not None
-                    else step_pb2.STEP_FAILURE_CODE_UNSPECIFIED
+
+        def too_large(
+            version: ProtocolVersion, size: int, limit: int, *, at_least: bool = False
+        ) -> tuple[Channel, bytes | str]:
+            logger.warning("a step result does not fit one message", step=index, size=size)
+            measured = f"at least {size}" if at_least else f"{size}"
+            return self._codec_for(version).encode_step_result(
+                request.request_id,
+                step_pb2.StepResult(
+                    index=index,
+                    elapsed_seconds=elapsed,
+                    failure_code=step_pb2.STEP_FAILURE_CODE_RESULT_TOO_LARGE,
+                    error=(
+                        f"step {index}'s result is {measured} bytes; "
+                        f"this connection takes at most {limit}"
+                    ),
                 ),
             )
-        except FrameEncodingError as error:
+
+        # Frames alone that outgrow one message are answered without copying
+        # them: a step's media can be far larger than any message.
+        limit = self._connections.max_message_size(request.conn_id)
+        size = media_size(step.bundle)
+        if limit is not None and size > limit:
+            self._connections.send_step_reply(
+                request.conn_id, lambda version: too_large(version, size, limit, at_least=True)
+            )
+            return
+        if tracks is None:
+            try:
+                tracks = track_frames(step.bundle, video_fps=step.fps)
+            except FrameEncodingError as error:
+                tracks = error
+        if isinstance(tracks, FrameEncodingError):
+            error = tracks
             logger.error("a step's output could not be encoded", step=index, error=str(error))
             failed = step_pb2.StepResult(
                 index=index,
@@ -1681,24 +1769,18 @@ class Runner(ServiceComponent, ConnectionSink):
                 ),
             )
             return
-
-        def too_large(
-            version: ProtocolVersion, size: int, limit: int
-        ) -> tuple[Channel, bytes | str]:
-            logger.warning("a step result does not fit one message", step=index, size=size)
-            return self._codec_for(version).encode_step_result(
-                request.request_id,
-                step_pb2.StepResult(
-                    index=index,
-                    elapsed_seconds=elapsed,
-                    failure_code=step_pb2.STEP_FAILURE_CODE_RESULT_TOO_LARGE,
-                    error=(
-                        f"step {index}'s result is {size} bytes; "
-                        f"this connection takes at most {limit}"
-                    ),
-                ),
-            )
-
+        result = step_pb2.StepResult(
+            index=index,
+            tracks=tracks,
+            elapsed_seconds=elapsed,
+            files=_step_file_refs(step) if saved else (),
+            error=step.error,
+            failure_code=(
+                step_pb2.STEP_FAILURE_CODE_FAILED
+                if step.error is not None
+                else step_pb2.STEP_FAILURE_CODE_UNSPECIFIED
+            ),
+        )
         self._connections.send_step_result(
             request.conn_id,
             lambda version: self._codec_for(version).encode_step_result(request.request_id, result),

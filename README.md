@@ -116,7 +116,7 @@ runtime:
 
 Every track of the step's output becomes its own stream in one `output.mp4`, beside the extra `files` the step carried and a `result.json` that lists them, with the measured length, frame count, frame rate, and size of each video track in its `usage`. `queue` bounds how many steps the model reports may wait to be saved; a step that finds it full is not saved, so saving never holds the model up. The steps a failed starting command records are saved past that bound, so each of them gets its folder. Each step is its own encode, so this suits a model that finishes a step every few seconds rather than every frame.
 
-When step results are on, `GET /sessions/{id}/steps` lists a session's saved folders by the session's own id; each stays readable for five minutes after it is written, after the session ends too.
+When step results are on, `GET /sessions/{id}/steps` lists a session's saved folders by the session's own id; each stays readable for five minutes after it is written, after the session ends too. A stepped session's result names its step's files before the step is written, so a client reads them once `GET /sessions/{id}/steps/{index}` answers with the step's `result.json`; until then the route answers 404, and a save that fails keeps no files and says why in `save_error`.
 
 Scaffold, build, and run it with the CLI:
 
