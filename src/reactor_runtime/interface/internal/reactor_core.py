@@ -16,7 +16,7 @@ import contextvars
 import json
 import logging
 import threading
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, get_type_hints
@@ -31,6 +31,8 @@ from reactor_runtime.core.values import (
     InputFrame,
     MediaBundle,
     MediaChunk,
+    RequestedStep,
+    StepRefusal,
     TrackData,
     TrackInfo,
     TrackKind,
@@ -82,6 +84,9 @@ StepSink = Callable[[CompletedStep], None]
 
 FailureSink = Callable[[BaseException], None]
 """Receives the exception that ended :meth:`ReactorCore.run`, on the model thread."""
+
+StepRefusalSink = Callable[[StepRefusal], None]
+"""Receives each step a client requested that the model refused, on the model thread."""
 
 
 @dataclass(frozen=True)
@@ -211,15 +216,38 @@ class CommandEnvelope:
         command: The validated command to dispatch.
         conn_id: The connection that sent it, when known.
         request_id: The request id to correlate a reply against, when present.
+        step_request_id: The request id of the step request that carries this
+            command, when it is one of a step's state keys or commands. A
+            failure of its handler then answers that step instead.
     """
 
     command: Command
     conn_id: ConnId | None
     request_id: RequestId | None
+    step_request_id: RequestId | None = None
 
 
-Inbound = CommandEnvelope | ReactorEvent
-"""One item of the model's inbound queue: a validated command or a reactor event."""
+@dataclass(frozen=True)
+class StepEnvelope:
+    """A client's request for one step of a stepped session, decoded.
+
+    The request's state values and commands reach the model as ordinary
+    commands, posted ahead of it.
+
+    Attributes:
+        media_input: The frames to write to each input track before the
+            step, by track name, in the order the client sent them.
+        conn_id: The connection that asked for the step.
+        request_id: The request id every reply to the step carries.
+    """
+
+    media_input: Mapping[str, tuple[InputFrame, ...]]
+    conn_id: ConnId
+    request_id: RequestId
+
+
+Inbound = CommandEnvelope | StepEnvelope | ReactorEvent
+"""One item of the model's inbound queue: a command, a step request, or a reactor event."""
 
 
 class ReactorCore:
@@ -259,6 +287,7 @@ class ReactorCore:
         self._out_addressed: AddressedSink | None = None
         self._out_media: MediaSink | None = None
         self._out_step: StepSink | None = None
+        self._out_step_refusal: StepRefusalSink | None = None
         # How many session starts the model has received, kept by the
         # subclass's dispatcher. A step report carries it, so the runtime can
         # set apart a late report from a session that has ended.
@@ -342,12 +371,19 @@ class ReactorCore:
         """
         self._report_step(step, self._sessions_started)
 
-    def _report_step(self, step: StepCompleted, session: int, fps: float | None = None) -> None:
+    def _report_step(
+        self,
+        step: StepCompleted,
+        session: int,
+        fps: float | None = None,
+        request: RequestedStep | None = None,
+    ) -> None:
         """Hand a step report to the bound sink, stamped with *session* and its playout rate.
 
         *fps* is the rate the step's media was emitted at. Without it, the
         report carries the rate of the last emission, or :attr:`fps` before
-        any.
+        any. *request* is the client request the step answers, in a stepped
+        session.
         """
         if self._out_step is None:
             return
@@ -362,6 +398,7 @@ class ReactorCore:
                 elapsed=step.elapsed,
                 session=session,
                 fps=fps,
+                request=request,
             )
         )
 
@@ -381,6 +418,7 @@ class ReactorCore:
         media: MediaSink,
         media_ops: MediaOps | None = None,
         step: StepSink | None = None,
+        step_refusal: StepRefusalSink | None = None,
     ) -> None:
         """Bind the outbound sinks. Called once before the loop starts.
 
@@ -400,6 +438,7 @@ class ReactorCore:
         self._out_media = media
         self._media_ops = media_ops
         self._out_step = step
+        self._out_step_refusal = step_refusal
         if media_ops is not None:
             if self.buffer_size is not None:
                 media_ops.set_depth(self.buffer_size)
@@ -418,10 +457,23 @@ class ReactorCore:
     # -- thread-safe ingress (called by the bridge from the runtime thread) ---
 
     def submit_command(
-        self, command: Command, conn_id: ConnId | None, request_id: RequestId | None
+        self,
+        command: Command,
+        conn_id: ConnId | None,
+        request_id: RequestId | None,
+        *,
+        step_request_id: RequestId | None = None,
     ) -> None:
         """Enqueue a validated command onto the model loop."""
-        self._enqueue(CommandEnvelope(command, conn_id, request_id))
+        self._enqueue(CommandEnvelope(command, conn_id, request_id, step_request_id))
+
+    def submit_step(self, step: StepEnvelope) -> None:
+        """Enqueue a validated step request onto the model loop.
+
+        It takes its place in the same queue as commands, so it is handled
+        after every command posted before it.
+        """
+        self._enqueue(step)
 
     def post_reactor_event(self, event: ReactorEvent) -> None:
         """Enqueue a reactor-authoritative event onto the model loop."""
@@ -493,6 +545,15 @@ class ReactorCore:
             self._on_failure(crash)
 
     # -- subclass loop hooks --------------------------------------------------
+
+    @classmethod
+    def supports_stepped(cls) -> bool:
+        """Return whether the model can serve a stepped session.
+
+        Only the default step loop of :class:`ReactorApp` runs a step per
+        request; an engine on its own has no step loop at all.
+        """
+        return False
 
     def _on_loop_ready(self) -> None:
         """Create loop-bound state. Overridden by subclasses."""

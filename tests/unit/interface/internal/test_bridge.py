@@ -22,7 +22,7 @@ from reactor_runtime.core.values import (
     MediaChunk,
 )
 from reactor_runtime.interface.internal.bridge import ModelBridge
-from reactor_runtime.interface.internal.reactor_core import MediaOps, RequestId
+from reactor_runtime.interface.internal.reactor_core import MediaOps, RequestId, StepEnvelope
 from reactor_runtime.interface.model.contract import ModelContract
 
 
@@ -128,6 +128,25 @@ def test_check_command_validates_without_admitting(monkeypatch: pytest.MonkeyPat
     assert valid.accepted is True
     assert (refused.accepted, refused.field) == (False, "prompt")
     assert admitted == []
+
+
+def test_submit_step_enqueues_the_step_with_its_frames(monkeypatch: pytest.MonkeyPatch) -> None:
+    bridge, model = make_bridge()
+    admitted: list[StepEnvelope] = []
+    monkeypatch.setattr(model, "submit_step", admitted.append)
+    camera = frame()
+
+    bridge.submit_step({"camera": [camera]}, conn_id=ConnId(1002), request_id="s1")
+
+    [step] = admitted
+    assert step.media_input == {"camera": (camera,)}
+    assert (step.conn_id, step.request_id) == (ConnId(1002), "s1")
+
+
+def test_the_bridge_says_whether_the_model_can_step() -> None:
+    bridge, _ = make_bridge()
+    # EchoModel drives its own run(), so it has no step to run on request.
+    assert bridge.supports_stepped is False
 
 
 # --- routing across the three inbound faces ------------------------------

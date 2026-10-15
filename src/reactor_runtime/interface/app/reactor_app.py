@@ -38,6 +38,13 @@ emits the media the step produced and reports the step with
 ``run()``. That replaces the loop and only the loop: the dispatch layer above
 stays, the three hooks are never called for that class, and the loop calls
 :meth:`complete_step` itself when it finishes a unit of work.
+
+A stepped session drives the same loop one step per client request. The
+request's state values and commands reach the model as ordinary commands ahead
+of it; when the request reaches the front of the inbound queue, its frames are
+written to the input tracks and the three hooks run once, with nothing else
+dispatched in between. Nothing is emitted in a stepped session; the step's
+report is its result.
 """
 
 from __future__ import annotations
@@ -59,7 +66,13 @@ from reactor_runtime.core.model import (
     SessionStarted,
     StartingInputApplied,
 )
-from reactor_runtime.core.values import CommandFailure, ConnId
+from reactor_runtime.core.values import (
+    CommandFailure,
+    ConnId,
+    RequestedStep,
+    StepRefusal,
+    StepRefusalKind,
+)
 from reactor_runtime.interface.app.input_state import InputState
 from reactor_runtime.interface.app.outcome import StepOutcome
 from reactor_runtime.interface.app.step_completed import StepCompleted
@@ -78,6 +91,7 @@ from reactor_runtime.interface.internal.reactor_core import (
     CommandEnvelope,
     ReactorCore,
     RequestId,
+    StepEnvelope,
 )
 from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.interface.tracks import Output
@@ -147,6 +161,11 @@ class ReactorApp(ReactorCore):
     _step_lock: asyncio.Lock
     _step_requested: asyncio.Event
     _gate_drops: int
+    _stepped: bool
+    _steps_accepted: int
+    _pending_step: tuple[StepEnvelope, asyncio.Future[None]] | None
+    _failed_step_calls: dict[tuple[ConnId, str], str]
+    _step_posted: asyncio.Event
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
@@ -175,7 +194,9 @@ class ReactorApp(ReactorCore):
         :class:`MediaInput` holder the class declared with ``try_read()``, and
         return the step input ``generate()`` receives. Raise
         :class:`ApplicationError` with the reason to refuse the step; the model
-        is not called and the loop asks again.
+        is not called and the loop asks again. In a stepped session the reason
+        answers the client's request; the state and frames the request set stay
+        as they are.
 
         Runs under the step lock. Does not call the model, ``emit()``,
         ``send()``, or ``flush()``.
@@ -270,6 +291,12 @@ class ReactorApp(ReactorCore):
         on a full wire. A refused step waits a few milliseconds before the next
         request, so a paused application does not spin a core.
 
+        In a stepped session the loop takes a step only when a client requests
+        one: it writes the request's input frames, then runs the three hooks.
+        Nothing is emitted; the step's report carries its media to the client
+        that asked. A refused step is answered with its reason and is not
+        reported.
+
         Playout is paced from the measured ``generate()`` time unless the author
         declares ``fps`` on the class. Whether ``fps`` is pinned is read when
         the loop starts, so a ``load()`` that assigns ``type(self).fps`` counts;
@@ -291,7 +318,20 @@ class ReactorApp(ReactorCore):
         last_refusal: str | None = None
         self._step_requested.set()
         while True:
-            await self._live.wait()
+            await self._next_turn()
+            pending = self._pending_step
+            if pending is not None:
+                self._pending_step = None
+                self._step_posted.clear()
+                request, done = pending
+                try:
+                    await self._run_requested_step(request)
+                finally:
+                    # The inbound queue waits on this, so the next command is
+                    # dispatched only once the step is over.
+                    if not done.done():
+                        done.set_result(None)
+                continue
             drops = self._gate_drops
             try:
                 while self._live.is_set() and self._gate_drops == drops:
@@ -327,20 +367,8 @@ class ReactorApp(ReactorCore):
                             outcome = None
                         else:
                             last_refusal = None
-                            # 3. The model. Synchronous on purpose: nothing changes
-                            #    under it. This is the one place a StepOutcome is
-                            #    built.
-                            started = time.perf_counter()
-                            try:
-                                result = self.generate(input)
-                            except Exception as error:
-                                outcome = StepOutcome(
-                                    error=error, elapsed=time.perf_counter() - started
-                                )
-                            else:
-                                outcome = StepOutcome(
-                                    result=result, elapsed=time.perf_counter() - started
-                                )
+                            # 3. The model.
+                            outcome = self._generate(input)
 
                             # 4. The application collects the outcome into media,
                             #    sends its messages, or recovers. A raise ends the
@@ -374,6 +402,81 @@ class ReactorApp(ReactorCore):
                 for buffer in self._input_buffers.values():
                     buffer.reset()
 
+    @classmethod
+    def supports_stepped(cls) -> bool:
+        """Return whether the class runs the default step loop a stepped session needs.
+
+        A class that overrides ``run()`` drives its own loop, so it has no step
+        to run on request.
+        """
+        return cls.run is ReactorApp.run
+
+    def _generate(self, input: Any) -> StepOutcome:
+        """Call ``generate()`` and build the step's outcome, the one place one is built.
+
+        Synchronous on purpose: nothing changes under the model while it runs.
+        """
+        started = time.perf_counter()
+        try:
+            result = self.generate(input)
+        except Exception as error:
+            return StepOutcome(error=error, elapsed=time.perf_counter() - started)
+        return StepOutcome(result=result, elapsed=time.perf_counter() - started)
+
+    async def _next_turn(self) -> None:
+        """Wait until the gate is open or a client has requested a step."""
+        if self._live.is_set() or self._pending_step is not None:
+            return
+        live = asyncio.ensure_future(self._live.wait())
+        posted = asyncio.ensure_future(self._step_posted.wait())
+        try:
+            await asyncio.wait({live, posted}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            live.cancel()
+            posted.cancel()
+
+    async def _run_requested_step(self, request: StepEnvelope) -> None:
+        """Write a step request's frames and run its step, under the step lock.
+
+        The frames go to their input tracks, then ``process_input()`` decides.
+        An :class:`ApplicationError` from it refuses the step and the client is
+        told why; the frames stay buffered. An accepted step takes the next
+        number in the session, and is reported with it once
+        ``process_output()`` returns, with the request it answers.
+        """
+        async with self._step_lock:
+            session = self._sessions_started
+            for track, frames in request.media_input.items():
+                buffer = self._input_buffers.get(track)
+                if buffer is not None:
+                    for frame in frames:
+                        buffer.push(frame)
+            try:
+                input = await self.process_input()
+            except ApplicationError as refused:
+                self._refuse_step(request, session, str(refused) or type(refused).__name__)
+                return
+            self._steps_accepted += 1
+            accepted = RequestedStep(request.conn_id, request.request_id, self._steps_accepted)
+            outcome = self._generate(input)
+            returned = await self.process_output(outcome)
+        self._report_step(_step_report(returned, outcome), session, request=accepted)
+
+    def _refuse_step(
+        self,
+        request: StepEnvelope,
+        session: int,
+        reason: str,
+        *,
+        kind: StepRefusalKind = StepRefusalKind.REFUSED,
+    ) -> None:
+        """Tell the client its step did not run, and why."""
+        logger.debug("requested step refused", reason=reason, kind=kind)
+        if self._out_step_refusal is not None:
+            self._out_step_refusal(
+                StepRefusal(request.conn_id, request.request_id, session, reason, kind)
+            )
+
     # -- engine hooks ---------------------------------------------------------
 
     def _on_loop_ready(self) -> None:
@@ -386,6 +489,11 @@ class ReactorApp(ReactorCore):
         self._step_lock = asyncio.Lock()
         self._step_requested = asyncio.Event()
         self._gate_drops = 0
+        self._stepped = False
+        self._steps_accepted = 0
+        self._pending_step = None
+        self._step_posted = asyncio.Event()
+        self._failed_step_calls = {}
 
     def _background_coros(self) -> list[Coroutine[Any, Any, None]]:
         """Run the inbound drain loop alongside ``run()``."""
@@ -394,10 +502,12 @@ class ReactorApp(ReactorCore):
     async def _inbound_loop(self) -> None:
         """Drain the inbound queue, dispatching each item before taking the next.
 
-        Commands and reactor events are handled one at a time in the order they
-        were posted, so a command never runs ahead of a session start or a
-        client connection posted before it. A handler or hook therefore must
-        not wait for a later reactor event: that event is queued behind it.
+        Commands, step requests, and reactor events are handled one at a time
+        in the order they were posted, so a command never runs ahead of a
+        session start or a client connection posted before it, and a step
+        request runs after every command posted before it. A handler or hook
+        therefore must not wait for a later reactor event: that event is queued
+        behind it.
         """
         queue = self._inbound_q
         assert queue is not None
@@ -405,8 +515,42 @@ class ReactorApp(ReactorCore):
             item = await queue.get()
             if isinstance(item, CommandEnvelope):
                 await self._dispatch_command(item)
+            elif isinstance(item, StepEnvelope):
+                await self._dispatch_step(item)
             else:
                 await self._dispatch_reactor_event(item)
+
+    async def _dispatch_step(self, request: StepEnvelope) -> None:
+        """Hand a step request to the step loop and wait until the step is over.
+
+        The queue is not drained while the step runs, so no command, lifecycle
+        hook, or later request is dispatched between its frames and its step. A
+        request that arrives while no session is running is answered not ready,
+        and one in a session that does not step is refused, both at once. One
+        whose state key or command handler failed is refused with that failure,
+        and its step does not run.
+        """
+        failed = self._failed_step_calls.pop((request.conn_id, request.request_id), None)
+        if failed is not None:
+            self._refuse_step(
+                request, self._sessions_started, failed, kind=StepRefusalKind.COMMAND_FAILED
+            )
+            return
+        if not self._session_active:
+            self._refuse_step(
+                request,
+                self._sessions_started,
+                "no session is running",
+                kind=StepRefusalKind.NOT_READY,
+            )
+            return
+        if not self._stepped:
+            self._refuse_step(request, self._sessions_started, "the session is not stepped")
+            return
+        done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._pending_step = (request, done)
+        self._step_posted.set()
+        await done
 
     # -- command dispatch -----------------------------------------------------
 
@@ -429,7 +573,21 @@ class ReactorApp(ReactorCore):
 
         The handler runs under the step lock, so it lands between two units of
         a ``run()`` loop that holds the same lock, never inside one.
+
+        One of a step request's calls is skipped once an earlier call of the
+        same request failed, so a request stops at its first failure.
         """
+        step = envelope.step_request_id
+        if (
+            step is not None
+            and envelope.conn_id is not None
+            and (envelope.conn_id, step) in self._failed_step_calls
+        ):
+            logger.debug(
+                "skipping a step request's call after an earlier one failed",
+                command=type(envelope.command).name,
+            )
+            return
         async with self._step_lock:
             await self._run_command(envelope)
 
@@ -517,6 +675,8 @@ class ReactorApp(ReactorCore):
             self._sessions_started += 1
             self._session_active = True
             self._starting_input_pending = event.starting_input
+            self._stepped = event.stepped
+            self._steps_accepted = 0
             self._update_live()
             # The state is written under the step lock, hook or no hook: a step
             # suspended in one of its hooks holds the lock and must not see the
@@ -531,12 +691,19 @@ class ReactorApp(ReactorCore):
         elif isinstance(event, SessionEnded):
             self._session_active = False
             self._starting_input_pending = False
+            self._failed_step_calls.clear()
             self._set_connected(0)
             async with self._step_lock:
                 await self._call_hook(hooks.session_ended, None)
                 self._clients.clear()
                 if self.__app_state__ is not None:
                     self.state = None
+                # A stepped session never opens the gate, so the loop's reset
+                # at a gate drop does not run for it.
+                if self._stepped:
+                    for buffer in self._input_buffers.values():
+                        buffer.reset()
+                self._stepped = False
             # The hook has returned, so its records were written while the
             # session's log binding was live; the session's last ambient writer
             # is done and the binding retires here, on the model thread.
@@ -592,10 +759,18 @@ class ReactorApp(ReactorCore):
     def _update_live(self) -> None:
         """Reconcile the live gate from session liveness, the starting input, and the client count.
 
+        A stepped session keeps the gate shut: its loop runs a step only when a
+        client requests one.
+
         Every drop of the gate is counted, so a loop that was blocked while the
         gate dropped and came back still sees that a boundary passed.
         """
-        if self.connected.is_set() and self._session_active and not self._starting_input_pending:
+        if (
+            self.connected.is_set()
+            and self._session_active
+            and not self._starting_input_pending
+            and not self._stepped
+        ):
             self._live.set()
         elif self._live.is_set():
             self._live.clear()
@@ -641,6 +816,13 @@ class ReactorApp(ReactorCore):
         """
         if envelope.conn_id is None:
             return
+        if envelope.step_request_id is not None:
+            # The step request's result carries the first failure; the calls
+            # after it are skipped, so there is no later one to report.
+            self._failed_step_calls.setdefault(
+                (envelope.conn_id, envelope.step_request_id),
+                f"{type(envelope.command).name} failed ({failure.code}): {failure.message}",
+            )
         self._reply(envelope.conn_id, failure, envelope.request_id)
 
     def _reply(

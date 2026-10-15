@@ -68,6 +68,7 @@ from reactor_runtime.interface.internal.reactor_core import (
     BroadcastSink,
     MediaOps,
     MediaSink,
+    StepRefusalSink,
     StepSink,
 )
 from reactor_runtime.message_gateway import InboundCommand
@@ -162,10 +163,16 @@ class FakeModel(ReactorApp):
         media: MediaSink,
         media_ops: MediaOps | None = None,
         step: StepSink | None = None,
+        step_refusal: StepRefusalSink | None = None,
     ) -> None:
         self.events.append("bind")
         super().bind_output(
-            broadcast=broadcast, addressed=addressed, media=media, media_ops=media_ops, step=step
+            broadcast=broadcast,
+            addressed=addressed,
+            media=media,
+            media_ops=media_ops,
+            step=step,
+            step_refusal=step_refusal,
         )
 
     def start_thread(self) -> None:

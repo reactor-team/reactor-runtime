@@ -373,6 +373,22 @@ class ConnectionManager:
             return
         conn.send_message(encode(conn.protocol_version))
 
+    def send_step_reply(
+        self, cid: ConnId, encode: Callable[[ProtocolVersion], tuple[Channel, bytes | str]]
+    ) -> None:
+        """Send a reply to a step request on the data channel, where the request came in.
+
+        Every reply to a step travels the channel its request did, whatever
+        channel the codec names, so a client reads a step's replies in the order
+        they were sent. Only the v1 codec carries step traffic; a v0 client
+        cannot send a step request, so it is sent no reply.
+        """
+        conn = self._by_id.get(cid)
+        if conn is None or conn.protocol_version is ProtocolVersion.V0:
+            return
+        _, frame = encode(conn.protocol_version)
+        conn.send_message(frame)
+
     def send_control(self, cid: ConnId, encode: Callable[[ProtocolVersion], bytes | str]) -> None:
         """Encode and send a control frame to one connection in its codec, if registered.
 

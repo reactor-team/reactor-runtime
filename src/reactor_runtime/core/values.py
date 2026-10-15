@@ -492,6 +492,56 @@ class MediaChunk:
 
 
 @dataclass(frozen=True)
+class RequestedStep:
+    """A client's request for one step of a stepped session, once accepted.
+
+    Attributes:
+        conn_id: The connection that asked for the step.
+        request_id: The id the client sent the request with, which every reply
+            to it carries.
+        index: The step's number in its session, counted from 1. Only an
+            accepted step takes one.
+    """
+
+    conn_id: ConnId
+    request_id: str
+    index: int
+
+
+class StepRefusalKind(StrEnum):
+    """Why a requested step did not run."""
+
+    REFUSED = "refused"
+    """The model refused this request, in its session or in ``process_input()``."""
+    NOT_READY = "not_ready"
+    """No session was running to take the step; the same request can succeed later."""
+    COMMAND_FAILED = "command_failed"
+    """The handler of one of the request's state keys or commands failed."""
+
+
+@dataclass(frozen=True)
+class StepRefusal:
+    """A step a client requested that the model did not run.
+
+    A refused step takes no number and is not recorded as a step.
+
+    Attributes:
+        conn_id: The connection that asked for the step.
+        request_id: The id the client sent the request with.
+        session: The session the request was handled in, counted the way
+            :attr:`CompletedStep.session` is.
+        reason: Why the step did not run.
+        kind: Which kind of refusal it is.
+    """
+
+    conn_id: ConnId
+    request_id: str
+    session: int
+    reason: str
+    kind: StepRefusalKind = StepRefusalKind.REFUSED
+
+
+@dataclass(frozen=True)
 class CompletedStep:
     """One finished step, as the model reports it to the runtime.
 
@@ -511,6 +561,8 @@ class CompletedStep:
         fps: The rate the step's media was emitted at, which a saved step's
             video plays at: the measured throughput for a model that does not
             pin its rate.
+        request: The client request the step answers, in a stepped session,
+            or ``None`` for a step the model took on its own.
     """
 
     bundle: MediaBundle | None
@@ -519,6 +571,7 @@ class CompletedStep:
     elapsed: float | None = None
     session: int = 0
     fps: float = 30.0
+    request: RequestedStep | None = None
 
 
 @dataclass(frozen=True)

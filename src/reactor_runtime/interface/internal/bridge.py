@@ -15,6 +15,7 @@ so nothing here reaches into model internals beyond the handful of entrypoints
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -28,6 +29,8 @@ from reactor_runtime.interface.internal.reactor_core import (
     MediaSink,
     ReactorCore,
     RequestId,
+    StepEnvelope,
+    StepRefusalSink,
     StepSink,
 )
 from reactor_runtime.interface.model.contract import ContractError, ModelContract
@@ -84,6 +87,16 @@ class ModelBridge:
         """The model's contract."""
         return self._contract
 
+    @property
+    def supports_stepped(self) -> bool:
+        """Whether the model can serve a stepped session.
+
+        True for a model that runs the default step loop of ``ReactorApp``. A
+        model that drives its own ``run()``, such as a ``ReactorPipeline``,
+        has no step to run on request.
+        """
+        return self._model.supports_stepped()
+
     # -- inbound: user-authored, validated --------------------------------
 
     async def submit_command(
@@ -92,7 +105,8 @@ class ModelBridge:
         raw_args: dict[str, Any],
         *,
         conn_id: ConnId | None,
-        request_id: RequestId,
+        request_id: RequestId | None,
+        step_request_id: RequestId | None = None,
     ) -> CommandOutcome:
         """Validate a client command against the contract and admit it.
 
@@ -104,7 +118,11 @@ class ModelBridge:
             name: The command name from the wire.
             raw_args: The raw argument mapping from the wire.
             conn_id: The connection that sent it, when known.
-            request_id: The request id to correlate a reply against.
+            request_id: The request id to correlate a reply against, or ``None``
+                for a command no reply answers, such as one a step request carries.
+            step_request_id: The id of the step request that carries the
+                command, when it is one of a step's state keys or commands. A
+                failure of its handler is then answered in that step's result.
 
         Returns:
             An accepted outcome when the command was valid and enqueued, else a
@@ -114,7 +132,7 @@ class ModelBridge:
             command = self._contract.validate(name, raw_args)
         except ContractError as error:
             return CommandOutcome.reject(error.field, error.reason)
-        self._model.submit_command(command, conn_id, request_id)
+        self._model.submit_command(command, conn_id, request_id, step_request_id=step_request_id)
         return CommandOutcome.accept()
 
     def check_command(self, name: str, raw_args: dict[str, Any]) -> CommandOutcome:
@@ -137,6 +155,32 @@ class ModelBridge:
         except ContractError as error:
             return CommandOutcome.reject(error.field, error.reason)
         return CommandOutcome.accept()
+
+    def submit_step(
+        self,
+        media_input: Mapping[str, Sequence[InputFrame]],
+        *,
+        conn_id: ConnId,
+        request_id: RequestId,
+    ) -> None:
+        """Admit a step whose state values and commands were submitted ahead of it.
+
+        The step reaches the model after every command submitted before it;
+        the model writes *media_input* to its input tracks and runs the step.
+
+        Args:
+            media_input: The decoded frames to write to each input track, by
+                name.
+            conn_id: The connection that asked for the step.
+            request_id: The request id the step's response carries.
+        """
+        self._model.submit_step(
+            StepEnvelope(
+                media_input={track: tuple(frames) for track, frames in media_input.items()},
+                conn_id=conn_id,
+                request_id=request_id,
+            )
+        )
 
     # -- inbound: reactor-authoritative, trusted --------------------------
 
@@ -166,6 +210,7 @@ class ModelBridge:
         media_ops: MediaOps | None = None,
         failure: FailureSink | None = None,
         step: StepSink | None = None,
+        step_refusal: StepRefusalSink | None = None,
     ) -> None:
         """Wire the model's outbound paths down into the runner. Call once.
 
@@ -181,7 +226,8 @@ class ModelBridge:
         loop, at most once, on the model thread — it is how the owner learns
         the model died rather than idled. ``step`` receives each
         :class:`~reactor_runtime.core.CompletedStep` the model reports, on the
-        model thread.
+        model thread. ``step_refusal`` receives, on the model thread, each
+        step a client requested that the model refused.
 
         Args:
             broadcast: Sink for a message sent to all clients.
@@ -191,6 +237,7 @@ class ModelBridge:
                 the model's ``output`` handle.
             failure: Sink for an unrecoverable crash of the model's run loop.
             step: Sink for each step the model reports finished.
+            step_refusal: Sink for each requested step the model refused.
 
         Raises:
             RuntimeError: If outbound has already been bound.
@@ -198,7 +245,12 @@ class ModelBridge:
         if self._outbound_bound:
             raise RuntimeError("bind_outbound must be called once")
         self._model.bind_output(
-            broadcast=broadcast, addressed=addressed, media=media, media_ops=media_ops, step=step
+            broadcast=broadcast,
+            addressed=addressed,
+            media=media,
+            media_ops=media_ops,
+            step=step,
+            step_refusal=step_refusal,
         )
         if failure is not None:
             self._model.bind_failure(failure)
