@@ -140,3 +140,12 @@ def test_a_fifo_read_notes_each_frame_it_took() -> None:
     buf.try_read(2, mode=ReadMode.FIFO)
 
     assert len(buf.take_read_waits()) == 2
+
+
+def test_waits_that_are_never_taken_stay_within_the_buffers_bound() -> None:
+    buf = InputBuffer(maxlen=2)
+    for value in range(5):
+        buf.push(frame(value), ConnId(1000 + value))
+        buf.try_read(1)
+
+    assert [source for source, _ in buf.take_read_waits()] == [ConnId(1003), ConnId(1004)]

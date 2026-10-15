@@ -60,8 +60,11 @@ class InputBuffer:
         # an eviction drops both.
         self._pushed_at: deque[tuple[float, ConnId | None]] = deque(maxlen=maxlen)
         # The sender of each frame a read took, and how long it waited in the
-        # buffer in ms, until the step loop takes them (take_read_waits).
-        self._read_waits: list[tuple[ConnId | None, float]] = []
+        # buffer in ms, until the step loop takes them (take_read_waits). A
+        # model with its own run() may never take them, so they are bounded
+        # like the frames: the oldest go first. The default step loop takes
+        # them after every read, so it never reaches the bound.
+        self._read_waits: deque[tuple[ConnId | None, float]] = deque(maxlen=maxlen)
         self._total_received = 0
         self._closed = False
 
@@ -141,7 +144,8 @@ class InputBuffer:
         the push named none. The waits start again.
         """
         with self._lock:
-            waits, self._read_waits = self._read_waits, []
+            waits = list(self._read_waits)
+            self._read_waits.clear()
         return waits
 
     def try_read(self, n: int = 1, mode: ReadMode = ReadMode.LATEST) -> list[InputFrame] | None:
@@ -208,7 +212,7 @@ class InputBuffer:
             self._closed = False
             self._buffer.clear()
             self._pushed_at.clear()
-            self._read_waits = []
+            self._read_waits.clear()
             self._total_received = 0
 
     def push(self, frame: InputFrame, source: ConnId | None = None) -> None:
