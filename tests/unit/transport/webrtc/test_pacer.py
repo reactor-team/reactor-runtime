@@ -1,6 +1,7 @@
 import queue
 import threading
 import time
+import weakref
 
 import numpy as np
 
@@ -314,6 +315,84 @@ def test_pacing_thread_delivers_submitted_frames() -> None:
 def test_stop_is_idempotent_before_start() -> None:
     pacer, _ = make_pacer()
     pacer.stop()  # never started; must not raise
+
+
+def test_stop_releases_the_model_output_it_was_pacing() -> None:
+    # Each paced frame is a view into the model's output array, so a stopped
+    # pacer must hold neither the last frame it delivered nor the frames still
+    # queued, or the whole array outlives the connection.
+    frames = batch(10, side=8)
+    output = weakref.ref(frames)
+    pacer = MediaPacer({"main": video_info()}, lambda bundle: None)
+    pacer.submit(chunk(video_bundle(frames), fps=50.0, n_frames=10))
+    del frames
+    pacer.start()
+    try:
+        time.sleep(0.05)  # some frames delivered, the rest still queued
+    finally:
+        pacer.stop()
+    assert output() is None
+
+
+def test_stop_releases_frames_queued_while_the_pacer_never_ran() -> None:
+    # A connection can close before its pacer starts, after frames were
+    # already submitted; stopping it must still let the output go.
+    frames = batch(10, side=8)
+    output = weakref.ref(frames)
+    pacer = MediaPacer({"main": video_info()}, lambda bundle: None)
+    pacer.submit(chunk(video_bundle(frames), n_frames=10))
+    del frames
+    pacer.stop()
+    assert output() is None
+
+
+def test_a_stopped_pacer_takes_no_more_media() -> None:
+    # A broadcast iterates a snapshot of connections, so a submit can reach a
+    # pacer after its single stop(); it must not repopulate the queue.
+    pacer = MediaPacer({"main": video_info()}, lambda bundle: None)
+    pacer.start()
+    pacer.stop()
+    frames = batch(10, side=8)
+    output = weakref.ref(frames)
+    assert pacer.submit(chunk(video_bundle(frames), n_frames=10)) == 0
+    assert pacer.submit(chunk(video_bundle(frames), n_frames=10, wait=True)) == 0
+    del frames
+    assert output() is None
+    assert pacer.dropped_frames == 0
+
+
+def test_a_stopped_pacer_does_not_restart() -> None:
+    pacer, _ = make_pacer()
+    pacer.stop()
+    pacer.start()
+    assert pacer._thread is None
+
+
+def test_a_submit_racing_stop_leaves_no_output_behind() -> None:
+    # One stop() only, as a connection teardown calls it, with a producer
+    # submitting fresh outputs the whole time.
+    pacer = MediaPacer({"main": video_info()}, lambda bundle: None, queue_depth=4)
+    pacer.start()
+    outputs: list[weakref.ref[np.ndarray]] = []
+    stop_producing = threading.Event()
+
+    def produce() -> None:
+        while not stop_producing.is_set():
+            frames = batch(4, side=8)
+            outputs.append(weakref.ref(frames))
+            pacer.submit(chunk(video_bundle(frames), fps=500.0, n_frames=4))
+            del frames
+
+    producer = threading.Thread(target=produce)
+    producer.start()
+    time.sleep(0.05)
+    pacer.stop()
+    time.sleep(0.02)  # the producer keeps submitting into the stopped pacer
+    stop_producing.set()
+    producer.join(timeout=2.0)
+    assert not producer.is_alive()
+    assert outputs
+    assert all(output() is None for output in outputs)
 
 
 def test_a_batching_model_keeps_the_wire_in_fresh_frames() -> None:
