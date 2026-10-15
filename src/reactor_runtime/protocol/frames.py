@@ -127,7 +127,11 @@ class RawFrames:
             samples = _int16_audio(data)
         else:
             samples = np.asarray(data).astype(np.uint8, copy=False)
-        if samples.ndim != rank or (kind is TrackKind.VIDEO and samples.shape[2] != 3):
+        if (
+            samples.ndim != rank
+            or 0 in samples.shape
+            or (kind is TrackKind.VIDEO and samples.shape[2] != 3)
+        ):
             raise FrameEncodingError(f"a {kind} frame cannot be shaped {list(np.shape(data))}")
         wire = np.dtype(dtype).newbyteorder("<")
         return step_pb2.Frame(

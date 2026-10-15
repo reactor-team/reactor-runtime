@@ -153,6 +153,20 @@ def test_a_video_payload_that_is_not_an_image_cannot_be_encoded() -> None:
         encode_frame(np.zeros((4, 4), dtype=np.uint8), TrackKind.VIDEO)
 
 
+@pytest.mark.parametrize(
+    ("data", "kind"),
+    [
+        (np.zeros((0, 4, 3), dtype=np.uint8), TrackKind.VIDEO),
+        (np.zeros((4, 0, 3), dtype=np.uint8), TrackKind.VIDEO),
+        (np.zeros((1, 0), dtype=np.int16), TrackKind.AUDIO),
+        (np.zeros((0,), dtype=np.float32), TrackKind.AUDIO),
+    ],
+)
+def test_an_empty_frame_cannot_be_encoded(data: np.ndarray, kind: TrackKind) -> None:
+    with pytest.raises(FrameEncodingError, match="cannot be shaped"):
+        encode_frame(data, kind)
+
+
 def _track(
     name: str, kind: TrackKind, data: np.ndarray, metadata: bytes | list[bytes] | None = None
 ) -> TrackData:
