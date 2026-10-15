@@ -121,6 +121,7 @@ convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["D"]
+"endurance-tests/unit/**" = ["D"]
 
 [tool.ty.environment]
 python = ".venv"
@@ -131,7 +132,8 @@ python-version = "3.12"
 # its tests can import their sibling `conftest` for the shared peer fakes; and
 # the contract suite, so its tests can import their sibling `contract_helpers`;
 # and each example workspace, whose two modules import each other as top-level
-# names, the way the runtime imports a workspace.
+# names, the way the runtime imports a workspace; and the endurance suite,
+# whose modules import each other the same way.
 extra-paths = [
     ".",
     "examples/starter",
@@ -139,12 +141,14 @@ extra-paths = [
     "examples/waypoint",
     "tests/unit/transport/webrtc",
     "tests/contract",
+    "endurance-tests",
 ]
 
 [tool.ty.src]
-# Check the package, its tests, and the example models; scripts/ ships developer
-# tooling that is not part of the published package surface.
-include = ["src", "tests", "examples"]
+# Check the package, its tests, the endurance suite, and the example models;
+# scripts/ ships developer tooling that is not part of the published package
+# surface.
+include = ["src", "tests", "endurance-tests", "examples"]
 # Generated bindings ship their own stubs.
 exclude = [
     "src/reactor_wire",
@@ -155,8 +159,9 @@ exclude = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "endurance-tests/unit"]
 asyncio_mode = "auto"
 # The example models live at the repo root (outside the package) so they are not
-# shipped; put the root on the path so the suite can import them.
-pythonpath = ["."]
+# shipped; put the root on the path so the suite can import them. The endurance
+# suite's modules import each other as top-level names.
+pythonpath = [".", "endurance-tests"]
