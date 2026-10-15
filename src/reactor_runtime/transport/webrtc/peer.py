@@ -726,8 +726,10 @@ class WebRTCPeer:
         ``sink_convert`` (its sink converting the decoded frame) and
         ``handoff`` (the wait for the GIL and the copy into Python), and
         ``handoff`` on the data channel for each message. A window's worth is
-        the difference since the previous fold. An engine without the totals
-        adds nothing.
+        the difference since the previous fold. The totals start at zero when
+        the sink is attached, so the first fold counts everything so far, and
+        a total that went backwards (a sink attached again) counts from zero.
+        An engine without the totals adds nothing.
         """
         for name, track in list(self._in_tracks.items()):
             totals = getattr(track, "handoff_totals", None)
@@ -737,9 +739,11 @@ class WebRTCPeer:
                 convert_s, handoff_s, frames = totals()
             except Exception:
                 continue
-            before = self._handoff_seen.get(name)
+            before = self._handoff_seen.get(name, (0.0, 0.0, 0))
+            if frames < before[2]:
+                before = (0.0, 0.0, 0)
             self._handoff_seen[name] = (convert_s, handoff_s, frames)
-            if before is None or frames <= before[2]:
+            if frames == before[2]:
                 continue
             count = int(frames - before[2])
             self.frame_stages.add(name, "sink_convert", (convert_s - before[0]) * 1000.0, count)
@@ -751,9 +755,11 @@ class WebRTCPeer:
             handoff_s, messages = totals()
         except Exception:
             return
-        before = self._handoff_seen.get("\0data")
+        before = self._handoff_seen.get("\0data", (0.0, 0))
+        if messages < before[1]:
+            before = (0.0, 0)
         self._handoff_seen["\0data"] = (handoff_s, messages)
-        if before is not None and messages > before[1]:
+        if messages > before[1]:
             self.message_stages.add(
                 "handoff", (handoff_s - before[0]) * 1000.0, int(messages - before[1])
             )
