@@ -15,7 +15,7 @@ import time
 from collections import deque
 from enum import Enum, auto
 
-from reactor_runtime.core.values import InputFrame
+from reactor_runtime.core.values import ConnId, InputFrame
 
 DEFAULT_BUFFER_CAPACITY = 128
 """How many frames a buffer holds before the oldest is evicted."""
@@ -55,12 +55,13 @@ class InputBuffer:
         self._lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
         self._buffer: deque[InputFrame] = deque(maxlen=maxlen)
-        # When each buffered frame was pushed, on perf_counter, beside it: the
-        # two deques share a bound, so an eviction drops both.
-        self._pushed_at: deque[float] = deque(maxlen=maxlen)
-        # How long each frame a read took waited in the buffer, in ms, until
-        # the step loop takes them (take_read_waits).
-        self._read_waits: list[float] = []
+        # When each buffered frame was pushed, on perf_counter, and the
+        # connection that sent it, beside it: the two deques share a bound, so
+        # an eviction drops both.
+        self._pushed_at: deque[tuple[float, ConnId | None]] = deque(maxlen=maxlen)
+        # The sender of each frame a read took, and how long it waited in the
+        # buffer in ms, until the step loop takes them (take_read_waits).
+        self._read_waits: list[tuple[ConnId | None, float]] = []
         self._total_received = 0
         self._closed = False
 
@@ -128,13 +129,17 @@ class InputBuffer:
         self._note_waits([self._pushed_at.popleft() for _ in range(n)])
         return [self._buffer.popleft() for _ in range(n)]
 
-    def _note_waits(self, pushed: list[float]) -> None:
+    def _note_waits(self, pushed: list[tuple[float, ConnId | None]]) -> None:
         """Note how long the frames pushed at *pushed* waited. Caller holds the lock."""
         now = time.perf_counter()
-        self._read_waits.extend((now - at) * 1000.0 for at in pushed)
+        self._read_waits.extend((source, (now - at) * 1000.0) for at, source in pushed)
 
-    def take_read_waits(self) -> list[float]:
-        """Return how long each frame read since the last take waited, in ms, and start again."""
+    def take_read_waits(self) -> list[tuple[ConnId | None, float]]:
+        """Return each frame read since the last take, as its sender and its wait in ms.
+
+        The sender is the connection that pushed the frame, or ``None`` when
+        the push named none. The waits start again.
+        """
         with self._lock:
             waits, self._read_waits = self._read_waits, []
         return waits
@@ -206,15 +211,17 @@ class InputBuffer:
             self._read_waits = []
             self._total_received = 0
 
-    def push(self, frame: InputFrame) -> None:
+    def push(self, frame: InputFrame, source: ConnId | None = None) -> None:
         """Append a frame from the runtime thread, waking a blocked reader.
 
-        Frames pushed after :meth:`close` are dropped until :meth:`reset`.
+        *source* is the connection that sent the frame, so the frame's wait in
+        the buffer is reported to that connection only. Frames pushed after
+        :meth:`close` are dropped until :meth:`reset`.
         """
         with self._condition:
             if self._closed:
                 return
             self._buffer.append(frame)
-            self._pushed_at.append(time.perf_counter())
+            self._pushed_at.append((time.perf_counter(), source))
             self._total_received += 1
             self._condition.notify_all()

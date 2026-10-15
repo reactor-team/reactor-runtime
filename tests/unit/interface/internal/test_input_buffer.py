@@ -3,7 +3,7 @@ import time
 import numpy as np
 import pytest
 
-from reactor_runtime.core.values import InputFrame
+from reactor_runtime.core.values import ConnId, InputFrame
 from reactor_runtime.interface.internal.input_buffer import (
     BufferClosed,
     InputBuffer,
@@ -116,9 +116,20 @@ def test_a_read_notes_how_long_its_frames_waited() -> None:
 
     assert buf.try_read(1) is not None
 
-    [wait] = buf.take_read_waits()
+    [(source, wait)] = buf.take_read_waits()
+    assert source is None
     assert wait >= 5.0
     assert buf.take_read_waits() == []
+
+
+def test_a_read_names_the_connection_that_sent_each_frame() -> None:
+    buf = InputBuffer(maxlen=4)
+    buf.push(frame(1), ConnId(1001))
+    buf.push(frame(2), ConnId(1002))
+
+    buf.try_read(2, mode=ReadMode.FIFO)
+
+    assert [source for source, _ in buf.take_read_waits()] == [ConnId(1001), ConnId(1002)]
 
 
 def test_a_fifo_read_notes_each_frame_it_took() -> None:

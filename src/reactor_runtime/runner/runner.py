@@ -387,6 +387,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 failure=self._on_model_failure,
                 step=self._on_step_completed,
                 command_timing=self._on_command_timing,
+                frame_timing=self._on_frame_timing,
             )
             bridge.start()
         except Exception:
@@ -557,7 +558,7 @@ class Runner(ServiceComponent, ConnectionSink):
     def media_received(self, conn_id: ConnId, track: str, frame: InputFrame) -> None:
         """Route an inbound media frame to its track on the model."""
         if self._bridge is not None:
-            self._bridge.push_media(track, frame)
+            self._bridge.push_media(track, frame, conn_id)
 
     def keepalive(self, conn_id: ConnId) -> None:
         """Note liveness for a connection."""
@@ -773,6 +774,16 @@ class Runner(ServiceComponent, ConnectionSink):
 
         with contextlib.suppress(RuntimeError):
             loop.call_soon_threadsafe(add)
+
+    def _on_frame_timing(self, conn_id: ConnId, track: str, stage: str, ms: float) -> None:
+        """Add a frame's time in a stage the model timed to its sender, on the loop.
+
+        The model reports from its own thread; the connections are the loop's.
+        """
+        loop = self._loop
+        if loop is None:
+            return
+        loop.call_soon_threadsafe(self._connections.add_frame_stage, conn_id, track, stage, ms)
 
     def _on_step_completed(self, step: CompletedStep) -> None:
         """Record a step the model reported finished, hopping onto the loop.

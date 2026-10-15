@@ -316,6 +316,8 @@ class ReactorApp(ReactorCore):
                         try:
                             input = await self.process_input()
                         except ApplicationError as refused:
+                            # Frames a refused turn read belong to no step.
+                            self._report_input_waits(report=False)
                             # One record per change of reason, not one per turn.
                             reason = f"{type(refused).__name__}: {refused}"
                             if reason != last_refusal:
@@ -330,6 +332,7 @@ class ReactorApp(ReactorCore):
                         else:
                             last_refusal = None
                             input_ms = (time.perf_counter() - input_started) * 1000.0
+                            self._report_input_waits()
                             # 3. The model. Synchronous on purpose: nothing changes
                             #    under it. This is the one place a StepOutcome is
                             #    built.
@@ -390,20 +393,27 @@ class ReactorApp(ReactorCore):
     ) -> tuple[tuple[str, str, float], ...]:
         """The frame stages of one step, for its chunk (:attr:`MediaChunk.stages`).
 
-        ``input_wait`` is each frame the step read, on its input track: from its
-        arrival in the buffer until the read took it. The step's own parts are
-        on ``"*"``, each video track the step emits.
+        The step's parts are on ``"*"``, each video track the step emits.
         """
-        stages: list[tuple[str, str, float]] = [
-            (track, "input_wait", ms)
-            for track, buffer in self._input_buffers.items()
-            for ms in buffer.take_read_waits()
-        ]
-        stages.append(("*", "process_input", input_ms))
+        stages: list[tuple[str, str, float]] = [("*", "process_input", input_ms)]
         if generate_s is not None:
             stages.append(("*", "generate", generate_s * 1000.0))
         stages.append(("*", "process_output", output_ms))
         return tuple(stages)
+
+    def _report_input_waits(self, report: bool = True) -> None:
+        """Report each frame the step read, as ``input_wait``, to the connection that sent it.
+
+        The wait runs from the frame's arrival in the input buffer until the
+        read took it. Frames from several connections share one buffer, so
+        each wait goes to its sender only, not into the step's chunk. With
+        *report* false, the waits are dropped.
+        """
+        sink = self._out_frame_timing
+        for track, buffer in self._input_buffers.items():
+            for source, ms in buffer.take_read_waits():
+                if report and sink is not None and source is not None:
+                    sink(source, track, "input_wait", ms)
 
     # -- engine hooks ---------------------------------------------------------
 

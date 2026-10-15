@@ -506,10 +506,10 @@ class MediaChunk:
             emitter does not count sessions. A consumer compares it with its
             own count to tell a late chunk of an earlier session apart.
         stages: The frame stages the step that made the chunk timed before it
-            emitted, as ``(track, stage, ms)``: ``input_wait`` on each input
-            track it read, and ``process_input``, ``generate`` and
-            ``process_output`` on the track ``"*"``, which stands for each
-            video track of the chunk. A consumer that times frames adds them.
+            emitted, as ``(track, stage, ms)``: ``process_input``,
+            ``generate`` and ``process_output`` on the track ``"*"``, which
+            stands for each video track of the chunk. A consumer that times
+            frames adds them.
         emitted_at: When the model called ``emit`` for the chunk, on
             :func:`time.perf_counter`, or ``None`` when not timed. A consumer
             times its ``emit`` stage from it.

@@ -88,6 +88,15 @@ MediaSink = Callable[[MediaChunk], None]
 StepSink = Callable[[CompletedStep], None]
 """Receives each step the model reports finished, on the model thread."""
 
+FrameTimingSink = Callable[[ConnId, str, str, float], None]
+"""Receives one frame's time in one stage that only the model sees, on the model thread.
+
+The arguments are the connection that sent the frame, the track, the stage
+and the milliseconds: ``input_wait``, the frame's wait in the model's input
+buffer until a step read it. It goes to that connection only, since frames
+from several connections share one input buffer.
+"""
+
 CommandTimingSink = Callable[[ConnId, int, float, float], None]
 """Receives how long a command waited and ran, on the model thread.
 
@@ -284,6 +293,7 @@ class ReactorCore:
         self._out_media: MediaSink | None = None
         self._out_step: StepSink | None = None
         self._out_command_timing: CommandTimingSink | None = None
+        self._out_frame_timing: FrameTimingSink | None = None
         # How many session starts the model has received, kept by the
         # subclass's dispatcher. A step report carries it, so the runtime can
         # set apart a late report from a session that has ended.
@@ -398,7 +408,12 @@ class ReactorCore:
 
     # -- outbound binding (called once by the bridge) -------------------------
 
-    def _bind_timing(self, *, command_timing: CommandTimingSink | None = None) -> None:
+    def _bind_timing(
+        self,
+        *,
+        command_timing: CommandTimingSink | None = None,
+        frame_timing: FrameTimingSink | None = None,
+    ) -> None:
         """Bind the runtime's timing sinks. Called once by the bridge, beside :meth:`bind_output`.
 
         Kept apart from :meth:`bind_output`, which a model may override with
@@ -406,6 +421,7 @@ class ReactorCore:
         that override.
         """
         self._out_command_timing = command_timing
+        self._out_frame_timing = frame_timing
 
     def bind_output(
         self,
@@ -481,15 +497,15 @@ class ReactorCore:
         """Enqueue a reactor-authoritative event onto the model loop."""
         self._enqueue(event)
 
-    def push_media(self, track: str, frame: InputFrame) -> None:
-        """Route an inbound frame into its track's buffer."""
+    def push_media(self, track: str, frame: InputFrame, source: ConnId | None = None) -> None:
+        """Route an inbound frame into its track's buffer, with the connection that sent it."""
         if self._loop.is_closed():
             return
         buffer = self._input_buffers.get(track)
         if buffer is None:
             logger.debug("media for unknown input track %r", track)
             return
-        buffer.push(frame)
+        buffer.push(frame, source)
 
     def _enqueue(self, item: Inbound) -> None:
         """Thread-safe put onto the inbound queue, dropped before the loop runs."""
