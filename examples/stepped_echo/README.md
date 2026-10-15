@@ -26,7 +26,9 @@ reactor run
 
 `--no-dockerfile` renders the image from `reactor.yaml`'s `build:` block.
 `build.runtime_version` must match the `reactor-runtime==<version>` pin in
-`requirements.txt`; bump both together to upgrade. `reactor run` serves on
+`requirements.txt`; bump both together to upgrade. The pin is 3.9.0, the first
+release with stepped sessions, so `reactor build` resolves it once that
+release is published. `reactor run` serves on
 `http://localhost:8080`. Start a stepped session with
 `POST /start_session {"generation": "stepped"}` and connect a client that asks
 for one.
@@ -64,13 +66,18 @@ report, as UTF-8 JSON:
   "tags": ["this step's tags, in the order sent"],
   "media_input": 2,
   "input_metadata": "the last webcam frame's metadata as text, or null",
+  "input_metadata_base64": "the same metadata's exact bytes, base64, or null",
   "overlay": {"name": "cat.png", "mime_type": "image/png", "size": 1024},
   "error": null
 }
 ```
 
-`overlay` is `null` when no file is set, and `error` is the reason `fail` gave,
-or `null`. Each step that works also keeps the same bytes as `report.json`
+`media_input` counts the `webcam` frames the step's input buffer held: at most
+128, the oldest dropped when a step carries more. Metadata is opaque bytes:
+`input_metadata` is it read as UTF-8, with any byte that is not UTF-8 replaced
+by U+FFFD, and
+`input_metadata_base64` is the bytes themselves, to compare exactly. `overlay` is `null` when no
+file is set, and `error` is the reason `fail` gave, or `null`. Each step that works also keeps the same bytes as `report.json`
 (`application/json`) with its saved result. A failed step keeps no files, as
 the runtime keeps none for a failed step, so its report travels on its frame
 alone. A step with no state, commands, or frames runs on the current state.
@@ -81,12 +88,13 @@ did, at up to 30 fps.
 
 ## From a client
 
-With the Python SDK:
+With the Python SDK, from the release that adds stepped sessions
+(`Reactor.step()`), against the `reactor run` above:
 
 ```python
 from reactor_sdk import Reactor, StepCommand
 
-reactor = Reactor("reactor/stepped-echo", api_key=key, generation="stepped")
+reactor = Reactor("stepped-echo", local=True, generation="stepped")
 await reactor.connect()
 
 webcam = await reactor.track("webcam").publish()
