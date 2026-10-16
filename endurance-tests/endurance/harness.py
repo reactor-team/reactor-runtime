@@ -255,6 +255,10 @@ class BareClient:
         await self._settle()
         return self.received_video
 
+    async def wait_for_replies(self) -> None:
+        """Wait, as a closing client does, for the replies it is still owed."""
+        await self._settle()
+
     async def stream_while(self, frame: tuple[bytes, int, int], done: asyncio.Event) -> None:
         """Stream on until *done* is set."""
         while not done.is_set():
