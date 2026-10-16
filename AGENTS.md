@@ -87,6 +87,14 @@ the `src/reactor_runtime/` module layout. A failing test must surface its full
 traceback — never wrap test execution in machinery that swallows exceptions
 from worker threads or event loops.
 
+The endurance suite (`endurance-tests/`) runs the runtime for a long stretch
+and checks it releases what each connection held. It runs after every release
+and on demand; PR CI runs a two-cycle smoke of it. A PR that adds state held
+per connection or per session, adds a client-facing path, or changes what the
+suite's launcher hooks must extend the suite in the same PR: see "When a change
+needs this suite" in `endurance-tests/README.md`. Run it with
+`mise run test-endurance`.
+
 ## Lints
 
 `mise run lint` (ruff check, ruff format --check, and the mise.lock drift check)

@@ -44,3 +44,5 @@ htmlcov/
 *.local.md
 mise.local.toml
 .mise.local.toml
+# Endurance suite reports and runtime logs, written next to wherever it runs.
+endurance-results/

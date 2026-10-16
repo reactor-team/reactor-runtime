@@ -1,0 +1,12 @@
+$schema: reactor/v2
+
+# The endurance suite's model: examples/echo, with every output batch tracked
+# so the probe can tell whether anything still holds one. No recording, so the
+# recorder holds no media of its own.
+model:
+  name: echo-endurance
+  version: v0.0.1
+  description: examples/echo with tracked output batches, for the endurance suite.
+
+runtime:
+  import: tracked_echo:TrackedEcho
