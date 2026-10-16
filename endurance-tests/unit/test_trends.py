@@ -187,11 +187,11 @@ def test_a_step_that_levelled_off_in_the_first_third_reads_flat_on_slope() -> No
 
 
 def test_a_fast_slope_with_a_rise_inside_the_noise_floor_passes() -> None:
-    # An hour climbing 24 MB/h: over the limit, but the fitted rise over the
-    # last forty minutes is under a 20 MB floor.
-    values = [300.0 + 0.4 * i for i in range(60)]
+    # Two hours climbing 24 MB/h: over the limit, but the fitted rise over the
+    # last eighty minutes is under a 40 MB floor.
+    values = [300.0 + 0.4 * i for i in range(120)]
     result = assert_slope_under(
-        _hours(60), values, name="rss_slope", max_per_hour=20.0, min_absolute_delta=20.0
+        _hours(120), values, name="rss_slope", max_per_hour=20.0, min_absolute_delta=40.0
     )
     assert result.status == "ok"
     assert "noise floor" in result.detail
@@ -204,6 +204,17 @@ def test_memory_swinging_over_a_few_minutes_is_not_judged() -> None:
     hours = [i * 13 / 3600 for i in range(len(values))]
     result = assert_slope_under(
         hours, values, name="rss_slope", max_per_hour=20.0, min_absolute_delta=5.0
+    )
+    assert result.status == "ok"
+    assert "not judged" in result.detail
+
+
+def test_an_hour_long_run_reports_its_slope_without_judging_it() -> None:
+    # A steep climb over forty minutes of fit is still within what a healthy
+    # runtime's swing reads as over that stretch.
+    values = [300.0 + i for i in range(60)]
+    result = assert_slope_under(
+        _hours(60), values, name="rss_slope", max_per_hour=20.0, min_absolute_delta=5.0
     )
     assert result.status == "ok"
     assert "not judged" in result.detail

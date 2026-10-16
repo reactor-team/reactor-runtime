@@ -40,7 +40,8 @@ Exact counts, which must be 0 on every cycle:
 Trends of the runtime process (RSS, CPU per cycle, threads, file
 descriptors): the last third of the run against the middle third, after a
 warm-up of `ENDURANCE_WARMUP_SECONDS` (default 120). RSS is also judged by
-its slope over the last two thirds, in MB per hour (`rss_slope`). A run too short to judge
+its slope over the last two thirds, in MB per hour (`rss_slope`), judged
+only when those samples span 75 minutes or more, as a two-hour run's do. A run too short to judge
 a trend ends in ERROR rather than in a verdict; a failed count still fails it.
 
 ## Scenarios

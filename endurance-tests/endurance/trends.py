@@ -39,10 +39,13 @@ MIN_TREND_SAMPLES = 6
 # limit relative to the run's own length loosens as the run grows.
 MAX_RSS_MB_PER_HOUR = 20.0
 # Shortest stretch of samples, in hours, a slope is judged over. RSS swings by
-# about a batch as the allocator takes and returns memory, and over a few
-# minutes a line fitted through that swing reads as a fast climb; over half an
-# hour or more the swing averages out.
-MIN_SLOPE_SPAN_HOURS = 0.5
+# about a batch as the allocator takes and returns memory, and a line fitted
+# through that swing reads as a climb or a fall that shrinks as the stretch
+# grows: on a healthy two-hour run, the steepest climb was 85 MB/h over 30
+# minutes, 18 MB/h over 60 and 9 MB/h over 70. So a slope is judged only over
+# 75 minutes or more, which a run of about two hours reaches: the release
+# runs are judged, shorter manual runs only report the rate.
+MIN_SLOPE_SPAN_HOURS = 1.25
 
 
 @dataclasses.dataclass
