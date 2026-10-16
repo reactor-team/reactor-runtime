@@ -186,3 +186,11 @@ def test_the_slope_check_refuses_too_few_samples() -> None:
         assert_slope_under(
             [0.0] * 5, [1.0] * 5, name="rss_slope", max_per_hour=20.0, min_absolute_delta=5.0
         )
+
+
+def test_a_task_the_first_cycle_left_counts_against_the_pre_run_baseline() -> None:
+    samples = [_sample(i, tasks=7) for i in range(3)]
+    assert assert_never_grows(samples, field="tasks").status == "ok"
+    result = assert_never_grows(samples, field="tasks", baseline=6)
+    assert result.status == "fail"
+    assert "from 6 to 7" in result.detail

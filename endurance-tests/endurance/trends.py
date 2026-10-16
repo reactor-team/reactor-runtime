@@ -281,9 +281,16 @@ def assert_always_zero(samples: list[Sample], *, field: str, unit: str = "count"
     )
 
 
-def assert_never_grows(samples: list[Sample], *, field: str, unit: str = "count") -> MetricResult:
-    """Fail when *field* ever rises above its first reading."""
-    baseline = getattr(samples[0], field)
+def assert_never_grows(
+    samples: list[Sample], *, field: str, baseline: float | None = None, unit: str = "count"
+) -> MetricResult:
+    """Fail when *field* ever rises above *baseline*, by default its first reading.
+
+    Pass the reading from before the first cycle as *baseline* when there is
+    one, so what the first cycle leaves behind counts too.
+    """
+    if baseline is None:
+        baseline = getattr(samples[0], field)
     peak = max(getattr(s, field) for s in samples)
     grew = peak > baseline
     reason = (
@@ -319,11 +326,16 @@ def retained_cycles(samples: list[Sample]) -> int:
     return sum(1 for s in samples if any(getattr(s, field) for field in ZERO_FIELDS))
 
 
-def exact_metrics(samples: list[Sample]) -> list[MetricResult]:
-    """Return the exact counts over every cycle: a retained object fails the cycle it shows in."""
+def exact_metrics(
+    samples: list[Sample], *, tasks_baseline: int | None = None
+) -> list[MetricResult]:
+    """Return the exact counts over every cycle: a retained object fails the cycle it shows in.
+
+    *tasks_baseline* is the task count before the first cycle, when known.
+    """
     return [
         *(assert_always_zero(samples, field=field) for field in ZERO_FIELDS),
-        assert_never_grows(samples, field="tasks"),
+        assert_never_grows(samples, field="tasks", baseline=tasks_baseline),
     ]
 
 

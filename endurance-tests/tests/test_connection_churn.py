@@ -60,12 +60,18 @@ async def test_connection_churn(runtime: RuntimeProcess) -> None:
         if ENDURANCE_SMOKE_CYCLES:
             metrics = [assert_full_streams(received)]
         else:
-            metrics = [assert_full_streams(received), *exact_metrics(sampler.samples)]
+            metrics = [
+                assert_full_streams(received),
+                *exact_metrics(sampler.samples, tasks_baseline=sampler.initial_tasks),
+            ]
             metrics += trend_metrics(sampler.samples)
     finally:
         # A run cut short still reports the cycles it finished.
         if not metrics and sampler.samples:
-            metrics = [assert_full_streams(received), *exact_metrics(sampler.samples)]
+            metrics = [
+                assert_full_streams(received),
+                *exact_metrics(sampler.samples, tasks_baseline=sampler.initial_tasks),
+            ]
         finish_and_check(
             test_name=TEST_NAME,
             subject="reactor-runtime",

@@ -386,6 +386,9 @@ class ResourceSampler:
         self.samples: list[Sample] = []
         self._process.cpu_percent(interval=None)
         first = runtime.probe()
+        # The session's tasks before any client: a task the first connection
+        # leaves behind must count against this, not hide in the first sample.
+        self.initial_tasks: int = first["tasks"]
         self._baseline = _Baseline(
             freed_by_gc=first["batches_freed_by_gc"],
             holding_after_stop=first["pacers_holding_after_stop"],
