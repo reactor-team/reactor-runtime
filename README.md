@@ -139,6 +139,23 @@ runtime:
 
 The runtime checks the block against the model when it loads: every command, message, and input track it names must exist, and a method can run only one command. A mistake stops the model from loading, so it shows at deploy time rather than in a session.
 
+The LiveKit SDK is an optional part of the runtime. A model that connects to rooms lists it in its workspace's `requirements.txt`, and `build.runtime_version` still picks the release:
+
+```text
+reactor-runtime[livekit]
+```
+
+A running session connects to a room through a connection of its own, the way a WebRTC client connects. The token is the credential of the session's participant: the room, the identity, and the grants come from it, and it never reaches the journal.
+
+```text
+POST /sessions/{session_id}/transport/livekit/connections
+{"url": "wss://example.livekit.cloud", "token": "eyJhbGciOi..."}
+
+202 {"connection_id": 4711}
+```
+
+The join runs in the background. A `GET` on the connection answers `202` while it runs, then reports `open`, `failed`, or `closed` with a reason, and a `DELETE` leaves the room. The room connection is a system connection: once the join succeeds it publishes one LiveKit track per output track, named after it, and occupies the session, so the session streams and the step loop runs whether or not anyone in the room is watching. A session has one room connection at a time. Losing the room closes the room connection and leaves the session running, so the session ends like any session left without a connection, after the orphan timeout.
+
 Scaffold, build, and run it with the CLI:
 
 ```sh

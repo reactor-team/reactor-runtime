@@ -46,12 +46,21 @@ dependencies = [
     "uvicorn>=0.49.0",
 ]
 
+[project.optional-dependencies]
+# The LiveKit transport. A model that joins LiveKit rooms lists
+# `reactor-runtime[livekit]` in its requirements; the runtime pin stays the
+# CLI's `build.runtime_version`.
+livekit = ["livekit==1.1.21"]
+
 [project.urls]
 Source = "https://github.com/reactor-team/reactor-runtime"
 
 [dependency-groups]
 dev = [
     "httpx>=0.28.1",
+    # The LiveKit transport and the token minting its tests use.
+    "livekit==1.1.21",
+    "livekit-api>=1.2.2",
     "opencv-python-headless>=4.10",
     "pillow>=10.1",
     "pytest",

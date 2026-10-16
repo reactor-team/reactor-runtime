@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi import FastAPI, Header, HTTPException, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
@@ -25,13 +25,10 @@ from reactor_runtime.core import ConnId
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.transport.router import (
     ConnectionIdClaimedError,
-    ConnectionsExhaustedError,
     ErrorDetail,
     SessionControl,
-    SessionNotRunningError,
-    TooManyConnectionsError,
     TransportRouter,
-    UnknownSessionError,
+    add_session_error_handlers,
 )
 from reactor_runtime.transport.webrtc.acceptor import PortRangeUnavailableError, WebRTCAcceptor
 from reactor_runtime.transport.webrtc.config import IceCredentials, IceServer, WebRtcConfig
@@ -296,22 +293,7 @@ class WebRtcRouter(TransportRouter):
             track_names=lambda: runner.track_map().keys(),
         )
 
-        async def _session_not_running(request: Request, exc: Exception) -> Response:
-            return JSONResponse(status_code=400, content={"detail": "No session running"})
-
-        async def _unknown_session(request: Request, exc: Exception) -> Response:
-            return JSONResponse(status_code=404, content={"detail": "Unknown session"})
-
-        async def _connections_exhausted(request: Request, exc: Exception) -> Response:
-            return JSONResponse(status_code=503, content={"detail": "No connection ids left"})
-
-        async def _too_many_connections(request: Request, exc: Exception) -> Response:
-            return JSONResponse(status_code=503, content={"detail": "Connection limit reached"})
-
-        app.add_exception_handler(SessionNotRunningError, _session_not_running)
-        app.add_exception_handler(UnknownSessionError, _unknown_session)
-        app.add_exception_handler(ConnectionsExhaustedError, _connections_exhausted)
-        app.add_exception_handler(TooManyConnectionsError, _too_many_connections)
+        add_session_error_handlers(app)
 
         @app.get(f"{_PREFIX}/ice_servers", responses=_GUARD_RESPONSES)
         async def ice_servers(sid: str) -> dict[str, Any]:
