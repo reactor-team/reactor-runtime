@@ -11,6 +11,12 @@ from __future__ import annotations
 
 from reactor_runtime.protocol import ProtocolVersion
 
+TRANSPORT_NAME = "webrtc"
+"""The WebRTC transport's name, on its connections and in the session descriptor."""
+
+TRANSPORT_VERSION = "1.0"
+"""The WebRTC transport version this runtime serves."""
+
 DEFAULT_PROTOCOL_VERSION = ProtocolVersion.V0
 """The codec assumed when a client declares no recognised transport version.
 
@@ -19,7 +25,7 @@ falls back to it and the connection still negotiates.
 """
 
 _TRANSPORT_TO_PROTOCOL: dict[str, ProtocolVersion] = {
-    "1.0": ProtocolVersion.V0,
+    TRANSPORT_VERSION: ProtocolVersion.V0,
 }
 
 
