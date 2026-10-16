@@ -44,12 +44,14 @@ import inspect
 import random
 from collections.abc import Callable, Mapping
 from dataclasses import replace
+from typing import Any
 
 from reactor_runtime.core import (
     Connection,
     ConnId,
     FrameStageSource,
     MediaChunk,
+    MessageObserver,
     MessageStageSource,
     SessionEvent,
     TransportReading,
@@ -127,6 +129,20 @@ def _takes_hold(flush_media: Callable[..., None]) -> bool:
     except (TypeError, ValueError):
         return False
     return "hold" in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+
+
+def _observe(conn: MessageObserver, act: Callable[[MessageObserver], None]) -> None:
+    """Hand plain data to one observing connection, containing what it raises.
+
+    An observer runs on the thread that sent the message, often the model's,
+    so its failure is logged with its traceback rather than raised there.
+    """
+    try:
+        act(conn)
+    except Exception:
+        logger.exception(
+            "connection rejected an observed message", conn_id=getattr(conn, "id", None)
+        )
 
 
 class ConnectionManager:
@@ -456,6 +472,37 @@ class ConnectionManager:
             conn.send_control(frame)
         else:
             conn.send_message(frame)
+
+    def observe_message(
+        self,
+        cid: ConnId | None,
+        name: str,
+        data: Mapping[str, Any],
+        request_id: str | None = None,
+    ) -> None:
+        """Hand a model message as plain data to the connections that observe messages.
+
+        Reaches one connection when *cid* is set and every connection when it
+        is ``None``, beside the encoded send that already reached them. A
+        connection that is not a :class:`MessageObserver` is skipped, and a
+        failure on one observer is contained like a failed send.
+        """
+        targets = self._by_id.values() if cid is None else [self._by_id.get(cid)]
+        for conn in targets:
+            if isinstance(conn, MessageObserver):
+                _observe(conn, lambda c: c.message_sent(name, data, request_id))
+
+    def observe_acknowledgement(self, cid: ConnId, request_id: str) -> None:
+        """Tell an observing connection that its command ended with no reply message."""
+        conn = self._by_id.get(cid)
+        if isinstance(conn, MessageObserver):
+            _observe(conn, lambda c: c.command_acknowledged(request_id))
+
+    def observe_failure(self, cid: ConnId, request_id: str, code: str, message: str) -> None:
+        """Tell an observing connection that its command failed, with the failure's code."""
+        conn = self._by_id.get(cid)
+        if isinstance(conn, MessageObserver):
+            _observe(conn, lambda c: c.command_failed(request_id, code, message))
 
     def broadcast_media(
         self, chunk: MediaChunk, *, abort: Callable[[], bool] | None = None

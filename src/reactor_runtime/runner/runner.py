@@ -591,6 +591,31 @@ class Runner(ServiceComponent, ConnectionSink):
         self._inbound.add(task)
         task.add_done_callback(self._inbound.discard)
 
+    def command_received(
+        self, conn_id: ConnId, name: str, args: Mapping[str, Any], request_id: str
+    ) -> None:
+        """Submit a command a transport received outside the Reactor protocol.
+
+        The command takes the path a decoded command takes: it waits for the
+        session's starting input, has its inline uploads resolved, is checked
+        against the contract, and is journalled. It is stamped on arrival, as
+        :meth:`message_received` stamps a frame, and scheduled on the runtime
+        loop, so a transport calls this from that loop.
+        """
+        if self._loop is None:
+            return
+        command = InboundCommand(
+            name=name,
+            args=dict(args),
+            uploads={},
+            conn_id=conn_id,
+            request_id=request_id,
+            received_at=time.monotonic(),
+        )
+        task = self._loop.create_task(self._submit_client_command(command))
+        self._inbound.add(task)
+        task.add_done_callback(self._inbound.discard)
+
     def media_received(self, conn_id: ConnId, track: str, frame: InputFrame) -> None:
         """Route an inbound media frame to its track on the model.
 
@@ -1543,6 +1568,7 @@ class Runner(ServiceComponent, ConnectionSink):
         self._connections.broadcast(
             lambda version: self._codec_for(version).encode_model_message(message.name, data)[1]
         )
+        self._connections.observe_message(None, message.name, data)
 
     def _send_addressed(
         self,
@@ -1559,6 +1585,8 @@ class Runner(ServiceComponent, ConnectionSink):
         matched to the command that caused it, and both are withheld from legacy
         clients, whose commands are fire-and-forget. A failure is journalled
         either way, so a reply the client cannot be told about is still auditable.
+        A connection that observes messages also receives each of the three as
+        plain data.
         """
         if isinstance(message, CommandFailure):
             self._on_handler_failure(message, conn_id, request_id)
@@ -1572,6 +1600,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 conn_id,
                 lambda version: self._codec_for(version).encode_command_ack(request_id)[1],
             )
+            self._connections.observe_acknowledgement(conn_id, request_id)
             return
         data = message.to_wire_format()["data"]
         self._connections.send(
@@ -1580,6 +1609,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 message.name, data, request_id=request_id
             )[1],
         )
+        self._connections.observe_message(conn_id, message.name, data, request_id)
 
     def _on_handler_failure(
         self, failure: CommandFailure, conn_id: ConnId, request_id: str | None
@@ -1663,7 +1693,8 @@ class Runner(ServiceComponent, ConnectionSink):
 
         Covers a payload the contract rejects, an upload that cannot be
         resolved, and a handler that raised. The reply is withheld from legacy
-        clients, whose commands are fire-and-forget.
+        clients, whose commands are fire-and-forget. A connection that observes
+        messages receives the failure as plain data.
         """
         self._connections.send_command_ack(
             conn_id,
@@ -1671,6 +1702,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 1
             ],
         )
+        self._connections.observe_failure(conn_id, request_id, code, detail)
 
     def _broadcast_moderation_notice(self) -> None:
         """Tell every client the session is ending on a moderation verdict.

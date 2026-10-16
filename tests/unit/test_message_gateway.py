@@ -1,5 +1,6 @@
 import logging
 from collections.abc import Mapping
+from typing import Any
 
 import pytest
 
@@ -32,6 +33,11 @@ class FakeSink:
 
     def message_received(
         self, conn_id: ConnId, payload: bytes | str, version: ProtocolVersion, channel: Channel
+    ) -> None:
+        pass
+
+    def command_received(
+        self, conn_id: ConnId, name: str, args: Mapping[str, Any], request_id: str
     ) -> None:
         pass
 

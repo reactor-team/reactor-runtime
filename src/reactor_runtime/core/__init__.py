@@ -41,6 +41,7 @@ from reactor_runtime.core.transport import (
     Connection,
     ConnectionSink,
     FrameStageSource,
+    MessageObserver,
     MessageStageSource,
     TransportStatsSource,
 )
@@ -100,6 +101,7 @@ __all__ = [
     "LiveKitRpcMethod",
     "MediaBundle",
     "MediaChunk",
+    "MessageObserver",
     "MessageStage",
     "MessageStageSource",
     "ReactorEvent",
