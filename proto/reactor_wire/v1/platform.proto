@@ -158,8 +158,9 @@ message ClientTrackStat {
 // frames the reading counted in the stage and `total_ms` the time they spent
 // in it together, so the stage's average per frame is total_ms / frames. `total_ms` is a finite number, never negative
 // (no NaN or infinity), and `frames` is at least 1, so a reader drops a
-// reading that breaks either. The stages cover the transport between the
-// client's app and the model, not the model's own time. A window divides at
+// reading that breaks either. The stages cover a frame's whole trip: the
+// transport between the client's app and the model, and the model's step that
+// turns input into output (input_wait through emit below). A window divides at
 // each reading: whoever reads the numbers sums readings to cover a longer
 // window. A stage that saw no frame in a window is left out of that reading.
 //
