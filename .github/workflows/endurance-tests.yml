@@ -10,6 +10,9 @@
 # tested. Only src/reactor_runtime is swapped: uv.lock and the wire bindings
 # stay this ref's, so a leak in a dependency can pass or fail differently from
 # the release itself.
+#
+# A failed run on a vX.Y.Z tag, as every release's run is, opens an issue for
+# that tag, or comments on its open one.
 
 name: Endurance Tests
 
@@ -161,3 +164,31 @@ jobs:
           name: ${{ steps.artifact.outputs.name }}
           path: endurance-results/
           if-no-files-found: warn
+
+  # A release's run is dispatched by github-actions, so a failure notifies no
+  # one: report it as an issue, one per tag, where people look.
+  report-release-failure:
+    name: Report a release's failure
+    needs: [setup, endurance]
+    if: failure() && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the issue for ${{ github.ref_name }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          title="Endurance tests failed on $TAG"
+          body="The endurance suite failed on release $TAG: $RUN_URL"
+          number=$(gh issue list --state open --search "\"$title\" in:title" --json number,title \
+            --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
