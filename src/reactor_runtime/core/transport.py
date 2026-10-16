@@ -222,7 +222,7 @@ class ConnectionSink(Protocol):
     the basis for mixed-transport sessions.
     """
 
-    def connection_opened(self, conn: Connection) -> None:
+    def connection_opened(self, conn: Connection) -> bool:
         """Register a connection whose wire can carry frames to the client.
 
         Fired when the transport is actually connected — for WebRTC, when the
@@ -232,6 +232,11 @@ class ConnectionSink(Protocol):
         connects never advances the session. Because the wire is open by the
         time this fires, a message the model sends from its ``@connected`` hook
         reaches the joining client.
+
+        Returns:
+            ``True`` when the connection is registered. ``False`` when it is
+            refused because it does not belong to the live session; the sink
+            then closes it, and a transport opens no connection through it.
         """
 
     def connection_closed(self, conn_id: ConnId) -> None:

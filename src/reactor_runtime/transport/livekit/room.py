@@ -12,6 +12,14 @@ room closes, the session's participant is removed, or the connection to the
 room is lost after the SDK's own reconnection attempts, the room connection
 closes, and the session goes on without it. When the session ends, its
 teardown closes the room connection, which leaves the room.
+
+Every other participant is a client of the session, from the moment the room
+connection is registered: one :class:`ParticipantConnection` each, on a
+connection id minted for the ``livekit`` transport, opened when the participant
+joins and closed when it leaves. The Reactor protocol messages a participant
+sends, as data packets or byte streams on the protocol's topics, reach the
+session as that participant's. When the room connection closes, every
+participant connection closes before it.
 """
 
 from __future__ import annotations
@@ -25,13 +33,15 @@ from livekit import rtc
 
 from reactor_runtime.core import ConnId, TrackDirection, TrackInfo, TrackKind
 from reactor_runtime.log import get_logger
+from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.transport.livekit.connection import (
     _INITIAL_VIDEO_SIZE,
     AUDIO_QUEUE_MS,
     RoomConnection,
 )
+from reactor_runtime.transport.livekit.participant import TOPIC_CHANNELS, ParticipantConnection
 from reactor_runtime.transport.livekit.version import TRANSPORT_NAME
-from reactor_runtime.transport.router import SessionControl
+from reactor_runtime.transport.router import ConnectionsExhaustedError, SessionControl
 
 logger = get_logger(__name__)
 
@@ -43,6 +53,9 @@ _JOIN_TIMED_OUT = "joining the LiveKit room timed out"
 _ROOM_LOST = "the LiveKit room connection closed ({reason})"
 _LEFT = "the room was left on request"
 _SESSION_ENDED = "the session ended"
+
+MAX_STREAMED_MESSAGE_BYTES = 8 * 1024 * 1024
+"""The largest protocol message a participant may send as a byte stream; larger ones are dropped."""
 
 
 class RoomState(StrEnum):
@@ -96,7 +109,18 @@ class RoomSession:
         # An abandoned attempt that will leave the room once it settles: set
         # when the attempt is abandoned, cleared once the room is left.
         self._leave_pending = False
+        # The participants that are clients of the session, by identity. Empty
+        # until the session registers the room connection: nobody in the room
+        # is a client of a session the room is not connected to.
+        self._participants: dict[str, ParticipantConnection] = {}
+        self._registered = False
+        self._readers: set[asyncio.Task[None]] = set()
         self._room.on("disconnected", self._on_disconnected)
+        self._room.on("participant_connected", lambda p: self._add_participant(p.identity))
+        self._room.on("participant_disconnected", lambda p: self._remove_participant(p.identity))
+        self._room.on("data_received", self._on_data)
+        for topic in TOPIC_CHANNELS:
+            self._room.register_byte_stream_handler(topic, self._on_byte_stream)
 
     @property
     def room(self) -> rtc.Room:
@@ -174,7 +198,12 @@ class RoomSession:
         self._connection = connection
         self.state = RoomState.OPEN
         connection.start()
-        self._control.connection_opened(connection)
+        if not self._control.connection_opened(connection):
+            # The session it was opened for has ended; closing it leaves the room.
+            return
+        self._registered = True
+        for participant in list(self._room.remote_participants.values()):
+            self._add_participant(participant.identity)
         logger.info(
             "joined the LiveKit room",
             conn_id=self.conn_id,
@@ -225,6 +254,14 @@ class RoomSession:
         joining = self.state is RoomState.JOINING
         self.state = RoomState.CLOSED
         self.reason = reason
+        self._registered = False
+        for reader in self._readers:
+            reader.cancel()
+        participants = list(self._participants.values())
+        self._participants.clear()
+        for participant in participants:
+            participant.drop()
+            self._control.connection_closed(participant.id)
         if joining:
             # The join leaves the room once its attempt settles.
             logger.info("abandoned a LiveKit room join", conn_id=self.conn_id, reason=reason)
@@ -237,8 +274,16 @@ class RoomSession:
         logger.info("left the LiveKit room", conn_id=self.conn_id, reason=reason)
 
     async def _connection_closed(self) -> None:
-        """Leave the room when the session closes the room connection itself."""
+        """Leave the room when the session closes the room connection itself.
+
+        The session's teardown closes every connection. The participants'
+        queued messages leave before the room does, so a notice sent just
+        before the session ended still reaches them.
+        """
         self._connection = None
+        participants = list(self._participants.values())
+        self._participants.clear()
+        await asyncio.gather(*(participant.close() for participant in participants))
         await self._finish(_SESSION_ENDED)
 
     async def _disconnect(self) -> None:
@@ -284,6 +329,61 @@ class RoomSession:
             tracks,
             on_close=self._connection_closed,
         )
+
+    def _add_participant(self, identity: str) -> None:
+        """Open a connection for a participant that is in the room."""
+        if not self._registered or identity in self._participants:
+            return
+        try:
+            conn_id = self._control.new_conn_id(TRANSPORT_NAME)
+        except ConnectionsExhaustedError:
+            logger.warning("no connection id left for a room participant", participant=identity)
+            return
+        conn = ParticipantConnection(
+            conn_id, identity, self._room.local_participant, asyncio.get_running_loop()
+        )
+        self._participants[identity] = conn
+        if not self._control.connection_opened(conn):
+            self._participants.pop(identity, None)
+
+    def _remove_participant(self, identity: str) -> None:
+        """Close the connection of a participant that has left."""
+        conn = self._participants.pop(identity, None)
+        if conn is None:
+            return
+        conn.drop()
+        self._control.connection_closed(conn.id)
+
+    def _on_data(self, packet: rtc.DataPacket) -> None:
+        """Hand a protocol message from a participant to the session as that participant's."""
+        channel = TOPIC_CHANNELS.get(packet.topic or "")
+        if channel is None or packet.participant is None:
+            return
+        conn = self._participants.get(packet.participant.identity)
+        if conn is not None:
+            self._control.message_received(conn.id, packet.data, ProtocolVersion.V1, channel)
+
+    def _on_byte_stream(self, reader: rtc.ByteStreamReader, identity: str) -> None:
+        """Read a protocol message sent as a byte stream, then hand it on like a packet."""
+        task = asyncio.get_running_loop().create_task(self._read_message(reader, identity))
+        self._readers.add(task)
+        task.add_done_callback(self._readers.discard)
+
+    async def _read_message(self, reader: rtc.ByteStreamReader, identity: str) -> None:
+        channel = TOPIC_CHANNELS[reader.info.topic]
+        data = bytearray()
+        async for chunk in reader:
+            data.extend(chunk)
+            if len(data) > MAX_STREAMED_MESSAGE_BYTES:
+                logger.warning(
+                    "dropped a protocol message larger than the limit",
+                    participant=identity,
+                    limit=MAX_STREAMED_MESSAGE_BYTES,
+                )
+                return
+        conn = self._participants.get(identity)
+        if conn is not None:
+            self._control.message_received(conn.id, bytes(data), ProtocolVersion.V1, channel)
 
     def _on_disconnected(self, reason: Any = None) -> None:
         """Close the room connection when the room drops the session's participant."""

@@ -936,7 +936,7 @@ async def test_a_connection_opened_during_closing_is_refused_and_closed(
     assert started_runner._sm.current_state is SessionState.CLOSING
 
     late = FakeConnection(7)
-    started_runner.connection_opened(late)
+    assert started_runner.connection_opened(late) is False
 
     await asyncio.sleep(0.01)
     assert started_runner._sm.current_state is SessionState.READY
@@ -948,7 +948,7 @@ async def test_a_connection_opened_with_no_session_open_is_refused_and_closed(
     started_runner: Runner,
 ) -> None:
     late = FakeConnection(7)
-    started_runner.connection_opened(late)
+    assert started_runner.connection_opened(late) is False
 
     await asyncio.sleep(0.01)
     assert started_runner._connections.count == 0
@@ -964,7 +964,7 @@ async def test_a_connection_opened_after_termination_is_refused_and_closed(
     _expect_state(started_runner, SessionState.TERMINATED)
 
     late = FakeConnection(7)
-    started_runner.connection_opened(late)
+    assert started_runner.connection_opened(late) is False
 
     await asyncio.sleep(0.01)
     assert started_runner._connections.count == 0
@@ -986,7 +986,7 @@ async def test_a_wire_admitted_in_an_earlier_session_cannot_join_the_next(
     started_runner.start_session({})
 
     stale = FakeConnection(stale_id)
-    started_runner.connection_opened(stale)
+    assert started_runner.connection_opened(stale) is False
 
     await asyncio.sleep(0.01)
     assert started_runner._connections.count == 0
@@ -996,7 +996,7 @@ async def test_a_wire_admitted_in_an_earlier_session_cannot_join_the_next(
     fresh_id = started_runner.new_conn_id("webrtc")
     started_runner.offer_admitted(fresh_id)
     fresh = FakeConnection(fresh_id)
-    started_runner.connection_opened(fresh)
+    assert started_runner.connection_opened(fresh) is True
     assert started_runner._connections.count == 1
     assert not fresh.closed
 
