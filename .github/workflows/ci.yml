@@ -132,3 +132,22 @@ jobs:
           version: ${{ env.MISE_VERSION }}
 
       - run: mise run test-integration
+
+  # Two cycles of every endurance scenario: proves the launcher's hooks, the
+  # probe and the scenarios' client still work against this change. It judges
+  # only that each cycle streamed in full; the leak checks need the long runs
+  # (endurance-tests.yml), so this job cannot fail on them.
+  endurance-smoke:
+    name: Endurance Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: jdx/mise-action@v4
+        with:
+          version: ${{ env.MISE_VERSION }}
+
+      - run: mise run test-endurance
+        env:
+          ENDURANCE_SMOKE_CYCLES: "2"

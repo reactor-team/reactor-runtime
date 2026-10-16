@@ -35,6 +35,9 @@ _build_app = http_server.build_app
 _stopped_pacers: weakref.WeakSet[Any] = weakref.WeakSet()
 # Stopped pacers found still reaching model output, since start.
 _holding_after_stop = 0
+# Whether the path of a hit has been logged: the first one per run is enough
+# to show what holds the output.
+_logged_a_path = False
 # What the reachability walk never follows: code, frames and modules lead back
 # to the model loop, which holds the newest output legitimately.
 _OPAQUE = (
@@ -50,16 +53,20 @@ _OPAQUE = (
 )
 
 
-def reaches_output(root: object, batches: list[np.ndarray]) -> bool:
-    """Return whether *root*'s own data reaches one of *batches*.
+def path_to_output(root: object, batches: list[np.ndarray]) -> list[str] | None:
+    """Return how *root*'s own data reaches one of *batches*, or None if it does not.
 
     Walks what *root* refers to, following an array view to the array it views,
-    and never through code, frames, modules or threads. *batches* is held for
-    the walk, so an id cannot be freed and reused by another object meanwhile.
+    and never through code, frames, modules or threads. The path names each
+    object's type on the way, with the attribute or key that led on from it
+    where one does. *batches* is held for the walk, so an id cannot be freed
+    and reused by another object meanwhile.
     """
     batch_ids = {id(batch) for batch in batches}
     if not batch_ids:
-        return False
+        return None
+    # Each object reached, by id: the object it was reached from, and how.
+    parents: dict[int, tuple[object, str]] = {}
     seen: set[int] = set()
     stack = [root]
     while stack:
@@ -68,13 +75,44 @@ def reaches_output(root: object, batches: list[np.ndarray]) -> bool:
             continue
         seen.add(id(obj))
         if id(obj) in batch_ids:
-            return True
+            return _describe_path(obj, parents)
         if isinstance(obj, np.ndarray):
-            if obj.base is not None:
-                stack.append(obj.base)
-            continue
-        stack.extend(gc.get_referents(obj))
-    return False
+            children = [] if obj.base is None else [obj.base]
+        else:
+            children = gc.get_referents(obj)
+        for child in children:
+            if id(child) not in seen and id(child) not in parents:
+                parents[id(child)] = (obj, _edge_name(obj, child))
+            stack.append(child)
+    return None
+
+
+def reaches_output(root: object, batches: list[np.ndarray]) -> bool:
+    """Return whether *root*'s own data reaches one of *batches*."""
+    return path_to_output(root, batches) is not None
+
+
+def _edge_name(parent: object, child: object) -> str:
+    """Name the attribute or key of *parent* that holds *child*, or ''."""
+    items: Any = None
+    if isinstance(parent, dict):
+        items = parent.items()
+    elif isinstance(getattr(parent, "__dict__", None), dict):
+        items = vars(parent).items()
+    for key, value in items or ():
+        if value is child:
+            return f".{key}" if not isinstance(parent, dict) else f"[{key!r}]"
+    return ""
+
+
+def _describe_path(target: object, parents: dict[int, tuple[object, str]]) -> list[str]:
+    steps = [type(target).__name__]
+    obj = target
+    while id(obj) in parents:
+        parent, edge = parents[id(obj)]
+        steps.append(f"{type(parent).__name__}{edge}")
+        obj = parent
+    return steps[::-1]
 
 
 def _install_pacer_check() -> None:
@@ -84,13 +122,23 @@ def _install_pacer_check() -> None:
     stop = MediaPacer.stop
 
     def checked_stop(self: MediaPacer) -> None:
-        global _holding_after_stop
+        global _holding_after_stop, _logged_a_path
         stop(self)
         import tracked_echo
 
         _stopped_pacers.add(self)
-        if reaches_output(self, tracked_echo.tracked_batches()):
+        path = path_to_output(self, tracked_echo.tracked_batches())
+        if path is not None:
             _holding_after_stop += 1
+            if not _logged_a_path:
+                _logged_a_path = True
+                # A real leak shows its holder; a false positive shows which
+                # exclusion the walk is missing.
+                print(
+                    "endurance: a stopped pacer reaches model output via " + " -> ".join(path),
+                    file=sys.stderr,
+                    flush=True,
+                )
 
     MediaPacer.stop = checked_stop
 
@@ -150,7 +198,7 @@ def build_app(
 def main() -> None:
     """Install the probe and the pacer check, then run the runtime."""
     # examples/echo, which the tracked model subclasses.
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "examples" / "echo"))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples" / "echo"))
     # Swapping in the wrapper is the point; ty refuses any assignment to a module function.
     http_server.build_app = build_app  # ty: ignore[invalid-assignment]
     _install_pacer_check()

@@ -6,7 +6,7 @@ from types import ModuleType
 
 import numpy as np
 import pytest
-from launcher import reaches_output
+from endurance.launcher import path_to_output, reaches_output
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -92,3 +92,19 @@ def test_a_batch_reachable_only_through_code_is_not_held_data() -> None:
 
 def test_nothing_reaches_an_empty_set_of_batches() -> None:
     assert not reaches_output(object(), [])
+
+
+def test_the_path_to_a_held_batch_names_its_holders() -> None:
+    batch = _batch()
+
+    class Pacer:
+        def __init__(self) -> None:
+            self.last_frame = {"video": batch[1]}
+
+    path = path_to_output(Pacer(), [batch])
+    assert path is not None
+    assert path[0].startswith("Pacer")
+    assert path[-1] == "ndarray"
+    joined = " -> ".join(path)
+    assert "last_frame" in joined
+    assert "'video'" in joined

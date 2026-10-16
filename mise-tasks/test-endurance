@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="[Testing] Run the endurance scenarios against the runtime from source (ENDURANCE_DURATION_SECONDS sets the length; ENDURANCE_SMOKE_CYCLES=2 for a smoke run)"
+set -euo pipefail
+mise run //proto:gen
+uv sync --locked
+uv run --no-sync pytest -v -s endurance-tests/tests "$@"

@@ -1,4 +1,4 @@
-from harness import FRAMES_PER_CYCLE, assert_full_streams
+from endurance.harness import FRAMES_PER_CYCLE, assert_full_streams
 
 
 def test_full_streams_pass_when_every_cycle_got_its_frames() -> None:

@@ -20,6 +20,11 @@ from endurance.report import MetricResult
 # Wall-clock rather than a cycle count, so the same scenario serves as a quick
 # local check and as a long CI run.
 ENDURANCE_DURATION_SECONDS = float(os.environ.get("ENDURANCE_DURATION_SECONDS", "300"))
+# A smoke run, as PR CI does: stop after this many cycles and judge only that
+# every cycle streamed in full, which proves the launcher's hooks, the probe,
+# the signaling and the control messages still work. The leak checks need a
+# real run, so a smoke run never fails on them. 0 runs to the deadline.
+ENDURANCE_SMOKE_CYCLES = int(os.environ.get("ENDURANCE_SMOKE_CYCLES", "0"))
 
 # The trend checks skip the first part of a run, in seconds: the runtime's
 # memory climbs for its first minute or more (encoders, buffers and allocator

@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
-from harness import RuntimeProcess
-from report import DEFAULT_OUTPUT_DIR
+from endurance.harness import RuntimeProcess
+from endurance.report import DEFAULT_OUTPUT_DIR
 
 
 @pytest.fixture

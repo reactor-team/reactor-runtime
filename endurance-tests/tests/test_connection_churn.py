@@ -4,9 +4,21 @@ from __future__ import annotations
 
 import os
 
-from harness import BareClient, ResourceSampler, RuntimeProcess, assert_full_streams, gray_frame
-from report import LiveReporter, MetricResult, finish_and_check, now_iso
-from trends import ENDURANCE_DURATION_SECONDS, exact_metrics, retained_cycles, trend_metrics
+from endurance.harness import (
+    BareClient,
+    ResourceSampler,
+    RuntimeProcess,
+    assert_full_streams,
+    gray_frame,
+)
+from endurance.report import LiveReporter, MetricResult, finish_and_check, now_iso
+from endurance.trends import (
+    ENDURANCE_DURATION_SECONDS,
+    ENDURANCE_SMOKE_CYCLES,
+    exact_metrics,
+    retained_cycles,
+    trend_metrics,
+)
 
 TEST_NAME = "connection-churn"
 DESCRIPTION = (
@@ -33,6 +45,8 @@ async def test_connection_churn(runtime: RuntimeProcess) -> None:
     metrics: list[MetricResult] = []
     try:
         while not sampler.deadline_reached():
+            if ENDURANCE_SMOKE_CYCLES and cycle >= ENDURANCE_SMOKE_CYCLES:
+                break
             received.append(await BareClient(runtime, session["session_id"]).run(frame))
             reading, _ = runtime.settled_probe()
             sampler.sample(cycle=cycle, reading=reading)
@@ -43,8 +57,11 @@ async def test_connection_churn(runtime: RuntimeProcess) -> None:
                 f"no cycle completed in {ENDURANCE_DURATION_SECONDS:g}s: "
                 "raise ENDURANCE_DURATION_SECONDS"
             )
-        metrics = [assert_full_streams(received), *exact_metrics(sampler.samples)]
-        metrics += trend_metrics(sampler.samples)
+        if ENDURANCE_SMOKE_CYCLES:
+            metrics = [assert_full_streams(received)]
+        else:
+            metrics = [assert_full_streams(received), *exact_metrics(sampler.samples)]
+            metrics += trend_metrics(sampler.samples)
     finally:
         # A run cut short still reports the cycles it finished.
         if not metrics and sampler.samples:

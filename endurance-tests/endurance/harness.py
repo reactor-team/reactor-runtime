@@ -26,14 +26,14 @@ from typing import Any
 import numpy as np
 import psutil
 import reactor_webrtc as rw
-from report import MetricResult
-from trends import ENDURANCE_DURATION_SECONDS, Sample
 
+from endurance.report import MetricResult
+from endurance.trends import ENDURANCE_DURATION_SECONDS, Sample
 from reactor_runtime.transport.webrtc.config import WebRtcConfig
 from reactor_runtime.transport.webrtc.frames import rgb_to_bgra
 from reactor_runtime.transport.webrtc.peer import _get_factory
 
-SUITE_DIR = Path(__file__).resolve().parent
+SUITE_DIR = Path(__file__).resolve().parent.parent
 
 # How long a closed connection may take to leave the runtime's registry. The
 # runtime notices a client that closed its peer connection only some seconds
@@ -70,7 +70,7 @@ class RuntimeProcess:
         }
         self._log = log_path.open("w")
         self._proc = subprocess.Popen(
-            [sys.executable, str(SUITE_DIR / "launcher.py")],
+            [sys.executable, str(SUITE_DIR / "endurance" / "launcher.py")],
             cwd=SUITE_DIR / "model",
             env=env,
             stdout=self._log,

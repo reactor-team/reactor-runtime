@@ -7,14 +7,14 @@ runtime serving real clients, cycle after cycle.
 ## How a run works
 
 - The runtime runs from source in its own process, started by
-  `launcher.py`. The launcher boots it the way `reactor-runtime` does and adds
+  `endurance/launcher.py`. The launcher boots it the way `reactor-runtime` does and adds
   one test-only route, `GET /_endurance/probe`. The published package is not
   changed.
 - The model is `model/tracked_echo.py`: `examples/echo` with a fixed burst
   (`ENDURANCE_BURST`, default 30 frames), so every emit is a clip-sized batch.
   It keeps a weak reference to each batch it emits, so the probe can tell
   whether anything still holds one.
-- The client is a bare `reactor_webrtc` peer (`harness.py`). It does the
+- The client is a bare `reactor_webrtc` peer (`endurance/harness.py`). It does the
   runtime's HTTP signaling and control messages itself, over localhost, with
   no client SDK in between.
 - After every cycle the test waits for the runtime to drop the connection and
@@ -47,15 +47,20 @@ a trend ends in ERROR rather than in a verdict; a failed count still fails it.
 ## Running it
 
 ```sh
-mise run //proto:gen && uv sync --locked
-ENDURANCE_DURATION_SECONDS=600 uv run pytest endurance-tests/tests/test_connection_churn.py -s
+ENDURANCE_DURATION_SECONDS=600 mise run test-endurance
+# One scenario:
+mise run test-endurance endurance-tests/tests/test_connection_churn.py
+# A smoke run, as PR CI does: two cycles, judged only on full streams.
+ENDURANCE_SMOKE_CYCLES=2 mise run test-endurance
 ```
 
 Each run writes `endurance-results/<scenario>.json`, `-report.md` and
 `-summary.txt`, plus the runtime's log.
 
-The checks and the reports (`trends.py`, `report.py`) need no runtime, and
-their unit tests under `unit/` run with the rest of the test suite.
+The checks and the reports (`endurance/trends.py`, `endurance/report.py`)
+need no runtime, and their unit tests under `unit/` run with the rest of the
+test suite. So does `unit/test_launcher_targets.py`, which checks that what the
+launcher hooks still has the shape it expects.
 
 ## Adding a scenario
 
@@ -63,3 +68,24 @@ Add `tests/test_<name>.py`. Drive the runtime through the `runtime` fixture
 and `BareClient`, take one `ResourceSampler.sample()` per cycle from
 `runtime.settled_probe()`, and end in a `finally` block with
 `finish_and_check(...)` over `exact_metrics(...) + trend_metrics(...)`.
+
+## When a change needs this suite
+
+The suite keeps its value only if new features join it. Check this list on
+every PR that touches the runtime:
+
+- **State held per connection or per session** (objects, tasks, threads,
+  buffers, caches, file descriptors): say which existing count covers it
+  (`live_connections`, `live_peers`, `live_pacers`, `tasks`, the trends), or
+  extend the probe in `endurance/launcher.py` with a count that does.
+- **A new client-facing path** (commands, uploads, client stats, clips and
+  recordings, several clients on one session, a control protocol version):
+  add a scenario that drives it, or extend an existing one. Today's scenarios
+  speak the v0 control protocol and send no commands or client stats.
+- **A change to what the launcher hooks** (`MediaPacer.stop`,
+  `http_server.build_app`, `Runner._connections`, the transport classes the
+  probe counts): update `endurance/launcher.py` in the same PR.
+  `unit/test_launcher_targets.py` and the smoke job fail if you do not.
+- **A new check**: show it fails on the commit before the fix it guards and
+  passes after it, the way `pacers_holding_output` was validated against the
+  pacer fix.
