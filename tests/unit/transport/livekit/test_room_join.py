@@ -61,6 +61,7 @@ class FakeRoom:
     def __init__(self, *, connect: Gate | None = None, publish: Gate | None = None) -> None:
         self.connect_gate = connect or Gate()
         self.local_participant = FakeParticipant(publish or Gate())
+        self.remote_participants: dict[str, Any] = {}
         self.disconnects = 0
 
     def on(self, event: str, callback: Any) -> None:
@@ -83,8 +84,9 @@ class FakeControl:
     def track_map(self) -> dict[str, Any]:
         return self._tracks
 
-    def connection_opened(self, conn: Any) -> None:
+    def connection_opened(self, conn: Any) -> bool:
         self.opened.append(conn)
+        return True
 
     def connection_closed(self, conn_id: ConnId) -> None:
         self.closed.append(conn_id)

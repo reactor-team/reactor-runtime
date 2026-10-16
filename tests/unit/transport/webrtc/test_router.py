@@ -75,8 +75,9 @@ class FakeRunner:
             "agent_audio": {"kind": "audio", "direction": "in", "rate": 24_000.0},
         }
 
-    def connection_opened(self, conn: Connection) -> None:
+    def connection_opened(self, conn: Connection) -> bool:
         self.opened.append(conn.id)
+        return True
 
     def connection_closed(self, conn_id: ConnId) -> None:
         self.closed.append(conn_id)

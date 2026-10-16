@@ -25,8 +25,8 @@ class FakeSink:
         self.clips: list[tuple[ConnId, float, str]] = []
         self.recordings: list[tuple[ConnId, str]] = []
 
-    def connection_opened(self, conn: Connection) -> None:
-        pass
+    def connection_opened(self, conn: Connection) -> bool:
+        return True
 
     def connection_closed(self, conn_id: ConnId) -> None:
         pass
