@@ -1,4 +1,5 @@
 from collections.abc import Mapping
+from typing import Any
 
 import numpy as np
 
@@ -68,6 +69,11 @@ class FakeSink:
         self, conn_id: ConnId, payload: bytes | str, version: ProtocolVersion, channel: Channel
     ) -> None:
         self.messages.append((conn_id, payload, channel))
+
+    def command_received(
+        self, conn_id: ConnId, name: str, args: Mapping[str, Any], request_id: str
+    ) -> None:
+        pass
 
     def media_received(self, conn_id: ConnId, track: str, frame: InputFrame) -> None:
         pass

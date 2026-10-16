@@ -5,7 +5,7 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -30,7 +30,7 @@ from reactor_runtime import (
     session_ended,
     session_started,
 )
-from reactor_runtime.codes import UNRESOLVED_UPLOAD
+from reactor_runtime.codes import INVALID_COMMAND, UNRESOLVED_UPLOAD
 from reactor_runtime.core import (
     ClientConnected,
     ClientConnectionStat,
@@ -51,6 +51,7 @@ from reactor_runtime.core import (
     LiveKitRpcMethod,
     MediaBundle,
     MediaChunk,
+    MessageObserver,
     RecordingConfig,
     RuntimeConfig,
     SessionEnded,
@@ -671,6 +672,142 @@ def test_an_uncorrelated_handler_failure_is_journalled_but_not_sent() -> None:
     runner._send_addressed(ConnId(1), CommandFailure("quota_exceeded", "No credits."), None)
 
     assert conn.sent == []
+
+
+# --- plain data for connections that observe messages ---------------------
+
+
+class ObservingConnection(FakeConnection):
+    """A connection that also takes what it is sent as plain data."""
+
+    def __init__(self, cid: int) -> None:
+        super().__init__(cid)
+        self.protocol_version = V1
+        self.observed: list[tuple[str, ...] | tuple[str, str, dict[str, Any], str | None]] = []
+
+    def message_sent(self, name: str, data: Mapping[str, Any], request_id: str | None) -> None:
+        self.observed.append(("message", name, dict(data), request_id))
+
+    def command_acknowledged(self, request_id: str) -> None:
+        self.observed.append(("ack", request_id))
+
+    def command_failed(self, request_id: str, code: str, message: str) -> None:
+        self.observed.append(("failed", request_id, code, message))
+
+
+def test_an_observing_connection_takes_a_broadcast_as_plain_data() -> None:
+    runner = _runner()
+    observer, plain = ObservingConnection(1), FakeConnection(2)
+    assert isinstance(observer, MessageObserver)
+    assert not isinstance(plain, MessageObserver)
+    runner.connection_opened(observer)
+    runner.connection_opened(plain)
+
+    runner._broadcast_message(Greeting(text="hello"))
+
+    assert observer.observed == [("message", "greeting", {"text": "hello"}, None)]
+    # The encoded frame still reaches both, the observer included.
+    assert len(observer.sent) == 1
+    assert len(plain.sent) == 1
+
+
+def test_an_observing_connection_takes_its_reply_with_the_request_id() -> None:
+    runner = _runner()
+    observer, other = ObservingConnection(1), ObservingConnection(2)
+    runner.connection_opened(observer)
+    runner.connection_opened(other)
+
+    runner._send_addressed(ConnId(1), Greeting(text="hi"), "req-1")
+
+    assert observer.observed == [("message", "greeting", {"text": "hi"}, "req-1")]
+    assert other.observed == []
+
+
+def test_an_observing_connection_takes_a_bodyless_reply_as_an_acknowledgement() -> None:
+    runner = _runner()
+    observer = ObservingConnection(1)
+    runner.connection_opened(observer)
+
+    runner._send_addressed(ConnId(1), None, "req-1")
+
+    assert observer.observed == [("ack", "req-1")]
+
+
+def test_an_observing_connection_takes_a_handler_failure_with_its_code() -> None:
+    runner = _runner()
+    observer = ObservingConnection(1)
+    runner.connection_opened(observer)
+
+    runner._send_addressed(
+        ConnId(1), CommandFailure("quota_exceeded", "No credits remain."), "req-3"
+    )
+
+    assert observer.observed == [("failed", "req-3", "quota_exceeded", "No credits remain.")]
+
+
+def test_an_observing_connection_takes_a_rejected_command_with_its_code() -> None:
+    runner = _runner()
+    observer = ObservingConnection(1)
+    runner.connection_opened(observer)
+
+    runner._reject_command(ConnId(1), "req-2", "invalid_command", "value out of range")
+
+    assert observer.observed == [("failed", "req-2", "invalid_command", "value out of range")]
+
+
+def test_an_observer_that_raises_does_not_stop_the_others() -> None:
+    class Failing(ObservingConnection):
+        def message_sent(self, name: str, data: Mapping[str, Any], request_id: str | None) -> None:
+            raise RuntimeError("wire down")
+
+    runner = _runner()
+    failing, healthy = Failing(1), ObservingConnection(2)
+    runner.connection_opened(failing)
+    runner.connection_opened(healthy)
+
+    runner._broadcast_message(Greeting(text="hello"))
+
+    assert healthy.observed == [("message", "greeting", {"text": "hello"}, None)]
+
+
+async def _observed(conn: ObservingConnection, count: int = 1) -> list[tuple[Any, ...]]:
+    for _ in range(200):
+        if len(conn.observed) >= count:
+            return conn.observed
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"observed {conn.observed}, expected {count} entries")
+
+
+async def test_a_command_received_outside_the_protocol_runs_and_is_answered(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    observer = ObservingConnection(10_000)
+    started_runner.connection_opened(observer)
+
+    started_runner.command_received(ConnId(10_000), "set_mode", {"mode": "calm"}, "rpc-1")
+
+    assert await _observed(observer) == [("ack", "rpc-1")]
+    commands = _moves(started_runner, SessionEvent.COMMAND)
+    assert commands[-1].detail == {
+        "name": "set_mode",
+        "args": {"mode": "calm"},
+        "conn_id": ConnId(10_000),
+    }
+
+
+async def test_a_command_received_outside_the_protocol_is_checked_by_the_contract(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    observer = ObservingConnection(10_000)
+    started_runner.connection_opened(observer)
+
+    # `mode` declares min_length=1.
+    started_runner.command_received(ConnId(10_000), "set_mode", {"mode": ""}, "rpc-2")
+
+    ((kind, request_id, code, _),) = await _observed(observer)
+    assert (kind, request_id, code) == ("failed", "rpc-2", INVALID_COMMAND)
 
 
 # --- the session-control face --------------------------------------------
