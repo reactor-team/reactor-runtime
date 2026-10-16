@@ -669,14 +669,14 @@ def assert_answered(unanswered: list[list[str]]) -> MetricResult:
 
 
 def assert_released(released: list[float | None]) -> MetricResult:
-    """Fail when any cycle's connection was still registered ``CLOSE_TIMEOUT_S`` after it left.
+    """Fail when a cycle's connection was still registered ``CLOSE_TIMEOUT_S`` after it left.
 
     The detail reports how long the runtime took to drop the connections it
     did drop, which is how fast it notices a client that is gone.
 
     Args:
-        released: Each cycle's seconds until its connection left the
-            runtime's registry, or ``None`` when it never did, in cycle order.
+        released: Each cycle's seconds until the runtime's registry emptied,
+            or ``None`` when it never did, in cycle order.
     """
     stuck = [cycle for cycle, seconds in enumerate(released) if seconds is None]
     times = sorted(seconds for seconds in released if seconds is not None)
@@ -685,14 +685,14 @@ def assert_released(released: list[float | None]) -> MetricResult:
         if times
         else ""
     )
-    threshold = f"every connection dropped within {CLOSE_TIMEOUT_S:g}s"
+    threshold = f"every cycle's connections dropped within {CLOSE_TIMEOUT_S:g}s"
     if stuck:
         reason = (
-            f"{len(stuck)}/{len(released)} connections were still registered "
-            f"{CLOSE_TIMEOUT_S:g}s after the client left (first at cycle {stuck[0]})"
+            f"a connection was still registered {CLOSE_TIMEOUT_S:g}s after its client left "
+            f"on {len(stuck)}/{len(released)} cycles (first at cycle {stuck[0]})"
         )
         if times:
-            reason += f"; the others {timing}"
+            reason += f"; the other cycles' connections {timing}"
         print(f"[unreleased_connections] FAILED: {reason}")
         return MetricResult(
             name="unreleased_connections",
@@ -705,7 +705,7 @@ def assert_released(released: list[float | None]) -> MetricResult:
             threshold=threshold,
             first_bad_cycle=stuck[0],
         )
-    reason = f"all {len(released)} connections {timing}"
+    reason = f"the connections of all {len(released)} cycles {timing}"
     print(f"[unreleased_connections] ok: {reason}")
     return MetricResult(
         name="unreleased_connections",
