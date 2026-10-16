@@ -1,6 +1,6 @@
 ---
 name: instrumenting-observability
-description: "Add or change a metric in this runtime. Use when a new fact about the process is worth measuring, when an existing instrument needs a label or a bucket, or when a change touches the /metrics surface. Covers the registry, the naming and label rules, where the call belongs, and what a metrics PR must carry."
+description: "Add or change a metric or a stage reading in this runtime. Use when a new fact about the process is worth measuring, when an existing instrument needs a label or a bucket, when a change touches the /metrics surface, or when a change adds a stage to a frame's or a command's trip or adds a path that frames or commands take. Covers the registry, the naming and label rules, where the call belongs, stage readings, and what a metrics PR must carry."
 ---
 
 # Instrumenting the runtime
@@ -27,7 +27,11 @@ Two things stay out:
   is no exporter, no endpoint to configure, and no work at all when nobody
   scrapes.
 - **Model compute.** How long a model takes to produce a frame is the model
-  author's business. This runtime measures that a frame rate fell, not why.
+  author's business, so `/metrics` measures that a frame rate fell, not why.
+  A session's stage readings do time the parts of each step (see
+  [Stage readings](#stage-readings)): they are per-session facts in the
+  journal, read next to the rest of that session's trip, not a series a
+  scraper aggregates.
 
 ## Where the registry lives
 
@@ -189,6 +193,77 @@ The `prometheus_client` collectors take a lock per operation and are safe to
 call from any thread. Media frames are counted on the model thread at the frame
 rate of the model, which is cheap next to producing the frame. Nothing here
 needs a queue or a hand-off to the event loop.
+
+## Stage readings
+
+A stage reading says where a session's frames and commands spent their time,
+stage by stage, over the window since the previous reading. The runtime
+journals its readings as the `runtime_stats` fact, and a client sends its own
+in `client_stats`. A reading is a per-session fact, so it lives in the journal
+and never in `/metrics`. The wire comments on `FrameStage` and `MessageStage`
+in `proto/reactor_wire/v1/platform.proto` are the reference for every stage
+name and what it covers.
+
+### Who times which stage
+
+Each stage is timed by the side that sees it, and that side alone reports it:
+
+- **The transport** times what happens on the wire and around it: for WebRTC,
+  libwebrtc's own stages, the chunked data channel's, `delivery` and its parts,
+  `emit`, `output_pacing` and `output_queue` and its parts. It holds them in
+  its own window and hands them over through `FrameStageSource` and
+  `MessageStageSource`.
+- **The model loop** times what happens inside the model's process: a frame's
+  `input_wait`, each step's `process_input`, `generate` and `process_output`,
+  and the points a command passes on its way to and through its handler. It
+  reports them up through the frame timing sink, the step report and the
+  command timing sink, and names no command stage itself.
+- **The runner** owns what the model loop reports. `RunnerStages` keeps it per
+  connection, cleared when a session starts, names the command stages from
+  their times, and adds them to each connection's reading beside the
+  transport's when the runner builds a report.
+
+A transport never holds a stage the runtime times, and the runner never holds
+one a transport times. That keeps the runtime's own stages on every
+connection's reading, whatever transport carries it.
+
+### Adding a stage
+
+1. Time it where the side that owns it already handles the frame or the
+   command, with `time.perf_counter()` or `time.monotonic()`, as the
+   neighbouring stages do.
+2. Add it to that side's window: a transport's `STAGES` tuple, or
+   `FRAME_STAGES` or `MESSAGE_STAGES` in `runner/stages.py`, in the order a
+   frame or a command goes through it.
+3. A stage inside another one is a part: list it in that side's parts table,
+   so its reading carries `part_of`. A reader nests or skips a part by
+   `part_of` alone, so a new part needs no change in any reader.
+4. Describe it in the wire comment on `FrameStage` or `MessageStage`, with the
+   side that reports it, and in the docstring of the window that holds it.
+5. Add a test that drives the code path and reads the stage back off the
+   reading.
+
+A path that frames or commands take keeps its timings intact only if it
+carries what the next stage needs: a command keeps the `received_at` the
+runner stamped when it arrived, a frame keeps the connection that sent it,
+and a step reports its stages on its step report. A new path that drops one
+of them drops the stages after it, silently.
+
+### A new transport
+
+A transport that times its own stages implements `FrameStageSource`,
+`MessageStageSource`, or both, next to `TransportStatsSource`. Keep the totals
+in a `StageTotals` from `core/stages.py`, which a report takes from the event
+loop while the transport adds from its own threads. A transport that times
+nothing implements neither and still gets the runtime's stages on its
+reading.
+
+### The wire
+
+A change under `proto/` ships in a wire release, which merging it to main
+cuts. The runtime vendors the pinned release, so the next runtime release
+needs `[tool.reactor-wire] version` in `pyproject.toml` moved to that
+release; `wire-check` stops it until then.
 
 ## Checklist for a metrics change
 
