@@ -94,18 +94,24 @@ class RuntimeProcess:
         self.process = psutil.Process(self._proc.pid)
 
     def wait_ready(self, timeout_s: float = 60.0) -> dict[str, Any]:
-        """Wait for the runtime to answer ``/session``, and return the answer.
+        """Wait for the runtime's session to be ready, and return ``/session``'s answer.
+
+        ``/session`` can answer while the model still loads, in state
+        ``created``, and a session cannot start until it reads ``ready``.
 
         Raises:
             RuntimeError: The runtime exited while starting.
-            TimeoutError: It did not answer within *timeout_s*.
+            TimeoutError: It was not ready within *timeout_s*.
         """
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             if self._proc.poll() is not None:
                 raise RuntimeError(f"the runtime exited with {self._proc.returncode} on startup")
             try:
-                return self.get("/session")
+                session = self.get("/session")
+                if session.get("state") == "ready":
+                    return session
+                time.sleep(0.25)
             # An answer that is an error is a broken runtime, not a slow one.
             except urllib.error.HTTPError:
                 raise
@@ -113,7 +119,7 @@ class RuntimeProcess:
             # times out is as much "not ready yet" as a refused connection.
             except OSError:
                 time.sleep(0.25)
-        raise TimeoutError("the runtime never answered /session")
+        raise TimeoutError("the runtime's session never became ready")
 
     def stop(self) -> None:
         """Stop the runtime, killing it if it does not exit in time."""
