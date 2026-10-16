@@ -25,9 +25,14 @@ def _write(root: Path, name: str, data: bytes) -> None:
     (root / name).write_bytes(data)
 
 
-def _mount(root: Path, files: dict[str, bytes]) -> None:
+def _mount_atomic_writer(root: Path, files: dict[str, bytes]) -> None:
+    stamp = root / "..2026_10_13_04_00_00.123456789"
+    stamp.mkdir()
     for name, data in files.items():
-        _write(root, name, data)
+        _write(stamp, name, data)
+    (root / "..data").symlink_to(stamp.name)
+    for name in files:
+        (root / name).symlink_to(f"..data/{name}")
 
 
 def _assert_no_value_leak(
@@ -62,7 +67,7 @@ def test_a_bad_value_in_a_later_file_blocks_with_a_names_only_message(
     data: bytes,
     failure: str,
 ) -> None:
-    _mount(tmp_path, {"AAA_FIRST": _GOOD, "ZZZ_LAST": data})
+    _mount_atomic_writer(tmp_path, {"AAA_FIRST": _GOOD, "ZZZ_LAST": data})
 
     with pytest.raises(SystemExit, match=f"'ZZZ_LAST' {failure}") as raised:
         load_expected_secrets(_env(["AAA_FIRST", "ZZZ_LAST"]), tmp_path)

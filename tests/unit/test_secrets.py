@@ -151,6 +151,15 @@ def test_case_distinct_files_are_two_secrets(tmp_path: Path) -> None:
 # -- The set contract ----------------------------------------------------------
 
 
+def test_the_atomic_writer_layout_passes(tmp_path: Path) -> None:
+    _mount_atomic_writer(tmp_path, {"API_TOKEN": _GOOD, "OTHER": b"other"})
+
+    assert load_expected_secrets(_env(["API_TOKEN", "OTHER"]), tmp_path) == {
+        "API_TOKEN": _GOOD.decode(),
+        "OTHER": "other",
+    }
+
+
 @pytest.mark.parametrize(
     "data",
     [
@@ -163,7 +172,7 @@ def test_case_distinct_files_are_two_secrets(tmp_path: Path) -> None:
     ],
 )
 def test_the_exact_bytes_are_kept(tmp_path: Path, data: bytes) -> None:
-    _write(tmp_path, "API_TOKEN", data)
+    _mount_atomic_writer(tmp_path, {"API_TOKEN": data})
 
     assert load_expected_secrets(_env(["API_TOKEN"]), tmp_path)["API_TOKEN"].encode() == data
 
@@ -230,10 +239,54 @@ def test_an_unreadable_root_blocks_the_start(tmp_path: Path) -> None:
         root.chmod(0o700)
 
 
+def test_a_root_that_is_itself_a_symlink_passes(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    _mount_atomic_writer(real, {"API_TOKEN": _GOOD})
+    (tmp_path / "link").symlink_to(real)
+
+    assert load_expected_secrets(_env(["API_TOKEN"]), tmp_path / "link") == {
+        "API_TOKEN": _GOOD.decode()
+    }
+
+
+@pytest.mark.parametrize(
+    ("target", "failure"),
+    [
+        ("outside", "escapes the mount"),
+        ("../secrets2/payload", "escapes the mount"),
+        ("/dev/null", "escapes the mount"),
+        ("..dangling", "dangling symlink"),
+        ("..dir", "not a regular file"),
+        ("..loop", "not a regular file|cannot be resolved|escapes the mount"),
+    ],
+)
+def test_an_unusable_symlink_blocks_the_start(tmp_path: Path, target: str, failure: str) -> None:
+    root = tmp_path / "secrets"
+    root.mkdir()
+    outside = tmp_path / "secrets2" / "payload"
+    outside.parent.mkdir()
+    outside.write_bytes(_GOOD)
+    (root / "..dir").mkdir()
+    (root / "..loop").symlink_to("..loop")
+    (root / "API_TOKEN").symlink_to(outside if target == "outside" else target)
+
+    with pytest.raises(SystemExit, match=failure) as raised:
+        load_expected_secrets(_env(["API_TOKEN"]), root)
+
+    assert "'API_TOKEN'" in str(raised.value)
+
+
+@pytest.mark.parametrize("through_symlink", [False, True])
 def test_a_fifo_blocks_the_start_without_blocking(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, through_symlink: bool
 ) -> None:
-    os.mkfifo(tmp_path / "API_TOKEN")
+    if through_symlink:
+        (tmp_path / "..store").mkdir()
+        os.mkfifo(tmp_path / "..store" / "pipe")
+        (tmp_path / "API_TOKEN").symlink_to("..store/pipe")
+    else:
+        os.mkfifo(tmp_path / "API_TOKEN")
 
     def forbidden(*args: Any) -> bytes:
         raise AssertionError("the loader opened a FIFO")

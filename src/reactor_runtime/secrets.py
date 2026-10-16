@@ -16,6 +16,7 @@ a value.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -117,22 +118,34 @@ def _listing(root: Path, expected: list[str]) -> list[str]:
 
 def _read_secrets(root: Path, names: list[str]) -> dict[str, str]:
     """Read every expected file."""
-    return {name: _read_secret(root, name) for name in names}
+    try:
+        real_root = os.path.realpath(root)
+    except OSError:
+        raise SystemExit(f"the secret directory {root} is unreadable") from None
+    return {name: _read_secret(real_root, name) for name in names}
 
 
-def _read_secret(root: Path, name: str) -> str:
+def _read_secret(real_root: str, name: str) -> str:
     """Read and validate one expected file, returning its decoded value.
 
     Raises:
         SystemExit: If the entry is unusable or its value fails a value rule.
     """
-    path = os.path.join(root, name)
+    path = os.path.join(real_root, name)
     try:
         info = os.lstat(path)
     except FileNotFoundError:
         raise SystemExit(f"secret file {name!r} is missing") from None
     except OSError:
         raise SystemExit(f"secret file {name!r} is unreadable") from None
+    if stat.S_ISLNK(info.st_mode):
+        path = _resolve_link(real_root, name)
+        try:
+            info = os.stat(path)
+        except FileNotFoundError:
+            raise SystemExit(f"secret file {name!r} is a dangling symlink") from None
+        except OSError:
+            raise SystemExit(f"secret file {name!r} is a symlink that cannot be resolved") from None
     if not stat.S_ISREG(info.st_mode):
         # Refused before any open, so a FIFO or a device can never block the boot.
         raise SystemExit(f"secret file {name!r} is not a regular file")
@@ -143,6 +156,24 @@ def _read_secret(root: Path, name: str) -> str:
         return data.decode("utf-8")
     except UnicodeDecodeError:
         raise SystemExit(f"secret file {name!r} is not valid UTF-8") from None
+
+
+def _resolve_link(real_root: str, name: str) -> str:
+    """Return the resolved target of the symlink *name*.
+
+    Raises:
+        SystemExit: If the link cannot be resolved or escapes the mount.
+    """
+    try:
+        resolved = os.path.realpath(os.path.join(real_root, name))
+    except (OSError, RuntimeError):
+        raise SystemExit(f"secret file {name!r} is a symlink that cannot be resolved") from None
+    inside = False
+    with contextlib.suppress(ValueError):
+        inside = os.path.commonpath((real_root, resolved)) == real_root
+    if not inside:
+        raise SystemExit(f"secret file {name!r} is a symlink that escapes the mount")
+    return resolved
 
 
 def _read_all(path: str, name: str) -> bytes:
