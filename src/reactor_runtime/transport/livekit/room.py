@@ -20,18 +20,25 @@ joins and closed when it leaves. The Reactor protocol messages a participant
 sends, as data packets or byte streams on the protocol's topics, reach the
 session as that participant's. When the room connection closes, every
 participant connection closes before it.
+
+The room's own signals reach the model as the manifest's ``runtime.livekit``
+block maps them (:class:`RoomSignals`): an RPC call to a mapped method runs its
+command and answers with the result, and a data packet on a mapped topic runs
+its command and answers nothing.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+import uuid
+from collections.abc import Awaitable, Callable, Mapping
 from enum import StrEnum
 from typing import Any
 
 from livekit import rtc
 
-from reactor_runtime.core import ConnId, TrackDirection, TrackInfo, TrackKind
+from reactor_runtime.codes import INVALID_COMMAND
+from reactor_runtime.core import ConnId, LiveKitConfig, TrackDirection, TrackInfo, TrackKind
 from reactor_runtime.log import get_logger
 from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.transport.livekit.connection import (
@@ -40,6 +47,7 @@ from reactor_runtime.transport.livekit.connection import (
     RoomConnection,
 )
 from reactor_runtime.transport.livekit.participant import TOPIC_CHANNELS, ParticipantConnection
+from reactor_runtime.transport.livekit.signals import RoomSignals, payload_args
 from reactor_runtime.transport.livekit.version import TRANSPORT_NAME
 from reactor_runtime.transport.router import ConnectionsExhaustedError, SessionControl
 
@@ -84,15 +92,24 @@ class RoomSession:
         token: The access token for the session's participant. A credential:
             it is used to join and never logged.
         control: The runner's session-control surface.
+        config: The manifest's ``runtime.livekit`` block.
     """
 
-    def __init__(self, conn_id: ConnId, url: str, token: str, control: SessionControl) -> None:
+    def __init__(
+        self,
+        conn_id: ConnId,
+        url: str,
+        token: str,
+        control: SessionControl,
+        config: LiveKitConfig | None = None,
+    ) -> None:
         self.conn_id = conn_id
         self.state = RoomState.JOINING
         self.reason: str | None = None
         self._url = url
         self._token = token
         self._control = control
+        self._signals = RoomSignals(config or LiveKitConfig())
         self._room = rtc.Room()
         self._connection: RoomConnection | None = None
         self._join: asyncio.Task[None] | None = None
@@ -144,6 +161,7 @@ class RoomSession:
             await asyncio.wait_for(
                 self._room.connect(self._url, self._token), timeout=JOIN_TIMEOUT_SECONDS
             )
+            self._register_methods()
             connection = await self._publish(self._output_tracks())
         except TimeoutError:
             await self._fail(_JOIN_TIMED_OUT)
@@ -270,7 +288,11 @@ class RoomSession:
             logger.warning("no connection id left for a room participant", participant=identity)
             return
         conn = ParticipantConnection(
-            conn_id, identity, self._room.local_participant, asyncio.get_running_loop()
+            conn_id,
+            identity,
+            self._room.local_participant,
+            asyncio.get_running_loop(),
+            self._signals.outbound,
         )
         self._participants[identity] = conn
         if not self._control.connection_opened(conn):
@@ -285,13 +307,56 @@ class RoomSession:
         self._control.connection_closed(conn.id)
 
     def _on_data(self, packet: rtc.DataPacket) -> None:
-        """Hand a protocol message from a participant to the session as that participant's."""
-        channel = TOPIC_CHANNELS.get(packet.topic or "")
-        if channel is None or packet.participant is None:
+        """Hand a participant's data packet to the session: a protocol message, or a command."""
+        if packet.participant is None:
             return
         conn = self._participants.get(packet.participant.identity)
-        if conn is not None:
+        if conn is None:
+            return
+        topic = packet.topic or ""
+        channel = TOPIC_CHANNELS.get(topic)
+        if channel is not None:
             self._control.message_received(conn.id, packet.data, ProtocolVersion.V1, channel)
+            return
+        command = self._signals.topic_command(topic)
+        if command is None:
+            return
+        args = payload_args(packet.data)
+        if args is None:
+            logger.info("dropped a data packet that is not a JSON object", topic=topic)
+            return
+        # A packet has no reply, so its answer goes nowhere.
+        self._control.command_received(conn.id, command, args, f"topic-{uuid.uuid4().hex}")
+
+    def _register_methods(self) -> None:
+        """Register each mapped RPC method on the session's participant."""
+        local = self._room.local_participant
+        for method, command in self._signals.inbound.items():
+            local.register_rpc_method(method, self._method_handler(command))
+
+    def _method_handler(self, command: str) -> Callable[[rtc.RpcInvocationData], Awaitable[str]]:
+        async def handle(call: rtc.RpcInvocationData) -> str:
+            """Run *command* for the caller and answer with what it returned."""
+            conn = self._participants.get(call.caller_identity)
+            if conn is None:
+                raise rtc.RpcError(
+                    rtc.RpcError.ErrorCode.APPLICATION_ERROR,
+                    "The session is not serving this participant.",
+                    "not_a_client",
+                )
+            args = payload_args(call.payload)
+            if args is None:
+                raise rtc.RpcError(
+                    rtc.RpcError.ErrorCode.APPLICATION_ERROR,
+                    "The payload must be a JSON object.",
+                    INVALID_COMMAND,
+                )
+            request_id = f"rpc-{call.request_id}"
+            reply = conn.expect_reply(request_id)
+            self._control.command_received(conn.id, command, args, request_id)
+            return await reply
+
+        return handle
 
     def _on_byte_stream(self, reader: rtc.ByteStreamReader, identity: str) -> None:
         """Read a protocol message sent as a byte stream, then hand it on like a packet."""

@@ -18,8 +18,24 @@ import numpy as np
 import pytest
 from livekit import api, rtc
 
-from reactor_runtime import Audio, MessageField, ModelMessage, Output, ReactorApp, Video, event
-from reactor_runtime.core import RuntimeConfig, SessionEvent, SessionState, Transition
+from reactor_runtime import (
+    Audio,
+    CommandError,
+    MessageField,
+    ModelMessage,
+    Output,
+    ReactorApp,
+    Video,
+    event,
+)
+from reactor_runtime.core import (
+    LiveKitConfig,
+    LiveKitRpcMethod,
+    RuntimeConfig,
+    SessionEvent,
+    SessionState,
+    Transition,
+)
 from reactor_runtime.http.server import build_app
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.protocol import Channel, Direction, ProtocolVersion, select
@@ -82,6 +98,14 @@ class ToneModel(ReactorApp):
     async def announce(self, text: str) -> None:
         await self.send(Announcement(text=text))
 
+    @event(name="quiet", description="Do nothing and reply with no message.")
+    async def quiet(self) -> None:
+        return None
+
+    @event(name="fail", description="Refuse with `not_now`.")
+    async def fail(self) -> None:
+        raise CommandError("not_now", "Not now.")
+
     def load(self, config_path: Path | None) -> None:
         self.sample = 0
 
@@ -92,6 +116,18 @@ class ToneModel(ReactorApp):
         tone = (0.5 * 32767 * np.sin(2 * np.pi * TONE_HZ * t)).astype(np.int16)
         frame = np.full((*SIZE, 3), GREY, dtype=np.uint8)
         return RoomOutput(main_video=frame, main_audio=tone.reshape(1, -1))
+
+
+# The room's own signals for the test model.
+SIGNALS = LiveKitConfig(
+    rpc=(
+        LiveKitRpcMethod(method="lk.echo", command="echo"),
+        LiveKitRpcMethod(method="lk.quiet", command="quiet"),
+        LiveKitRpcMethod(method="lk.fail", command="fail"),
+        LiveKitRpcMethod(method="lk.announced", message="announcement"),
+    ),
+    topics=("avatar",),
+)
 
 
 def _token(room: str, identity: str) -> str:
@@ -117,7 +153,7 @@ def _moves(runner: Runner, event: SessionEvent) -> list[Transition]:
 @pytest.fixture
 async def runner(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Runner]:
     monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: ToneModel)
-    runner = Runner(RuntimeConfig(model_ref="tone:ToneModel"))
+    runner = Runner(RuntimeConfig(model_ref="tone:ToneModel", livekit=SIGNALS))
     await runner.start()
     try:
         yield runner
@@ -136,7 +172,7 @@ async def runner(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Runner]:
 async def http(runner: Runner) -> AsyncIterator[httpx.AsyncClient]:
     """The runtime's HTTP surface with the LiveKit routes, on the test's own loop."""
     metrics = RuntimeMetrics(version="0.0.0", model="tone:ToneModel")
-    app = build_app(runner, [LiveKitRouter()], runner.health, metrics)
+    app = build_app(runner, [LiveKitRouter(SIGNALS)], runner.health, metrics)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://runtime") as client:
         yield client
@@ -553,5 +589,118 @@ async def test_messages_above_the_packet_limit_travel_as_byte_streams(
         await _until(lambda: bool(client.model_messages()))
 
         assert client.model_messages() == [("stream", "req-3", "echoed", {"text": text})]
+    finally:
+        await client.leave()
+
+
+async def _client_in_session(runner: Runner, room_name: str, identity: str) -> ProtocolClient:
+    client = ProtocolClient(identity)
+    await client.join(room_name)
+    await _until(lambda: any(t.detail["identity"] == identity for t in _participants(runner)))
+    return client
+
+
+def _conn_id_of(runner: Runner, identity: str) -> int:
+    (opened,) = [t for t in _participants(runner) if t.detail["identity"] == identity]
+    return opened.detail["conn_id"]
+
+
+async def _call(client: ProtocolClient, method: str, payload: str = "") -> str:
+    return await client.room.local_participant.perform_rpc(
+        destination_identity="model", method=method, payload=payload
+    )
+
+
+async def test_an_rpc_call_runs_its_command_and_returns_the_reply(
+    runner: Runner, http: httpx.AsyncClient, room_name: str
+) -> None:
+    await _joined(runner, http, room_name)
+    client = await _client_in_session(runner, room_name, "caller")
+    try:
+        assert await _call(client, "lk.echo", '{"text": "hi"}') == '{"text": "hi"}'
+        assert await _call(client, "lk.quiet") == ""
+
+        (command,) = [t for t in _moves(runner, SessionEvent.COMMAND) if t.detail["name"] == "echo"]
+        assert command.detail["conn_id"] == _conn_id_of(runner, "caller")
+    finally:
+        await client.leave()
+
+
+async def test_an_rpc_call_whose_command_refuses_fails_with_the_code(
+    runner: Runner, http: httpx.AsyncClient, room_name: str
+) -> None:
+    await _joined(runner, http, room_name)
+    client = await _client_in_session(runner, room_name, "caller")
+    try:
+        with pytest.raises(rtc.RpcError) as refused:
+            await _call(client, "lk.fail")
+        assert refused.value.code == rtc.RpcError.ErrorCode.APPLICATION_ERROR
+        assert (refused.value.message, refused.value.data) == ("Not now.", "not_now")
+
+        with pytest.raises(rtc.RpcError) as malformed:
+            await _call(client, "lk.echo", "[1, 2]")
+        assert malformed.value.data == "invalid_command"
+
+        with pytest.raises(rtc.RpcError) as invalid:
+            await _call(client, "lk.echo", '{"text": 7}')
+        assert invalid.value.data == "invalid_command"
+
+        with pytest.raises(rtc.RpcError) as unknown:
+            await _call(client, "lk.nothing")
+        assert unknown.value.code == rtc.RpcError.ErrorCode.UNSUPPORTED_METHOD
+    finally:
+        await client.leave()
+
+
+async def test_a_topic_runs_its_command_and_a_mapped_message_calls_every_participant(
+    runner: Runner, http: httpx.AsyncClient, room_name: str
+) -> None:
+    await _joined(runner, http, room_name)
+    one = await _client_in_session(runner, room_name, "one")
+    two = ProtocolClient("two")
+    await two.join(room_name)
+    called: dict[str, list[str]] = {"one": [], "two": []}
+    for client in (one, two):
+
+        async def announced(call: rtc.RpcInvocationData, who: str = client.identity) -> str:
+            called[who].append(call.payload)
+            return ""
+
+        client.room.local_participant.register_rpc_method("lk.announced", announced)
+    try:
+        await _until(lambda: len(_participants(runner)) == 2)
+
+        await one.room.local_participant.publish_data(
+            b'{"text": "via topic"}', destination_identities=["model"], topic="avatar.announce"
+        )
+        await _until(lambda: bool(called["one"]) and bool(called["two"]))
+
+        assert called == {"one": ['{"text": "via topic"}'], "two": ['{"text": "via topic"}']}
+        # The broadcast also reaches each participant as a protocol message.
+        assert one.model_messages() == [("packet", "", "announcement", {"text": "via topic"})]
+    finally:
+        await one.leave()
+        await two.leave()
+
+
+async def test_a_topic_cannot_run_a_command_an_rpc_method_runs(
+    runner: Runner, http: httpx.AsyncClient, room_name: str
+) -> None:
+    await _joined(runner, http, room_name)
+    client = await _client_in_session(runner, room_name, "sender")
+    try:
+        await client.room.local_participant.publish_data(
+            b'{"text": "nope"}', destination_identities=["model"], topic="avatar.echo"
+        )
+        await client.room.local_participant.publish_data(
+            b'{"text": "yes"}', destination_identities=["model"], topic="avatar.announce"
+        )
+        await _until(
+            lambda: any(
+                t.detail["name"] == "announce" for t in _moves(runner, SessionEvent.COMMAND)
+            )
+        )
+
+        assert [t.detail["name"] for t in _moves(runner, SessionEvent.COMMAND)] == ["announce"]
     finally:
         await client.leave()

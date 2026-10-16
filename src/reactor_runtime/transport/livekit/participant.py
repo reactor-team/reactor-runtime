@@ -10,12 +10,21 @@ protocol's two message families, as the WebRTC transport's two data channels
 do. A message larger than :data:`MAX_PACKET_BYTES` goes as a byte stream on
 the same topic. Messages to one participant leave in the order they were sent,
 through one queue, so a reply never overtakes the message sent before it.
+
+The connection also takes what it is sent as plain data
+(:class:`~reactor_runtime.core.MessageObserver`). That is how a command an RPC
+call ran answers the caller, and how a model message mapped to an RPC method
+calls it on the participant. RPC calls go out through a queue of their own, in
+order, so a slow answer never holds up the protocol's messages.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 from livekit import rtc
 
@@ -46,6 +55,17 @@ against ``livekit-server`` 1.13), so this keeps a margin for every client.
 # notice sent just before the session ends still reaches the participant.
 _CLOSE_DRAIN_SECONDS = 2.0
 
+# The RPC failures worth another try: the call may simply not have arrived.
+_TRANSIENT_RPC_ERRORS = frozenset(
+    {
+        rtc.RpcError.ErrorCode.CONNECTION_TIMEOUT,
+        rtc.RpcError.ErrorCode.RESPONSE_TIMEOUT,
+        rtc.RpcError.ErrorCode.SEND_FAILED,
+    }
+)
+_RPC_ATTEMPTS = 3
+_RPC_RETRY_SECONDS = 0.25
+
 
 class ParticipantConnection:
     """One remote participant of the session's room, as a connection of the session."""
@@ -56,6 +76,7 @@ class ParticipantConnection:
         identity: str,
         participant: rtc.LocalParticipant,
         loop: asyncio.AbstractEventLoop,
+        outbound: Mapping[str, Sequence[str]] | None = None,
     ) -> None:
         """Bind the connection to the participant it speaks to.
 
@@ -64,6 +85,7 @@ class ParticipantConnection:
             identity: The participant's identity in the room.
             participant: The session's own participant, which sends to it.
             loop: The loop the room runs on.
+            outbound: Each model message that calls RPC methods, and the methods.
         """
         self.id = conn_id
         self.identity = identity
@@ -74,8 +96,15 @@ class ParticipantConnection:
         # Messages to send, in order; None ends the queue.
         self._outbox: asyncio.Queue[tuple[str, bytes] | None] = asyncio.Queue()
         self._pump = loop.create_task(self._send_all(), name=f"room-participant-{conn_id}")
+        self._outbound = dict(outbound or {})
+        # RPC calls to make, in order: (method, payload).
+        self._calls: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+        self._caller = loop.create_task(self._call_all(), name=f"room-rpc-{conn_id}")
+        # The RPC calls this participant made that wait for their command's answer.
+        self._replies: dict[str, asyncio.Future[str]] = {}
         self._closed = False
         self._refused_warned = False
+        self._failed_methods: set[str] = set()
 
     @property
     def protocol_version(self) -> ProtocolVersion:
@@ -108,11 +137,43 @@ class ParticipantConnection:
     def pause_track(self, name: str) -> None:
         """Do nothing: the room's server manages who receives each track."""
 
+    def expect_reply(self, request_id: str) -> asyncio.Future[str]:
+        """Return the future the answer to command *request_id* resolves, for an RPC call.
+
+        It resolves with the reply message's fields as JSON, or an empty string
+        for an acknowledgement, and fails with an :class:`rtc.RpcError` that
+        carries the failure's code as its data. Call on the room's loop.
+        """
+        future: asyncio.Future[str] = self._loop.create_future()
+        self._replies[request_id] = future
+        future.add_done_callback(lambda _: self._replies.pop(request_id, None))
+        return future
+
+    def message_sent(self, name: str, data: Mapping[str, Any], request_id: str | None) -> None:
+        """Answer the RPC call a reply belongs to, or call the methods a message maps to."""
+        payload = json.dumps(dict(data))
+        if request_id is not None and request_id in self._replies:
+            self._resolve(request_id, payload)
+            return
+        for method in self._outbound.get(name, ()):
+            self._call_soon(method, payload)
+
+    def command_acknowledged(self, request_id: str) -> None:
+        """Answer the RPC call whose command returned nothing with an empty string."""
+        self._resolve(request_id, "")
+
+    def command_failed(self, request_id: str, code: str, message: str) -> None:
+        """Fail the RPC call whose command failed, with the failure's code as the error's data."""
+        error = rtc.RpcError(rtc.RpcError.ErrorCode.APPLICATION_ERROR, message, code)
+        self._loop.call_soon_threadsafe(self._settle, request_id, None, error)
+
     async def close(self) -> None:
         """Send what is queued, then stop. Idempotent."""
         if self._closed:
             return
         self._closed = True
+        self._caller.cancel()
+        self._fail_replies()
         # Through the loop's callbacks, so the end follows every send scheduled before it.
         self._loop.call_soon(self._outbox.put_nowait, None)
         try:
@@ -124,6 +185,64 @@ class ParticipantConnection:
         """Stop at once, for a participant that has left: nothing queued can reach it."""
         self._closed = True
         self._pump.cancel()
+        self._caller.cancel()
+        self._fail_replies()
+
+    def _resolve(self, request_id: str, payload: str) -> None:
+        if self._loop.is_closed():
+            return
+        self._loop.call_soon_threadsafe(self._settle, request_id, payload, None)
+
+    def _settle(self, request_id: str, payload: str | None, error: Exception | None) -> None:
+        future = self._replies.get(request_id)
+        if future is None or future.done():
+            return
+        if error is not None:
+            future.set_exception(error)
+        else:
+            future.set_result(payload or "")
+
+    def _fail_replies(self) -> None:
+        for future in list(self._replies.values()):
+            if not future.done():
+                future.set_exception(
+                    rtc.RpcError(rtc.RpcError.ErrorCode.APPLICATION_ERROR, "The session ended.")
+                )
+
+    def _call_soon(self, method: str, payload: str) -> None:
+        if self._closed or self._loop.is_closed():
+            return
+        self._loop.call_soon_threadsafe(self._calls.put_nowait, (method, payload))
+
+    async def _call_all(self) -> None:
+        while True:
+            method, payload = await self._calls.get()
+            await self._call(method, payload)
+
+    async def _call(self, method: str, payload: str) -> None:
+        """Call *method* on the participant, retrying a failure that may be transient."""
+        for attempt in range(_RPC_ATTEMPTS):
+            try:
+                await self._participant.perform_rpc(
+                    destination_identity=self.identity, method=method, payload=payload
+                )
+                return
+            except rtc.RpcError as error:
+                if error.code == rtc.RpcError.ErrorCode.UNSUPPORTED_METHOD:
+                    return
+                if error.code in _TRANSIENT_RPC_ERRORS and attempt + 1 < _RPC_ATTEMPTS:
+                    await asyncio.sleep(_RPC_RETRY_SECONDS * (attempt + 1))
+                    continue
+                self._call_failed(method, f"{error.code}: {error.message}")
+                return
+            except Exception as error:
+                self._call_failed(method, str(error) or type(error).__name__)
+                return
+
+    def _call_failed(self, method: str, reason: str) -> None:
+        level = logging.DEBUG if method in self._failed_methods else logging.WARNING
+        self._failed_methods.add(method)
+        logger.log(level, "calling %r on participant %r failed: %s", method, self.identity, reason)
 
     def _enqueue(self, topic: str, payload: bytes | str) -> None:
         if self._closed:

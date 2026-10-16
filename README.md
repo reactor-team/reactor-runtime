@@ -158,6 +158,8 @@ The join runs in the background. A `GET` on the connection answers `202` while i
 
 Every other participant in the room is a client of the session, with a connection of its own: the model gets `@connected` when it joins and `@disconnected` when it leaves, and the journal names its identity in the room. A participant speaks the Reactor protocol as data messages on two topics, `reactor.data` and `reactor.control`, the two families a WebRTC client sends on its two data channels; a message larger than 15,000 bytes travels as a byte stream on the same topic. A command's reply reaches the participant that sent it, and a broadcast reaches every participant. When the room connection closes, its participants' connections close with it.
 
+The `runtime.livekit` block reaches the room's own signals. A call to an RPC method listed with a `command` runs that command for the caller, and answers with the reply message's fields as JSON, an empty string when the handler returns nothing, or an `RpcError` with code `1500`, the failure's message, and its code as the error's `data`. To fail the call, raise `CommandError`. Sending a message listed with a `message` calls that method on each participant the message reaches, with the message's fields as the JSON payload; `send` returns at once, and a participant that did not register the method is skipped. A data packet on `<prefix>.<command>` runs the command with the packet's JSON object as its arguments and answers nothing. A command an RPC method runs is reachable only through that method.
+
 Scaffold, build, and run it with the CLI:
 
 ```sh
