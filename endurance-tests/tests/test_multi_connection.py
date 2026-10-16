@@ -41,6 +41,8 @@ async def test_multi_connection(runtime: RuntimeProcess) -> None:
             finally:
                 done.set()
                 await streaming
+            # Streaming on sent requests after the settle in open().
+            await publisher.wait_for_replies()
             if n % 2:
                 publisher.close()
                 runtime.wait_registered(VIEWERS)
