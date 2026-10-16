@@ -451,10 +451,17 @@ class ConnectionManager:
             if caps.carries_video or caps.carries_audio:
                 _deliver(conn, "broadcast_media", lambda c: c.send_media(chunk))
 
-    def flush_media(self) -> None:
-        """Drop every connection's queued media and cut playout to black."""
+    def flush_media(self, *, hold: bool = False) -> None:
+        """Drop every connection's queued media, then cut playout to black or hold it.
+
+        A plain flush calls ``flush_media()`` with no argument, so a connection
+        written before the hold flush existed still takes it.
+        """
         for conn in self._by_id.values():
-            _deliver(conn, "flush_media", lambda c: c.flush_media())
+            if hold:
+                _deliver(conn, "flush_media", lambda c: c.flush_media(hold=True))
+            else:
+                _deliver(conn, "flush_media", lambda c: c.flush_media())
 
     def set_media_rate(self, fps: float) -> None:
         """Re-pace every connection's queued media at *fps* immediately."""

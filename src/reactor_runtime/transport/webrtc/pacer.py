@@ -209,13 +209,15 @@ class MediaPacer:
             self._depth = depth
             self._room.notify_all()
 
-    def flush(self) -> None:
-        """Drop queued frames and cut playout to black.
+    def flush(self, *, hold: bool = False) -> None:
+        """Drop queued frames, then cut playout to black or hold the last frame.
 
-        The queue is drained, the boundary black re-armed, and any producer
-        blocked in a backpressure submit abandons the rest of its chunk — so
-        the next tick emits a black frame and none of the flushed content
-        plays afterwards.
+        The queue is drained and any producer blocked in a backpressure submit
+        abandons the rest of its chunk, so none of the flushed content plays
+        afterwards. Without *hold* the boundary black is re-armed and the next
+        tick emits it. With *hold* nothing is sent until new media arrives, so
+        the client keeps the frame it has, and the last frame stays the one
+        a gap-fill repeats.
         """
         with self._room:
             self._epoch += 1
@@ -224,8 +226,9 @@ class MediaPacer:
                     self._queue.get_nowait()
                 except queue.Empty:
                     break
-            self._boundary_black_pending = True
-            self._last_frame = None
+            if not hold:
+                self._boundary_black_pending = True
+                self._last_frame = None
             self._room.notify_all()
 
     def start(self) -> None:

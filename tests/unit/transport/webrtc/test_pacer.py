@@ -264,6 +264,63 @@ def test_flush_drains_the_queue_and_rearms_the_boundary_black() -> None:
     assert not sink.seen[1].tracks["main"].data.any()
 
 
+def test_a_hold_flush_drains_the_queue_and_sends_no_black() -> None:
+    pacer, sink = make_pacer()
+    shown = np.full((8, 8, 3), 200, dtype=np.uint8)
+    pacer.submit(chunk(video_bundle(np.stack([shown] * 5)), n_frames=5))
+    pacer._emit_one_tick()  # one real frame on screen
+
+    pacer.flush(hold=True)
+    pacer._emit_one_tick()
+    pacer._emit_one_tick()
+
+    # Nothing more reaches the wire, so the client keeps the frame it shows.
+    assert len(sink.seen) == 1
+    assert sink.seen[0].tracks["main"].data.any()
+
+
+def test_a_hold_flush_plays_the_next_frame_without_a_cut() -> None:
+    pacer, sink = make_pacer()
+    pacer.submit(chunk(video_bundle(np.full((4, 4, 3), 1, dtype=np.uint8))))
+    pacer._emit_one_tick()
+    pacer.flush(hold=True)
+
+    pacer.submit(chunk(video_bundle(np.full((4, 4, 3), 2, dtype=np.uint8))))
+    pacer._emit_one_tick()
+
+    assert [int(b.tracks["main"].data[0, 0, 0]) for b in sink.seen] == [1, 2]
+
+
+def test_a_hold_flush_keeps_the_frame_a_gap_fill_repeats() -> None:
+    pacer, sink = make_pacer()
+    pacer.submit(chunk(video_bundle(np.zeros((4, 4, 3), dtype=np.uint8), metadata=b"pose-7")))
+    pacer._emit_one_tick()
+    pacer.flush(hold=True)
+    pacer._emit_one_tick()  # queue empty -> the held frame's gap-fill
+
+    assert [b.tracks["main"].metadata for b in sink.seen] == [b"pose-7", b"pose-7"]
+
+
+def test_a_hold_flush_releases_a_producer_blocked_on_a_full_queue() -> None:
+    pacer, _ = make_pacer(queue_depth=1)
+    frames = np.zeros((1, 4, 4, 3), dtype=np.uint8)
+    pacer.submit(chunk(video_bundle(frames)))
+    pacer._stop.clear()  # a running pacer, so a backpressure submit waits
+    enqueued: list[int] = []
+    producer = threading.Thread(
+        target=lambda: enqueued.append(pacer.submit(chunk(video_bundle(frames), wait=True)))
+    )
+    producer.start()
+    time.sleep(0.05)
+
+    pacer.flush(hold=True)
+    producer.join(timeout=1.0)
+
+    assert not producer.is_alive()
+    assert enqueued == [0]
+    assert pacer._queue.qsize() == 0
+
+
 def test_each_frame_of_a_batch_is_paced_out_with_its_own_metadata() -> None:
     pacer, sink = make_pacer()
     batch = np.zeros((3, 4, 4, 3), dtype=np.uint8)
