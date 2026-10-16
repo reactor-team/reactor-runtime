@@ -58,7 +58,12 @@ Each run writes `endurance-results/<scenario>.json`, `-report.md` and
 `-summary.txt`, plus the runtime's log. In CI, the **Endurance Tests**
 workflow runs every scenario on demand: `duration_minutes` sets the length,
 and `runtime_ref` tests another tag or commit's runtime source with the
-current suite.
+current suite. It swaps in only `src/reactor_runtime`: the dependencies
+(`uv.lock`, so `reactor-webrtc` among them) and the wire bindings stay the
+current ref's. A `v3.8.2` run, for example, uses this ref's `reactor-webrtc`,
+not the one 3.8.2 shipped with. That measures a leak in the runtime's own
+code; a leak in a dependency can pass or fail differently from the release
+itself, so read such a result as the runtime's code, not as what shipped.
 
 The checks and the reports (`endurance/trends.py`, `endurance/report.py`)
 need no runtime, and their unit tests under `unit/` run with the rest of the

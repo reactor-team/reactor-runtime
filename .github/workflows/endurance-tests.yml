@@ -7,7 +7,9 @@
 #
 # Runs on demand. `runtime_ref` tests another tag or commit's runtime source
 # with this ref's suite, which is how a release that predates the suite is
-# tested.
+# tested. Only src/reactor_runtime is swapped: uv.lock and the wire bindings
+# stay this ref's, so a leak in a dependency can pass or fail differently from
+# the release itself.
 
 name: Endurance Tests
 
@@ -19,7 +21,7 @@ on:
         type: string
         default: "15"
       runtime_ref:
-        description: "Tag or commit whose runtime source to test (empty: this ref's)"
+        description: "Tag or commit whose runtime source to test (empty: this ref's). Only src/reactor_runtime is swapped: dependencies and wire bindings stay this ref's, so the result is not exactly what that release shipped"
         type: string
         default: ""
 
