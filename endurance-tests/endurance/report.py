@@ -377,7 +377,11 @@ def finish_run(
     there is what marks the run as stopped short. A failed check outranks that,
     so the status is FAIL when any check failed, ERROR when the run stopped
     short with none failed, and PASS otherwise. A failure to write the reports
-    is printed rather than raised, so it never hides the test's own failure.
+    is raised on a PASS, since the reports are the run's output; on a FAIL or
+    an ERROR it is printed instead, so it never hides the test's own failure.
+
+    Raises:
+        Exception: Writing the reports failed on a run that otherwise passed.
     """
     exc_type, exc_val, _ = sys.exc_info()
     run_error = f"{exc_type.__name__}: {exc_val}" if exc_type is not None else None
@@ -398,12 +402,13 @@ def finish_run(
         commit_sha=git_commit_sha(),
         run_error=run_error,
     )
-    # Any failure from here on is printed, not raised: the test's own failure
-    # must surface.
     try:
         result.samples = [dataclasses.asdict(s) for s in samples]
         write_reports(result, out_dir)
     except Exception as e:
+        if status == "PASS":
+            raise
+        # The test's own failure must surface, not this one.
         print(f"[finish_run] writing the reports failed: {e!r}")
     return result
 

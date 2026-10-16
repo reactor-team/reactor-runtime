@@ -112,3 +112,16 @@ def test_the_live_status_says_when_a_cycle_left_something_behind(
     assert "2 cycle(s) left something behind" in capsys.readouterr().out
     live.update(_samples(), retained=0, force=True)
     assert "Nothing left behind so far" in capsys.readouterr().out
+
+
+def test_a_report_that_cannot_be_written_fails_a_passing_run(tmp_path: Path) -> None:
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("")
+    with pytest.raises(FileExistsError):
+        _finish(blocker, [_metric("live_pacers", "ok")])
+
+
+def test_a_report_that_cannot_be_written_does_not_hide_a_failed_check(tmp_path: Path) -> None:
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("")
+    assert _finish(blocker, [_metric("live_pacers", "fail")]).status == "FAIL"
