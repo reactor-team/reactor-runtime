@@ -385,8 +385,9 @@ class V1Client(BareClient):
         self._control: Any = None
         self._data: Any = None
         self._lock = threading.Lock()
-        # Request id to what it asked for, until its reply arrives.
-        self._pending: dict[str, str] = {}
+        # Request id to what it asked for and the reply payloads that answer
+        # it, until its reply arrives.
+        self._pending: dict[str, tuple[str, frozenset[str | None]]] = {}
         self._failed: list[str] = []
         self._next_tick = 0.0
         self._sent = 0
@@ -400,7 +401,8 @@ class V1Client(BareClient):
                 kind=_REQUEST,
                 publish_track=track_pb2.PublishTrack(name="webcam"),
             ),
-            expects="publish_track",
+            asked="publish_track",
+            answers=frozenset({"publish_track"}),
         )
         for name in ("main_video", "main_audio"):
             self._send_control(
@@ -412,7 +414,8 @@ class V1Client(BareClient):
             control_pb2.ControlClientMessage(
                 request_id="schema", kind=_REQUEST, request_schema=platform_pb2.RequestSchema()
             ),
-            expects="model_schema",
+            asked="request_schema",
+            answers=frozenset({"model_schema"}),
         )
 
     def _on_tick(self) -> None:
@@ -437,7 +440,8 @@ class V1Client(BareClient):
             args.update({"effect": _EFFECTS[(n // 2) % len(_EFFECTS)]})
         request_id = f"command-{n}"
         with self._lock:
-            self._pending[request_id] = name
+            # A command is answered by a bodyless ack, or by the model's reply.
+            self._pending[request_id] = (name, frozenset({None, "message"}))
         self._data.send(
             data_pb2.DataClientMessage(
                 request_id=request_id,
@@ -479,11 +483,15 @@ class V1Client(BareClient):
         )
 
     def _send_control(
-        self, message: control_pb2.ControlClientMessage, *, expects: str | None = None
+        self,
+        message: control_pb2.ControlClientMessage,
+        *,
+        asked: str | None = None,
+        answers: frozenset[str | None] = frozenset(),
     ) -> None:
-        if expects is not None:
+        if asked is not None:
             with self._lock:
-                self._pending[message.request_id] = expects
+                self._pending[message.request_id] = (asked, answers)
         self._control.send(message.SerializeToString(), binary=True)
 
     def close(self) -> None:
@@ -514,11 +522,14 @@ class V1Client(BareClient):
 
     def _answered(self, request_id: str, payload: str | None, message: Any) -> None:
         with self._lock:
-            asked = self._pending.pop(request_id, None)
-            if asked is None:
+            pending = self._pending.pop(request_id, None)
+            if pending is None:
                 return
+            asked, answers = pending
             if payload == "error":
                 self._failed.append(f"{asked} ({request_id}): {message.error.code}")
+            elif payload not in answers:
+                self._failed.append(f"{asked} ({request_id}): answered with {payload or 'nothing'}")
 
     async def _settle(self) -> None:
         deadline = time.monotonic() + _REPLY_WAIT_S
@@ -530,7 +541,7 @@ class V1Client(BareClient):
         with self._lock:
             self.unanswered = [
                 *self._failed,
-                *(f"{asked} ({rid}): no reply" for rid, asked in self._pending.items()),
+                *(f"{asked} ({rid}): no reply" for rid, (asked, _) in self._pending.items()),
             ]
 
 
