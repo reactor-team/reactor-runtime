@@ -895,3 +895,20 @@ def test_broadcast_media_names_the_video_connections_it_reached() -> None:
     sent = cm.broadcast_media(MediaChunk(bundle=MediaBundle(), fps=30.0, n_frames=1))
 
     assert sent == [ConnId(1)]
+
+
+class RefusingConnection(FakeConnection):
+    """A connection whose wire rejects every media chunk."""
+
+    def send_media(self, chunk: MediaChunk) -> None:
+        raise RuntimeError("wire closed")
+
+
+def test_broadcast_media_leaves_out_a_connection_that_rejected_the_chunk() -> None:
+    cm, _ = waiting_manager()
+    cm.register(RefusingConnection(1, capabilities=ConnectionCapabilities(carries_video=True)))
+    cm.register(FakeConnection(2, capabilities=ConnectionCapabilities(carries_video=True)))
+
+    sent = cm.broadcast_media(MediaChunk(bundle=MediaBundle(), fps=30.0, n_frames=1))
+
+    assert sent == [ConnId(2)]

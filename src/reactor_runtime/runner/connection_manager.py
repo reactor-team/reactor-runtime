@@ -81,7 +81,7 @@ def _connection_detail(cid: ConnId, system: bool) -> dict[str, ConnId | bool]:
     return {"conn_id": cid, "system": True} if system else {"conn_id": cid}
 
 
-def _deliver(conn: Connection, operation: str, act: Callable[[Connection], None]) -> None:
+def _deliver(conn: Connection, operation: str, act: Callable[[Connection], None]) -> bool:
     """Hand one already-encoded frame to one wire, containing what the wire raises.
 
     A fan-out reaches every client in the session, so a failure on one wire is
@@ -97,6 +97,9 @@ def _deliver(conn: Connection, operation: str, act: Callable[[Connection], None]
     client's: a payload the codec cannot render fails identically for every
     connection, and absorbing it would turn one authoring mistake into a message
     that silently reaches nobody and a log line per client blaming their wires.
+
+    Returns:
+        Whether the wire took the frame.
     """
     try:
         act(conn)
@@ -104,6 +107,8 @@ def _deliver(conn: Connection, operation: str, act: Callable[[Connection], None]
         logger.exception(
             "connection rejected an outbound frame", operation=operation, conn_id=conn.id
         )
+        return False
+    return True
 
 
 class ConnectionManager:
@@ -451,7 +456,7 @@ class ConnectionManager:
                 further connection.
 
         Returns:
-            The connections that carry video and were handed the chunk.
+            The connections that carry video and took the chunk.
         """
         video: list[ConnId] = []
         for cid, conn in list(self._by_id.items()):
@@ -459,8 +464,8 @@ class ConnectionManager:
                 break
             caps = conn.capabilities
             if caps.carries_video or caps.carries_audio:
-                _deliver(conn, "broadcast_media", lambda c: c.send_media(chunk))
-                if caps.carries_video:
+                took = _deliver(conn, "broadcast_media", lambda c: c.send_media(chunk))
+                if took and caps.carries_video:
                     video.append(cid)
         return video
 
