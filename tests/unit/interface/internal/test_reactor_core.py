@@ -287,8 +287,38 @@ def test_push_media_routes_to_the_track_buffer() -> None:
 
 def test_push_media_for_an_unknown_track_is_a_noop() -> None:
     core = IdleCore()
-    core.push_media("nope", frame(1))
+    assert core.push_media("nope", frame(1)) == 0
     assert core._input_buffers["camera"].available == 0
+
+
+def test_push_media_reports_the_frames_a_full_buffer_evicts() -> None:
+    core = IdleCore()
+    evicted = [core.push_media("camera", frame(i)) for i in range(130)]
+
+    assert evicted == [0] * 128 + [1, 1]
+
+
+def test_an_audio_track_with_buffer_seconds_holds_that_much_audio() -> None:
+    class AgentAudio(Audio):
+        sample_rate = 24_000
+        buffer_seconds = 0.05
+
+    class AudioIn(MediaInput):
+        agent_audio: AgentAudio
+
+    class AudioCore(ReactorCore):
+        input: AudioIn
+
+        async def run(self) -> None:
+            await asyncio.sleep(60)
+
+    core = AudioCore()
+    # 10 ms frames at 24 kHz: 0.05 s is five of them.
+    ten_ms = InputFrame(data=np.zeros((1, 240), dtype=np.int16))
+    evicted = [core.push_media("agent_audio", ten_ms) for _ in range(7)]
+
+    assert evicted == [0, 0, 0, 0, 0, 1, 1]
+    assert core._input_buffers["agent_audio"].available == 5
 
 
 def test_run_is_not_implemented_by_the_core() -> None:

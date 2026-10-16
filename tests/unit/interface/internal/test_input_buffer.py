@@ -149,3 +149,135 @@ def test_waits_that_are_never_taken_stay_within_the_buffers_bound() -> None:
         buf.try_read(1)
 
     assert [source for source, _ in buf.take_read_waits()] == [ConnId(1003), ConnId(1004)]
+
+
+def audio(index: int, samples: int = 480) -> InputFrame:
+    """One 10 ms frame of 48 kHz mono audio whose samples encode its index."""
+    data = ((np.arange(samples) + index * samples) % 30_000).astype(np.int16).reshape(1, samples)
+    return InputFrame(data=data, pts=float(index))
+
+
+def test_the_default_bound_keeps_the_newest_128_audio_frames_untouched() -> None:
+    buffer = InputBuffer()
+    pushed = [audio(i) for i in range(200)]
+    for item in pushed:
+        buffer.push(item)
+
+    read = buffer.try_read(128, mode=ReadMode.FIFO)
+
+    assert read is not None
+    # The same objects, in arrival order: nothing is copied, resampled, or reordered.
+    assert read == pushed[72:]
+    samples = np.concatenate([f.data for f in read], axis=1)
+    assert np.array_equal(samples, np.concatenate([f.data for f in pushed[72:]], axis=1))
+    assert buffer.available == 0
+
+
+async def test_the_default_bound_refuses_a_read_above_128_frames() -> None:
+    buffer = InputBuffer()
+    with pytest.raises(ValueError, match="at most 128"):
+        await buffer.read(129)
+
+
+def test_a_latest_read_of_audio_returns_the_newest_frames_in_order() -> None:
+    buffer = InputBuffer()
+    pushed = [audio(i) for i in range(10)]
+    for item in pushed:
+        buffer.push(item)
+
+    assert buffer.try_read(3, mode=ReadMode.LATEST) == pushed[7:]
+    assert buffer.available == 0
+
+
+def test_a_push_reports_the_frame_the_default_bound_evicts() -> None:
+    buffer = InputBuffer(maxlen=2)
+
+    assert [buffer.push(audio(i)) for i in range(4)] == [0, 0, 1, 1]
+
+
+def test_a_push_to_a_closed_buffer_reports_no_eviction() -> None:
+    buffer = InputBuffer(maxlen=1)
+    buffer.push(audio(0))
+    buffer.close()
+
+    assert buffer.push(audio(1)) == 0
+
+
+def test_a_sample_bound_holds_that_many_samples_of_the_newest_audio() -> None:
+    # 50 ms at 48 kHz: five 10 ms frames.
+    buffer = InputBuffer(max_samples=2_400)
+    pushed = [audio(i) for i in range(8)]
+
+    evicted = [buffer.push(item) for item in pushed]
+
+    assert evicted == [0, 0, 0, 0, 0, 1, 1, 1]
+    assert buffer.try_read(5, mode=ReadMode.FIFO) == pushed[3:]
+
+
+def test_a_sample_bound_is_the_same_length_whatever_the_frame_size() -> None:
+    # 100 ms frames, as a transport that delivers larger frames sends them.
+    buffer = InputBuffer(max_samples=48_000)
+    for i in range(15):
+        buffer.push(audio(i, samples=4_800))
+
+    assert buffer.available == 10
+
+
+def test_a_sample_bound_lifts_the_128_frame_read_limit() -> None:
+    buffer = InputBuffer(max_samples=48_000 * 120)
+    pushed = [audio(i) for i in range(300)]
+    for item in pushed:
+        assert buffer.push(item) == 0
+
+    assert buffer.try_read(300, mode=ReadMode.FIFO) == pushed
+
+
+def test_a_sample_bound_keeps_a_frame_larger_than_the_bound() -> None:
+    buffer = InputBuffer(max_samples=480)
+    buffer.push(audio(0))
+
+    assert buffer.push(audio(1, samples=960)) == 1
+    assert buffer.available == 1
+
+
+def test_a_sample_bound_counts_a_zero_sample_frame_as_no_audio() -> None:
+    buffer = InputBuffer(max_samples=960)
+    buffer.push(audio(0))
+    buffer.push(InputFrame(data=np.zeros((1, 0), dtype=np.int16)))
+
+    assert buffer.push(audio(1)) == 0
+    assert buffer.available == 3
+
+
+@pytest.mark.parametrize("mode", [ReadMode.FIFO, ReadMode.LATEST])
+def test_a_sample_bound_frees_the_samples_a_read_takes(mode: ReadMode) -> None:
+    buffer = InputBuffer(max_samples=960)
+    buffer.push(audio(0))
+    buffer.push(audio(1))
+    buffer.try_read(2, mode=mode)
+
+    assert buffer.push(audio(2)) == 0
+    assert buffer.push(audio(3)) == 0
+
+
+@pytest.mark.parametrize("empty", ["clear", "reset"])
+def test_a_sample_bound_starts_over_after_the_buffer_empties(empty: str) -> None:
+    buffer = InputBuffer(max_samples=960)
+    buffer.push(audio(0))
+    buffer.push(audio(1))
+    if empty == "reset":
+        buffer.close()
+    getattr(buffer, empty)()
+
+    assert buffer.push(audio(2)) == 0
+    assert buffer.push(audio(3)) == 0
+
+
+def test_a_sample_bound_drops_the_wait_of_each_frame_it_evicts() -> None:
+    buffer = InputBuffer(max_samples=960)
+    for index in range(4):
+        buffer.push(audio(index), ConnId(1000 + index))
+
+    buffer.try_read(2, mode=ReadMode.FIFO)
+
+    assert [source for source, _ in buffer.take_read_waits()] == [ConnId(1002), ConnId(1003)]
