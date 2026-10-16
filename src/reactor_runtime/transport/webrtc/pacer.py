@@ -147,6 +147,7 @@ class MediaPacer:
         """
         if chunk.fps > 0:
             self._interval = 1.0 / chunk.fps
+        self._add_emit_stage(chunk)
         epoch = self._epoch
         enqueued = 0
         aborted = False
@@ -289,6 +290,18 @@ class MediaPacer:
         except Exception:
             logger.exception("Media pacer loop crashed")
             self._stop.set()
+
+    def _add_emit_stage(self, chunk: MediaChunk) -> None:
+        """Add ``emit`` for the chunk's video: the model's ``emit`` call until the chunk got here.
+
+        A chunk with several frames counts once.
+        """
+        if self._stages is None or chunk.emitted_at is None:
+            return
+        ms = (time.perf_counter() - chunk.emitted_at) * 1000.0
+        for data in chunk.bundle.tracks.values():
+            if data.info.kind is TrackKind.VIDEO:
+                self._stages.add(data.info.name, "emit", ms)
 
     def _emit_one_tick(self) -> None:
         """Emit the next queued frame, the boundary black, or a gap-fill repeat.

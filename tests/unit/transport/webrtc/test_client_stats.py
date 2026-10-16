@@ -306,3 +306,13 @@ def test_bindings_without_message_stages_read_as_none() -> None:
     older = SimpleNamespace(timestamp=1, metrics={}, environment=None)
 
     assert _decode_message_stages(cast(Any, older)) == ()
+
+
+def test_bindings_without_part_of_read_a_stage_of_its_own() -> None:
+    older = SimpleNamespace(
+        message_stages=[SimpleNamespace(name="queue_wait", total_ms=0.4, messages=4)]
+    )
+
+    [stage] = _decode_message_stages(cast(Any, older))
+
+    assert stage.part_of == ""

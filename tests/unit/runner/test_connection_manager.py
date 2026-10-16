@@ -522,9 +522,10 @@ def test_broadcast_media_aborts_between_connections() -> None:
     chunk = MediaChunk(bundle=MediaBundle(), fps=30.0, n_frames=1)
     # The abort flips once the first connection has media, so the second
     # never receives the chunk — the flush-mid-fan-out contract.
-    cm.broadcast_media(chunk, abort=lambda: len(a.media) > 0)
+    sent = cm.broadcast_media(chunk, abort=lambda: len(a.media) > 0)
     assert a.media == [chunk]
     assert b.media == []
+    assert sent == [ConnId(1)]
 
 
 def test_flush_media_reaches_every_connection() -> None:
@@ -555,7 +556,7 @@ def test_set_media_depth_reaches_every_connection() -> None:
     assert (a.media_depth, b.media_depth) == (8, 8)
 
 
-FanOut = Callable[[ConnectionManager], None]
+FanOut = Callable[[ConnectionManager], object]
 
 
 def _refuse_to_encode_frame(_version: ProtocolVersion) -> bytes | str:
@@ -877,3 +878,37 @@ def test_one_take_adds_a_connections_frame_and_message_stages() -> None:
 
     assert reading.tracks[0].frame_stages == frames
     assert reading.message_stages == messages
+
+
+def test_broadcast_media_names_the_video_connections_it_reached() -> None:
+    cm, _ = waiting_manager()
+    video = FakeConnection(1, capabilities=ConnectionCapabilities(carries_video=True))
+    audio_only = FakeConnection(
+        2, capabilities=ConnectionCapabilities(carries_video=False, carries_audio=True)
+    )
+    data_only = FakeConnection(
+        3, capabilities=ConnectionCapabilities(carries_video=False, carries_audio=False)
+    )
+    for conn in (video, audio_only, data_only):
+        cm.register(conn)
+
+    sent = cm.broadcast_media(MediaChunk(bundle=MediaBundle(), fps=30.0, n_frames=1))
+
+    assert sent == [ConnId(1)]
+
+
+class RefusingConnection(FakeConnection):
+    """A connection whose wire rejects every media chunk."""
+
+    def send_media(self, chunk: MediaChunk) -> None:
+        raise RuntimeError("wire closed")
+
+
+def test_broadcast_media_leaves_out_a_connection_that_rejected_the_chunk() -> None:
+    cm, _ = waiting_manager()
+    cm.register(RefusingConnection(1, capabilities=ConnectionCapabilities(carries_video=True)))
+    cm.register(FakeConnection(2, capabilities=ConnectionCapabilities(carries_video=True)))
+
+    sent = cm.broadcast_media(MediaChunk(bundle=MediaBundle(), fps=30.0, n_frames=1))
+
+    assert sent == [ConnId(2)]

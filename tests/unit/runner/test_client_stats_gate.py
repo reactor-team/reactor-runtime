@@ -11,6 +11,7 @@ from reactor_runtime.core import (
     ClientTrackStat,
     ConnId,
     FrameStage,
+    MessageStage,
     TrackKind,
 )
 from reactor_runtime.runner.client_stats import (
@@ -244,3 +245,18 @@ def test_an_environment_value_longer_than_a_name_is_too_large() -> None:
         )
         assert not fits(batch), field.name
     assert not fits(_batch(_track(codec_implementation=long)))
+
+
+def test_a_stage_whose_part_of_is_longer_than_a_name_is_too_large() -> None:
+    long = "x" * (MAX_NAME_LENGTH + 1)
+    frame = FrameStage("to_rgb", total_ms=1.0, frames=1, part_of=long)
+    message = MessageStage("parse", total_ms=1.0, messages=1, part_of=long)
+    with_message = ClientStatsBatch(
+        track_stats=[_track()],
+        connection_stat=ClientConnectionStat(
+            timestamp=1_700_000_000_000, metrics={}, message_stages=(message,)
+        ),
+    )
+
+    assert not fits(_batch(_track(frame_stages=(frame,))))
+    assert not fits(with_message)

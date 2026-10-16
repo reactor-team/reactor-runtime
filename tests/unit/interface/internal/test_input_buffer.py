@@ -1,7 +1,9 @@
+import time
+
 import numpy as np
 import pytest
 
-from reactor_runtime.core.values import InputFrame
+from reactor_runtime.core.values import ConnId, InputFrame
 from reactor_runtime.interface.internal.input_buffer import (
     BufferClosed,
     InputBuffer,
@@ -104,3 +106,46 @@ async def test_read_rejects_more_than_capacity() -> None:
     buffer = InputBuffer(maxlen=4)
     with pytest.raises(ValueError, match="at most"):
         await buffer.read(5)
+
+
+def test_a_read_notes_how_long_its_frames_waited() -> None:
+    buf = InputBuffer(maxlen=4)
+    buf.push(frame(1))
+    buf.push(frame(2))
+    time.sleep(0.005)
+
+    assert buf.try_read(1) is not None
+
+    [(source, wait)] = buf.take_read_waits()
+    assert source is None
+    assert wait >= 5.0
+    assert buf.take_read_waits() == []
+
+
+def test_a_read_names_the_connection_that_sent_each_frame() -> None:
+    buf = InputBuffer(maxlen=4)
+    buf.push(frame(1), ConnId(1001))
+    buf.push(frame(2), ConnId(1002))
+
+    buf.try_read(2, mode=ReadMode.FIFO)
+
+    assert [source for source, _ in buf.take_read_waits()] == [ConnId(1001), ConnId(1002)]
+
+
+def test_a_fifo_read_notes_each_frame_it_took() -> None:
+    buf = InputBuffer(maxlen=4)
+    for value in range(3):
+        buf.push(frame(value))
+
+    buf.try_read(2, mode=ReadMode.FIFO)
+
+    assert len(buf.take_read_waits()) == 2
+
+
+def test_waits_that_are_never_taken_stay_within_the_buffers_bound() -> None:
+    buf = InputBuffer(maxlen=2)
+    for value in range(5):
+        buf.push(frame(value), ConnId(1000 + value))
+        buf.try_read(1)
+
+    assert [source for source, _ in buf.take_read_waits()] == [ConnId(1003), ConnId(1004)]

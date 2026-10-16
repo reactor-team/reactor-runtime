@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from collections import deque
 from enum import Enum, auto
 
-from reactor_runtime.core.values import InputFrame
+from reactor_runtime.core.values import ConnId, InputFrame
 
 DEFAULT_BUFFER_CAPACITY = 128
 """How many frames a buffer holds before the oldest is evicted."""
@@ -54,6 +55,16 @@ class InputBuffer:
         self._lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
         self._buffer: deque[InputFrame] = deque(maxlen=maxlen)
+        # When each buffered frame was pushed, on perf_counter, and the
+        # connection that sent it, beside it: the two deques share a bound, so
+        # an eviction drops both.
+        self._pushed_at: deque[tuple[float, ConnId | None]] = deque(maxlen=maxlen)
+        # The sender of each frame a read took, and how long it waited in the
+        # buffer in ms, until the step loop takes them (take_read_waits). A
+        # model with its own run() may never take them, so they are bounded
+        # like the frames: the oldest go first. The default step loop takes
+        # them after every read, so it never reaches the bound.
+        self._read_waits: deque[tuple[ConnId | None, float]] = deque(maxlen=maxlen)
         self._total_received = 0
         self._closed = False
 
@@ -111,12 +122,31 @@ class InputBuffer:
         """Return the *n* newest frames and drop the rest. Caller holds the lock."""
         start = len(self._buffer) - n
         result = [self._buffer[start + i] for i in range(n)]
+        self._note_waits([self._pushed_at[start + i] for i in range(n)])
         self._buffer.clear()
+        self._pushed_at.clear()
         return result
 
     def _take_fifo(self, n: int) -> list[InputFrame]:
         """Pop the *n* oldest frames. Caller holds the lock."""
+        self._note_waits([self._pushed_at.popleft() for _ in range(n)])
         return [self._buffer.popleft() for _ in range(n)]
+
+    def _note_waits(self, pushed: list[tuple[float, ConnId | None]]) -> None:
+        """Note how long the frames pushed at *pushed* waited. Caller holds the lock."""
+        now = time.perf_counter()
+        self._read_waits.extend((source, (now - at) * 1000.0) for at, source in pushed)
+
+    def take_read_waits(self) -> list[tuple[ConnId | None, float]]:
+        """Return each frame read since the last take, as its sender and its wait in ms.
+
+        The sender is the connection that pushed the frame, or ``None`` when
+        the push named none. The waits start again.
+        """
+        with self._lock:
+            waits = list(self._read_waits)
+            self._read_waits.clear()
+        return waits
 
     def try_read(self, n: int = 1, mode: ReadMode = ReadMode.LATEST) -> list[InputFrame] | None:
         """Return *n* frames without blocking, or ``None`` when too few are ready.
@@ -163,6 +193,7 @@ class InputBuffer:
         """Drop every buffered frame without closing the track."""
         with self._lock:
             self._buffer.clear()
+            self._pushed_at.clear()
 
     def close(self) -> None:
         """Close the track, waking any blocked reader to raise :class:`BufferClosed`."""
@@ -180,16 +211,21 @@ class InputBuffer:
         with self._condition:
             self._closed = False
             self._buffer.clear()
+            self._pushed_at.clear()
+            self._read_waits.clear()
             self._total_received = 0
 
-    def push(self, frame: InputFrame) -> None:
+    def push(self, frame: InputFrame, source: ConnId | None = None) -> None:
         """Append a frame from the runtime thread, waking a blocked reader.
 
-        Frames pushed after :meth:`close` are dropped until :meth:`reset`.
+        *source* is the connection that sent the frame, so the frame's wait in
+        the buffer is reported to that connection only. Frames pushed after
+        :meth:`close` are dropped until :meth:`reset`.
         """
         with self._condition:
             if self._closed:
                 return
             self._buffer.append(frame)
+            self._pushed_at.append((time.perf_counter(), source))
             self._total_received += 1
             self._condition.notify_all()

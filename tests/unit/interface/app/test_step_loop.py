@@ -9,13 +9,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pytest
 
 from reactor_runtime import (
     ApplicationError,
+    InputBuffer,
     InputField,
     InputState,
     MediaInput,
@@ -36,7 +37,7 @@ from reactor_runtime.core.model import (
     SessionStarted,
     StartingInputApplied,
 )
-from reactor_runtime.core.values import CompletedStep, ConnId, MediaChunk
+from reactor_runtime.core.values import CompletedStep, ConnId, InputFrame, MediaChunk
 from reactor_runtime.interface.internal.reactor_core import CommandEnvelope, ReactorCore
 from reactor_runtime.interface.model.contract import ModelContract
 
@@ -972,3 +973,85 @@ async def test_media_emitted_outside_a_step_carries_the_current_session() -> Non
     await ReactorCore.emit(app, _frame())
 
     assert chunks[0].session == 1
+
+
+async def test_a_step_reports_each_frames_input_wait_to_the_connection_that_sent_it() -> None:
+    class WithCamera(OnlyGenerate):
+        media: Camera
+
+        async def process_input(self) -> State:
+            if cast(InputBuffer, self.media.webcam).try_read(1) is None:
+                raise ApplicationError("no frame")
+            return self.state
+
+    app = WithCamera()
+    app._on_loop_ready()
+    waits: list[tuple[ConnId, str, str]] = []
+    app.bind_output(
+        broadcast=lambda message: None,
+        addressed=lambda *args: None,
+        media=lambda chunk: None,
+    )
+    app._bind_timing(
+        frame_timing=lambda conn_id, session, track, stage, ms: waits.append(
+            (conn_id, track, stage)
+        ),
+    )
+    await _go_live(app)
+    app.push_media("webcam", InputFrame(data=np.zeros((2, 2, 3), dtype=np.uint8)), ConnId(1002))
+    task = await _run_for(app)
+    await _stop(task)
+
+    assert waits == [(ConnId(1002), "webcam", "input_wait")]
+
+
+async def test_a_refused_step_drops_the_input_waits_of_the_frames_it_read() -> None:
+    class Gated(OnlyGenerate):
+        media: Camera
+
+        async def process_input(self) -> State:
+            cast(InputBuffer, self.media.webcam).try_read(1)
+            if self.state.paused:
+                raise ApplicationError("paused")
+            return self.state
+
+    app = Gated()
+    app._on_loop_ready()
+    waits: list[ConnId] = []
+    app.bind_output(
+        broadcast=lambda message: None,
+        addressed=lambda *args: None,
+        media=lambda chunk: None,
+    )
+    app._bind_timing(
+        frame_timing=lambda conn_id, session, track, stage, ms: waits.append(conn_id),
+    )
+    await _go_live(app)
+    app.state.paused = True
+    app.push_media("webcam", InputFrame(data=np.zeros((2, 2, 3), dtype=np.uint8)), ConnId(1001))
+    task = await _run_for(app)
+    app.state.paused = False
+    await asyncio.sleep(0.02)
+    await _stop(task)
+
+    assert waits == []
+    assert app._input_buffers["webcam"].take_read_waits() == []
+
+
+async def test_a_steps_report_carries_the_time_of_each_of_its_parts() -> None:
+    app = OnlyGenerate()
+    _ready(app)
+    reports: list[CompletedStep] = []
+    app.bind_output(
+        broadcast=lambda message: None,
+        addressed=lambda *args: None,
+        media=lambda chunk: None,
+        step=reports.append,
+    )
+    await _go_live(app)
+    task = await _run_for(app)
+    await _stop(task)
+
+    assert reports
+    assert set(reports[0].stages) == {"process_input", "generate", "process_output"}
+    assert all(ms >= 0 for ms in reports[0].stages.values())

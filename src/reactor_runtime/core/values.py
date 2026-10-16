@@ -48,10 +48,14 @@ class CommandFailure:
 class FrameStage:
     """The time a track's frames spent in one stage of their trip, over one window.
 
-    The stages cover the transport between the client's app and the model:
+    The stages cover the trip between the client's app and the model:
     ``submit``, ``encode_wait``, ``encode``, ``packetize``, ``pacer``,
-    ``jitter_buffer``, ``decode``, ``delivery``, ``output_pacing`` and
-    ``output_queue``, in the order a frame goes through them. Each side
+    ``jitter_buffer``, ``decode``, ``sink_convert``, ``handoff``,
+    ``delivery`` (with its parts ``to_rgb`` and ``loop_wait``),
+    ``input_wait``, ``process_input``, ``generate``, ``process_output``,
+    ``emit``, ``output_pacing`` and ``output_queue`` (with its parts
+    ``feed_wait``, ``to_bgra`` and ``ingest``), in the order a frame goes
+    through them. A part names its stage in ``part_of``. Each side
     reports the stages it can see. The set grows, so a reader ignores a name
     it does not know.
 
@@ -60,11 +64,15 @@ class FrameStage:
         total_ms: The time all *frames* frames spent in the stage together,
             so the average per frame is ``total_ms / frames``.
         frames: How many frames the window counted in the stage.
+        part_of: The stage this one is a part of, whose time includes it, or
+            ``""`` for a stage of its own. Adding a part to its stage counts
+            its time twice.
     """
 
     name: str
     total_ms: float
     frames: int
+    part_of: str = ""
 
 
 @dataclass(frozen=True)
@@ -80,11 +88,15 @@ class MessageStage:
         total_ms: The time all *messages* messages spent in the stage
             together, so the average per message is ``total_ms / messages``.
         messages: How many messages the window counted in the stage.
+        part_of: The stage this one is a part of, whose time includes it, or
+            ``""`` for a stage of its own. Adding a part to its stage counts
+            its time twice.
     """
 
     name: str
     total_ms: float
     messages: int
+    part_of: str = ""
 
 
 @dataclass(frozen=True)
@@ -501,6 +513,9 @@ class MediaChunk:
             the chunk, counted on the model's side, or ``None`` when the
             emitter does not count sessions. A consumer compares it with its
             own count to tell a late chunk of an earlier session apart.
+        emitted_at: When the model called ``emit`` for the chunk, on
+            :func:`time.perf_counter`, or ``None`` when not timed. A consumer
+            times its ``emit`` stage from it.
     """
 
     bundle: MediaBundle
@@ -508,6 +523,7 @@ class MediaChunk:
     n_frames: int = 1
     wait: bool = False
     session: int | None = None
+    emitted_at: float | None = None
 
     def frames(self) -> list[MediaBundle]:
         """Split the chunk into one single-frame bundle per carried frame."""
@@ -534,6 +550,9 @@ class CompletedStep:
         fps: The rate the step's media was emitted at, which a saved step's
             video plays at: the measured throughput for a model that does not
             pin its rate.
+        stages: The time the step spent in each of its frame stages, in
+            milliseconds, by stage name: ``process_input``, ``generate`` and
+            ``process_output``. Empty when the step was not timed.
     """
 
     bundle: MediaBundle | None
@@ -542,6 +561,7 @@ class CompletedStep:
     elapsed: float | None = None
     session: int = 0
     fps: float = 30.0
+    stages: Mapping[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

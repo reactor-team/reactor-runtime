@@ -2,7 +2,17 @@
 
 from __future__ import annotations
 
-from reactor_runtime.core import ConnId, MessageStage, TransportReading
+from dataclasses import replace
+
+from reactor_runtime.core import (
+    ClientTrackDirection,
+    ConnId,
+    FrameStage,
+    MessageStage,
+    TrackKind,
+    TransportReading,
+    TransportTrackReading,
+)
 from reactor_runtime.runner.stages import RunnerStages
 
 
@@ -61,3 +71,53 @@ def test_reset_drops_every_stage() -> None:
     [(_, reading)] = stages.merge([(ConnId(2), TransportReading())])
 
     assert reading.message_stages == ()
+
+
+def _video_reading(*tracks: str) -> TransportReading:
+    return TransportReading(
+        tracks=tuple(
+            TransportTrackReading(name, TrackKind.VIDEO, ClientTrackDirection.SENDONLY)
+            for name in tracks
+        )
+    )
+
+
+def test_a_frames_stage_goes_to_its_track_after_the_transports() -> None:
+    stages = RunnerStages()
+    stages.add_frame(ConnId(2), "webcam", "input_wait", 2.0)
+    wire = FrameStage("delivery", total_ms=8.0, frames=1)
+    reading = _video_reading("webcam", "main")
+    reading = replace(
+        reading, tracks=(replace(reading.tracks[0], frame_stages=(wire,)), reading.tracks[1])
+    )
+
+    [(_, merged)] = stages.merge([(ConnId(2), reading)])
+
+    assert merged.tracks[0].frame_stages == (wire, FrameStage("input_wait", 2.0, 1))
+    assert merged.tracks[1].frame_stages == ()
+
+
+def test_a_step_counts_once_on_each_track_of_each_connection() -> None:
+    stages = RunnerStages()
+    stages.add_step([ConnId(1), ConnId(2)], ["main"], {"process_input": 1.0, "generate": 4.0})
+
+    merged = stages.merge(
+        [(ConnId(1), _video_reading("main")), (ConnId(2), _video_reading("main"))]
+    )
+
+    for _, reading in merged:
+        assert reading.tracks[0].frame_stages == (
+            FrameStage("process_input", 1.0, 1),
+            FrameStage("generate", 4.0, 1),
+        )
+
+
+def test_a_tracks_stages_wait_until_a_reading_carries_the_track() -> None:
+    stages = RunnerStages()
+    stages.add_frame(ConnId(2), "webcam", "input_wait", 2.0)
+
+    [(_, before)] = stages.merge([(ConnId(2), _video_reading("main"))])
+    [(_, after)] = stages.merge([(ConnId(2), _video_reading("main", "webcam"))])
+
+    assert before.tracks[0].frame_stages == ()
+    assert after.tracks[1].frame_stages == (FrameStage("input_wait", 2.0, 1),)

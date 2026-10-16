@@ -158,8 +158,9 @@ message ClientTrackStat {
 // frames the reading counted in the stage and `total_ms` the time they spent
 // in it together, so the stage's average per frame is total_ms / frames. `total_ms` is a finite number, never negative
 // (no NaN or infinity), and `frames` is at least 1, so a reader drops a
-// reading that breaks either. The stages cover the transport between the
-// client's app and the model, not the model's own time. A window divides at
+// reading that breaks either. The stages cover a frame's whole trip: the
+// transport between the client's app and the model, and the model's step that
+// turns input into output (input_wait through emit below). A window divides at
 // each reading: whoever reads the numbers sums readings to cover a longer
 // window. A stage that saw no frame in a window is left out of that reading.
 //
@@ -178,12 +179,37 @@ message ClientTrackStat {
 //   jitter_buffer  The frame waits in the receiver's jitter buffer, as
 //                  libwebrtc's jitterBufferDelay counts it.
 //   decode         The decoder decompresses the frame.
+//   sink_convert   reactor-webrtc's sink converts the decoded frame to BGRA
+//                  and hands it to the Python binding. Runtime.
+//   handoff        The Python binding waits for the GIL and copies the frame
+//                  into Python, until it calls the runtime's sink. Runtime.
 //   delivery       The decoded frame goes from the decoder to the app (client)
-//                  or to the model's input (runtime).
+//                  or from the runtime's sink to the model's input (runtime).
+//   to_rgb         Part of delivery: BGRA to RGB. Runtime.
+//   loop_wait      Part of delivery: the wait for the runtime's event loop.
+//                  Runtime.
+//   input_wait     The frame waits in the model's input buffer until a step
+//                  reads it. Runtime.
+//   process_input  The model's process_input. Runtime.
+//   generate       The model's generate. Runtime.
+//   process_output The model's process_output. Runtime.
+//   emit           The model's emit, until the output reaches the output
+//                  pacer. Runtime.
 //   output_pacing  The model's output waits for its tick in the runtime's
 //                  output pacer. Runtime.
 //   output_queue   The paced frame goes from the output pacer to libwebrtc.
 //                  Runtime.
+//   feed_wait      Part of output_queue: the wait for the feeding thread.
+//                  Runtime.
+//   to_bgra        Part of output_queue: RGB to BGRA. Runtime.
+//   ingest         Part of output_queue: reactor-webrtc takes the frame into
+//                  libwebrtc. Runtime.
+//
+// A stage named "part of" another is inside it, and says so in `part_of`:
+// adding both counts that time twice. A reader nests or skips parts by
+// `part_of` alone, so a new part needs no change in any reader.
+// process_input, generate and process_output are timed once per step and
+// counted on each video track the step emits.
 //
 // encode_wait, packetize and pacer come from libwebrtc's timing frames, a
 // sample: libwebrtc marks about one frame every 200 ms, the receiver reports
@@ -199,6 +225,9 @@ message FrameStage {
   string name = 1;
   double total_ms = 2;
   uint64 frames = 3;
+  // The stage this one is a part of, whose time includes it; empty for a
+  // stage of its own.
+  string part_of = 4;
 }
 
 // A connection-wide fact, not tied to any one track — e.g.
@@ -236,6 +265,10 @@ message ClientConnectionStat {
 //   stall       The time the sender's chunk pump stopped because SCTP's buffer
 //               was full, per message sent. Sender.
 //   reassembly  From the message's first chunk arriving to its last. Receiver.
+//   handoff     The Python binding waits for the GIL and copies the message
+//               into Python, until it calls the runtime's sink. Runtime.
+//   loop_wait   The runtime's sink until its event loop takes the message.
+//               Runtime.
 //   dispatch    The command reaches the runtime until its handler starts,
 //               including the wait for the model's step, less any wait for a
 //               file the command references. Runtime.
@@ -247,6 +280,9 @@ message MessageStage {
   string name = 1;
   double total_ms = 2;
   uint64 messages = 3;
+  // The stage this one is a part of, whose time includes it; empty for a
+  // stage of its own.
+  string part_of = 4;
 }
 
 // The SDK and the system a client runs on. `os` and `arch` are canonical

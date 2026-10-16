@@ -84,8 +84,13 @@ def fits(batch: ClientStatsBatch) -> bool:
     if len(message_stages) > MAX_MESSAGE_STAGES:
         return False
     names = [name for metrics in readings for name in metrics]
-    names += [stage.name for stat in batch.track_stats for stage in stat.frame_stages]
-    names += [stage.name for stage in message_stages]
+    names += [
+        name
+        for stat in batch.track_stats
+        for stage in stat.frame_stages
+        for name in (stage.name, stage.part_of)
+    ]
+    names += [name for stage in message_stages for name in (stage.name, stage.part_of)]
     names += [
         field
         for stat in batch.track_stats
@@ -156,6 +161,7 @@ def frame_stages_detail(stages: Iterable[FrameStage]) -> list[dict[str, Any]]:
     """
     return [
         {"name": stage.name, "total_ms": stage.total_ms, "frames": stage.frames}
+        | ({"part_of": stage.part_of} if stage.part_of else {})
         for stage in stages
         if stage.name and stage.frames > 0 and math.isfinite(stage.total_ms) and stage.total_ms >= 0
     ]
@@ -168,6 +174,7 @@ def message_stages_detail(stages: Iterable[MessageStage]) -> list[dict[str, Any]
     """
     return [
         {"name": stage.name, "total_ms": stage.total_ms, "messages": stage.messages}
+        | ({"part_of": stage.part_of} if stage.part_of else {})
         for stage in stages
         if stage.name
         and stage.messages > 0

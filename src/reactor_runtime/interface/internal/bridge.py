@@ -25,6 +25,7 @@ from reactor_runtime.interface.internal.reactor_core import (
     BroadcastSink,
     CommandTimingSink,
     FailureSink,
+    FrameTimingSink,
     MediaOps,
     MediaSink,
     ReactorCore,
@@ -155,9 +156,9 @@ class ModelBridge:
 
     # -- inbound: media plane ---------------------------------------------
 
-    def push_media(self, track: str, frame: InputFrame) -> None:
-        """Route an inbound frame to its track's buffer."""
-        self._model.push_media(track, frame)
+    def push_media(self, track: str, frame: InputFrame, source: ConnId | None = None) -> None:
+        """Route an inbound frame to its track's buffer, with the connection that sent it."""
+        self._model.push_media(track, frame, source)
 
     # -- outbound: bound once before start --------------------------------
 
@@ -171,6 +172,7 @@ class ModelBridge:
         failure: FailureSink | None = None,
         step: StepSink | None = None,
         command_timing: CommandTimingSink | None = None,
+        frame_timing: FrameTimingSink | None = None,
     ) -> None:
         """Wire the model's outbound paths down into the runner. Call once.
 
@@ -197,6 +199,8 @@ class ModelBridge:
             failure: Sink for an unrecoverable crash of the model's run loop.
             step: Sink for each step the model reports finished.
             command_timing: Sink for how long each command waited and ran.
+            frame_timing: Sink for a frame's time in a stage only the model
+                sees, for the connection that sent the frame.
 
         Raises:
             RuntimeError: If outbound has already been bound.
@@ -210,7 +214,7 @@ class ModelBridge:
             media_ops=media_ops,
             step=step,
         )
-        self._model._bind_timing(command_timing=command_timing)
+        self._model._bind_timing(command_timing=command_timing, frame_timing=frame_timing)
         if failure is not None:
             self._model.bind_failure(failure)
         self._outbound_bound = True

@@ -339,9 +339,42 @@ def test_push_bundle_times_a_frames_wait_since_it_was_queued() -> None:
 
     peer._push_bundle(_video_bundle("v"), queued_at=time.perf_counter() - 0.01)
 
-    [queued] = peer.frame_stages.take()["v"]
-    assert (queued.name, queued.frames) == ("output_queue", 1)
-    assert queued.total_ms >= 10.0
+    stages = {s.name: s for s in peer.frame_stages.take()["v"]}
+    assert set(stages) == {"feed_wait", "to_bgra", "ingest", "output_queue"}
+    assert stages["output_queue"].frames == 1
+    assert stages["output_queue"].total_ms >= 10.0
+    assert stages["feed_wait"].total_ms >= 10.0
+    parts = sum(stages[s].total_ms for s in ("feed_wait", "to_bgra", "ingest"))
+    assert parts == pytest.approx(stages["output_queue"].total_ms, abs=0.01)
+
+
+async def test_video_sink_times_the_parts_of_delivery() -> None:
+    peer = WebRTCPeer()
+    peer._loop = asyncio.get_running_loop()
+    peer.on_media(lambda _name, _frame: None)
+
+    peer._make_video_sink("cam")(bytes(2 * 2 * 4), 2, 2, None)
+    await asyncio.sleep(0.01)
+
+    stages = {s.name: s for s in peer.frame_stages.take()["cam"]}
+    assert set(stages) == {"to_rgb", "loop_wait", "delivery"}
+    assert stages["to_rgb"].total_ms + stages["loop_wait"].total_ms <= stages["delivery"].total_ms
+
+
+async def test_a_data_message_times_its_wait_for_the_loop() -> None:
+    peer = WebRTCPeer()
+    peer._loop = asyncio.get_running_loop()
+    got: list[Any] = []
+    peer.on_message(lambda payload, _version, _channel: got.append(payload))
+
+    peer._deliver(b"x", peer.protocol_version, Channel.DATA, time.perf_counter() - 0.005)
+    peer._deliver(b"y", peer.protocol_version, Channel.CONTROL, time.perf_counter() - 0.005)
+    await asyncio.sleep(0.01)
+
+    assert got == [b"x", b"y"]
+    [wait] = [s for s in peer.message_stages.take() if s.name == "loop_wait"]
+    assert wait.messages == 1
+    assert wait.total_ms >= 5.0
 
 
 # ── Inbound metadata ─────────────────────────────────────────────────────────
@@ -368,7 +401,7 @@ async def test_video_sink_times_a_frames_trip_from_the_decoder() -> None:
     peer._make_video_sink("cam")(bytes(2 * 2 * 4), 2, 2, None)
     await asyncio.sleep(0.01)
 
-    [delivery] = peer.frame_stages.take()["cam"]
+    [delivery] = [s for s in peer.frame_stages.take()["cam"] if s.name == "delivery"]
     assert (delivery.name, delivery.frames) == ("delivery", 1)
 
 
@@ -380,7 +413,7 @@ async def test_delivery_covers_handing_the_frame_to_the_model_input() -> None:
     peer._make_video_sink("cam")(bytes(2 * 2 * 4), 2, 2, None)
     await asyncio.sleep(0.05)
 
-    [delivery] = peer.frame_stages.take()["cam"]
+    [delivery] = [s for s in peer.frame_stages.take()["cam"] if s.name == "delivery"]
     assert delivery.total_ms >= 10.0
 
 
@@ -2284,3 +2317,22 @@ async def test_a_first_subscription_leaves_the_others_out() -> None:
     assert "a=mid:1\r\na=sendonly" in local
     assert "a=mid:0\r\na=inactive" in remote  # not asked for
     assert "a=mid:0\r\na=inactive" in local
+
+
+async def test_a_message_held_until_the_wire_opens_reports_its_loop_wait() -> None:
+    peer = WebRTCPeer()
+    peer._loop = asyncio.get_running_loop()
+    got: list[Any] = []
+    peer.on_message(lambda payload, _version, _channel: got.append(payload))
+
+    peer._make_message_sink(Channel.DATA)(b"x", True)
+    await asyncio.sleep(0.005)
+    with peer._ready_lock:
+        peer._peer_connected = peer._data_open = peer._control_open = True
+        peer._fire_connected_if_ready()
+    await asyncio.sleep(0.01)
+
+    assert got == [b"x"]
+    [wait] = [s for s in peer.message_stages.take() if s.name == "loop_wait"]
+    assert wait.messages == 1
+    assert wait.total_ms >= 5.0

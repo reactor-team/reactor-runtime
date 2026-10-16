@@ -103,7 +103,13 @@ def _decode_frame_stages(stat: platform_pb2.ClientTrackStat) -> tuple[FrameStage
     if stat.kind != platform_pb2.TrackKind.TRACK_KIND_VIDEO:
         return ()
     return tuple(
-        FrameStage(name=s.name, total_ms=s.total_ms, frames=s.frames) for s in stat.frame_stages
+        FrameStage(
+            name=s.name,
+            total_ms=s.total_ms,
+            frames=s.frames,
+            part_of=getattr(s, "part_of", ""),
+        )
+        for s in stat.frame_stages
     )
 
 
@@ -172,5 +178,11 @@ def _decode_message_stages(stat: platform_pb2.ClientConnectionStat) -> tuple[Mes
     """
     stages = getattr(stat, "message_stages", ())
     return tuple(
-        MessageStage(name=s.name, total_ms=s.total_ms, messages=s.messages) for s in stages
+        MessageStage(
+            name=s.name,
+            total_ms=s.total_ms,
+            messages=s.messages,
+            part_of=getattr(s, "part_of", ""),
+        )
+        for s in stages
     )

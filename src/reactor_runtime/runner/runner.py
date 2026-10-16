@@ -270,6 +270,10 @@ class Runner(ServiceComponent, ConnectionSink):
         # them; the lock orders that against the reset at a session start.
         self._step_messages: deque[dict[str, Any]] = deque(maxlen=_STEP_MESSAGES_LIMIT)
         self._step_messages_lock = threading.Lock()
+        # The connections that carry video and were handed the model's media
+        # since its last step report, so the step's stages go to them alone.
+        self._step_recipients: set[ConnId] = set()
+        self._step_recipients_lock = threading.Lock()
         self._connections = ConnectionManager(state_machine=self._sm)
         self._offer_epochs = OfferEpochs()
         # Playout settings the model set through its output handle, remembered
@@ -387,6 +391,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 failure=self._on_model_failure,
                 step=self._on_step_completed,
                 command_timing=self._on_command_timing,
+                frame_timing=self._on_frame_timing,
             )
             bridge.start()
         except Exception:
@@ -557,7 +562,7 @@ class Runner(ServiceComponent, ConnectionSink):
     def media_received(self, conn_id: ConnId, track: str, frame: InputFrame) -> None:
         """Route an inbound media frame to its track on the model."""
         if self._bridge is not None:
-            self._bridge.push_media(track, frame)
+            self._bridge.push_media(track, frame, conn_id)
 
     def keepalive(self, conn_id: ConnId) -> None:
         """Note liveness for a connection."""
@@ -774,6 +779,27 @@ class Runner(ServiceComponent, ConnectionSink):
         with contextlib.suppress(RuntimeError):
             loop.call_soon_threadsafe(add)
 
+    def _on_frame_timing(
+        self, conn_id: ConnId, session: int, track: str, stage: str, ms: float
+    ) -> None:
+        """Add a frame's time in a stage the model timed to its sender's stages, on the loop.
+
+        The model reports from its own thread; the stages are the loop's.
+        A report that arrives after the loop closed, at shutdown, is dropped,
+        and so is one from an earlier session: its connection id may already
+        belong to a connection of the current one.
+        """
+        loop = self._loop
+        if loop is None:
+            return
+
+        def add() -> None:
+            if session == self._sessions_posted:
+                self._stages.add_frame(conn_id, track, stage, ms)
+
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(add)
+
     def _on_step_completed(self, step: CompletedStep) -> None:
         """Record a step the model reported finished, hopping onto the loop.
 
@@ -784,7 +810,12 @@ class Runner(ServiceComponent, ConnectionSink):
 
         The messages the model broadcast since its last report are taken here,
         on the model's thread, so they belong to this step and not the next.
+        So are the connections its media was handed to, which the step's
+        stages go to.
         """
+        with self._step_recipients_lock:
+            recipients = tuple(self._step_recipients)
+            self._step_recipients.clear()
         messages: tuple[dict[str, Any], ...] = ()
         if self._step_store is not None:
             with self._step_messages_lock:
@@ -795,9 +826,14 @@ class Runner(ServiceComponent, ConnectionSink):
                     self._step_messages.clear()
         loop = self._loop
         if loop is not None:
-            loop.call_soon_threadsafe(self._record_step, step, messages)
+            loop.call_soon_threadsafe(self._record_step, step, messages, recipients)
 
-    def _record_step(self, step: CompletedStep, messages: tuple[dict[str, Any], ...] = ()) -> None:
+    def _record_step(
+        self,
+        step: CompletedStep,
+        messages: tuple[dict[str, Any], ...] = (),
+        recipients: tuple[ConnId, ...] = (),
+    ) -> None:
         """Number a reported step, journal it, and close a session that reached its steps.
 
         The detail of the ``step_completed`` fact carries the step's number
@@ -817,6 +853,9 @@ class Runner(ServiceComponent, ConnectionSink):
         after the runtime recorded the session's remaining steps as errors
         (see :meth:`_fail_remaining_steps`), so no step past ``steps`` is
         saved.
+
+        The step's stages go to *recipients*, the connections its media was
+        handed to.
         """
         if step.session != self._sessions_posted:
             logger.debug(
@@ -834,6 +873,16 @@ class Runner(ServiceComponent, ConnectionSink):
             )
             return
         self._save_step(step, messages)
+        if step.stages and step.bundle is not None:
+            self._stages.add_step(
+                recipients,
+                [
+                    d.info.name
+                    for d in step.bundle.tracks.values()
+                    if d.info.kind is TrackKind.VIDEO
+                ],
+                step.stages,
+            )
         limit = self._session_start.steps
         if (
             limit is not None
@@ -1406,7 +1455,14 @@ class Runner(ServiceComponent, ConnectionSink):
             # plays out, but it is not this session's output.
             self._model_output.emitted(track, chunk.n_frames, chunk.session)
         generation = self._media_generation
-        self._connections.broadcast_media(chunk, abort=lambda: self._media_generation != generation)
+        sent = self._connections.broadcast_media(
+            chunk, abort=lambda: self._media_generation != generation
+        )
+        # Media from an earlier session (its session-end hook, say) reached
+        # nobody for this session's steps.
+        if chunk.session is None or chunk.session == self._sessions_posted:
+            with self._step_recipients_lock:
+                self._step_recipients.update(sent)
         # The archive takes the whole chunk even when a flush cut the broadcast
         # short: a playout cut is not an archive boundary.
         self._recorder.on_chunk(chunk)
@@ -1840,6 +1896,8 @@ class Runner(ServiceComponent, ConnectionSink):
             # can emit, and every frame it emits for this session counts.
             self._model_output.reset(self._sessions_posted)
             self._stages.reset()
+            with self._step_recipients_lock:
+                self._step_recipients.clear()
             bridge.dispatch_reactor_event(
                 SessionStarted(
                     self._session_id,

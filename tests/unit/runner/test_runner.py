@@ -3373,7 +3373,7 @@ async def test_media_reaches_the_connections_before_the_recorder(
     monkeypatch.setattr(
         started_runner._connections,
         "broadcast_media",
-        lambda *_a, **_k: served.append("connections"),
+        lambda *_a, **_k: served.append("connections") or [],
     )
     monkeypatch.setattr(started_runner._recorder, "on_chunk", lambda _c: served.append("recorder"))
 
@@ -3394,7 +3394,7 @@ async def test_a_flush_that_cuts_the_broadcast_short_still_records_the_chunk(
     monkeypatch.setattr(
         started_runner._connections,
         "broadcast_media",
-        lambda *_a, **_k: started_runner._flush_media(),
+        lambda *_a, **_k: started_runner._flush_media() or [],
     )
     chunk = MediaChunk(bundle=_video_bundle(), fps=30.0, n_frames=1)
 
@@ -4164,3 +4164,81 @@ async def test_a_command_timing_from_an_earlier_session_is_dropped() -> None:
     await asyncio.sleep(0)
 
     assert added == [(ConnId(1001), "dispatch"), (ConnId(1001), "handler")]
+
+
+async def test_a_frame_timing_from_an_earlier_session_is_dropped() -> None:
+    runner = _runner()
+    runner._loop = asyncio.get_running_loop()
+    added: list[tuple[ConnId, str]] = []
+    setattr(  # noqa: B010
+        runner._stages,
+        "add_frame",
+        lambda conn_id, track, stage, ms: added.append((conn_id, stage)),
+    )
+    runner._sessions_posted = 2
+
+    runner._on_frame_timing(ConnId(1001), 1, "webcam", "input_wait", 1.0)
+    runner._on_frame_timing(ConnId(1001), 2, "webcam", "input_wait", 1.0)
+    await asyncio.sleep(0)
+
+    assert added == [(ConnId(1001), "input_wait")]
+
+
+async def test_a_steps_stages_go_to_the_connections_its_media_reached(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    added: list[tuple[tuple[ConnId, ...], list[str], dict[str, float]]] = []
+    setattr(  # noqa: B010
+        started_runner._stages,
+        "add_step",
+        lambda conn_ids, tracks, stages: added.append((tuple(conn_ids), list(tracks), stages)),
+    )
+    reached = FakeConnection(1)
+    started_runner._connections.register(reached)
+    started_runner._emit_media(
+        MediaChunk(bundle=_video_bundle(), fps=30.0, session=started_runner._sessions_posted)
+    )
+    # A connection that joins after the media went out did not receive it.
+    started_runner._connections.register(FakeConnection(2))
+
+    started_runner._on_step_completed(
+        CompletedStep(
+            bundle=_video_bundle(),
+            session=started_runner._sessions_posted,
+            stages={"generate": 4.0},
+        )
+    )
+    await asyncio.sleep(0)
+    started_runner._record_step(_step(started_runner))
+
+    [(conn_ids, tracks, stages)] = added
+    assert conn_ids == (ConnId(1),)
+    assert tracks == ["main"]
+    assert stages == {"generate": 4.0}
+
+
+async def test_a_new_session_starts_with_no_step_recipients(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    started_runner._connections.register(FakeConnection(1))
+    started_runner._emit_media(
+        MediaChunk(bundle=_video_bundle(), fps=30.0, session=started_runner._sessions_posted)
+    )
+    started_runner.stop_session()
+    await asyncio.sleep(0.05)
+
+    started_runner.start_session({})
+    await asyncio.sleep(0.05)
+
+    assert started_runner._step_recipients == set()
+
+
+async def test_media_from_an_earlier_session_reaches_no_step(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    started_runner._connections.register(FakeConnection(1))
+
+    started_runner._emit_media(
+        MediaChunk(bundle=_video_bundle(), fps=30.0, session=started_runner._sessions_posted - 1)
+    )
+
+    assert started_runner._step_recipients == set()

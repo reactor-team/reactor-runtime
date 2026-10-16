@@ -311,9 +311,12 @@ class ReactorApp(ReactorCore):
                         # that session ends while it emits.
                         session = self._sessions_started
                         # 2. The application gate.
+                        input_started = time.perf_counter()
                         try:
                             input = await self.process_input()
                         except ApplicationError as refused:
+                            # Frames a refused turn read belong to no step.
+                            self._report_input_waits(session, report=False)
                             # One record per change of reason, not one per turn.
                             reason = f"{type(refused).__name__}: {refused}"
                             if reason != last_refusal:
@@ -327,6 +330,8 @@ class ReactorApp(ReactorCore):
                             outcome = None
                         else:
                             last_refusal = None
+                            input_ms = (time.perf_counter() - input_started) * 1000.0
+                            self._report_input_waits(session)
                             # 3. The model. Synchronous on purpose: nothing changes
                             #    under it. This is the one place a StepOutcome is
                             #    built.
@@ -345,7 +350,13 @@ class ReactorApp(ReactorCore):
                             # 4. The application collects the outcome into media,
                             #    sends its messages, or recovers. A raise ends the
                             #    loop.
+                            output_started = time.perf_counter()
                             returned = await self.process_output(outcome)
+                            stages = self._step_stages(
+                                input_ms,
+                                outcome.elapsed,
+                                (time.perf_counter() - output_started) * 1000.0,
+                            )
 
                     # 5. Emit outside the lock, so a handler can run while the
                     #    wire is full, then report the step that ran.
@@ -363,7 +374,7 @@ class ReactorApp(ReactorCore):
                                 STEP_SESSION.reset(token)
                             frames = self._to_bundle(report.output).frame_count
                             rate = self._playout_rate(frames, pace)
-                        self._report_step(report, session, rate)
+                        self._report_step(report, session, rate, stages)
 
                     # A refused turn waits a little before asking again; a
                     # productive turn yields once so handler tasks already
@@ -373,6 +384,31 @@ class ReactorApp(ReactorCore):
             finally:
                 for buffer in self._input_buffers.values():
                     buffer.reset()
+
+    @staticmethod
+    def _step_stages(
+        input_ms: float, generate_s: float | None, output_ms: float
+    ) -> dict[str, float]:
+        """The time one step spent in each of its frame stages, in milliseconds, for its report."""
+        stages = {"process_input": input_ms}
+        if generate_s is not None:
+            stages["generate"] = generate_s * 1000.0
+        stages["process_output"] = output_ms
+        return stages
+
+    def _report_input_waits(self, session: int, report: bool = True) -> None:
+        """Report each frame the step read, as ``input_wait``, to the connection that sent it.
+
+        The wait runs from the frame's arrival in the input buffer until the
+        read took it. Frames from several connections share one buffer, so
+        each wait goes to its sender only, not into the step's report. With
+        *report* false, the waits are dropped.
+        """
+        sink = self._out_frame_timing
+        for track, buffer in self._input_buffers.items():
+            for source, ms in buffer.take_read_waits():
+                if report and sink is not None and source is not None:
+                    sink(source, session, track, "input_wait", ms)
 
     # -- engine hooks ---------------------------------------------------------
 
