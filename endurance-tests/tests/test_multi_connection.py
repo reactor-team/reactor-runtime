@@ -21,6 +21,32 @@ DESCRIPTION = (
 VIEWERS = 3
 
 
+class _Participant:
+    """A client that streams on in the background, pinging, until it leaves.
+
+    A connected client that goes quiet is dropped by the runtime's ping
+    watchdog, so every participant keeps streaming while the others come and go.
+    """
+
+    def __init__(self, client: V1Client, frame: tuple[bytes, int, int]) -> None:
+        self.client = client
+        self._done = asyncio.Event()
+        self._task = asyncio.create_task(client.stream_while(frame, self._done))
+
+    async def leave(self) -> None:
+        """Stop streaming, wait for the replies still owed, and close."""
+        self._done.set()
+        await self._task
+        await self.client.wait_for_replies()
+        self.client.close()
+
+    async def abandon(self) -> None:
+        """Stop streaming and close at once, for a cycle that failed."""
+        self._done.set()
+        await asyncio.gather(self._task, return_exceptions=True)
+        self.client.close()
+
+
 async def test_multi_connection(runtime: RuntimeProcess) -> None:
     """Release everything each connection of a shared session held, every time."""
     session = runtime.request("POST", "/start_session", {})[1]
@@ -31,40 +57,57 @@ async def test_multi_connection(runtime: RuntimeProcess) -> None:
         publisher = V1Client(runtime, sid)
         viewers = [Viewer(runtime, sid) for _ in range(VIEWERS)]
         successor = V1Client(runtime, sid)
-        clients = [publisher, *viewers]
+        joined: list[_Participant] = []
+        missed: list[str] = []
+
+        async def expect_registered(count: int, step: str) -> None:
+            # Exactly: a participant the runtime dropped early is a failure too.
+            # Waited in a thread, so the participants keep streaming meanwhile.
+            reading = await asyncio.to_thread(runtime.wait_registered, count)
+            if reading["registered_connections"] != count:
+                missed.append(
+                    f"{step}: {reading['registered_connections']} connections registered, "
+                    f"{count} expected"
+                )
+
+        async def join(client: V1Client) -> int:
+            received = await client.open(frame)
+            joined.append(_Participant(client, frame))
+            return received
+
+        async def leave(client: V1Client) -> None:
+            participant = next(p for p in joined if p.client is client)
+            joined.remove(participant)
+            await participant.leave()
+
         try:
-            received = [await publisher.open(frame)]
-            done = asyncio.Event()
-            streaming = asyncio.create_task(publisher.stream_while(frame, done))
-            try:
-                received += await asyncio.gather(*(viewer.open(frame) for viewer in viewers))
-            finally:
-                done.set()
-                await streaming
-            # Streaming on sent requests after the settle in open().
-            await publisher.wait_for_replies()
+            received = [await join(publisher)]
+            received += await asyncio.gather(*(join(viewer) for viewer in viewers))
+            await expect_registered(1 + VIEWERS, "all joined")
             if n % 2:
-                publisher.close()
-                runtime.wait_registered(VIEWERS)
+                await leave(publisher)
+                await expect_registered(VIEWERS, "publisher left")
                 # The webcam passes to a new publisher while the viewers stay.
-                clients.append(successor)
-                received.append(await successor.open(frame))
-                successor.close()
-                runtime.wait_registered(VIEWERS)
+                received.append(await join(successor))
+                await leave(successor)
+                await expect_registered(VIEWERS, "successor left")
                 for viewer in viewers:
-                    viewer.close()
+                    await leave(viewer)
             else:
                 for viewer in viewers:
-                    viewer.close()
-                runtime.wait_registered(1)
+                    await leave(viewer)
+                await expect_registered(1, "viewers left")
+                await leave(publisher)
         finally:
-            for client in clients:
+            for participant in joined:
+                await participant.abandon()
+            for client in (publisher, *viewers, successor):
                 client.close()
         unanswered = [f"publisher: {miss}" for miss in publisher.collect_unanswered()]
         for i, viewer in enumerate(viewers):
             unanswered += [f"viewer {i}: {miss}" for miss in viewer.collect_unanswered()]
-        if successor in clients:
+        if n % 2:
             unanswered += [f"successor: {miss}" for miss in successor.collect_unanswered()]
-        return CycleOutcome(received=min(received), unanswered=unanswered)
+        return CycleOutcome(received=min(received), unanswered=[*unanswered, *missed])
 
     await run_cycles(runtime, test_name="multi-connection", description=DESCRIPTION, cycle=cycle)
