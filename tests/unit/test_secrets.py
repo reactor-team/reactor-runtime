@@ -230,8 +230,33 @@ def test_an_unreadable_root_blocks_the_start(tmp_path: Path) -> None:
         root.chmod(0o700)
 
 
+def test_a_fifo_blocks_the_start_without_blocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    os.mkfifo(tmp_path / "API_TOKEN")
+
+    def forbidden(*args: Any) -> bytes:
+        raise AssertionError("the loader opened a FIFO")
+
+    monkeypatch.setattr(secrets, "_read_all", forbidden)
+
+    with pytest.raises(SystemExit, match="not a regular file"):
+        load_expected_secrets(_env(["API_TOKEN"]), tmp_path)
+
+
 def test_a_directory_named_as_a_secret_blocks_the_start(tmp_path: Path) -> None:
     (tmp_path / "API_TOKEN").mkdir()
 
     with pytest.raises(SystemExit, match="'API_TOKEN' is not a regular file"):
         load_expected_secrets(_env(["API_TOKEN"]), tmp_path)
+
+
+def test_an_unreadable_file_blocks_the_start(tmp_path: Path) -> None:
+    _skip_as_root()
+    _write(tmp_path, "API_TOKEN", _GOOD)
+    (tmp_path / "API_TOKEN").chmod(0)
+    try:
+        with pytest.raises(SystemExit, match="'API_TOKEN' is unreadable"):
+            load_expected_secrets(_env(["API_TOKEN"]), tmp_path)
+    finally:
+        (tmp_path / "API_TOKEN").chmod(0o600)

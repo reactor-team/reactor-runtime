@@ -5,7 +5,7 @@ directory (:data:`SECRETS_ROOT`) and names the files it mounted in the reserved
 environment variable ``REACTOR_SECRETS_EXPECTED_KEYS``. The value is a strict
 JSON array of names, and ``[]`` when the deployment has no secrets.
 :func:`load_expected_secrets` checks that the mounted files match the expected
-set exactly, reads every file, and returns the decoded values by name.
+set exactly, validates every value, and returns the values by name.
 
 When the variable is absent, the loader does nothing and touches no file.
 
@@ -26,6 +26,7 @@ from pathlib import Path
 EXPECTED_KEYS_ENV = "REACTOR_SECRETS_EXPECTED_KEYS"
 SECRETS_ROOT = Path("/run/secrets")
 
+_MAX_BYTES = 32768
 _NAME_PATTERN = "[A-Za-z_][A-Za-z0-9_]*"
 _NAME_RE = re.compile(_NAME_PATTERN)
 
@@ -48,9 +49,9 @@ def load_expected_secrets(env: Mapping[str, str], root: Path) -> dict[str, str]:
     Raises:
         SystemExit: If the variable holds invalid JSON or an invalid name
             list, if the mounted entries do not match the expected set
-            exactly, if an entry is not a readable regular file, or if a
-            value is not valid UTF-8. The message names the keys and the
-            failure, never a value.
+            exactly, if an entry is not a usable regular file, or if a value
+            is empty, larger than 32 KiB, not valid UTF-8, or contains a NUL
+            byte. The message names the keys and the failure, never a value.
     """
     raw = env.get(EXPECTED_KEYS_ENV)
     if raw is None:
@@ -136,6 +137,8 @@ def _read_secret(root: Path, name: str) -> str:
         # Refused before any open, so a FIFO or a device can never block the boot.
         raise SystemExit(f"secret file {name!r} is not a regular file")
     data = _read_all(path, name)
+    if b"\x00" in data:
+        raise SystemExit(f"secret file {name!r} contains a NUL byte")
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError:
@@ -143,13 +146,18 @@ def _read_secret(root: Path, name: str) -> str:
 
 
 def _read_all(path: str, name: str) -> bytes:
-    """Read the regular file at *path*.
+    """Read the regular file at *path*, enforcing the size rules.
 
     Raises:
-        SystemExit: If the file is unreadable.
+        SystemExit: If the file is unreadable, empty, or over the limit.
     """
     try:
         with open(path, "rb") as file:
-            return file.read()
+            data = file.read(_MAX_BYTES + 1)
     except OSError:
         raise SystemExit(f"secret file {name!r} is unreadable") from None
+    if len(data) > _MAX_BYTES:
+        raise SystemExit(f"secret file {name!r} is larger than {_MAX_BYTES} bytes")
+    if not data:
+        raise SystemExit(f"secret file {name!r} is empty")
+    return data
