@@ -7,6 +7,7 @@ from endurance.report import (
     MetricResult,
     RunResult,
     finish_run,
+    git_commit_sha,
     render_markdown,
     write_reports,
 )
@@ -125,3 +126,13 @@ def test_a_report_that_cannot_be_written_does_not_hide_a_failed_check(tmp_path: 
     blocker = tmp_path / "not-a-dir"
     blocker.write_text("")
     assert _finish(blocker, [_metric("live_pacers", "fail")]).status == "FAIL"
+
+
+def test_the_commit_under_test_is_the_swapped_in_runtime_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GITHUB_SHA", "a" * 40)
+    monkeypatch.setenv("ENDURANCE_COMMIT_SHA", "b" * 40)
+    assert git_commit_sha() == "b" * 40
+    monkeypatch.delenv("ENDURANCE_COMMIT_SHA")
+    assert git_commit_sha() == "a" * 40

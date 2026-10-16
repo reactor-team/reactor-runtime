@@ -105,6 +105,8 @@ jobs:
           fi
           git rm -rq src/reactor_runtime
           git checkout "$sha" -- src/reactor_runtime
+          # The reports name this commit, not the workflow's checkout.
+          echo "ENDURANCE_COMMIT_SHA=$sha" >> "$GITHUB_ENV"
           echo "Testing the runtime from $RUNTIME_REF (${sha:0:7})"
 
       - uses: jdx/mise-action@v4
