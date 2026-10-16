@@ -18,13 +18,21 @@ import numpy as np
 import pytest
 from livekit import api, rtc
 
-from reactor_runtime import Audio, Output, ReactorApp, Video
+from reactor_runtime import Audio, MessageField, ModelMessage, Output, ReactorApp, Video, event
 from reactor_runtime.core import RuntimeConfig, SessionEvent, SessionState, Transition
 from reactor_runtime.http.server import build_app
 from reactor_runtime.metrics import RuntimeMetrics
+from reactor_runtime.protocol import Channel, Direction, ProtocolVersion, select
+from reactor_runtime.protocol.common import dict_to_struct, struct_to_dict
 from reactor_runtime.runner import Runner
 from reactor_runtime.runner.runner import SESSION_ID
 from reactor_runtime.transport.livekit import LiveKitRouter
+from reactor_runtime.transport.livekit.participant import (
+    CONTROL_TOPIC,
+    DATA_TOPIC,
+    MAX_PACKET_BYTES,
+)
+from reactor_wire.v1 import data_pb2, model_pb2
 
 LIVEKIT_URL = os.environ.get("LIVEKIT_URL", "")
 API_KEY = os.environ.get("LIVEKIT_API_KEY", "devkey")
@@ -53,10 +61,26 @@ class RoomOutput(Output):
     main_audio: Voice
 
 
+class Echoed(ModelMessage):
+    text: str = MessageField(description="The text the command carried.")
+
+
+class Announcement(ModelMessage):
+    text: str = MessageField(description="The text announced to every client.")
+
+
 class ToneModel(ReactorApp):
     """A flat grey picture and a continuous 440 Hz tone, one 40 ms frame per step."""
 
     fps = FPS
+
+    @event(name="echo", description="Reply with `echoed`, carrying `text`.")
+    async def echo(self, text: str) -> Echoed:
+        return Echoed(text=text)
+
+    @event(name="announce", description="Broadcast `announcement` to every client.")
+    async def announce(self, text: str) -> None:
+        await self.send(Announcement(text=text))
 
     def load(self, config_path: Path | None) -> None:
         self.sample = 0
@@ -169,20 +193,23 @@ class Watcher:
 
     def _on_track(self, track: rtc.Track, *_: Any) -> None:
         self.tracks[track.name] = track
-        reader = self._read_video if track.kind == rtc.TrackKind.KIND_VIDEO else self._read_audio
-        self._tasks.append(asyncio.ensure_future(reader(track)))
+        # Only the model's own tracks: other modules of the run publish theirs too.
+        if track.name == "main_video":
+            self._tasks.append(asyncio.ensure_future(self._read_video(track)))
+        elif track.name == "main_audio":
+            self._tasks.append(asyncio.ensure_future(self._read_audio(track)))
 
     async def _read_video(self, track: rtc.Track) -> None:
-        async for event in rtc.VideoStream(track):
-            frame = event.frame.convert(rtc.VideoBufferType.RGB24)
+        async for received in rtc.VideoStream(track):
+            frame = received.frame.convert(rtc.VideoBufferType.RGB24)
             self.video.append(
                 np.frombuffer(bytes(frame.data), np.uint8).reshape(frame.height, frame.width, 3)
             )
 
     async def _read_audio(self, track: rtc.Track) -> None:
-        async for event in rtc.AudioStream(track, sample_rate=RATE, num_channels=1):
-            self.audio_rates.add(event.frame.sample_rate)
-            self.audio.append(np.frombuffer(bytes(event.frame.data), np.int16).copy())
+        async for received in rtc.AudioStream(track, sample_rate=RATE, num_channels=1):
+            self.audio_rates.add(received.frame.sample_rate)
+            self.audio.append(np.frombuffer(bytes(received.frame.data), np.int16).copy())
 
     async def leave(self) -> None:
         for task in self._tasks:
@@ -346,3 +373,185 @@ async def test_the_token_never_reaches_the_journal(
 
 def _expect_state(runner: Runner, state: SessionState) -> None:
     assert runner._sm.current_state is state
+
+
+V1 = select(ProtocolVersion.V1)
+
+
+class ProtocolClient(Watcher):
+    """A participant that speaks the Reactor protocol over the room's data messages."""
+
+    def __init__(self, identity: str) -> None:
+        super().__init__()
+        self.identity = identity
+        # (how it arrived, the decoded message), in arrival order.
+        self.received: list[tuple[str, Any]] = []
+        self.room.on("data_received", self._on_data)
+        for topic in (DATA_TOPIC, CONTROL_TOPIC):
+            self.room.register_byte_stream_handler(topic, self._on_stream)
+
+    async def join(self, room: str) -> None:
+        await self.room.connect(LIVEKIT_URL, _token(room, self.identity))
+
+    def _decode(self, topic: str, data: bytes) -> Any:
+        channel = Channel.DATA if topic == DATA_TOPIC else Channel.CONTROL
+        return V1.decode(data, channel, Direction.SERVER)
+
+    def _on_data(self, packet: rtc.DataPacket) -> None:
+        if packet.topic in (DATA_TOPIC, CONTROL_TOPIC):
+            self.received.append(("packet", self._decode(packet.topic, packet.data)))
+
+    def _on_stream(self, reader: rtc.ByteStreamReader, identity: str) -> None:
+        async def read() -> None:
+            data = b"".join([chunk async for chunk in reader])
+            self.received.append(("stream", self._decode(reader.info.topic, data)))
+
+        self._tasks.append(asyncio.ensure_future(read()))
+
+    async def command(self, name: str, request_id: str, **args: Any) -> None:
+        message = data_pb2.DataClientMessage(
+            request_id=request_id, command=model_pb2.Command(type=name, data=dict_to_struct(args))
+        )
+        _, frame = V1.encode(message)
+        assert isinstance(frame, bytes)
+        local = self.room.local_participant
+        if len(frame) <= MAX_PACKET_BYTES:
+            await local.publish_data(frame, destination_identities=["model"], topic=DATA_TOPIC)
+        else:
+            await local.send_bytes(frame, topic=DATA_TOPIC, destination_identities=["model"])
+
+    def model_messages(self) -> list[tuple[str, str, str, dict[str, Any]]]:
+        return [
+            (how, m.request_id, m.message.type, struct_to_dict(m.message.data))
+            for how, m in self.received
+            if isinstance(m, data_pb2.DataServerMessage) and m.WhichOneof("payload") == "message"
+        ]
+
+
+async def _joined(runner: Runner, http: httpx.AsyncClient, room_name: str) -> int:
+    """Start a session, connect it to the room, and return the room connection's id."""
+    runner.start_session({})
+    conn_id = await _open(http, _token(room_name, "model"))
+    assert (await _settled(http, conn_id))["state"] == "open"
+    return conn_id
+
+
+def _participants(runner: Runner) -> list[Transition]:
+    return [
+        move for move in _moves(runner, SessionEvent.CONNECTION_OPENED) if "identity" in move.detail
+    ]
+
+
+async def test_each_participant_is_a_client_named_by_its_identity(
+    runner: Runner, http: httpx.AsyncClient, room_name: str
+) -> None:
+    room_id = await _joined(runner, http, room_name)
+    client = ProtocolClient("viewer")
+    await client.join(room_name)
+    await _until(lambda: bool(_participants(runner)))
+
+    (opened,) = _participants(runner)
+    conn_id = opened.detail["conn_id"]
+    assert dict(opened.detail) == {"conn_id": conn_id, "transport": "livekit", "identity": "viewer"}
+    assert 1002 <= conn_id <= 9999
+    assert conn_id != room_id
+    assert (opened.from_state, opened.to_state) == (SessionState.STREAMING, SessionState.STREAMING)
+
+    await client.leave()
+    await _until(lambda: bool(_moves(runner, SessionEvent.CONNECTION_CLOSED)))
+    (closed,) = _moves(runner, SessionEvent.CONNECTION_CLOSED)
+    assert dict(closed.detail) == dict(opened.detail)
+    _expect_state(runner, SessionState.STREAMING)
+
+
+async def test_a_participant_already_in_the_room_becomes_a_client_at_the_join(
+    runner: Runner, http: httpx.AsyncClient, room_name: str
+) -> None:
+    client = ProtocolClient("early")
+    await client.join(room_name)
+    try:
+        await _joined(runner, http, room_name)
+        await _until(lambda: bool(_participants(runner)))
+        assert _participants(runner)[0].detail["identity"] == "early"
+    finally:
+        await client.leave()
+
+
+async def test_leaving_the_room_closes_every_participant_before_the_room_connection(
+    runner: Runner, http: httpx.AsyncClient, room_name: str
+) -> None:
+    room_id = await _joined(runner, http, room_name)
+    client = ProtocolClient("viewer")
+    await client.join(room_name)
+    try:
+        await _until(lambda: bool(_participants(runner)))
+        (participant,) = _participants(runner)
+
+        await http.delete(f"{_CONNECTIONS}/{room_id}")
+
+        closed = [move.detail["conn_id"] for move in _moves(runner, SessionEvent.CONNECTION_CLOSED)]
+        assert closed == [participant.detail["conn_id"], room_id]
+        _expect_state(runner, SessionState.ORPHANED)
+    finally:
+        await client.leave()
+
+
+async def test_a_command_is_answered_to_the_participant_that_sent_it(
+    runner: Runner, http: httpx.AsyncClient, room_name: str
+) -> None:
+    await _joined(runner, http, room_name)
+    asker, bystander = ProtocolClient("asker"), ProtocolClient("bystander")
+    await asker.join(room_name)
+    await bystander.join(room_name)
+    try:
+        await _until(lambda: len(_participants(runner)) == 2)
+
+        await asker.command("echo", "req-1", text="hello")
+        await _until(lambda: bool(asker.model_messages()))
+
+        assert asker.model_messages() == [("packet", "req-1", "echoed", {"text": "hello"})]
+        await asyncio.sleep(0.3)
+        assert bystander.model_messages() == []
+    finally:
+        await asker.leave()
+        await bystander.leave()
+
+
+async def test_a_broadcast_reaches_every_participant(
+    runner: Runner, http: httpx.AsyncClient, room_name: str
+) -> None:
+    await _joined(runner, http, room_name)
+    one, two = ProtocolClient("one"), ProtocolClient("two")
+    await one.join(room_name)
+    await two.join(room_name)
+    try:
+        await _until(lambda: len(_participants(runner)) == 2)
+
+        await one.command("announce", "req-2", text="to everyone")
+        await _until(lambda: bool(one.model_messages()) and bool(two.model_messages()))
+
+        expected = ("packet", "", "announcement", {"text": "to everyone"})
+        assert one.model_messages() == [expected]
+        assert two.model_messages() == [expected]
+    finally:
+        await one.leave()
+        await two.leave()
+
+
+async def test_messages_above_the_packet_limit_travel_as_byte_streams(
+    runner: Runner, http: httpx.AsyncClient, room_name: str
+) -> None:
+    await _joined(runner, http, room_name)
+    client = ProtocolClient("viewer")
+    await client.join(room_name)
+    try:
+        await _until(lambda: bool(_participants(runner)))
+        text = "x" * 40_000
+
+        # Sent as a byte stream, and answered with one.
+        await client.command("echo", "req-3", text=text)
+        await _until(lambda: bool(client.model_messages()))
+
+        assert client.model_messages() == [("stream", "req-3", "echoed", {"text": text})]
+    finally:
+        await client.leave()

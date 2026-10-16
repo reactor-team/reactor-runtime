@@ -156,6 +156,8 @@ POST /sessions/{session_id}/transport/livekit/connections
 
 The join runs in the background. A `GET` on the connection answers `202` while it runs, then reports `open`, `failed`, or `closed` with a reason, and a `DELETE` leaves the room. The room connection is a system connection: once the join succeeds it publishes one LiveKit track per output track, named after it, and occupies the session, so the session streams and the step loop runs whether or not anyone in the room is watching. A session has one room connection at a time. Losing the room closes the room connection and leaves the session running, so the session ends like any session left without a connection, after the orphan timeout.
 
+Every other participant in the room is a client of the session, with a connection of its own: the model gets `@connected` when it joins and `@disconnected` when it leaves, and the journal names its identity in the room. A participant speaks the Reactor protocol as data messages on two topics, `reactor.data` and `reactor.control`, the two families a WebRTC client sends on its two data channels; a message larger than 15,000 bytes travels as a byte stream on the same topic. A command's reply reaches the participant that sent it, and a broadcast reaches every participant. When the room connection closes, its participants' connections close with it.
+
 Scaffold, build, and run it with the CLI:
 
 ```sh

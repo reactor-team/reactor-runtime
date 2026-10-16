@@ -59,8 +59,9 @@ class FakeSink:
         self.messages: list[tuple[ConnId, bytes | str, Channel]] = []
         self.answers: list[tuple[ConnId, dict[str, str]]] = []
 
-    def connection_opened(self, conn: Connection) -> None:
+    def connection_opened(self, conn: Connection) -> bool:
         self.opened.append(conn.id)
+        return True
 
     def connection_closed(self, conn_id: ConnId) -> None:
         pass

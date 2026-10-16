@@ -60,8 +60,9 @@ class FakeRunner:
     def track_map(self) -> dict[str, Any]:
         return {"tracks": [{"name": "main_video", "kind": "video"}]}
 
-    def connection_opened(self, conn: Connection) -> None:
+    def connection_opened(self, conn: Connection) -> bool:
         self.opened.append(conn.id)
+        return True
 
     def connection_closed(self, conn_id: ConnId) -> None:
         self.closed.append(conn_id)
