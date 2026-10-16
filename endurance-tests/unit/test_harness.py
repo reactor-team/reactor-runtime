@@ -48,7 +48,9 @@ def test_a_connection_still_registered_after_the_timeout_fails_its_cycle() -> No
     result = assert_released([7.0, None, 8.0])
     assert result.status == "fail"
     assert result.first_bad_cycle == 1
-    assert f"1/3 connections were still registered {CLOSE_TIMEOUT_S:g}s" in result.detail
+    assert f"still registered {CLOSE_TIMEOUT_S:g}s after its client left on 1/3 cycles" in (
+        result.detail
+    )
 
 
 def test_a_run_whose_connections_all_stayed_reports_no_drop_time() -> None:
