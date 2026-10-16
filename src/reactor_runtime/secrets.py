@@ -1,17 +1,27 @@
-"""Managed secrets that a deployment platform mounts as files.
+"""Managed secrets, loaded into the environment before the model module imports.
 
 A deployment platform mounts one file per managed secret under a well-known
 directory (:data:`SECRETS_ROOT`) and names the files it mounted in the reserved
 environment variable ``REACTOR_SECRETS_EXPECTED_KEYS``. The value is a strict
-JSON array of names, and ``[]`` when the deployment has no secrets.
-:func:`load_expected_secrets` checks that the mounted files match the expected
-set exactly, validates every value, and returns the values by name.
+JSON array of names, and ``[]`` when the deployment has no secrets. At boot,
+:func:`export_secrets` checks that the mounted files match the expected set
+exactly, validates every value, and sets each name in the process environment.
+This happens before the model module imports, so model code sees the secrets
+from its first line.
 
-When the variable is absent, the loader does nothing and touches no file.
+When the variable is absent, the loader does nothing: no file access and no
+environment change. A deployment without secrets and a local run behave as
+before. A mounted value replaces a value that the image already set under the
+same name. An image value never masks a missing file, because the file check
+runs first.
 
 Every failure raises :class:`SystemExit` with a message that names the affected
 keys or entries and the failure. A message never contains a value or a byte of
 a value.
+
+The distributed runner starts its rank processes with the ``spawn``
+multiprocessing context after the export. The ranks inherit the environment of
+the parent process and do not read the mount again.
 """
 
 from __future__ import annotations
@@ -24,12 +34,16 @@ import stat
 from collections.abc import Mapping
 from pathlib import Path
 
+from reactor_runtime import log
+
 EXPECTED_KEYS_ENV = "REACTOR_SECRETS_EXPECTED_KEYS"
 SECRETS_ROOT = Path("/run/secrets")
 
 _MAX_BYTES = 32768
 _NAME_PATTERN = "[A-Za-z_][A-Za-z0-9_]*"
 _NAME_RE = re.compile(_NAME_PATTERN)
+
+logger = log.get_logger(__name__)
 
 
 def load_expected_secrets(env: Mapping[str, str], root: Path) -> dict[str, str]:
@@ -72,6 +86,29 @@ def load_expected_secrets(env: Mapping[str, str], root: Path) -> dict[str, str]:
             f"the secret files in {root} do not match {EXPECTED_KEYS_ENV}: {'; '.join(problems)}"
         )
     return _read_secrets(root, sorted(expected))
+
+
+def export_secrets() -> None:
+    """Load the managed secrets and set them in the process environment.
+
+    Reads :data:`EXPECTED_KEYS_ENV` from ``os.environ`` and the files from
+    :data:`SECRETS_ROOT`, both at call time. Does nothing when the variable is
+    absent. A name that is already set is replaced. Each value goes in through
+    ``os.environb`` as the exact file bytes, so the bytes do not depend on the
+    locale. ``os.environ`` then shows the strict UTF-8 text when the
+    interpreter's file-system encoding is UTF-8, which is the default on Linux
+    (PEP 538 and PEP 540).
+
+    Raises:
+        SystemExit: If a check in :func:`load_expected_secrets` fails. A
+            failure leaves the environment untouched.
+    """
+    if EXPECTED_KEYS_ENV not in os.environ:
+        return
+    values = load_expected_secrets(os.environ, SECRETS_ROOT)
+    for name, text in values.items():
+        os.environb[name.encode()] = text.encode()
+    logger.info("loaded secret files", keys=sorted(values), count=len(values))
 
 
 def _parse_expected(raw: str) -> list[str]:

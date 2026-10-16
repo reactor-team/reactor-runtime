@@ -9,7 +9,10 @@ never carry a value or a byte of a value.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -17,7 +20,7 @@ from typing import Any
 import pytest
 
 from reactor_runtime import secrets
-from reactor_runtime.secrets import EXPECTED_KEYS_ENV, load_expected_secrets
+from reactor_runtime.secrets import EXPECTED_KEYS_ENV, export_secrets, load_expected_secrets
 
 _GOOD = b"synth-value-3c6d6c03"
 _IMAGE_DEFAULT = "synth-image-default-7712"
@@ -51,6 +54,11 @@ def _mount_atomic_writer(root: Path, files: dict[str, bytes]) -> None:
     (root / "..data").symlink_to(stamp.name)
     for name in files:
         (root / name).symlink_to(f"..data/{name}")
+
+
+def _export_from(root: Path, names: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(secrets, "SECRETS_ROOT", root)
+    monkeypatch.setenv(EXPECTED_KEYS_ENV, json.dumps(names))
 
 
 def _case_sensitive(root: Path) -> bool:
@@ -313,3 +321,61 @@ def test_an_unreadable_file_blocks_the_start(tmp_path: Path) -> None:
             load_expected_secrets(_env(["API_TOKEN"]), tmp_path)
     finally:
         (tmp_path / "API_TOKEN").chmod(0o600)
+
+
+# -- Export ------------------------------------------------------------------------
+
+
+def test_export_sets_the_exact_bytes_over_an_image_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = "synth-café\n".encode()
+    _mount_atomic_writer(tmp_path, {"API_TOKEN": data})
+    _export_from(tmp_path, ["API_TOKEN"], monkeypatch)
+    os.environ["API_TOKEN"] = _IMAGE_DEFAULT
+
+    export_secrets()
+
+    assert os.environ["API_TOKEN"] == data.decode()
+    assert os.environb[b"API_TOKEN"] == data
+    probe = "import os, sys; sys.stdout.buffer.write(os.environb[b'API_TOKEN'])"
+    child = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, check=True, timeout=60
+    )
+    assert child.stdout == data
+
+
+def test_an_image_default_never_masks_a_missing_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _export_from(tmp_path, ["API_TOKEN"], monkeypatch)
+    os.environ["API_TOKEN"] = _IMAGE_DEFAULT
+
+    with pytest.raises(SystemExit, match="missing 'API_TOKEN'"):
+        export_secrets()
+
+    assert os.environ["API_TOKEN"] == _IMAGE_DEFAULT
+
+
+def test_a_nul_in_a_later_file_leaves_the_environment_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _mount_atomic_writer(tmp_path, {"AAA_FIRST": _GOOD, "ZZZ_LAST": b"synth\x00"})
+    _export_from(tmp_path, ["AAA_FIRST", "ZZZ_LAST"], monkeypatch)
+    os.environ["AAA_FIRST"] = _IMAGE_DEFAULT
+    snapshot = dict(os.environ)
+
+    with pytest.raises(SystemExit, match="'ZZZ_LAST' contains a NUL byte"):
+        export_secrets()
+
+    assert dict(os.environ) == snapshot
+
+
+def test_export_is_a_noop_when_the_variable_is_absent(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO)
+    snapshot = dict(os.environ)
+
+    export_secrets()
+
+    assert dict(os.environ) == snapshot
+    assert not [record for record in caplog.records if record.name == secrets.__name__]

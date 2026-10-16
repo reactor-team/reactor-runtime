@@ -7,14 +7,30 @@ a value.
 from __future__ import annotations
 
 import json
+import logging
+import os
 import traceback
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-from reactor_runtime.secrets import EXPECTED_KEYS_ENV, load_expected_secrets
+from reactor_runtime import secrets
+from reactor_runtime.secrets import EXPECTED_KEYS_ENV, export_secrets, load_expected_secrets
 
 _GOOD = b"synth-value-3c6d6c03"
+
+
+@pytest.fixture(autouse=True)
+def _clean_environ() -> Iterator[None]:
+    """Restore the whole process environment, because the export writes it directly."""
+    snapshot = dict(os.environ)
+    os.environ.pop(EXPECTED_KEYS_ENV, None)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(snapshot)
 
 
 def _env(names: list[str]) -> dict[str, str]:
@@ -75,3 +91,23 @@ def test_a_bad_value_in_a_later_file_blocks_with_a_names_only_message(
     # A decode error quotes the bad byte and its position, so it must not show.
     assert "position" not in "".join(traceback.format_exception(raised.value))
     _assert_no_value_leak(raised.value, caplog, capsys, data)
+
+
+@pytest.mark.parametrize("names", [[], ["API_TOKEN"]])
+def test_export_logs_key_names_and_a_count_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    names: list[str],
+) -> None:
+    for name in names:
+        _write(tmp_path, name, _GOOD)
+    monkeypatch.setattr(secrets, "SECRETS_ROOT", tmp_path)
+    monkeypatch.setenv(EXPECTED_KEYS_ENV, json.dumps(names))
+    caplog.set_level(logging.INFO)
+
+    export_secrets()
+
+    [record] = [record for record in caplog.records if record.name == secrets.__name__]
+    assert getattr(record, "reactor_fields", None) == {"keys": names, "count": len(names)}
+    assert _GOOD.decode() not in caplog.text

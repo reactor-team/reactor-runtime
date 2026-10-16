@@ -33,6 +33,7 @@ from reactor_runtime.http import HttpServer
 from reactor_runtime.manifest import MANIFEST, load_config
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.runner import Runner
+from reactor_runtime.secrets import export_secrets
 from reactor_runtime.service import Service
 from reactor_runtime.transport.webrtc.config import (
     CodecEntry,
@@ -402,10 +403,14 @@ def main() -> None:
     bind address, ICE/transport configuration, lifecycle timeouts, and log level
     are read from the environment around it.
 
+    Before it reads the manifest, it exports the secrets that the deployment
+    platform mounted, so the model module sees them when it imports.
+
     Raises:
-        SystemExit: If no ``reactor.yaml`` is found or an environment variable
-            is set to a malformed value, and — carrying the failure status —
-            when the runtime went down because its model loop crashed.
+        SystemExit: If the mounted secrets fail a check, if no ``reactor.yaml``
+            is found or an environment variable is set to a malformed value,
+            and — carrying the failure status — when the runtime went down
+            because its model loop crashed.
     """
     from reactor_runtime.transport.webrtc.peer import libwebrtc_peer_factory
 
@@ -416,6 +421,7 @@ def main() -> None:
     # projects it to — so every record the process writes carries its lifecycle,
     # the first one included.
     log.set_state(SessionState.CREATED.name.lower(), RuntimeState.LOADING.value)
+    export_secrets()
     manifest = Path.cwd() / MANIFEST
     if not manifest.is_file():
         raise SystemExit(f"no {MANIFEST} found in {Path.cwd()}")
