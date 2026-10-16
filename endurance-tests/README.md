@@ -17,7 +17,7 @@ runtime serving real clients, cycle after cycle.
 - The client is a bare `reactor_webrtc` peer (`endurance/harness.py`). It does the
   runtime's HTTP signaling and control messages itself, over localhost, with
   no client SDK in between: `BareClient` in v0 JSON, `V1Client` in v1
-  protobuf.
+  protobuf. `abrupt_disconnect` runs it in a process of its own, to kill it.
 - After every cycle the test waits for the runtime to drop the connection and
   finish tearing it down, then reads the probe and samples the runtime's
   process. Each reading is one sample.
@@ -29,6 +29,7 @@ Exact counts, which must be 0 on every cycle:
 | Count | What it means |
 |---|---|
 | `short_cycles` | A cycle whose client got fewer than its 60 frames back: it did not exercise what the scenario claims to. |
+| `unreleased_connections` | A connection still in the runtime's registry 30 s after its client left. The detail reports how long the runtime took to drop the others, which is how fast it notices a client is gone. |
 | `unanswered_requests` | v1 only: a cycle where the publish, the schema request or a command was refused or never answered. |
 | `pacers_holding_output` | A media pacer that still reaches model output after it stopped. Checked the moment it stops, so it does not depend on when garbage collection runs. |
 | `pinned_batches` | Model output the cyclic garbage collector freed: nothing but reference-cycle garbage held it. |
@@ -48,6 +49,7 @@ a trend ends in ERROR rather than in a verdict; a failed count still fails it.
 |---|---|
 | `connection_churn` | One session. Each cycle a client joins, streams a webcam both ways until 60 frames come back, and leaves. The client speaks the v0 JSON control protocol. |
 | `connection_churn_v1` | The same churn with a client that speaks v1 protobuf, as current SDKs do: it also requests the schema and, once a second, pings, sends client stats and a `set_effect` or `set_intensity` command. Every request must be answered without an error (`unanswered_requests`). |
+| `abrupt_disconnect` | The v1 churn, with each client in its own process (`endurance/abrupt.py`), killed with `SIGKILL` a moment after its frames came back instead of closing. The runtime learns the client is gone only from the wire going silent, as it does when a client crashes or loses its network. |
 
 ## Running it
 
@@ -78,8 +80,9 @@ launcher hooks still has the shape it expects.
 ## Adding a scenario
 
 Add `tests/test_<name>.py`. A churn of a different client is one call to
-`run_churn(...)` (`endurance/churn.py`) with a `BareClient` subclass. Anything
-else drives the runtime through the `runtime` fixture, takes one
+`run_churn(...)` (`endurance/churn.py`) with a `BareClient` subclass, or with
+any client that has its `run()` and `unanswered` (`ChurnClient`). Any other
+scenario drives the runtime through the `runtime` fixture, takes one
 `ResourceSampler.sample()` per cycle from `runtime.settled_probe()`, and ends
 in a `finally` block with `finish_and_check(...)` over `exact_metrics(...) +
 trend_metrics(...)`. CI picks the file up as its own job.
@@ -96,8 +99,9 @@ every PR that touches the runtime:
 - **A new client-facing path** (commands, uploads, client stats, clips and
   recordings, several clients on one session, a control protocol version):
   add a scenario that drives it, or extend an existing one. Today's scenarios
-  cover the v0 and v1 control protocols, commands and client stats; uploads,
-  clips, recordings and several clients on one session have none yet.
+  cover the v0 and v1 control protocols, commands, client stats and a client
+  that dies without closing; uploads, clips, recordings and several clients
+  on one session have none yet.
 - **A change to what the launcher hooks** (`MediaPacer.stop`,
   `http_server.build_app`, `Runner._connections`, the transport classes the
   probe counts): update `endurance/launcher.py` in the same PR.
