@@ -3,7 +3,8 @@
 The runtime runs from source in its own process, started by ``launcher.py``,
 and every resource reading is of that process, never of pytest's. The client
 is a ``reactor_webrtc`` peer driven from here: it does the runtime's HTTP
-signaling and the v0 control messages itself, so no client SDK is involved.
+signaling and the control messages itself, in v0 JSON (:class:`BareClient`) or
+v1 protobuf (:class:`V1Client`), so no client SDK is involved.
 """
 
 from __future__ import annotations
@@ -26,12 +27,26 @@ from typing import Any
 import numpy as np
 import psutil
 import reactor_webrtc as rw
+from google.protobuf import struct_pb2
+from google.protobuf.message import DecodeError
 
 from endurance.report import MetricResult
 from endurance.trends import ENDURANCE_DURATION_SECONDS, Sample
 from reactor_runtime.transport.webrtc.config import WebRtcConfig
 from reactor_runtime.transport.webrtc.frames import rgb_to_bgra
 from reactor_runtime.transport.webrtc.peer import _get_factory
+from reactor_wire.v1 import (
+    common_pb2,
+    control_pb2,
+    data_pb2,
+    model_pb2,
+    platform_pb2,
+    track_pb2,
+)
+
+_REQUEST = common_pb2.MessageKind.MESSAGE_KIND_REQUEST
+_RESPONSE = common_pb2.MessageKind.MESSAGE_KIND_RESPONSE
+_NOTIFICATION = common_pb2.MessageKind.MESSAGE_KIND_NOTIFICATION
 
 SUITE_DIR = Path(__file__).resolve().parent.parent
 
@@ -196,7 +211,9 @@ class BareClient:
             deadline = time.monotonic() + _FRAME_WAIT_S
             while self.received_video < FRAMES_PER_CYCLE and time.monotonic() < deadline:
                 self._camera.push_video_frame(bgra, width, height)
+                self._on_tick()
                 await asyncio.sleep(1 / _FPS)
+            await self._settle()
             return self.received_video
         finally:
             self.close()
@@ -226,6 +243,8 @@ class BareClient:
         await send_video.set_track(camera)
         data = pc.create_data_channel("data")
         control = pc.create_data_channel("control")
+        data.on_message(self._on_data_message)
+        control.on_message(self._on_control_message)
         control.on_state_change(
             lambda state: control_open.set() if state == rw.DataChannelState.Open else None
         )
@@ -290,6 +309,10 @@ class BareClient:
                 )
             await asyncio.sleep(0.05)
 
+        self._start_wire(control, data)
+
+    def _start_wire(self, control: Any, data: Any) -> None:
+        """Publish the webcam and resume both output tracks, in v0 JSON."""
         control.send(
             json.dumps(
                 {
@@ -309,6 +332,18 @@ class BareClient:
                 binary=False,
             )
 
+    def _on_tick(self) -> None:
+        """Run once per webcam frame sent; the v0 client sends nothing more."""
+
+    async def _settle(self) -> None:
+        """Wait, before closing, for what the client is still owed; v0 is owed nothing."""
+
+    def _on_data_message(self, data: bytes, binary: bool) -> None:
+        """Read a data-channel frame from the runtime; v0 reads none."""
+
+    def _on_control_message(self, data: bytes, binary: bool) -> None:
+        """Read a control-channel frame from the runtime; v0 reads none."""
+
     def _on_track(self, kind: rw.MediaKind, track: rw.Track) -> None:
         self._keep.append(track)
         if kind == rw.MediaKind.Video:
@@ -318,6 +353,179 @@ class BareClient:
 
     def _count_video(self, *_: Any) -> None:
         self.received_video += 1
+
+
+# How often the v1 client pings, sends client stats and a command: client
+# stats closer than a second apart are dropped by the runtime.
+_V1_INTERVAL_S = 1.1
+# How long a closing v1 client waits for the replies it is still owed.
+_REPLY_WAIT_S = 3.0
+_EFFECTS = ("none", "grayscale", "invert")
+
+
+class V1Client(BareClient):
+    """A :class:`BareClient` that speaks the v1 protobuf protocol, as current SDKs do.
+
+    Besides the webcam it requests the model's schema, and once a second it
+    pings, sends a client stats batch and a ``set_effect`` or ``set_intensity``
+    command, so the churn also exercises the per-connection state that path
+    keeps. Every request it sends must be answered without an error before it
+    closes; :attr:`unanswered` lists the ones that were not.
+    """
+
+    def __init__(self, runtime: RuntimeProcess, session_id: str) -> None:
+        """Create a client for *session_id*; nothing connects until :meth:`run`."""
+        super().__init__(runtime, session_id)
+        self._control: Any = None
+        self._data: Any = None
+        self._lock = threading.Lock()
+        # Request id to what it asked for, until its reply arrives.
+        self._pending: dict[str, str] = {}
+        self._failed: list[str] = []
+        self._next_tick = 0.0
+        self._sent = 0
+        self.unanswered: list[str] = []
+
+    def _start_wire(self, control: Any, data: Any) -> None:
+        self._control, self._data = control, data
+        self._send_control(
+            control_pb2.ControlClientMessage(
+                request_id="publish-webcam",
+                kind=_REQUEST,
+                publish_track=track_pb2.PublishTrack(name="webcam"),
+            ),
+            expects="publish_track",
+        )
+        for name in ("main_video", "main_audio"):
+            self._send_control(
+                control_pb2.ControlClientMessage(
+                    kind=_NOTIFICATION, resume_track=track_pb2.ResumeTrack(name=name)
+                )
+            )
+        self._send_control(
+            control_pb2.ControlClientMessage(
+                request_id="schema", kind=_REQUEST, request_schema=platform_pb2.RequestSchema()
+            ),
+            expects="model_schema",
+        )
+
+    def _on_tick(self) -> None:
+        now = time.monotonic()
+        if now < self._next_tick:
+            return
+        self._next_tick = now + _V1_INTERVAL_S
+        n = self._sent
+        self._sent += 1
+        self._send_control(
+            control_pb2.ControlClientMessage(kind=_NOTIFICATION, ping=platform_pb2.Ping())
+        )
+        self._send_control(
+            control_pb2.ControlClientMessage(kind=_NOTIFICATION, client_stats=self._client_stats(n))
+        )
+        args = struct_pb2.Struct()
+        if n % 2:
+            name = "set_intensity"
+            args.update({"intensity": 0.5 if n % 4 == 1 else 1.0})
+        else:
+            name = "set_effect"
+            args.update({"effect": _EFFECTS[(n // 2) % len(_EFFECTS)]})
+        request_id = f"command-{n}"
+        with self._lock:
+            self._pending[request_id] = name
+        self._data.send(
+            data_pb2.DataClientMessage(
+                request_id=request_id,
+                kind=_REQUEST,
+                command=model_pb2.Command(type=name, data=args),
+            ).SerializeToString(),
+            binary=True,
+        )
+
+    def _client_stats(self, n: int) -> platform_pb2.ClientStats:
+        now_ms = int(time.time() * 1000)
+        connection = platform_pb2.ClientConnectionStat(
+            timestamp=now_ms, metrics={"rtt_ms": 1.0, "available_outgoing_bitrate": 2e6}
+        )
+        if n == 0:
+            connection.environment.CopyFrom(
+                platform_pb2.ClientEnvironment(sdk_type="endurance", sdk_version="0")
+            )
+        return platform_pb2.ClientStats(
+            track_stats=[
+                platform_pb2.ClientTrackStat(
+                    timestamp=now_ms,
+                    track_name="main_video",
+                    kind=platform_pb2.TrackKind.TRACK_KIND_VIDEO,
+                    direction=platform_pb2.TrackDirection.TRACK_DIRECTION_RECVONLY,
+                    video_codec=platform_pb2.VideoCodec.VIDEO_CODEC_VP8,
+                    metrics={"frames_decoded": float(self.received_video), "jitter": 0.01},
+                ),
+                platform_pb2.ClientTrackStat(
+                    timestamp=now_ms,
+                    track_name="webcam",
+                    kind=platform_pb2.TrackKind.TRACK_KIND_VIDEO,
+                    direction=platform_pb2.TrackDirection.TRACK_DIRECTION_SENDONLY,
+                    video_codec=platform_pb2.VideoCodec.VIDEO_CODEC_VP8,
+                    metrics={"frames_encoded": float(n * 30)},
+                ),
+            ],
+            connection_stat=connection,
+        )
+
+    def _send_control(
+        self, message: control_pb2.ControlClientMessage, *, expects: str | None = None
+    ) -> None:
+        if expects is not None:
+            with self._lock:
+                self._pending[message.request_id] = expects
+        self._control.send(message.SerializeToString(), binary=True)
+
+    def close(self) -> None:
+        """Close the connection, dropping the channels this client also holds."""
+        self._control = self._data = None
+        super().close()
+
+    def _on_control_message(self, data: bytes, binary: bool) -> None:
+        message = control_pb2.ControlServerMessage()
+        if self._parse(message, data, "control"):
+            self._answered(message.request_id, message.WhichOneof("payload"), message)
+
+    def _on_data_message(self, data: bytes, binary: bool) -> None:
+        message = data_pb2.DataServerMessage()
+        if self._parse(message, data, "data") and message.kind == _RESPONSE:
+            self._answered(message.request_id, message.WhichOneof("payload"), message)
+
+    def _parse(self, message: Any, data: bytes, channel: str) -> bool:
+        # Called on a libwebrtc thread: an exception here would go nowhere, so
+        # a frame that is not v1 is recorded as a failure instead.
+        try:
+            message.ParseFromString(bytes(data))
+        except DecodeError:
+            with self._lock:
+                self._failed.append(f"an undecodable frame on {channel}")
+            return False
+        return True
+
+    def _answered(self, request_id: str, payload: str | None, message: Any) -> None:
+        with self._lock:
+            asked = self._pending.pop(request_id, None)
+            if asked is None:
+                return
+            if payload == "error":
+                self._failed.append(f"{asked} ({request_id}): {message.error.code}")
+
+    async def _settle(self) -> None:
+        deadline = time.monotonic() + _REPLY_WAIT_S
+        while time.monotonic() < deadline:
+            with self._lock:
+                if not self._pending:
+                    break
+            await asyncio.sleep(0.05)
+        with self._lock:
+            self.unanswered = [
+                *self._failed,
+                *(f"{asked} ({rid}): no reply" for rid, asked in self._pending.items()),
+            ]
 
 
 def assert_full_streams(received: list[int]) -> MetricResult:
@@ -352,6 +560,48 @@ def assert_full_streams(received: list[int]) -> MetricResult:
     print(f"[short_cycles] ok: {reason}")
     return MetricResult(
         name="short_cycles",
+        start=0,
+        end=0,
+        change=0,
+        unit="count",
+        status="ok",
+        detail=reason,
+        threshold="always 0",
+    )
+
+
+def assert_answered(unanswered: list[list[str]]) -> MetricResult:
+    """Fail when any cycle's client was refused or left without a reply.
+
+    A v1 cycle whose publish, schema request or commands went unanswered did
+    not exercise the path it claims to, so a run with one is not a pass.
+
+    Args:
+        unanswered: Each cycle's unanswered or refused requests, in cycle order.
+    """
+    bad = [(cycle, misses) for cycle, misses in enumerate(unanswered) if misses]
+    if bad:
+        cycle, misses = bad[0]
+        reason = (
+            f"requests went unanswered or were refused on {len(bad)}/{len(unanswered)} cycles "
+            f"(first at cycle {cycle}: {'; '.join(misses[:3])})"
+        )
+        print(f"[unanswered_requests] FAILED: {reason}")
+        return MetricResult(
+            name="unanswered_requests",
+            start=0,
+            end=len(bad),
+            change=len(bad),
+            unit="count",
+            status="fail",
+            detail=reason,
+            threshold="always 0",
+            first_bad_cycle=cycle,
+        )
+    reason = f"every request of the {len(unanswered)} cycles was answered"
+    print(f"[unanswered_requests] ok: {reason}")
+    return MetricResult(
+        name="unanswered_requests",
         start=0,
         end=0,
         change=0,
@@ -422,6 +672,7 @@ class ResourceSampler:
                 live_connections=reading["live"]["connections"],
                 live_peers=reading["live"]["peers"],
                 live_pacers=reading["live"]["pacers"],
+                live_client_stats=reading["client_stats_connections"],
                 tasks=reading["tasks"],
             )
         self._baseline.freed_by_gc = freed

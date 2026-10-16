@@ -184,6 +184,7 @@ def build_app(
         gc.collect()
         return {
             "registered_connections": runner._connections.count,
+            "client_stats_connections": len(runner._client_stats._accepted_at),
             "batches_freed_by_gc": tracked_echo.freed_by_gc(),
             "pacers_holding_after_stop": _holding_after_stop,
             "stopped_pacers_holding_now": stopped_holding,

@@ -29,6 +29,7 @@ def _sample(cycle: int, **overrides: float) -> Sample:
         "live_connections": 0,
         "live_peers": 0,
         "live_pacers": 0,
+        "live_client_stats": 0,
         "tasks": 6,
     }
     fields.update(overrides)
@@ -126,6 +127,7 @@ def test_exact_metrics_cover_every_count() -> None:
         "live_connections",
         "live_peers",
         "live_pacers",
+        "live_client_stats",
         "tasks",
     ]
 

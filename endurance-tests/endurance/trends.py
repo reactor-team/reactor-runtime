@@ -79,6 +79,9 @@ class Sample:
     live_connections: int
     live_peers: int
     live_pacers: int
+    # Connections the runtime still keeps client-stats state for, with no
+    # client connected.
+    live_client_stats: int
     # Running asyncio tasks on the runtime's loop.
     tasks: int
 
@@ -333,6 +336,7 @@ ZERO_FIELDS = (
     "live_connections",
     "live_peers",
     "live_pacers",
+    "live_client_stats",
 )
 
 
