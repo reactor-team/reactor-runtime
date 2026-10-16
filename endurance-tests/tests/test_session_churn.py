@@ -42,6 +42,9 @@ async def test_session_churn(runtime: RuntimeProcess) -> None:
                 # Stopped once the runtime has dropped the client, so the
                 # session is orphaned rather than streaming.
                 runtime.settled_probe()
+                state = runtime.get("/session")["state"]
+                if state != "orphaned":
+                    missed.append(f"{stop}: the session was {state}, not orphaned, at the stop")
                 runtime.request("POST", "/stop_session", {})
             else:
                 if notice := _NOTICES.get(stop):
