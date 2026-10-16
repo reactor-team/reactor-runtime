@@ -214,7 +214,7 @@ class FakeConnection:
 
     def send_media(self, chunk: MediaChunk) -> None: ...
 
-    def flush_media(self) -> None:
+    def flush_media(self, *, hold: bool = False) -> None:
         self.flushed = True
 
     def set_media_rate(self, fps: float) -> None:
@@ -427,6 +427,23 @@ def test_flush_media_cuts_every_connection() -> None:
 
     assert a.flushed
     assert b.flushed
+
+
+def test_a_hold_flush_reaches_every_connection_as_a_hold() -> None:
+    held: list[ConnId] = []
+
+    class Holding(FakeConnection):
+        def flush_media(self, *, hold: bool = False) -> None:
+            if hold:
+                held.append(self.id)
+
+    runner = _runner()
+    runner.connection_opened(Holding(1))
+    runner.connection_opened(Holding(2))
+
+    runner._flush_media(True)
+
+    assert held == [ConnId(1), ConnId(2)]
 
 
 def test_a_flush_during_fan_out_abandons_the_remaining_connections() -> None:

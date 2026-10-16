@@ -429,10 +429,14 @@ class WebRTCPeer:
         # Outbound media: the drain thread pushes video and buffers audio; the
         # audio thread feeds that buffer to this peer's LocalAudioSource track in
         # steady 10 ms frames via track.push_pcm().
-        # Each bundle carries the time it was queued, to time its wait for libwebrtc.
-        self._frame_queue: queue.Queue[tuple[MediaBundle, float]] = queue.Queue(
+        # Each bundle carries the time it was queued, to time its wait for libwebrtc,
+        # and the flush count it was queued under, so one queued before a flush
+        # and still on its way is dropped rather than played after the cut.
+        self._frame_queue: queue.Queue[tuple[MediaBundle, float, int]] = queue.Queue(
             maxsize=_FRAME_QUEUE_MAX
         )
+        # Bumped by flush_media(), under _audio_lock.
+        self._flushes = 0
         self.frame_stages = FrameStageWindow()
         """Where this peer's frames spend their time; see :mod:`.frame_stages`."""
         self.message_stages = MessageStageWindow()
@@ -984,22 +988,28 @@ class WebRTCPeer:
     def _frame_drain_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
-                bundle, queued_at = self._frame_queue.get(timeout=0.05)
+                bundle, queued_at, flushes = self._frame_queue.get(timeout=0.05)
             except queue.Empty:
                 continue
             try:
-                self._push_bundle(bundle, queued_at)
+                self._push_bundle(bundle, queued_at, flushes)
             except Exception:
                 logger.debug("outbound frame push failed", exc_info=True)
 
-    def _push_bundle(self, bundle: MediaBundle, queued_at: float | None = None) -> None:
+    def _push_bundle(
+        self, bundle: MediaBundle, queued_at: float | None = None, flushes: int | None = None
+    ) -> None:
         """Push a bundle's video and buffer its audio for the feeder thread.
 
         Video crosses the boundary immediately, carrying the frame's metadata
         into the encoded packet's trailer. Audio is appended to the shallow
         buffer the feeder drains in 10 ms frames via ``track.push_pcm()``.
 
+        A bundle queued under an earlier flush count was queued before a
+        flush that has since landed, and is dropped whole.
         """
+        if flushes is not None and flushes != self._flushes:
+            return
         for track_name, data in bundle.tracks.items():
             info = data.info
             if track_name in self._paused_tracks or info.name in self._paused_tracks:
@@ -1029,7 +1039,7 @@ class WebRTCPeer:
                     ):
                         self.frame_stages.add(name, stage, ms * 1000.0)
             else:
-                self._enqueue_audio(name, to_int16_mono(data.data))
+                self._enqueue_audio(name, to_int16_mono(data.data), flushes)
 
     def _attached_name(self, track_name: str, info: TrackInfo) -> str | None:
         """Resolve a bundle entry to the name its outbound track is held under.
@@ -1043,17 +1053,24 @@ class WebRTCPeer:
             return track_name
         return None
 
-    def _enqueue_audio(self, name: str, samples: npt.NDArray[np.int16]) -> None:
+    def _enqueue_audio(
+        self, name: str, samples: npt.NDArray[np.int16], flushes: int | None = None
+    ) -> None:
         """Append mono samples to *name*'s outbound buffer, capping its depth.
 
         Trimming an overfull buffer discards the oldest samples, which the wire
         can only express by pulling everything after them earlier. The count is
         reported so sustained over-production is a number rather than a
         complaint about the sound.
+
+        Samples from a bundle queued before a flush that landed while the
+        bundle was being pushed are dropped; the check shares the flush's lock.
         """
         if not samples.size:
             return
         with self._audio_lock:
+            if flushes is not None and flushes != self._flushes:
+                return
             buf = self._audio_bufs.get(name, _EMPTY_AUDIO)
             buf = np.concatenate([buf, samples])
             overflow = buf.size - _AUDIO_BUFFER_MAX_SAMPLES
@@ -1165,9 +1182,28 @@ class WebRTCPeer:
         if self._stop_event.is_set() or not self._out_tracks:
             return
         try:
-            self._frame_queue.put_nowait((bundle, time.perf_counter()))
+            self._frame_queue.put_nowait((bundle, time.perf_counter(), self._flushes))
         except queue.Full:
             self._dropped_bundles += 1
+
+    def flush_media(self) -> None:
+        """Drop the media this peer still holds for the wire.
+
+        The bundles waiting for the drain thread are dropped, along with any
+        bundle already on its way, and so is each audio track's buffer: up to
+        ``_AUDIO_BUFFER_MAX_SAMPLES`` that would otherwise play after the cut.
+        The feeder keeps pushing one 10 ms frame per tick, silence until the
+        model sends audio again, so each track's sample clock keeps running.
+        Nothing dropped here counts as dropped media: the model asked for it.
+        """
+        with self._audio_lock:
+            self._flushes += 1
+            while True:
+                try:
+                    self._frame_queue.get_nowait()
+                except queue.Empty:
+                    break
+            self._audio_bufs.clear()
 
     def send_message(self, payload: bytes | str) -> None:
         """Send an already-encoded frame over the data channel (text or binary)."""

@@ -30,7 +30,7 @@ class FakeConnection:
     def send_media(self, chunk: MediaChunk) -> None:
         pass
 
-    def flush_media(self) -> None:
+    def flush_media(self, *, hold: bool = False) -> None:
         pass
 
     def set_media_rate(self, fps: float) -> None:
