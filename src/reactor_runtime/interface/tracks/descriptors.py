@@ -30,12 +30,24 @@ class Audio(Track):
 
     Subclass to override the rate, e.g. ``class Narration(Audio): sample_rate = 16_000``.
 
+    An input track can bound its buffer in seconds of audio instead of frames,
+    so it holds the same length of audio whatever frame size the transport
+    delivers::
+
+        class AgentAudio(Audio):
+            sample_rate = 24_000
+            buffer_seconds = 120
+
     Attributes:
         sample_rate: Native sample rate in Hz.
+        buffer_seconds: How many seconds of audio an input track buffers
+            before dropping the oldest, or ``None`` to buffer 128 frames.
+            Ignored on an output track.
     """
 
     kind = TrackKind.AUDIO
     sample_rate: ClassVar[int] = 48_000
+    buffer_seconds: ClassVar[float | None] = None
 
 
 def _resolve_tracks(cls: type, direction: TrackDirection) -> dict[str, TrackInfo]:
@@ -47,6 +59,10 @@ def _resolve_tracks(cls: type, direction: TrackDirection) -> dict[str, TrackInfo
 
     Returns:
         Track name to its metadata, in declaration order.
+
+    Raises:
+        ValueError: If an audio track declares a ``buffer_seconds`` that is not
+            a positive number.
     """
     try:
         hints = get_type_hints(cls)
@@ -55,8 +71,24 @@ def _resolve_tracks(cls: type, direction: TrackDirection) -> dict[str, TrackInfo
     tracks: dict[str, TrackInfo] = {}
     for name, annotation in hints.items():
         if isinstance(annotation, type) and issubclass(annotation, Track):
-            rate = float(annotation.sample_rate) if issubclass(annotation, Audio) else 0.0
+            rate = 0.0
+            buffer_seconds: float | None = None
+            if issubclass(annotation, Audio):
+                rate = float(annotation.sample_rate)
+                buffer_seconds = _buffer_seconds(name, annotation.buffer_seconds)
             tracks[name] = TrackInfo(
-                name=name, kind=annotation.kind, rate=rate, direction=direction
+                name=name,
+                kind=annotation.kind,
+                rate=rate,
+                direction=direction,
+                buffer_seconds=buffer_seconds,
             )
     return tracks
+
+
+def _buffer_seconds(name: str, value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+        raise ValueError(f"track {name!r}: buffer_seconds must be a positive number, got {value!r}")
+    return float(value)

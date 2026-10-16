@@ -41,30 +41,44 @@ class InputBuffer:
     """A bounded, thread-safe frame buffer for one inbound track.
 
     "Input" is from the model's point of view: frames flow from the client into
-    the model. The buffer is a bounded deque — when full, the oldest frame is
-    evicted so the model always sees the most recent data.
+    the model. The buffer is bounded — when full, the oldest frame is evicted so
+    the model always sees the most recent data.
+
+    The bound is a number of frames, or, for an audio track that declares
+    ``buffer_seconds``, a number of samples. A frame bound holds a length of
+    audio that depends on the transport's frame size; a sample bound holds the
+    same length on every transport.
 
     Args:
         maxlen: How many frames the buffer holds before evicting the oldest.
+            Ignored when *max_samples* is set.
+        max_samples: How many audio samples the buffer holds before evicting
+            the oldest frames, or ``None`` to bound it by *maxlen* instead.
     """
 
-    def __init__(self, maxlen: int = DEFAULT_BUFFER_CAPACITY) -> None:
+    def __init__(
+        self, maxlen: int = DEFAULT_BUFFER_CAPACITY, *, max_samples: int | None = None
+    ) -> None:
         # One mutex shared between the plain lock and the condition: simple
         # acquire/release reads take the lock, wait/notify paths take the
         # condition, and a single underlying mutex rules out lock-ordering bugs.
         self._lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
-        self._buffer: deque[InputFrame] = deque(maxlen=maxlen)
+        # A sample bound is enforced by push(), so its deques are unbounded.
+        bound = None if max_samples is not None else maxlen
+        self._buffer: deque[InputFrame] = deque(maxlen=bound)
         # When each buffered frame was pushed, on perf_counter, and the
         # connection that sent it, beside it: the two deques share a bound, so
         # an eviction drops both.
-        self._pushed_at: deque[tuple[float, ConnId | None]] = deque(maxlen=maxlen)
+        self._pushed_at: deque[tuple[float, ConnId | None]] = deque(maxlen=bound)
         # The sender of each frame a read took, and how long it waited in the
         # buffer in ms, until the step loop takes them (take_read_waits). A
         # model with its own run() may never take them, so they are bounded
         # like the frames: the oldest go first. The default step loop takes
         # them after every read, so it never reaches the bound.
         self._read_waits: deque[tuple[ConnId | None, float]] = deque(maxlen=maxlen)
+        self._max_samples = max_samples
+        self._samples = 0
         self._total_received = 0
         self._closed = False
 
@@ -125,12 +139,16 @@ class InputBuffer:
         self._note_waits([self._pushed_at[start + i] for i in range(n)])
         self._buffer.clear()
         self._pushed_at.clear()
+        self._samples = 0
         return result
 
     def _take_fifo(self, n: int) -> list[InputFrame]:
         """Pop the *n* oldest frames. Caller holds the lock."""
         self._note_waits([self._pushed_at.popleft() for _ in range(n)])
-        return [self._buffer.popleft() for _ in range(n)]
+        result = [self._buffer.popleft() for _ in range(n)]
+        if self._max_samples is not None:
+            self._samples -= sum(_sample_count(frame) for frame in result)
+        return result
 
     def _note_waits(self, pushed: list[tuple[float, ConnId | None]]) -> None:
         """Note how long the frames pushed at *pushed* waited. Caller holds the lock."""
@@ -194,6 +212,7 @@ class InputBuffer:
         with self._lock:
             self._buffer.clear()
             self._pushed_at.clear()
+            self._samples = 0
 
     def close(self) -> None:
         """Close the track, waking any blocked reader to raise :class:`BufferClosed`."""
@@ -213,19 +232,45 @@ class InputBuffer:
             self._buffer.clear()
             self._pushed_at.clear()
             self._read_waits.clear()
+            self._samples = 0
             self._total_received = 0
 
-    def push(self, frame: InputFrame, source: ConnId | None = None) -> None:
+    def push(self, frame: InputFrame, source: ConnId | None = None) -> int:
         """Append a frame from the runtime thread, waking a blocked reader.
 
         *source* is the connection that sent the frame, so the frame's wait in
         the buffer is reported to that connection only. Frames pushed after
-        :meth:`close` are dropped until :meth:`reset`.
+        :meth:`close` are dropped until :meth:`reset`, and are not counted as
+        evicted: the track is not being read.
+
+        Returns:
+            How many buffered frames the bound evicted to make room. Under a
+            sample bound the newest frame is always kept, even when it alone
+            holds more samples than the bound.
         """
         with self._condition:
             if self._closed:
-                return
-            self._buffer.append(frame)
-            self._pushed_at.append((time.perf_counter(), source))
+                return 0
+            evicted = 0
+            if self._max_samples is None:
+                maxlen = self._buffer.maxlen
+                if maxlen is not None and len(self._buffer) == maxlen:
+                    evicted = 1
+                self._buffer.append(frame)
+                self._pushed_at.append((time.perf_counter(), source))
+            else:
+                self._buffer.append(frame)
+                self._pushed_at.append((time.perf_counter(), source))
+                self._samples += _sample_count(frame)
+                while self._samples > self._max_samples and len(self._buffer) > 1:
+                    self._samples -= _sample_count(self._buffer.popleft())
+                    self._pushed_at.popleft()
+                    evicted += 1
             self._total_received += 1
             self._condition.notify_all()
+            return evicted
+
+
+def _sample_count(frame: InputFrame) -> int:
+    """How many samples an ``(1, M)`` audio frame carries."""
+    return int(frame.data.shape[-1])
