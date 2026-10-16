@@ -43,6 +43,7 @@ def _samples() -> list[Sample]:
             live_connections=0,
             live_peers=0,
             live_pacers=0,
+            live_client_stats=0,
             tasks=6,
         )
         for i in range(3)

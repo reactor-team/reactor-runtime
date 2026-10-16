@@ -29,6 +29,7 @@ def _sample(cycle: int, **overrides: float) -> Sample:
         "live_connections": 0,
         "live_peers": 0,
         "live_pacers": 0,
+        "live_client_stats": 0,
         "tasks": 6,
     }
     fields.update(overrides)
@@ -126,6 +127,7 @@ def test_exact_metrics_cover_every_count() -> None:
         "live_connections",
         "live_peers",
         "live_pacers",
+        "live_client_stats",
         "tasks",
     ]
 
@@ -173,12 +175,26 @@ def test_a_step_that_levelled_off_in_the_first_third_reads_flat_on_slope() -> No
 
 
 def test_a_fast_slope_with_a_rise_inside_the_noise_floor_passes() -> None:
-    # Ten minutes: 4 MB of drift is a steep rate but no more than noise.
-    values = [300.0 + 0.4 * i for i in range(10)]
+    # An hour climbing 24 MB/h: over the limit, but the fitted rise over the
+    # last forty minutes is under a 20 MB floor.
+    values = [300.0 + 0.4 * i for i in range(60)]
     result = assert_slope_under(
-        _hours(10), values, name="rss_slope", max_per_hour=20.0, min_absolute_delta=5.0
+        _hours(60), values, name="rss_slope", max_per_hour=20.0, min_absolute_delta=20.0
     )
     assert result.status == "ok"
+    assert "noise floor" in result.detail
+
+
+def test_memory_swinging_over_a_few_minutes_is_not_judged() -> None:
+    # A five-minute run whose RSS swings by a batch: a steep fitted line, but
+    # no rate to judge yet.
+    values = [380.0, 410.0, 380.0, 410.0, 410.0, 410.0, 385.0, 385.0, 413.0]
+    hours = [i * 13 / 3600 for i in range(len(values))]
+    result = assert_slope_under(
+        hours, values, name="rss_slope", max_per_hour=20.0, min_absolute_delta=5.0
+    )
+    assert result.status == "ok"
+    assert "not judged" in result.detail
 
 
 def test_the_slope_check_refuses_too_few_samples() -> None:
