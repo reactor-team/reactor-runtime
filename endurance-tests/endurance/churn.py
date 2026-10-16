@@ -50,13 +50,17 @@ async def run_cycles(
     test_name: str,
     description: str,
     cycle: Callable[[int], Awaitable[CycleOutcome]],
+    min_smoke_cycles: int = 0,
 ) -> None:
     """Run *cycle* until the run's deadline, reading the runtime after each, then check.
 
     *cycle* is called with the cycle's index. Once it returns, the runtime is
     read when its client is gone and teardown has finished, and that reading
-    is the cycle's sample.
+    is the cycle's sample. A smoke run takes ``ENDURANCE_SMOKE_CYCLES``
+    cycles, or *min_smoke_cycles* when that is more: a scenario whose cycles
+    take turns passes their count, so a smoke run reaches every one.
     """
+    smoke_cycles = max(ENDURANCE_SMOKE_CYCLES, min_smoke_cycles) if ENDURANCE_SMOKE_CYCLES else 0
     version = runtime.get("/session")["server_info"]["server_version"]
     # CI can run the suite against another release's runtime source, while the
     # package metadata still names this checkout's version.
@@ -81,7 +85,7 @@ async def run_cycles(
 
     try:
         while not sampler.deadline_reached():
-            if ENDURANCE_SMOKE_CYCLES and count >= ENDURANCE_SMOKE_CYCLES:
+            if smoke_cycles and count >= smoke_cycles:
                 break
             outcome = await cycle(count)
             received.append(outcome.received)

@@ -247,11 +247,15 @@ class BareClient:
         return self.received_video
 
     async def stream_until_dropped(self, frame: tuple[bytes, int, int], timeout_s: float) -> bool:
-        """Stream on until the runtime drops the connection; return whether it did in time."""
+        """Stream on until the runtime drops the connection; return whether it did in time.
+
+        Only webcam frames are sent: a request sent now could not be answered
+        before the connection closes, so none is.
+        """
         deadline = time.monotonic() + timeout_s
         while not self._dropped.is_set() and time.monotonic() < deadline:
             try:
-                await self._send_frame(frame)
+                await self._push_frame(frame)
             # A channel the runtime closed refuses the send before its state
             # change arrives here.
             except RuntimeError:
@@ -277,9 +281,12 @@ class BareClient:
             await self._send_frame(frame)
 
     async def _send_frame(self, frame: tuple[bytes, int, int]) -> None:
+        self._on_tick()
+        await self._push_frame(frame)
+
+    async def _push_frame(self, frame: tuple[bytes, int, int]) -> None:
         bgra, width, height = frame
         self._camera.push_video_frame(bgra, width, height)
-        self._on_tick()
         await asyncio.sleep(1 / _FPS)
 
     def close(self) -> None:
