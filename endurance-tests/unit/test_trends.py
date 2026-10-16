@@ -210,3 +210,15 @@ def test_a_task_the_first_cycle_left_counts_against_the_pre_run_baseline() -> No
     result = assert_never_grows(samples, field="tasks", baseline=6)
     assert result.status == "fail"
     assert "from 6 to 7" in result.detail
+
+
+def test_a_named_zero_check_carries_its_name() -> None:
+    result = assert_always_zero([_sample(0, live_peers=1)], field="live_peers", name="peers_end")
+    assert result.name == "peers_end"
+    assert result.status == "fail"
+
+
+def test_a_named_growth_check_carries_its_name() -> None:
+    result = assert_never_grows([_sample(0, tasks=9)], field="tasks", baseline=6, name="tasks_end")
+    assert result.name == "tasks_end"
+    assert result.status == "fail"

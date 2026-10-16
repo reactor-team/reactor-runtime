@@ -51,6 +51,7 @@ a trend ends in ERROR rather than in a verdict; a failed count still fails it.
 | `connection_churn_v1` | The same churn with a client that speaks v1 protobuf, as current SDKs do: it also requests the schema and, once a second, pings, sends client stats and a `set_effect` or `set_intensity` command. Every request must be answered without an error (`unanswered_requests`). |
 | `session_churn` | Each cycle starts a session under a fresh id, a v1 client streams until its 60 frames come back, and the session is stopped: in turn a plain stop, the client leaving first and the orphaned session stopped after, a stop with a close reason, and a moderated stop. The last two owe the client its `session_ended` or `moderation` notice before the connection closes. The runtime is read once the session is ready again. |
 | `multi_connection` | One session shared by several clients. Each cycle a v1 client publishes the webcam, and three v1 viewers that publish nothing join and each get 60 frames of the same output. They leave in two steps, in turn the viewers first or the publisher first; when the publisher leaves first, a new publisher takes over the webcam while the viewers stay, and must be granted it. |
+| `steady_stream` | One v1 client stays connected for the whole run, streaming while it pings, sends client stats and a command once a second. The runtime is read every 15 s as it streams: what the live connection holds (`live_*`, `tasks`) must never rise above the first reading, `pacers_holding_output` and `pinned_batches` stay 0, and every interval gets 60 frames back. Once the client leaves, the reading after teardown must be 0 on every count (`*_after_close`), with the tasks back to the reading before it joined. The trends judge the streaming readings. |
 | `abrupt_disconnect` | The v1 churn, with each client in its own process (`endurance/abrupt.py`), killed with `SIGKILL` a moment after its frames came back instead of closing. The runtime learns the client is gone only from the wire going silent, as it does when a client crashes or loses its network. |
 
 ## Running it
@@ -103,8 +104,8 @@ every PR that touches the runtime:
   add a scenario that drives it, or extend an existing one. Today's scenarios
   cover the v0 and v1 control protocols, commands, client stats, a client
   that dies without closing, and sessions started and stopped, with and
-  without a close reason or a moderation verdict, and several clients on one
-  session; uploads, clips and recordings have none yet.
+  without a close reason or a moderation verdict, several clients on one
+  session, and one connection streaming for hours; uploads, clips and recordings have none yet.
 - **A change to what the launcher hooks** (`MediaPacer.stop`,
   `http_server.build_app`, `Runner._connections`, the transport classes the
   probe counts): update `endurance/launcher.py` in the same PR.
