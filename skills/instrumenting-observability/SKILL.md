@@ -263,7 +263,13 @@ reading.
 A change under `proto/` ships in a wire release, which merging it to main
 cuts. The runtime vendors the pinned release, so the next runtime release
 needs `[tool.reactor-wire] version` in `pyproject.toml` moved to that
-release; `wire-check` stops it until then.
+release; `wire-check-release` stops the release until then. `wire-check`
+reports the same drift on a pull request without failing it.
+
+Until the pin moves, the runtime decodes with bindings older than `proto/`,
+so code that reads a new field off a decoded message reads it with a
+default, as `getattr(stat, "message_stages", ())` does, rather than failing
+on bindings that lack it.
 
 ## Checklist for a metrics change
 
