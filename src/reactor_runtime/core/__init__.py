@@ -40,6 +40,7 @@ from reactor_runtime.core.transport import (
     Connection,
     ConnectionSink,
     FrameStageSource,
+    MessageObserver,
     TransportStatsSource,
 )
 from reactor_runtime.core.typespec import TypeSpec
@@ -96,6 +97,7 @@ __all__ = [
     "LiveKitRpcMethod",
     "MediaBundle",
     "MediaChunk",
+    "MessageObserver",
     "ReactorEvent",
     "RecordingConfig",
     "RuntimeConfig",

@@ -6,13 +6,14 @@ client; ``ConnectionSink`` carries facts up from the transport. Both are
 ``Protocol``s, so a transport author or a test fake conforms by shape and
 signaling never reaches the runner. ``TransportStatsSource`` and
 ``FrameStageSource`` are optional capabilities a connection adds when its
-transport measures its wire.
+transport measures its wire, and ``MessageObserver`` one it adds when its wire
+needs what it is sent as plain data rather than as encoded frames.
 """
 
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from reactor_runtime.core.stats import TransportReading
 from reactor_runtime.core.values import (
@@ -146,6 +147,40 @@ class FrameStageSource(Protocol):
 
 
 @runtime_checkable
+class MessageObserver(Protocol):
+    """A connection that also takes what it is sent as plain data.
+
+    Optional, beside :class:`Connection`, and checked for with ``isinstance``.
+    A connection whose wire does not carry the Reactor protocol, such as one
+    that answers a command as a remote procedure call, needs the content of a
+    reply or a model message rather than its encoded frame. The runner calls
+    these next to the encoded send, on every connection that implements them,
+    from whichever thread sent the message: the model's own, for its replies
+    and messages.
+    """
+
+    def message_sent(self, name: str, data: Mapping[str, Any], request_id: str | None) -> None:
+        """Take a model message sent to this connection.
+
+        *request_id* is set when the message is the reply to a command this
+        connection sent, and ``None`` for a broadcast or a ``client.send``.
+        *data* holds the message's fields, without the ``type`` envelope.
+        """
+
+    def command_acknowledged(self, request_id: str) -> None:
+        """Take the end of a command this connection sent whose handler returned nothing."""
+
+    def command_failed(self, request_id: str, code: str, message: str) -> None:
+        """Take the failure of a command this connection sent.
+
+        Covers every refusal the client is told about: arguments the contract
+        rejects, an upload that cannot be resolved, and a handler that raised.
+        *code* is the stable failure code, such as ``invalid_command`` or the
+        code of a raised ``CommandError``.
+        """
+
+
+@runtime_checkable
 class ConnectionSink(Protocol):
     """The transport-to-runner upward channel — the facts-up half.
 
@@ -187,6 +222,19 @@ class ConnectionSink(Protocol):
         not a single runtime-wide codec. *channel* is the physical channel it
         arrived on (data or control), so the gateway decodes it as the right
         message family rather than guessing.
+        """
+
+    def command_received(
+        self, conn_id: ConnId, name: str, args: Mapping[str, Any], request_id: str
+    ) -> None:
+        """Hand up a command that arrived outside the Reactor protocol.
+
+        For a transport that maps a signal of its own wire, such as an RPC
+        call or a data packet, onto one of the model's commands. The command
+        goes through the same contract validation, upload resolution, and
+        dispatch as one decoded from a frame. The transport chooses
+        *request_id*, and a connection that is a :class:`MessageObserver`
+        receives the command's reply, acknowledgement, or failure under it.
         """
 
     def media_received(self, conn_id: ConnId, track: str, frame: InputFrame) -> None:
