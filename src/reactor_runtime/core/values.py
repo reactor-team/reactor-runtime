@@ -68,6 +68,26 @@ class FrameStage:
 
 
 @dataclass(frozen=True)
+class MessageStage:
+    """The time a connection's data-channel messages spent in one stage, over one window.
+
+    Each side reports the stages it times, in the order a message goes
+    through them. Only the data channel that carries commands is timed. The
+    set grows, so a reader ignores a name it does not know.
+
+    Attributes:
+        name: The stage.
+        total_ms: The time all *messages* messages spent in the stage
+            together, so the average per message is ``total_ms / messages``.
+        messages: How many messages the window counted in the stage.
+    """
+
+    name: str
+    total_ms: float
+    messages: int
+
+
+@dataclass(frozen=True)
 class ClientTrackStat:
     """One WebRTC quality reading a client took for one of its tracks.
 
@@ -170,11 +190,14 @@ class ClientConnectionStat:
         metrics: The reading's measurements, by name.
         environment: What the client runs on, sent on every batch; ``None``
             from a client that does not send it.
+        message_stages: Where the client's data-channel messages spent their
+            time since its previous batch, stage by stage.
     """
 
     timestamp: int
     metrics: Mapping[str, float]
     environment: ClientEnvironment | None = None
+    message_stages: tuple[MessageStage, ...] = ()
 
 
 @dataclass(frozen=True)

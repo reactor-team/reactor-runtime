@@ -216,6 +216,32 @@ message ClientConnectionStat {
   // batch. Each field is empty when the client does not know it; a client
   // that predates this field does not send `environment` at all.
   ClientEnvironment environment = 3;
+  // Where the messages of the data channel that carries commands spent their
+  // time, stage by stage, over the window since the previous batch. See
+  // MessageStage.
+  repeated MessageStage message_stages = 4;
+}
+
+// The time a connection's data-channel messages spent in one stage of their
+// trip, over one window. The average per message is total_ms / messages. Only
+// the data channel that carries commands is timed, not the control channel.
+//
+// The stages are the engine's chunked data channel's, in the order a message
+// goes through them. The side that reports a stage is the side that times it:
+//
+//   queue_wait  The message waits in the sender's chunk queue until its first
+//               chunk leaves it. Sender.
+//   send        From the message's first chunk to its last being handed to
+//               SCTP. Sender.
+//   stall       The time the sender's chunk pump stopped because SCTP's buffer
+//               was full, per message sent. Sender.
+//   reassembly  From the message's first chunk arriving to its last. Receiver.
+//
+// A channel without chunking reports none of them.
+message MessageStage {
+  string name = 1;
+  double total_ms = 2;
+  uint64 messages = 3;
 }
 
 // The SDK and the system a client runs on. `os` and `arch` are canonical

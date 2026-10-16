@@ -15,7 +15,13 @@ import time
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
-from reactor_runtime.core import ClientEnvironment, ClientStatsBatch, ConnId, FrameStage
+from reactor_runtime.core import (
+    ClientEnvironment,
+    ClientStatsBatch,
+    ConnId,
+    FrameStage,
+    MessageStage,
+)
 
 # The SDK sends a batch every few seconds, with a few tracks and a few dozen
 # metrics each; these limits are far above that.
@@ -23,6 +29,7 @@ MIN_INTERVAL_SECONDS = 1.0
 MAX_TRACKS = 32
 MAX_METRICS = 64
 MAX_FRAME_STAGES = 32
+MAX_MESSAGE_STAGES = 32
 MAX_NAME_LENGTH = 128
 
 
@@ -73,8 +80,12 @@ def fits(batch: ClientStatsBatch) -> bool:
         return False
     if any(len(stat.frame_stages) > MAX_FRAME_STAGES for stat in batch.track_stats):
         return False
+    message_stages = batch.connection_stat.message_stages if batch.connection_stat else ()
+    if len(message_stages) > MAX_MESSAGE_STAGES:
+        return False
     names = [name for metrics in readings for name in metrics]
     names += [stage.name for stat in batch.track_stats for stage in stat.frame_stages]
+    names += [stage.name for stage in message_stages]
     names += [
         field
         for stat in batch.track_stats
@@ -116,6 +127,7 @@ def to_detail(batch: ClientStatsBatch) -> dict[str, Any]:
                     if batch.connection_stat.environment is not None
                     else None
                 ),
+                "message_stages": message_stages_detail(batch.connection_stat.message_stages),
             }
             if batch.connection_stat is not None
             else None
@@ -146,6 +158,21 @@ def frame_stages_detail(stages: Iterable[FrameStage]) -> list[dict[str, Any]]:
         {"name": stage.name, "total_ms": stage.total_ms, "frames": stage.frames}
         for stage in stages
         if stage.name and stage.frames > 0 and math.isfinite(stage.total_ms) and stage.total_ms >= 0
+    ]
+
+
+def message_stages_detail(stages: Iterable[MessageStage]) -> list[dict[str, Any]]:
+    """Shape a connection's message stage times for a fact's detail.
+
+    Kept and left out by the same rules as :func:`frame_stages_detail`.
+    """
+    return [
+        {"name": stage.name, "total_ms": stage.total_ms, "messages": stage.messages}
+        for stage in stages
+        if stage.name
+        and stage.messages > 0
+        and math.isfinite(stage.total_ms)
+        and stage.total_ms >= 0
     ]
 
 

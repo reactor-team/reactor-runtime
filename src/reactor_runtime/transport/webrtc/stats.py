@@ -174,6 +174,52 @@ class OutboundMediaHealth:
 
 
 @dataclass(frozen=True)
+class ChunkingSample:
+    """Running totals of the command data channel's chunked messages, since it opened.
+
+    Every time is in seconds and summed over the messages that finished the
+    step, so a window's average is the change in a time over the change in its
+    count. A channel without chunking has no sample.
+
+    Attributes:
+        messages_sent: Messages whose last chunk went to SCTP.
+        queue_wait_s: From ``send`` to the message's first chunk leaving the queue.
+        send_s: From a message's first chunk to its last going to SCTP.
+        stall_s: The time the chunk pump stopped because SCTP's buffer was full.
+        messages_received: Messages the reassembler completed.
+        reassembly_s: From a message's first chunk arriving to its last.
+    """
+
+    messages_sent: int = 0
+    queue_wait_s: float = 0.0
+    send_s: float = 0.0
+    stall_s: float = 0.0
+    messages_received: int = 0
+    reassembly_s: float = 0.0
+
+
+@dataclass(frozen=True)
+class SctpSample:
+    """The SCTP association that carries the connection's data channels.
+
+    Attributes:
+        smoothed_rtt_ms: The association's smoothed round trip time.
+        congestion_window_bytes: How much may be in flight before an
+            acknowledgement.
+        unacked_chunks: Chunks in flight, not yet acknowledged.
+        peer_receive_window_bytes: The receive window the peer last announced.
+        packets_retransmitted: Packets that carried a retransmitted chunk,
+            since the association started.
+    """
+
+    smoothed_rtt_ms: float
+    congestion_window_bytes: int
+    unacked_chunks: int
+    peer_receive_window_bytes: int
+    packets_retransmitted: int
+
+
+@dataclass(frozen=True)
 class PeerStats:
     """A snapshot of a peer's transport statistics.
 
@@ -194,9 +240,14 @@ class PeerStats:
         tracks: Per-track samples gathered in the same cycle.
         media: Cumulative counts of outbound media manufactured or discarded
             inside the runtime, which no transport-level statistic reports.
+        chunking: The command data channel's chunking totals, or ``None`` when
+            the channel does not chunk or is not open.
+        sctp: The SCTP association, or ``None`` before a data channel made one.
     """
 
     rtt_seconds: float | None = None
     available_outgoing_bitrate_bps: float | None = None
     tracks: tuple[TrackStat, ...] = ()
     media: OutboundMediaHealth = field(default_factory=OutboundMediaHealth)
+    chunking: ChunkingSample | None = None
+    sctp: SctpSample | None = None

@@ -14,11 +14,11 @@ video, as timing frames, so the client's own stages show up here as samples.
 
 from __future__ import annotations
 
-import math
 import threading
 from collections.abc import Collection, Mapping
 
 from reactor_runtime.core import FrameStage, TrackDirection
+from reactor_runtime.core.stages import StageTotals
 from reactor_runtime.transport.webrtc.stats import PeerStats, TrackStat
 
 STAGES = (
@@ -35,8 +35,6 @@ STAGES = (
 )
 """Every stage, in the order a frame goes through them."""
 
-_ORDER = {name: index for index, name in enumerate(STAGES)}
-
 
 class FrameStageWindow:
     """The time each track's frames spent in each stage, since the last take.
@@ -46,8 +44,8 @@ class FrameStageWindow:
     """
 
     def __init__(self) -> None:
+        self._totals = StageTotals(STAGES)
         self._lock = threading.Lock()
-        self._totals: dict[tuple[str, str], tuple[float, int]] = {}
         # The last timing frame folded in, per track, so one that a later
         # sample repeats is counted once.
         self._timing_frames: dict[str, int] = {}
@@ -58,12 +56,7 @@ class FrameStageWindow:
         A count below one or a time that is negative or not finite is no
         measurement, and is left out.
         """
-        if frames < 1 or not math.isfinite(ms) or ms < 0:
-            return
-        key = (track, stage)
-        with self._lock:
-            total, count = self._totals.get(key, (0.0, 0))
-            self._totals[key] = (total + ms, count + frames)
+        self._totals.add(track, stage, ms, frames)
 
     def fold(self, sample: PeerStats, previous: PeerStats | None) -> None:
         """Add the stages libwebrtc timed between *previous* and *sample*.
@@ -100,20 +93,11 @@ class FrameStageWindow:
         Every track when *tracks* is ``None``. A track not named keeps its
         times for a later take.
         """
-        with self._lock:
-            if tracks is None:
-                totals, self._totals = self._totals, {}
-            else:
-                wanted = set(tracks)
-                totals = {key: v for key, v in self._totals.items() if key[0] in wanted}
-                for key in totals:
-                    del self._totals[key]
-        stages: dict[str, list[FrameStage]] = {}
-        for (track, stage), (total, count) in totals.items():
-            stages.setdefault(track, []).append(FrameStage(stage, total_ms=total, frames=count))
         return {
-            track: tuple(sorted(found, key=lambda s: _ORDER.get(s.name, len(_ORDER))))
-            for track, found in stages.items()
+            str(track): tuple(
+                FrameStage(name, total_ms=total, frames=count) for name, total, count in found
+            )
+            for track, found in self._totals.take(tracks).items()
         }
 
     def _add_delta(

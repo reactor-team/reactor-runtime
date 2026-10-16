@@ -41,7 +41,7 @@ replaced rather than edited.
 from __future__ import annotations
 
 import random
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 
 from reactor_runtime.core import (
@@ -49,6 +49,7 @@ from reactor_runtime.core import (
     ConnId,
     FrameStageSource,
     MediaChunk,
+    MessageStageSource,
     SessionEvent,
     TransportReading,
     TransportStatsSource,
@@ -157,20 +158,21 @@ class ConnectionManager:
             and (reading := conn.latest_reading) is not None
         ]
 
-    def take_frame_stages(
-        self, readings: Iterable[tuple[ConnId, TransportReading]]
-    ) -> list[tuple[ConnId, TransportReading]]:
-        """Add each connection's stage times since the previous take to its *readings*.
+    def take_stages(self) -> list[tuple[ConnId, TransportReading]]:
+        """Return each connection's latest reading, with its stage times since the previous take.
 
-        For a connection that times its frames (a :class:`FrameStageSource`),
-        each track in its reading gets the stage times the connection held for
-        it, and those are taken: the next call gets only what was timed after
-        this one, so the runner calls this once per report. Stages of a track
-        the reading does not carry yet stay with the connection until a
-        reading does. A connection with no reading here keeps all its stages.
+        The readings are :meth:`transport_readings`. For a connection that
+        times its frames (a :class:`FrameStageSource`), each track in its
+        reading gets the stage times the connection held for it; for one that
+        times its data-channel messages (a :class:`MessageStageSource`), the
+        reading gets those. What is added is taken: the next call gets only
+        what was timed after this one, so the runner calls this once per
+        report. Stages of a track the reading does not carry yet stay with the
+        connection until a reading does, and a connection with no reading
+        keeps all its stages.
         """
         out: list[tuple[ConnId, TransportReading]] = []
-        for cid, reading in readings:
+        for cid, reading in self.transport_readings():
             conn = self._by_id.get(cid)
             if isinstance(conn, FrameStageSource) and reading.tracks:
                 stages = conn.take_frame_stages([t.track_name for t in reading.tracks])
@@ -182,6 +184,10 @@ class ConnectionManager:
                             for track in reading.tracks
                         ),
                     )
+            if isinstance(conn, MessageStageSource):
+                message_stages = conn.take_message_stages()
+                if message_stages:
+                    reading = replace(reading, message_stages=message_stages)
             out.append((cid, reading))
         return out
 

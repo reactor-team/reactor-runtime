@@ -143,6 +143,7 @@ from reactor_runtime.transport.webrtc.frames import (
     rgb_to_bgra,
     to_int16_mono,
 )
+from reactor_runtime.transport.webrtc.message_stages import MessageStageWindow
 from reactor_runtime.transport.webrtc.sdp import (
     Candidate,
     bump_session_version,
@@ -152,8 +153,10 @@ from reactor_runtime.transport.webrtc.sdp import (
 )
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpAnswer, SdpOffer, TrackMap
 from reactor_runtime.transport.webrtc.stats import (
+    ChunkingSample,
     OutboundMediaHealth,
     PeerStats,
+    SctpSample,
     SenderTiming,
     TrackStat,
 )
@@ -431,6 +434,8 @@ class WebRTCPeer:
         )
         self.frame_stages = FrameStageWindow()
         """Where this peer's frames spend their time; see :mod:`.frame_stages`."""
+        self.message_stages = MessageStageWindow()
+        """Where this peer's command messages spend their time; see :mod:`.message_stages`."""
         self._frame_thread: threading.Thread | None = None
         # Outbound audio, keyed by track name. A model may send several audio
         # tracks and each is its own stream on the wire: its own buffer, its
@@ -1430,6 +1435,29 @@ class WebRTCPeer:
             available_outgoing_bitrate_bps=available_outgoing,
             tracks=tuple(tracks),
             media=self._media_health(),
+            chunking=self._chunking_sample(),
+            sctp=_sctp_sample(getattr(report, "sctp", None)),
+        )
+
+    def _chunking_sample(self) -> ChunkingSample | None:
+        """Read the command data channel's chunking totals, or ``None`` without chunking."""
+        channel = self._data_channel
+        if channel is None:
+            return None
+        try:
+            totals = channel.chunking_stats()
+        except Exception:
+            logger.debug("chunking stats read failed", exc_info=True)
+            return None
+        if totals is None:
+            return None
+        return ChunkingSample(
+            messages_sent=totals.messages_sent,
+            queue_wait_s=totals.queue_wait_s,
+            send_s=totals.send_s,
+            stall_s=totals.stall_s,
+            messages_received=totals.messages_received,
+            reassembly_s=totals.reassembly_s,
         )
 
     async def close(self, *, drain: bool = True) -> None:
@@ -1505,4 +1533,17 @@ def _sender_timing(info: rw.TimingFrameInfo | None) -> SenderTiming | None:
         encode_wait_ms=span(sender.capture_ms, sender.encode_start_ms),
         packetize_ms=span(sender.encode_finish_ms, sender.packetization_finish_ms),
         pacer_ms=span(sender.packetization_finish_ms, sender.pacer_exit_ms),
+    )
+
+
+def _sctp_sample(sctp: rw.SctpStats | None) -> SctpSample | None:
+    """Copy the SCTP association's metrics, or ``None`` before an association exists."""
+    if sctp is None:
+        return None
+    return SctpSample(
+        smoothed_rtt_ms=float(sctp.smoothed_rtt_ms),
+        congestion_window_bytes=sctp.congestion_window_bytes,
+        unacked_chunks=sctp.unacked_chunks,
+        peer_receive_window_bytes=sctp.peer_receive_window_bytes,
+        packets_retransmitted=sctp.packets_retransmitted,
     )

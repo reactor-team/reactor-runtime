@@ -1,3 +1,6 @@
+from types import SimpleNamespace
+from typing import Any, cast
+
 from reactor_runtime.core import (
     ClientConnectionStat,
     ClientEnvironment,
@@ -5,12 +8,16 @@ from reactor_runtime.core import (
     ClientTrackDirection,
     ClientTrackStat,
     FrameStage,
+    MessageStage,
     TrackKind,
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.protocol.v0.codec import V0Codec
 from reactor_runtime.protocol.v1.codec import V1Codec
-from reactor_runtime.transport.webrtc.client_stats import read_client_stats
+from reactor_runtime.transport.webrtc.client_stats import (
+    _decode_message_stages,
+    read_client_stats,
+)
 from reactor_wire.v1 import control_pb2, platform_pb2
 
 
@@ -262,3 +269,40 @@ def test_an_undecodable_control_frame_is_not_a_batch() -> None:
 def test_a_v0_control_frame_is_not_a_batch() -> None:
     channel, ping = V0Codec().encode(control_pb2.ControlClientMessage(ping=platform_pb2.Ping()))
     assert read_client_stats(ping, ProtocolVersion.V0, channel) is None
+
+
+def test_the_connections_message_stages_decode_in_the_order_sent() -> None:
+    batch = _read(
+        platform_pb2.ClientStats(
+            connection_stat=platform_pb2.ClientConnectionStat(
+                timestamp=1_700_000_000_000,
+                message_stages=[
+                    platform_pb2.MessageStage(name="queue_wait", total_ms=0.4, messages=4),
+                    platform_pb2.MessageStage(name="reassembly", total_ms=0.2, messages=4),
+                ],
+            ),
+        )
+    )
+
+    assert batch.connection_stat is not None
+    assert batch.connection_stat.message_stages == (
+        MessageStage("queue_wait", total_ms=0.4, messages=4),
+        MessageStage("reassembly", total_ms=0.2, messages=4),
+    )
+
+
+def test_a_client_that_sends_no_message_stages_has_none() -> None:
+    batch = _read(
+        platform_pb2.ClientStats(
+            connection_stat=platform_pb2.ClientConnectionStat(timestamp=1_700_000_000_000)
+        )
+    )
+
+    assert batch.connection_stat is not None
+    assert batch.connection_stat.message_stages == ()
+
+
+def test_bindings_without_message_stages_read_as_none() -> None:
+    older = SimpleNamespace(timestamp=1, metrics={}, environment=None)
+
+    assert _decode_message_stages(cast(Any, older)) == ()

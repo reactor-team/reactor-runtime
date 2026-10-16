@@ -52,6 +52,7 @@ def transport_reading(
                 "dropped_bundles": media.dropped_bundles,
                 "dropped_frames": media.dropped_frames,
             }
+            | _sctp(sample, previous)
         ),
         tracks=tuple(
             _track(track, before.get((track.name, track.direction)), elapsed_s)
@@ -121,4 +122,27 @@ def _finite(metrics: Mapping[str, float | int | None]) -> dict[str, float]:
         name: float(value)
         for name, value in metrics.items()
         if value is not None and math.isfinite(value)
+    }
+
+
+def _sctp(sample: PeerStats, previous: PeerStats | None) -> dict[str, float | int | None]:
+    """The SCTP association's state, and its retransmissions since *previous*.
+
+    The retransmitted packets are a total for the association's life, so the
+    reading carries the difference from the previous sample; with no previous
+    association, it carries none.
+    """
+    sctp = sample.sctp
+    if sctp is None:
+        return {}
+    before = previous.sctp if previous is not None else None
+    retransmitted = None
+    if before is not None and sctp.packets_retransmitted >= before.packets_retransmitted:
+        retransmitted = sctp.packets_retransmitted - before.packets_retransmitted
+    return {
+        "sctp_smoothed_rtt_ms": sctp.smoothed_rtt_ms,
+        "sctp_congestion_window_bytes": sctp.congestion_window_bytes,
+        "sctp_unacked_chunks": sctp.unacked_chunks,
+        "sctp_peer_receive_window_bytes": sctp.peer_receive_window_bytes,
+        "sctp_packets_retransmitted": retransmitted,
     }

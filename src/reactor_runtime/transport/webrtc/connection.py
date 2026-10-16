@@ -23,6 +23,7 @@ from reactor_runtime.core import (
     FrameStage,
     InputFrame,
     MediaChunk,
+    MessageStage,
     TrackDirection,
     TrackInfo,
     TrackKind,
@@ -171,6 +172,10 @@ class WebRTCConnection:
     def take_frame_stages(self, tracks: Collection[str]) -> dict[str, tuple[FrameStage, ...]]:
         """Return the stage times of *tracks* since their previous take, and start them again."""
         return self._peer.frame_stages.take(tracks)
+
+    def take_message_stages(self) -> tuple[MessageStage, ...]:
+        """Return the message stage times since the previous take, and start them again."""
+        return self._peer.message_stages.take()
 
     @property
     def protocol_version(self) -> ProtocolVersion:
@@ -389,6 +394,10 @@ class WebRTCConnection:
                 elapsed = now - self._sampled_at if self._sampled_at is not None else None
                 self._latest_reading = transport_reading(stats, self._latest_stats, elapsed)
                 self._peer.frame_stages.fold(stats, self._latest_stats)
+                self._peer.message_stages.fold(
+                    stats.chunking,
+                    self._latest_stats.chunking if self._latest_stats is not None else None,
+                )
                 self._latest_stats = stats
                 self._sampled_at = now
                 if self._on_stats is not None:
