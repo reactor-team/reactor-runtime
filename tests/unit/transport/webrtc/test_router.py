@@ -51,6 +51,9 @@ class FakeRunner:
         if self.claims.setdefault(conn_id, transport) != transport:
             raise ConnectionIdClaimedError(conn_id)
 
+    def connection_failed(self, conn_id: ConnId, transport: str, reason: str) -> None:
+        pass
+
     def offer_admitted(self, conn_id: ConnId) -> None:
         self.admitted.append(conn_id)
 

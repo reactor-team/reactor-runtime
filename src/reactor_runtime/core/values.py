@@ -543,6 +543,31 @@ class ConnectionCapabilities:
     carries_audio: bool = False
 
 
+@dataclass(frozen=True)
+class ConnectionOrigin:
+    """Where a connection comes from, as the session's journal names it.
+
+    A transport reports it for each connection it opens, and the runner adds
+    it to the connection's ``connection_opened`` and ``connection_closed``
+    journal entries, so a reader of ``/events`` can tell the connections of
+    one transport from another's.
+
+    Attributes:
+        transport: The transport that opened the connection, such as
+            ``webrtc``.
+        identity: The name the client goes by on its transport, for a
+            transport whose clients have one; ``None`` otherwise.
+        system: Whether the transport opened the connection for the session
+            itself rather than for a client. The model sees it as a client
+            whose ``system`` is true, as it sees the runtime's own system
+            client, and it occupies the session like any other connection.
+    """
+
+    transport: str
+    identity: str | None = None
+    system: bool = False
+
+
 class HealthStatus(Enum):
     """A component's verdict on itself: working or broken.
 

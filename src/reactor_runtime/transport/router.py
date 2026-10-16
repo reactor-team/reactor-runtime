@@ -167,6 +167,16 @@ class SessionControl(ConnectionSink, Protocol):
             ConnectionIdClaimedError: If another transport holds *conn_id*.
         """
 
+    def connection_failed(self, conn_id: ConnId, transport: str, reason: str) -> None:
+        """Report that a connection the transport was opening will not open.
+
+        For a connection the transport opens in the background, after the
+        request that asked for it has been answered, so the failure still
+        reaches the session's journal: an ``error`` entry with *reason*, the
+        connection's id, and the transport. *reason* is read by clients of the
+        journal, so it names the cause and never a credential.
+        """
+
     def offer_admitted(self, conn_id: ConnId) -> None:
         """Stamp an admitted connection offer with the live session.
 
@@ -189,10 +199,14 @@ class TransportRouter(ABC):
 
     Attributes:
         protocol: The transport's name, such as ``webrtc``. The router claims
-            the connection ids it uses under this name.
+            the connection ids it uses under this name, and the session
+            descriptor lists it among the transports the runtime serves.
+        version: The version of the transport the router serves, listed
+            beside its name.
     """
 
     protocol: ClassVar[str]
+    version: ClassVar[str]
 
     @abstractmethod
     def mount(self, app: FastAPI, runner: SessionControl) -> None:

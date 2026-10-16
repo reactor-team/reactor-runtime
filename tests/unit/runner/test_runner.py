@@ -42,6 +42,7 @@ from reactor_runtime.core import (
     CompletedStep,
     Connection,
     ConnectionCapabilities,
+    ConnectionOrigin,
     ConnId,
     EndReason,
     FileUploaded,
@@ -4389,3 +4390,61 @@ async def test_client_stats_limits_are_cleared_when_the_session_closes(
     started_runner.stop_session()
 
     assert started_runner._client_stats._accepted_at == {}
+
+
+class TransportSystemConnection(FakeConnection):
+    """A connection a transport opens for the session itself, on a minted id."""
+
+    def __init__(self, cid: int) -> None:
+        super().__init__(cid)
+        self.origin = ConnectionOrigin(transport="room", system=True)
+
+
+async def test_a_transports_system_connection_reaches_the_model_as_a_system_client(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = _record_reactor_events(started_runner, monkeypatch)
+    started_runner.start_session({})
+    conn_id = started_runner.new_conn_id("room")
+    started_runner.offer_admitted(conn_id)
+    started_runner.connection_opened(TransportSystemConnection(conn_id))
+
+    assert ClientConnected(conn_id, 1, system=True) in events
+    _expect_state(started_runner, SessionState.STREAMING)
+    [opened] = _moves(started_runner, SessionEvent.CONNECTION_OPENED)
+    assert dict(opened.detail) == {"conn_id": conn_id, "system": True, "transport": "room"}
+
+    started_runner.connection_closed(conn_id)
+    _expect_state(started_runner, SessionState.ORPHANED)
+    [closed] = _moves(started_runner, SessionEvent.CONNECTION_CLOSED)
+    assert dict(closed.detail) == {"conn_id": conn_id, "system": True, "transport": "room"}
+
+
+async def test_connection_failed_journals_an_error_and_leaves_the_session(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    conn_id = started_runner.new_conn_id("room")
+    started_runner.connection_failed(conn_id, "room", "the room could not be joined")
+
+    [error] = _moves(started_runner, SessionEvent.ERROR)
+    assert dict(error.detail) == {
+        "message": "the room could not be joined",
+        "conn_id": conn_id,
+        "transport": "room",
+    }
+    _expect_state(started_runner, SessionState.WAITING)
+
+
+def test_the_descriptor_lists_every_transport_the_runtime_serves() -> None:
+    runner = _runner()
+    assert runner.descriptor()["transports"] == []
+    runner.add_transport("webrtc", "1.0")
+    runner.add_transport("room", "1.0")
+    descriptor = runner.descriptor()
+    assert descriptor["transports"] == [
+        {"protocol": "webrtc", "version": "1.0"},
+        {"protocol": "room", "version": "1.0"},
+    ]
+    # The transport a client connects over by default stays WebRTC.
+    assert descriptor["selected_transport"] == {"protocol": "webrtc", "version": "1.0"}

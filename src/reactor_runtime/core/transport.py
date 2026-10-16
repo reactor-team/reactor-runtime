@@ -6,8 +6,9 @@ client; ``ConnectionSink`` carries facts up from the transport. Both are
 ``Protocol``s, so a transport author or a test fake conforms by shape and
 signaling never reaches the runner. ``TransportStatsSource`` and
 ``FrameStageSource`` are optional capabilities a connection adds when its
-transport measures its wire, and ``MessageObserver`` one it adds when its wire
-needs what it is sent as plain data rather than as encoded frames.
+transport measures its wire, ``MessageObserver`` one it adds when its wire
+needs what it is sent as plain data rather than as encoded frames, and
+``ConnectionOriginSource`` one it adds to name where it comes from.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from reactor_runtime.core.stats import TransportReading
 from reactor_runtime.core.values import (
     ClientStatsBatch,
     ConnectionCapabilities,
+    ConnectionOrigin,
     ConnId,
     FrameStage,
     InputFrame,
@@ -178,6 +180,22 @@ class MessageObserver(Protocol):
         *code* is the stable failure code, such as ``invalid_command`` or the
         code of a raised ``CommandError``.
         """
+
+
+@runtime_checkable
+class ConnectionOriginSource(Protocol):
+    """A connection that names the transport it comes from.
+
+    Optional, beside :class:`Connection`, and checked for with ``isinstance``
+    when the connection registers. Its origin rides the connection's journal
+    entries, and a connection whose origin is ``system`` is the session's
+    own rather than a client's. A connection without it is journalled by id
+    alone.
+    """
+
+    @property
+    def origin(self) -> ConnectionOrigin:
+        """Where this connection comes from. Fixed for the connection's life."""
 
 
 @runtime_checkable

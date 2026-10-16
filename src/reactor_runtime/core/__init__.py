@@ -38,6 +38,7 @@ from reactor_runtime.core.session import (
 from reactor_runtime.core.stats import TransportReading, TransportTrackReading
 from reactor_runtime.core.transport import (
     Connection,
+    ConnectionOriginSource,
     ConnectionSink,
     FrameStageSource,
     MessageObserver,
@@ -53,6 +54,7 @@ from reactor_runtime.core.values import (
     CommandFailure,
     CompletedStep,
     ConnectionCapabilities,
+    ConnectionOrigin,
     ConnId,
     FrameStage,
     Health,
@@ -83,6 +85,8 @@ __all__ = [
     "ConnId",
     "Connection",
     "ConnectionCapabilities",
+    "ConnectionOrigin",
+    "ConnectionOriginSource",
     "ConnectionSink",
     "EndReason",
     "FieldInfo",

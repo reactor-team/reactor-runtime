@@ -19,6 +19,7 @@ from dataclasses import replace
 from reactor_runtime.core import (
     ClientStatsBatch,
     ConnectionCapabilities,
+    ConnectionOrigin,
     ConnId,
     FrameStage,
     InputFrame,
@@ -36,6 +37,7 @@ from reactor_runtime.transport.webrtc.peer import WebRTCPeer, WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.reading import transport_reading
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpAnswer, SdpOffer, TrackMap
 from reactor_runtime.transport.webrtc.stats import OutboundMediaHealth, PeerStats
+from reactor_runtime.transport.webrtc.version import TRANSPORT_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +62,10 @@ class WebRTCConnection:
     Built by the acceptor during negotiation and held until its wire connects.
     The acceptor registers the inbound callbacks before the wire goes live; the
     connection starts its watchdog and stats sampling on connect and stops them
-    on loss or close.
+    on loss or close. Its journal entries name the ``webrtc`` transport.
     """
+
+    origin = ConnectionOrigin(transport=TRANSPORT_NAME)
 
     _WATCHDOG_POLL_SECONDS = 2.0
     _STATS_INTERVAL_SECONDS = 2.0
