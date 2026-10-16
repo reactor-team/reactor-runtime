@@ -4216,3 +4216,29 @@ async def test_a_steps_stages_go_to_the_connections_its_media_reached(
     assert conn_ids == (ConnId(1),)
     assert tracks == ["main"]
     assert stages == {"generate": 4.0}
+
+
+async def test_a_new_session_starts_with_no_step_recipients(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    started_runner._connections.register(FakeConnection(1))
+    started_runner._emit_media(
+        MediaChunk(bundle=_video_bundle(), fps=30.0, session=started_runner._sessions_posted)
+    )
+    started_runner.stop_session()
+    await asyncio.sleep(0.05)
+
+    started_runner.start_session({})
+    await asyncio.sleep(0.05)
+
+    assert started_runner._step_recipients == set()
+
+
+async def test_media_from_an_earlier_session_reaches_no_step(started_runner: Runner) -> None:
+    started_runner.start_session({})
+    started_runner._connections.register(FakeConnection(1))
+
+    started_runner._emit_media(
+        MediaChunk(bundle=_video_bundle(), fps=30.0, session=started_runner._sessions_posted - 1)
+    )
+
+    assert started_runner._step_recipients == set()

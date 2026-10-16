@@ -1458,8 +1458,11 @@ class Runner(ServiceComponent, ConnectionSink):
         sent = self._connections.broadcast_media(
             chunk, abort=lambda: self._media_generation != generation
         )
-        with self._step_recipients_lock:
-            self._step_recipients.update(sent)
+        # Media from an earlier session (its session-end hook, say) reached
+        # nobody for this session's steps.
+        if chunk.session is None or chunk.session == self._sessions_posted:
+            with self._step_recipients_lock:
+                self._step_recipients.update(sent)
         # The archive takes the whole chunk even when a flush cut the broadcast
         # short: a playout cut is not an archive boundary.
         self._recorder.on_chunk(chunk)
@@ -1893,6 +1896,8 @@ class Runner(ServiceComponent, ConnectionSink):
             # can emit, and every frame it emits for this session counts.
             self._model_output.reset(self._sessions_posted)
             self._stages.reset()
+            with self._step_recipients_lock:
+                self._step_recipients.clear()
             bridge.dispatch_reactor_event(
                 SessionStarted(
                     self._session_id,
