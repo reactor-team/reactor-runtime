@@ -118,7 +118,7 @@ class ModelBridge:
             command = self._contract.validate(name, raw_args)
         except ContractError as error:
             return CommandOutcome.reject(error.field, error.reason)
-        self._model.submit_command(command, conn_id, request_id, received_at)
+        self._model._submit_command_at(command, conn_id, request_id, received_at)
         return CommandOutcome.accept()
 
     def check_command(self, name: str, raw_args: dict[str, Any]) -> CommandOutcome:

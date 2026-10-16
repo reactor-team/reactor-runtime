@@ -441,17 +441,29 @@ class ReactorCore:
     # -- thread-safe ingress (called by the bridge from the runtime thread) ---
 
     def submit_command(
+        self, command: Command, conn_id: ConnId | None, request_id: RequestId | None
+    ) -> None:
+        """Enqueue a validated command onto the model loop."""
+        self._enqueue(CommandEnvelope(command, conn_id, request_id))
+
+    def _submit_command_at(
         self,
         command: Command,
         conn_id: ConnId | None,
         request_id: RequestId | None,
         received_at: float | None = None,
     ) -> None:
-        """Enqueue a validated command onto the model loop.
+        """Enqueue a validated command with when it reached the runtime. Called by the bridge.
 
-        *received_at* is when the command reached the runtime, on the monotonic
-        clock; with it, the dispatcher reports how long the command waited.
+        *received_at* is on the monotonic clock; with it, the dispatcher
+        reports how long the command waited. Kept apart from
+        :meth:`submit_command`, which a model may override with the signature
+        it was written against: a command for such a model goes through its
+        override, untimed.
         """
+        if type(self).submit_command is not ReactorCore.submit_command:
+            self.submit_command(command, conn_id, request_id)
+            return
         self._enqueue(CommandEnvelope(command, conn_id, request_id, received_at))
 
     def post_reactor_event(self, event: ReactorEvent) -> None:
