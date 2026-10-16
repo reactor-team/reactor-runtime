@@ -1172,13 +1172,21 @@ class Runner(ServiceComponent, ConnectionSink):
         if not self._sm.send(SessionEvent.STOP_SESSION, **detail):
             raise SessionTransitionError("stop", self._sm.current_state)
 
-    def new_conn_id(self) -> ConnId:
-        """Mint a fresh connection id, delegating to the manager that owns the namespace.
+    def new_conn_id(self, transport: str) -> ConnId:
+        """Mint a fresh connection id and claim it for *transport*.
 
         The connection manager is the single owner of the id namespace, so the
         runner forwards rather than keeping a second counter that could diverge.
         """
-        return self._connections.new_conn_id()
+        return self._connections.new_conn_id(transport)
+
+    def claim_conn_id(self, conn_id: ConnId, transport: str) -> None:
+        """Claim *conn_id* for *transport*, unless another transport holds it.
+
+        Raises:
+            ConnectionIdClaimedError: If another transport holds *conn_id*.
+        """
+        self._connections.claim_conn_id(conn_id, transport)
 
     def offer_admitted(self, conn_id: ConnId) -> None:
         """Stamp an admitted offer with the session it was admitted into.
