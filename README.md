@@ -160,6 +160,17 @@ Every other participant in the room is a client of the session, with a connectio
 
 The `runtime.livekit` block reaches the room's own signals. A call to an RPC method listed with a `command` runs that command for the caller, and answers with the reply message's fields as JSON, an empty string when the handler returns nothing, or an `RpcError` with code `1500`, the failure's message, and its code as the error's `data`. To fail the call, raise `CommandError`. Sending a message listed with a `message` calls that method on each participant the message reaches, with the message's fields as the JSON payload; `send` returns at once, and a participant that did not register the method is skipped. A data packet on `<prefix>.<command>` runs the command with the packet's JSON object as its arguments and answers nothing. A command an RPC method runs is reachable only through that method.
 
+A participant feeds the model's input tracks in two ways. A remote track published under an input track's name feeds it, which needs the subscribe grant in the session's token. A byte stream on a topic `media_inputs` maps feeds the mapped track, without that grant: its `pcm_s16le` bytes are cut into 10 ms frames at the track's declared rate, in mono, using the stream's `sample_rate` and `num_channels` attributes. A track named in `media_inputs` is fed only by its mapped source. Each frame of a stream says which stream it came from, and the stream's last frame carries no samples, so a model can tell where one utterance ends and which buffered frames belong to it:
+
+```python
+for frame in await self.media.agent_audio.read(n=8):
+    info = json.loads(frame.metadata)
+    # {"stream_id": "AUDIO_x7Kq", "attributes": {"sample_rate": "24000", "num_channels": "1"}}
+    # last frame of the stream, data of shape (1, 0): {"stream_id": "AUDIO_x7Kq", "ended": true}
+```
+
+A stream ends when it closes, when a new stream starts on the same topic while it is open, or when its sender leaves. The first participant that feeds an input track holds it until it leaves, and media from anyone else is dropped.
+
 Scaffold, build, and run it with the CLI:
 
 ```sh

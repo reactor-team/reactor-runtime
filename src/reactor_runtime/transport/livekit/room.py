@@ -24,7 +24,8 @@ participant connection closes before it.
 The room's own signals reach the model as the manifest's ``runtime.livekit``
 block maps them (:class:`RoomSignals`): an RPC call to a mapped method runs its
 command and answers with the result, and a data packet on a mapped topic runs
-its command and answers nothing.
+its command and answers nothing. Participants' tracks and byte streams feed the
+model's input tracks (:class:`RoomInputs`).
 """
 
 from __future__ import annotations
@@ -46,6 +47,7 @@ from reactor_runtime.transport.livekit.connection import (
     AUDIO_QUEUE_MS,
     RoomConnection,
 )
+from reactor_runtime.transport.livekit.media_in import RoomInputs
 from reactor_runtime.transport.livekit.participant import TOPIC_CHANNELS, ParticipantConnection
 from reactor_runtime.transport.livekit.signals import RoomSignals, payload_args
 from reactor_runtime.transport.livekit.version import TRANSPORT_NAME
@@ -109,7 +111,9 @@ class RoomSession:
         self._url = url
         self._token = token
         self._control = control
-        self._signals = RoomSignals(config or LiveKitConfig())
+        self._config = config or LiveKitConfig()
+        self._signals = RoomSignals(self._config)
+        self._inputs: RoomInputs | None = None
         self._room = rtc.Room()
         self._connection: RoomConnection | None = None
         self._join: asyncio.Task[None] | None = None
@@ -124,6 +128,7 @@ class RoomSession:
         self._room.on("participant_connected", lambda p: self._add_participant(p.identity))
         self._room.on("participant_disconnected", lambda p: self._remove_participant(p.identity))
         self._room.on("data_received", self._on_data)
+        self._room.on("track_subscribed", self._on_track_subscribed)
         for topic in TOPIC_CHANNELS:
             self._room.register_byte_stream_handler(topic, self._on_byte_stream)
 
@@ -162,7 +167,8 @@ class RoomSession:
                 self._room.connect(self._url, self._token), timeout=JOIN_TIMEOUT_SECONDS
             )
             self._register_methods()
-            connection = await self._publish(self._output_tracks())
+            self._register_inputs()
+            connection = await self._publish(self._tracks(TrackDirection.OUT))
         except TimeoutError:
             await self._fail(_JOIN_TIMED_OUT)
             return
@@ -178,6 +184,9 @@ class RoomSession:
         self._registered = True
         for participant in list(self._room.remote_participants.values()):
             self._add_participant(participant.identity)
+            for publication in participant.track_publications.values():
+                if publication.track is not None:
+                    self._on_track_subscribed(publication.track, publication, participant)
         logger.info(
             "joined the LiveKit room",
             conn_id=self.conn_id,
@@ -209,6 +218,8 @@ class RoomSession:
         self._registered = False
         for reader in self._readers:
             reader.cancel()
+        if self._inputs is not None:
+            self._inputs.close()
         participants = list(self._participants.values())
         self._participants.clear()
         for participant in participants:
@@ -240,18 +251,50 @@ class RoomSession:
         except Exception:
             logger.warning("leaving the LiveKit room failed", exc_info=True)
 
-    def _output_tracks(self) -> dict[str, TrackInfo]:
+    def _tracks(self, direction: TrackDirection) -> dict[str, TrackInfo]:
+        """The model's declared tracks that flow in *direction*."""
         tracks: dict[str, TrackInfo] = {}
         for name, entry in self._control.track_map().items():
-            if entry["direction"] != TrackDirection.OUT.value:
+            if entry["direction"] != direction.value:
                 continue
             tracks[name] = TrackInfo(
                 name=name,
                 kind=TrackKind(entry["kind"]),
                 rate=float(entry["rate"]),
-                direction=TrackDirection.OUT,
+                direction=direction,
             )
         return tracks
+
+    def _register_inputs(self) -> None:
+        """Feed the input tracks from the byte stream topics that map to them."""
+        inputs = RoomInputs(
+            self._tracks(TrackDirection.IN), self._config.media_inputs, self._control.media_received
+        )
+        self._inputs = inputs
+        for topic in inputs.stream_topics:
+            self._room.register_byte_stream_handler(topic, self._on_media_stream)
+
+    def _on_media_stream(self, reader: rtc.ByteStreamReader, identity: str) -> None:
+        conn = self._participants.get(identity)
+        if conn is None or self._inputs is None:
+            # Not a client: read the stream away, so it does not pile up.
+            self._drain(reader)
+            return
+        self._inputs.on_byte_stream(reader, identity, conn.id)
+
+    def _on_track_subscribed(self, track: rtc.Track, publication: Any, participant: Any) -> None:
+        conn = self._participants.get(participant.identity)
+        if conn is not None and self._inputs is not None:
+            self._inputs.on_track(track, participant.identity, conn.id)
+
+    def _drain(self, reader: rtc.ByteStreamReader) -> None:
+        async def drain() -> None:
+            async for _ in reader:
+                pass
+
+        task = asyncio.get_running_loop().create_task(drain())
+        self._readers.add(task)
+        task.add_done_callback(self._readers.discard)
 
     async def _publish(self, tracks: Mapping[str, TrackInfo]) -> RoomConnection:
         """Publish one LiveKit track per output track, named after it."""
@@ -303,6 +346,8 @@ class RoomSession:
         conn = self._participants.pop(identity, None)
         if conn is None:
             return
+        if self._inputs is not None:
+            self._inputs.release(identity)
         conn.drop()
         self._control.connection_closed(conn.id)
 

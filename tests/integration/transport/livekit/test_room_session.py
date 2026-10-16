@@ -7,11 +7,13 @@ The tests skip when ``LIVEKIT_URL`` is not set.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 import uuid
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import numpy as np
@@ -21,10 +23,13 @@ from livekit import api, rtc
 from reactor_runtime import (
     Audio,
     CommandError,
+    InputBuffer,
+    MediaInput,
     MessageField,
     ModelMessage,
     Output,
     ReactorApp,
+    ReadMode,
     Video,
     event,
 )
@@ -77,6 +82,25 @@ class RoomOutput(Output):
     main_audio: Voice
 
 
+class AgentAudio(Audio):
+    sample_rate = RATE
+    buffer_seconds = 120
+
+
+class RoomInput(MediaInput):
+    agent_audio: AgentAudio
+    camera: Video
+
+
+class Heard(ModelMessage):
+    samples: int = MessageField(description="Samples of agent audio received so far.")
+    digest: str = MessageField(description="SHA-256 of every sample received, in order.")
+    streams: list[str] = MessageField(description="The streams the samples came from.")
+    ended: list[str] = MessageField(description="The streams that ended.")
+    camera_frames: int = MessageField(description="Camera frames received so far.")
+    camera_mean: float = MessageField(description="The last camera frame's mean value.")
+
+
 class Echoed(ModelMessage):
     text: str = MessageField(description="The text the command carried.")
 
@@ -89,6 +113,33 @@ class ToneModel(ReactorApp):
     """A flat grey picture and a continuous 440 Hz tone, one 40 ms frame per step."""
 
     fps = FPS
+    media: RoomInput
+
+    @event(name="heard", description="Reply with `heard`: what the input tracks received.")
+    async def heard(self) -> Heard:
+        audio = cast(InputBuffer, self.media.agent_audio)
+        for frame in audio.try_read(audio.available, ReadMode.FIFO) or []:
+            info = json.loads(frame.metadata or b"{}")
+            if info.get("ended"):
+                self.ended.append(info["stream_id"])
+                continue
+            if info["stream_id"] not in self.streams:
+                self.streams.append(info["stream_id"])
+            self.received.append(frame.data[0])
+        camera = cast(InputBuffer, self.media.camera)
+        frames = camera.try_read(camera.available, ReadMode.FIFO) or []
+        self.camera_frames += len(frames)
+        if frames:
+            self.camera_mean = float(frames[-1].data.mean())
+        samples = np.concatenate(self.received) if self.received else np.empty(0, np.int16)
+        return Heard(
+            samples=int(samples.size),
+            digest=hashlib.sha256(samples.astype("<i2").tobytes()).hexdigest(),
+            streams=self.streams,
+            ended=self.ended,
+            camera_frames=self.camera_frames,
+            camera_mean=self.camera_mean,
+        )
 
     @event(name="echo", description="Reply with `echoed`, carrying `text`.")
     async def echo(self, text: str) -> Echoed:
@@ -108,6 +159,11 @@ class ToneModel(ReactorApp):
 
     def load(self, config_path: Path | None) -> None:
         self.sample = 0
+        self.received: list[np.ndarray] = []
+        self.streams: list[str] = []
+        self.ended: list[str] = []
+        self.camera_frames = 0
+        self.camera_mean = 0.0
 
     def generate(self, input: Any) -> RoomOutput:
         n = RATE // FPS
@@ -127,6 +183,7 @@ SIGNALS = LiveKitConfig(
         LiveKitRpcMethod(method="lk.announced", message="announcement"),
     ),
     topics=("avatar",),
+    media_inputs={"lk.audio_stream": "agent_audio"},
 )
 
 
@@ -704,3 +761,88 @@ async def test_a_topic_cannot_run_a_command_an_rpc_method_runs(
         assert [t.detail["name"] for t in _moves(runner, SessionEvent.COMMAND)] == ["announce"]
     finally:
         await client.leave()
+
+
+async def _heard(client: ProtocolClient, request_id: str) -> dict[str, Any]:
+    await client.command("heard", request_id)
+    await _until(lambda: any(rid == request_id for _, rid, _, _ in client.model_messages()))
+    return next(data for _, rid, _, data in client.model_messages() if rid == request_id)
+
+
+async def _stream(client: ProtocolClient, data: bytes, rate: int, channels: int) -> str:
+    writer = await client.room.local_participant.stream_bytes(
+        "utterance",
+        topic="lk.audio_stream",
+        destination_identities=["model"],
+        attributes={"sample_rate": str(rate), "num_channels": str(channels)},
+    )
+    # Uneven chunks, some splitting a sample in two.
+    for start in range(0, len(data), 3_001):
+        await writer.write(data[start : start + 3_001])
+    await writer.aclose()
+    return writer.info.stream_id
+
+
+async def test_a_byte_stream_reaches_the_input_track_sample_for_sample(
+    runner: Runner, http: httpx.AsyncClient, room_name: str
+) -> None:
+    await _joined(runner, http, room_name)
+    agent = await _client_in_session(runner, room_name, "agent")
+    try:
+        t = np.arange(2 * RATE) / RATE
+        speech = (12_000 * np.sin(2 * np.pi * 220 * t)).astype("<i2")
+
+        stream_id = await _stream(agent, speech.tobytes(), RATE, 1)
+        await asyncio.sleep(1.0)
+        heard = await _heard(agent, "heard-1")
+
+        assert heard["samples"] == speech.size
+        assert heard["digest"] == hashlib.sha256(speech.tobytes()).hexdigest()
+        assert heard["streams"] == [stream_id]
+        assert heard["ended"] == [stream_id]
+    finally:
+        await agent.leave()
+
+
+async def test_a_byte_stream_at_another_rate_is_resampled_and_mixed_to_mono(
+    runner: Runner, http: httpx.AsyncClient, room_name: str
+) -> None:
+    await _joined(runner, http, room_name)
+    agent = await _client_in_session(runner, room_name, "agent")
+    try:
+        t = np.arange(48_000) / 48_000
+        tone = (8_000 * np.sin(2 * np.pi * 440 * t)).astype("<i2")
+        stereo = np.stack([tone, tone], axis=1).reshape(-1)
+
+        stream_id = await _stream(agent, stereo.tobytes(), 48_000, 2)
+        await asyncio.sleep(1.0)
+        heard = await _heard(agent, "heard-2")
+
+        # One second of audio at the track's 24 kHz, give or take the resampler's edge.
+        assert abs(heard["samples"] - RATE) <= 240
+        assert heard["ended"] == [stream_id]
+    finally:
+        await agent.leave()
+
+
+async def test_a_track_published_under_an_input_tracks_name_feeds_it(
+    runner: Runner, http: httpx.AsyncClient, room_name: str
+) -> None:
+    await _joined(runner, http, room_name)
+    viewer = await _client_in_session(runner, room_name, "viewer")
+    source = rtc.VideoSource(64, 48)
+    track = rtc.LocalVideoTrack.create_video_track("camera", source)
+    await viewer.room.local_participant.publish_track(
+        track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_CAMERA)
+    )
+    try:
+        frame = np.full((48, 64, 3), 77, np.uint8)
+        for _ in range(30):
+            source.capture_frame(rtc.VideoFrame(64, 48, rtc.VideoBufferType.RGB24, frame.tobytes()))
+            await asyncio.sleep(0.05)
+        heard = await _heard(viewer, "heard-3")
+
+        assert heard["camera_frames"] > 0
+        assert abs(heard["camera_mean"] - 77) < 6
+    finally:
+        await viewer.leave()
