@@ -57,4 +57,10 @@ async def test_session_churn(runtime: RuntimeProcess) -> None:
         runtime.wait_ready(timeout_s=CLOSE_TIMEOUT_S)
         return CycleOutcome(received=received, unanswered=[*client.collect_unanswered(), *missed])
 
-    await run_cycles(runtime, test_name="session-churn", description=DESCRIPTION, cycle=cycle)
+    await run_cycles(
+        runtime,
+        test_name="session-churn",
+        description=DESCRIPTION,
+        cycle=cycle,
+        min_smoke_cycles=len(STOPS),
+    )
