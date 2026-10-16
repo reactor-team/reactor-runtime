@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from reactor_runtime.core import (
     ClientTrackDirection,
     ConnId,
@@ -13,7 +15,8 @@ from reactor_runtime.core import (
     TransportReading,
     TransportTrackReading,
 )
-from reactor_runtime.runner.stages import RunnerStages
+from reactor_runtime.interface.internal.reactor_core import CommandTimes
+from reactor_runtime.runner.stages import RunnerStages, command_stages
 
 
 def test_a_connections_stages_follow_its_transports_on_its_reading() -> None:
@@ -121,3 +124,45 @@ def test_a_tracks_stages_wait_until_a_reading_carries_the_track() -> None:
 
     assert before.tracks[0].frame_stages == ()
     assert after.tracks[1].frame_stages == (FrameStage("input_wait", 2.0, 1),)
+
+
+def test_a_commands_parts_name_dispatch_and_add_up_to_it() -> None:
+    stages = RunnerStages()
+    stages.add_command(
+        ConnId(2),
+        CommandTimes(
+            received_at=10.0,
+            submitted_at=10.030,
+            held_ms=20.0,
+            taken=10.040,
+            started=10.045,
+            finished=10.047,
+        ),
+    )
+
+    [(_, reading)] = stages.merge([(ConnId(2), TransportReading())])
+
+    by_name = {s.name: s for s in reading.message_stages}
+    assert [s.name for s in reading.message_stages] == [
+        "dispatch",
+        "start_wait",
+        "parse",
+        "model_queue",
+        "lock_wait",
+        "handler",
+    ]
+    assert by_name["dispatch"].part_of == ""
+    assert by_name["handler"].part_of == ""
+    parts = [s for s in reading.message_stages if s.part_of == "dispatch"]
+    assert sum(s.total_ms for s in parts) == pytest.approx(by_name["dispatch"].total_ms)
+    assert by_name["parse"].total_ms == pytest.approx(10.0)
+
+
+def test_a_command_with_no_queue_time_reports_no_parts_before_the_lock() -> None:
+    names = command_stages(
+        CommandTimes(
+            received_at=1.0, submitted_at=None, held_ms=0.0, taken=1.0, started=1.0, finished=1.0
+        )
+    )
+
+    assert set(names) == {"dispatch", "lock_wait", "handler"}

@@ -2,6 +2,8 @@ import asyncio
 import time
 from typing import Any
 
+import pytest
+
 from reactor_runtime import (
     ClientInfo,
     CommandError,
@@ -25,6 +27,7 @@ from reactor_runtime.core.model import (
 )
 from reactor_runtime.core.values import CommandFailure, ConnId
 from reactor_runtime.interface.internal.reactor_core import CommandEnvelope, RequestId
+from reactor_runtime.runner.stages import command_stages
 
 Addressed = list[tuple[ConnId, ModelMessage | CommandFailure | None, RequestId | None]]
 
@@ -294,9 +297,9 @@ def test_loops_drain_the_queues_on_the_model_thread() -> None:
         time.sleep(0.1)
 
 
-def _timed(model: Model) -> list[tuple[ConnId, float, float]]:
-    """Bring a model up and capture what it reports through the command timing sink."""
-    timings: list[tuple[ConnId, float, float]] = []
+def _timed(model: Model) -> list[tuple[ConnId, dict[str, float]]]:
+    """Bring a model up and capture each command's stages from its command timing reports."""
+    timings: list[tuple[ConnId, dict[str, float]]] = []
     model._on_loop_ready()
     model.bind_output(
         broadcast=lambda message: None,
@@ -304,8 +307,8 @@ def _timed(model: Model) -> list[tuple[ConnId, float, float]]:
         media=lambda chunk: None,
     )
     model._bind_timing(
-        command_timing=lambda conn_id, _session, dispatch_ms, handler_ms: timings.append(
-            (conn_id, dispatch_ms, handler_ms)
+        command_timing=lambda conn_id, _session, times: timings.append(
+            (conn_id, command_stages(times))
         ),
     )
     return timings
@@ -320,10 +323,10 @@ async def test_a_command_reports_its_wait_for_the_handler_and_the_handlers_run()
         CommandEnvelope(_cmd("set_value", value=1), ConnId(1001), "req-t", received_at)
     )
 
-    [(conn_id, dispatch_ms, handler_ms)] = timings
+    [(conn_id, stages)] = timings
     assert conn_id == ConnId(1001)
-    assert dispatch_ms >= 50.0
-    assert handler_ms >= 0.0
+    assert stages["dispatch"] >= 50.0
+    assert stages["handler"] >= 0.0
 
 
 async def test_a_failing_handler_still_reports_its_times() -> None:
@@ -347,3 +350,37 @@ async def test_a_command_without_an_arrival_time_or_a_connection_reports_nothing
     )
 
     assert timings == []
+
+
+async def test_a_command_reports_the_parts_of_its_wait() -> None:
+    model = Model()
+    timings = _timed(model)
+    now = time.monotonic()
+
+    await model._dispatch_command(
+        CommandEnvelope(_cmd("set_value", value=1), ConnId(1001), "req-p", now - 0.05, now - 0.02)
+    )
+
+    [(_, split)] = timings
+    assert split["start_wait"] == 0.0
+    assert split["parse"] == pytest.approx(30.0, abs=1.0)
+    assert split["model_queue"] >= 20.0
+    assert split["lock_wait"] >= 0.0
+    total = split["parse"] + split["model_queue"] + split["lock_wait"]
+    assert total == pytest.approx(split["dispatch"], abs=0.01)
+
+
+async def test_a_command_held_for_the_starting_input_reports_the_hold_apart_from_parse() -> None:
+    model = Model()
+    timings = _timed(model)
+    now = time.monotonic()
+
+    await model._dispatch_command(
+        CommandEnvelope(
+            _cmd("set_value", value=1), ConnId(1001), "req-h", now - 0.05, now - 0.02, 25.0
+        )
+    )
+
+    [(_, split)] = timings
+    assert split["start_wait"] == 25.0
+    assert split["parse"] == pytest.approx(5.0, abs=1.0)
