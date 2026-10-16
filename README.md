@@ -116,6 +116,23 @@ Every track of the step's output becomes its own stream in one `output.mp4`, bes
 
 When step results are on, `GET /sessions/{id}/steps` lists a session's saved folders by the session's own id; each stays readable for five minutes after it is written, after the session ends too.
 
+A session can also join a LiveKit room, where every other participant is a client. Participants that speak the Reactor protocol need nothing more. For the room's own signals, the model says in `reactor.yaml` which RPC methods, data topics, and byte streams reach which of its commands, messages, and input tracks:
+
+```yaml
+runtime:
+  livekit:
+    rpc:
+      - method: lk.clear_buffer        # a call to this method runs clear_buffer
+        command: clear_buffer
+      - method: lk.playback_finished   # sending playback_finished calls this method
+        message: playback_finished
+    topics: [avatar]                   # a data packet on avatar.<command> runs <command>
+    media_inputs:
+      lk.audio_stream: agent_audio     # byte streams on this topic feed agent_audio
+```
+
+The runtime checks the block against the model when it loads: every command, message, and input track it names must exist, and a method can run only one command. A mistake stops the model from loading, so it shows at deploy time rather than in a session.
+
 Scaffold, build, and run it with the CLI:
 
 ```sh

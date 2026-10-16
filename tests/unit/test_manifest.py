@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from reactor_runtime import ReactorApp
-from reactor_runtime.core import RecordingConfig, StepResultsConfig
+from reactor_runtime.core import LiveKitConfig, LiveKitRpcMethod, RecordingConfig, StepResultsConfig
 from reactor_runtime.manifest import import_model_class, load_config
 
 _MANIFEST = """\
@@ -275,3 +275,128 @@ def test_import_model_class_rejects_a_malformed_reference(ref: str) -> None:
 def test_import_model_class_rejects_a_class_that_is_no_model() -> None:
     with pytest.raises(TypeError, match="ReactorCore subclass"):
         import_model_class("pathlib:Path")
+
+
+def test_load_config_leaves_livekit_empty_when_absent(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_MANIFEST)
+
+    assert load_config(manifest).livekit == LiveKitConfig()
+
+
+def test_load_config_reads_the_livekit_block(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(
+        "runtime:\n"
+        "  import: pipeline:Demo\n"
+        "  livekit:\n"
+        "    rpc:\n"
+        "      - method: lk.clear_buffer\n"
+        "        command: clear_buffer\n"
+        "      - method: lk.playback_finished\n"
+        "        message: playback_finished\n"
+        "    topics: [avatar, acme.avatar]\n"
+        "    media_inputs:\n"
+        "      lk.audio_stream: agent_audio\n"
+    )
+
+    assert load_config(manifest).livekit == LiveKitConfig(
+        rpc=(
+            LiveKitRpcMethod(method="lk.clear_buffer", command="clear_buffer"),
+            LiveKitRpcMethod(method="lk.playback_finished", message="playback_finished"),
+        ),
+        topics=("avatar", "acme.avatar"),
+        media_inputs={"lk.audio_stream": "agent_audio"},
+    )
+
+
+def test_load_config_allows_two_inbound_methods_for_one_command(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(
+        "runtime:\n  import: pipeline:Demo\n  livekit:\n    rpc:\n"
+        "      - {method: clear_buffer, command: clear_buffer}\n"
+        "      - {method: lk.clear_buffer, command: clear_buffer}\n"
+    )
+
+    assert len(load_config(manifest).livekit.rpc) == 2
+
+
+def test_load_config_ignores_unknown_livekit_keys(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(
+        "runtime:\n  import: pipeline:Demo\n  livekit:\n    from_the_future: 1\n    rpc:\n"
+        "      - {method: m, command: c, timeout: 3}\n"
+    )
+
+    assert load_config(manifest).livekit == LiveKitConfig(
+        rpc=(LiveKitRpcMethod(method="m", command="c"),)
+    )
+
+
+@pytest.mark.parametrize(
+    ("block", "reason"),
+    [
+        ("  livekit: true\n", "runtime.livekit must be a mapping"),
+        ("  livekit:\n    rpc: {method: m}\n", "rpc must be a list"),
+        ("  livekit:\n    rpc: [m]\n", r"rpc\[0\] must be a mapping"),
+        ("  livekit:\n    rpc:\n      - {command: c}\n", r"rpc\[0\]\.method"),
+        ("  livekit:\n    rpc:\n      - {method: m}\n", "exactly one of"),
+        ("  livekit:\n    rpc:\n      - {method: m, command: c, message: d}\n", "exactly one of"),
+        ("  livekit:\n    rpc:\n      - {method: m, command: ''}\n", r"rpc\[0\]\.command"),
+        (
+            "  livekit:\n    rpc:\n"
+            "      - {method: m, command: a}\n"
+            "      - {method: m, command: b}\n",
+            "already runs a command",
+        ),
+        ("  livekit:\n    topics: avatar\n", "topics must be a list"),
+        ("  livekit:\n    topics: ['']\n", "topics must be a list"),
+        ("  livekit:\n    media_inputs: [lk.audio_stream]\n", "media_inputs must map"),
+        ("  livekit:\n    media_inputs: {lk.audio_stream: 3}\n", "media_inputs must map"),
+    ],
+)
+def test_load_config_refuses_a_livekit_block_of_the_wrong_shape(
+    tmp_path: Path, block: str, reason: str
+) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text("runtime:\n  import: pipeline:Demo\n" + block)
+
+    with pytest.raises(ValueError, match=reason):
+        load_config(manifest)
+
+
+def test_livekit_check_accepts_a_block_naming_what_the_model_declares() -> None:
+    config = LiveKitConfig(
+        rpc=(
+            LiveKitRpcMethod(method="lk.clear_buffer", command="clear_buffer"),
+            LiveKitRpcMethod(method="lk.playback_finished", message="playback_finished"),
+        ),
+        media_inputs={"lk.audio_stream": "agent_audio"},
+    )
+
+    config.check(
+        commands={"clear_buffer"},
+        messages={"playback_finished"},
+        input_tracks={"agent_audio"},
+    )
+
+
+@pytest.mark.parametrize(
+    ("config", "reason"),
+    [
+        (
+            LiveKitConfig(rpc=(LiveKitRpcMethod(method="m", command="missing"),)),
+            "runs command 'missing'",
+        ),
+        (
+            LiveKitConfig(rpc=(LiveKitRpcMethod(method="m", message="missing"),)),
+            "message 'missing'",
+        ),
+        (LiveKitConfig(media_inputs={"lk.audio_stream": "missing"}), "input track 'missing'"),
+    ],
+)
+def test_livekit_check_refuses_a_name_the_model_does_not_declare(
+    config: LiveKitConfig, reason: str
+) -> None:
+    with pytest.raises(ValueError, match=reason):
+        config.check(commands={"c"}, messages={"d"}, input_tracks={"t"})
