@@ -1,12 +1,13 @@
 import dataclasses
 
 import pytest
-import trends
-from trends import (
+from endurance import trends
+from endurance.trends import (
     Sample,
     assert_always_zero,
     assert_never_grows,
     assert_no_sustained_growth,
+    assert_slope_under,
     cpu_deltas,
     exact_metrics,
     retained_cycles,
@@ -141,3 +142,47 @@ def test_a_leak_just_over_the_limit_reads_as_over_it() -> None:
     result = assert_no_sustained_growth(values, name="rss", max_growth_ratio=0.15)
     assert result.status == "fail"
     assert "+15.4%" in result.detail
+
+
+def _hours(n: int) -> list[float]:
+    # One sample a minute.
+    return [i / 60 for i in range(n)]
+
+
+def test_a_steady_leak_the_ratio_check_passes_fails_on_slope() -> None:
+    # 300 MB growing 1 MB a minute for two hours: under 15% from the middle
+    # third to the last, but 60 MB/h.
+    values = [300.0 + i for i in range(120)]
+    ratio = assert_no_sustained_growth(
+        values, name="rss", max_growth_ratio=0.15, min_absolute_delta=5.0
+    )
+    slope = assert_slope_under(
+        _hours(120), values, name="rss_slope", max_per_hour=20.0, min_absolute_delta=5.0, unit="MB"
+    )
+    assert ratio.status == "ok"
+    assert slope.status == "fail"
+    assert "+60.0 MB/h" in slope.detail
+
+
+def test_a_step_that_levelled_off_in_the_first_third_reads_flat_on_slope() -> None:
+    values = [300.0] * 10 + [350.0] * 50
+    result = assert_slope_under(
+        _hours(60), values, name="rss_slope", max_per_hour=20.0, min_absolute_delta=5.0
+    )
+    assert result.status == "ok"
+
+
+def test_a_fast_slope_with_a_rise_inside_the_noise_floor_passes() -> None:
+    # Ten minutes: 4 MB of drift is a steep rate but no more than noise.
+    values = [300.0 + 0.4 * i for i in range(10)]
+    result = assert_slope_under(
+        _hours(10), values, name="rss_slope", max_per_hour=20.0, min_absolute_delta=5.0
+    )
+    assert result.status == "ok"
+
+
+def test_the_slope_check_refuses_too_few_samples() -> None:
+    with pytest.raises(AssertionError, match="needed for a trend"):
+        assert_slope_under(
+            [0.0] * 5, [1.0] * 5, name="rss_slope", max_per_hour=20.0, min_absolute_delta=5.0
+        )

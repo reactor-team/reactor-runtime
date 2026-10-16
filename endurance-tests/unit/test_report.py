@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
-from report import (
+from endurance.report import (
     LiveReporter,
     MetricResult,
     RunResult,
@@ -10,7 +10,7 @@ from report import (
     render_markdown,
     write_reports,
 )
-from trends import Sample
+from endurance.trends import Sample
 
 
 def _metric(name: str, status: str, detail: str = "") -> MetricResult:

@@ -132,8 +132,8 @@ python-version = "3.12"
 # its tests can import their sibling `conftest` for the shared peer fakes; and
 # the contract suite, so its tests can import their sibling `contract_helpers`;
 # and each example workspace, whose two modules import each other as top-level
-# names, the way the runtime imports a workspace; and the endurance suite,
-# whose modules import each other the same way.
+# names, the way the runtime imports a workspace; and the endurance suite's
+# root, so its `endurance` package resolves.
 extra-paths = [
     ".",
     "examples/starter",
@@ -163,5 +163,5 @@ testpaths = ["tests", "endurance-tests/unit"]
 asyncio_mode = "auto"
 # The example models live at the repo root (outside the package) so they are not
 # shipped; put the root on the path so the suite can import them. The endurance
-# suite's modules import each other as top-level names.
+# suite's root holds its `endurance` package.
 pythonpath = [".", "endurance-tests"]

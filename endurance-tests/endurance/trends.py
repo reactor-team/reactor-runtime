@@ -2,7 +2,10 @@
 
 Given the samples a run collected, each check returns a :class:`MetricResult`
 rather than raising, so the report can show every signal even when one fails.
-Nothing here needs a running runtime.
+The one exception is a run too short to judge: the trend checks raise
+``AssertionError`` when they get fewer than ``MIN_TREND_SAMPLES`` samples, and
+the run is reported as ERROR. A new check follows the same contract. Nothing
+here needs a running runtime.
 """
 
 from __future__ import annotations
@@ -12,7 +15,7 @@ import itertools
 import os
 import statistics
 
-from report import MetricResult
+from endurance.report import MetricResult
 
 # Wall-clock rather than a cycle count, so the same scenario serves as a quick
 # local check and as a long CI run.
@@ -26,6 +29,10 @@ ENDURANCE_DURATION_SECONDS = float(os.environ.get("ENDURANCE_DURATION_SECONDS", 
 ENDURANCE_WARMUP_SECONDS = float(os.environ.get("ENDURANCE_WARMUP_SECONDS", "120"))
 # Fewer samples than this after the warm-up and a trend cannot be judged.
 MIN_TREND_SAMPLES = 6
+# Largest RSS growth rate allowed over the end of a run, in MB per hour. An
+# absolute rate stays as strict on a two-hour run as on a short one, where a
+# limit relative to the run's own length loosens as the run grows.
+MAX_RSS_MB_PER_HOUR = 20.0
 
 
 @dataclasses.dataclass
@@ -161,6 +168,72 @@ def assert_no_sustained_growth(
     )
 
 
+def assert_slope_under(
+    hours: list[float],
+    values: list[float],
+    *,
+    name: str,
+    max_per_hour: float,
+    min_absolute_delta: float,
+    unit: str = "",
+) -> MetricResult:
+    """Fail when *values* climbs faster than *max_per_hour* over the end of the run.
+
+    Fits a least-squares line over the last two thirds of the samples, the
+    windows the ratio check compares, so a one-time step that levelled off
+    before them reads as flat. It fails only when the slope is over the limit
+    and the line also rises more than *min_absolute_delta* across those
+    samples, so on a short run a few MB of noise cannot read as a fast rate.
+
+    Args:
+        hours: When each sample was taken, in hours.
+        values: A non-cumulative measurement, one per sample.
+        name: The metric's name in the report.
+        max_per_hour: Largest allowed slope, in *unit* per hour.
+        min_absolute_delta: A fitted rise at or under this is noise, whatever
+            the slope.
+        unit: The unit the report renders the values in.
+
+    Returns:
+        The metric's row, failed or not.
+
+    Raises:
+        AssertionError: Fewer than ``MIN_TREND_SAMPLES`` values.
+    """
+    n = len(values)
+    if n < MIN_TREND_SAMPLES:
+        raise AssertionError(f"only {n} {name} sample(s), {MIN_TREND_SAMPLES} needed for a trend")
+    # Everything after the first third: the middle and last windows.
+    tail = n - n // 3
+    xs, ys = hours[-tail:], values[-tail:]
+    slope = statistics.linear_regression(xs, ys).slope if xs[-1] > xs[0] else 0.0
+    rise = slope * (xs[-1] - xs[0])
+    is_leak = slope > max_per_hour and rise > min_absolute_delta
+    if is_leak:
+        reason = (
+            f"climbing {slope:+,.1f} {unit}/h over the end of the run, "
+            f"above the {max_per_hour:g} {unit}/h limit"
+        )
+    elif rise <= min_absolute_delta:
+        reason = (
+            f"{slope:+,.1f} {unit}/h, a fitted rise of {rise:+,.1f} {unit} "
+            f"within the {min_absolute_delta:g} {unit} noise floor"
+        )
+    else:
+        reason = f"{slope:+,.1f} {unit}/h, under the {max_per_hour:g} {unit}/h limit"
+    print(f"[{name}] {'LEAK?' if is_leak else 'ok'}: {reason}")
+    return MetricResult(
+        name=name,
+        start=ys[0],
+        end=ys[-1],
+        change=rise,
+        unit=unit,
+        status="fail" if is_leak else "ok",
+        detail=reason,
+        threshold=f"slope > {max_per_hour:g} {unit}/h (min rise {min_absolute_delta:g} {unit})",
+    )
+
+
 def assert_always_zero(samples: list[Sample], *, field: str, unit: str = "count") -> MetricResult:
     """Fail when *field* is nonzero on any cycle.
 
@@ -272,6 +345,14 @@ def trend_metrics(samples: list[Sample]) -> list[MetricResult]:
             name="rss",
             unit="MB",
             max_growth_ratio=0.15,
+            min_absolute_delta=5.0,
+        ),
+        assert_slope_under(
+            [s.elapsed_s / 3600 for s in warmed],
+            [s.rss_bytes / 1e6 for s in warmed],
+            name="rss_slope",
+            unit="MB",
+            max_per_hour=MAX_RSS_MB_PER_HOUR,
             min_absolute_delta=5.0,
         ),
         assert_no_sustained_growth(
