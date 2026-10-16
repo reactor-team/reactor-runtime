@@ -223,8 +223,8 @@ Each stage is timed by the side that sees it, and that side alone reports it:
   their times, and adds them to each connection's reading beside the
   transport's when the runner builds a report.
 
-A transport never holds a stage the runtime times, and the runner never holds
-one a transport times. That keeps the runtime's own stages on every
+A transport never holds a stage the model loop times, and `RunnerStages`
+never holds one a transport times. That keeps the model loop's stages on every
 connection's reading, whatever transport carries it.
 
 ### Adding a stage
