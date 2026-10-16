@@ -8,7 +8,9 @@ producing it can wait on ICE gathering), and trickles ICE candidates over the
 connection's life. Every client registers an explicit connection: there is no
 implicit default. A client whose transport dropped reconnects by re-offering on
 the same connection — a PUT to its ``sdp_params`` — which renegotiates a fresh
-peer for that id rather than minting a new one.
+peer for that id rather than minting a new one. Connection ids are shared with
+the session's other transports, so an offer on an id another transport holds is
+refused with a 409 rather than taking that connection over.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from pydantic import BaseModel, Field, model_validator
 from reactor_runtime.core import ConnId
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.transport.router import (
+    ConnectionIdClaimedError,
     ConnectionsExhaustedError,
     ErrorDetail,
     SessionControl,
@@ -56,11 +59,11 @@ _CONNECT_RESPONSES: dict[int | str, dict[str, Any]] = {
     503: {"model": ErrorDetail},
 }
 
-# Offering adds a 409 on top: a ``port_range`` pinned to a single port another
-# connection already holds is refused, since a pinned caller has no second port
-# to fall back on. Unlike the 503s this is not transient — retrying the same
-# port changes nothing, so it is a distinct code the caller branches on to pin
-# another port.
+# Offering adds a 409 on top, for two conflicts a retry of the same request
+# cannot clear: a ``port_range`` pinned to a single port another connection
+# already holds, since a pinned caller has no second port to fall back on; and
+# a connection id another transport of the session holds, since the caller has
+# to choose another id. The detail names which.
 _OFFER_RESPONSES: dict[int | str, dict[str, Any]] = {
     **_CONNECT_RESPONSES,
     409: {"model": ErrorDetail},
@@ -261,6 +264,8 @@ class WebRtcRouter(TransportRouter):
     builds connections with; bound to the runner when mounted.
     """
 
+    protocol = "webrtc"
+
     def __init__(
         self,
         config: WebRtcConfig,
@@ -312,7 +317,8 @@ class WebRtcRouter(TransportRouter):
         async def register(sid: str) -> RegisterConnectionResponse:
             runner.require_session_running(sid)
             return RegisterConnectionResponse(
-                connection_id=runner.new_conn_id(), track_map=dict(runner.track_map())
+                connection_id=runner.new_conn_id(self.protocol),
+                track_map=dict(runner.track_map()),
             )
 
         # One handler, registered once per method: a POST opens a connection's
@@ -329,6 +335,10 @@ class WebRtcRouter(TransportRouter):
             runner.require_session_running(sid)
             tracks = TrackMap.from_client(entry.model_dump() for entry in req.track_mapping)
             conn_id = ConnId(cid)
+            try:
+                runner.claim_conn_id(conn_id, self.protocol)
+            except ConnectionIdClaimedError as claimed:
+                raise HTTPException(status_code=409, detail=str(claimed)) from None
             runner.offer_admitted(conn_id)
             try:
                 acceptor.start_offer(

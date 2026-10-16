@@ -93,6 +93,7 @@ from reactor_runtime.runner.session_start import (
 )
 from reactor_runtime.runner.system_client import SYSTEM_CONN_ID, SystemConnection
 from reactor_runtime.transport.router import (
+    ConnectionIdClaimedError,
     SessionControl,
     SessionNotRunningError,
     SessionTransitionError,
@@ -806,8 +807,16 @@ def test_runner_satisfies_the_session_control_surface() -> None:
 
 def test_new_conn_id_is_unique() -> None:
     runner = _runner()
-    ids = {runner.new_conn_id() for _ in range(5)}
+    ids = {runner.new_conn_id("webrtc") for _ in range(5)}
     assert len(ids) == 5
+
+
+def test_an_id_one_transport_minted_cannot_be_claimed_by_another() -> None:
+    runner = _runner()
+    minted = runner.new_conn_id("room")
+    runner.claim_conn_id(minted, "room")
+    with pytest.raises(ConnectionIdClaimedError):
+        runner.claim_conn_id(minted, "webrtc")
 
 
 def test_require_session_running_raises_when_idle() -> None:
@@ -874,7 +883,7 @@ async def test_a_wire_admitted_in_an_earlier_session_cannot_join_the_next(
     # once the next session is running — the state looks valid, so only the
     # offer's epoch stamp can tell the sessions apart.
     started_runner.start_session({})
-    stale_id = started_runner.new_conn_id()
+    stale_id = started_runner.new_conn_id("webrtc")
     started_runner.offer_admitted(stale_id)
     started_runner.stop_session()
     await asyncio.sleep(0.01)
@@ -889,7 +898,7 @@ async def test_a_wire_admitted_in_an_earlier_session_cannot_join_the_next(
     assert stale.closed
 
     # An offer admitted in the live session still registers.
-    fresh_id = started_runner.new_conn_id()
+    fresh_id = started_runner.new_conn_id("webrtc")
     started_runner.offer_admitted(fresh_id)
     fresh = FakeConnection(fresh_id)
     started_runner.connection_opened(fresh)
