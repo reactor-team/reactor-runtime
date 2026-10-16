@@ -66,6 +66,7 @@ from reactor_runtime.interface.internal.bridge import CommandOutcome
 from reactor_runtime.interface.internal.reactor_core import (
     AddressedSink,
     BroadcastSink,
+    CommandTimes,
     MediaOps,
     MediaSink,
     StepSink,
@@ -4139,31 +4140,38 @@ async def test_client_stats_limits_are_cleared_when_the_session_closes(
     assert started_runner._client_stats._accepted_at == {}
 
 
+def _command_times() -> CommandTimes:
+    return CommandTimes(
+        received_at=1.0, submitted_at=None, held_ms=0.0, taken=1.0, started=1.0, finished=1.0
+    )
+
+
 def test_a_command_timing_reported_after_the_loop_closed_is_dropped() -> None:
     runner = _runner()
     loop = asyncio.new_event_loop()
     loop.close()
     runner._loop = loop
 
-    runner._on_command_timing(ConnId(1001), 0, 1.0, 2.0)
+    runner._on_command_timing(ConnId(1001), 0, _command_times())
 
 
 async def test_a_command_timing_from_an_earlier_session_is_dropped() -> None:
     runner = _runner()
     runner._loop = asyncio.get_running_loop()
-    added: list[tuple[ConnId, str]] = []
+    added: list[tuple[ConnId, CommandTimes]] = []
     setattr(  # noqa: B010
         runner._stages,
-        "add_message",
-        lambda conn_id, stage, ms: added.append((conn_id, stage)),
+        "add_command",
+        lambda conn_id, times: added.append((conn_id, times)),
     )
     runner._sessions_posted = 2
+    times = _command_times()
 
-    runner._on_command_timing(ConnId(1001), 1, 1.0, 2.0)
-    runner._on_command_timing(ConnId(1001), 2, 1.0, 2.0)
+    runner._on_command_timing(ConnId(1001), 1, times)
+    runner._on_command_timing(ConnId(1001), 2, times)
     await asyncio.sleep(0)
 
-    assert added == [(ConnId(1001), "dispatch"), (ConnId(1001), "handler")]
+    assert added == [(ConnId(1001), times)]
 
 
 async def test_a_frame_timing_from_an_earlier_session_is_dropped() -> None:

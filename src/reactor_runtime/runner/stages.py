@@ -3,6 +3,7 @@
 A transport times the stages it sees on the wire and reports them on its
 reading. The runner and the model loop time the rest. For each command:
 ``dispatch``, from the command reaching the runtime until its handler starts,
+with its parts ``start_wait``, ``parse``, ``model_queue`` and ``lock_wait``;
 and ``handler``, the handler running and its reply being written. For each
 frame: ``input_wait``, the frame in the model's input buffer until a step
 reads it, timed for the connection that sent it; and the step's
@@ -24,9 +25,40 @@ from reactor_runtime.core import (
     TransportReading,
 )
 from reactor_runtime.core.stages import StageTotals
+from reactor_runtime.interface.internal.reactor_core import CommandTimes
 
-MESSAGE_STAGES = ("dispatch", "handler")
+MESSAGE_STAGES = ("dispatch", "start_wait", "parse", "model_queue", "lock_wait", "handler")
 """The message stages the runtime times, in the order a command goes through them."""
+
+MESSAGE_PARTS = {
+    "start_wait": "dispatch",
+    "parse": "dispatch",
+    "model_queue": "dispatch",
+    "lock_wait": "dispatch",
+}
+"""The stage each part of a command's trip is inside, by the part's name."""
+
+
+def command_stages(times: CommandTimes) -> dict[str, float]:
+    """Name the stages of one command, in milliseconds, from when it reached each point.
+
+    ``dispatch`` runs from arrival until the handler starts, and holds the
+    parts: ``start_wait`` (held for the session's starting input), ``parse``
+    (arrival until the command is on the model's queue, less ``start_wait``),
+    ``model_queue`` (on that queue until the model loop takes it) and
+    ``lock_wait`` (the wait for the step lock). ``handler`` runs from the
+    handler's start until its reply is written. A part whose start is not
+    known is left out.
+    """
+    stages = {"dispatch": (times.started - times.received_at) * 1000.0}
+    if times.submitted_at is not None:
+        stages["start_wait"] = times.held_ms
+        stages["parse"] = (times.submitted_at - times.received_at) * 1000.0 - times.held_ms
+        stages["model_queue"] = (times.taken - times.submitted_at) * 1000.0
+    stages["lock_wait"] = (times.started - times.taken) * 1000.0
+    stages["handler"] = (times.finished - times.started) * 1000.0
+    return stages
+
 
 FRAME_STAGES = ("input_wait", "process_input", "generate", "process_output")
 """The frame stages the runtime times, in the order a frame goes through them."""
@@ -47,6 +79,11 @@ class RunnerStages:
     def add_message(self, conn_id: ConnId, stage: str, ms: float) -> None:
         """Add one message from *conn_id* that spent *ms* milliseconds in *stage*."""
         self._messages.add(conn_id, stage, ms)
+
+    def add_command(self, conn_id: ConnId, times: CommandTimes) -> None:
+        """Add one command from *conn_id*, by the stages :func:`command_stages` names."""
+        for stage, ms in command_stages(times).items():
+            self._messages.add(conn_id, stage, ms)
 
     def add_frame(self, conn_id: ConnId, track: str, stage: str, ms: float) -> None:
         """Add one frame on *conn_id*'s *track* that spent *ms* milliseconds in *stage*."""
@@ -89,7 +126,12 @@ class RunnerStages:
                     reading,
                     message_stages=reading.message_stages
                     + tuple(
-                        MessageStage(name, total_ms=total, messages=count)
+                        MessageStage(
+                            name,
+                            total_ms=total,
+                            messages=count,
+                            part_of=MESSAGE_PARTS.get(name, ""),
+                        )
                         for name, total, count in found
                     ),
                 )

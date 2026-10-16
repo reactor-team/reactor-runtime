@@ -61,7 +61,7 @@ from reactor_runtime.core import (
 from reactor_runtime.event_stream import EventStream
 from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.bridge import ModelBridge
-from reactor_runtime.interface.internal.reactor_core import MediaOps
+from reactor_runtime.interface.internal.reactor_core import CommandTimes, MediaOps
 from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.log import get_logger, set_session_id, set_state
 from reactor_runtime.manifest import import_model_class
@@ -756,15 +756,8 @@ class Runner(ServiceComponent, ConnectionSink):
             playlist_url=clip.playlist_url,
         )
 
-    def _on_command_timing(
-        self,
-        conn_id: ConnId,
-        session: int,
-        dispatch_ms: float,
-        handler_ms: float,
-        parts: Mapping[str, float] | None = None,
-    ) -> None:
-        """Add a command's ``dispatch`` and ``handler`` times to the runtime's stages, on the loop.
+    def _on_command_timing(self, conn_id: ConnId, session: int, times: CommandTimes) -> None:
+        """Add a command's stages, from the times the model reported, on the loop.
 
         The model reports from its own thread; the stages are the loop's.
         A report that arrives after the loop closed, at shutdown, is dropped,
@@ -776,10 +769,8 @@ class Runner(ServiceComponent, ConnectionSink):
             return
 
         def add() -> None:
-            if session != self._sessions_posted:
-                return
-            self._stages.add_message(conn_id, "dispatch", dispatch_ms)
-            self._stages.add_message(conn_id, "handler", handler_ms)
+            if session == self._sessions_posted:
+                self._stages.add_command(conn_id, times)
 
         with contextlib.suppress(RuntimeError):
             loop.call_soon_threadsafe(add)

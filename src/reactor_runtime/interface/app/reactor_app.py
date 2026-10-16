@@ -76,6 +76,7 @@ from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.reactor_core import (
     STEP_SESSION,
     CommandEnvelope,
+    CommandTimes,
     ReactorCore,
     RequestId,
 )
@@ -465,9 +466,8 @@ class ReactorApp(ReactorCore):
 
         The handler runs under the step lock, so it lands between two units of
         a ``run()`` loop that holds the same lock, never inside one. The time a
-        command waited before its handler started, with its parts
-        (``start_wait``, ``decode``, ``model_queue`` and ``lock_wait``), and the
-        time its handler ran go to the runtime's command timing sink.
+        command reached each point on its way to and through its handler goes
+        to the runtime's command timing sink.
         """
         taken = time.monotonic()
         async with self._step_lock:
@@ -486,28 +486,26 @@ class ReactorApp(ReactorCore):
         started: float,
         finished: float,
     ) -> None:
-        """Report how long *envelope* waited, in parts, and how long its handler ran.
+        """Report when *envelope* reached each point on its way to and through its handler.
 
         *taken* is when the model loop took it off its queue, *started* when
-        the step lock was held and its handler started. The run includes
-        writing the reply or the failure back to the sender.
+        the step lock was held and its handler started, *finished* when its
+        reply or failure was written back to the sender.
         """
         sink = self._out_command_timing
         if sink is None or envelope.conn_id is None or envelope.received_at is None:
             return
-        parts = {"lock_wait": (started - taken) * 1000.0}
-        if envelope.submitted_at is not None:
-            parts["start_wait"] = envelope.held_ms
-            parts["decode"] = (
-                envelope.submitted_at - envelope.received_at
-            ) * 1000.0 - envelope.held_ms
-            parts["model_queue"] = (taken - envelope.submitted_at) * 1000.0
         sink(
             envelope.conn_id,
             session,
-            (started - envelope.received_at) * 1000.0,
-            (finished - started) * 1000.0,
-            parts,
+            CommandTimes(
+                received_at=envelope.received_at,
+                submitted_at=envelope.submitted_at,
+                held_ms=envelope.held_ms,
+                taken=taken,
+                started=started,
+                finished=finished,
+            ),
         )
 
     async def _run_command(self, envelope: CommandEnvelope) -> None:

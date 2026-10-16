@@ -92,19 +92,13 @@ buffer until a step read it. It goes to that connection only, since frames
 from several connections share one input buffer.
 """
 
-CommandTimingSink = Callable[[ConnId, int, float, float, Mapping[str, float]], None]
-"""Receives how long a command waited and ran, on the model thread.
+CommandTimingSink = Callable[[ConnId, int, "CommandTimes"], None]
+"""Receives when a command reached each point on its way to and through its handler.
 
 The arguments are the connection that sent the command, the session it ran
 in (counted as the model counts session starts, so a report that lands after
-its session ended can be told apart), the milliseconds from its arrival at the
-runtime to the start of its handler (``dispatch``), the milliseconds its
-handler ran and its reply or failure was written (``handler``), and the parts
-of ``dispatch`` in milliseconds: ``start_wait`` (held for the session's
-starting input), ``decode`` (arrival until the command, decoded and
-validated, is put on the model's queue, less ``start_wait``), ``model_queue``
-(on that queue until the model loop takes it) and ``lock_wait`` (the wait for
-the step lock, which a running step holds). A part not timed is left out.
+its session ended can be told apart), and the times themselves. Called on the
+model thread.
 """
 
 FailureSink = Callable[[BaseException], None]
@@ -254,6 +248,30 @@ class CommandEnvelope:
     received_at: float | None = None
     submitted_at: float | None = None
     held_ms: float = 0.0
+
+
+@dataclass(frozen=True)
+class CommandTimes:
+    """When a command reached each point on its way to and through its handler.
+
+    Every time is on the monotonic clock, in seconds.
+
+    Attributes:
+        received_at: The command reached the runtime.
+        submitted_at: It was put on the model's queue, when known.
+        held_ms: How long it was held for the session's starting input, in
+            milliseconds, between arriving and being put on the queue.
+        taken: The model loop took it off its queue.
+        started: The step lock was held and its handler started.
+        finished: Its handler returned and its reply or failure was written.
+    """
+
+    received_at: float
+    submitted_at: float | None
+    held_ms: float
+    taken: float
+    started: float
+    finished: float
 
 
 Inbound = CommandEnvelope | ReactorEvent

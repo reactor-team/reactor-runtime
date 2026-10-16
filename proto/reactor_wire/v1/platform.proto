@@ -272,7 +272,18 @@ message ClientConnectionStat {
 //   dispatch    The command reaches the runtime until its handler starts,
 //               including the wait for the model's step, less any wait for a
 //               file the command references. Runtime.
+//   start_wait  Part of dispatch: the command is held until the session's
+//               starting input is in. Runtime.
+//   parse       Part of dispatch: parsing and validating the command, until
+//               it is on the model's queue. Runtime.
+//   model_queue Part of dispatch: on the model's queue until its loop takes
+//               it. Runtime.
+//   lock_wait   Part of dispatch: the wait for the step lock, which a running
+//               step holds. Runtime.
 //   handler     The command's handler runs and its reply is written. Runtime.
+//
+// A part says which stage it is inside in `part_of`: adding both counts that
+// time twice.
 //
 // queue_wait, send, stall and reassembly come from the chunked channel; a
 // channel without chunking reports none of them.

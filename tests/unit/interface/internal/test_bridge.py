@@ -267,7 +267,7 @@ def test_a_model_overriding_bind_output_with_its_old_signature_still_binds() -> 
 
     model = OwnBind()
     bridge = ModelBridge(model, ModelContract.of(OwnBind))
-    timing = lambda conn_id, session, dispatch_ms, handler_ms, parts: None  # noqa: E731
+    timing = lambda conn_id, session, times: None  # noqa: E731
 
     bridge.bind_outbound(
         broadcast=lambda m: None,
