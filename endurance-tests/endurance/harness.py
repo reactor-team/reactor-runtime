@@ -20,6 +20,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -70,13 +71,38 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-class RuntimeProcess:
+class RuntimeEndpoint:
+    """The runtime's HTTP API at a URL: all a client needs, from any process."""
+
+    def __init__(self, url: str) -> None:
+        """Talk to the runtime served at *url*."""
+        self.url = url
+
+    def request(self, method: str, path: str, body: Any = None) -> tuple[int, Any]:
+        """Send one HTTP request to the runtime; return its status and decoded JSON body."""
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(
+            self.url + path,
+            data=data,
+            method=method,
+            headers={"content-type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = resp.read()
+            return resp.status, (json.loads(raw) if raw else None)
+
+    def get(self, path: str) -> Any:
+        """Return the decoded JSON body of ``GET`` *path*."""
+        return self.request("GET", path)[1]
+
+
+class RuntimeProcess(RuntimeEndpoint):
     """The runtime under test, in its own process, with the probe route mounted."""
 
     def __init__(self, log_path: Path) -> None:
         """Start the runtime on a free local port, its output going to *log_path*."""
         self.port = _free_port()
-        self.url = f"http://127.0.0.1:{self.port}"
+        super().__init__(f"http://127.0.0.1:{self.port}")
         env = {
             **os.environ,
             "PORT": str(self.port),
@@ -131,44 +157,32 @@ class RuntimeProcess:
             self._proc.wait()
         self._log.close()
 
-    def request(self, method: str, path: str, body: Any = None) -> tuple[int, Any]:
-        """Send one HTTP request to the runtime; return its status and decoded JSON body."""
-        data = json.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(
-            self.url + path,
-            data=data,
-            method=method,
-            headers={"content-type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            raw = resp.read()
-            return resp.status, (json.loads(raw) if raw else None)
-
-    def get(self, path: str) -> Any:
-        """Return the decoded JSON body of ``GET`` *path*."""
-        return self.request("GET", path)[1]
-
     def probe(self) -> dict[str, Any]:
         """Return one reading of the probe route."""
         return self.get("/_endurance/probe")
 
-    def settled_probe(self) -> tuple[dict[str, Any], float]:
+    def settled_probe(self) -> tuple[dict[str, Any], float | None]:
         """Read the probe once nothing is connected and teardown has finished.
 
         Waits for the registry to empty, then re-reads until every live count is
-        0. Returns the last reading either way, with the seconds it took: a count
-        that is still nonzero after the timeouts is a leak, not a slow teardown.
+        0. Returns the last reading either way, with the seconds the registry
+        took to empty, or ``None`` when a connection was still registered after
+        ``CLOSE_TIMEOUT_S``: a count that is still nonzero after the timeouts is
+        a leak, not a slow teardown.
         """
         start = time.monotonic()
         reading = self.probe()
         while reading["registered_connections"] > 0 and time.monotonic() - start < CLOSE_TIMEOUT_S:
             time.sleep(0.25)
             reading = self.probe()
+        released_after_s = (
+            time.monotonic() - start if reading["registered_connections"] == 0 else None
+        )
         settle_start = time.monotonic()
         while any(reading["live"].values()) and time.monotonic() - settle_start < SETTLE_TIMEOUT_S:
             time.sleep(0.25)
             reading = self.probe()
-        return reading, time.monotonic() - start
+        return reading, released_after_s
 
 
 def _candidates_from(sdp: str) -> list[rw.IceCandidate]:
@@ -200,7 +214,11 @@ class BareClient:
     peer is closed.
     """
 
-    def __init__(self, runtime: RuntimeProcess, session_id: str) -> None:
+    # The requests a cycle sent that were refused or never answered; ``None``
+    # for a client that sends none it waits on.
+    unanswered: list[str] | None = None
+
+    def __init__(self, runtime: RuntimeEndpoint, session_id: str) -> None:
         self._runtime = runtime
         self._base = f"/sessions/{session_id}/transport/webrtc"
         self._factory = _get_factory(WebRtcConfig())
@@ -213,16 +231,37 @@ class BareClient:
         """Connect, stream until enough frames came back, and close; return the frames received."""
         await self._connect()
         try:
-            bgra, width, height = frame
-            deadline = time.monotonic() + _FRAME_WAIT_S
-            while self.received_video < FRAMES_PER_CYCLE and time.monotonic() < deadline:
-                self._camera.push_video_frame(bgra, width, height)
-                self._on_tick()
-                await asyncio.sleep(1 / _FPS)
+            await self._stream_burst(frame)
             await self._settle()
             return self.received_video
         finally:
             self.close()
+
+    async def run_until_killed(
+        self, frame: tuple[bytes, int, int], ready: Callable[[], None]
+    ) -> None:
+        """Stream as :meth:`run` does, call *ready*, then stream on until the process dies.
+
+        Never closes: the connection ends only with the process, the way a
+        client that crashes or loses power leaves.
+        """
+        await self._connect()
+        await self._stream_burst(frame)
+        await self._settle()
+        ready()
+        while True:
+            await self._send_frame(frame)
+
+    async def _stream_burst(self, frame: tuple[bytes, int, int]) -> None:
+        deadline = time.monotonic() + _FRAME_WAIT_S
+        while self.received_video < FRAMES_PER_CYCLE and time.monotonic() < deadline:
+            await self._send_frame(frame)
+
+    async def _send_frame(self, frame: tuple[bytes, int, int]) -> None:
+        bgra, width, height = frame
+        self._camera.push_video_frame(bgra, width, height)
+        self._on_tick()
+        await asyncio.sleep(1 / _FPS)
 
     def close(self) -> None:
         """Close the connection: a ``reactor_webrtc`` peer closes when nothing holds it."""
@@ -379,7 +418,7 @@ class V1Client(BareClient):
     closes; :attr:`unanswered` lists the ones that were not.
     """
 
-    def __init__(self, runtime: RuntimeProcess, session_id: str) -> None:
+    def __init__(self, runtime: RuntimeEndpoint, session_id: str) -> None:
         """Create a client for *session_id*; nothing connects until :meth:`run`."""
         super().__init__(runtime, session_id)
         self._control: Any = None
@@ -391,7 +430,7 @@ class V1Client(BareClient):
         self._failed: list[str] = []
         self._next_tick = 0.0
         self._sent = 0
-        self.unanswered: list[str] = []
+        self.unanswered = []
 
     def _start_wire(self, control: Any, data: Any) -> None:
         self._control, self._data = control, data
@@ -626,6 +665,57 @@ def assert_answered(unanswered: list[list[str]]) -> MetricResult:
         status="ok",
         detail=reason,
         threshold="always 0",
+    )
+
+
+def assert_released(released: list[float | None]) -> MetricResult:
+    """Fail when a cycle's connection was still registered ``CLOSE_TIMEOUT_S`` after it left.
+
+    The detail reports how long the runtime took to drop the connections it
+    did drop, which is how fast it notices a client that is gone.
+
+    Args:
+        released: Each cycle's seconds until the runtime's registry emptied,
+            or ``None`` when it never did, in cycle order.
+    """
+    stuck = [cycle for cycle, seconds in enumerate(released) if seconds is None]
+    times = sorted(seconds for seconds in released if seconds is not None)
+    timing = (
+        f"dropped in {times[len(times) // 2]:.1f}s median, {times[-1]:.1f}s at worst"
+        if times
+        else ""
+    )
+    threshold = f"every cycle's connections dropped within {CLOSE_TIMEOUT_S:g}s"
+    if stuck:
+        reason = (
+            f"a connection was still registered {CLOSE_TIMEOUT_S:g}s after its client left "
+            f"on {len(stuck)}/{len(released)} cycles (first at cycle {stuck[0]})"
+        )
+        if times:
+            reason += f"; the other cycles' connections {timing}"
+        print(f"[unreleased_connections] FAILED: {reason}")
+        return MetricResult(
+            name="unreleased_connections",
+            start=0,
+            end=len(stuck),
+            change=len(stuck),
+            unit="count",
+            status="fail",
+            detail=reason,
+            threshold=threshold,
+            first_bad_cycle=stuck[0],
+        )
+    reason = f"the connections of all {len(released)} cycles {timing}"
+    print(f"[unreleased_connections] ok: {reason}")
+    return MetricResult(
+        name="unreleased_connections",
+        start=0,
+        end=0,
+        change=0,
+        unit="count",
+        status="ok",
+        detail=reason,
+        threshold=threshold,
     )
 
 
