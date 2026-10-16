@@ -187,8 +187,8 @@ def test_each_tracks_stages_are_taken_once_onto_its_reading() -> None:
     pacing = FrameStage("output_pacing", total_ms=300.0, frames=10)
     cm.register(TimedConnection(2, reading, {"main_video": (pacing,)}))
 
-    [(cid, first)] = cm.take_frame_stages(cm.transport_readings())
-    [(_, second)] = cm.take_frame_stages(cm.transport_readings())
+    [(cid, first)] = cm.take_stages()
+    [(_, second)] = cm.take_stages()
 
     assert cid == ConnId(2)
     assert first.tracks[0].frame_stages == ()
@@ -205,12 +205,12 @@ def test_a_tracks_stages_wait_until_a_reading_carries_the_track() -> None:
     conn = TimedConnection(2, TransportReading(tracks=(video,)), {"webcam": (delivery,)})
     cm.register(conn)
 
-    [(_, before)] = cm.take_frame_stages(cm.transport_readings())
+    [(_, before)] = cm.take_stages()
     assert before.tracks[0].frame_stages == ()
 
     # A later sample matches the track; its stages were kept for it.
     conn.latest_reading = TransportReading(tracks=(video, webcam))
-    [(_, after)] = cm.take_frame_stages(cm.transport_readings())
+    [(_, after)] = cm.take_stages()
     assert after.tracks[1].frame_stages == (delivery,)
 
 
@@ -222,11 +222,11 @@ def test_a_connection_without_a_reading_keeps_its_stages() -> None:
     conn.latest_reading = None
     cm.register(conn)
 
-    assert cm.take_frame_stages(cm.transport_readings()) == []
+    assert cm.take_stages() == []
     assert conn.takes == 0
 
     conn.latest_reading = TransportReading(tracks=(video,))
-    [(_, reading)] = cm.take_frame_stages(cm.transport_readings())
+    [(_, reading)] = cm.take_stages()
     assert reading.tracks[0].frame_stages == (pacing,)
 
 
@@ -835,8 +835,8 @@ def test_a_connections_message_stages_are_taken_once_onto_its_reading() -> None:
     stages = conn.stages
     cm.register(conn)
 
-    [(_, first)] = cm.take_message_stages(cm.transport_readings())
-    [(_, second)] = cm.take_message_stages(cm.transport_readings())
+    [(_, first)] = cm.take_stages()
+    [(_, second)] = cm.take_stages()
 
     assert first.message_stages == stages
     # The window started again with the first report.
@@ -848,5 +848,32 @@ def test_a_connection_without_a_reading_keeps_its_message_stages() -> None:
     conn = MessageTimedConnection(2, None)
     cm.register(conn)
 
-    assert cm.take_message_stages(cm.transport_readings()) == []
+    assert cm.take_stages() == []
     assert conn.stages != ()
+
+
+class FullyTimedConnection(MessageTimedConnection):
+    """A fake whose transport times both its frames and its messages."""
+
+    def __init__(self, cid: int, reading: TransportReading) -> None:
+        super().__init__(cid, reading)
+        self.frame_stages: dict[str, tuple[FrameStage, ...]] = {
+            "main_video": (FrameStage("delivery", total_ms=8.0, frames=10),)
+        }
+
+    def take_frame_stages(self, tracks: Collection[str]) -> dict[str, tuple[FrameStage, ...]]:
+        taken, self.frame_stages = self.frame_stages, {}
+        return taken
+
+
+def test_one_take_adds_a_connections_frame_and_message_stages() -> None:
+    cm, _ = waiting_manager()
+    video = TransportTrackReading("main_video", TrackKind.VIDEO, ClientTrackDirection.RECVONLY)
+    conn = FullyTimedConnection(2, TransportReading(tracks=(video,)))
+    frames, messages = conn.frame_stages["main_video"], conn.stages
+    cm.register(conn)
+
+    [(_, reading)] = cm.take_stages()
+
+    assert reading.tracks[0].frame_stages == frames
+    assert reading.message_stages == messages

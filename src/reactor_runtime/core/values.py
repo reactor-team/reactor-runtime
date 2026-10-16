@@ -71,10 +71,9 @@ class FrameStage:
 class MessageStage:
     """The time a connection's data-channel messages spent in one stage, over one window.
 
-    The stages are the engine's chunked data channel's: ``queue_wait``,
-    ``send`` and ``stall`` on the side that sends a message, ``reassembly`` on
-    the side that receives it. Only the data channel that carries commands is
-    timed. The set grows, so a reader ignores a name it does not know.
+    Each side reports the stages it times, in the order a message goes
+    through them. Only the data channel that carries commands is timed. The
+    set grows, so a reader ignores a name it does not know.
 
     Attributes:
         name: The stage.

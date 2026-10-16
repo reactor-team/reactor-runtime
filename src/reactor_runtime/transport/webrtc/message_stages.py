@@ -13,10 +13,8 @@ chunking has no totals, so it reports no stages.
 
 from __future__ import annotations
 
-import math
-import threading
-
 from reactor_runtime.core import MessageStage
+from reactor_runtime.core.stages import StageTotals
 from reactor_runtime.transport.webrtc.stats import ChunkingSample
 
 STAGES = (
@@ -27,8 +25,6 @@ STAGES = (
 )
 """Every stage, in the order a message goes through them."""
 
-_ORDER = {name: index for index, name in enumerate(STAGES)}
-
 
 class MessageStageWindow:
     """The time a connection's messages spent in each stage, since the last take.
@@ -38,8 +34,7 @@ class MessageStageWindow:
     """
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._totals: dict[str, tuple[float, int]] = {}
+        self._totals = StageTotals(STAGES)
 
     def add(self, stage: str, ms: float, messages: int = 1) -> None:
         """Add *messages* messages that spent *ms* milliseconds in *stage*, together.
@@ -47,11 +42,7 @@ class MessageStageWindow:
         A count below one or a time that is negative or not finite is no
         measurement, and is left out.
         """
-        if messages < 1 or not math.isfinite(ms) or ms < 0:
-            return
-        with self._lock:
-            total, count = self._totals.get(stage, (0.0, 0))
-            self._totals[stage] = (total + ms, count + messages)
+        self._totals.add(None, stage, ms, messages)
 
     def fold(self, sample: ChunkingSample | None, previous: ChunkingSample | None) -> None:
         """Add the stages the chunked channel timed between *previous* and *sample*.
@@ -79,11 +70,7 @@ class MessageStageWindow:
 
     def take(self) -> tuple[MessageStage, ...]:
         """Return the stages in trip order, and start them again."""
-        with self._lock:
-            totals, self._totals = self._totals, {}
         return tuple(
-            MessageStage(stage, total_ms=total, messages=count)
-            for stage, (total, count) in sorted(
-                totals.items(), key=lambda item: _ORDER.get(item[0], len(_ORDER))
-            )
+            MessageStage(name, total_ms=total, messages=count)
+            for name, total, count in self._totals.take().get(None, [])
         )
