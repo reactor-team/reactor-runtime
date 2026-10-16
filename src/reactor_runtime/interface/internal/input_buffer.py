@@ -40,20 +40,33 @@ class InputBuffer:
     """A bounded, thread-safe frame buffer for one inbound track.
 
     "Input" is from the model's point of view: frames flow from the client into
-    the model. The buffer is a bounded deque — when full, the oldest frame is
-    evicted so the model always sees the most recent data.
+    the model. The buffer is bounded — when full, the oldest frame is evicted so
+    the model always sees the most recent data.
+
+    The bound is a number of frames, or, for an audio track that declares
+    ``buffer_seconds``, a number of samples. A frame bound holds a length of
+    audio that depends on the transport's frame size; a sample bound holds the
+    same length on every transport.
 
     Args:
         maxlen: How many frames the buffer holds before evicting the oldest.
+            Ignored when *max_samples* is set.
+        max_samples: How many audio samples the buffer holds before evicting
+            the oldest frames, or ``None`` to bound it by *maxlen* instead.
     """
 
-    def __init__(self, maxlen: int = DEFAULT_BUFFER_CAPACITY) -> None:
+    def __init__(
+        self, maxlen: int = DEFAULT_BUFFER_CAPACITY, *, max_samples: int | None = None
+    ) -> None:
         # One mutex shared between the plain lock and the condition: simple
         # acquire/release reads take the lock, wait/notify paths take the
         # condition, and a single underlying mutex rules out lock-ordering bugs.
         self._lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
-        self._buffer: deque[InputFrame] = deque(maxlen=maxlen)
+        # A sample bound is enforced by push(), so its deque is unbounded.
+        self._buffer: deque[InputFrame] = deque(maxlen=None if max_samples is not None else maxlen)
+        self._max_samples = max_samples
+        self._samples = 0
         self._total_received = 0
         self._closed = False
 
@@ -112,11 +125,15 @@ class InputBuffer:
         start = len(self._buffer) - n
         result = [self._buffer[start + i] for i in range(n)]
         self._buffer.clear()
+        self._samples = 0
         return result
 
     def _take_fifo(self, n: int) -> list[InputFrame]:
         """Pop the *n* oldest frames. Caller holds the lock."""
-        return [self._buffer.popleft() for _ in range(n)]
+        result = [self._buffer.popleft() for _ in range(n)]
+        if self._max_samples is not None:
+            self._samples -= sum(_sample_count(frame) for frame in result)
+        return result
 
     def try_read(self, n: int = 1, mode: ReadMode = ReadMode.LATEST) -> list[InputFrame] | None:
         """Return *n* frames without blocking, or ``None`` when too few are ready.
@@ -163,6 +180,7 @@ class InputBuffer:
         """Drop every buffered frame without closing the track."""
         with self._lock:
             self._buffer.clear()
+            self._samples = 0
 
     def close(self) -> None:
         """Close the track, waking any blocked reader to raise :class:`BufferClosed`."""
@@ -180,16 +198,40 @@ class InputBuffer:
         with self._condition:
             self._closed = False
             self._buffer.clear()
+            self._samples = 0
             self._total_received = 0
 
-    def push(self, frame: InputFrame) -> None:
+    def push(self, frame: InputFrame) -> int:
         """Append a frame from the runtime thread, waking a blocked reader.
 
-        Frames pushed after :meth:`close` are dropped until :meth:`reset`.
+        Frames pushed after :meth:`close` are dropped until :meth:`reset`, and
+        are not counted as evicted: the track is not being read.
+
+        Returns:
+            How many buffered frames the bound evicted to make room. Under a
+            sample bound the newest frame is always kept, even when it alone
+            holds more samples than the bound.
         """
         with self._condition:
             if self._closed:
-                return
-            self._buffer.append(frame)
+                return 0
+            evicted = 0
+            if self._max_samples is None:
+                maxlen = self._buffer.maxlen
+                if maxlen is not None and len(self._buffer) == maxlen:
+                    evicted = 1
+                self._buffer.append(frame)
+            else:
+                self._buffer.append(frame)
+                self._samples += _sample_count(frame)
+                while self._samples > self._max_samples and len(self._buffer) > 1:
+                    self._samples -= _sample_count(self._buffer.popleft())
+                    evicted += 1
             self._total_received += 1
             self._condition.notify_all()
+            return evicted
+
+
+def _sample_count(frame: InputFrame) -> int:
+    """How many samples an ``(1, M)`` audio frame carries."""
+    return int(frame.data.shape[-1])

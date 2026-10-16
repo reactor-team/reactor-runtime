@@ -14,8 +14,10 @@ import numpy as np
 import pytest
 
 from reactor_runtime import (
+    Audio,
     CommandError,
     InputField,
+    MediaInput,
     ModelMessage,
     Output,
     ReactorApp,
@@ -44,6 +46,7 @@ from reactor_runtime.core import (
     EndReason,
     FileUploaded,
     HealthStatus,
+    InputFrame,
     LiveKitConfig,
     LiveKitRpcMethod,
     MediaBundle,
@@ -3993,6 +3996,52 @@ async def test_runtime_stats_carry_the_model_output_past_a_connection_that_measu
     assert facts
     assert facts[0].detail["connection_stats"] == []
     assert facts[0].detail["model_output"][0]["metrics"]["frames_emitted"] == 1.0
+
+
+class MicIn(MediaInput):
+    mic: Audio
+
+
+class ListeningModel(FakeModel):
+    """A model with an input track it never reads, so its buffer fills."""
+
+    input: MicIn
+
+
+async def test_runtime_stats_count_the_input_frames_a_full_buffer_drops(
+    monkeypatch: pytest.MonkeyPatch, register_model: Callable[[type], None]
+) -> None:
+    register_model(ListeningModel)
+    monkeypatch.setattr(
+        "reactor_runtime.runner.runner.import_model_class", lambda ref: ListeningModel
+    )
+    runner = _runner()
+    await runner.start()
+    try:
+        runner._runtime_stats_interval = 0.01
+        runner.start_session({})
+        ten_ms = InputFrame(data=np.zeros((1, 480), dtype=np.int16))
+        # The default bound holds 128 frames; nothing reads them.
+        for _ in range(130):
+            runner.media_received(ConnId(1002), "mic", ten_ms)
+
+        await asyncio.sleep(0.05)
+
+        (mic,) = _runtime_stats_facts(runner)[-1].detail["model_input"]
+        assert mic["track_name"] == "mic"
+        assert mic["kind"] == "audio"
+        assert mic["metrics"] == {"frames_received": 130.0, "frames_dropped": 2.0}
+
+        runner.stop_session()
+        await runner._drain_teardown()
+        runner.start_session({})
+        await asyncio.sleep(0.05)
+
+        # A new session counts from zero.
+        (mic,) = _runtime_stats_facts(runner)[-1].detail["model_input"]
+        assert mic["metrics"] == {"frames_received": 0.0, "frames_dropped": 0.0}
+    finally:
+        await runner.stop()
 
 
 async def test_runtime_stats_stop_when_the_session_ends(started_runner: Runner) -> None:

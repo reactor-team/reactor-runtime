@@ -15,6 +15,7 @@ import contextlib
 import contextvars
 import json
 import logging
+import math
 import threading
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
@@ -427,15 +428,19 @@ class ReactorCore:
         """Enqueue a reactor-authoritative event onto the model loop."""
         self._enqueue(event)
 
-    def push_media(self, track: str, frame: InputFrame) -> None:
-        """Route an inbound frame into its track's buffer."""
+    def push_media(self, track: str, frame: InputFrame) -> int:
+        """Route an inbound frame into its track's buffer.
+
+        Returns:
+            How many buffered frames the track's bound evicted to make room.
+        """
         if self._loop.is_closed():
-            return
+            return 0
         buffer = self._input_buffers.get(track)
         if buffer is None:
             logger.debug("media for unknown input track %r", track)
-            return
-        buffer.push(frame)
+            return 0
+        return buffer.push(frame)
 
     def _enqueue(self, item: Inbound) -> None:
         """Thread-safe put onto the inbound queue, dropped before the loop runs."""
@@ -521,7 +526,7 @@ class ReactorCore:
         if holder is None:
             return
         attr_name, input_cls = holder
-        buffers = {name: InputBuffer() for name in input_cls.__tracks__}
+        buffers = {name: _input_buffer(info) for name, info in input_cls.__tracks__.items()}
         self._input_buffers.update(buffers)
         setattr(self, attr_name, input_cls(**buffers))
 
@@ -536,6 +541,13 @@ class ReactorCore:
             if isinstance(hint, type) and issubclass(hint, base) and hint is not base:
                 return attr_name, hint
         return None
+
+
+def _input_buffer(info: TrackInfo) -> InputBuffer:
+    """Build the buffer for one input track, bounded as the track declares."""
+    if info.buffer_seconds is None:
+        return InputBuffer()
+    return InputBuffer(max_samples=math.ceil(info.rate * info.buffer_seconds))
 
 
 def _encode_metadata(

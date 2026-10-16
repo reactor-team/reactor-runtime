@@ -42,6 +42,34 @@ def test_audio_subclass_overrides_sample_rate() -> None:
     assert Out.__tracks__["speech"].rate == 16_000.0
 
 
+def test_an_audio_track_buffers_frames_unless_it_declares_seconds() -> None:
+    assert GameOutput.__tracks__["narration"].buffer_seconds is None
+    assert GameInput.__tracks__["camera"].buffer_seconds is None
+
+
+def test_an_audio_subclass_carries_its_buffer_seconds() -> None:
+    class AgentAudio(Audio):
+        sample_rate = 24_000
+        buffer_seconds = 120
+
+    class In(MediaInput):
+        agent_audio: AgentAudio
+
+    track = In.__tracks__["agent_audio"]
+    assert (track.rate, track.buffer_seconds) == (24_000.0, 120.0)
+
+
+@pytest.mark.parametrize("seconds", [0, -1.5, True, "120"])
+def test_a_buffer_seconds_that_is_not_a_positive_number_is_refused(seconds: object) -> None:
+    class AgentAudio(Audio):
+        buffer_seconds = seconds
+
+    with pytest.raises(ValueError, match="buffer_seconds must be a positive number"):
+
+        class In(MediaInput):
+            agent_audio: AgentAudio
+
+
 def test_a_class_with_no_track_fields_has_no_tracks() -> None:
     class Empty(Output):
         pass

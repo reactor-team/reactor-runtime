@@ -151,9 +151,13 @@ class ModelBridge:
 
     # -- inbound: media plane ---------------------------------------------
 
-    def push_media(self, track: str, frame: InputFrame) -> None:
-        """Route an inbound frame to its track's buffer."""
-        self._model.push_media(track, frame)
+    def push_media(self, track: str, frame: InputFrame) -> int:
+        """Route an inbound frame to its track's buffer.
+
+        Returns:
+            How many buffered frames the track's bound evicted to make room.
+        """
+        return self._model.push_media(track, frame)
 
     # -- outbound: bound once before start --------------------------------
 

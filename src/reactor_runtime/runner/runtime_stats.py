@@ -1,9 +1,10 @@
-"""Count what the model emits during a session, for the runtime's own stats.
+"""Count what the model emits and receives during a session, for the runtime's own stats.
 
 The runtime reports its own view of a session alongside what clients report
-about theirs. The model's output is the part of that view no transport sees:
+about theirs. The model's media is the part of that view no transport sees:
 how many frames it produced on each output track and how evenly it produced
-them. :class:`ModelOutput` keeps those counts for the session that is running.
+them, which :class:`ModelOutput` keeps, and how many frames each input track
+received and dropped, which :class:`ModelInput` keeps.
 """
 
 from __future__ import annotations
@@ -141,6 +142,58 @@ class ModelOutput:
             return readings
 
 
+class ModelInput:
+    """Per-session counts of the frames the model's input tracks received and dropped.
+
+    A track's buffer drops its oldest frames when it is full, so a model that
+    reads too slowly loses input without seeing it. Counting the drops here
+    makes the loss visible. Frames arrive from the transport's threads and a
+    reading is taken on the runtime's loop, so every access holds a lock. Both
+    counts run for the whole session; :meth:`reset` starts the next one.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._tracks: tuple[str, ...] = ()
+        self._received: dict[str, int] = {}
+        self._dropped: dict[str, int] = {}
+
+    def declare(self, tracks: Iterable[str]) -> None:
+        """Name the input tracks the model declares, so an idle track reads zero."""
+        with self._lock:
+            self._tracks = tuple(tracks)
+
+    def reset(self) -> None:
+        """Start counting a new session from zero."""
+        with self._lock:
+            self._received.clear()
+            self._dropped.clear()
+
+    def received(self, track: str, dropped: int) -> None:
+        """Count one frame arriving on *track*, and the *dropped* frames it pushed out."""
+        with self._lock:
+            self._received[track] = self._received.get(track, 0) + 1
+            if dropped:
+                self._dropped[track] = self._dropped.get(track, 0) + dropped
+
+    def take(self) -> dict[str, dict[str, float]]:
+        """Read every input track's counts.
+
+        Returns:
+            Per track name, ``frames_received`` and ``frames_dropped``, each the
+            session's total.
+        """
+        with self._lock:
+            names = dict.fromkeys((*self._tracks, *self._received))
+            return {
+                name: {
+                    "frames_received": float(self._received.get(name, 0)),
+                    "frames_dropped": float(self._dropped.get(name, 0)),
+                }
+                for name in names
+            }
+
+
 INTERVAL_SECONDS = 5.0
 """How often the runner journals a ``runtime_stats`` reading during a session."""
 
@@ -151,6 +204,8 @@ def to_detail(
     model_output: Mapping[str, Mapping[str, float]],
     output_kinds: Mapping[str, TrackKind],
     readings: Iterable[tuple[ConnId, TransportReading]],
+    model_input: Mapping[str, Mapping[str, float]] | None = None,
+    input_kinds: Mapping[str, TrackKind] | None = None,
 ) -> dict[str, Any]:
     """Shape one ``runtime_stats`` reading as a ``metric`` fact's detail.
 
@@ -166,9 +221,23 @@ def to_detail(
             returned.
         output_kinds: The kind of each output track the model declares.
         readings: Each connection's latest transport reading.
+        model_input: Per input track, the metrics :meth:`ModelInput.take`
+            returned. A model with no input tracks has none.
+        input_kinds: The kind of each input track the model declares.
     """
+    input_kinds = input_kinds or {}
     return {
         "observed_at": observed_at_ms,
+        "model_input": [
+            {
+                "track_name": name,
+                "kind": str(input_kinds[name]) if name in input_kinds else "",
+                # What the model receives, the client sends.
+                "direction": str(ClientTrackDirection.SENDONLY),
+                "metrics": _finite(metrics),
+            }
+            for name, metrics in (model_input or {}).items()
+        ],
         "model_output": [
             {
                 "track_name": name,

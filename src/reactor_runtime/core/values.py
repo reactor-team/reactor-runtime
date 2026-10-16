@@ -278,12 +278,15 @@ class TrackInfo:
         rate: Native rate in units per second — frames/sec for video,
             samples/sec for audio. ``0`` when unknown or not applicable.
         direction: Flow direction from the model's perspective.
+        buffer_seconds: How many seconds of audio an input track buffers, or
+            ``None`` for the default bound in frames.
     """
 
     name: str
     kind: TrackKind
     rate: float = 0.0
     direction: TrackDirection = TrackDirection.OUT
+    buffer_seconds: float | None = None
 
 
 @dataclass(eq=False)
