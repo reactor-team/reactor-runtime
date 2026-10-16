@@ -32,8 +32,12 @@ def now_iso() -> str:
 
 
 def git_commit_sha() -> str | None:
-    """Return the commit under test, or None when it cannot be told."""
-    if sha := os.environ.get("GITHUB_SHA"):
+    """Return the commit under test, or None when it cannot be told.
+
+    ``ENDURANCE_COMMIT_SHA`` names the runtime source when CI swaps in another
+    commit's; otherwise the workflow's checkout is the commit under test.
+    """
+    if sha := os.environ.get("ENDURANCE_COMMIT_SHA") or os.environ.get("GITHUB_SHA"):
         return sha
     try:
         out = subprocess.run(

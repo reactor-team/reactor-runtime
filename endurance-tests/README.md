@@ -55,7 +55,15 @@ ENDURANCE_SMOKE_CYCLES=2 mise run test-endurance
 ```
 
 Each run writes `endurance-results/<scenario>.json`, `-report.md` and
-`-summary.txt`, plus the runtime's log.
+`-summary.txt`, plus the runtime's log. In CI, the **Endurance Tests**
+workflow runs every scenario on demand: `duration_minutes` sets the length,
+and `runtime_ref` tests another tag or commit's runtime source with the
+current suite. It swaps in only `src/reactor_runtime`: the dependencies
+(`uv.lock`, so `reactor-webrtc` among them) and the wire bindings stay the
+current ref's. A `v3.8.2` run, for example, uses this ref's `reactor-webrtc`,
+not the one 3.8.2 shipped with. That measures a leak in the runtime's own
+code; a leak in a dependency can pass or fail differently from the release
+itself, so read such a result as the runtime's code, not as what shipped.
 
 The checks and the reports (`endurance/trends.py`, `endurance/report.py`)
 need no runtime, and their unit tests under `unit/` run with the rest of the
@@ -67,7 +75,8 @@ launcher hooks still has the shape it expects.
 Add `tests/test_<name>.py`. Drive the runtime through the `runtime` fixture
 and `BareClient`, take one `ResourceSampler.sample()` per cycle from
 `runtime.settled_probe()`, and end in a `finally` block with
-`finish_and_check(...)` over `exact_metrics(...) + trend_metrics(...)`.
+`finish_and_check(...)` over `exact_metrics(...) + trend_metrics(...)`. CI
+picks the file up as its own job.
 
 ## When a change needs this suite
 
