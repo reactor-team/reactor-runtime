@@ -80,6 +80,16 @@ MediaSink = Callable[[MediaChunk], None]
 StepSink = Callable[[CompletedStep], None]
 """Receives each step the model reports finished, on the model thread."""
 
+CommandTimingSink = Callable[[ConnId, int, float, float], None]
+"""Receives how long a command waited and ran, on the model thread.
+
+The arguments are the connection that sent the command, the session it ran
+in (counted as the model counts session starts, so a report that lands after
+its session ended can be told apart), the milliseconds from its arrival at the
+runtime to the start of its handler (``dispatch``), and the milliseconds its
+handler ran and its reply or failure was written (``handler``).
+"""
+
 FailureSink = Callable[[BaseException], None]
 """Receives the exception that ended :meth:`ReactorCore.run`, on the model thread."""
 
@@ -211,11 +221,14 @@ class CommandEnvelope:
         command: The validated command to dispatch.
         conn_id: The connection that sent it, when known.
         request_id: The request id to correlate a reply against, when present.
+        received_at: When the command reached the runtime, on the monotonic
+            clock, when known.
     """
 
     command: Command
     conn_id: ConnId | None
     request_id: RequestId | None
+    received_at: float | None = None
 
 
 Inbound = CommandEnvelope | ReactorEvent
@@ -259,6 +272,7 @@ class ReactorCore:
         self._out_addressed: AddressedSink | None = None
         self._out_media: MediaSink | None = None
         self._out_step: StepSink | None = None
+        self._out_command_timing: CommandTimingSink | None = None
         # How many session starts the model has received, kept by the
         # subclass's dispatcher. A step report carries it, so the runtime can
         # set apart a late report from a session that has ended.
@@ -373,6 +387,15 @@ class ReactorCore:
 
     # -- outbound binding (called once by the bridge) -------------------------
 
+    def _bind_timing(self, *, command_timing: CommandTimingSink | None = None) -> None:
+        """Bind the runtime's timing sinks. Called once by the bridge, beside :meth:`bind_output`.
+
+        Kept apart from :meth:`bind_output`, which a model may override with
+        the signature it was written against: a new sink here does not break
+        that override.
+        """
+        self._out_command_timing = command_timing
+
     def bind_output(
         self,
         *,
@@ -422,6 +445,26 @@ class ReactorCore:
     ) -> None:
         """Enqueue a validated command onto the model loop."""
         self._enqueue(CommandEnvelope(command, conn_id, request_id))
+
+    def _submit_command_at(
+        self,
+        command: Command,
+        conn_id: ConnId | None,
+        request_id: RequestId | None,
+        received_at: float | None = None,
+    ) -> None:
+        """Enqueue a validated command with when it reached the runtime. Called by the bridge.
+
+        *received_at* is on the monotonic clock; with it, the dispatcher
+        reports how long the command waited. Kept apart from
+        :meth:`submit_command`, which a model may override with the signature
+        it was written against: a command for such a model goes through its
+        override, untimed.
+        """
+        if type(self).submit_command is not ReactorCore.submit_command:
+            self.submit_command(command, conn_id, request_id)
+            return
+        self._enqueue(CommandEnvelope(command, conn_id, request_id, received_at))
 
     def post_reactor_event(self, event: ReactorEvent) -> None:
         """Enqueue a reactor-authoritative event onto the model loop."""

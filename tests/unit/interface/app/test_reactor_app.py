@@ -292,3 +292,58 @@ def test_loops_drain_the_queues_on_the_model_thread() -> None:
     finally:
         model.stop()
         time.sleep(0.1)
+
+
+def _timed(model: Model) -> list[tuple[ConnId, float, float]]:
+    """Bring a model up and capture what it reports through the command timing sink."""
+    timings: list[tuple[ConnId, float, float]] = []
+    model._on_loop_ready()
+    model.bind_output(
+        broadcast=lambda message: None,
+        addressed=lambda conn_id, message, request_id: None,
+        media=lambda chunk: None,
+    )
+    model._bind_timing(
+        command_timing=lambda conn_id, _session, dispatch_ms, handler_ms: timings.append(
+            (conn_id, dispatch_ms, handler_ms)
+        ),
+    )
+    return timings
+
+
+async def test_a_command_reports_its_wait_for_the_handler_and_the_handlers_run() -> None:
+    model = Model()
+    timings = _timed(model)
+    received_at = time.monotonic() - 0.05
+
+    await model._dispatch_command(
+        CommandEnvelope(_cmd("set_value", value=1), ConnId(1001), "req-t", received_at)
+    )
+
+    [(conn_id, dispatch_ms, handler_ms)] = timings
+    assert conn_id == ConnId(1001)
+    assert dispatch_ms >= 50.0
+    assert handler_ms >= 0.0
+
+
+async def test_a_failing_handler_still_reports_its_times() -> None:
+    model = Model()
+    timings = _timed(model)
+
+    await model._dispatch_command(
+        CommandEnvelope(_cmd("boom"), ConnId(1001), "req-b", time.monotonic())
+    )
+
+    assert len(timings) == 1
+
+
+async def test_a_command_without_an_arrival_time_or_a_connection_reports_nothing() -> None:
+    model = Model()
+    timings = _timed(model)
+
+    await model._dispatch_command(CommandEnvelope(_cmd("set_value", value=1), ConnId(1001), "r"))
+    await model._dispatch_command(
+        CommandEnvelope(_cmd("set_value", value=1), None, "r", time.monotonic())
+    )
+
+    assert timings == []

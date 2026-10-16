@@ -1,5 +1,6 @@
 import asyncio
 import time
+from typing import Any
 
 import numpy as np
 import pytest
@@ -22,7 +23,15 @@ from reactor_runtime.core.values import (
     MediaChunk,
 )
 from reactor_runtime.interface.internal.bridge import ModelBridge
-from reactor_runtime.interface.internal.reactor_core import MediaOps, RequestId
+from reactor_runtime.interface.internal.reactor_core import (
+    AddressedSink,
+    BroadcastSink,
+    CommandEnvelope,
+    MediaOps,
+    MediaSink,
+    RequestId,
+    StepSink,
+)
 from reactor_runtime.interface.model.contract import ModelContract
 
 
@@ -235,3 +244,77 @@ def test_bind_outbound_rejects_a_second_call() -> None:
 def test_contract_is_exposed() -> None:
     bridge, _ = make_bridge()
     assert bridge.contract is ModelContract.of(EchoModel)
+
+
+def test_a_model_overriding_bind_output_with_its_old_signature_still_binds() -> None:
+    class OwnBind(EchoModel):
+        def bind_output(
+            self,
+            *,
+            broadcast: BroadcastSink,
+            addressed: AddressedSink,
+            media: MediaSink,
+            media_ops: MediaOps | None = None,
+            step: StepSink | None = None,
+        ) -> None:
+            super().bind_output(
+                broadcast=broadcast,
+                addressed=addressed,
+                media=media,
+                media_ops=media_ops,
+                step=step,
+            )
+
+    model = OwnBind()
+    bridge = ModelBridge(model, ModelContract.of(OwnBind))
+    timing = lambda conn_id, session, dispatch_ms, handler_ms: None  # noqa: E731
+
+    bridge.bind_outbound(
+        broadcast=lambda m: None,
+        addressed=lambda *a: None,
+        media=lambda c: None,
+        command_timing=timing,
+    )
+
+    assert model._out_command_timing is timing
+
+
+def test_a_model_that_overrides_submit_command_still_gets_its_commands() -> None:
+    class OwnSubmit(EchoModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.submitted: list[tuple[str, ConnId | None, RequestId | None]] = []
+
+        def submit_command(
+            self, command: Any, conn_id: ConnId | None, request_id: RequestId | None
+        ) -> None:
+            self.submitted.append((type(command).__name__, conn_id, request_id))
+
+    model = OwnSubmit()
+    bridge = ModelBridge(model, ModelContract.of(OwnSubmit))
+
+    outcome = asyncio.run(
+        bridge.submit_command(
+            "set_prompt", {"prompt": "hi"}, conn_id=ConnId(1), request_id="r1", received_at=1.0
+        )
+    )
+
+    assert outcome.accepted is True
+    assert [(conn, request) for _, conn, request in model.submitted] == [(ConnId(1), "r1")]
+
+
+def test_a_command_reaches_the_model_with_when_it_arrived(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge, model = make_bridge()
+    queued: list[CommandEnvelope] = []
+    monkeypatch.setattr(model, "_enqueue", queued.append)
+
+    asyncio.run(
+        bridge.submit_command(
+            "set_prompt", {"prompt": "hi"}, conn_id=ConnId(1), request_id="r1", received_at=1.5
+        )
+    )
+
+    [envelope] = queued
+    assert envelope.received_at == 1.5
