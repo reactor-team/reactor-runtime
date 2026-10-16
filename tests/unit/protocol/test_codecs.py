@@ -11,6 +11,7 @@ from reactor_wire.v1 import (
     data_pb2,
     model_pb2,
     platform_pb2,
+    step_pb2,
     track_pb2,
 )
 
@@ -397,6 +398,89 @@ def test_v1_message_roundtrip(
     assert codec.decode(frame, out_channel, direction) == message
 
 
+_STEP_MESSAGES = [
+    (
+        data_pb2.DataClientMessage(
+            request_id="s1",
+            kind=K.MESSAGE_KIND_REQUEST,
+            request_step=step_pb2.RequestStep(
+                state=dict_to_struct({"prompt": "a"}),
+                commands=[model_pb2.Command(type="reset", data=dict_to_struct({}))],
+                media_input=[
+                    step_pb2.TrackFrames(
+                        track="webcam",
+                        kind=platform_pb2.TRACK_KIND_VIDEO,
+                        frames=[
+                            step_pb2.Frame(
+                                encoding=step_pb2.FRAME_ENCODING_RAW,
+                                dtype="uint8",
+                                shape=[1, 1, 3],
+                                data=b"abc",
+                                metadata=b"{}",
+                                capture_time_us=7,
+                            )
+                        ],
+                    )
+                ],
+            ),
+        ),
+        CLIENT,
+    ),
+    (
+        data_pb2.DataServerMessage(
+            request_id="s1",
+            kind=K.MESSAGE_KIND_RESPONSE,
+            step_result=step_pb2.StepResult(
+                index=1, tracks=[step_pb2.TrackFrames(track="main_video", rate=24.0)]
+            ),
+        ),
+        SERVER,
+    ),
+    (
+        data_pb2.DataServerMessage(
+            request_id="s2",
+            kind=K.MESSAGE_KIND_RESPONSE,
+            step_result=step_pb2.StepResult(
+                failure_code=step_pb2.STEP_FAILURE_CODE_NOT_READY, error="not running"
+            ),
+        ),
+        SERVER,
+    ),
+]
+
+
+@pytest.mark.parametrize(("message", "direction"), _STEP_MESSAGES)
+def test_v1_roundtrips_step_messages_on_the_data_channel(
+    message: protocol.Message, direction: protocol.Direction
+) -> None:
+    codec = protocol.select(protocol.ProtocolVersion.V1)
+    out_channel, frame = codec.encode(message)
+    assert out_channel is DATA
+    assert codec.decode(frame, out_channel, direction) == message
+
+
+def test_a_step_result_tells_an_unknown_index_from_a_step_that_did_not_run() -> None:
+    codec = protocol.select(protocol.ProtocolVersion.V1)
+    not_run = step_pb2.StepResult(index=0, failure_code=step_pb2.STEP_FAILURE_CODE_REFUSED)
+    ended = step_pb2.StepResult(failure_code=step_pb2.STEP_FAILURE_CODE_SESSION_ENDED)
+    for result, has_index in ((not_run, True), (ended, False)):
+        message = data_pb2.DataServerMessage(
+            request_id="s", kind=K.MESSAGE_KIND_RESPONSE, step_result=result
+        )
+        out_channel, frame = codec.encode(message)
+        decoded = codec.decode(frame, out_channel, SERVER)
+        assert isinstance(decoded, data_pb2.DataServerMessage)
+        assert decoded.step_result.HasField("index") is has_index
+
+
+@pytest.mark.parametrize(("message", "direction"), _STEP_MESSAGES)
+def test_v0_has_no_form_for_step_messages(
+    message: protocol.Message, direction: protocol.Direction
+) -> None:
+    with pytest.raises(protocol.UnsupportedMessageError):
+        protocol.select(protocol.ProtocolVersion.V0).encode(message)
+
+
 @pytest.mark.parametrize(
     ("message", "direction"),
     [
@@ -440,6 +524,9 @@ def test_every_payload_variant_is_covered() -> None:
         ("DataServerMessage", "error"),
         ("ControlClientMessage", "error"),
         ("ControlClientMessage", "client_stats"),
+        # Stepped generation is v1-only: no legacy client ever requested a step.
+        ("DataClientMessage", "request_step"),
+        ("DataServerMessage", "step_result"),
     }
     message_types: list[Any] = [
         data_pb2.DataClientMessage,
