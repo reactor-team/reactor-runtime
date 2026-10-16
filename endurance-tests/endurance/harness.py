@@ -161,6 +161,18 @@ class RuntimeProcess(RuntimeEndpoint):
         """Return one reading of the probe route."""
         return self.get("/_endurance/probe")
 
+    def wait_registered(self, count: int) -> dict[str, Any]:
+        """Wait until at most *count* connections are registered, or ``CLOSE_TIMEOUT_S``.
+
+        Returns the last probe reading either way.
+        """
+        deadline = time.monotonic() + CLOSE_TIMEOUT_S
+        reading = self.probe()
+        while reading["registered_connections"] > count and time.monotonic() < deadline:
+            time.sleep(0.25)
+            reading = self.probe()
+        return reading
+
     def settled_probe(self) -> tuple[dict[str, Any], float | None]:
         """Read the probe once nothing is connected and teardown has finished.
 
@@ -171,10 +183,7 @@ class RuntimeProcess(RuntimeEndpoint):
         a leak, not a slow teardown.
         """
         start = time.monotonic()
-        reading = self.probe()
-        while reading["registered_connections"] > 0 and time.monotonic() - start < CLOSE_TIMEOUT_S:
-            time.sleep(0.25)
-            reading = self.probe()
+        reading = self.wait_registered(0)
         released_after_s = (
             time.monotonic() - start if reading["registered_connections"] == 0 else None
         )
@@ -245,6 +254,15 @@ class BareClient:
         await self._stream_burst(frame)
         await self._settle()
         return self.received_video
+
+    async def wait_for_replies(self) -> None:
+        """Wait, as a closing client does, for the replies it is still owed."""
+        await self._settle()
+
+    async def stream_while(self, frame: tuple[bytes, int, int], done: asyncio.Event) -> None:
+        """Stream on until *done* is set."""
+        while not done.is_set():
+            await self._send_frame(frame)
 
     async def stream_until_dropped(self, frame: tuple[bytes, int, int], timeout_s: float) -> bool:
         """Stream on until the runtime drops the connection; return whether it did in time.
@@ -478,15 +496,7 @@ class V1Client(BareClient):
 
     def _start_wire(self, control: Any, data: Any) -> None:
         self._control, self._data = control, data
-        self._send_control(
-            control_pb2.ControlClientMessage(
-                request_id="publish-webcam",
-                kind=_REQUEST,
-                publish_track=track_pb2.PublishTrack(name="webcam"),
-            ),
-            asked="publish_track",
-            answers=frozenset({"publish_track"}),
-        )
+        self._publish_webcam()
         for name in ("main_video", "main_audio"):
             self._send_control(
                 control_pb2.ControlClientMessage(
@@ -499,6 +509,17 @@ class V1Client(BareClient):
             ),
             asked="request_schema",
             answers=frozenset({"model_schema"}),
+        )
+
+    def _publish_webcam(self) -> None:
+        self._send_control(
+            control_pb2.ControlClientMessage(
+                request_id="publish-webcam",
+                kind=_REQUEST,
+                publish_track=track_pb2.PublishTrack(name="webcam"),
+            ),
+            asked="publish_track",
+            answers=frozenset({"publish_track"}),
         )
 
     def _on_tick(self) -> None:
@@ -655,6 +676,21 @@ class V1Client(BareClient):
                     break
             await asyncio.sleep(0.05)
         self.collect_unanswered()
+
+
+class Viewer(V1Client):
+    """A :class:`V1Client` that watches without publishing: it sends no webcam.
+
+    It joins a session another client publishes to and counts the output that
+    comes back, as a second participant in a shared session does.
+    """
+
+    def _publish_webcam(self) -> None:
+        """Publish nothing: a viewer only receives."""
+
+    async def _send_frame(self, frame: tuple[bytes, int, int]) -> None:
+        self._on_tick()
+        await asyncio.sleep(1 / _FPS)
 
 
 def assert_full_streams(received: list[int]) -> MetricResult:
