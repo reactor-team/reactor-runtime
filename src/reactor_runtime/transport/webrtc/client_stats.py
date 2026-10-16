@@ -158,9 +158,19 @@ def _decode_client_stats(message: platform_pb2.ClientStats) -> ClientStatsBatch:
             timestamp=message.connection_stat.timestamp,
             metrics=dict(message.connection_stat.metrics),
             environment=_decode_environment(message.connection_stat),
-            message_stages=tuple(
-                MessageStage(name=s.name, total_ms=s.total_ms, messages=s.messages)
-                for s in message.connection_stat.message_stages
-            ),
+            message_stages=_decode_message_stages(message.connection_stat),
         )
     return ClientStatsBatch(track_stats=track_stats, connection_stat=connection_stat)
+
+
+def _decode_message_stages(stat: platform_pb2.ClientConnectionStat) -> tuple[MessageStage, ...]:
+    """Read the connection's message stages, or none from bindings that predate the field.
+
+    The runtime vendors a released wire package, which can be older than the
+    schema these sources were written against. A batch decoded with it carries
+    the field as unknown bytes, so it reads as no stages rather than failing.
+    """
+    stages = getattr(stat, "message_stages", ())
+    return tuple(
+        MessageStage(name=s.name, total_ms=s.total_ms, messages=s.messages) for s in stages
+    )

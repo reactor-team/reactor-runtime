@@ -1,3 +1,6 @@
+from types import SimpleNamespace
+from typing import Any, cast
+
 from reactor_runtime.core import (
     ClientConnectionStat,
     ClientEnvironment,
@@ -11,7 +14,10 @@ from reactor_runtime.core import (
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.protocol.v0.codec import V0Codec
 from reactor_runtime.protocol.v1.codec import V1Codec
-from reactor_runtime.transport.webrtc.client_stats import read_client_stats
+from reactor_runtime.transport.webrtc.client_stats import (
+    _decode_message_stages,
+    read_client_stats,
+)
 from reactor_wire.v1 import control_pb2, platform_pb2
 
 
@@ -294,3 +300,9 @@ def test_a_client_that_sends_no_message_stages_has_none() -> None:
 
     assert batch.connection_stat is not None
     assert batch.connection_stat.message_stages == ()
+
+
+def test_bindings_without_message_stages_read_as_none() -> None:
+    older = SimpleNamespace(timestamp=1, metrics={}, environment=None)
+
+    assert _decode_message_stages(cast(Any, older)) == ()
