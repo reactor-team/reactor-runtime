@@ -1,0 +1,75 @@
+# Runs the endurance suite against every release, once it is published.
+#
+# The release workflow tags and publishes with GITHUB_TOKEN, whose events start
+# no other workflow, so this follows the release run itself: when it completes
+# on main, whatever its conclusion, and a vX.Y.Z GitHub release now points at
+# its commit, this dispatches Endurance Tests on that tag. The release is
+# judged rather than the run, so a release whose later PyPI upload failed
+# still gets its run. A merge that only ships a pre-release tags pre/vX.Y.Z,
+# and nothing is dispatched. Re-running a release run completes it again and dispatches again:
+# telling that apart from a manual or a failed earlier run is not worth missing
+# a release's own run.
+
+name: Endurance Tests on Release
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  # How long each scenario runs on a release, from a repository variable so it
+  # can be tuned without a change here.
+  RELEASE_ENDURANCE_DURATION_MINUTES: ${{ vars.RELEASE_ENDURANCE_DURATION_MINUTES || '120' }}
+
+jobs:
+  dispatch:
+    name: Dispatch the endurance suite
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Find the release this run published
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          tag=$(gh api "repos/$GH_REPO/tags" --paginate \
+            --jq ".[] | select(.commit.sha == \"$HEAD_SHA\") | .name" | { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true; } | head -n 1)
+          if [ -z "$tag" ]; then
+            echo "No vX.Y.Z tag points at $HEAD_SHA: nothing was released"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          release=$(gh release view "$tag" --json isDraft,isPrerelease \
+            --jq 'if .isDraft or .isPrerelease then "unpublished" else "published" end' 2>/dev/null || echo "missing")
+          echo "release $tag: $release"
+          if [ "$release" != "published" ]; then
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch Endurance Tests on ${{ steps.release.outputs.tag }}
+        if: steps.release.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          minutes="$RELEASE_ENDURANCE_DURATION_MINUTES"
+          if ! [[ "$minutes" =~ ^[0-9]+$ ]] || (( 10#$minutes < 1 || 10#$minutes > 340 )); then
+            echo "::error::RELEASE_ENDURANCE_DURATION_MINUTES must be a whole number from 1 to 340, got '$minutes'"
+            exit 1
+          fi
+          gh workflow run endurance-tests.yml --ref "$TAG" -f duration_minutes="$minutes"
+          echo "Dispatched Endurance Tests on $TAG for $minutes minutes per scenario"
