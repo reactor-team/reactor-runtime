@@ -3,11 +3,10 @@
 The engine's chunked data channel keeps running totals of four stages, which a
 stats sample turns into a window's worth: ``queue_wait``, ``send`` and
 ``stall`` for the messages this side sends, and ``reassembly`` for the
-messages it receives. The runner times two more for each command itself,
-``dispatch`` and ``handler``, and adds them here (:meth:`MessageStageWindow.add`).
+messages it receives.
 
 Only the data channel that carries commands is timed. A channel without
-chunking has no totals, so it reports only the runner's stages.
+chunking has no totals, so it reports no stages.
 
 :class:`MessageStageWindow` holds all of them until a report takes them.
 """
@@ -23,18 +22,15 @@ STAGES = (
     "send",
     "stall",
     "reassembly",
-    "dispatch",
-    "handler",
 )
-"""Every stage, in the order a command goes through them."""
+"""Every stage, in the order a message goes through them."""
 
 
 class MessageStageWindow:
     """The time a connection's messages spent in each stage, since the last take.
 
-    The stats sampler folds in the channel's totals, the runner adds its own
-    stages, and a report takes them from the event loop, so every access holds
-    a lock.
+    The stats sampler folds in the channel's totals and a report takes them
+    from the event loop, so every access holds a lock.
     """
 
     def __init__(self) -> None:

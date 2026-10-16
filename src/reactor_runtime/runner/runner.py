@@ -86,6 +86,7 @@ from reactor_runtime.runner.session_start import (
     StartingCommand,
     parse_session_start,
 )
+from reactor_runtime.runner.stages import RunnerStages
 from reactor_runtime.runner.state_machine import SessionStateMachine
 from reactor_runtime.runner.system_client import SYSTEM_CONN_ID, SystemConnection
 from reactor_runtime.runner.upload_resolution import declares_upload, resolve_uploads
@@ -246,6 +247,9 @@ class Runner(ServiceComponent, ConnectionSink):
         self._model_metrics = ModelMetrics(self._metrics)
         # The same emissions, counted per session for the runtime's own stats.
         self._model_output = ModelOutput()
+        # The stages the runtime times itself, per connection, which a report
+        # adds to each connection's reading beside its transport's.
+        self._stages = RunnerStages()
         self._output_kinds: dict[str, TrackKind] = {}
         self._runtime_stats_interval = runtime_stats.INTERVAL_SECONDS
         self._runtime_stats_task: asyncio.Task[None] | None = None
@@ -750,9 +754,9 @@ class Runner(ServiceComponent, ConnectionSink):
     def _on_command_timing(
         self, conn_id: ConnId, session: int, dispatch_ms: float, handler_ms: float
     ) -> None:
-        """Add a command's ``dispatch`` and ``handler`` times to its connection, on the loop.
+        """Add a command's ``dispatch`` and ``handler`` times to the runtime's stages, on the loop.
 
-        The model reports from its own thread; the connections are the loop's.
+        The model reports from its own thread; the stages are the loop's.
         A report that arrives after the loop closed, at shutdown, is dropped,
         and so is one from an earlier session: its connection id may already
         belong to a connection of the current one.
@@ -764,8 +768,8 @@ class Runner(ServiceComponent, ConnectionSink):
         def add() -> None:
             if session != self._sessions_posted:
                 return
-            self._connections.add_message_stage(conn_id, "dispatch", dispatch_ms)
-            self._connections.add_message_stage(conn_id, "handler", handler_ms)
+            self._stages.add_message(conn_id, "dispatch", dispatch_ms)
+            self._stages.add_message(conn_id, "handler", handler_ms)
 
         with contextlib.suppress(RuntimeError):
             loop.call_soon_threadsafe(add)
@@ -1835,6 +1839,7 @@ class Runner(ServiceComponent, ConnectionSink):
             # Before the model hears of the session: from then on its thread
             # can emit, and every frame it emits for this session counts.
             self._model_output.reset(self._sessions_posted)
+            self._stages.reset()
             bridge.dispatch_reactor_event(
                 SessionStarted(
                     self._session_id,
@@ -1948,7 +1953,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 observed_at_ms=int(time.time() * 1000),
                 model_output=self._model_output.take(),
                 output_kinds=self._output_kinds,
-                readings=self._connections.take_stages(),
+                readings=self._stages.merge(self._connections.take_stages()),
             ),
         )
 

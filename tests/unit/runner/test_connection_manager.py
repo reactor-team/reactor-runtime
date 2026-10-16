@@ -823,9 +823,6 @@ class MessageTimedConnection(MeasuredConnection):
             MessageStage("reassembly", total_ms=6.0, messages=3),
         )
 
-    def add_message_stage(self, stage: str, ms: float, messages: int = 1) -> None:
-        self.stages = (*self.stages, MessageStage(stage, total_ms=ms, messages=messages))
-
     def take_message_stages(self) -> tuple[MessageStage, ...]:
         taken, self.stages = self.stages, ()
         return taken
@@ -880,43 +877,3 @@ def test_one_take_adds_a_connections_frame_and_message_stages() -> None:
 
     assert reading.tracks[0].frame_stages == frames
     assert reading.message_stages == messages
-
-
-def test_a_runner_timed_stage_reaches_its_connection_and_not_an_untimed_one() -> None:
-    cm, _ = waiting_manager()
-    conn = MessageTimedConnection(2, TransportReading())
-    conn.stages = ()
-    cm.register(conn)
-    cm.register(FakeConnection(1))
-
-    cm.add_message_stage(ConnId(2), "dispatch", 3.0)
-    cm.add_message_stage(ConnId(1), "dispatch", 3.0)
-    cm.add_message_stage(ConnId(9), "handler", 1.0)
-
-    assert conn.stages == (MessageStage("dispatch", total_ms=3.0, messages=1),)
-
-
-class ReportOnlyConnection(MeasuredConnection):
-    """A transport that reports its own message stages and takes none from the runner."""
-
-    def __init__(self, cid: int, reading: TransportReading | None) -> None:
-        super().__init__(cid, reading)
-        self.stages: tuple[MessageStage, ...] = (
-            MessageStage("queue_wait", total_ms=0.3, messages=3),
-        )
-
-    def take_message_stages(self) -> tuple[MessageStage, ...]:
-        taken, self.stages = self.stages, ()
-        return taken
-
-
-def test_a_transport_that_only_reports_its_message_stages_still_has_them_taken() -> None:
-    cm, _ = waiting_manager()
-    conn = ReportOnlyConnection(2, TransportReading())
-    stages = conn.stages
-    cm.register(conn)
-
-    cm.add_message_stage(ConnId(2), "dispatch", 3.0)
-    [(_, reading)] = cm.take_message_stages(cm.transport_readings())
-
-    assert reading.message_stages == stages

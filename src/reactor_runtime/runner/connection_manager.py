@@ -49,7 +49,6 @@ from reactor_runtime.core import (
     ConnId,
     FrameStageSource,
     MediaChunk,
-    MessageStageSink,
     MessageStageSource,
     SessionEvent,
     TransportReading,
@@ -191,12 +190,6 @@ class ConnectionManager:
                     reading = replace(reading, message_stages=message_stages)
             out.append((cid, reading))
         return out
-
-    def add_message_stage(self, conn_id: ConnId, stage: str, ms: float) -> None:
-        """Add one message's time in *stage* to connection *conn_id*, if it takes them."""
-        conn = self._by_id.get(conn_id)
-        if isinstance(conn, MessageStageSink):
-            conn.add_message_stage(stage, ms)
 
     def new_conn_id(self) -> ConnId:
         """Mint a fresh random connection id, unique within the session.

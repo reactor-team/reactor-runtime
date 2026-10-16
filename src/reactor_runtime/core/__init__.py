@@ -38,7 +38,6 @@ from reactor_runtime.core.transport import (
     Connection,
     ConnectionSink,
     FrameStageSource,
-    MessageStageSink,
     MessageStageSource,
     TransportStatsSource,
 )
@@ -96,7 +95,6 @@ __all__ = [
     "MediaBundle",
     "MediaChunk",
     "MessageStage",
-    "MessageStageSink",
     "MessageStageSource",
     "ReactorEvent",
     "RecordingConfig",

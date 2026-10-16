@@ -4153,8 +4153,8 @@ async def test_a_command_timing_from_an_earlier_session_is_dropped() -> None:
     runner._loop = asyncio.get_running_loop()
     added: list[tuple[ConnId, str]] = []
     setattr(  # noqa: B010
-        runner._connections,
-        "add_message_stage",
+        runner._stages,
+        "add_message",
         lambda conn_id, stage, ms: added.append((conn_id, stage)),
     )
     runner._sessions_posted = 2
