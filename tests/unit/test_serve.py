@@ -1,4 +1,5 @@
 import logging
+import os
 from pathlib import Path
 from typing import cast
 
@@ -60,6 +61,7 @@ _RUNTIME_ENV = (
     "SIGTERM_GRACE_PERIOD",
     "EXIT_TIMEOUT_SECONDS",
     "REACTOR_LOG_LEVEL",
+    "REACTOR_SECRETS_EXPECTED_KEYS",
 )
 
 
@@ -232,6 +234,51 @@ def test_main_refuses_when_no_manifest_in_the_working_directory(
 
     with pytest.raises(SystemExit):
         main()
+
+
+def test_main_refuses_bad_secrets_before_the_manifest_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("REACTOR_SECRETS_EXPECTED_KEYS", "not json")
+
+    with pytest.raises(SystemExit, match="invalid JSON"):
+        main()
+
+
+def test_main_without_the_secrets_variable_never_reads_the_mount(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trap = tmp_path / "trap"
+    trap.write_text("not a directory")
+    monkeypatch.setattr("reactor_runtime.secrets.SECRETS_ROOT", trap)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit, match=r"no reactor\.yaml"):
+        main()
+
+
+def test_main_exports_the_secrets_before_serving(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mount = tmp_path / "secrets"
+    mount.mkdir()
+    (mount / "API_TOKEN").write_bytes(b"synth-mounted\n")
+    _fake_main_environment(tmp_path, monkeypatch, code=0)
+    seen: list[str | None] = []
+
+    async def recording_serve(*args: object, **kwargs: object) -> int:
+        seen.append(os.environ.get("API_TOKEN"))
+        return 0
+
+    monkeypatch.setattr("reactor_runtime.serve.serve", recording_serve)
+    monkeypatch.setattr("reactor_runtime.secrets.SECRETS_ROOT", mount)
+    monkeypatch.setenv("REACTOR_SECRETS_EXPECTED_KEYS", '["API_TOKEN"]')
+    monkeypatch.setenv("API_TOKEN", "synth-image-default")
+
+    main()
+
+    assert seen == ["synth-mounted\n"]
 
 
 def test_webrtc_config_falls_back_to_a_public_stun_when_unconfigured() -> None:
