@@ -2,9 +2,11 @@
 #
 # The release workflow tags and publishes with GITHUB_TOKEN, whose events start
 # no other workflow, so this follows the release run itself: when it completes
-# on main and its publish job succeeded, this dispatches Endurance Tests on the
-# new tag. A merge that only ships a pre-release skips that job, and nothing is
-# dispatched. Re-running a release run completes it again and dispatches again:
+# on main, whatever its conclusion, and a vX.Y.Z GitHub release now points at
+# its commit, this dispatches Endurance Tests on that tag. The release is
+# judged rather than the run, so a release whose later PyPI upload failed
+# still gets its run. A merge that only ships a pre-release tags pre/vX.Y.Z,
+# and nothing is dispatched. Re-running a release run completes it again and dispatches again:
 # telling that apart from a manual or a failed earlier run is not worth missing
 # a release's own run.
 
@@ -27,7 +29,6 @@ env:
 jobs:
   dispatch:
     name: Dispatch the endurance suite
-    if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     permissions:
       actions: write
@@ -38,22 +39,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RUN_ID: ${{ github.event.workflow_run.id }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
-          published=$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID/jobs" --paginate \
-            --jq '[.jobs[] | select(.name == "Build and publish a release")] | last | .conclusion // "missing"')
-          echo "publish job: $published"
-          if [ "$published" != "success" ]; then
-            echo "tag=" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
           tag=$(gh api "repos/$GH_REPO/tags" --paginate \
             --jq ".[] | select(.commit.sha == \"$HEAD_SHA\") | .name" | { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true; } | head -n 1)
           if [ -z "$tag" ]; then
-            echo "::error::the release run published, but no vX.Y.Z tag points at $HEAD_SHA"
-            exit 1
+            echo "No vX.Y.Z tag points at $HEAD_SHA: nothing was released"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          release=$(gh release view "$tag" --json isDraft,isPrerelease \
+            --jq 'if .isDraft or .isPrerelease then "unpublished" else "published" end' 2>/dev/null || echo "missing")
+          echo "release $tag: $release"
+          if [ "$release" != "published" ]; then
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
