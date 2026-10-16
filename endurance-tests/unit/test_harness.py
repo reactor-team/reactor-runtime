@@ -11,6 +11,8 @@ from endurance.harness import (
     assert_released,
 )
 
+from reactor_wire.v1 import common_pb2, control_pb2
+
 
 def test_full_streams_pass_when_every_cycle_got_its_frames() -> None:
     assert assert_full_streams([FRAMES_PER_CYCLE] * 5).status == "ok"
@@ -68,6 +70,7 @@ def _client_owed(request_id: str, asked: str, answers: frozenset[str | None]) ->
     client._lock = threading.Lock()
     client._pending = {request_id: (asked, answers)}
     client._failed = []
+    client._owed_notices = set()
     return client
 
 
@@ -124,3 +127,28 @@ def test_a_settled_probe_given_a_task_count_waits_for_teardown_tasks_to_finish(
     reading, _ = runtime.settled_probe(connections=1, tasks=7)
 
     assert reading["tasks"] == 7
+
+
+def _notification(payload: str) -> bytes:
+    message = control_pb2.ControlServerMessage(
+        kind=common_pb2.MessageKind.MESSAGE_KIND_NOTIFICATION
+    )
+    getattr(message, payload).SetInParent()
+    return message.SerializeToString()
+
+
+def test_an_owed_notice_that_never_arrives_is_unanswered() -> None:
+    client = _client_owed("schema", "request_schema", frozenset({"model_schema"}))
+    client._answered("schema", "model_schema", None)
+    client.expect_notice("session_ended")
+    assert client.collect_unanswered() == ["session_ended notice: never arrived"]
+
+
+def test_the_owed_notification_settles_its_notice() -> None:
+    client = _client_owed("schema", "request_schema", frozenset({"model_schema"}))
+    client._answered("schema", "model_schema", None)
+    client.expect_notice("moderation")
+    client._on_control_message(_notification("session_ended"), True)
+    assert client.collect_unanswered() == ["moderation notice: never arrived"]
+    client._on_control_message(_notification("moderation"), True)
+    assert client.collect_unanswered() == []

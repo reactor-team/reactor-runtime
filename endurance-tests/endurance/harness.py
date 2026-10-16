@@ -239,16 +239,37 @@ class BareClient:
         self._pc: Any = None
         self._camera: Any = None
         self._keep: list[Any] = []
+        # Set from a libwebrtc thread once the peer connection is gone.
+        self._dropped = threading.Event()
 
     async def run(self, frame: tuple[bytes, int, int]) -> int:
         """Connect, stream until enough frames came back, and close; return the frames received."""
-        await self._connect()
         try:
-            await self._stream_burst(frame)
-            await self._settle()
-            return self.received_video
+            return await self.open(frame)
         finally:
             self.close()
+
+    async def open(self, frame: tuple[bytes, int, int]) -> int:
+        """Connect and stream until enough frames came back; return the frames received.
+
+        The connection stays open, for the caller to close or to keep streaming on.
+        """
+        await self._connect()
+        await self._stream_burst(frame)
+        await self._settle()
+        return self.received_video
+
+    async def stream_until_dropped(self, frame: tuple[bytes, int, int], timeout_s: float) -> bool:
+        """Stream on until the runtime drops the connection; return whether it did in time."""
+        deadline = time.monotonic() + timeout_s
+        while not self._dropped.is_set() and time.monotonic() < deadline:
+            try:
+                await self._send_frame(frame)
+            # A channel the runtime closed refuses the send before its state
+            # change arrives here.
+            except RuntimeError:
+                self._dropped.set()
+        return self._dropped.is_set()
 
     async def run_until_killed(
         self,
@@ -262,9 +283,7 @@ class BareClient:
         the connection ends only with the process, the way a client that
         crashes or loses power leaves.
         """
-        await self._connect()
-        await self._stream_burst(frame)
-        await self._settle()
+        await self.open(frame)
         ready()
         while True:
             await self._send_frame(frame)
@@ -299,6 +318,7 @@ class BareClient:
         observer = rw.PeerConnectionObserver()
         observer.on_ice_candidate = ice.append
         observer.on_track = self._on_track
+        observer.on_connection_state_change = self._on_state
         pc = self._factory.create_peer_connection(rw.RtcConfiguration(), observer)
         recv_video = pc.add_transceiver(rw.MediaKind.Video, rw.TransceiverDirection.RecvOnly)
         recv_audio = pc.add_transceiver(rw.MediaKind.Audio, rw.TransceiverDirection.RecvOnly)
@@ -309,9 +329,7 @@ class BareClient:
         control = pc.create_data_channel("control")
         data.on_message(self._on_data_message)
         control.on_message(self._on_control_message)
-        control.on_state_change(
-            lambda state: control_open.set() if state == rw.DataChannelState.Open else None
-        )
+        control.on_state_change(lambda state: self._on_control_state(state, control_open))
         self._pc, self._camera = pc, camera
         self._keep += [observer, recv_video, recv_audio, send_video, data, control]
 
@@ -408,6 +426,23 @@ class BareClient:
     def _on_control_message(self, data: bytes, binary: bool) -> None:
         """Read a control-channel frame from the runtime; v0 reads none."""
 
+    def _on_control_state(self, state: rw.DataChannelState, control_open: threading.Event) -> None:
+        if state == rw.DataChannelState.Open:
+            control_open.set()
+        # The runtime closes the channels as it closes the connection, ahead
+        # of the peer connection's own state change.
+        elif state == rw.DataChannelState.Closing or state == rw.DataChannelState.Closed:
+            self._dropped.set()
+
+    def _on_state(self, state: rw.PeerConnectionState) -> None:
+        # The binding hands each callback a fresh enum instance: compare by value.
+        if (
+            state == rw.PeerConnectionState.Disconnected
+            or state == rw.PeerConnectionState.Failed
+            or state == rw.PeerConnectionState.Closed
+        ):
+            self._dropped.set()
+
     def _on_track(self, kind: rw.MediaKind, track: rw.Track) -> None:
         self._keep.append(track)
         if kind == rw.MediaKind.Video:
@@ -447,6 +482,8 @@ class V1Client(BareClient):
         # it, until its reply arrives.
         self._pending: dict[str, tuple[str, frozenset[str | None]]] = {}
         self._failed: list[str] = []
+        # Notifications the runtime owes this client, by payload name.
+        self._owed_notices: set[str] = set()
         self._next_tick = 0.0
         self._sent = 0
         self.unanswered = []
@@ -562,10 +599,43 @@ class V1Client(BareClient):
         with self._lock:
             return list(self._failed)
 
+    def expect_notice(self, payload: str) -> None:
+        """Count a control notification with *payload* as owed until it arrives.
+
+        :meth:`collect_unanswered` lists it as unanswered if it never does.
+        """
+        with self._lock:
+            self._owed_notices.add(payload)
+
+    def collect_unanswered(self) -> list[str]:
+        """Return the requests and notices still unanswered, refreshing :attr:`unanswered`."""
+        with self._lock:
+            self.unanswered = [
+                *self._failed,
+                *(f"{asked} ({rid}): no reply" for rid, (asked, _) in self._pending.items()),
+                *(f"{payload} notice: never arrived" for payload in sorted(self._owed_notices)),
+            ]
+            return self.unanswered
+
+    async def wait_for_notices(self, timeout_s: float) -> None:
+        """Wait up to *timeout_s* for every owed notification to arrive."""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            with self._lock:
+                if not self._owed_notices:
+                    return
+            await asyncio.sleep(0.05)
+
     def _on_control_message(self, data: bytes, binary: bool) -> None:
         message = control_pb2.ControlServerMessage()
-        if self._parse(message, data, "control"):
-            self._answered(message.request_id, message.WhichOneof("payload"), message)
+        if not self._parse(message, data, "control"):
+            return
+        payload = message.WhichOneof("payload")
+        if message.kind == _NOTIFICATION:
+            with self._lock:
+                self._owed_notices.discard(payload or "")
+            return
+        self._answered(message.request_id, payload, message)
 
     def _on_data_message(self, data: bytes, binary: bool) -> None:
         message = data_pb2.DataServerMessage()
@@ -601,11 +671,7 @@ class V1Client(BareClient):
                 if not self._pending:
                     break
             await asyncio.sleep(0.05)
-        with self._lock:
-            self.unanswered = [
-                *self._failed,
-                *(f"{asked} ({rid}): no reply" for rid, (asked, _) in self._pending.items()),
-            ]
+        self.collect_unanswered()
 
 
 def assert_full_streams(received: list[int]) -> MetricResult:

@@ -30,7 +30,7 @@ Exact counts, which must be 0 on every cycle:
 |---|---|
 | `short_cycles` | A cycle whose client got fewer than its 60 frames back: it did not exercise what the scenario claims to. |
 | `unreleased_connections` | A connection still in the runtime's registry 30 s after its client left. The detail reports how long the runtime took to drop the others, which is how fast it notices a client is gone. |
-| `unanswered_requests` | v1 only: a cycle where the publish, the schema request or a command was refused or never answered. |
+| `unanswered_requests` | v1 only: a cycle where the publish, the schema request or a command was refused or never answered, or a notice the client was owed (a stop's `session_ended` or `moderation`) never arrived. |
 | `pacers_holding_output` | A media pacer that still reaches model output after it stopped. Checked the moment it stops, so it does not depend on when garbage collection runs. |
 | `pinned_batches` | Model output the cyclic garbage collector freed: nothing but reference-cycle garbage held it. |
 | `live_connections`, `live_peers`, `live_pacers` | Transport objects still alive after a collection, with no client connected. |
@@ -53,6 +53,7 @@ trend ends in ERROR rather than in a verdict; a failed count still fails it.
 | `connection_churn` | One session. Each cycle a client joins, streams a webcam both ways until 60 frames come back, and leaves. The client speaks the v0 JSON control protocol. |
 | `connection_churn_v1` | The same churn with a client that speaks v1 protobuf, as current SDKs do: it also requests the schema and, once a second, pings, sends client stats and a `set_effect` or `set_intensity` command. Every request must be answered without an error (`unanswered_requests`). |
 | `room_participant_churn` | One session connected to a LiveKit room, the room connection open throughout. Each cycle a participant joins the room, requests the schema and runs a command over the Reactor protocol, calls an RPC method that runs a command, sends a data packet on a topic that runs one, publishes a `webcam` track the session reads by name, sends a microphone byte stream on the topic mapped to `mic`, and leaves. Every request that has an answer must get it, and the topic command must get none; the runtime's own counts must also show that the model's handler ran the topic command, which the runtime did not reject, and that frames arrived on both inputs, since LiveKit accepts a packet, a track, or a stream whether or not the runtime uses it (`unanswered_requests`). Needs a LiveKit server (`LIVEKIT_URL`), and skips without one or against a runtime that serves no LiveKit transport. |
+| `session_churn` | Each cycle starts a session under a fresh id, a v1 client streams until its 60 frames come back, and the session is stopped: in turn a plain stop, the client leaving first and the orphaned session stopped after, a stop with a close reason, and a moderated stop. The last two owe the client its `session_ended` or `moderation` notice before the connection closes. The runtime is read once the session is ready again. |
 | `abrupt_disconnect` | The v1 churn, with each client in its own process (`endurance/abrupt.py`), killed with `SIGKILL` a moment after its frames came back instead of closing. The runtime learns the client is gone only from the wire going silent, as it does when a client crashes or loses its network. |
 
 ## Running it
@@ -86,13 +87,13 @@ launcher hooks still has the shape it expects.
 
 ## Adding a scenario
 
-Add `tests/test_<name>.py`. A churn of a different client is one call to
-`run_churn(...)` (`endurance/churn.py`) with a `BareClient` subclass, or with
-any client that has its `run()` and `unanswered` (`ChurnClient`). Any other
-scenario drives the runtime through the `runtime` fixture, takes one
-`ResourceSampler.sample()` per cycle from `runtime.settled_probe()`, and ends
-in a `finally` block with `finish_and_check(...)` over `exact_metrics(...) +
-trend_metrics(...)`. CI picks the file up as its own job.
+Add `tests/test_<name>.py`. A scenario is a loop of cycles: `run_cycles(...)`
+(`endurance/churn.py`) runs its cycle until the deadline, reads the runtime
+once the cycle's client is gone, and checks and reports the run. A churn of a
+different client is one call to `run_churn(...)` with a `BareClient`
+subclass, or with any client that has its `run()` and `unanswered`
+(`ChurnClient`). A scenario that does more per cycle passes `run_cycles` its
+own cycle, as `session_churn` does. CI picks the file up as its own job.
 
 ## When a change needs this suite
 
@@ -107,9 +108,10 @@ every PR that touches the runtime:
   recordings, several clients on one session, a control protocol version):
   add a scenario that drives it, or extend an existing one. Today's scenarios
   cover the v0 and v1 control protocols, commands and client stats, a client
-  that dies without closing, and room participants with their RPC and
-  data-topic commands and media inputs; uploads, clips, recordings and several
-  clients on one session have none yet.
+  that dies without closing, sessions started and stopped, with and without a
+  close reason or a moderation verdict, and room participants with their RPC
+  and data-topic commands and media inputs; uploads, clips, recordings and
+  several clients on one session have none yet.
 - **A change to what the launcher hooks** (`MediaPacer.stop`,
   `http_server.build_app`, `Runner._connections`, the transport classes the
   probe counts): update `endurance/launcher.py` in the same PR.
