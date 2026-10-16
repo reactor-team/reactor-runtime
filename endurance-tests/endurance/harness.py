@@ -50,6 +50,12 @@ _RESPONSE = common_pb2.MessageKind.MESSAGE_KIND_RESPONSE
 _NOTIFICATION = common_pb2.MessageKind.MESSAGE_KIND_NOTIFICATION
 
 SUITE_DIR = Path(__file__).resolve().parent.parent
+# The model every scenario serves unless it names another.
+MODEL_DIR = SUITE_DIR / "model"
+# Where the distributed package's shared-memory blocks live on Linux, named
+# ``rr`` and 8 hex digits, ``_`` and a generation number.
+SHM_DIR = Path("/dev/shm")
+_SHM_BLOCKS = "rr????????_*"
 
 # How long a closed connection may take to leave the runtime's registry. The
 # runtime notices a client that closed its peer connection only some seconds
@@ -99,8 +105,11 @@ class RuntimeEndpoint:
 class RuntimeProcess(RuntimeEndpoint):
     """The runtime under test, in its own process, with the probe route mounted."""
 
-    def __init__(self, log_path: Path) -> None:
-        """Start the runtime on a free local port, its output going to *log_path*."""
+    def __init__(self, log_path: Path, *, model_dir: Path = MODEL_DIR) -> None:
+        """Start the runtime on a free local port, its output going to *log_path*.
+
+        It serves the model in *model_dir*, read from its ``reactor.yaml``.
+        """
         self.port = _free_port()
         super().__init__(f"http://127.0.0.1:{self.port}")
         env = {
@@ -112,7 +121,7 @@ class RuntimeProcess(RuntimeEndpoint):
         self._log = log_path.open("w")
         self._proc = subprocess.Popen(
             [sys.executable, str(SUITE_DIR / "endurance" / "launcher.py")],
-            cwd=SUITE_DIR / "model",
+            cwd=model_dir,
             env=env,
             stdout=self._log,
             stderr=subprocess.STDOUT,
@@ -845,6 +854,38 @@ class _Baseline:
     holding_after_stop: int
 
 
+def shm_usage() -> tuple[int, int] | None:
+    """Return the distributed package's shared-memory blocks and their bytes.
+
+    ``None`` on a platform with no ``/dev/shm``, where the blocks are not
+    files to count.
+    """
+    if not SHM_DIR.is_dir():
+        return None
+    blocks = size = 0
+    for path in SHM_DIR.glob(_SHM_BLOCKS):
+        # A block can be unlinked between the listing and the stat.
+        try:
+            size += path.stat().st_size
+        except FileNotFoundError:
+            continue
+        blocks += 1
+    return blocks, size
+
+
+def _children(process: psutil.Process) -> tuple[int, int]:
+    """Return how many processes *process* started, at any depth, and their summed RSS."""
+    count = rss = 0
+    for child in process.children(recursive=True):
+        # A child can exit between the listing and the read.
+        try:
+            rss += child.memory_info().rss
+        except psutil.NoSuchProcess:
+            continue
+        count += 1
+    return count, rss
+
+
 class ResourceSampler:
     """Takes one ``Sample`` of the runtime process per settled cycle."""
 
@@ -861,6 +902,8 @@ class ResourceSampler:
         # The session's tasks before any client: a task the first connection
         # leaves behind must count against this, not hide in the first sample.
         self.initial_tasks: int = first["tasks"]
+        # The model's worker processes are up by now: one more is a leak.
+        self.initial_children: int = _children(self._process)[0]
         self._baseline = _Baseline(
             freed_by_gc=first["batches_freed_by_gc"],
             holding_after_stop=first["pacers_holding_after_stop"],
@@ -874,6 +917,8 @@ class ResourceSampler:
         """Record the runtime process and a settled probe *reading* as one sample."""
         freed = reading["batches_freed_by_gc"]
         holding = reading["pacers_holding_after_stop"]
+        children, children_rss = _children(self._process)
+        shm = shm_usage()
         with self._process.oneshot():
             cpu = self._process.cpu_times()
             sample = Sample(
@@ -896,6 +941,10 @@ class ResourceSampler:
                 live_pacers=reading["live"]["pacers"],
                 live_client_stats=reading["client_stats_connections"],
                 tasks=reading["tasks"],
+                child_processes=children,
+                child_rss_bytes=children_rss,
+                shm_blocks=shm[0] if shm else None,
+                shm_bytes=shm[1] if shm else None,
             )
         self._baseline.freed_by_gc = freed
         self._baseline.holding_after_stop = holding

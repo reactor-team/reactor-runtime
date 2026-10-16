@@ -106,7 +106,11 @@ async def run_cycles(
         else:
             metrics = [
                 *stream_checks(),
-                *exact_metrics(sampler.samples, tasks_baseline=sampler.initial_tasks),
+                *exact_metrics(
+                    sampler.samples,
+                    tasks_baseline=sampler.initial_tasks,
+                    children_baseline=sampler.initial_children,
+                ),
             ]
             metrics += trend_metrics(sampler.samples)
     finally:
@@ -114,7 +118,11 @@ async def run_cycles(
         if not metrics and sampler.samples:
             metrics = [
                 *stream_checks(),
-                *exact_metrics(sampler.samples, tasks_baseline=sampler.initial_tasks),
+                *exact_metrics(
+                    sampler.samples,
+                    tasks_baseline=sampler.initial_tasks,
+                    children_baseline=sampler.initial_children,
+                ),
             ]
         finish_and_check(
             test_name=test_name,

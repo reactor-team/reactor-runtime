@@ -198,8 +198,10 @@ def build_app(
 
 def main() -> None:
     """Install the probe and the pacer check, then run the runtime."""
-    # examples/echo, which the tracked model subclasses.
+    # examples/echo, which the tracked model subclasses, and the tracked model,
+    # which the probe reads and a model in another directory subclasses.
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples" / "echo"))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "model"))
     # Swapping in the wrapper is the point; ty refuses any assignment to a module function.
     http_server.build_app = build_app  # ty: ignore[invalid-assignment]
     _install_pacer_check()
