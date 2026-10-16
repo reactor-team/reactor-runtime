@@ -34,6 +34,8 @@ from reactor_runtime.manifest import MANIFEST, load_config
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.runner import Runner
 from reactor_runtime.service import Service
+from reactor_runtime.transport.livekit import LiveKitRouter, livekit_available
+from reactor_runtime.transport.router import TransportRouter
 from reactor_runtime.transport.webrtc.config import (
     CodecEntry,
     IceServer,
@@ -316,7 +318,9 @@ def _assemble(
     The runner is built once and shared with the HTTP server, which the routes
     drive and the transport reports into. The WebRTC transport is mounted with
     the selected media engine, so a client can negotiate a peer connection and
-    stream to and from the model. The runner's shutdown hook is wired to the
+    stream to and from the model. The LiveKit transport is mounted beside it
+    when the runtime's ``livekit`` extra is installed, so a session can connect
+    to a room. The runner's shutdown hook is wired to the
     service so a failed model load or a crashed model loop brings the whole
     process down, inside the exit deadline the service arms from the lifecycle
     timeouts, and the service's aggregate health is wired into the HTTP server
@@ -348,12 +352,16 @@ def _assemble(
     runner = Runner(cfg, metrics)
     runner.request_shutdown = service.request_shutdown
     service.add(runner)
-    transport = WebRtcRouter(webrtc or WebRtcConfig(), peer_factory, metrics)
+    transports: list[TransportRouter] = [
+        WebRtcRouter(webrtc or WebRtcConfig(), peer_factory, metrics)
+    ]
+    if livekit_available():
+        transports.append(LiveKitRouter())
     service.add(
         HttpServer(
             cfg,
             runner,
-            transports=[transport],
+            transports=transports,
             process_health=service.health,
             metrics=metrics,
         )

@@ -266,6 +266,76 @@
         "title": "RegisterConnectionResponse",
         "type": "object"
       },
+      "RoomConnectionAccepted": {
+        "description": "The room connection is accepted and joining in the background; poll for the outcome.",
+        "properties": {
+          "connection_id": {
+            "title": "Connection Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "connection_id"
+        ],
+        "title": "RoomConnectionAccepted",
+        "type": "object"
+      },
+      "RoomConnectionRequest": {
+        "description": "Where the room is, and the credential the session's participant joins it with.\n\nThe token is the access token of the session's participant: the room, the\nidentity, and the grants come from it. It is never logged or journalled,\nand a refused request does not repeat it.",
+        "properties": {
+          "token": {
+            "format": "password",
+            "title": "Token",
+            "type": "string",
+            "writeOnly": true
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "token"
+        ],
+        "title": "RoomConnectionRequest",
+        "type": "object"
+      },
+      "RoomConnectionStatus": {
+        "description": "How a room connection's join ended, and whether the connection has closed since.\n\n``open`` once the join succeeded and the room connection is a connection\nof the session; ``failed`` when the join did not succeed; ``closed`` once\nthe room was left or lost. ``reason`` names the cause of a failure or a\nclose.",
+        "properties": {
+          "connection_id": {
+            "title": "Connection Id",
+            "type": "integer"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "state": {
+            "enum": [
+              "open",
+              "failed",
+              "closed"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "connection_id",
+          "state"
+        ],
+        "title": "RoomConnectionStatus",
+        "type": "object"
+      },
       "RuntimeState": {
         "description": "The lifecycle word describing what the process is doing right now.\n\nOrthogonal to :class:`HealthStatus`: where the status says whether the\nprocess is working, the state says what it is up to.\n\nStates:\n    LOADING: The model is still loading; a session cannot be opened yet.\n    AVAILABLE: The model is loaded and idle, ready to open a session.\n    SERVING: A session is open, from its start through its teardown.\n    TERMINATED: The process is finished and will not serve again.",
         "enum": [
@@ -1173,6 +1243,225 @@
           }
         },
         "summary": "Get Step File"
+      }
+    },
+    "/sessions/{sid}/transport/livekit/connections": {
+      "post": {
+        "operationId": "open_room_connection_sessions__sid__transport_livekit_connections_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sid",
+            "required": true,
+            "schema": {
+              "title": "Sid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoomConnectionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoomConnectionAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Open Room Connection"
+      }
+    },
+    "/sessions/{sid}/transport/livekit/connections/{cid}": {
+      "delete": {
+        "operationId": "leave_room_sessions__sid__transport_livekit_connections__cid__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sid",
+            "required": true,
+            "schema": {
+              "title": "Sid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "cid",
+            "required": true,
+            "schema": {
+              "title": "Cid",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Leave Room"
+      },
+      "get": {
+        "operationId": "room_connection_status_sessions__sid__transport_livekit_connections__cid__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sid",
+            "required": true,
+            "schema": {
+              "title": "Sid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "cid",
+            "required": true,
+            "schema": {
+              "title": "Cid",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoomConnectionStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "202": {
+            "description": "The join is still in flight; poll again."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Room Connection Status"
       }
     },
     "/sessions/{sid}/transport/webrtc/connections": {
