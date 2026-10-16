@@ -38,6 +38,11 @@ MIN_TREND_SAMPLES = 6
 # absolute rate stays as strict on a two-hour run as on a short one, where a
 # limit relative to the run's own length loosens as the run grows.
 MAX_RSS_MB_PER_HOUR = 20.0
+# Shortest stretch of samples, in hours, a slope is judged over. RSS swings by
+# about a batch as the allocator takes and returns memory, and over a few
+# minutes a line fitted through that swing reads as a fast climb; over half an
+# hour or more the swing averages out.
+MIN_SLOPE_SPAN_HOURS = 0.5
 
 
 @dataclasses.dataclass
@@ -189,6 +194,9 @@ def assert_slope_under(
     before them reads as flat. It fails only when the slope is over the limit
     and the line also rises more than *min_absolute_delta* across those
     samples, so on a short run a few MB of noise cannot read as a fast rate.
+    A fit over less than :data:`MIN_SLOPE_SPAN_HOURS` is reported but never
+    fails: over a few minutes, memory that swings up and down fits a steep
+    line too.
 
     Args:
         hours: When each sample was taken, in hours.
@@ -212,9 +220,16 @@ def assert_slope_under(
     tail = n - n // 3
     xs, ys = hours[-tail:], values[-tail:]
     slope = statistics.linear_regression(xs, ys).slope if xs[-1] > xs[0] else 0.0
-    rise = slope * (xs[-1] - xs[0])
-    is_leak = slope > max_per_hour and rise > min_absolute_delta
-    if is_leak:
+    span = xs[-1] - xs[0]
+    rise = slope * span
+    judged = span >= MIN_SLOPE_SPAN_HOURS
+    is_leak = judged and slope > max_per_hour and rise > min_absolute_delta
+    if not judged:
+        reason = (
+            f"{slope:+,.1f} {unit}/h over {span * 60:.0f} min, not judged: "
+            f"a rate needs {MIN_SLOPE_SPAN_HOURS * 60:.0f} min of samples"
+        )
+    elif is_leak:
         reason = (
             f"climbing {slope:+,.1f} {unit}/h over the end of the run, "
             f"above the {max_per_hour:g} {unit}/h limit"
