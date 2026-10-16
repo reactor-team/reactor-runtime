@@ -185,7 +185,7 @@ def _capture_ops(core: ReactorCore) -> tuple[list[MediaChunk], list[tuple[str, f
         addressed=lambda conn, msg, req: None,
         media=chunks.append,
         media_ops=MediaOps(
-            flush=lambda: calls.append(("flush", 0)),
+            flush=lambda hold: calls.append(("flush", int(hold))),
             set_rate=lambda fps: calls.append(("rate", fps)),
             set_depth=lambda depth: calls.append(("depth", depth)),
         ),
@@ -273,6 +273,13 @@ def test_flush_fans_out_to_the_bound_ops() -> None:
     _, calls = _capture_ops(core)
     core.output.flush()
     assert ("flush", 0) in calls
+
+
+def test_a_hold_flush_reaches_the_bound_ops_as_a_hold() -> None:
+    core = OutputOnlyCore()
+    _, calls = _capture_ops(core)
+    core.output.flush(hold=True)
+    assert ("flush", 1) in calls
 
 
 def test_flush_before_bind_is_a_noop() -> None:

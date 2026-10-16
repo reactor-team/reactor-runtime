@@ -151,6 +151,24 @@ async def test_playout_operations_reach_the_pacer(
     conn.send_media(_video_chunk())
     conn.flush_media()
     assert conn._pacer._queue.qsize() == 0
+    # The peer drops what it holds for the wire on the same flush.
+    assert fake_peer.flushes == 1
+    await conn.close()
+
+
+async def test_a_hold_flush_keeps_the_last_frame_and_still_flushes_the_peer(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    conn = await _connect(fake_peer, factory_for(fake_peer), out_av_tracks)
+    conn.send_media(_video_chunk())
+
+    conn.flush_media(hold=True)
+
+    assert conn._pacer._queue.qsize() == 0
+    assert conn._pacer._boundary_black_pending is True  # still the start-of-connection black
+    assert fake_peer.flushes == 1
     await conn.close()
 
 
