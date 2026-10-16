@@ -161,3 +161,14 @@ def test_a_take_of_some_tracks_leaves_the_others() -> None:
         "webcam": (FrameStage("delivery", total_ms=2.0, frames=1),)
     }
     assert window.take() == {}
+
+
+def test_a_part_names_the_stage_it_is_inside() -> None:
+    window = FrameStageWindow()
+    window.add("main", "to_rgb", 1.0)
+    window.add("main", "delivery", 3.0)
+
+    by_name = {s.name: s for s in window.take()["main"]}
+
+    assert by_name["to_rgb"].part_of == "delivery"
+    assert by_name["delivery"].part_of == ""

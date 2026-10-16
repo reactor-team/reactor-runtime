@@ -416,9 +416,6 @@ class WebRTCPeer:
         # binding stops delivering frames once a track is dropped, so a receiver
         # that is only referenced from its own frame callback would go silent.
         self._in_tracks: dict[str, rw.Track] = {}
-        # The engine's handoff totals at the previous fold, per inbound video
-        # track and for the data channel (see fold_handoffs).
-        self._handoff_seen: dict[str, tuple[float, ...]] = {}
         # Counters that match inbound tracks to IN track metadata by arrival order.
         self._in_video_seen = 0
         self._in_audio_seen = 0
@@ -718,51 +715,6 @@ class WebRTCPeer:
         if seen < len(matching):
             return matching[seen].name
         return f"{kind.value}-{seen + 1}"
-
-    def fold_handoffs(self) -> None:
-        """Add the engine's own stages, from the decoder or the channel to this peer's sinks.
-
-        The engine keeps running totals: on each inbound video track,
-        ``sink_convert`` (its sink converting the decoded frame) and
-        ``handoff`` (the wait for the GIL and the copy into Python), and
-        ``handoff`` on the data channel for each message. A window's worth is
-        the difference since the previous fold. The totals start at zero when
-        the sink is attached, so the first fold counts everything so far, and
-        a total that went backwards (a sink attached again) counts from zero.
-        An engine without the totals adds nothing.
-        """
-        for name, track in list(self._in_tracks.items()):
-            totals = getattr(track, "handoff_totals", None)
-            if totals is None or track.kind() != rw.MediaKind.Video:
-                continue
-            try:
-                convert_s, handoff_s, frames = totals()
-            except Exception:
-                continue
-            before = self._handoff_seen.get(name, (0.0, 0.0, 0))
-            if frames < before[2]:
-                before = (0.0, 0.0, 0)
-            self._handoff_seen[name] = (convert_s, handoff_s, frames)
-            if frames == before[2]:
-                continue
-            count = int(frames - before[2])
-            self.frame_stages.add(name, "sink_convert", (convert_s - before[0]) * 1000.0, count)
-            self.frame_stages.add(name, "handoff", (handoff_s - before[1]) * 1000.0, count)
-        totals = getattr(self._data_channel, "handoff_totals", None)
-        if totals is None:
-            return
-        try:
-            handoff_s, messages = totals()
-        except Exception:
-            return
-        before = self._handoff_seen.get("\0data", (0.0, 0))
-        if messages < before[1]:
-            before = (0.0, 0)
-        self._handoff_seen["\0data"] = (handoff_s, messages)
-        if messages > before[1]:
-            self.message_stages.add(
-                "handoff", (handoff_s - before[0]) * 1000.0, int(messages - before[1])
-            )
 
     def _make_video_sink(
         self, name: str

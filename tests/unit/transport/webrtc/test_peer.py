@@ -2319,66 +2319,6 @@ async def test_a_first_subscription_leaves_the_others_out() -> None:
     assert "a=mid:0\r\na=inactive" in local
 
 
-class _TimedTrack:
-    """An inbound video track whose engine reports its hand-off totals."""
-
-    def __init__(self) -> None:
-        self.totals = (0.0, 0.0, 0)
-
-    def kind(self) -> rw.MediaKind:
-        return rw.MediaKind.Video
-
-    def handoff_totals(self) -> tuple[float, float, int]:
-        return self.totals
-
-
-class _TimedChannel:
-    def __init__(self) -> None:
-        self.totals = (0.0, 0)
-
-    def handoff_totals(self) -> tuple[float, int]:
-        return self.totals
-
-
-def test_the_first_fold_counts_the_handoffs_since_the_sink_was_attached() -> None:
-    peer = WebRTCPeer()
-    track, channel = _TimedTrack(), _TimedChannel()
-    peer._in_tracks["cam"] = cast(Any, track)
-    peer._data_channel = cast(Any, channel)
-    track.totals = (0.004, 0.002, 4)
-    channel.totals = (0.003, 3)
-
-    peer.fold_handoffs()
-
-    stages = {s.name: s for s in peer.frame_stages.take()["cam"]}
-    assert (stages["sink_convert"].frames, stages["sink_convert"].total_ms) == (
-        4,
-        pytest.approx(4.0),
-    )
-    assert (stages["handoff"].frames, stages["handoff"].total_ms) == (4, pytest.approx(2.0))
-    [handoff] = [s for s in peer.message_stages.take() if s.name == "handoff"]
-    assert (handoff.messages, handoff.total_ms) == (3, pytest.approx(3.0))
-
-
-def test_a_fold_counts_only_the_window_and_restarts_from_zero_after_a_reset() -> None:
-    peer = WebRTCPeer()
-    track = _TimedTrack()
-    peer._in_tracks["cam"] = cast(Any, track)
-    track.totals = (0.004, 0.002, 4)
-    peer.fold_handoffs()
-    peer.frame_stages.take()
-
-    track.totals = (0.006, 0.003, 6)
-    peer.fold_handoffs()
-    [convert] = [s for s in peer.frame_stages.take()["cam"] if s.name == "sink_convert"]
-    assert (convert.frames, convert.total_ms) == (2, pytest.approx(2.0))
-
-    track.totals = (0.001, 0.001, 1)
-    peer.fold_handoffs()
-    [convert] = [s for s in peer.frame_stages.take()["cam"] if s.name == "sink_convert"]
-    assert (convert.frames, convert.total_ms) == (1, pytest.approx(1.0))
-
-
 async def test_a_message_held_until_the_wire_opens_reports_its_loop_wait() -> None:
     peer = WebRTCPeer()
     peer._loop = asyncio.get_running_loop()

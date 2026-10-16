@@ -394,7 +394,6 @@ class WebRTCConnection:
                 elapsed = now - self._sampled_at if self._sampled_at is not None else None
                 self._latest_reading = transport_reading(stats, self._latest_stats, elapsed)
                 self._peer.frame_stages.fold(stats, self._latest_stats)
-                self._peer.fold_handoffs()
                 self._peer.message_stages.fold(
                     stats.chunking,
                     self._latest_stats.chunking if self._latest_stats is not None else None,

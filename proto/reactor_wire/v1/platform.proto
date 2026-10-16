@@ -204,9 +204,11 @@ message ClientTrackStat {
 //   ingest         Part of output_queue: reactor-webrtc takes the frame into
 //                  libwebrtc. Runtime.
 //
-// A stage named "part of" another is inside it: adding both counts that time
-// twice. process_input, generate and process_output are timed once per step
-// and counted on each video track the step emits.
+// A stage named "part of" another is inside it, and says so in `part_of`:
+// adding both counts that time twice. A reader nests or skips parts by
+// `part_of` alone, so a new part needs no change in any reader.
+// process_input, generate and process_output are timed once per step and
+// counted on each video track the step emits.
 //
 // encode_wait, packetize and pacer come from libwebrtc's timing frames, a
 // sample: libwebrtc marks about one frame every 200 ms, the receiver reports
@@ -222,6 +224,9 @@ message FrameStage {
   string name = 1;
   double total_ms = 2;
   uint64 frames = 3;
+  // The stage this one is a part of, whose time includes it; empty for a
+  // stage of its own.
+  string part_of = 4;
 }
 
 // A connection-wide fact, not tied to any one track — e.g.
@@ -274,6 +279,9 @@ message MessageStage {
   string name = 1;
   double total_ms = 2;
   uint64 messages = 3;
+  // The stage this one is a part of, whose time includes it; empty for a
+  // stage of its own.
+  string part_of = 4;
 }
 
 // The SDK and the system a client runs on. `os` and `arch` are canonical

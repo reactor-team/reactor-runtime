@@ -156,6 +156,7 @@ def frame_stages_detail(stages: Iterable[FrameStage]) -> list[dict[str, Any]]:
     """
     return [
         {"name": stage.name, "total_ms": stage.total_ms, "frames": stage.frames}
+        | ({"part_of": stage.part_of} if stage.part_of else {})
         for stage in stages
         if stage.name and stage.frames > 0 and math.isfinite(stage.total_ms) and stage.total_ms >= 0
     ]
@@ -168,6 +169,7 @@ def message_stages_detail(stages: Iterable[MessageStage]) -> list[dict[str, Any]
     """
     return [
         {"name": stage.name, "total_ms": stage.total_ms, "messages": stage.messages}
+        | ({"part_of": stage.part_of} if stage.part_of else {})
         for stage in stages
         if stage.name
         and stage.messages > 0

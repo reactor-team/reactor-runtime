@@ -5,12 +5,8 @@ itself, frame by frame: ``delivery`` (decoder to the runner), ``output_pacing``
 (the output pacer's queue) and ``output_queue`` (the pacer to libwebrtc).
 ``delivery`` and ``output_queue`` are also timed in parts: ``to_rgb`` and
 ``loop_wait`` within ``delivery``; ``feed_wait``, ``to_bgra`` and ``ingest``
-within ``output_queue``. Between them, the model's step: ``input_wait`` (a
-frame in the input buffer until a step reads it), the step's
-``process_input``, ``generate`` and ``process_output``, and ``emit`` (the
-model's ``emit`` call until the chunk reaches the output pacer). The engine
-times ``sink_convert`` and ``handoff``, from the decoder to the runtime's sink,
-when it reports them.
+within ``output_queue``. ``emit`` runs from the model's ``emit`` call until
+the chunk reaches the output pacer.
 libwebrtc times others as running totals, which a stats sample turns into a
 window's worth: ``encode`` on an outbound track, ``jitter_buffer`` and
 ``decode`` on an inbound one. On an inbound video track, libwebrtc also
@@ -37,15 +33,9 @@ STAGES = (
     "pacer",
     "jitter_buffer",
     "decode",
-    "sink_convert",
-    "handoff",
     "to_rgb",
     "loop_wait",
     "delivery",
-    "input_wait",
-    "process_input",
-    "generate",
-    "process_output",
     "emit",
     "output_pacing",
     "feed_wait",
@@ -54,6 +44,15 @@ STAGES = (
     "output_queue",
 )
 """Every stage, in the order a frame goes through them."""
+
+PARTS = {
+    "to_rgb": "delivery",
+    "loop_wait": "delivery",
+    "feed_wait": "output_queue",
+    "to_bgra": "output_queue",
+    "ingest": "output_queue",
+}
+"""The stage each part is inside, by the part's name."""
 
 
 class FrameStageWindow:
@@ -115,7 +114,8 @@ class FrameStageWindow:
         """
         return {
             str(track): tuple(
-                FrameStage(name, total_ms=total, frames=count) for name, total, count in found
+                FrameStage(name, total_ms=total, frames=count, part_of=PARTS.get(name, ""))
+                for name, total, count in found
             )
             for track, found in self._totals.take(tracks).items()
         }

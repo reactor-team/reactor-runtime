@@ -55,7 +55,7 @@ class FrameStage:
     ``input_wait``, ``process_input``, ``generate``, ``process_output``,
     ``emit``, ``output_pacing`` and ``output_queue`` (with its parts
     ``feed_wait``, ``to_bgra`` and ``ingest``), in the order a frame goes
-    through them. A part is inside its stage, so the two are not added. Each side
+    through them. A part names its stage in ``part_of``. Each side
     reports the stages it can see. The set grows, so a reader ignores a name
     it does not know.
 
@@ -64,11 +64,15 @@ class FrameStage:
         total_ms: The time all *frames* frames spent in the stage together,
             so the average per frame is ``total_ms / frames``.
         frames: How many frames the window counted in the stage.
+        part_of: The stage this one is a part of, whose time includes it, or
+            ``""`` for a stage of its own. Adding a part to its stage counts
+            its time twice.
     """
 
     name: str
     total_ms: float
     frames: int
+    part_of: str = ""
 
 
 @dataclass(frozen=True)
@@ -84,11 +88,15 @@ class MessageStage:
         total_ms: The time all *messages* messages spent in the stage
             together, so the average per message is ``total_ms / messages``.
         messages: How many messages the window counted in the stage.
+        part_of: The stage this one is a part of, whose time includes it, or
+            ``""`` for a stage of its own. Adding a part to its stage counts
+            its time twice.
     """
 
     name: str
     total_ms: float
     messages: int
+    part_of: str = ""
 
 
 @dataclass(frozen=True)
@@ -505,12 +513,6 @@ class MediaChunk:
             the chunk, counted on the model's side, or ``None`` when the
             emitter does not count sessions. A consumer compares it with its
             own count to tell a late chunk of an earlier session apart.
-        stages: The frame stages the step that made the chunk timed before it
-            emitted, as ``(track, stage, ms)``: ``process_input``,
-            ``generate`` and ``process_output`` on the track ``"*"``, which
-            stands for each video track of the chunk. Every consumer that
-            times frames adds them, so each connection's stages include the
-            step that made the frames it sends.
         emitted_at: When the model called ``emit`` for the chunk, on
             :func:`time.perf_counter`, or ``None`` when not timed. A consumer
             times its ``emit`` stage from it.
@@ -521,7 +523,6 @@ class MediaChunk:
     n_frames: int = 1
     wait: bool = False
     session: int | None = None
-    stages: tuple[tuple[str, str, float], ...] = ()
     emitted_at: float | None = None
 
     def frames(self) -> list[MediaBundle]:
@@ -549,6 +550,9 @@ class CompletedStep:
         fps: The rate the step's media was emitted at, which a saved step's
             video plays at: the measured throughput for a model that does not
             pin its rate.
+        stages: The time the step spent in each of its frame stages, in
+            milliseconds, by stage name: ``process_input``, ``generate`` and
+            ``process_output``. Empty when the step was not timed.
     """
 
     bundle: MediaBundle | None
@@ -557,6 +561,7 @@ class CompletedStep:
     elapsed: float | None = None
     session: int = 0
     fps: float = 30.0
+    stages: Mapping[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

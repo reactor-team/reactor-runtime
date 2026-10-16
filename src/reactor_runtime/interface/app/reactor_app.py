@@ -75,7 +75,6 @@ from reactor_runtime.interface.events.errors import ApplicationError, CommandErr
 from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.reactor_core import (
     STEP_SESSION,
-    STEP_STAGES,
     CommandEnvelope,
     ReactorCore,
     RequestId,
@@ -369,15 +368,13 @@ class ReactorApp(ReactorCore):
                             # The media is the step's, so it carries the
                             # session the step began in, as the report does.
                             token = STEP_SESSION.set(session)
-                            stages_token = STEP_STAGES.set(stages)
                             try:
                                 await self.emit(report.output, compute_time=pace)
                             finally:
-                                STEP_STAGES.reset(stages_token)
                                 STEP_SESSION.reset(token)
                             frames = self._to_bundle(report.output).frame_count
                             rate = self._playout_rate(frames, pace)
-                        self._report_step(report, session, rate)
+                        self._report_step(report, session, rate, stages)
 
                     # A refused turn waits a little before asking again; a
                     # productive turn yields once so handler tasks already
@@ -388,25 +385,23 @@ class ReactorApp(ReactorCore):
                 for buffer in self._input_buffers.values():
                     buffer.reset()
 
+    @staticmethod
     def _step_stages(
-        self, input_ms: float, generate_s: float | None, output_ms: float
-    ) -> tuple[tuple[str, str, float], ...]:
-        """The frame stages of one step, for its chunk (:attr:`MediaChunk.stages`).
-
-        The step's parts are on ``"*"``, each video track the step emits.
-        """
-        stages: list[tuple[str, str, float]] = [("*", "process_input", input_ms)]
+        input_ms: float, generate_s: float | None, output_ms: float
+    ) -> dict[str, float]:
+        """The time one step spent in each of its frame stages, in milliseconds, for its report."""
+        stages = {"process_input": input_ms}
         if generate_s is not None:
-            stages.append(("*", "generate", generate_s * 1000.0))
-        stages.append(("*", "process_output", output_ms))
-        return tuple(stages)
+            stages["generate"] = generate_s * 1000.0
+        stages["process_output"] = output_ms
+        return stages
 
     def _report_input_waits(self, session: int, report: bool = True) -> None:
         """Report each frame the step read, as ``input_wait``, to the connection that sent it.
 
         The wait runs from the frame's arrival in the input buffer until the
         read took it. Frames from several connections share one buffer, so
-        each wait goes to its sender only, not into the step's chunk. With
+        each wait goes to its sender only, not into the step's report. With
         *report* false, the waits are dropped.
         """
         sink = self._out_frame_timing

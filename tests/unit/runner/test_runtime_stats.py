@@ -14,6 +14,7 @@ from reactor_runtime.core import (
     TransportReading,
     TransportTrackReading,
 )
+from reactor_runtime.runner.client_stats import frame_stages_detail, message_stages_detail
 from reactor_runtime.runner.runtime_stats import ModelOutput, to_detail
 
 
@@ -257,3 +258,15 @@ def test_a_connections_message_stages_ride_its_reading() -> None:
 
     # A time JSON cannot carry is left out.
     assert connection["message_stages"] == [{"name": "reassembly", "total_ms": 60.0, "messages": 2}]
+
+
+def test_a_part_carries_the_stage_it_is_inside_and_a_stage_of_its_own_does_not() -> None:
+    assert frame_stages_detail(
+        [FrameStage("delivery", 3.0, 1), FrameStage("to_rgb", 1.0, 1, part_of="delivery")]
+    ) == [
+        {"name": "delivery", "total_ms": 3.0, "frames": 1},
+        {"name": "to_rgb", "total_ms": 1.0, "frames": 1, "part_of": "delivery"},
+    ]
+    assert message_stages_detail([MessageStage("lock_wait", 1.0, 1, part_of="dispatch")]) == [
+        {"name": "lock_wait", "total_ms": 1.0, "messages": 1, "part_of": "dispatch"}
+    ]

@@ -17,7 +17,7 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, get_type_hints
@@ -61,14 +61,6 @@ A step reports the session it began in, and its media is stamped with the
 same number, so both count toward one session even when the session changes
 while the step emits. An emit made outside a step leaves it unset and is
 stamped with the session the model is in when it emits.
-"""
-
-STEP_STAGES: contextvars.ContextVar[tuple[tuple[str, str, float], ...]] = contextvars.ContextVar(
-    "reactor_step_stages", default=()
-)
-"""The frame stages the step being emitted timed, set by the step loop around its emit.
-
-They ride the chunk (:attr:`MediaChunk.stages`) to the consumers that time frames.
 """
 
 BroadcastSink = Callable[[ModelMessage], None]
@@ -217,7 +209,6 @@ class OutputStream:
                 n_frames=n_frames,
                 wait=not drop,
                 session=core._sessions_started if session is None else session,
-                stages=STEP_STAGES.get(),
                 emitted_at=emitted_at,
             )
             await asyncio.to_thread(core._out_media, chunk)
@@ -380,12 +371,19 @@ class ReactorCore:
         """
         self._report_step(step, self._sessions_started)
 
-    def _report_step(self, step: StepCompleted, session: int, fps: float | None = None) -> None:
+    def _report_step(
+        self,
+        step: StepCompleted,
+        session: int,
+        fps: float | None = None,
+        stages: Mapping[str, float] | None = None,
+    ) -> None:
         """Hand a step report to the bound sink, stamped with *session* and its playout rate.
 
         *fps* is the rate the step's media was emitted at. Without it, the
         report carries the rate of the last emission, or :attr:`fps` before
-        any.
+        any. *stages* is the time the step spent in each of its frame stages,
+        in milliseconds, when the step loop timed them.
         """
         if self._out_step is None:
             return
@@ -400,6 +398,7 @@ class ReactorCore:
                 elapsed=step.elapsed,
                 session=session,
                 fps=fps,
+                stages=dict(stages or {}),
             )
         )
 

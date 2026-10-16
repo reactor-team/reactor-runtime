@@ -1036,3 +1036,22 @@ async def test_a_refused_step_drops_the_input_waits_of_the_frames_it_read() -> N
 
     assert waits == []
     assert app._input_buffers["webcam"].take_read_waits() == []
+
+
+async def test_a_steps_report_carries_the_time_of_each_of_its_parts() -> None:
+    app = OnlyGenerate()
+    _ready(app)
+    reports: list[CompletedStep] = []
+    app.bind_output(
+        broadcast=lambda message: None,
+        addressed=lambda *args: None,
+        media=lambda chunk: None,
+        step=reports.append,
+    )
+    await _go_live(app)
+    task = await _run_for(app)
+    await _stop(task)
+
+    assert reports
+    assert set(reports[0].stages) == {"process_input", "generate", "process_output"}
+    assert all(ms >= 0 for ms in reports[0].stages.values())

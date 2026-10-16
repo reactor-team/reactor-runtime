@@ -4171,8 +4171,8 @@ async def test_a_frame_timing_from_an_earlier_session_is_dropped() -> None:
     runner._loop = asyncio.get_running_loop()
     added: list[tuple[ConnId, str]] = []
     setattr(  # noqa: B010
-        runner._connections,
-        "add_frame_stage",
+        runner._stages,
+        "add_frame",
         lambda conn_id, track, stage, ms: added.append((conn_id, stage)),
     )
     runner._sessions_posted = 2
@@ -4182,3 +4182,31 @@ async def test_a_frame_timing_from_an_earlier_session_is_dropped() -> None:
     await asyncio.sleep(0)
 
     assert added == [(ConnId(1001), "input_wait")]
+
+
+async def test_a_steps_stages_go_to_each_connection_on_its_video_tracks(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    added: list[tuple[tuple[ConnId, ...], list[str], dict[str, float]]] = []
+    setattr(  # noqa: B010
+        started_runner._stages,
+        "add_step",
+        lambda conn_ids, tracks, stages: added.append((tuple(conn_ids), list(tracks), stages)),
+    )
+    started_runner._connections.register(FakeConnection(1))
+    started_runner._connections.register(FakeConnection(2))
+
+    started_runner._record_step(
+        CompletedStep(
+            bundle=_video_bundle(),
+            session=started_runner._sessions_posted,
+            stages={"generate": 4.0},
+        )
+    )
+    started_runner._record_step(_step(started_runner))
+
+    [(conn_ids, tracks, stages)] = added
+    assert set(conn_ids) >= {ConnId(1), ConnId(2)}
+    assert tracks == ["main"]
+    assert stages == {"generate": 4.0}

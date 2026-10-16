@@ -778,9 +778,9 @@ class Runner(ServiceComponent, ConnectionSink):
     def _on_frame_timing(
         self, conn_id: ConnId, session: int, track: str, stage: str, ms: float
     ) -> None:
-        """Add a frame's time in a stage the model timed to its sender, on the loop.
+        """Add a frame's time in a stage the model timed to its sender's stages, on the loop.
 
-        The model reports from its own thread; the connections are the loop's.
+        The model reports from its own thread; the stages are the loop's.
         A report that arrives after the loop closed, at shutdown, is dropped,
         and so is one from an earlier session: its connection id may already
         belong to a connection of the current one.
@@ -791,7 +791,7 @@ class Runner(ServiceComponent, ConnectionSink):
 
         def add() -> None:
             if session == self._sessions_posted:
-                self._connections.add_frame_stage(conn_id, track, stage, ms)
+                self._stages.add_frame(conn_id, track, stage, ms)
 
         with contextlib.suppress(RuntimeError):
             loop.call_soon_threadsafe(add)
@@ -856,6 +856,16 @@ class Runner(ServiceComponent, ConnectionSink):
             )
             return
         self._save_step(step, messages)
+        if step.stages and step.bundle is not None:
+            self._stages.add_step(
+                self._connections.ids,
+                [
+                    d.info.name
+                    for d in step.bundle.tracks.values()
+                    if d.info.kind is TrackKind.VIDEO
+                ],
+                step.stages,
+            )
         limit = self._session_start.steps
         if (
             limit is not None

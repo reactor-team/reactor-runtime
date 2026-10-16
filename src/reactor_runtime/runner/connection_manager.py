@@ -140,6 +140,11 @@ class ConnectionManager:
         self._unoccupying: set[ConnId] = set()
 
     @property
+    def ids(self) -> tuple[ConnId, ...]:
+        """The ids of the connections currently registered."""
+        return tuple(self._by_id)
+
+    @property
     def count(self) -> int:
         """The number of connections currently registered."""
         return len(self._by_id)
