@@ -349,9 +349,12 @@ class Runner(ServiceComponent, ConnectionSink):
         """Resolve and bring up the model, then declare the session ready.
 
         The ordering is deliberate: resolve the class, read its contract from
-        the class, instantiate and load it, build the bridge and bind the
-        outbound path before the model thread spins, spawn it, and only then
-        send ``INITIALIZATION_SUCCESS`` so the session leaves ``CREATED``.
+        the class, check the manifest's ``runtime.livekit`` block against it,
+        instantiate and load it, build the bridge and bind the outbound path
+        before the model thread spins, spawn it, and only then send
+        ``INITIALIZATION_SUCCESS`` so the session leaves ``CREATED``. The
+        block is checked before the load so a mistake in it costs seconds, not
+        a weights load.
 
         Bringing the model up is the one step that can fail outright. A failure
         here is terminal for the process — there is no model to serve — so it is
@@ -376,6 +379,15 @@ class Runner(ServiceComponent, ConnectionSink):
         try:
             model_cls = import_model_class(self._cfg.model_ref)
             contract = ModelContract.of(model_cls)
+            self._cfg.livekit.check(
+                commands=contract.commands.keys(),
+                messages=contract.messages.keys(),
+                input_tracks=[
+                    name
+                    for name, info in contract.tracks.items()
+                    if info.direction is TrackDirection.IN
+                ],
+            )
             model = model_cls()
             await asyncio.to_thread(model.load, self._cfg.config_path)
             bridge = ModelBridge(model, contract)

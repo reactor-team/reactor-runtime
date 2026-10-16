@@ -22,6 +22,8 @@ from reactor_runtime.core.model import (
     UploadedFile,
 )
 from reactor_runtime.core.service import (
+    LiveKitConfig,
+    LiveKitRpcMethod,
     RecordingConfig,
     RuntimeConfig,
     ServiceComponent,
@@ -92,6 +94,8 @@ __all__ = [
     "HealthStatus",
     "InputField",
     "InputFrame",
+    "LiveKitConfig",
+    "LiveKitRpcMethod",
     "MediaBundle",
     "MediaChunk",
     "MessageStage",
