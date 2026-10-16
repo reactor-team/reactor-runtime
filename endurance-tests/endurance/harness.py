@@ -267,6 +267,12 @@ class BareClient:
         await self._settle()
         return self.received_video
 
+    async def stream_for(self, frame: tuple[bytes, int, int], seconds: float) -> None:
+        """Stream on for *seconds*."""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            await self._send_frame(frame)
+
     async def wait_for_replies(self) -> None:
         """Wait, as a closing client does, for the replies it is still owed."""
         await self._settle()

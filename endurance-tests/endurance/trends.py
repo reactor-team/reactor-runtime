@@ -264,12 +264,16 @@ def assert_slope_under(
     )
 
 
-def assert_always_zero(samples: list[Sample], *, field: str, unit: str = "count") -> MetricResult:
+def assert_always_zero(
+    samples: list[Sample], *, field: str, unit: str = "count", name: str | None = None
+) -> MetricResult:
     """Fail when *field* is nonzero on any cycle.
 
     For a count that must return to exactly 0 after every cycle: an object
-    retained on one cycle is a bug even if it is gone a few cycles later.
+    retained on one cycle is a bug even if it is gone a few cycles later. The
+    result is named *name*, by default *field*.
     """
+    label = name or field
     bad = [(s.cycle, getattr(s, field)) for s in samples if getattr(s, field) != 0]
     if bad:
         cycle, value = bad[0]
@@ -278,11 +282,11 @@ def assert_always_zero(samples: list[Sample], *, field: str, unit: str = "count"
             f"nonzero on {len(bad)}/{len(samples)} cycles (first at cycle {cycle}: "
             f"{value}, peak {peak})"
         )
-        print(f"[{field}] LEAK?: {reason}")
+        print(f"[{label}] LEAK?: {reason}")
         # The peak, not the last value: a count back at 0 by the end would
         # otherwise read as 0 to 0.
         return MetricResult(
-            name=field,
+            name=label,
             start=0,
             end=peak,
             change=peak,
@@ -293,9 +297,9 @@ def assert_always_zero(samples: list[Sample], *, field: str, unit: str = "count"
             first_bad_cycle=cycle,
         )
     reason = f"stayed at exactly 0 across all {len(samples)} cycles"
-    print(f"[{field}] ok: {reason}")
+    print(f"[{label}] ok: {reason}")
     return MetricResult(
-        name=field,
+        name=label,
         start=0,
         end=0,
         change=0,
@@ -307,13 +311,20 @@ def assert_always_zero(samples: list[Sample], *, field: str, unit: str = "count"
 
 
 def assert_never_grows(
-    samples: list[Sample], *, field: str, baseline: float | None = None, unit: str = "count"
+    samples: list[Sample],
+    *,
+    field: str,
+    baseline: float | None = None,
+    unit: str = "count",
+    name: str | None = None,
 ) -> MetricResult:
     """Fail when *field* ever rises above *baseline*, by default its first reading.
 
     Pass the reading from before the first cycle as *baseline* when there is
-    one, so what the first cycle leaves behind counts too.
+    one, so what the first cycle leaves behind counts too. The result is named
+    *name*, by default *field*.
     """
+    label = name or field
     if baseline is None:
         baseline = getattr(samples[0], field)
     peak = max(getattr(s, field) for s in samples)
@@ -323,9 +334,9 @@ def assert_never_grows(
         if grew
         else f"never rose above its first reading ({baseline})"
     )
-    print(f"[{field}] {'LEAK?' if grew else 'ok'}: {reason}")
+    print(f"[{label}] {'LEAK?' if grew else 'ok'}: {reason}")
     return MetricResult(
-        name=field,
+        name=label,
         start=baseline,
         end=peak,
         change=peak - baseline,

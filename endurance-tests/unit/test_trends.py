@@ -243,3 +243,15 @@ def test_a_two_hour_release_run_has_its_rss_slope_judged() -> None:
     samples = [_sample(i, elapsed_s=i * 10.0) for i in range(2 * 3600 // 10)]
     slope = next(m for m in trend_metrics(samples) if m.name == "rss_slope")
     assert slope.status == "ok"
+
+
+def test_a_named_zero_check_carries_its_name() -> None:
+    result = assert_always_zero([_sample(0, live_peers=1)], field="live_peers", name="peers_end")
+    assert result.name == "peers_end"
+    assert result.status == "fail"
+
+
+def test_a_named_growth_check_carries_its_name() -> None:
+    result = assert_never_grows([_sample(0, tasks=9)], field="tasks", baseline=6, name="tasks_end")
+    assert result.name == "tasks_end"
+    assert result.status == "fail"
