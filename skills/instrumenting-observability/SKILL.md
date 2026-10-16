@@ -273,6 +273,10 @@ on bindings that lack it.
 
 ## Checklist for a metrics change
 
+This checklist is for `/metrics`. A stage reading follows
+[Adding a stage](#adding-a-stage) instead: it is a per-session fact, so the
+rules on aggregation, labels and buckets below do not apply to it.
+
 1. The fact aggregates, and it is not model compute.
 2. It is observed at one choke point, in an instrument group built by that
    component's owner.
