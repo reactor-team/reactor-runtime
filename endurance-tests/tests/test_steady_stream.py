@@ -20,6 +20,7 @@ from endurance.trends import (
     Sample,
     assert_always_zero,
     assert_never_grows,
+    process_metrics,
     trend_metrics,
 )
 
@@ -41,10 +42,11 @@ _STREAMING_FIELDS = ("live_connections", "live_peers", "live_pacers", "live_clie
 _ZERO_WHILE_STREAMING = ("pacers_holding_output", "pinned_batches")
 
 
-def _streaming_checks(samples: list[Sample]) -> list[MetricResult]:
+def _streaming_checks(samples: list[Sample], children_baseline: int) -> list[MetricResult]:
     return [
         *(assert_always_zero(samples, field=field) for field in _ZERO_WHILE_STREAMING),
         *(assert_never_grows(samples, field=field) for field in _STREAMING_FIELDS),
+        *process_metrics(samples, children_baseline=children_baseline),
     ]
 
 
@@ -81,7 +83,7 @@ async def test_steady_stream(runtime: RuntimeProcess) -> None:
     def checks() -> list[MetricResult]:
         results = [assert_full_streams(received)]
         if streaming:
-            results += _streaming_checks(streaming)
+            results += _streaming_checks(streaming, sampler.initial_children)
         results.append(assert_answered([client.collect_unanswered()]))
         if final is not None:
             results += _after_close_checks(final, sampler.initial_tasks)

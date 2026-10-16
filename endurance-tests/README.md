@@ -36,9 +36,11 @@ Exact counts, which must be 0 on every cycle:
 | `live_connections`, `live_peers`, `live_pacers` | Transport objects still alive after a collection, with no client connected. |
 | `live_client_stats` | Connections the runtime still keeps client-stats state for, with no client connected. |
 | `tasks` | asyncio tasks on the runtime's loop; must never rise above the reading taken before the first client. |
+| `child_processes` | Processes the runtime started, at any depth; must never rise above the reading taken before the first client. |
+| `shm_blocks`, `shm_bytes` | The distributed package's shared-memory blocks in `/dev/shm` (`rr*`); must never rise above the first reading. Linux only: elsewhere they are not files, and the run says they were not measured. |
 
 Trends of the runtime process (RSS, CPU per cycle, threads, file
-descriptors): the last third of the run against the middle third, after a
+descriptors, and the RSS of its child processes when it has any): the last third of the run against the middle third, after a
 warm-up of `ENDURANCE_WARMUP_SECONDS` (default 120). RSS is also judged by
 its slope over the last two thirds, in MB per hour (`rss_slope`). A run too short to judge
 a trend ends in ERROR rather than in a verdict; a failed count still fails it.
@@ -52,6 +54,7 @@ a trend ends in ERROR rather than in a verdict; a failed count still fails it.
 | `session_churn` | Each cycle starts a session under a fresh id, a v1 client streams until its 60 frames come back, and the session is stopped: in turn a plain stop, the client leaving first and the orphaned session stopped after, a stop with a close reason, and a moderated stop. The last two owe the client its `session_ended` or `moderation` notice before the connection closes. The runtime is read once the session is ready again. |
 | `multi_connection` | One session shared by several clients. Each cycle a v1 client publishes the webcam, and three v1 viewers that publish nothing join and each get 60 frames of the same output. They leave in two steps, in turn the viewers first or the publisher first; when the publisher leaves first, a new publisher takes over the webcam while the viewers stay, and must be granted it. |
 | `steady_stream` | One v1 client stays connected for the whole run, streaming while it pings, sends client stats and a command once a second. The runtime is read every 15 s as it streams: what the live connection holds (`live_*`, `tasks`) must never rise above the first reading, `pacers_holding_output` and `pinned_batches` stay 0, and every interval gets 60 frames back. Once the client leaves, the reading after teardown must be 0 on every count (`*_after_close`), with the tasks back to the reading before it joined. The trends judge the streaming readings. |
+| `distributed_echo` | The v1 connection churn on `model-distributed/`, where the echo's engine runs in a worker process behind a `DistributedRunner`, so every frame crosses to the worker and back through shared memory. |
 | `abrupt_disconnect` | The v1 churn, with each client in its own process (`endurance/abrupt.py`), killed with `SIGKILL` a moment after its frames came back instead of closing. The runtime learns the client is gone only from the wire going silent, as it does when a client crashes or loses its network. |
 
 ## Running it
@@ -96,8 +99,9 @@ The suite keeps its value only if new features join it. Check this list on
 every PR that touches the runtime:
 
 - **State held per connection or per session** (objects, tasks, threads,
-  buffers, caches, file descriptors): say which existing count covers it
-  (`live_connections`, `live_peers`, `live_pacers`, `tasks`, the trends), or
+  buffers, caches, file descriptors, processes, shared memory): say which
+  existing count covers it (`live_connections`, `live_peers`, `live_pacers`,
+  `tasks`, `child_processes`, `shm_blocks`, the trends), or
   extend the probe in `endurance/launcher.py` with a count that does.
 - **A new client-facing path** (commands, uploads, client stats, clips and
   recordings, several clients on one session, a control protocol version):
@@ -105,7 +109,8 @@ every PR that touches the runtime:
   cover the v0 and v1 control protocols, commands, client stats, a client
   that dies without closing, and sessions started and stopped, with and
   without a close reason or a moderation verdict, several clients on one
-  session, and one connection streaming for hours; uploads, clips and recordings have none yet.
+  session, one connection streaming for hours, and a model run in worker
+  processes; uploads, clips and recordings have none yet.
 - **A change to what the launcher hooks** (`MediaPacer.stop`,
   `http_server.build_app`, `Runner._connections`, the transport classes the
   probe counts): update `endurance/launcher.py` in the same PR.

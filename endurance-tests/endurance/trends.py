@@ -84,6 +84,15 @@ class Sample:
     live_client_stats: int
     # Running asyncio tasks on the runtime's loop.
     tasks: int
+    # Processes the runtime started, at any depth: a model's worker ranks and
+    # the helpers they bring.
+    child_processes: int = 0
+    # Those processes' resident memory, summed.
+    child_rss_bytes: int = 0
+    # Shared-memory blocks the distributed package holds in /dev/shm, and
+    # their bytes; None on a platform with no /dev/shm.
+    shm_blocks: int | None = None
+    shm_bytes: int | None = None
 
 
 def cpu_deltas(samples: list[Sample]) -> list[float]:
@@ -356,16 +365,43 @@ def retained_cycles(samples: list[Sample]) -> int:
     return sum(1 for s in samples if any(getattr(s, field) for field in ZERO_FIELDS))
 
 
+def process_metrics(
+    samples: list[Sample], *, children_baseline: int | None = None
+) -> list[MetricResult]:
+    """Return the counts of what the runtime holds outside its own process.
+
+    The child processes must never outnumber *children_baseline*, the count
+    before the first cycle when known. The shared-memory blocks and bytes must
+    never rise above the first reading: a block grows to its high-water mark
+    on first use and is then reused. They are judged only where they were
+    measured.
+    """
+    results = [assert_never_grows(samples, field="child_processes", baseline=children_baseline)]
+    if any(s.shm_blocks is None or s.shm_bytes is None for s in samples):
+        print("[shm_blocks] not measured: this platform has no /dev/shm")
+        return results
+    return [
+        *results,
+        assert_never_grows(samples, field="shm_blocks"),
+        assert_never_grows(samples, field="shm_bytes", unit="bytes"),
+    ]
+
+
 def exact_metrics(
-    samples: list[Sample], *, tasks_baseline: int | None = None
+    samples: list[Sample],
+    *,
+    tasks_baseline: int | None = None,
+    children_baseline: int | None = None,
 ) -> list[MetricResult]:
     """Return the exact counts over every cycle: a retained object fails the cycle it shows in.
 
-    *tasks_baseline* is the task count before the first cycle, when known.
+    *tasks_baseline* and *children_baseline* are the task and child process
+    counts before the first cycle, when known.
     """
     return [
         *(assert_always_zero(samples, field=field) for field in ZERO_FIELDS),
         assert_never_grows(samples, field="tasks", baseline=tasks_baseline),
+        *process_metrics(samples, children_baseline=children_baseline),
     ]
 
 
@@ -426,5 +462,19 @@ def trend_metrics(samples: list[Sample]) -> list[MetricResult]:
             max_growth_ratio=0.15,
             min_absolute_delta=3,
             use_median=True,
+        ),
+        # Judged only for a runtime whose model runs in processes of its own.
+        *(
+            [
+                assert_no_sustained_growth(
+                    [s.child_rss_bytes / 1e6 for s in warmed],
+                    name="child_rss",
+                    unit="MB",
+                    max_growth_ratio=0.15,
+                    min_absolute_delta=5.0,
+                )
+            ]
+            if any(s.child_rss_bytes for s in warmed)
+            else []
         ),
     ]

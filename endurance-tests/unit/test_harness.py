@@ -1,5 +1,8 @@
 import threading
+from pathlib import Path
 
+import pytest
+from endurance import harness
 from endurance.harness import (
     CLOSE_TIMEOUT_S,
     FRAMES_PER_CYCLE,
@@ -110,3 +113,20 @@ def test_the_owed_notification_settles_its_notice() -> None:
     assert client.collect_unanswered() == ["moderation notice: never arrived"]
     client._on_control_message(_notification("moderation"), True)
     assert client.collect_unanswered() == []
+
+
+def test_shm_usage_counts_only_the_distributed_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "rr0123abcd_0").write_bytes(b"x" * 10)
+    (tmp_path / "rr0123abcd_1").write_bytes(b"x" * 20)
+    (tmp_path / "psm_0123abcd").write_bytes(b"x" * 40)
+    monkeypatch.setattr(harness, "SHM_DIR", tmp_path)
+    assert harness.shm_usage() == (2, 30)
+
+
+def test_shm_usage_is_unmeasured_without_a_shm_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(harness, "SHM_DIR", tmp_path / "missing")
+    assert harness.shm_usage() is None
