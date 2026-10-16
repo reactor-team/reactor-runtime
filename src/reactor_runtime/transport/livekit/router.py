@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, SecretStr, field_validator
 
+from reactor_runtime.core import LiveKitConfig
 from reactor_runtime.transport.livekit.version import TRANSPORT_NAME, TRANSPORT_VERSION
 from reactor_runtime.transport.router import (
     ErrorDetail,
@@ -130,12 +131,17 @@ class LiveKitRouter(TransportRouter):
 
     Holds the session's room connection between requests: one at a time,
     the latest a caller opened.
+
+    Args:
+        config: The manifest's ``runtime.livekit`` block, which maps the
+            room's own signals onto the model's commands and messages.
     """
 
     protocol = TRANSPORT_NAME
     version = TRANSPORT_VERSION
 
-    def __init__(self) -> None:
+    def __init__(self, config: LiveKitConfig | None = None) -> None:
+        self._config = config or LiveKitConfig()
         self._room: RoomSession | None = None
         self._room_epoch = 0
         # One open at a time: retiring an ended session's room yields, and a
@@ -171,7 +177,9 @@ class LiveKitRouter(TransportRouter):
 
                 conn_id = runner.new_conn_id(self.protocol)
                 runner.offer_admitted(conn_id)
-                room = RoomSession(conn_id, req.url, req.token.get_secret_value(), runner)
+                room = RoomSession(
+                    conn_id, req.url, req.token.get_secret_value(), runner, self._config
+                )
                 self._room = room
                 self._room_epoch = epoch
                 room.start()

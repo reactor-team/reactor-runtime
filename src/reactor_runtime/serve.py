@@ -356,7 +356,7 @@ def _assemble(
         WebRtcRouter(webrtc or WebRtcConfig(), peer_factory, metrics)
     ]
     if livekit_available():
-        transports.append(LiveKitRouter())
+        transports.append(LiveKitRouter(cfg.livekit))
     service.add(
         HttpServer(
             cfg,
