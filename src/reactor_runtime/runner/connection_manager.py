@@ -140,11 +140,6 @@ class ConnectionManager:
         self._unoccupying: set[ConnId] = set()
 
     @property
-    def ids(self) -> tuple[ConnId, ...]:
-        """The ids of the connections currently registered."""
-        return tuple(self._by_id)
-
-    @property
     def count(self) -> int:
         """The number of connections currently registered."""
         return len(self._by_id)
@@ -441,7 +436,7 @@ class ConnectionManager:
 
     def broadcast_media(
         self, chunk: MediaChunk, *, abort: Callable[[], bool] | None = None
-    ) -> None:
+    ) -> list[ConnId]:
         """Send a media chunk to every connection whose wire carries media.
 
         Data-only connections are skipped rather than relying on a silent no-op, so
@@ -454,13 +449,20 @@ class ConnectionManager:
                 the rest of the fan-out. The runner points it at its flush
                 generation so a chunk flushed mid-broadcast reaches no
                 further connection.
+
+        Returns:
+            The connections that carry video and were handed the chunk.
         """
-        for conn in self._by_id.values():
+        video: list[ConnId] = []
+        for cid, conn in list(self._by_id.items()):
             if abort is not None and abort():
-                return
+                break
             caps = conn.capabilities
             if caps.carries_video or caps.carries_audio:
                 _deliver(conn, "broadcast_media", lambda c: c.send_media(chunk))
+                if caps.carries_video:
+                    video.append(cid)
+        return video
 
     def flush_media(self) -> None:
         """Drop every connection's queued media and cut playout to black."""

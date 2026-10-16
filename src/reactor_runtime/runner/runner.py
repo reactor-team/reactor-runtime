@@ -270,6 +270,10 @@ class Runner(ServiceComponent, ConnectionSink):
         # them; the lock orders that against the reset at a session start.
         self._step_messages: deque[dict[str, Any]] = deque(maxlen=_STEP_MESSAGES_LIMIT)
         self._step_messages_lock = threading.Lock()
+        # The connections that carry video and were handed the model's media
+        # since its last step report, so the step's stages go to them alone.
+        self._step_recipients: set[ConnId] = set()
+        self._step_recipients_lock = threading.Lock()
         self._connections = ConnectionManager(state_machine=self._sm)
         self._offer_epochs = OfferEpochs()
         # Playout settings the model set through its output handle, remembered
@@ -806,7 +810,12 @@ class Runner(ServiceComponent, ConnectionSink):
 
         The messages the model broadcast since its last report are taken here,
         on the model's thread, so they belong to this step and not the next.
+        So are the connections its media was handed to, which the step's
+        stages go to.
         """
+        with self._step_recipients_lock:
+            recipients = tuple(self._step_recipients)
+            self._step_recipients.clear()
         messages: tuple[dict[str, Any], ...] = ()
         if self._step_store is not None:
             with self._step_messages_lock:
@@ -817,9 +826,14 @@ class Runner(ServiceComponent, ConnectionSink):
                     self._step_messages.clear()
         loop = self._loop
         if loop is not None:
-            loop.call_soon_threadsafe(self._record_step, step, messages)
+            loop.call_soon_threadsafe(self._record_step, step, messages, recipients)
 
-    def _record_step(self, step: CompletedStep, messages: tuple[dict[str, Any], ...] = ()) -> None:
+    def _record_step(
+        self,
+        step: CompletedStep,
+        messages: tuple[dict[str, Any], ...] = (),
+        recipients: tuple[ConnId, ...] = (),
+    ) -> None:
         """Number a reported step, journal it, and close a session that reached its steps.
 
         The detail of the ``step_completed`` fact carries the step's number
@@ -839,6 +853,9 @@ class Runner(ServiceComponent, ConnectionSink):
         after the runtime recorded the session's remaining steps as errors
         (see :meth:`_fail_remaining_steps`), so no step past ``steps`` is
         saved.
+
+        The step's stages go to *recipients*, the connections its media was
+        handed to.
         """
         if step.session != self._sessions_posted:
             logger.debug(
@@ -858,7 +875,7 @@ class Runner(ServiceComponent, ConnectionSink):
         self._save_step(step, messages)
         if step.stages and step.bundle is not None:
             self._stages.add_step(
-                self._connections.ids,
+                recipients,
                 [
                     d.info.name
                     for d in step.bundle.tracks.values()
@@ -1438,7 +1455,11 @@ class Runner(ServiceComponent, ConnectionSink):
             # plays out, but it is not this session's output.
             self._model_output.emitted(track, chunk.n_frames, chunk.session)
         generation = self._media_generation
-        self._connections.broadcast_media(chunk, abort=lambda: self._media_generation != generation)
+        sent = self._connections.broadcast_media(
+            chunk, abort=lambda: self._media_generation != generation
+        )
+        with self._step_recipients_lock:
+            self._step_recipients.update(sent)
         # The archive takes the whole chunk even when a flush cut the broadcast
         # short: a playout cut is not an archive boundary.
         self._recorder.on_chunk(chunk)

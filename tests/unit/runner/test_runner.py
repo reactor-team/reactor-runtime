@@ -3373,7 +3373,7 @@ async def test_media_reaches_the_connections_before_the_recorder(
     monkeypatch.setattr(
         started_runner._connections,
         "broadcast_media",
-        lambda *_a, **_k: served.append("connections"),
+        lambda *_a, **_k: served.append("connections") or [],
     )
     monkeypatch.setattr(started_runner._recorder, "on_chunk", lambda _c: served.append("recorder"))
 
@@ -3394,7 +3394,7 @@ async def test_a_flush_that_cuts_the_broadcast_short_still_records_the_chunk(
     monkeypatch.setattr(
         started_runner._connections,
         "broadcast_media",
-        lambda *_a, **_k: started_runner._flush_media(),
+        lambda *_a, **_k: started_runner._flush_media() or [],
     )
     chunk = MediaChunk(bundle=_video_bundle(), fps=30.0, n_frames=1)
 
@@ -4184,7 +4184,7 @@ async def test_a_frame_timing_from_an_earlier_session_is_dropped() -> None:
     assert added == [(ConnId(1001), "input_wait")]
 
 
-async def test_a_steps_stages_go_to_each_connection_on_its_video_tracks(
+async def test_a_steps_stages_go_to_the_connections_its_media_reached(
     started_runner: Runner,
 ) -> None:
     started_runner.start_session({})
@@ -4194,19 +4194,25 @@ async def test_a_steps_stages_go_to_each_connection_on_its_video_tracks(
         "add_step",
         lambda conn_ids, tracks, stages: added.append((tuple(conn_ids), list(tracks), stages)),
     )
-    started_runner._connections.register(FakeConnection(1))
+    reached = FakeConnection(1)
+    started_runner._connections.register(reached)
+    started_runner._emit_media(
+        MediaChunk(bundle=_video_bundle(), fps=30.0, session=started_runner._sessions_posted)
+    )
+    # A connection that joins after the media went out did not receive it.
     started_runner._connections.register(FakeConnection(2))
 
-    started_runner._record_step(
+    started_runner._on_step_completed(
         CompletedStep(
             bundle=_video_bundle(),
             session=started_runner._sessions_posted,
             stages={"generate": 4.0},
         )
     )
+    await asyncio.sleep(0)
     started_runner._record_step(_step(started_runner))
 
     [(conn_ids, tracks, stages)] = added
-    assert set(conn_ids) >= {ConnId(1), ConnId(2)}
+    assert conn_ids == (ConnId(1),)
     assert tracks == ["main"]
     assert stages == {"generate": 4.0}
