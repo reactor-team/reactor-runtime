@@ -131,6 +131,7 @@ def test_exact_metrics_cover_every_count() -> None:
         "live_client_stats",
         "live_participants",
         "tasks",
+        "child_processes",
     ]
 
 
@@ -142,6 +143,34 @@ def test_a_participant_left_alive_fails_its_cycle() -> None:
 
     assert participants.status == "fail"
     assert retained_cycles(samples) == 1
+
+
+def test_exact_metrics_judge_shared_memory_where_it_was_measured() -> None:
+    samples = [_sample(i, shm_blocks=2, shm_bytes=4_000_000) for i in range(3)]
+    names = [m.name for m in exact_metrics(samples)]
+    assert names[-3:] == ["child_processes", "shm_blocks", "shm_bytes"]
+
+
+def test_a_shared_memory_block_left_each_cycle_fails() -> None:
+    samples = [_sample(i, shm_blocks=2 + i, shm_bytes=4_000_000) for i in range(3)]
+    results = {m.name: m for m in exact_metrics(samples)}
+    assert results["shm_blocks"].status == "fail"
+    assert results["shm_bytes"].status == "ok"
+
+
+def test_a_child_process_past_the_baseline_fails() -> None:
+    samples = [_sample(i, child_processes=2) for i in range(3)]
+    results = {m.name: m for m in exact_metrics(samples, children_baseline=1)}
+    assert results["child_processes"].status == "fail"
+
+
+def test_child_rss_is_judged_only_when_the_runtime_has_children(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(trends, "ENDURANCE_WARMUP_SECONDS", 0.0)
+    assert "child_rss" not in [m.name for m in trend_metrics(_samples(15))]
+    with_children = [_sample(i, child_rss_bytes=200_000_000) for i in range(15)]
+    assert "child_rss" in [m.name for m in trend_metrics(with_children)]
 
 
 def test_retained_cycles_count_every_cycle_with_any_nonzero_count() -> None:

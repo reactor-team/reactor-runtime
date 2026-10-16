@@ -1,0 +1,12 @@
+$schema: reactor/v2
+
+# The endurance suite's model with its engine in a worker process: the tracked
+# echo, its EchoModel run behind a DistributedRunner, so every step crosses a
+# process boundary through shared memory.
+model:
+  name: echo-endurance-distributed
+  version: v0.0.1
+  description: The endurance suite's tracked echo, its engine run in a worker process.
+
+runtime:
+  import: distributed_echo:DistributedEcho
