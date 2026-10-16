@@ -149,12 +149,12 @@ async def test_the_wire_connecting_and_dropping_drives_the_occupancy_edges(
         harness.peer.fire_connected()
         opened = await journal.expect("connection_opened")
         assert (opened["from"], opened["to"]) == ("waiting", "streaming")
-        assert opened["detail"] == {"conn_id": cid}
+        assert opened["detail"] == {"conn_id": cid, "transport": "webrtc"}
 
         harness.peer.fire_disconnect()
         closed = await journal.expect("connection_closed")
         assert (closed["from"], closed["to"]) == ("streaming", "orphaned")
-        assert closed["detail"] == {"conn_id": cid}
+        assert closed["detail"] == {"conn_id": cid, "transport": "webrtc"}
     finally:
         await journal.aclose()
 

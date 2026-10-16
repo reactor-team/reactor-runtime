@@ -15,6 +15,7 @@ class FakeRouter(TransportRouter):
     """A transport router that records its mount and adds one route."""
 
     protocol = "fake"
+    version = "0.1"
 
     def __init__(self) -> None:
         self.mounted_with: SessionControl | None = None
@@ -47,6 +48,7 @@ def test_mounts_route_groups_and_each_transport() -> None:
     paths = {getattr(route, "path", "") for route in server._app.routes}
     assert {"/start_session", "/stop_session", "/session", "/events", "/health"} <= paths
     assert "/sessions/{sid}/transport/fake/ping" in paths
+    assert runner.descriptor()["transports"] == [{"protocol": "fake", "version": "0.1"}]
 
 
 def test_cors_preflight_is_answered() -> None:

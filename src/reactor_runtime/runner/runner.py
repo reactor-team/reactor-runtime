@@ -340,6 +340,8 @@ class Runner(ServiceComponent, ConnectionSink):
         # first session binds one.
         self._log_binding = 0
         self._accepting = True
+        # The transports mounted on the HTTP surface, as the descriptor lists them.
+        self._transports: list[dict[str, str]] = []
         # The process-shutdown hook, wired by the assembly so the runner can ask
         # the service to bring the process down when the session is terminated
         # (a failed model load, or a crashed model loop). A no-op until then, so
@@ -1195,6 +1197,22 @@ class Runner(ServiceComponent, ConnectionSink):
         """Release a new claim on *conn_id* whose connection *transport* refused."""
         self._connections.release_conn_id(conn_id, transport)
 
+    def connection_failed(self, conn_id: ConnId, transport: str, reason: str) -> None:
+        """Journal a connection a transport could not open, as an ``error`` entry.
+
+        The entry carries *reason*, the connection's id, and the transport, so
+        a reader of ``/events`` learns why the connection it asked for never
+        opened. The session itself is left as it was.
+        """
+        logger.info(
+            "a connection could not be opened", conn_id=conn_id, transport=transport, reason=reason
+        )
+        self._sm.send(SessionEvent.ERROR, message=reason, conn_id=conn_id, transport=transport)
+
+    def add_transport(self, protocol: str, version: str) -> None:
+        """Record a transport this runtime serves, for the descriptor's ``transports`` list."""
+        self._transports.append({"protocol": protocol, "version": version})
+
     def offer_admitted(self, conn_id: ConnId) -> None:
         """Stamp an admitted offer with the session it was admitted into.
 
@@ -1271,6 +1289,10 @@ class Runner(ServiceComponent, ConnectionSink):
         loaded. The ``commands`` list is intentionally empty here — a client
         reads the model's command contract from the ``/schema`` endpoint, not
         from the session descriptor.
+
+        ``selected_transport`` names WebRTC, the transport a client connects
+        over by default, and ``transports`` lists every transport the runtime
+        serves, each as ``{"protocol": ..., "version": ...}``.
         """
         descriptor: dict[str, Any] = {
             "session_id": self._session_id,
@@ -1282,6 +1304,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 "protocol": "webrtc",
                 "version": _WEBRTC_TRANSPORT_VERSION,
             },
+            "transports": [dict(transport) for transport in self._transports],
             "recording": {
                 "enabled": self._cfg.recording.enabled,
                 "chunk_seconds": self._cfg.recording.chunk_seconds,
@@ -1944,7 +1967,7 @@ class Runner(ServiceComponent, ConnectionSink):
         finally:
             if self._starting_input_done is done and self._sm.current_state in _RUNNING_STATES:
                 if self._session_start.steps is None:
-                    self._connections.drop(SYSTEM_CONN_ID, system=True)
+                    self._connections.drop(SYSTEM_CONN_ID)
                 if self._bridge is not None:
                     self._bridge.dispatch_reactor_event(StartingInputApplied())
             done.set()

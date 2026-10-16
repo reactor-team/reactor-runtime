@@ -50,7 +50,8 @@ def build_app(
     """Assemble the runtime's ASGI application from its route groups.
 
     The one place the HTTP surface is composed: the fixed route groups, the
-    CORS policy, and one mount per transport. :class:`HttpServer` serves the
+    CORS policy, and one mount per transport, which the session descriptor
+    then lists among the transports the runtime serves. :class:`HttpServer` serves the
     result; the OpenAPI spec renderer reads the same assembly so the published
     contract is exactly the served surface.
 
@@ -84,6 +85,9 @@ def build_app(
     StepRoutes(runner).mount(app)
     for transport in transports:
         transport.mount(app, runner)
+        # A router that names no transport and version is served, not listed.
+        if transport.protocol is not None and transport.version is not None:
+            runner.add_transport(transport.protocol, transport.version)
     return app
 
 
