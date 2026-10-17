@@ -14,6 +14,7 @@ import threading
 import time
 from collections import deque
 from enum import Enum, auto
+from typing import NamedTuple
 
 from reactor_runtime.core.values import ConnId, InputFrame
 
@@ -37,6 +38,17 @@ class BufferClosed(Exception):  # noqa: N818 — the established name a model au
     """Raised by a read once the track has closed and is drained."""
 
 
+class _Entry(NamedTuple):
+    """One buffered frame, with what the buffer keeps beside it."""
+
+    session: int
+    frame: InputFrame
+    pushed_at: float
+    """When the frame was pushed, on ``perf_counter``."""
+    source: ConnId | None
+    """The connection that sent the frame, or ``None``."""
+
+
 class InputBuffer:
     """A bounded, thread-safe frame buffer for one inbound track.
 
@@ -48,6 +60,11 @@ class InputBuffer:
     ``buffer_seconds``, a number of samples. A frame bound holds a length of
     audio that depends on the transport's frame size; a sample bound holds the
     same length on every transport.
+
+    Each frame is pushed for a session, by number. A new session can begin
+    before the model has finished the last one, so a :meth:`reset` for the
+    session that ended keeps any frame already pushed for a later one, and a
+    push only counts the frames it evicts from its own session.
 
     Args:
         maxlen: How many frames the buffer holds before evicting the oldest.
@@ -64,23 +81,22 @@ class InputBuffer:
         # condition, and a single underlying mutex rules out lock-ordering bugs.
         self._lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
-        # A sample bound is enforced by push(), so its deques are unbounded.
-        bound = None if max_samples is not None else maxlen
-        self._buffer: deque[InputFrame] = deque(maxlen=bound)
-        # When each buffered frame was pushed, on perf_counter, and the
-        # connection that sent it, beside it: the two deques share a bound, so
-        # an eviction drops both.
-        self._pushed_at: deque[tuple[float, ConnId | None]] = deque(maxlen=bound)
+        # Both bounds are enforced by push(), so the deque itself is unbounded.
+        self._buffer: deque[_Entry] = deque()
+        self._maxlen = maxlen
+        self._max_samples = max_samples
+        self._samples = 0
         # The sender of each frame a read took, and how long it waited in the
         # buffer in ms, until the step loop takes them (take_read_waits). A
         # model with its own run() may never take them, so they are bounded
         # like the frames: the oldest go first. The default step loop takes
         # them after every read, so it never reaches the bound.
         self._read_waits: deque[tuple[ConnId | None, float]] = deque(maxlen=maxlen)
-        self._max_samples = max_samples
-        self._samples = 0
         self._total_received = 0
         self._closed = False
+        # Set when a push had to evict, so the buffer holds all it can until a
+        # read or a reset takes frames out.
+        self._full = False
 
     async def read(
         self,
@@ -112,48 +128,53 @@ class InputBuffer:
         Raises:
             BufferClosed: The track closed before *n* frames were available.
             TimeoutError: *timeout* elapsed first.
-            ValueError: *n* exceeds the buffer capacity.
+            ValueError: *n* exceeds the buffer's frame bound, or, under a
+                ``buffer_seconds`` bound, the buffer is full with fewer than
+                *n* frames, so *n* frames of that size never fit.
         """
         return await asyncio.to_thread(self._read, n, timeout, mode)
 
     def _read(self, n: int, timeout: float | None, mode: ReadMode) -> list[InputFrame]:
-        if self._buffer.maxlen is not None and n > self._buffer.maxlen:
-            raise ValueError(
-                f"requested {n} frames but the buffer holds at most {self._buffer.maxlen}"
-            )
+        if self._max_samples is None and n > self._maxlen:
+            raise ValueError(f"requested {n} frames but the buffer holds at most {self._maxlen}")
         with self._condition:
             if not self._condition.wait_for(
-                lambda: len(self._buffer) >= n or self._closed, timeout=timeout
+                lambda: len(self._buffer) >= n or self._closed or self._full, timeout=timeout
             ):
                 raise TimeoutError(f"timed out waiting for {n} frame(s) after {timeout}s")
-            if self._closed and len(self._buffer) < n:
-                raise BufferClosed("buffer closed")
+            if len(self._buffer) < n:
+                if self._closed:
+                    raise BufferClosed("buffer closed")
+                raise ValueError(
+                    f"requested {n} frames but the buffer is full at {len(self._buffer)}: "
+                    "the track's buffer_seconds holds fewer frames than that"
+                )
             if mode is ReadMode.LATEST:
                 return self._take_latest(n)
             return self._take_fifo(n)
 
     def _take_latest(self, n: int) -> list[InputFrame]:
         """Return the *n* newest frames and drop the rest. Caller holds the lock."""
-        start = len(self._buffer) - n
-        result = [self._buffer[start + i] for i in range(n)]
-        self._note_waits([self._pushed_at[start + i] for i in range(n)])
+        taken = list(self._buffer)[len(self._buffer) - n :]
+        self._note_waits(taken)
         self._buffer.clear()
-        self._pushed_at.clear()
         self._samples = 0
-        return result
+        self._full = False
+        return [entry.frame for entry in taken]
 
     def _take_fifo(self, n: int) -> list[InputFrame]:
         """Pop the *n* oldest frames. Caller holds the lock."""
-        self._note_waits([self._pushed_at.popleft() for _ in range(n)])
-        result = [self._buffer.popleft() for _ in range(n)]
+        taken = [self._buffer.popleft() for _ in range(n)]
+        self._note_waits(taken)
+        self._full = False
         if self._max_samples is not None:
-            self._samples -= sum(_sample_count(frame) for frame in result)
-        return result
+            self._samples -= sum(_sample_count(entry.frame) for entry in taken)
+        return [entry.frame for entry in taken]
 
-    def _note_waits(self, pushed: list[tuple[float, ConnId | None]]) -> None:
-        """Note how long the frames pushed at *pushed* waited. Caller holds the lock."""
+    def _note_waits(self, taken: list[_Entry]) -> None:
+        """Note how long the frames *taken* waited. Caller holds the lock."""
         now = time.perf_counter()
-        self._read_waits.extend((source, (now - at) * 1000.0) for at, source in pushed)
+        self._read_waits.extend((entry.source, (now - entry.pushed_at) * 1000.0) for entry in taken)
 
     def take_read_waits(self) -> list[tuple[ConnId | None, float]]:
         """Return each frame read since the last take, as its sender and its wait in ms.
@@ -211,8 +232,8 @@ class InputBuffer:
         """Drop every buffered frame without closing the track."""
         with self._lock:
             self._buffer.clear()
-            self._pushed_at.clear()
             self._samples = 0
+            self._full = False
 
     def close(self) -> None:
         """Close the track, waking any blocked reader to raise :class:`BufferClosed`."""
@@ -220,55 +241,71 @@ class InputBuffer:
             self._closed = True
             self._condition.notify_all()
 
-    def reset(self) -> None:
-        """Re-open a closed track for a new session, dropping frames and counters.
+    def reset(self, through_session: int | None = None) -> None:
+        """Re-open the track for a new session, dropping the ended sessions' frames.
 
         Follows :meth:`close`: closing releases any parked reader, and reset then
         re-opens the drained track. Re-opening without closing first would leave a
         parked indefinite read waiting against the fresh buffer.
+
+        Args:
+            through_session: The session that ended. Frames pushed for it, or
+                for an earlier one, are dropped; frames already pushed for a
+                later session are kept, with their count. ``None`` drops every
+                frame.
         """
         with self._condition:
             self._closed = False
-            self._buffer.clear()
-            self._pushed_at.clear()
+            if through_session is None:
+                self._buffer.clear()
+            else:
+                self._buffer = deque(e for e in self._buffer if e.session > through_session)
+            self._samples = sum(_sample_count(entry.frame) for entry in self._buffer)
             self._read_waits.clear()
-            self._samples = 0
-            self._total_received = 0
+            self._total_received = len(self._buffer)
+            self._full = False
 
-    def push(self, frame: InputFrame, source: ConnId | None = None) -> int:
+    def push(self, frame: InputFrame, source: ConnId | None = None, session: int = 0) -> int:
         """Append a frame from the runtime thread, waking a blocked reader.
 
-        *source* is the connection that sent the frame, so the frame's wait in
-        the buffer is reported to that connection only. Frames pushed after
-        :meth:`close` are dropped until :meth:`reset`, and are not counted as
-        evicted: the track is not being read.
+        Frames pushed after :meth:`close` are dropped until :meth:`reset`, and
+        are not counted as evicted: the track is not being read.
+
+        Args:
+            frame: The frame to buffer.
+            source: The connection that sent the frame, so the frame's wait in
+                the buffer is reported to that connection only.
+            session: The session the frame belongs to, by number.
 
         Returns:
-            How many buffered frames the bound evicted to make room. Under a
-            sample bound the newest frame is always kept, even when it alone
-            holds more samples than the bound.
+            How many frames of the same session the bound evicted to make room.
+            Frames of an earlier session are evicted too, but not counted: they
+            belonged to a session that has ended. Under a sample bound the
+            newest frame is always kept, even when it alone holds more samples
+            than the bound.
         """
         with self._condition:
             if self._closed:
                 return 0
+            self._buffer.append(_Entry(session, frame, time.perf_counter(), source))
+            self._samples += _sample_count(frame) if self._max_samples is not None else 0
             evicted = 0
-            if self._max_samples is None:
-                maxlen = self._buffer.maxlen
-                if maxlen is not None and len(self._buffer) == maxlen:
-                    evicted = 1
-                self._buffer.append(frame)
-                self._pushed_at.append((time.perf_counter(), source))
-            else:
-                self._buffer.append(frame)
-                self._pushed_at.append((time.perf_counter(), source))
-                self._samples += _sample_count(frame)
-                while self._samples > self._max_samples and len(self._buffer) > 1:
-                    self._samples -= _sample_count(self._buffer.popleft())
-                    self._pushed_at.popleft()
+            while len(self._buffer) > 1 and self._over_bound():
+                gone = self._buffer.popleft()
+                if self._max_samples is not None:
+                    self._samples -= _sample_count(gone.frame)
+                if gone.session == session:
                     evicted += 1
+                self._full = True
             self._total_received += 1
             self._condition.notify_all()
             return evicted
+
+    def _over_bound(self) -> bool:
+        """Whether the buffer holds more than its bound. Caller holds the lock."""
+        if self._max_samples is not None:
+            return self._samples > self._max_samples
+        return len(self._buffer) > self._maxlen
 
 
 def _sample_count(frame: InputFrame) -> int:

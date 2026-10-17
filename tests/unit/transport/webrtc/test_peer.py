@@ -2336,3 +2336,32 @@ async def test_a_message_held_until_the_wire_opens_reports_its_loop_wait() -> No
     [wait] = [s for s in peer.message_stages.take() if s.name == "loop_wait"]
     assert wait.messages == 1
     assert wait.total_ms >= 5.0
+
+
+def _pcm(rate: int, frames: int) -> list[bytes]:
+    """*frames* 10 ms frames of a 440 Hz tone at *rate*, as interleaved int16 PCM."""
+    size = rate // 100
+    tone = (8_000 * np.sin(2 * np.pi * 440 * np.arange(frames * size) / rate)).astype(np.int16)
+    return [tone[i * size : (i + 1) * size].tobytes() for i in range(frames)]
+
+
+@pytest.mark.parametrize(("declared", "decoded"), [(24_000, 48_000), (48_000, 48_000)])
+def test_inbound_audio_reaches_the_model_at_the_tracks_declared_rate(
+    declared: int, decoded: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    peer = WebRTCPeer()
+    peer._track_map = TrackMap.from_client(
+        [{"mid": "0", "name": "agent_audio", "kind": "audio", "direction": "sendonly"}]
+    ).with_rates({"agent_audio": float(declared)})
+    delivered: list[InputFrame] = []
+    peer._cb_media = lambda name, frame: delivered.append(frame)
+    monkeypatch.setattr(peer, "_fire", lambda callback, *args: callback(*args))
+
+    sink = peer._make_audio_sink("agent_audio")
+    for pcm in _pcm(decoded, 100):
+        sink(pcm, decoded, 1, decoded // 100)
+
+    total = sum(frame.data.shape[-1] for frame in delivered)
+    # One second of audio arrives as one second at the declared rate.
+    assert abs(total - declared) <= 48
+    assert all(frame.data.size for frame in delivered)

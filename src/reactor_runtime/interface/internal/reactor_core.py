@@ -534,11 +534,16 @@ class ReactorCore:
         """Enqueue a reactor-authoritative event onto the model loop."""
         self._enqueue(event)
 
-    def push_media(self, track: str, frame: InputFrame, source: ConnId | None = None) -> int:
-        """Route an inbound frame into its track's buffer, with the connection that sent it.
+    def push_media(
+        self, track: str, frame: InputFrame, source: ConnId | None = None, session: int = 0
+    ) -> int:
+        """Route an inbound frame, pushed for *session*, into its track's buffer.
+
+        *source* is the connection that sent it.
 
         Returns:
-            How many buffered frames the track's bound evicted to make room.
+            How many buffered frames of the same session the track's bound
+            evicted to make room.
         """
         if self._loop.is_closed():
             return 0
@@ -546,7 +551,7 @@ class ReactorCore:
         if buffer is None:
             logger.debug("media for unknown input track %r", track)
             return 0
-        return buffer.push(frame, source)
+        return buffer.push(frame, source, session)
 
     def _enqueue(self, item: Inbound) -> None:
         """Thread-safe put onto the inbound queue, dropped before the loop runs."""

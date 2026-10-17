@@ -596,9 +596,13 @@ class Runner(ServiceComponent, ConnectionSink):
 
         Frames the track's buffer drops to make room are counted for the
         session's ``runtime_stats``, so input the model never read is visible.
+        Each frame is pushed for the live session, so a frame of an earlier
+        session that the push evicts is not counted against this one.
         """
         if self._bridge is not None:
-            dropped = self._bridge.push_media(track, frame, conn_id)
+            dropped = self._bridge.push_media(
+                track, frame, source=conn_id, session=self._sessions_posted
+            )
             if track in self._input_kinds:
                 self._model_input.received(track, dropped)
 

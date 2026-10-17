@@ -99,6 +99,20 @@ Command handlers and lifecycle hooks run between steps, never during one. A mode
 
 A command handler refuses by raising `CommandError(code, message)`: `code` is a short, stable token the client branches on, and `message` reaches the client unchanged, so write it for them and name the codes in the command's description. The runtime answers that command's request with the failure, so the caller learns on its own call, no other client in the session hears about a command it did not send, and the runtime records that the command failed. Do not refuse by sending an error message and returning: the runtime counts that as success and acknowledges the command. Any other exception a handler raises reaches the client as an internal error with a fixed message, so catch what a check raises and raise a `CommandError` with a code of its own. The waypoint example's `set_image` does both.
 
+An input track buffers the newest 128 frames and drops the oldest when it is full. How much audio that holds depends on the frame size the transport delivers, so an audio input track can bound its buffer in seconds instead. Its audio arrives at the declared `sample_rate` on every transport:
+
+```python
+class AgentAudio(Audio):
+    sample_rate = 24_000
+    buffer_seconds = 120      # the newest 120 s of audio, whatever the frame size
+
+
+class MyInput(MediaInput):
+    agent_audio: AgentAudio
+```
+
+Frames a full buffer drops are counted per track in the session's `runtime_stats`. A `read()` of more frames than a full `buffer_seconds` bound holds fails with `ValueError` instead of waiting.
+
 A session can start with its setup already in hand: `POST /start_session` takes a `starting_input` of state values and commands, which the runtime applies on the normal command path before any client connects. A system client sends them, a connection the runtime opens itself, so a handler that takes `client` gets a `ClientInfo` whose `system` is true. The step loop takes its first step only once every starting command has landed, uploads included, so no step runs on the defaults the starting input replaces. In a live session the system client then leaves and the loop waits for a viewer, as it always does; a model with its own `run()` sees the system client connect like any client. A live session stays `waiting` while its starting input applies, because the system client does not occupy it, and `/events` journals the system client's `connection_opened` and `connection_closed` as `waiting -> waiting`. A session with `steps` is occupied by the system client until it ends, so it streams with no other client. `steps` is a whole number from 1 to 10,000. The runtime ends it itself once the model has reported that many steps, with a normal stop whose close reason is "Session ended: the requested steps are complete." A session with `steps` has no client to correct its starting input, so a starting command the runtime cannot apply (an upload whose bytes never arrive, or arguments the contract refuses) ends it at once with the reason `start_refused` and the refusal as its close reason. If the handler of a starting command fails instead, by raising `CommandError` or any other exception, every step the model has not reported yet is recorded with the handler's message, so a session at step 3 of 4 saves steps 3 and 4 with that error, and the session ends with the reason `error`. The model keeps running and takes the next session.
 
 A model can keep each step it reports as a folder of files, turned on in `reactor.yaml`:

@@ -9,7 +9,7 @@ stay blind to WebRTC.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from reactor_runtime.core import TrackDirection, TrackInfo, TrackKind
 
@@ -107,6 +107,21 @@ class TrackMap:
                 )
             )
         return cls(tracks=tuple(mapped))
+
+    def with_rates(self, rates: Mapping[str, float]) -> TrackMap:
+        """Return the map with each track's rate taken from *rates*, by track name.
+
+        A client names its tracks but not their rates, so the model's declared
+        rates are filled in here. A track *rates* does not name keeps its own.
+        """
+        return TrackMap(
+            tracks=tuple(
+                replace(t, info=replace(t.info, rate=rates[t.info.name]))
+                if t.info.name in rates
+                else t
+                for t in self.tracks
+            )
+        )
 
     def by_direction(self, direction: TrackDirection) -> list[TrackInfo]:
         """Return the metadata of every track flowing in *direction*."""

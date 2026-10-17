@@ -281,3 +281,56 @@ def test_a_sample_bound_drops_the_wait_of_each_frame_it_evicts() -> None:
     buffer.try_read(2, mode=ReadMode.FIFO)
 
     assert [source for source, _ in buffer.take_read_waits()] == [ConnId(1002), ConnId(1003)]
+
+
+def test_a_push_counts_only_the_frames_it_evicts_from_its_own_session() -> None:
+    buffer = InputBuffer(maxlen=2)
+    buffer.push(frame(1), session=1)
+    buffer.push(frame(2), session=1)
+
+    # A new session's frames push the old session's out without charging it.
+    assert buffer.push(frame(3), session=2) == 0
+    assert buffer.push(frame(4), session=2) == 0
+    assert buffer.push(frame(5), session=2) == 1
+
+
+def test_a_reset_for_an_ended_session_keeps_a_later_sessions_frames() -> None:
+    buffer = InputBuffer(max_samples=48_000)
+    buffer.push(audio(0), session=1)
+    buffer.push(audio(1), session=1)
+    buffer.push(audio(2), session=2)
+
+    buffer.reset(through_session=1)
+
+    assert buffer.available == 1
+    assert buffer.total_received == 1
+    kept = buffer.try_read(1)
+    assert kept is not None
+    assert kept[0].pts == 2.0
+
+
+def test_a_reset_with_no_session_drops_every_frame() -> None:
+    buffer = InputBuffer()
+    buffer.push(frame(1), session=2)
+
+    buffer.reset()
+
+    assert buffer.available == 0
+
+
+async def test_a_read_more_frames_than_a_full_sample_bound_holds_fails_at_once() -> None:
+    # 10 ms frames under a 50 ms bound: the buffer is full at five frames.
+    buffer = InputBuffer(max_samples=2_400)
+    for index in range(6):
+        buffer.push(audio(index))
+
+    with pytest.raises(ValueError, match="buffer is full at 5"):
+        await buffer.read(10, timeout=5.0)
+
+
+async def test_a_read_waits_while_a_sample_bound_still_has_room() -> None:
+    buffer = InputBuffer(max_samples=2_400)
+    buffer.push(audio(0))
+
+    with pytest.raises(TimeoutError):
+        await buffer.read(3, timeout=0.05)

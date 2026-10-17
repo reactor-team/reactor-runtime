@@ -4377,3 +4377,26 @@ async def test_media_from_an_earlier_session_reaches_no_step(started_runner: Run
     )
 
     assert started_runner._step_recipients == set()
+
+
+async def test_inbound_media_is_pushed_for_the_live_session(
+    started_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert started_runner._bridge is not None
+    pushed: list[int] = []
+
+    def push(track: str, frame: InputFrame, source: ConnId | None = None, session: int = 0) -> int:
+        pushed.append(session)
+        return 0
+
+    monkeypatch.setattr(started_runner._bridge, "push_media", push)
+    frame = InputFrame(data=np.zeros((1, 480), dtype=np.int16))
+
+    started_runner.start_session({})
+    started_runner.media_received(ConnId(1), "mic", frame)
+    started_runner.stop_session()
+    await asyncio.sleep(0.01)
+    started_runner.start_session({})
+    started_runner.media_received(ConnId(1), "mic", frame)
+
+    assert pushed == [1, 2]

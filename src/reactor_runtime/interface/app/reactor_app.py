@@ -294,6 +294,9 @@ class ReactorApp(ReactorCore):
         while True:
             await self._live.wait()
             drops = self._gate_drops
+            # The session this run serves. The next one can start before the
+            # reset below, and its frames must survive it.
+            served = self._sessions_started
             try:
                 while self._live.is_set() and self._gate_drops == drops:
                     # 1. Wait for a step request. While this await is pending the
@@ -384,7 +387,7 @@ class ReactorApp(ReactorCore):
                     self._step_requested.set()
             finally:
                 for buffer in self._input_buffers.values():
-                    buffer.reset()
+                    buffer.reset(through_session=served)
 
     @staticmethod
     def _step_stages(
