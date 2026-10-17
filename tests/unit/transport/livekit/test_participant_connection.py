@@ -30,9 +30,12 @@ class FakeLocalParticipant:
         self.blocked.set()
         self.calls: list[tuple[str, str, str]] = []
         self.rpc_errors: list[rtc.RpcError] = []
+        self.answering = asyncio.Event()
+        self.answering.set()
 
     async def perform_rpc(self, *, destination_identity: str, method: str, payload: str) -> str:
         self.calls.append((destination_identity, method, payload))
+        await self.answering.wait()
         if self.rpc_errors:
             raise self.rpc_errors.pop(0)
         return ""
@@ -518,6 +521,8 @@ async def test_a_participant_without_the_method_is_not_called_again() -> None:
 
     conn.message_sent("playback_finished", {}, None)
     await _settle()
+    conn.message_sent("playback_finished", {}, None)
+    await _settle()
 
     assert len(local.calls) == 1
     conn.drop()
@@ -532,6 +537,56 @@ async def test_a_call_that_may_not_have_arrived_is_tried_again() -> None:
 
     assert len(local.calls) == 2
     conn.drop()
+
+
+async def test_a_call_whose_answer_timed_out_is_not_made_again() -> None:
+    conn, local = make()
+    local.rpc_errors.append(rtc.RpcError(rtc.RpcError.ErrorCode.RESPONSE_TIMEOUT, "no answer"))
+
+    conn.message_sent("playback_finished", {}, None)
+    await asyncio.sleep(0.5)
+
+    assert len(local.calls) == 1
+    conn.drop()
+
+
+async def test_calls_past_the_queue_limit_are_dropped_while_one_is_stalled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(participant_module, "MAX_PENDING_CALLS", 2)
+    conn, local = make()
+    local.answering.clear()
+
+    conn.message_sent("playback_finished", {"playback_position": 0}, None)
+    await _settle()
+    for position in range(1, 5):
+        conn.message_sent("playback_finished", {"playback_position": position}, None)
+    await _settle()
+    # The first call is in flight; two wait; the rest are dropped.
+    local.answering.set()
+    await _settle(20)
+
+    assert [json.loads(payload)["playback_position"] for _, _, payload in local.calls] == [
+        0,
+        1,
+        2,
+    ]
+    conn.drop()
+
+
+async def test_closing_makes_the_calls_queued_before_it() -> None:
+    conn, local = make()
+    local.answering.clear()
+    conn.message_sent("playback_finished", {"playback_position": 1}, None)
+    conn.message_sent("playback_finished", {"playback_position": 2}, None)
+    await _settle()
+
+    closing = asyncio.create_task(conn.close())
+    await _settle()
+    local.answering.set()
+    await closing
+
+    assert [json.loads(payload)["playback_position"] for _, _, payload in local.calls] == [1, 2]
 
 
 async def test_calls_go_out_in_the_order_the_messages_were_sent() -> None:

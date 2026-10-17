@@ -7,7 +7,7 @@ import pytest
 from tests.unit.transport.livekit.test_participant_connection import FakeReader
 from tests.unit.transport.livekit.test_room_join import FakeControl, FakeRoom
 
-from reactor_runtime.core import ConnId
+from reactor_runtime.core import ConnId, LiveKitConfig, LiveKitRpcMethod, ReplyRoute
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.transport import ConnectionsExhaustedError
 from reactor_runtime.transport.livekit.participant import CONTROL_TOPIC, DATA_TOPIC
@@ -23,6 +23,7 @@ class ParticipantControl(FakeControl):
         self._refuse = refuse or set()
         self.received: list[tuple[ConnId, bytes, Channel]] = []
         self.released: list[ConnId] = []
+        self.commands: list[tuple[ConnId, str, dict[str, Any], str, ReplyRoute]] = []
 
     def new_conn_id(self, transport: str) -> ConnId:
         assert transport == "livekit"
@@ -45,6 +46,16 @@ class ParticipantControl(FakeControl):
         assert version is ProtocolVersion.V1
         self.received.append((conn_id, payload, channel))
 
+    def command_received(
+        self,
+        conn_id: ConnId,
+        name: str,
+        args: dict[str, Any],
+        request_id: str,
+        reply: ReplyRoute = ReplyRoute.PROTOCOL,
+    ) -> None:
+        self.commands.append((conn_id, name, args, request_id, reply))
+
 
 def _person(identity: str) -> SimpleNamespace:
     return SimpleNamespace(identity=identity)
@@ -66,16 +77,31 @@ async def _leave_every_room() -> AsyncIterator[None]:
         await _sessions.pop().leave()
 
 
-def _session(room: FakeRoom, control: ParticipantControl) -> RoomSession:
+SIGNALS = LiveKitConfig(
+    rpc=(LiveKitRpcMethod(method="lk.clear_buffer", command="clear_buffer"),),
+    topics=("avatar",),
+)
+
+
+def _session(
+    room: FakeRoom, control: ParticipantControl, config: LiveKitConfig | None = None
+) -> RoomSession:
     session = RoomSession(
-        ConnId(4711), "wss://rooms.example", "a-token", cast(Any, control), room=cast(Any, room)
+        ConnId(4711),
+        "wss://rooms.example",
+        "a-token",
+        cast(Any, control),
+        config,
+        room=cast(Any, room),
     )
     _sessions.append(session)
     return session
 
 
-async def _open(room: FakeRoom, control: ParticipantControl) -> RoomSession:
-    session = _session(room, control)
+async def _open(
+    room: FakeRoom, control: ParticipantControl, config: LiveKitConfig | None = None
+) -> RoomSession:
+    session = _session(room, control, config)
     session.start()
     await _settle()
     assert session.state is RoomState.OPEN
@@ -234,3 +260,41 @@ async def test_ending_the_room_closes_every_participant_before_leaving() -> None
     assert room.disconnects == 1
     _join(room, "carol")
     assert len(control.opened) == 3
+
+
+async def test_a_packet_on_a_mapped_topic_runs_its_command_with_no_answer() -> None:
+    room, control = FakeRoom(), ParticipantControl()
+    await _open(room, control, SIGNALS)
+    _join(room, "avatar-worker")
+
+    _packet(room, "avatar-worker", b'{"state": "speaking"}', "avatar.user_speaking_state")
+
+    ((conn_id, name, args, _, reply),) = control.commands
+    assert (conn_id, name, args, reply) == (
+        ConnId(5000),
+        "user_speaking_state",
+        {"state": "speaking"},
+        ReplyRoute.NONE,
+    )
+
+
+async def test_an_rpc_call_runs_its_command_and_is_answered_off_the_protocol_topics() -> None:
+    room, control = FakeRoom(), ParticipantControl()
+    await _open(room, control, SIGNALS)
+    _join(room, "avatar-worker")
+    handler = room.local_participant.methods["lk.clear_buffer"]
+    call = SimpleNamespace(caller_identity="avatar-worker", payload="{}", request_id="r1")
+
+    answer = asyncio.create_task(handler(call))
+    await _settle()
+    ((conn_id, name, args, request_id, reply),) = control.commands
+    assert (conn_id, name, args, request_id, reply) == (
+        ConnId(5000),
+        "clear_buffer",
+        {},
+        "rpc-r1",
+        ReplyRoute.OBSERVER,
+    )
+    control.opened[1].command_acknowledged(request_id)
+
+    assert await asyncio.wait_for(answer, 1) == ""

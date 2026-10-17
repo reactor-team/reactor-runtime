@@ -15,6 +15,7 @@ from reactor_runtime.core import (
     InputFrame,
     LiveKitConfig,
     LiveKitRpcMethod,
+    ReplyRoute,
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.transport import SessionNotRunningError, UnknownSessionError
@@ -78,7 +79,12 @@ class FakeRunner:
         pass
 
     def command_received(
-        self, conn_id: ConnId, name: str, args: Mapping[str, Any], request_id: str
+        self,
+        conn_id: ConnId,
+        name: str,
+        args: Mapping[str, Any],
+        request_id: str,
+        reply: ReplyRoute = ReplyRoute.PROTOCOL,
     ) -> None:
         pass
 

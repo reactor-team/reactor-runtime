@@ -53,6 +53,10 @@ class FakeParticipant:
 
     def __init__(self, publish: Gate) -> None:
         self._publish = publish
+        self.methods: dict[str, Any] = {}
+
+    def register_rpc_method(self, method: str, handler: Any) -> None:
+        self.methods[method] = handler
 
     async def publish_track(self, track: Any, options: Any) -> None:
         await self._publish.pass_through()
