@@ -152,16 +152,20 @@ class RuntimeProcess:
         """Return one reading of the probe route."""
         return self.get("/_endurance/probe")
 
-    def settled_probe(self) -> tuple[dict[str, Any], float]:
-        """Read the probe once nothing is connected and teardown has finished.
+    def settled_probe(self, *, connections: int = 0) -> tuple[dict[str, Any], float]:
+        """Read the probe once the cycle's client is gone and teardown has finished.
 
-        Waits for the registry to empty, then re-reads until every live count is
-        0. Returns the last reading either way, with the seconds it took: a count
+        Waits for the registry to fall to *connections*, the ones the scenario
+        keeps open across cycles, then re-reads until every live count is 0.
+        Returns the last reading either way, with the seconds it took: a count
         that is still nonzero after the timeouts is a leak, not a slow teardown.
         """
         start = time.monotonic()
         reading = self.probe()
-        while reading["registered_connections"] > 0 and time.monotonic() - start < CLOSE_TIMEOUT_S:
+        while (
+            reading["registered_connections"] > connections
+            and time.monotonic() - start < CLOSE_TIMEOUT_S
+        ):
             time.sleep(0.25)
             reading = self.probe()
         settle_start = time.monotonic()
@@ -691,6 +695,7 @@ class ResourceSampler:
                 live_pacers=reading["live"]["pacers"],
                 live_client_stats=reading["client_stats_connections"],
                 tasks=reading["tasks"],
+                live_participants=reading["live"].get("participants", 0),
             )
         self._baseline.freed_by_gc = freed
         self._baseline.holding_after_stop = holding

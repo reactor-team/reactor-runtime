@@ -1,6 +1,13 @@
 import threading
 
-from endurance.harness import FRAMES_PER_CYCLE, V1Client, assert_answered, assert_full_streams
+import pytest
+from endurance.harness import (
+    FRAMES_PER_CYCLE,
+    RuntimeProcess,
+    V1Client,
+    assert_answered,
+    assert_full_streams,
+)
 
 
 def test_full_streams_pass_when_every_cycle_got_its_frames() -> None:
@@ -54,3 +61,21 @@ def test_a_bodyless_ack_answers_a_command() -> None:
     client = _client_owed("command-0", "set_effect", frozenset({None, "message"}))
     client._answered("command-0", None, None)
     assert client._failed == []
+
+
+def test_a_settled_probe_waits_only_for_the_connections_a_scenario_does_not_keep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    readings = iter(
+        [
+            {"registered_connections": 2, "live": {"participants": 1}},
+            {"registered_connections": 1, "live": {"participants": 0}},
+        ]
+    )
+    runtime = object.__new__(RuntimeProcess)
+    monkeypatch.setattr(runtime, "probe", lambda: next(readings))
+
+    reading, waited = runtime.settled_probe(connections=1)
+
+    assert reading == {"registered_connections": 1, "live": {"participants": 0}}
+    assert waited < 5.0
