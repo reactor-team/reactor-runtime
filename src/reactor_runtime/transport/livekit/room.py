@@ -36,7 +36,7 @@ from reactor_runtime.transport.router import SessionControl
 logger = get_logger(__name__)
 
 JOIN_TIMEOUT_SECONDS = 30.0
-"""How long a join may take before it fails."""
+"""How long a join, connecting and publishing the output tracks, may take before it fails."""
 
 _JOIN_REFUSED = "the LiveKit room could not be joined: {cause}"
 _JOIN_TIMED_OUT = "joining the LiveKit room timed out"
@@ -71,16 +71,25 @@ class RoomSession:
         token: The access token for the session's participant. A credential:
             it is used to join and never logged.
         control: The runner's session-control surface.
+        room: The room to join; a fresh ``rtc.Room`` unless one is given.
     """
 
-    def __init__(self, conn_id: ConnId, url: str, token: str, control: SessionControl) -> None:
+    def __init__(
+        self,
+        conn_id: ConnId,
+        url: str,
+        token: str,
+        control: SessionControl,
+        *,
+        room: rtc.Room | None = None,
+    ) -> None:
         self.conn_id = conn_id
         self.state = RoomState.JOINING
         self.reason: str | None = None
         self._url = url
         self._token = token
         self._control = control
-        self._room = rtc.Room()
+        self._room = room if room is not None else rtc.Room()
         self._connection: RoomConnection | None = None
         self._join: asyncio.Task[None] | None = None
         self._closing: set[asyncio.Task[None]] = set()
@@ -110,23 +119,42 @@ class RoomSession:
     async def leave(self) -> None:
         """Leave the room, closing the room connection. Idempotent.
 
-        A join still in flight is cancelled.
+        A join still in flight is abandoned: it is not cancelled, and the room
+        is left once it settles.
         """
         await self._finish(_LEFT)
 
+    async def retire(self) -> None:
+        """End a room connection whose session has ended, as :meth:`leave` does."""
+        await self._finish(_SESSION_ENDED)
+
     async def _run_join(self) -> None:
-        """Join the room, publish the output tracks, and open the room connection."""
-        try:
-            await asyncio.wait_for(
-                self._room.connect(self._url, self._token), timeout=JOIN_TIMEOUT_SECONDS
-            )
-            connection = await self._publish(self._output_tracks())
-        except TimeoutError:
-            await self._fail(_JOIN_TIMED_OUT)
+        """Join the room, publish the output tracks, and open the room connection.
+
+        Connecting and publishing run as one attempt that is never cancelled:
+        the SDK cannot undo a native operation cancelled half way. The deadline
+        covers the whole attempt. One that passes it, or that is abandoned by
+        a leave, keeps running, and the room is left once it settles.
+        """
+        attempt = asyncio.get_running_loop().create_task(
+            self._connect_and_publish(), name=f"livekit-attempt-{self.conn_id}"
+        )
+        done, _ = await asyncio.wait({attempt}, timeout=JOIN_TIMEOUT_SECONDS)
+        if not done:
+            attempt.add_done_callback(self._leave_when_settled)
+            if self.joining:
+                await self._fail(_JOIN_TIMED_OUT, leave=False)
             return
-        except Exception as error:
+        if not self.joining:
+            # Left while joining: the attempt has settled, so leaving is safe.
+            attempt.exception()
+            await self._disconnect()
+            return
+        error = attempt.exception()
+        if error is not None:
             await self._fail(_JOIN_REFUSED.format(cause=str(error) or type(error).__name__))
             return
+        connection = attempt.result()
         self._connection = connection
         self.state = RoomState.OPEN
         connection.start()
@@ -138,11 +166,30 @@ class RoomSession:
             identity=self._room.local_participant.identity,
         )
 
-    async def _fail(self, reason: str) -> None:
-        """End a join that did not succeed, and report it on the connection."""
+    async def _connect_and_publish(self) -> RoomConnection:
+        await self._room.connect(self._url, self._token)
+        return await self._publish(self._output_tracks())
+
+    def _leave_when_settled(self, attempt: asyncio.Task[RoomConnection]) -> None:
+        """Leave the room once an abandoned attempt has finished, whatever its outcome."""
+        if not attempt.cancelled():
+            attempt.exception()  # retrieved, so an abandoned failure is not reported as lost
+        task = asyncio.get_running_loop().create_task(self._disconnect())
+        self._closing.add(task)
+        task.add_done_callback(self._closing.discard)
+
+    async def _fail(self, reason: str, *, leave: bool = True) -> None:
+        """End a join that did not succeed, and report it on the connection.
+
+        Args:
+            reason: Why the join failed.
+            leave: Whether to leave the room now. A join whose attempt is
+                still running leaves once the attempt settles instead.
+        """
         self.state = RoomState.FAILED
         self.reason = reason
-        await self._disconnect()
+        if leave:
+            await self._disconnect()
         self._control.connection_failed(self.conn_id, TRANSPORT_NAME, reason)
 
     async def _finish(self, reason: str) -> None:
@@ -156,9 +203,10 @@ class RoomSession:
         joining = self.state is RoomState.JOINING
         self.state = RoomState.CLOSED
         self.reason = reason
-        if joining and self._join is not None:
-            self._join.cancel()
-            await asyncio.gather(self._join, return_exceptions=True)
+        if joining:
+            # The join leaves the room once its attempt settles.
+            logger.info("abandoned a LiveKit room join", conn_id=self.conn_id, reason=reason)
+            return
         connection, self._connection = self._connection, None
         if connection is not None:
             self._control.connection_closed(self.conn_id)

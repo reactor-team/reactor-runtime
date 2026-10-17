@@ -40,3 +40,13 @@ def test_a_reoffer_restamps_into_the_live_session() -> None:
     epochs.session_started()
     epochs.stamp(ConnId(1))
     assert not epochs.consume(ConnId(1))
+
+
+def test_the_current_epoch_counts_the_sessions_started() -> None:
+    epochs = OfferEpochs()
+    assert epochs.current == 0
+
+    epochs.session_started()
+    epochs.session_started()
+
+    assert epochs.current == 2

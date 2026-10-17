@@ -26,6 +26,7 @@ class FakeRunner:
         self._running = running
         self.minted: list[tuple[ConnId, str]] = []
         self.admitted: list[ConnId] = []
+        self.epoch = 1
 
     def require_session_running(self, sid: str) -> None:
         if not self._running:
@@ -38,11 +39,17 @@ class FakeRunner:
         self.minted.append((conn_id, transport))
         return conn_id
 
-    def claim_conn_id(self, conn_id: ConnId, transport: str) -> None:
+    def claim_conn_id(self, conn_id: ConnId, transport: str) -> bool:
+        return True
+
+    def release_conn_id(self, conn_id: ConnId, transport: str) -> None:
         pass
 
     def connection_failed(self, conn_id: ConnId, transport: str, reason: str) -> None:
         pass
+
+    def session_epoch(self) -> int:
+        return self.epoch
 
     def offer_admitted(self, conn_id: ConnId) -> None:
         self.admitted.append(conn_id)
@@ -114,6 +121,7 @@ class FakeRoomSession:
         self.reason: str | None = None
         self.started = False
         self.left = False
+        self.retired = False
         _built.append(self)
 
     @property
@@ -131,6 +139,11 @@ class FakeRoomSession:
         self.left = True
         self.state = RoomState.CLOSED
         self.reason = "the room was left on request"
+
+    async def retire(self) -> None:
+        self.retired = True
+        self.state = RoomState.CLOSED
+        self.reason = "the session ended"
 
 
 _built: list[FakeRoomSession] = []
@@ -179,6 +192,24 @@ def test_a_second_room_connection_is_refused_while_one_is_active(
     assert refused.status_code == 409
     assert refused.json() == {"detail": "the session already has a room connection"}
     assert len(rooms) == 1
+
+
+def test_a_join_from_an_ended_session_is_retired_by_the_next_session(
+    rooms: list[FakeRoomSession],
+) -> None:
+    runner = FakeRunner()
+    client = _client(runner)
+    client.post(_CONNECTIONS, json=_ROOM)
+    runner.epoch = 2
+
+    again = client.post(_CONNECTIONS, json=_ROOM)
+
+    assert again.status_code == 202
+    assert again.json() == {"connection_id": 4712}
+    stale, fresh = rooms
+    assert (stale.retired, stale.state) == (True, RoomState.CLOSED)
+    assert fresh.started
+    assert client.post(_CONNECTIONS, json=_ROOM).status_code == 409
 
 
 def test_a_room_connection_can_open_again_once_the_last_one_ended(

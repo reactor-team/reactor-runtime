@@ -136,6 +136,7 @@ class LiveKitRouter(TransportRouter):
 
     def __init__(self) -> None:
         self._room: RoomSession | None = None
+        self._room_epoch = 0
 
     def mount(self, app: FastAPI, runner: SessionControl) -> None:
         """Register the LiveKit route group against *app*, bound to *runner*."""
@@ -145,16 +146,22 @@ class LiveKitRouter(TransportRouter):
             sid: str, req: RoomConnectionRequest
         ) -> RoomConnectionAccepted:
             runner.require_session_running(sid)
-            if self._room is not None and self._room.active:
-                raise HTTPException(
-                    status_code=409, detail="the session already has a room connection"
-                )
+            epoch = runner.session_epoch()
+            previous = self._room
+            if previous is not None and previous.active:
+                if self._room_epoch == epoch:
+                    raise HTTPException(
+                        status_code=409, detail="the session already has a room connection"
+                    )
+                # Admitted by a session that has ended: its room is retired, not reused.
+                await previous.retire()
             from reactor_runtime.transport.livekit.room import RoomSession
 
             conn_id = runner.new_conn_id(self.protocol)
             runner.offer_admitted(conn_id)
             room = RoomSession(conn_id, req.url, req.token.get_secret_value(), runner)
             self._room = room
+            self._room_epoch = epoch
             room.start()
             return RoomConnectionAccepted(connection_id=conn_id)
 
