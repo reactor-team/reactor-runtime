@@ -8,20 +8,25 @@ producing it can wait on ICE gathering), and trickles ICE candidates over the
 connection's life. Every client registers an explicit connection: there is no
 implicit default. A client whose transport dropped reconnects by re-offering on
 the same connection — a PUT to its ``sdp_params`` — which renegotiates a fresh
-peer for that id rather than minting a new one.
+peer for that id rather than minting a new one. Connection ids are shared with
+the session's other transports, so an offer on an id another transport holds is
+refused with a 409 rather than taking that connection over.
 """
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, ClassVar
 
-from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi import FastAPI, Header, HTTPException, Path, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
 from reactor_runtime.core import ConnId
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.transport.router import (
+    CONN_ID_MAX,
+    OFFERED_CONN_ID_MIN,
+    ConnectionIdClaimedError,
     ConnectionsExhaustedError,
     ErrorDetail,
     SessionControl,
@@ -38,6 +43,11 @@ from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpOffer, T
 from reactor_runtime.transport.webrtc.version import protocol_for_transport
 
 _PREFIX = "/sessions/{sid}/transport/webrtc"
+
+# The connection ids a client may address: the runtime's minted range, and the
+# id kept for legacy single-connection callers. An id outside it is a 422, so
+# no offer claims an id the session could never mint or would never use.
+OfferedConnId = Annotated[int, Path(ge=OFFERED_CONN_ID_MIN, le=CONN_ID_MAX)]
 
 # Every route in the group is guarded by require_session_running, whose
 # rejections the app-level exception handlers render. Declared bare — statuses
@@ -56,11 +66,11 @@ _CONNECT_RESPONSES: dict[int | str, dict[str, Any]] = {
     503: {"model": ErrorDetail},
 }
 
-# Offering adds a 409 on top: a ``port_range`` pinned to a single port another
-# connection already holds is refused, since a pinned caller has no second port
-# to fall back on. Unlike the 503s this is not transient — retrying the same
-# port changes nothing, so it is a distinct code the caller branches on to pin
-# another port.
+# Offering adds a 409 on top, for two conflicts a retry of the same request
+# cannot clear: a ``port_range`` pinned to a single port another connection
+# already holds, since a pinned caller has no second port to fall back on; and
+# a connection id another transport of the session holds, since the caller has
+# to choose another id. The detail names which.
 _OFFER_RESPONSES: dict[int | str, dict[str, Any]] = {
     **_CONNECT_RESPONSES,
     409: {"model": ErrorDetail},
@@ -261,6 +271,8 @@ class WebRtcRouter(TransportRouter):
     builds connections with; bound to the runner when mounted.
     """
 
+    protocol: ClassVar[str] = "webrtc"
+
     def __init__(
         self,
         config: WebRtcConfig,
@@ -312,7 +324,8 @@ class WebRtcRouter(TransportRouter):
         async def register(sid: str) -> RegisterConnectionResponse:
             runner.require_session_running(sid)
             return RegisterConnectionResponse(
-                connection_id=runner.new_conn_id(), track_map=dict(runner.track_map())
+                connection_id=runner.new_conn_id(self.protocol),
+                track_map=dict(runner.track_map()),
             )
 
         # One handler, registered once per method: a POST opens a connection's
@@ -322,7 +335,7 @@ class WebRtcRouter(TransportRouter):
         # unordered method set — unstable and duplicated).
         async def offer(
             sid: str,
-            cid: int,
+            cid: OfferedConnId,
             req: SdpParamsRequest,
             webrtc_version: Annotated[str | None, Header(alias="reactor-webrtc-version")] = None,
         ) -> OfferAccepted:
@@ -332,6 +345,10 @@ class WebRtcRouter(TransportRouter):
                 entry.model_dump() for entry in req.track_mapping
             ).with_rates({name: float(entry["rate"]) for name, entry in declared.items()})
             conn_id = ConnId(cid)
+            try:
+                claimed_now = runner.claim_conn_id(conn_id, self.protocol)
+            except ConnectionIdClaimedError as claimed:
+                raise HTTPException(status_code=409, detail=str(claimed)) from None
             runner.offer_admitted(conn_id)
             try:
                 acceptor.start_offer(
@@ -343,11 +360,16 @@ class WebRtcRouter(TransportRouter):
                     ice_credentials=_ice_credentials_from_request(req.ice_credentials),
                     port_range=req.port_range,
                 )
-            except PortRangeUnavailableError as taken:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"port {taken.port} is already held by another connection",
-                ) from None
+            except BaseException as refused:
+                # A refused offer does not keep the id it claimed.
+                if claimed_now:
+                    runner.release_conn_id(conn_id, self.protocol)
+                if isinstance(refused, PortRangeUnavailableError):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"port {refused.port} is already held by another connection",
+                    ) from None
+                raise
             return OfferAccepted(connection_id=cid)
 
         offer_path = f"{_PREFIX}/connections/{{cid}}/sdp_params"
@@ -362,7 +384,7 @@ class WebRtcRouter(TransportRouter):
                 **_GUARD_RESPONSES,
             },
         )
-        async def sdp_answer(sid: str, cid: int) -> Response:
+        async def sdp_answer(sid: str, cid: OfferedConnId) -> Response:
             runner.require_session_running(sid)
             answer = acceptor.take_answer(ConnId(cid))
             if answer is None:
@@ -375,7 +397,7 @@ class WebRtcRouter(TransportRouter):
             status_code=202,
             responses=_GUARD_RESPONSES,
         )
-        async def ice(sid: str, cid: int, req: IceCandidatesRequest) -> Response:
+        async def ice(sid: str, cid: OfferedConnId, req: IceCandidatesRequest) -> Response:
             runner.require_session_running(sid)
             for entry in req.candidates:
                 await acceptor.add_ice(

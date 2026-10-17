@@ -25,7 +25,7 @@ from reactor_runtime.core import (
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.runner import ConnectionManager, SessionStateMachine
-from reactor_runtime.transport import ConnectionsExhaustedError
+from reactor_runtime.transport import ConnectionIdClaimedError, ConnectionsExhaustedError
 
 
 class FakeConnection:
@@ -233,18 +233,18 @@ def test_a_connection_without_a_reading_keeps_its_stages() -> None:
 
 def test_new_conn_id_is_random_in_range_and_unique() -> None:
     cm, _ = waiting_manager()
-    ids = [cm.new_conn_id() for _ in range(50)]
+    ids = [cm.new_conn_id("webrtc") for _ in range(50)]
     assert len(set(ids)) == 50
     assert all(1002 <= int(cid) <= 9999 for cid in ids)
 
 
 def test_new_conn_id_is_not_reused_after_a_drop() -> None:
     cm, _ = waiting_manager()
-    first = cm.new_conn_id()
+    first = cm.new_conn_id("webrtc")
     cm.register(FakeConnection(first))
     cm.drop(first)
-    # The dropped id stays in the session's used pool, so no later mint returns it.
-    later = {cm.new_conn_id() for _ in range(100)}
+    # The dropped id stays claimed for the session, so no later mint returns it.
+    later = {cm.new_conn_id("webrtc") for _ in range(100)}
     assert first not in later
 
 
@@ -256,9 +256,9 @@ def test_new_conn_id_raises_when_the_draw_keeps_colliding(
     monkeypatch.setattr("reactor_runtime.runner.connection_manager._MIN_CONN_ID", 1002)
     monkeypatch.setattr("reactor_runtime.runner.connection_manager._MAX_CONN_ID", 1002)
     cm, _ = waiting_manager()
-    assert int(cm.new_conn_id()) == 1002
+    assert int(cm.new_conn_id("webrtc")) == 1002
     with pytest.raises(ConnectionsExhaustedError):
-        cm.new_conn_id()
+        cm.new_conn_id("webrtc")
 
 
 def test_new_conn_id_still_mints_when_some_ids_are_taken(
@@ -269,16 +269,53 @@ def test_new_conn_id_still_mints_when_some_ids_are_taken(
     monkeypatch.setattr("reactor_runtime.runner.connection_manager._MIN_CONN_ID", 1002)
     monkeypatch.setattr("reactor_runtime.runner.connection_manager._MAX_CONN_ID", 1003)
     cm, _ = waiting_manager()
-    assert {int(cm.new_conn_id()), int(cm.new_conn_id())} == {1002, 1003}
+    assert {int(cm.new_conn_id("webrtc")), int(cm.new_conn_id("webrtc"))} == {1002, 1003}
+
+
+def test_new_conn_id_skips_an_id_another_transport_claimed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("reactor_runtime.runner.connection_manager._MIN_CONN_ID", 1002)
+    monkeypatch.setattr("reactor_runtime.runner.connection_manager._MAX_CONN_ID", 1003)
+    cm, _ = waiting_manager()
+    cm.claim_conn_id(ConnId(1002), "webrtc")
+    assert int(cm.new_conn_id("room")) == 1003
+
+
+def test_claim_conn_id_refuses_an_id_another_transport_holds() -> None:
+    cm, _ = waiting_manager()
+    minted = cm.new_conn_id("room")
+    with pytest.raises(ConnectionIdClaimedError) as refused:
+        cm.claim_conn_id(minted, "webrtc")
+    assert refused.value.conn_id == minted
+
+
+def test_claim_conn_id_accepts_an_id_the_same_transport_holds() -> None:
+    # A client's second offer on its own id is a reconnect, not a conflict.
+    cm, _ = waiting_manager()
+    cm.claim_conn_id(ConnId(5001), "webrtc")
+    cm.claim_conn_id(ConnId(5001), "webrtc")
+    minted = cm.new_conn_id("webrtc")
+    cm.claim_conn_id(minted, "webrtc")
+
+
+def test_a_claim_outlives_the_connection_that_made_it() -> None:
+    cm, _ = waiting_manager()
+    conn_id = cm.new_conn_id("room")
+    cm.register(FakeConnection(conn_id))
+    cm.drop(conn_id)
+    with pytest.raises(ConnectionIdClaimedError):
+        cm.claim_conn_id(conn_id, "webrtc")
 
 
 @pytest.mark.asyncio
-async def test_close_all_frees_the_id_pool_for_the_next_session() -> None:
+async def test_close_all_frees_every_claim_for_the_next_session() -> None:
     cm, _ = waiting_manager()
-    cm.register(FakeConnection(cm.new_conn_id()))
+    conn_id = cm.new_conn_id("room")
+    cm.register(FakeConnection(conn_id))
     await cm.close_all()
-    # Session teardown clears the used-id pool so the next session starts fresh.
-    assert cm._used_conn_ids == set()
+    # Session teardown clears the claims, so the next session starts fresh.
+    cm.claim_conn_id(conn_id, "webrtc")
 
 
 def test_first_connection_moves_session_to_streaming() -> None:
@@ -948,3 +985,35 @@ def test_broadcast_media_leaves_out_a_connection_that_rejected_the_chunk() -> No
     sent = cm.broadcast_media(MediaChunk(bundle=MediaBundle(), fps=30.0, n_frames=1))
 
     assert sent == [ConnId(2)]
+
+
+def test_claim_conn_id_says_whether_the_claim_is_new() -> None:
+    cm, _ = waiting_manager()
+
+    assert cm.claim_conn_id(ConnId(5001), "webrtc") is True
+    assert cm.claim_conn_id(ConnId(5001), "webrtc") is False
+
+
+def test_release_conn_id_frees_only_the_releasing_transports_claim() -> None:
+    cm, _ = waiting_manager()
+    cm.claim_conn_id(ConnId(5001), "webrtc")
+    cm.claim_conn_id(ConnId(5002), "room")
+
+    cm.release_conn_id(ConnId(5001), "webrtc")
+    cm.release_conn_id(ConnId(5002), "webrtc")
+
+    assert cm.claim_conn_id(ConnId(5001), "room") is True
+    with pytest.raises(ConnectionIdClaimedError):
+        cm.claim_conn_id(ConnId(5002), "webrtc")
+
+
+@pytest.mark.asyncio
+async def test_the_system_clients_id_is_held_by_the_runtime_in_every_session() -> None:
+    cm, _ = waiting_manager()
+    with pytest.raises(ConnectionIdClaimedError):
+        cm.claim_conn_id(ConnId(0), "webrtc")
+
+    await cm.close_all()
+
+    with pytest.raises(ConnectionIdClaimedError):
+        cm.claim_conn_id(ConnId(0), "webrtc")
