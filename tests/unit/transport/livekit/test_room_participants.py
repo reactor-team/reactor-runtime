@@ -58,7 +58,7 @@ class ParticipantControl(FakeControl):
 
 
 def _person(identity: str) -> SimpleNamespace:
-    return SimpleNamespace(identity=identity)
+    return SimpleNamespace(identity=identity, track_publications={})
 
 
 async def _settle() -> None:

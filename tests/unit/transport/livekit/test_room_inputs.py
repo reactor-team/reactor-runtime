@@ -91,6 +91,7 @@ class Reader:
         self._chunks = chunks
         self.released = asyncio.Event()
         self.read: list[bytes] = []
+        self.closed = False
 
     def __aiter__(self) -> AsyncIterator[bytes]:
         return self._iter()
@@ -98,8 +99,14 @@ class Reader:
     async def _iter(self) -> AsyncIterator[bytes]:
         await self.released.wait()
         for chunk in self._chunks:
+            # A closed reader ends, as the SDK's does.
+            if self.closed:
+                return
             self.read.append(chunk)
             yield chunk
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class Sink:
@@ -165,8 +172,9 @@ async def test_a_new_stream_on_the_topic_ends_the_open_one() -> None:
         ("AUDIO_2", False),
         ("AUDIO_2", True),
     ]
-    # The superseded stream is still read to its end, so its chunks do not pile up.
-    assert first.read == first._chunks
+    # The superseded stream is closed, so its chunks stop arriving.
+    assert first.closed
+    assert first.read == []
 
 
 async def test_the_first_participant_to_send_holds_the_track() -> None:
@@ -182,7 +190,8 @@ async def test_the_first_participant_to_send_holds_the_track() -> None:
     await _settle()
 
     assert {m["stream_id"] for m in sink.metadata()} == {"AUDIO_1"}
-    assert other.read == other._chunks
+    assert other.closed
+    assert other.read == []
 
 
 async def test_a_participant_that_leaves_ends_its_stream_and_frees_the_track() -> None:
@@ -202,6 +211,7 @@ async def test_a_participant_that_leaves_ends_its_stream_and_frees_the_track() -
         ("AUDIO_2", False),
         ("AUDIO_2", True),
     ]
+    assert stuck.closed
 
 
 async def test_a_stream_mapped_to_a_video_track_is_refused() -> None:
@@ -214,6 +224,55 @@ async def test_a_stream_mapped_to_a_video_track_is_refused() -> None:
     await _settle()
 
     assert sink.frames == []
+    assert reader.closed
+
+
+@pytest.mark.parametrize(
+    "attributes",
+    [
+        {"sample_rate": "0", "num_channels": "1"},
+        {"sample_rate": "24k", "num_channels": "1"},
+        {"sample_rate": "1000000", "num_channels": "1"},
+        {"sample_rate": "24000", "num_channels": "0"},
+        {"sample_rate": "24000", "num_channels": "4096"},
+    ],
+)
+async def test_a_stream_with_an_unusable_format_is_refused_without_holding_the_track(
+    attributes: dict[str, str],
+) -> None:
+    sink = Sink()
+    room = inputs(sink)
+    bad = Reader("AUDIO_1", [pcm(np.ones(240, np.int16))], attributes=attributes)
+    good = Reader("AUDIO_2", [pcm(np.ones(240, np.int16))])
+
+    room.on_byte_stream(cast(Any, bad), "agent", ConnId(5120))
+    room.on_byte_stream(cast(Any, good), "other", ConnId(10_001))
+    bad.released.set()
+    good.released.set()
+    await _settle()
+
+    assert bad.closed
+    assert {m["stream_id"] for m in sink.metadata()} == {"AUDIO_2"}
+
+
+async def test_a_stream_without_format_attributes_is_taken_at_the_tracks_rate_in_mono() -> None:
+    sink = Sink()
+    room = inputs(sink)
+    reader = Reader("AUDIO_1", [pcm(np.ones(480, np.int16))], attributes={})
+
+    room.on_byte_stream(cast(Any, reader), "agent", ConnId(5120))
+    reader.released.set()
+    await _settle()
+
+    assert [f.data.shape for _, _, f in sink.frames] == [(1, 240), (1, 240), (1, 0)]
+
+
+def test_stream_samples_are_read_as_little_endian() -> None:
+    framer = StreamFramer(rate=200, stream_rate=200, channels=1)
+
+    (frame,) = framer.push(b"\x01\x00\x00\x01")
+
+    assert frame.tolist() == [[1, 256]]
 
 
 def test_a_protocol_topic_cannot_feed_an_input_track() -> None:

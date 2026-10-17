@@ -108,6 +108,9 @@ class FakeControl:
     def connection_failed(self, conn_id: ConnId, transport: str, reason: str) -> None:
         self.failed.append((conn_id, transport, reason))
 
+    def media_received(self, conn_id: ConnId, track: str, frame: Any) -> None:
+        pass
+
 
 def _session(room: FakeRoom, control: FakeControl) -> RoomSession:
     return RoomSession(
