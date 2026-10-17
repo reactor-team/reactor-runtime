@@ -793,6 +793,62 @@ def test_an_observer_that_raises_does_not_stop_the_others() -> None:
     assert healthy.observed == [("message", "greeting", {"text": "hello"}, None)]
 
 
+class BrokenWire(ObservingConnection):
+    """An observer whose encoded sends fail, as a wire that is not up yet does."""
+
+    def send_message(self, payload: bytes | str) -> None:
+        raise RuntimeError("data path not up")
+
+
+def test_an_observer_whose_encoded_send_fails_still_takes_its_reply() -> None:
+    runner = _runner()
+    observer = BrokenWire(1)
+    runner.connection_opened(observer)
+
+    with pytest.raises(RuntimeError, match="data path not up"):
+        runner._send_addressed(ConnId(1), Greeting(text="hi"), "req-1")
+
+    assert observer.observed == [("message", "greeting", {"text": "hi"}, "req-1")]
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        (None, ("ack", "req-1")),
+        (CommandFailure("not_now", "Not now."), ("failed", "req-1", "not_now", "Not now.")),
+    ],
+)
+def test_an_observer_whose_encoded_send_fails_still_takes_its_ack_or_failure(
+    reply: CommandFailure | None, expected: tuple[str, ...]
+) -> None:
+    runner = _runner()
+    observer = BrokenWire(1)
+    runner.connection_opened(observer)
+
+    with pytest.raises(RuntimeError, match="data path not up"):
+        runner._send_addressed(ConnId(1), reply, "req-1")
+
+    assert observer.observed == [expected]
+
+
+def test_a_connection_that_joins_during_a_broadcast_takes_neither_form_of_it() -> None:
+    runner = _runner()
+    late = ObservingConnection(2)
+
+    class Slow(FakeConnection):
+        def send_message(self, payload: bytes | str) -> None:
+            # Another connection registers while this broadcast is on the wire.
+            runner.connection_opened(late)
+            super().send_message(payload)
+
+    runner.connection_opened(Slow(1))
+
+    runner._broadcast_message(Greeting(text="hello"))
+
+    assert late.sent == []
+    assert late.observed == []
+
+
 async def _observed(conn: ObservingConnection, count: int = 1) -> list[tuple[Any, ...]]:
     for _ in range(200):
         if len(conn.observed) >= count:

@@ -44,7 +44,6 @@ import inspect
 import random
 from collections.abc import Callable, Mapping
 from dataclasses import replace
-from typing import Any
 
 from reactor_runtime.core import (
     Connection,
@@ -385,7 +384,12 @@ class ConnectionManager:
         if conn is not None:
             conn.pause_track(name)
 
-    def broadcast(self, encode: Callable[[ProtocolVersion], bytes | str]) -> None:
+    def broadcast(
+        self,
+        encode: Callable[[ProtocolVersion], bytes | str],
+        *,
+        observe: Callable[[MessageObserver], None] | None = None,
+    ) -> None:
         """Encode and send a frame to every connection in its own codec.
 
         *encode* renders the outbound frame for a given wire version. Each
@@ -393,28 +397,59 @@ class ConnectionManager:
         mixed-version session reaches every client in the version it speaks.
         Encoding happens outside the per-wire containment, so a frame the codec
         cannot render raises here rather than being absorbed once per client.
+
+        *observe* hands the same message as plain data to each connection that
+        is a :class:`MessageObserver`. Both deliveries go to one snapshot of the
+        connections, so an observer is told about exactly the broadcasts its
+        connection was sent; see :meth:`send` for their order.
         """
-        for conn in self._by_id.values():
+        for conn in list(self._by_id.values()):
+            if observe is not None and isinstance(conn, MessageObserver):
+                _observe(conn, observe)
             frame = encode(conn.protocol_version)
             _deliver(conn, "broadcast", lambda c, payload=frame: c.send_message(payload))
 
-    def send(self, cid: ConnId, encode: Callable[[ProtocolVersion], bytes | str]) -> None:
-        """Encode and send a frame to one connection in its codec, if registered."""
+    def send(
+        self,
+        cid: ConnId,
+        encode: Callable[[ProtocolVersion], bytes | str],
+        *,
+        observe: Callable[[MessageObserver], None] | None = None,
+    ) -> None:
+        """Encode and send a frame to one connection in its codec, if registered.
+
+        *observe* hands the same message as plain data to that connection when
+        it is a :class:`MessageObserver`. The plain data goes first and its
+        failure is contained, so an encoded send that raises cannot keep it
+        from an observer that answers on it, such as an RPC caller.
+        """
         conn = self._by_id.get(cid)
-        if conn is not None:
-            conn.send_message(encode(conn.protocol_version))
+        if conn is None:
+            return
+        if observe is not None and isinstance(conn, MessageObserver):
+            _observe(conn, observe)
+        conn.send_message(encode(conn.protocol_version))
 
     def send_command_ack(
-        self, cid: ConnId, encode: Callable[[ProtocolVersion], bytes | str]
+        self,
+        cid: ConnId,
+        encode: Callable[[ProtocolVersion], bytes | str],
+        *,
+        observe: Callable[[MessageObserver], None] | None = None,
     ) -> None:
         """Send a command acknowledgement to one connection, if its codec carries one.
 
         The ack correlates a client's awaited command to its completion on the
         data channel. A legacy (v0) client issues fire-and-forget commands and
-        expects no reply, so it is sent none.
+        expects no reply, so it is sent none. *observe* reaches an observing
+        connection first, as in :meth:`send`, whatever its codec.
         """
         conn = self._by_id.get(cid)
-        if conn is None or conn.protocol_version is ProtocolVersion.V0:
+        if conn is None:
+            return
+        if observe is not None and isinstance(conn, MessageObserver):
+            _observe(conn, observe)
+        if conn.protocol_version is ProtocolVersion.V0:
             return
         conn.send_message(encode(conn.protocol_version))
 
@@ -472,37 +507,6 @@ class ConnectionManager:
             conn.send_control(frame)
         else:
             conn.send_message(frame)
-
-    def observe_message(
-        self,
-        cid: ConnId | None,
-        name: str,
-        data: Mapping[str, Any],
-        request_id: str | None = None,
-    ) -> None:
-        """Hand a model message as plain data to the connections that observe messages.
-
-        Reaches one connection when *cid* is set and every connection when it
-        is ``None``, beside the encoded send that already reached them. A
-        connection that is not a :class:`MessageObserver` is skipped, and a
-        failure on one observer is contained like a failed send.
-        """
-        targets = self._by_id.values() if cid is None else [self._by_id.get(cid)]
-        for conn in targets:
-            if isinstance(conn, MessageObserver):
-                _observe(conn, lambda c: c.message_sent(name, data, request_id))
-
-    def observe_acknowledgement(self, cid: ConnId, request_id: str) -> None:
-        """Tell an observing connection that its command ended with no reply message."""
-        conn = self._by_id.get(cid)
-        if isinstance(conn, MessageObserver):
-            _observe(conn, lambda c: c.command_acknowledged(request_id))
-
-    def observe_failure(self, cid: ConnId, request_id: str, code: str, message: str) -> None:
-        """Tell an observing connection that its command failed, with the failure's code."""
-        conn = self._by_id.get(cid)
-        if isinstance(conn, MessageObserver):
-            _observe(conn, lambda c: c.command_failed(request_id, code, message))
 
     def broadcast_media(
         self, chunk: MediaChunk, *, abort: Callable[[], bool] | None = None

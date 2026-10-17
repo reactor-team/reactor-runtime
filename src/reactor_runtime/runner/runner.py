@@ -1566,9 +1566,9 @@ class Runner(ServiceComponent, ConnectionSink):
             with self._step_messages_lock:
                 self._step_messages.append(wire)
         self._connections.broadcast(
-            lambda version: self._codec_for(version).encode_model_message(message.name, data)[1]
+            lambda version: self._codec_for(version).encode_model_message(message.name, data)[1],
+            observe=lambda observer: observer.message_sent(message.name, data, None),
         )
-        self._connections.observe_message(None, message.name, data)
 
     def _send_addressed(
         self,
@@ -1599,8 +1599,8 @@ class Runner(ServiceComponent, ConnectionSink):
             self._connections.send_command_ack(
                 conn_id,
                 lambda version: self._codec_for(version).encode_command_ack(request_id)[1],
+                observe=lambda observer: observer.command_acknowledged(request_id),
             )
-            self._connections.observe_acknowledgement(conn_id, request_id)
             return
         data = message.to_wire_format()["data"]
         self._connections.send(
@@ -1608,8 +1608,8 @@ class Runner(ServiceComponent, ConnectionSink):
             lambda version: self._codec_for(version).encode_model_message(
                 message.name, data, request_id=request_id
             )[1],
+            observe=lambda observer: observer.message_sent(message.name, data, request_id),
         )
-        self._connections.observe_message(conn_id, message.name, data, request_id)
 
     def _on_handler_failure(
         self, failure: CommandFailure, conn_id: ConnId, request_id: str | None
@@ -1701,8 +1701,8 @@ class Runner(ServiceComponent, ConnectionSink):
             lambda version: self._codec_for(version).encode_command_error(request_id, code, detail)[
                 1
             ],
+            observe=lambda observer: observer.command_failed(request_id, code, detail),
         )
-        self._connections.observe_failure(conn_id, request_id, code, detail)
 
     def _broadcast_moderation_notice(self) -> None:
         """Tell every client the session is ending on a moderation verdict.
