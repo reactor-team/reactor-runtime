@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import importlib
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
@@ -30,8 +30,12 @@ from reactor_runtime.core import (
     RecordingConfig,
     RuntimeConfig,
     StepResultsConfig,
+    TrackDirection,
 )
 from reactor_runtime.interface.internal.reactor_core import ReactorCore
+
+if TYPE_CHECKING:
+    from reactor_runtime.interface.model.contract import ModelContract
 
 MANIFEST = "reactor.yaml"
 
@@ -212,11 +216,13 @@ def _step_results_from_manifest(runtime: dict[str, Any]) -> StepResultsConfig:
 def _livekit_from_manifest(runtime: dict[str, Any]) -> LiveKitConfig:
     """Parse the manifest's ``runtime.livekit`` block into a :class:`LiveKitConfig`.
 
-    A missing block leaves the configuration empty. Unlike the recording and
-    step-results blocks, a block of the wrong shape is refused rather than
-    tolerated: every entry connects a room signal to the model, and one that
-    is silently dropped is a signal the model never receives. Unknown keys
-    are ignored so a manifest can carry forward-looking settings.
+    A missing block, or a missing key in it, leaves that part empty. Unlike
+    the recording and step-results blocks, a block of the wrong shape is
+    refused rather than tolerated: every entry connects a room signal to the
+    model, and one that is silently dropped is a signal the model never
+    receives. A key present with no value (``livekit:`` or ``rpc:`` left
+    empty) is refused the same way. Unknown keys are ignored so a manifest
+    can carry forward-looking settings.
 
     Args:
         runtime: The manifest's ``runtime`` section.
@@ -228,21 +234,37 @@ def _livekit_from_manifest(runtime: dict[str, Any]) -> LiveKitConfig:
         ValueError: The block, or one of its entries, has the wrong shape, or
             an inbound method is listed twice.
     """
-    block = runtime.get("livekit")
-    if block is None:
+    if "livekit" not in runtime:
         return LiveKitConfig()
+    block = runtime["livekit"]
     if not isinstance(block, dict):
         raise ValueError("runtime.livekit must be a mapping")
     return LiveKitConfig(
-        rpc=_livekit_rpc(block.get("rpc")),
-        topics=_livekit_topics(block.get("topics")),
-        media_inputs=_livekit_media_inputs(block.get("media_inputs")),
+        rpc=_livekit_rpc(block["rpc"]) if "rpc" in block else (),
+        topics=_livekit_topics(block["topics"]) if "topics" in block else (),
+        media_inputs=(
+            _livekit_media_inputs(block["media_inputs"]) if "media_inputs" in block else {}
+        ),
+    )
+
+
+def check_livekit_block(config: LiveKitConfig, contract: ModelContract) -> None:
+    """Refuse a ``runtime.livekit`` block that names something *contract* does not declare.
+
+    Raises:
+        LiveKitBlockError: Naming the first command, message, or input track
+            the block refers to that the model lacks.
+    """
+    config.check(
+        commands=contract.commands.keys(),
+        messages=contract.messages.keys(),
+        input_tracks=[
+            name for name, info in contract.tracks.items() if info.direction is TrackDirection.IN
+        ],
     )
 
 
 def _livekit_rpc(raw: Any) -> tuple[LiveKitRpcMethod, ...]:
-    if raw is None:
-        return ()
     if not isinstance(raw, list):
         raise ValueError("runtime.livekit.rpc must be a list")
     entries: list[LiveKitRpcMethod] = []
@@ -272,16 +294,12 @@ def _livekit_rpc(raw: Any) -> tuple[LiveKitRpcMethod, ...]:
 
 
 def _livekit_topics(raw: Any) -> tuple[str, ...]:
-    if raw is None:
-        return ()
     if not isinstance(raw, list) or not all(isinstance(t, str) and t for t in raw):
         raise ValueError("runtime.livekit.topics must be a list of non-empty strings")
     return tuple(raw)
 
 
 def _livekit_media_inputs(raw: Any) -> dict[str, str]:
-    if raw is None:
-        return {}
     if not isinstance(raw, dict) or not all(
         isinstance(k, str) and k and isinstance(v, str) and v for k, v in raw.items()
     ):

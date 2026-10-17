@@ -355,17 +355,27 @@ async def test_start_loads_a_model_whose_livekit_block_names_what_it_declares(
     ],
 )
 async def test_start_refuses_a_livekit_block_naming_what_the_model_lacks(
-    monkeypatch: pytest.MonkeyPatch, livekit: LiveKitConfig
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, livekit: LiveKitConfig
 ) -> None:
     created_models.clear()
     monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
     runner = Runner(RuntimeConfig(model_ref="fake:Model", livekit=livekit))
 
-    await runner.start()
+    load_failures: list[float] = []
+    monkeypatch.setattr(
+        runner._model_metrics, "load_failed", lambda *, since: load_failures.append(since)
+    )
+
+    with caplog.at_level(logging.ERROR):
+        await runner.start()
 
     assert runner._sm.current_state is SessionState.TERMINATED
     # Checked before the model is built, so no weights load was spent on it.
     assert created_models == []
+    # A manifest mistake is reported as one, not as a model that failed to load.
+    assert load_failures == []
+    assert any("runtime.livekit block does not match" in r.getMessage() for r in caplog.records)
+    assert not any("model failed to load" in r.getMessage() for r in caplog.records)
 
 
 def test_every_session_state_has_a_lifecycle_word() -> None:

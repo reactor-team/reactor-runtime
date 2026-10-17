@@ -42,6 +42,7 @@ from reactor_runtime.core import (
     Health,
     HealthStatus,
     InputFrame,
+    LiveKitBlockError,
     MediaChunk,
     RuntimeConfig,
     RuntimeState,
@@ -64,7 +65,7 @@ from reactor_runtime.interface.internal.bridge import ModelBridge
 from reactor_runtime.interface.internal.reactor_core import CommandTimes, MediaOps
 from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.log import get_logger, set_session_id, set_state
-from reactor_runtime.manifest import import_model_class
+from reactor_runtime.manifest import check_livekit_block, import_model_class
 from reactor_runtime.message_gateway import InboundCommand, MessageGateway
 from reactor_runtime.metrics import (
     UNKNOWN_COMMAND,
@@ -379,15 +380,7 @@ class Runner(ServiceComponent, ConnectionSink):
         try:
             model_cls = import_model_class(self._cfg.model_ref)
             contract = ModelContract.of(model_cls)
-            self._cfg.livekit.check(
-                commands=contract.commands.keys(),
-                messages=contract.messages.keys(),
-                input_tracks=[
-                    name
-                    for name, info in contract.tracks.items()
-                    if info.direction is TrackDirection.IN
-                ],
-            )
+            check_livekit_block(self._cfg.livekit, contract)
             model = model_cls()
             await asyncio.to_thread(model.load, self._cfg.config_path)
             bridge = ModelBridge(model, contract)
@@ -406,6 +399,16 @@ class Runner(ServiceComponent, ConnectionSink):
                 frame_timing=self._on_frame_timing,
             )
             bridge.start()
+        except LiveKitBlockError as mismatch:
+            # A manifest mistake, not a model that failed to load: reported on
+            # its own and kept out of the load-failure count.
+            logger.error(
+                "the manifest's runtime.livekit block does not match the model; "
+                "terminating the session",
+                reason=str(mismatch),
+            )
+            self._sm.send(SessionEvent.INITIALIZATION_FAIL)
+            return
         except Exception:
             self._model_metrics.load_failed(since=started_at)
             logger.exception("model failed to load; terminating the session")

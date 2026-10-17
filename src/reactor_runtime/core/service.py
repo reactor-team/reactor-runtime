@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Protocol, runtime_checkable
 
 from reactor_runtime.core.values import Health
@@ -143,6 +144,14 @@ class LiveKitRpcMethod:
     message: str | None = None
 
 
+class LiveKitBlockError(ValueError):
+    """Raised when the manifest's ``runtime.livekit`` block names something the model lacks.
+
+    A manifest mistake, told apart from a model that fails to load, so it can
+    be reported as one.
+    """
+
+
 @dataclass(frozen=True)
 class LiveKitConfig:
     """How a LiveKit room reaches the model, drawn from the manifest's ``livekit:`` block.
@@ -156,12 +165,17 @@ class LiveKitConfig:
         topics: Data topic prefixes. A data packet on ``<prefix>.<command>``
             runs that command.
         media_inputs: Byte stream topics or remote track names, each mapped to
-            the declared input track it feeds.
+            the declared input track it feeds. Held read-only, and left out of
+            the hash, so the configuration stays hashable.
     """
 
     rpc: tuple[LiveKitRpcMethod, ...] = ()
     topics: tuple[str, ...] = ()
-    media_inputs: Mapping[str, str] = field(default_factory=dict)
+    media_inputs: Mapping[str, str] = field(default_factory=dict, hash=False)
+
+    def __post_init__(self) -> None:
+        """Hold ``media_inputs`` as a read-only copy of what was passed."""
+        object.__setattr__(self, "media_inputs", MappingProxyType(dict(self.media_inputs)))
 
     def check(
         self,
@@ -178,23 +192,23 @@ class LiveKitConfig:
             input_tracks: The input tracks the model declares.
 
         Raises:
-            ValueError: Naming the first entry that refers to something the
-                model does not declare.
+            LiveKitBlockError: Naming the first entry that refers to something
+                the model does not declare.
         """
         for entry in self.rpc:
             if entry.command is not None and entry.command not in commands:
-                raise ValueError(
+                raise LiveKitBlockError(
                     f"runtime.livekit.rpc: method {entry.method!r} runs command "
                     f"{entry.command!r}, which the model does not declare"
                 )
             if entry.message is not None and entry.message not in messages:
-                raise ValueError(
+                raise LiveKitBlockError(
                     f"runtime.livekit.rpc: method {entry.method!r} is called for message "
                     f"{entry.message!r}, which the model does not declare"
                 )
         for source, track in self.media_inputs.items():
             if track not in input_tracks:
-                raise ValueError(
+                raise LiveKitBlockError(
                     f"runtime.livekit.media_inputs: {source!r} feeds input track {track!r}, "
                     "which the model does not declare"
                 )

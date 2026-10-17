@@ -1,9 +1,17 @@
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
 from reactor_runtime import ReactorApp
-from reactor_runtime.core import LiveKitConfig, LiveKitRpcMethod, RecordingConfig, StepResultsConfig
+from reactor_runtime.core import (
+    LiveKitBlockError,
+    LiveKitConfig,
+    LiveKitRpcMethod,
+    RecordingConfig,
+    RuntimeConfig,
+    StepResultsConfig,
+)
 from reactor_runtime.manifest import import_model_class, load_config
 
 _MANIFEST = """\
@@ -353,6 +361,11 @@ def test_load_config_ignores_unknown_livekit_keys(tmp_path: Path) -> None:
         ("  livekit:\n    topics: ['']\n", "topics must be a list"),
         ("  livekit:\n    media_inputs: [lk.audio_stream]\n", "media_inputs must map"),
         ("  livekit:\n    media_inputs: {lk.audio_stream: 3}\n", "media_inputs must map"),
+        # A key present with no value is refused, not read as an empty block.
+        ("  livekit:\n", "runtime.livekit must be a mapping"),
+        ("  livekit:\n    rpc:\n", "rpc must be a list"),
+        ("  livekit:\n    topics:\n", "topics must be a list"),
+        ("  livekit:\n    media_inputs:\n", "media_inputs must map"),
     ],
 )
 def test_load_config_refuses_a_livekit_block_of_the_wrong_shape(
@@ -363,6 +376,25 @@ def test_load_config_refuses_a_livekit_block_of_the_wrong_shape(
 
     with pytest.raises(ValueError, match=reason):
         load_config(manifest)
+
+
+def test_a_livekit_block_keeps_the_runtime_config_hashable() -> None:
+    def config() -> RuntimeConfig:
+        livekit = LiveKitConfig(media_inputs={"lk.audio_stream": "agent_audio"})
+        return RuntimeConfig(model_ref="pipeline:Demo", livekit=livekit)
+
+    assert config() == config()
+    assert hash(config()) == hash(config())
+
+
+def test_a_livekit_blocks_media_inputs_cannot_be_changed() -> None:
+    sources = {"lk.audio_stream": "agent_audio"}
+    livekit = LiveKitConfig(media_inputs=sources)
+    sources["lk.other"] = "other"
+
+    assert dict(livekit.media_inputs) == {"lk.audio_stream": "agent_audio"}
+    with pytest.raises(TypeError):
+        cast(Any, livekit.media_inputs)["lk.other"] = "other"
 
 
 def test_livekit_check_accepts_a_block_naming_what_the_model_declares() -> None:
@@ -398,5 +430,5 @@ def test_livekit_check_accepts_a_block_naming_what_the_model_declares() -> None:
 def test_livekit_check_refuses_a_name_the_model_does_not_declare(
     config: LiveKitConfig, reason: str
 ) -> None:
-    with pytest.raises(ValueError, match=reason):
+    with pytest.raises(LiveKitBlockError, match=reason):
         config.check(commands={"c"}, messages={"d"}, input_tracks={"t"})
