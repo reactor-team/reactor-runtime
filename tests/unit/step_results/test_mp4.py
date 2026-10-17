@@ -1,3 +1,7 @@
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +18,7 @@ from reactor_runtime.core import (
     TrackKind,
 )
 from reactor_runtime.step_results import VideoUsage, write_mp4
+from reactor_runtime.step_results.mp4 import _video_options
 
 _CONFIG = StepResultsConfig(enabled=True)
 
@@ -176,6 +181,76 @@ def test_h265_is_used_when_configured(tmp_path: Path) -> None:
 
     (video,) = _decoded(path)
     assert video["codec"] == "hevc"
+
+
+# Encodes one- and two-frame H.265 tracks the way write_mp4 does and prints
+# each packet's (pts, dts).
+_SHORT_H265_TRACKS = """
+import json, sys
+from fractions import Fraction
+import av, numpy as np
+from reactor_runtime.core import StepResultsConfig
+from reactor_runtime.step_results import mp4
+
+config = StepResultsConfig(enabled=True, video_codec="h265")
+stamps = {}
+for count in (1, 2):
+    frames = np.zeros((count, 48, 64, 3), dtype=np.uint8)
+    container = av.open(f"{sys.argv[1]}/{count}.mp4", mode="w", format="mp4")
+    stream = mp4._add_video(container, frames, Fraction(24), config)
+    stamps[count] = [(p.pts, p.dts) for p in mp4._encode_video(stream, frames)]
+    container.close()
+print(json.dumps(stamps))
+"""
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="MALLOC_PERTURB_ is a glibc setting")
+def test_a_short_h265_track_decodes_each_packet_at_its_presentation_time(
+    tmp_path: Path,
+) -> None:
+    """A one- or two-frame H.265 track gets decode times that do not depend on the heap.
+
+    With B-frames, x265 releases up to 4.3 read the decode time of a track
+    shorter than three frames from memory they never set. glibc's
+    ``MALLOC_PERTURB_`` fills fresh memory with junk, so a value read that way
+    is wrong on every run rather than only when the memory was used before.
+    """
+    run = subprocess.run(
+        [sys.executable, "-c", _SHORT_H265_TRACKS, str(tmp_path)],
+        env={**os.environ, "MALLOC_PERTURB_": "165"},
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=True,
+    )
+    stamps = json.loads(run.stdout.strip().splitlines()[-1])
+
+    assert stamps == {"1": [[0, 0]], "2": [[0, 0], [1, 1]]}
+
+
+def test_an_h265_track_of_three_frames_keeps_its_b_frames(tmp_path: Path) -> None:
+    path = tmp_path / "output.mp4"
+    config = StepResultsConfig(enabled=True, video_codec="h265")
+    write_mp4(path, _bundle(_video("main_video", _frames(3))), 24, config)
+
+    with av.open(str(path)) as container:
+        stamps = [(p.pts, p.dts) for p in container.demux(video=0) if p.size]
+    pts, dts = stamps[0]
+    assert pts is not None
+    assert dts is not None
+    # A reordered stream decodes its first packet before it is presented.
+    assert dts < pts
+
+
+@pytest.mark.parametrize(("frames", "bframes_off"), [(1, True), (2, True), (3, False), (24, False)])
+def test_only_an_h265_track_shorter_than_three_frames_turns_b_frames_off(
+    frames: int, bframes_off: bool
+) -> None:
+    h265 = _video_options(StepResultsConfig(enabled=True, video_codec="h265"), frames)
+    h264 = _video_options(StepResultsConfig(enabled=True, video_codec="h264"), frames)
+
+    assert ("bframes=0" in h265["x265-params"].split(":")) is bframes_off
+    assert "x264-params" not in h264
 
 
 def test_the_file_is_laid_out_to_play_while_it_downloads(tmp_path: Path) -> None:
