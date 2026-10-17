@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from reactor_runtime.transport.webrtc.frames import (
+    InboundAudioConverter,
     bgra_to_rgb,
     inbound_audio_to_mono,
     rgb_to_bgra,
@@ -86,3 +87,56 @@ def test_inbound_audio_to_mono_keeps_mono() -> None:
     out = inbound_audio_to_mono(pcm, channels=1)
     assert out.shape == (1, 3)
     assert out.tolist() == [[1, 2, 3]]
+
+
+def _tone(rate: int, frames: int, hz: float = 440.0) -> list[np.ndarray]:
+    """*frames* 10 ms frames of a continuous tone at *rate*, as ``(1, M)`` int16."""
+    size = rate // 100
+    t = np.arange(frames * size) / rate
+    tone = (8_000 * np.sin(2 * np.pi * hz * t)).astype(np.int16)
+    return [tone[i * size : (i + 1) * size].reshape(1, -1) for i in range(frames)]
+
+
+def test_samples_at_the_declared_rate_pass_through_untouched() -> None:
+    converter = InboundAudioConverter(48_000)
+    [samples] = _tone(48_000, 1)
+
+    assert converter.convert(samples, 48_000) is samples
+
+
+def test_samples_at_another_rate_are_resampled_to_the_declared_rate() -> None:
+    converter = InboundAudioConverter(24_000)
+
+    out = np.concatenate(
+        [converter.convert(chunk, 48_000).reshape(-1) for chunk in _tone(48_000, 100)]
+    )
+
+    # One second in, one second out at 24 kHz, give or take the resampler's delay.
+    assert abs(out.size - 24_000) <= 48
+    peak_hz = np.fft.rfftfreq(out.size, 1 / 24_000)[int(np.abs(np.fft.rfft(out)).argmax())]
+    assert abs(peak_hz - 440.0) < 2
+
+
+def test_a_change_of_arriving_rate_rebuilds_the_resampler() -> None:
+    converter = InboundAudioConverter(24_000)
+    before = sum(converter.convert(chunk, 48_000).size for chunk in _tone(48_000, 50))
+    after = sum(converter.convert(chunk, 16_000).size for chunk in _tone(16_000, 50))
+
+    assert abs(before - 12_000) <= 48
+    assert abs(after - 12_000) <= 48
+
+
+def test_audio_after_a_stretch_at_the_declared_rate_is_resampled_afresh() -> None:
+    converter = InboundAudioConverter(24_000)
+    for chunk in _tone(48_000, 5):
+        converter.convert(chunk, 48_000)
+    for chunk in _tone(24_000, 5):
+        converter.convert(chunk, 24_000)
+
+    later = _tone(48_000, 3, hz=880)
+    resumed = [converter.convert(chunk, 48_000) for chunk in later]
+    fresh = InboundAudioConverter(24_000)
+    expected = [fresh.convert(chunk, 48_000) for chunk in later]
+
+    # Nothing from before the declared-rate stretch is carried into the new audio.
+    assert all(np.array_equal(a, b) for a, b in zip(resumed, expected, strict=True))

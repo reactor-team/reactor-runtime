@@ -138,6 +138,7 @@ from reactor_runtime.protocol import Channel, ProtocolVersion, sniff
 from reactor_runtime.transport.webrtc.config import WebRtcConfig
 from reactor_runtime.transport.webrtc.frame_stages import FrameStageWindow
 from reactor_runtime.transport.webrtc.frames import (
+    InboundAudioConverter,
     bgra_to_rgb,
     inbound_audio_to_mono,
     rgb_to_bgra,
@@ -766,11 +767,32 @@ class WebRTCPeer:
         self.frame_stages.add(name, "delivery", (time.perf_counter() - decoded_at) * 1000.0)
 
     def _make_audio_sink(self, name: str) -> Callable[[bytes, int, int, int], None]:
+        """Build the callback that turns decoded PCM into InputFrames at the track's rate.
+
+        The decoder reports the rate it decoded at, which need not be the rate
+        the track declares, so the samples are brought to the declared rate
+        before the model sees them. A track the model does not declare keeps
+        the decoded rate.
+        """
+        declared = next(
+            (
+                int(info.rate)
+                for info in self._track_map.by_direction(TrackDirection.IN)
+                if info.name == name and info.rate > 0
+            ),
+            None,
+        )
+        converter = InboundAudioConverter(declared) if declared is not None else None
+
         def sink(pcm: bytes, sample_rate: int, channels: int, frames: int) -> None:
             if self._stop_event.is_set():
                 return
-            frame = InputFrame(data=inbound_audio_to_mono(pcm, channels))
-            self._fire(self._cb_media, name, frame)
+            samples = inbound_audio_to_mono(pcm, channels)
+            if converter is not None:
+                samples = converter.convert(samples, sample_rate)
+                if not samples.size:
+                    return
+            self._fire(self._cb_media, name, InputFrame(data=samples))
 
         return sink
 
