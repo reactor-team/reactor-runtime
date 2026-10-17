@@ -68,9 +68,14 @@ class FakeRoom:
         self.local_participant = FakeParticipant(publish or Gate())
         self.remote_participants: dict[str, Any] = {}
         self.disconnects = 0
+        self.handlers: dict[str, Any] = {}
+        self.stream_handlers: dict[str, Any] = {}
 
     def on(self, event: str, callback: Any) -> None:
-        pass
+        self.handlers[event] = callback
+
+    def register_byte_stream_handler(self, topic: str, handler: Any) -> None:
+        self.stream_handlers[topic] = handler
 
     async def connect(self, url: str, token: str) -> None:
         await self.connect_gate.pass_through()

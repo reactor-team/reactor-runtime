@@ -10,12 +10,25 @@ protocol's two message families, as the WebRTC transport's two data channels
 do. A message larger than :data:`MAX_PACKET_BYTES` goes as a byte stream on
 the same topic. Messages to one participant leave in the order they were sent,
 through one queue, so a reply never overtakes the message sent before it.
+
+Messages from a participant reach the session in the order they arrived on
+their topic, as on a WebRTC data channel: a packet that arrives while an
+earlier byte stream on the same topic is still being read waits for it. Every
+stream belongs to the connection it arrived on, and is never handed to a later
+connection of the same identity. What one participant can hold is bounded:
+:data:`MAX_OPEN_STREAMS` streams at once, :data:`MAX_INBOUND_BYTES` of
+messages being read or waiting their turn, and :data:`MAX_OUTBOX_BYTES` of
+messages waiting to be sent to it. A message past a bound is dropped and
+logged.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
+from collections.abc import Callable
+from dataclasses import dataclass
 
 from livekit import rtc
 
@@ -42,9 +55,47 @@ message size each peer negotiates with the server (64,000 bytes measured
 against ``livekit-server`` 1.13), so this keeps a margin for every client.
 """
 
+MAX_STREAMED_MESSAGE_BYTES = 8 * 1024 * 1024
+"""The largest protocol message a participant may send as a byte stream; a larger one is dropped."""
+
+MAX_OPEN_STREAMS = 8
+"""How many byte streams one participant may have open at once; a stream past it is refused."""
+
+MAX_INBOUND_BYTES = 2 * MAX_STREAMED_MESSAGE_BYTES
+"""How many bytes of one participant's messages may be held while read or waiting their turn."""
+
+MAX_OUTBOX_BYTES = 2 * MAX_STREAMED_MESSAGE_BYTES
+"""How many bytes may wait to be sent to one participant; a message past it is dropped."""
+
+STREAM_READ_TIMEOUT_SECONDS = 30.0
+"""How long one byte stream may take to arrive before it is dropped."""
+
 # How long a closing connection waits for its queued messages to leave, so a
 # notice sent just before the session ends still reaches the participant.
 _CLOSE_DRAIN_SECONDS = 2.0
+
+
+@dataclass
+class _Inbound:
+    """One message from a participant, in its place in its topic's order."""
+
+    data: bytes | None = None
+    done: bool = False
+
+
+class _Warning:
+    """Log a recurring problem once as a warning, then quietly, until it clears."""
+
+    def __init__(self) -> None:
+        self._raised = False
+
+    def log(self, message: str, *args: object, exc_info: bool = False) -> None:
+        level = logging.DEBUG if self._raised else logging.WARNING
+        self._raised = True
+        logger.log(level, message, *args, exc_info=exc_info)
+
+    def clear(self) -> None:
+        self._raised = False
 
 
 class ParticipantConnection:
@@ -56,6 +107,7 @@ class ParticipantConnection:
         identity: str,
         participant: rtc.LocalParticipant,
         loop: asyncio.AbstractEventLoop,
+        on_message: Callable[[bytes, Channel], None],
     ) -> None:
         """Bind the connection to the participant it speaks to.
 
@@ -64,6 +116,8 @@ class ParticipantConnection:
             identity: The participant's identity in the room.
             participant: The session's own participant, which sends to it.
             loop: The loop the room runs on.
+            on_message: Called on the loop with each message the participant
+                sends, in order, while the connection is open.
         """
         self.id = conn_id
         self.identity = identity
@@ -71,11 +125,19 @@ class ParticipantConnection:
         self.capabilities = ConnectionCapabilities()
         self._participant = participant
         self._loop = loop
+        self._on_message = on_message
         # Messages to send, in order; None ends the queue.
         self._outbox: asyncio.Queue[tuple[str, bytes] | None] = asyncio.Queue()
+        self._outbox_bytes = 0
         self._pump = loop.create_task(self._send_all(), name=f"room-participant-{conn_id}")
         self._closed = False
-        self._refused_warned = False
+        # Messages received, in arrival order per topic, until their turn comes.
+        self._inbound: dict[Channel, deque[_Inbound]] = {c: deque() for c in Channel}
+        self._inbound_bytes = 0
+        self._readers: set[asyncio.Task[None]] = set()
+        self._send_failed = _Warning()
+        self._outbox_full = _Warning()
+        self._inbound_full = _Warning()
 
     @property
     def protocol_version(self) -> ProtocolVersion:
@@ -108,11 +170,53 @@ class ParticipantConnection:
     def pause_track(self, name: str) -> None:
         """Do nothing: the room's server manages who receives each track."""
 
+    def receive_packet(self, data: bytes, channel: Channel) -> None:
+        """Take a message the participant sent as a data packet, on the loop."""
+        if self._closed:
+            return
+        if not self._hold(len(data)):
+            self._log_over_budget()
+            return
+        self._inbound[channel].append(_Inbound(data, done=True))
+        self._deliver(channel)
+
+    def receive_stream(self, reader: rtc.ByteStreamReader, channel: Channel) -> None:
+        """Take a message the participant sent as a byte stream, on the loop.
+
+        The stream is read at once, and its message waits its turn behind
+        what arrived before it on the same topic. A stream past the bounds is
+        closed unread.
+        """
+        declared = reader.info.size or 0
+        if self._closed or len(self._readers) >= MAX_OPEN_STREAMS:
+            reader.close()
+            if not self._closed:
+                self._inbound_full.log(
+                    "refused a byte stream from participant %r: %d are already open",
+                    self.identity,
+                    MAX_OPEN_STREAMS,
+                )
+            return
+        if declared > MAX_STREAMED_MESSAGE_BYTES:
+            reader.close()
+            self._log_oversized()
+            return
+        slot = _Inbound()
+        self._inbound[channel].append(slot)
+        task = self._loop.create_task(self._read_stream(reader, slot, channel))
+        self._readers.add(task)
+        task.add_done_callback(self._readers.discard)
+
     async def close(self) -> None:
-        """Send what is queued, then stop. Idempotent."""
+        """Send what is queued, then stop. Idempotent.
+
+        Messages from the participant that have not reached the session yet
+        are dropped.
+        """
         if self._closed:
             return
         self._closed = True
+        self._stop_reading()
         # Through the loop's callbacks, so the end follows every send scheduled before it.
         self._loop.call_soon(self._outbox.put_nowait, None)
         try:
@@ -123,7 +227,78 @@ class ParticipantConnection:
     def drop(self) -> None:
         """Stop at once, for a participant that has left: nothing queued can reach it."""
         self._closed = True
+        self._stop_reading()
         self._pump.cancel()
+
+    def _stop_reading(self) -> None:
+        for task in self._readers:
+            task.cancel()
+        for queue in self._inbound.values():
+            queue.clear()
+        self._inbound_bytes = 0
+
+    def _hold(self, size: int) -> bool:
+        """Count *size* more inbound bytes against the budget, if they fit."""
+        if self._inbound_bytes + size > MAX_INBOUND_BYTES:
+            return False
+        self._inbound_bytes += size
+        return True
+
+    def _log_over_budget(self) -> None:
+        self._inbound_full.log(
+            "dropped a message from participant %r: its messages are over the limit",
+            self.identity,
+        )
+
+    def _log_oversized(self) -> None:
+        self._inbound_full.log(
+            "dropped a message from participant %r larger than %d bytes",
+            self.identity,
+            MAX_STREAMED_MESSAGE_BYTES,
+        )
+
+    async def _read_stream(
+        self, reader: rtc.ByteStreamReader, slot: _Inbound, channel: Channel
+    ) -> None:
+        data = bytearray()
+        try:
+            async with asyncio.timeout(STREAM_READ_TIMEOUT_SECONDS):
+                async for chunk in reader:
+                    if len(data) + len(chunk) > MAX_STREAMED_MESSAGE_BYTES:
+                        self._log_oversized()
+                        return
+                    if not self._hold(len(chunk)):
+                        self._log_over_budget()
+                        return
+                    data.extend(chunk)
+            slot.data = bytes(data)
+        except TimeoutError:
+            self._inbound_full.log(
+                "dropped a byte stream from participant %r that did not finish in %.0f s",
+                self.identity,
+                STREAM_READ_TIMEOUT_SECONDS,
+            )
+        except rtc.StreamError as error:
+            logger.debug("a byte stream from participant %r ended early: %s", self.identity, error)
+        finally:
+            reader.close()
+            slot.done = True
+            if not self._closed:
+                if slot.data is None:
+                    self._inbound_bytes -= len(data)
+                self._deliver(channel)
+
+    def _deliver(self, channel: Channel) -> None:
+        """Hand on the messages at the front of *channel* whose turn has come."""
+        queue = self._inbound[channel]
+        while queue and queue[0].done and not self._closed:
+            data = queue.popleft().data
+            if data is None:
+                continue
+            self._inbound_bytes -= len(data)
+            if self._inbound_bytes < MAX_INBOUND_BYTES // 2:
+                self._inbound_full.clear()
+            self._on_message(data, channel)
 
     def _enqueue(self, topic: str, payload: bytes | str) -> None:
         if self._closed:
@@ -131,7 +306,23 @@ class ParticipantConnection:
         data = payload.encode("utf-8") if isinstance(payload, str) else payload
         if self._loop.is_closed():
             return
-        self._loop.call_soon_threadsafe(self._outbox.put_nowait, (topic, data))
+        self._loop.call_soon_threadsafe(self._admit, topic, data)
+
+    def _admit(self, topic: str, data: bytes) -> None:
+        """Queue a message to send, on the loop, if the outbox has room for it.
+
+        A message sent before the connection closed is still admitted, so it
+        leaves ahead of the end of the queue.
+        """
+        if self._outbox_bytes + len(data) > MAX_OUTBOX_BYTES:
+            self._outbox_full.log(
+                "dropped a message to participant %r: %d bytes already wait to be sent",
+                self.identity,
+                self._outbox_bytes,
+            )
+            return
+        self._outbox_bytes += len(data)
+        self._outbox.put_nowait((topic, data))
 
     async def _send_all(self) -> None:
         while True:
@@ -144,16 +335,17 @@ class ParticipantConnection:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                level = logging.DEBUG if self._refused_warned else logging.WARNING
-                self._refused_warned = True
-                logger.log(
-                    level,
+                self._send_failed.log(
                     "sending to participant %r failed (%d bytes on %s)",
                     self.identity,
                     len(data),
                     topic,
                     exc_info=True,
                 )
+            finally:
+                self._outbox_bytes -= len(data)
+                if self._outbox_bytes < MAX_OUTBOX_BYTES // 2:
+                    self._outbox_full.clear()
 
     async def _send_one(self, topic: str, data: bytes) -> None:
         if len(data) <= MAX_PACKET_BYTES:
