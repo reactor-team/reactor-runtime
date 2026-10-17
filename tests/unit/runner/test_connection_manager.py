@@ -10,6 +10,7 @@ from reactor_runtime.core import (
     ClientTrackDirection,
     Connection,
     ConnectionCapabilities,
+    ConnectionOrigin,
     ConnId,
     FrameStage,
     MediaBundle,
@@ -331,7 +332,7 @@ def test_only_the_system_client_is_marked_in_the_journal_detail() -> None:
     sm.on_transition(seen.append)
     cm.register(FakeConnection(0), system=True)
     cm.register(FakeConnection(1002))
-    cm.drop(ConnId(0), system=True)
+    cm.drop(ConnId(0))
     cm.drop(ConnId(1002))
     assert [(t.event, dict(t.detail)) for t in seen] == [
         (SessionEvent.CONNECTION_OPENED, {"conn_id": 0, "system": True}),
@@ -341,6 +342,52 @@ def test_only_the_system_client_is_marked_in_the_journal_detail() -> None:
     ]
 
 
+class OriginConnection(FakeConnection):
+    """A connection that names the transport it comes from."""
+
+    def __init__(self, cid: int, origin: ConnectionOrigin) -> None:
+        super().__init__(cid)
+        self.origin = origin
+
+
+def test_a_connections_origin_rides_its_open_and_its_close() -> None:
+    cm, sm = waiting_manager()
+    seen: list[Transition] = []
+    sm.on_transition(seen.append)
+    cm.register(OriginConnection(4711, ConnectionOrigin(transport="room", system=True)))
+    cm.register(OriginConnection(5120, ConnectionOrigin(transport="room", identity="agent-7f3a")))
+    cm.register(OriginConnection(1002, ConnectionOrigin(transport="webrtc")))
+    cm.drop(ConnId(5120))
+    cm.drop(ConnId(4711))
+    assert [(t.event, dict(t.detail)) for t in seen] == [
+        (
+            SessionEvent.CONNECTION_OPENED,
+            {"conn_id": 4711, "system": True, "transport": "room"},
+        ),
+        (
+            SessionEvent.CONNECTION_OPENED,
+            {"conn_id": 5120, "transport": "room", "identity": "agent-7f3a"},
+        ),
+        (SessionEvent.CONNECTION_OPENED, {"conn_id": 1002, "transport": "webrtc"}),
+        (
+            SessionEvent.CONNECTION_CLOSED,
+            {"conn_id": 5120, "transport": "room", "identity": "agent-7f3a"},
+        ),
+        (
+            SessionEvent.CONNECTION_CLOSED,
+            {"conn_id": 4711, "system": True, "transport": "room"},
+        ),
+    ]
+
+
+def test_a_transports_system_connection_occupies_the_session() -> None:
+    cm, sm = waiting_manager()
+    cm.register(OriginConnection(4711, ConnectionOrigin(transport="room", system=True)))
+    expect_state(sm, SessionState.STREAMING)
+    cm.drop(ConnId(4711))
+    expect_state(sm, SessionState.ORPHANED)
+
+
 def test_a_connection_that_does_not_occupy_leaves_the_session_waiting() -> None:
     cm, sm = waiting_manager()
     seen: list[Transition] = []
@@ -348,7 +395,7 @@ def test_a_connection_that_does_not_occupy_leaves_the_session_waiting() -> None:
     cm.register(FakeConnection(0), system=True, occupies=False)
     assert cm.count == 1
     expect_state(sm, SessionState.WAITING)
-    cm.drop(ConnId(0), system=True)
+    cm.drop(ConnId(0))
     assert cm.count == 0
     expect_state(sm, SessionState.WAITING)
     # The drop closes the connection the way it opened: both are self-loops.
@@ -365,7 +412,7 @@ def test_a_connection_that_does_not_occupy_does_not_hold_the_session_streaming()
     expect_state(sm, SessionState.STREAMING)
     cm.drop(ConnId(1002))
     expect_state(sm, SessionState.ORPHANED)
-    cm.drop(ConnId(0), system=True)
+    cm.drop(ConnId(0))
     expect_state(sm, SessionState.ORPHANED)
 
 

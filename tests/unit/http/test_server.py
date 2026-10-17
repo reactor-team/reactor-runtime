@@ -15,6 +15,7 @@ class FakeRouter(TransportRouter):
     """A transport router that records its mount and adds one route."""
 
     protocol = "fake"
+    version = "0.1"
 
     def __init__(self) -> None:
         self.mounted_with: SessionControl | None = None
@@ -47,6 +48,7 @@ def test_mounts_route_groups_and_each_transport() -> None:
     paths = {getattr(route, "path", "") for route in server._app.routes}
     assert {"/start_session", "/stop_session", "/session", "/events", "/health"} <= paths
     assert "/sessions/{sid}/transport/fake/ping" in paths
+    assert runner.descriptor()["transports"] == [{"protocol": "fake", "version": "0.1"}]
 
 
 def test_cors_preflight_is_answered() -> None:
@@ -130,3 +132,22 @@ async def test_graceful_shutdown_is_bounded_short_whatever_the_grace_period() ->
     finally:
         await server.drain()
         await asyncio.wait_for(server.stop(), timeout=5.0)
+
+
+def test_a_router_that_names_no_transport_is_served_but_not_listed() -> None:
+    class Unnamed(TransportRouter):
+        """A router written before routers named their transport."""
+
+        def mount(self, app: FastAPI, runner: SessionControl) -> None:
+            @app.get("/sessions/{sid}/transport/unnamed/ping")
+            async def ping(sid: str) -> dict[str, str]:
+                return {"sid": sid}
+
+    runner = _runner()
+    server = HttpServer(
+        RuntimeConfig(model_ref="fake:Model"), runner, [Unnamed()], Health.healthy, _metrics()
+    )
+
+    paths = {getattr(route, "path", "") for route in server._app.routes}
+    assert "/sessions/{sid}/transport/unnamed/ping" in paths
+    assert runner.descriptor()["transports"] == []

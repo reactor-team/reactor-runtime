@@ -59,6 +59,9 @@ class FakeRunner:
         if self.claims.get(conn_id) == transport:
             del self.claims[conn_id]
 
+    def connection_failed(self, conn_id: ConnId, transport: str, reason: str) -> None:
+        pass
+
     def offer_admitted(self, conn_id: ConnId) -> None:
         self.admitted.append(conn_id)
 

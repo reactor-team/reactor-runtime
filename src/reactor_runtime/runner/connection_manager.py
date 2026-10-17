@@ -44,9 +44,11 @@ import inspect
 import random
 from collections.abc import Callable, Mapping
 from dataclasses import replace
+from typing import Any
 
 from reactor_runtime.core import (
     Connection,
+    ConnectionOriginSource,
     ConnId,
     FrameStageSource,
     MediaChunk,
@@ -82,9 +84,22 @@ _RESERVED_CLAIMS: Mapping[ConnId, str] = {SYSTEM_CONN_ID: "runtime"}
 _MAX_MINT_ATTEMPTS = 100
 
 
-def _connection_detail(cid: ConnId, system: bool) -> dict[str, ConnId | bool]:
-    """Build a connection move's journal detail, marking the system client only."""
-    return {"conn_id": cid, "system": True} if system else {"conn_id": cid}
+def _connection_detail(conn: Connection, system: bool) -> dict[str, Any]:
+    """Build a connection's journal detail: its id, and where it comes from.
+
+    A system connection is marked, whether the runner opened it or a
+    transport did. A connection that names its origin also carries its
+    transport, and its identity when the transport gives one.
+    """
+    origin = conn.origin if isinstance(conn, ConnectionOriginSource) else None
+    detail: dict[str, Any] = {"conn_id": conn.id}
+    if system or (origin is not None and origin.system):
+        detail["system"] = True
+    if origin is not None:
+        detail["transport"] = origin.transport
+        if origin.identity is not None:
+            detail["identity"] = origin.identity
+    return detail
 
 
 def _deliver(conn: Connection, operation: str, act: Callable[[Connection], None]) -> bool:
@@ -182,6 +197,9 @@ class ConnectionManager:
         # The registered connections that do not count toward occupancy, so a
         # drop sends the same kind of close its register sent as an open.
         self._unoccupying: set[ConnId] = set()
+        # The journal detail each registered connection opened with, so its
+        # close carries the same.
+        self._details: dict[ConnId, dict[str, Any]] = {}
 
     @property
     def count(self) -> int:
@@ -300,6 +318,11 @@ class ConnectionManager:
         replaces the handle without re-driving the session — connection identity
         across a reconnect is the transport's concern, not the manager's.
 
+        The ``CONNECTION_OPENED`` detail carries the connection's id, and the
+        origin a :class:`~reactor_runtime.core.ConnectionOriginSource` names:
+        ``system``, ``transport``, and ``identity``. The connection's close
+        carries the same detail.
+
         Args:
             conn: The connection to add.
             system: Whether this is the runtime's own system client. The
@@ -313,14 +336,15 @@ class ConnectionManager:
         self._by_id = {**self._by_id, conn.id: conn}
         if known:
             return
-        detail = _connection_detail(conn.id, system)
+        detail = _connection_detail(conn, system)
+        self._details[conn.id] = detail
         if occupies:
             self._sm.send(SessionEvent.CONNECTION_OPENED, **detail)
         else:
             self._unoccupying.add(conn.id)
             self._sm.send_without_occupancy(SessionEvent.CONNECTION_OPENED, **detail)
 
-    def drop(self, cid: ConnId, *, system: bool = False) -> None:
+    def drop(self, cid: ConnId) -> None:
         """Remove a connection and advance the session for its loss.
 
         Sends a single ``CONNECTION_CLOSED``; the state machine derives occupancy
@@ -329,17 +353,16 @@ class ConnectionManager:
         not occupying the session closes as a self-loop. The handle is removed
         before the event so a listener reading the live count sees this
         connection gone. Any tracks the connection still held are released. A
-        drop for an id that is not registered is ignored.
+        drop for an id that is not registered is ignored. The
+        ``CONNECTION_CLOSED`` carries the detail the connection opened with.
 
         Args:
             cid: The connection to remove.
-            system: Whether this is the runtime's own system client. The
-                ``CONNECTION_CLOSED`` then carries ``system=True`` in its detail.
         """
         if cid not in self._by_id:
             return
         self._by_id = {other: conn for other, conn in self._by_id.items() if other != cid}
-        detail = _connection_detail(cid, system)
+        detail = self._details.pop(cid)
         if cid in self._unoccupying:
             self._unoccupying.discard(cid)
             self._sm.send_without_occupancy(SessionEvent.CONNECTION_CLOSED, **detail)
@@ -367,6 +390,7 @@ class ConnectionManager:
         self._publishers.clear()
         self._claims = dict(_RESERVED_CLAIMS)
         self._unoccupying.clear()
+        self._details.clear()
         for conn in conns:
             await conn.close()
 
