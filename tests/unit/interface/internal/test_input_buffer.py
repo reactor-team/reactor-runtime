@@ -334,3 +334,11 @@ async def test_a_read_waits_while_a_sample_bound_still_has_room() -> None:
 
     with pytest.raises(TimeoutError):
         await buffer.read(3, timeout=0.05)
+
+
+async def test_a_read_more_frames_than_one_oversized_frame_leaves_room_for_fails_at_once() -> None:
+    buffer = InputBuffer(max_samples=480)
+    buffer.push(audio(0, samples=960))
+
+    with pytest.raises(ValueError, match="buffer is full at 1"):
+        await buffer.read(2, timeout=5.0)

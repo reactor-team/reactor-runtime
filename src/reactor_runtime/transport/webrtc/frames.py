@@ -93,8 +93,9 @@ class InboundAudioConverter:
 
     Samples that arrive at the declared rate pass through untouched. Any other
     rate is resampled, by a resampler that keeps its state from one frame to
-    the next so the stream stays continuous, and that is rebuilt when the
-    arriving rate changes. Used from one thread at a time.
+    the next so the stream stays continuous, and that starts again whenever
+    the arriving rate changes, a return to the declared rate included. Used
+    from one thread at a time.
 
     Args:
         target_rate: The sample rate the track declares, in Hz.
@@ -112,6 +113,8 @@ class InboundAudioConverter:
         delay line.
         """
         if sample_rate == self._target_rate:
+            # The next resampled frame belongs to a new stretch of audio.
+            self._resampler = None
             return samples
         if self._resampler is None or sample_rate != self._source_rate:
             self._resampler = av.AudioResampler(format="s16", layout="mono", rate=self._target_rate)

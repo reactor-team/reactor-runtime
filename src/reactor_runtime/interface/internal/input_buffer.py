@@ -297,6 +297,9 @@ class InputBuffer:
                 if gone.session == session:
                     evicted += 1
                 self._full = True
+            if self._max_samples is not None and self._samples > self._max_samples:
+                # The newest frame alone is over the bound: nothing more fits.
+                self._full = True
             self._total_received += 1
             self._condition.notify_all()
             return evicted

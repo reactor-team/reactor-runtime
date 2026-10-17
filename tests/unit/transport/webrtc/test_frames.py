@@ -124,3 +124,19 @@ def test_a_change_of_arriving_rate_rebuilds_the_resampler() -> None:
 
     assert abs(before - 12_000) <= 48
     assert abs(after - 12_000) <= 48
+
+
+def test_audio_after_a_stretch_at_the_declared_rate_is_resampled_afresh() -> None:
+    converter = InboundAudioConverter(24_000)
+    for chunk in _tone(48_000, 5):
+        converter.convert(chunk, 48_000)
+    for chunk in _tone(24_000, 5):
+        converter.convert(chunk, 24_000)
+
+    later = _tone(48_000, 3, hz=880)
+    resumed = [converter.convert(chunk, 48_000) for chunk in later]
+    fresh = InboundAudioConverter(24_000)
+    expected = [fresh.convert(chunk, 48_000) for chunk in later]
+
+    # Nothing from before the declared-rate stretch is carried into the new audio.
+    assert all(np.array_equal(a, b) for a, b in zip(resumed, expected, strict=True))
