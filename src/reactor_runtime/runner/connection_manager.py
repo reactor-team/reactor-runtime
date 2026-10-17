@@ -59,6 +59,7 @@ from reactor_runtime.core import (
 from reactor_runtime.log import get_logger
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.runner.state_machine import SessionStateMachine
+from reactor_runtime.runner.system_client import SYSTEM_CONN_ID
 from reactor_runtime.transport.router import ConnectionIdClaimedError, ConnectionsExhaustedError
 
 logger = get_logger(__name__)
@@ -68,6 +69,9 @@ logger = get_logger(__name__)
 # legacy single-connection compatibility, so explicit ids start at 1002.
 _MIN_CONN_ID = 1002
 _MAX_CONN_ID = 9999
+
+# Ids no transport can claim: the runtime's own system client.
+_RESERVED_CLAIMS: Mapping[ConnId, str] = {SYSTEM_CONN_ID: "runtime"}
 
 # The most times a mint redraws before giving up. Bounding the draw count keeps
 # allocation from spinning the event loop when the id space is dense, without
@@ -174,7 +178,7 @@ class ConnectionManager:
         # another's id. Scoped to the session: it is cleared on teardown so ids
         # do not accumulate across sessions and the full range is available
         # again to the next one.
-        self._claims: dict[ConnId, str] = {}
+        self._claims: dict[ConnId, str] = dict(_RESERVED_CLAIMS)
         # The registered connections that do not count toward occupancy, so a
         # drop sends the same kind of close its register sent as an open.
         self._unoccupying: set[ConnId] = set()
@@ -254,20 +258,36 @@ class ConnectionManager:
                 return conn_id
         raise ConnectionsExhaustedError
 
-    def claim_conn_id(self, conn_id: ConnId, transport: str) -> None:
+    def claim_conn_id(self, conn_id: ConnId, transport: str) -> bool:
         """Claim *conn_id* for *transport*, unless another transport holds it.
 
         For an id the transport did not mint here, such as one a client chose
         and offered. The claim lasts until session teardown, and claiming an id
         the same transport already holds is accepted, so a re-offer on a
-        connection's own id is still a reconnect.
+        connection's own id is still a reconnect. The system client's id is
+        held by the runtime, so no transport can claim it.
+
+        Returns:
+            Whether the claim is new.
 
         Raises:
             ConnectionIdClaimedError: If another transport holds *conn_id*.
         """
-        holder = self._claims.setdefault(conn_id, transport)
+        holder = self._claims.get(conn_id)
+        if holder is None:
+            self._claims[conn_id] = transport
+            return True
         if holder != transport:
             raise ConnectionIdClaimedError(conn_id)
+        return False
+
+    def release_conn_id(self, conn_id: ConnId, transport: str) -> None:
+        """Release *transport*'s claim on *conn_id*, for a connection it refused.
+
+        A claim held by another transport, or by the runtime, is left alone.
+        """
+        if self._claims.get(conn_id) == transport:
+            del self._claims[conn_id]
 
     def register(self, conn: Connection, *, system: bool = False, occupies: bool = True) -> None:
         """Add a connection and advance the session for it.
@@ -345,7 +365,7 @@ class ConnectionManager:
         conns = list(self._by_id.values())
         self._by_id = {}
         self._publishers.clear()
-        self._claims.clear()
+        self._claims = dict(_RESERVED_CLAIMS)
         self._unoccupying.clear()
         for conn in conns:
             await conn.close()

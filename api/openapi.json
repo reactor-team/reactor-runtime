@@ -1262,6 +1262,8 @@
             "name": "cid",
             "required": true,
             "schema": {
+              "maximum": 9999,
+              "minimum": 1001,
               "title": "Cid",
               "type": "integer"
             }
@@ -1338,6 +1340,8 @@
             "name": "cid",
             "required": true,
             "schema": {
+              "maximum": 9999,
+              "minimum": 1001,
               "title": "Cid",
               "type": "integer"
             }
@@ -1407,6 +1411,8 @@
             "name": "cid",
             "required": true,
             "schema": {
+              "maximum": 9999,
+              "minimum": 1001,
               "title": "Cid",
               "type": "integer"
             }
@@ -1519,6 +1525,8 @@
             "name": "cid",
             "required": true,
             "schema": {
+              "maximum": 9999,
+              "minimum": 1001,
               "title": "Cid",
               "type": "integer"
             }

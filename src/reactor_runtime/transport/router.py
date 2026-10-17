@@ -87,6 +87,14 @@ class ConnectionsExhaustedError(RuntimeError):
     """
 
 
+OFFERED_CONN_ID_MIN = 1001
+"""The lowest connection id a client may offer on: ``1001``, kept for legacy
+single-connection callers, below the ids the runtime mints from ``1002``."""
+
+CONN_ID_MAX = 9999
+"""The highest connection id a client may offer on, and the runtime mints."""
+
+
 class ConnectionIdClaimedError(RuntimeError):
     """Raised when a transport uses a connection id another transport has claimed.
 
@@ -155,7 +163,7 @@ class SessionControl(ConnectionSink, Protocol):
             ConnectionsExhaustedError: If the session's id space is used up.
         """
 
-    def claim_conn_id(self, conn_id: ConnId, transport: str) -> None:
+    def claim_conn_id(self, conn_id: ConnId, transport: str) -> bool:
         """Claim *conn_id* for *transport*, the first time the transport uses it.
 
         For an id the transport did not mint itself, such as one a client
@@ -163,8 +171,19 @@ class SessionControl(ConnectionSink, Protocol):
         first until the session ends, so claiming an id the same transport
         already holds is accepted.
 
+        Returns:
+            Whether the claim is new, so a transport that then refuses the
+            connection knows to :meth:`release_conn_id` it.
+
         Raises:
             ConnectionIdClaimedError: If another transport holds *conn_id*.
+        """
+
+    def release_conn_id(self, conn_id: ConnId, transport: str) -> None:
+        """Release a new claim on *conn_id* whose connection *transport* refused.
+
+        So a refused offer does not hold its id for the rest of the session.
+        An id another transport holds is left alone.
         """
 
     def offer_admitted(self, conn_id: ConnId) -> None:
@@ -188,11 +207,12 @@ class TransportRouter(ABC):
     :class:`SessionControl` surface — never reaching into transport internals.
 
     Attributes:
-        protocol: The transport's name, such as ``webrtc``. The router claims
-            the connection ids it uses under this name.
+        protocol: The transport's name, such as ``webrtc``. A router that
+            claims connection ids claims them under this name. ``None`` for a
+            router that names no transport.
     """
 
-    protocol: ClassVar[str]
+    protocol: ClassVar[str | None] = None
 
     @abstractmethod
     def mount(self, app: FastAPI, runner: SessionControl) -> None:

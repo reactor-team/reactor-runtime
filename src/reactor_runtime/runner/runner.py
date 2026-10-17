@@ -1180,13 +1180,20 @@ class Runner(ServiceComponent, ConnectionSink):
         """
         return self._connections.new_conn_id(transport)
 
-    def claim_conn_id(self, conn_id: ConnId, transport: str) -> None:
+    def claim_conn_id(self, conn_id: ConnId, transport: str) -> bool:
         """Claim *conn_id* for *transport*, unless another transport holds it.
+
+        Returns:
+            Whether the claim is new.
 
         Raises:
             ConnectionIdClaimedError: If another transport holds *conn_id*.
         """
-        self._connections.claim_conn_id(conn_id, transport)
+        return self._connections.claim_conn_id(conn_id, transport)
+
+    def release_conn_id(self, conn_id: ConnId, transport: str) -> None:
+        """Release a new claim on *conn_id* whose connection *transport* refused."""
+        self._connections.release_conn_id(conn_id, transport)
 
     def offer_admitted(self, conn_id: ConnId) -> None:
         """Stamp an admitted offer with the session it was admitted into.

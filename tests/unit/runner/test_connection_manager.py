@@ -985,3 +985,35 @@ def test_broadcast_media_leaves_out_a_connection_that_rejected_the_chunk() -> No
     sent = cm.broadcast_media(MediaChunk(bundle=MediaBundle(), fps=30.0, n_frames=1))
 
     assert sent == [ConnId(2)]
+
+
+def test_claim_conn_id_says_whether_the_claim_is_new() -> None:
+    cm, _ = waiting_manager()
+
+    assert cm.claim_conn_id(ConnId(5001), "webrtc") is True
+    assert cm.claim_conn_id(ConnId(5001), "webrtc") is False
+
+
+def test_release_conn_id_frees_only_the_releasing_transports_claim() -> None:
+    cm, _ = waiting_manager()
+    cm.claim_conn_id(ConnId(5001), "webrtc")
+    cm.claim_conn_id(ConnId(5002), "room")
+
+    cm.release_conn_id(ConnId(5001), "webrtc")
+    cm.release_conn_id(ConnId(5002), "webrtc")
+
+    assert cm.claim_conn_id(ConnId(5001), "room") is True
+    with pytest.raises(ConnectionIdClaimedError):
+        cm.claim_conn_id(ConnId(5002), "webrtc")
+
+
+@pytest.mark.asyncio
+async def test_the_system_clients_id_is_held_by_the_runtime_in_every_session() -> None:
+    cm, _ = waiting_manager()
+    with pytest.raises(ConnectionIdClaimedError):
+        cm.claim_conn_id(ConnId(0), "webrtc")
+
+    await cm.close_all()
+
+    with pytest.raises(ConnectionIdClaimedError):
+        cm.claim_conn_id(ConnId(0), "webrtc")
