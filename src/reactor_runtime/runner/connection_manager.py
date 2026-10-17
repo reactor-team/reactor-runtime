@@ -44,6 +44,7 @@ import inspect
 import random
 from collections.abc import Callable, Mapping
 from dataclasses import replace
+from typing import Any
 
 from reactor_runtime.core import (
     Connection,

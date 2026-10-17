@@ -4655,3 +4655,34 @@ def test_the_descriptor_lists_every_transport_the_runtime_serves() -> None:
     ]
     # The transport a client connects over by default stays WebRTC.
     assert descriptor["selected_transport"] == {"protocol": "webrtc", "version": "1.0"}
+
+
+async def test_a_connection_that_fails_after_its_session_ended_is_not_journalled_in_the_next(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    conn_id = started_runner.new_conn_id("room")
+    started_runner.offer_admitted(conn_id)
+    started_runner.stop_session()
+    await asyncio.sleep(0.01)
+    _expect_state(started_runner, SessionState.READY)
+    started_runner.start_session({})
+
+    started_runner.connection_failed(conn_id, "room", "the room could not be joined")
+
+    assert _moves(started_runner, SessionEvent.ERROR) == []
+
+
+async def test_a_connection_failure_with_no_session_running_is_not_journalled(
+    started_runner: Runner,
+) -> None:
+    started_runner.connection_failed(ConnId(4711), "room", "the room could not be joined")
+
+    assert _moves(started_runner, SessionEvent.ERROR) == []
+
+
+def test_the_selected_transport_names_the_webrtc_version_its_router_registered() -> None:
+    runner = _runner()
+    runner.add_transport("webrtc", "1.1")
+
+    assert runner.descriptor()["selected_transport"] == {"protocol": "webrtc", "version": "1.1"}
