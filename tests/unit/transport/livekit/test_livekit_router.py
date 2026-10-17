@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 from collections.abc import Mapping
 from typing import Any
@@ -5,6 +6,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
 from reactor_runtime.core import ClientStatsBatch, Connection, ConnId, InputFrame
 from reactor_runtime.protocol import Channel, ProtocolVersion
@@ -210,6 +212,33 @@ def test_a_join_from_an_ended_session_is_retired_by_the_next_session(
     assert (stale.retired, stale.state) == (True, RoomState.CLOSED)
     assert fresh.started
     assert client.post(_CONNECTIONS, json=_ROOM).status_code == 409
+
+
+async def test_concurrent_opens_while_an_ended_sessions_room_retires_make_one_room(
+    rooms: list[FakeRoomSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = FakeRunner()
+    app = FastAPI()
+    LiveKitRouter().mount(app, runner)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://runtime") as client:
+        await client.post(_CONNECTIONS, json=_ROOM)
+        runner.epoch = 2
+        stale = rooms[0]
+        retiring = asyncio.Event()
+
+        async def slow_retire() -> None:
+            await retiring.wait()
+            stale.state = RoomState.CLOSED
+
+        monkeypatch.setattr(stale, "retire", slow_retire)
+        first = asyncio.create_task(client.post(_CONNECTIONS, json=_ROOM))
+        second = asyncio.create_task(client.post(_CONNECTIONS, json=_ROOM))
+        await asyncio.sleep(0.05)
+        retiring.set()
+        statuses = sorted([(await first).status_code, (await second).status_code])
+
+    assert statuses == [202, 409]
+    assert len(rooms) == 2
 
 
 def test_a_room_connection_can_open_again_once_the_last_one_ended(
