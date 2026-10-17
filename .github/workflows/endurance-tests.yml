@@ -121,10 +121,21 @@ jobs:
           mise run //proto:gen
           uv sync --locked
 
+      # A LiveKit server for the room churn, in dev mode: it accepts tokens
+      # signed with the key `devkey` and the secret `secret`.
+      - name: Start a LiveKit server
+        if: matrix.scenario == 'room_participant_churn'
+        run: |
+          docker run -d --name livekit --network host livekit/livekit-server:v1.13.10 \
+            --dev --bind 127.0.0.1 --node-ip 127.0.0.1
+          for _ in $(seq 30); do curl -sf http://127.0.0.1:7880/ && exit 0; sleep 1; done
+          docker logs livekit; exit 1
+
       - name: Run ${{ matrix.scenario }}
         env:
           DURATION_MINUTES: ${{ inputs.duration_minutes }}
           ENDURANCE_RUNTIME_REF: ${{ inputs.runtime_ref }}
+          LIVEKIT_URL: ws://127.0.0.1:7880
         run: |
           set -euo pipefail
           export ENDURANCE_DURATION_SECONDS=$((10#$DURATION_MINUTES * 60))

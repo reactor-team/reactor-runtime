@@ -84,6 +84,9 @@ class Sample:
     live_client_stats: int
     # Running asyncio tasks on the runtime's loop.
     tasks: int
+    # Room participant connections alive after the probe's collection, with
+    # no participant in the room.
+    live_participants: int = 0
 
 
 def cpu_deltas(samples: list[Sample]) -> list[float]:
@@ -337,6 +340,7 @@ ZERO_FIELDS = (
     "live_peers",
     "live_pacers",
     "live_client_stats",
+    "live_participants",
 )
 
 
