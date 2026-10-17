@@ -54,9 +54,6 @@ _ROOM_LOST = "the LiveKit room connection closed ({reason})"
 _LEFT = "the room was left on request"
 _SESSION_ENDED = "the session ended"
 
-MAX_STREAMED_MESSAGE_BYTES = 8 * 1024 * 1024
-"""The largest protocol message a participant may send as a byte stream; larger ones are dropped."""
-
 
 class RoomState(StrEnum):
     """Where a room connection is in its life."""
@@ -111,7 +108,6 @@ class RoomSession:
         # is a client of a session the room is not connected to.
         self._participants: dict[str, ParticipantConnection] = {}
         self._registered = False
-        self._readers: set[asyncio.Task[None]] = set()
         self._room.on("disconnected", self._on_disconnected)
         self._room.on("participant_connected", lambda p: self._add_participant(p.identity))
         self._room.on("participant_disconnected", lambda p: self._remove_participant(p.identity))
@@ -233,8 +229,6 @@ class RoomSession:
         self.state = RoomState.CLOSED
         self.reason = reason
         self._registered = False
-        for reader in self._readers:
-            reader.cancel()
         participants = list(self._participants.values())
         self._participants.clear()
         for participant in participants:
@@ -318,7 +312,13 @@ class RoomSession:
             logger.warning("no connection id left for a room participant", participant=identity)
             return
         conn = ParticipantConnection(
-            conn_id, identity, self._room.local_participant, asyncio.get_running_loop()
+            conn_id,
+            identity,
+            self._room.local_participant,
+            asyncio.get_running_loop(),
+            lambda data, channel: self._control.message_received(
+                conn_id, data, ProtocolVersion.V1, channel
+            ),
         )
         self._participants[identity] = conn
         if not self._control.connection_opened(conn):
@@ -333,35 +333,25 @@ class RoomSession:
         self._control.connection_closed(conn.id)
 
     def _on_data(self, packet: rtc.DataPacket) -> None:
-        """Hand a protocol message from a participant to the session as that participant's."""
+        """Hand a protocol message from a participant to that participant's connection."""
         channel = TOPIC_CHANNELS.get(packet.topic or "")
         if channel is None or packet.participant is None:
             return
         conn = self._participants.get(packet.participant.identity)
         if conn is not None:
-            self._control.message_received(conn.id, packet.data, ProtocolVersion.V1, channel)
+            conn.receive_packet(packet.data, channel)
 
     def _on_byte_stream(self, reader: rtc.ByteStreamReader, identity: str) -> None:
-        """Read a protocol message sent as a byte stream, then hand it on like a packet."""
-        task = asyncio.get_running_loop().create_task(self._read_message(reader, identity))
-        self._readers.add(task)
-        task.add_done_callback(self._readers.discard)
+        """Hand a protocol message sent as a byte stream to the sender's connection.
 
-    async def _read_message(self, reader: rtc.ByteStreamReader, identity: str) -> None:
-        channel = TOPIC_CHANNELS[reader.info.topic]
-        data = bytearray()
-        async for chunk in reader:
-            data.extend(chunk)
-            if len(data) > MAX_STREAMED_MESSAGE_BYTES:
-                logger.warning(
-                    "dropped a protocol message larger than the limit",
-                    participant=identity,
-                    limit=MAX_STREAMED_MESSAGE_BYTES,
-                )
-                return
+        The stream belongs to the connection it opened on. One from a
+        participant that is not a client is closed unread.
+        """
         conn = self._participants.get(identity)
-        if conn is not None:
-            self._control.message_received(conn.id, bytes(data), ProtocolVersion.V1, channel)
+        if conn is None:
+            reader.close()
+            return
+        conn.receive_stream(reader, TOPIC_CHANNELS[reader.info.topic])
 
     def _on_disconnected(self, reason: Any = None) -> None:
         """Close the room connection when the room drops the session's participant."""
