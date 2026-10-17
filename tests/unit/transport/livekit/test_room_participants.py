@@ -22,6 +22,7 @@ class ParticipantControl(FakeControl):
         self._ids = iter(range(5000, 5000 + ids))
         self._refuse = refuse or set()
         self.received: list[tuple[ConnId, bytes, Channel]] = []
+        self.released: list[ConnId] = []
 
     def new_conn_id(self, transport: str) -> ConnId:
         assert transport == "livekit"
@@ -33,6 +34,10 @@ class ParticipantControl(FakeControl):
     def connection_opened(self, conn: Any) -> bool:
         self.opened.append(conn)
         return conn.id not in self._refuse
+
+    def release_conn_id(self, conn_id: ConnId, transport: str) -> None:
+        assert transport == "livekit"
+        self.released.append(conn_id)
 
     def message_received(
         self, conn_id: ConnId, payload: bytes, version: ProtocolVersion, channel: Channel
@@ -137,9 +142,15 @@ async def test_a_participant_the_session_refuses_gets_no_messages_through() -> N
 
     _join(room, "alice")
     _packet(room, "alice", b"command")
+    await _settle()
 
     assert _ids(control) == [4711, 5000]
     assert control.received == []
+    # Its id goes back, and its connection stops.
+    assert control.released == [ConnId(5000)]
+    refused = control.opened[1]
+    assert refused._closed
+    assert refused._pump.done()
 
 
 async def test_a_participant_past_the_connection_ids_is_left_out() -> None:
