@@ -61,16 +61,16 @@ class RoomSignals:
 def payload_args(payload: str | bytes) -> dict[str, Any] | None:
     """Read a signal's payload as a command's arguments.
 
-    An empty payload means no arguments. Anything other than a JSON object is
-    not a command's arguments.
+    An empty payload means no arguments. Anything other than a JSON object in
+    valid UTF-8 is not a command's arguments.
 
     Returns:
         The arguments, or ``None`` when the payload is not a JSON object.
     """
-    text = payload.decode("utf-8", errors="replace") if isinstance(payload, bytes) else payload
-    if not text.strip():
-        return {}
     try:
+        text = payload.decode("utf-8") if isinstance(payload, bytes) else payload
+        if not text.strip():
+            return {}
         value = json.loads(text)
     except ValueError:
         return None

@@ -44,6 +44,7 @@ from reactor_runtime.core.transport import (
     FrameStageSource,
     MessageObserver,
     MessageStageSource,
+    ReplyRoute,
     TransportStatsSource,
 )
 from reactor_runtime.core.typespec import TypeSpec
@@ -110,6 +111,7 @@ __all__ = [
     "MessageStageSource",
     "ReactorEvent",
     "RecordingConfig",
+    "ReplyRoute",
     "RuntimeConfig",
     "RuntimeState",
     "ServiceComponent",

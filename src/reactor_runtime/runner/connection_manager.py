@@ -515,6 +515,12 @@ class ConnectionManager:
             return
         conn.send_message(encode(conn.protocol_version))
 
+    def observe(self, cid: ConnId, observe: Callable[[MessageObserver], None]) -> None:
+        """Hand plain data to one connection's observer alone, with no frame on its wire."""
+        conn = self._by_id.get(cid)
+        if conn is not None and isinstance(conn, MessageObserver):
+            _observe(conn, observe)
+
     def send_control(self, cid: ConnId, encode: Callable[[ProtocolVersion], bytes | str]) -> None:
         """Encode and send a control frame to one connection in its codec, if registered.
 

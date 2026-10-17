@@ -54,6 +54,7 @@ from reactor_runtime.core import (
     MediaChunk,
     MessageObserver,
     RecordingConfig,
+    ReplyRoute,
     RuntimeConfig,
     SessionEnded,
     SessionEvent,
@@ -866,6 +867,84 @@ async def test_a_command_received_outside_the_protocol_is_checked_by_the_contrac
 
     ((kind, request_id, code, _),) = await _observed(observer)
     assert (kind, request_id, code) == ("failed", "rpc-2", INVALID_COMMAND)
+
+
+async def _until_journalled(runner: Runner, event: SessionEvent, count: int) -> None:
+    for _ in range(200):
+        if len(_moves(runner, event)) >= count:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"{event} journalled fewer than {count} times")
+
+
+async def test_a_command_answered_to_the_observer_puts_no_frame_on_the_wire(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    observer = ObservingConnection(10_000)
+    started_runner.connection_opened(observer)
+
+    started_runner.command_received(
+        ConnId(10_000), "set_mode", {"mode": "calm"}, "rpc-3", ReplyRoute.OBSERVER
+    )
+    started_runner.command_received(
+        ConnId(10_000), "set_mode", {"mode": ""}, "rpc-4", ReplyRoute.OBSERVER
+    )
+
+    answers = await _observed(observer, 2)
+    assert sorted(answer[:3] for answer in answers) == [
+        ("ack", "rpc-3"),
+        ("failed", "rpc-4", INVALID_COMMAND),
+    ]
+    assert observer.sent == []
+
+
+def test_a_reply_answered_to_the_observer_puts_no_frame_on_the_wire() -> None:
+    runner = _runner()
+    observer = ObservingConnection(1)
+    runner.connection_opened(observer)
+    runner._reply_routes[(ConnId(1), "rpc-5")] = ReplyRoute.OBSERVER
+
+    runner._send_addressed(ConnId(1), Greeting(text="hi"), "rpc-5")
+    runner._send_addressed(ConnId(1), Greeting(text="again"), "rpc-5")
+
+    assert observer.observed == [
+        ("message", "greeting", {"text": "hi"}, "rpc-5"),
+        ("message", "greeting", {"text": "again"}, "rpc-5"),
+    ]
+    # The route answers one reply; a second under the same id takes the protocol.
+    assert len(observer.sent) == 1
+
+
+async def test_a_command_with_no_answer_is_journalled_and_answers_nothing(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    observer = ObservingConnection(10_000)
+    started_runner.connection_opened(observer)
+    commands = len(_moves(started_runner, SessionEvent.COMMAND))
+    errors = len(_moves(started_runner, SessionEvent.ERROR))
+
+    started_runner.command_received(
+        ConnId(10_000), "set_mode", {"mode": "calm"}, "topic-1", ReplyRoute.NONE
+    )
+    started_runner.command_received(
+        ConnId(10_000), "set_mode", {"mode": ""}, "topic-2", ReplyRoute.NONE
+    )
+
+    await _until_journalled(started_runner, SessionEvent.COMMAND, commands + 1)
+    await _until_journalled(started_runner, SessionEvent.ERROR, errors + 1)
+    await asyncio.sleep(0.05)
+    assert observer.observed == []
+    assert observer.sent == []
+
+
+async def test_a_new_session_forgets_the_routes_of_the_last(started_runner: Runner) -> None:
+    started_runner._reply_routes[(ConnId(1), "rpc-6")] = ReplyRoute.NONE
+
+    started_runner.start_session({})
+
+    assert started_runner._reply_routes == {}
 
 
 # --- the session-control face --------------------------------------------

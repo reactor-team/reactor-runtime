@@ -59,6 +59,7 @@ def test_no_topics_run_nothing() -> None:
         ("[1, 2]", None),
         ("speaking", None),
         ("42", None),
+        (b'{"state": "sp\xffaking"}', None),
     ],
 )
 def test_a_payload_is_a_json_object_or_nothing(payload: str | bytes, args: object) -> None:

@@ -38,7 +38,14 @@ from typing import Any
 from livekit import rtc
 
 from reactor_runtime.codes import INVALID_COMMAND
-from reactor_runtime.core import ConnId, LiveKitConfig, TrackDirection, TrackInfo, TrackKind
+from reactor_runtime.core import (
+    ConnId,
+    LiveKitConfig,
+    ReplyRoute,
+    TrackDirection,
+    TrackInfo,
+    TrackKind,
+)
 from reactor_runtime.log import get_logger
 from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.transport.livekit.connection import (
@@ -367,8 +374,9 @@ class RoomSession:
         if args is None:
             logger.info("dropped a data packet that is not a JSON object", topic=topic)
             return
-        # A packet has no reply, so its answer goes nowhere.
-        self._control.command_received(conn.id, command, args, f"topic-{uuid.uuid4().hex}")
+        self._control.command_received(
+            conn.id, command, args, f"topic-{uuid.uuid4().hex}", ReplyRoute.NONE
+        )
 
     def _register_methods(self) -> None:
         """Register each mapped RPC method on the session's participant."""
@@ -395,7 +403,7 @@ class RoomSession:
                 )
             request_id = f"rpc-{call.request_id}"
             reply = conn.expect_reply(request_id)
-            self._control.command_received(conn.id, command, args, request_id)
+            self._control.command_received(conn.id, command, args, request_id, ReplyRoute.OBSERVER)
             return await reply
 
         return handle
