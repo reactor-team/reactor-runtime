@@ -322,7 +322,10 @@ class RoomSession:
         )
         self._participants[identity] = conn
         if not self._control.connection_opened(conn):
+            # Refused, as during a teardown: nothing it holds may outlive it.
             self._participants.pop(identity, None)
+            conn.drop()
+            self._control.release_conn_id(conn_id, TRANSPORT_NAME)
 
     def _remove_participant(self, identity: str) -> None:
         """Close the connection of a participant that has left."""
