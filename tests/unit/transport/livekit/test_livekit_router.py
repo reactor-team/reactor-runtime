@@ -258,6 +258,21 @@ def test_deleting_the_room_connection_leaves_the_room(rooms: list[FakeRoomSessio
 
 
 @pytest.mark.parametrize("method", ["get", "delete"])
+def test_a_room_an_ended_session_opened_is_not_found_in_the_next(
+    rooms: list[FakeRoomSession], method: str
+) -> None:
+    runner = FakeRunner()
+    client = _client(runner)
+    client.post(_CONNECTIONS, json=_ROOM)
+    runner.epoch = 2
+
+    response = client.request(method.upper(), f"{_CONNECTIONS}/4711")
+
+    assert response.status_code == 404
+    assert not rooms[0].left
+
+
+@pytest.mark.parametrize("method", ["get", "delete"])
 def test_an_unknown_room_connection_is_not_found(rooms: list[FakeRoomSession], method: str) -> None:
     client = _client(FakeRunner())
     client.post(_CONNECTIONS, json=_ROOM)

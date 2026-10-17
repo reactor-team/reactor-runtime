@@ -167,7 +167,7 @@ class LiveKitRouter(TransportRouter):
 
         async def room_connection_status(sid: str, cid: int) -> Response:
             runner.require_session_running(sid)
-            room = self._room_for(cid)
+            room = self._room_for(cid, runner.session_epoch())
             if room.joining:
                 return Response(status_code=202)
             status = RoomConnectionStatus.model_validate(
@@ -177,7 +177,7 @@ class LiveKitRouter(TransportRouter):
 
         async def leave_room(sid: str, cid: int) -> Response:
             runner.require_session_running(sid)
-            await self._room_for(cid).leave()
+            await self._room_for(cid, runner.session_epoch()).leave()
             return Response(status_code=204)
 
         # Every route answers a malformed request without repeating it, since
@@ -210,9 +210,13 @@ class LiveKitRouter(TransportRouter):
             route_class_override=_UnechoedValidationRoute,
         )
 
-    def _room_for(self, cid: int) -> RoomSession:
-        """Return the room connection *cid* names, or answer 404."""
+    def _room_for(self, cid: int, epoch: int) -> RoomSession:
+        """Return the live session's room connection *cid* names, or answer 404.
+
+        A room an ended session opened is not the live session's connection,
+        whatever its id.
+        """
         room = self._room
-        if room is None or room.conn_id != cid:
+        if room is None or room.conn_id != cid or self._room_epoch != epoch:
             raise HTTPException(status_code=404, detail="Unknown connection")
         return room
