@@ -58,6 +58,19 @@ MAX_STREAM_RATE = 192_000
 MAX_STREAM_CHANNELS = 8
 """The most ``num_channels`` a byte stream may declare."""
 
+VIDEO_QUEUE_FRAMES = 4
+"""How many decoded frames a remote video track may queue; past it, the oldest is dropped.
+
+The model reads video for its latest picture, so a short queue loses nothing it uses.
+"""
+
+AUDIO_QUEUE_FRAMES = 100
+"""How many 10 ms frames a remote audio track may queue; past it, the oldest is dropped.
+
+One second: enough to ride out a stall without a gap, and a bound on what a
+participant can make the runtime hold.
+"""
+
 _EMPTY = np.empty(0, dtype=np.int16)
 _PCM_S16LE = np.dtype("<i2")
 
@@ -307,15 +320,26 @@ class RoomInputs:
         self._sink(stream.conn_id, stream.track, InputFrame(data=samples, metadata=stream.metadata))
 
     async def _read_video(self, track: rtc.Track, target: str, conn_id: ConnId) -> None:
-        async for event in rtc.VideoStream(track):
-            frame = event.frame.convert(rtc.VideoBufferType.RGB24)
-            data = np.frombuffer(bytes(frame.data), np.uint8).reshape(frame.height, frame.width, 3)
-            self._sink(conn_id, target, InputFrame(data=data.copy()))
+        stream = rtc.VideoStream(track, capacity=VIDEO_QUEUE_FRAMES)
+        try:
+            async for event in stream:
+                frame = event.frame.convert(rtc.VideoBufferType.RGB24)
+                data = np.frombuffer(bytes(frame.data), np.uint8)
+                picture = data.reshape(frame.height, frame.width, 3).copy()
+                self._sink(conn_id, target, InputFrame(data=picture))
+        finally:
+            await stream.aclose()
 
     async def _read_audio(self, track: rtc.Track, target: str, rate: int, conn_id: ConnId) -> None:
-        async for event in rtc.AudioStream(track, sample_rate=rate, num_channels=1):
-            samples = np.frombuffer(bytes(event.frame.data), np.int16).reshape(1, -1)
-            self._sink(conn_id, target, InputFrame(data=samples.copy()))
+        stream = rtc.AudioStream(
+            track, capacity=AUDIO_QUEUE_FRAMES, sample_rate=rate, num_channels=1
+        )
+        try:
+            async for event in stream:
+                samples = np.frombuffer(bytes(event.frame.data), np.int16).reshape(1, -1)
+                self._sink(conn_id, target, InputFrame(data=samples.copy()))
+        finally:
+            await stream.aclose()
 
 
 def _attribute(

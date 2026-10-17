@@ -9,7 +9,12 @@ import pytest
 from livekit import rtc
 
 from reactor_runtime.core import ConnId, InputFrame, TrackDirection, TrackInfo, TrackKind
-from reactor_runtime.transport.livekit.media_in import RoomInputs, StreamFramer
+from reactor_runtime.transport.livekit.media_in import (
+    AUDIO_QUEUE_FRAMES,
+    VIDEO_QUEUE_FRAMES,
+    RoomInputs,
+    StreamFramer,
+)
 
 AGENT = TrackInfo(
     name="agent_audio", kind=TrackKind.AUDIO, rate=24_000, direction=TrackDirection.IN
@@ -308,3 +313,44 @@ async def test_a_track_named_after_an_input_feeds_it_unless_the_input_is_reserve
     await _settle()
 
     assert started == [("mic", "mic")]
+
+
+_streams: list["FakeMediaStream"] = []
+
+
+class FakeMediaStream:
+    """Stands in for ``rtc.VideoStream`` and ``rtc.AudioStream``: never yields, records closing."""
+
+    def __init__(self, track: Any, *, capacity: int = 0, **_: Any) -> None:
+        self.capacity = capacity
+        self.closed = False
+        _streams.append(self)
+
+    def __aiter__(self) -> "FakeMediaStream":
+        return self
+
+    async def __anext__(self) -> Any:
+        await asyncio.Event().wait()
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+async def test_a_remote_tracks_queue_is_bounded_and_closed_when_its_sender_leaves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _streams.clear()
+    monkeypatch.setattr(rtc, "VideoStream", FakeMediaStream)
+    monkeypatch.setattr(rtc, "AudioStream", FakeMediaStream)
+    room = RoomInputs({"camera": CAMERA, "mic": MIC}, {}, Sink())
+
+    room.on_track(cast(Any, Track("mic", rtc.TrackKind.KIND_AUDIO)), "viewer", ConnId(5120))
+    room.on_track(cast(Any, Track("camera", rtc.TrackKind.KIND_VIDEO)), "viewer", ConnId(5120))
+    await _settle()
+    room.release("viewer")
+    await _settle()
+
+    audio, video = _streams
+    assert (audio.capacity, video.capacity) == (AUDIO_QUEUE_FRAMES, VIDEO_QUEUE_FRAMES)
+    assert audio.closed
+    assert video.closed
