@@ -11,9 +11,12 @@ model:
 runtime:
   import: tracked_echo:TrackedEcho
   # For the room churn: a LiveKit room reaches set_intensity through an RPC
-  # method, and set_effect through a data topic.
+  # method, set_effect through a data topic, and the mic input through byte
+  # streams; the webcam input is fed by a track of its name.
   livekit:
     rpc:
       - method: endurance.set_intensity
         command: set_intensity
     topics: [endurance]
+    media_inputs:
+      endurance.mic: mic

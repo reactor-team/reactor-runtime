@@ -3,7 +3,9 @@
 The participant joins the session's LiveKit room, as every client of a room
 session does, and runs one command through each path a room offers: the
 Reactor protocol on its data topics, an RPC method, and a data topic. It
-closes once each is answered, or has had the time to be.
+feeds both kinds of media input too: a webcam track, by name, and a
+microphone byte stream on the topic the model maps to its ``mic`` input. It
+closes once each command is answered, or has had the time to be.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ import os
 import time
 from typing import Any
 
+import numpy as np
 from google.protobuf import struct_pb2
 from google.protobuf.message import DecodeError
 from livekit import api, rtc
@@ -34,6 +37,17 @@ RPC_METHOD = "endurance.set_intensity"
 
 COMMAND_TOPIC = "endurance.set_effect"
 """A data topic that runs the endurance model's ``set_effect`` command."""
+
+MIC_TOPIC = "endurance.mic"
+"""The byte stream topic the endurance model maps to its ``mic`` input track."""
+
+# The webcam track's frames, for long enough that the session subscribes and
+# decodes some, and the microphone stream: 100 ms at 24 kHz, so the runtime
+# resamples it to the track's rate.
+_WEBCAM_SIZE = (64, 48)
+_WEBCAM_FRAMES = 45
+_MIC_RATE = 24_000
+_MIC_SAMPLES = 2_400
 
 _REQUEST = common_pb2.MessageKind.MESSAGE_KIND_REQUEST
 _RESPONSE = common_pb2.MessageKind.MESSAGE_KIND_RESPONSE
@@ -82,11 +96,11 @@ class RoomParticipant:
         await self._room.connect(LIVEKIT_URL, token(self._room_name, self._identity))
         try:
             if not await self._become_client():
-                self.unanswered.append("the session never answered the schema request")
                 return
             await self._protocol_command()
             await self._rpc_command()
             await self._topic_command()
+            await self._feed_media()
         finally:
             for reader in self._readers:
                 reader.cancel()
@@ -94,7 +108,11 @@ class RoomParticipant:
         self.unanswered.extend(self._unexpected)
 
     async def _become_client(self) -> bool:
-        """Ask for the schema until it is answered: then the session serves this participant."""
+        """Ask for the schema until it is answered: then the session serves this participant.
+
+        Only the schema itself counts as the answer; an error reply is a
+        failure of the cycle.
+        """
         deadline = time.monotonic() + _JOIN_WAIT_S
         attempt = 0
         while time.monotonic() < deadline:
@@ -104,8 +122,14 @@ class RoomParticipant:
                 request_id=request_id, kind=_REQUEST, request_schema=platform_pb2.RequestSchema()
             )
             await self._send(CONTROL_TOPIC, message.SerializeToString())
-            if await self._reply(request_id, within=0.5) is not None:
-                return True
+            reply = await self._reply(request_id, within=0.5)
+            if reply is None:
+                continue
+            if reply[1] != "model_schema":
+                self.unanswered.append(f"request_schema: answered with {reply[1] or 'nothing'}")
+                return False
+            return True
+        self.unanswered.append("request_schema: no reply")
         return False
 
     async def _protocol_command(self) -> None:
@@ -142,6 +166,28 @@ class RoomParticipant:
             topic=COMMAND_TOPIC,
         )
         await asyncio.sleep(_QUIET_S)
+
+    async def _feed_media(self) -> None:
+        """Publish a webcam track and send a microphone stream, then take the track down."""
+        local = self._room.local_participant
+        width, height = _WEBCAM_SIZE
+        source = rtc.VideoSource(width, height)
+        track = rtc.LocalVideoTrack.create_video_track("webcam", source)
+        publication = await local.publish_track(
+            track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_CAMERA)
+        )
+        frame = rtc.VideoFrame(width, height, rtc.VideoBufferType.RGB24, bytes(width * height * 3))
+        for _ in range(_WEBCAM_FRAMES):
+            source.capture_frame(frame)
+            await asyncio.sleep(0.03)
+        tone = np.sin(2 * np.pi * 440 * np.arange(_MIC_SAMPLES) / _MIC_RATE)
+        await local.send_bytes(
+            (8_000 * tone).astype(np.int16).tobytes(),
+            topic=MIC_TOPIC,
+            attributes={"sample_rate": str(_MIC_RATE), "num_channels": "1"},
+            destination_identities=[self._model],
+        )
+        await local.unpublish_track(publication.sid)
 
     async def _send(self, topic: str, payload: bytes) -> None:
         await self._room.local_participant.publish_data(
