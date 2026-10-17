@@ -95,6 +95,12 @@ class MyModel(ReactorApp):
         return outcome.to_output()
 ```
 
+`self.output.flush()` drops everything queued for the clients, the audio the transport still holds included, and cuts the picture to black. A model that stops what it was saying and carries on rendering keeps the picture instead:
+
+```python
+self.output.flush(hold=True)   # drop the queued media, keep the last frame on screen
+```
+
 Command handlers and lifecycle hooks run between steps, never during one. A model has one method per lifecycle hook kind (`@session_started`, `@session_ended`, `@connected`, `@disconnected`, `@file_uploaded`). A subclass extends an inherited hook by overriding that method and calling `super()`; the override runs whether or not it repeats the decorator. Marking a second method with the same kind, in one class or in a subclass, fails when the class is defined, so a hook is never dropped in silence. The default `run()` is the loop that drives the three hooks, and it reports each step that runs with `complete_step()`, which is what the runtime counts a session's steps by. To write that report yourself, for example to keep extra files with the step, return a `StepCompleted(output=..., files=...)` from `process_output()` instead of the `Output`. Override `run()` to write your own loop against `emit()`, `send()`, `complete_step()`, `@event`, `self.connected`, and the tracks; `process_input()`, `generate()`, and `process_output()` are then not called, and your loop calls `complete_step(StepCompleted(output=...))` each time it finishes a unit of work. Do that for a loop that is not one step per emit, such as a renderer that emits several times per step or a model that must block on an input.
 
 A command handler refuses by raising `CommandError(code, message)`: `code` is a short, stable token the client branches on, and `message` reaches the client unchanged, so write it for them and name the codes in the command's description. The runtime answers that command's request with the failure, so the caller learns on its own call, no other client in the session hears about a command it did not send, and the runtime records that the command failed. Do not refuse by sending an error message and returning: the runtime counts that as success and acknowledges the command. Any other exception a handler raises reaches the client as an internal error with a fixed message, so catch what a check raises and raise a `CommandError` with a code of its own. The waypoint example's `set_image` does both.

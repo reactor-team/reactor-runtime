@@ -823,6 +823,111 @@ def test_a_pause_leaves_no_stale_audio_to_replay_on_resume() -> None:
     assert all(pcm == _AUDIO_SILENT_FRAME for pcm, _, _ in audio.pushed)
 
 
+# ── Flush ────────────────────────────────────────────────────────────────────
+
+
+def test_a_flush_drops_the_buffered_audio_and_feeds_silence_next() -> None:
+    peer, _, audio = _wired_peer()
+    for _ in range(5):
+        peer._push_bundle(_av_bundle())  # 50 ms of the model's audio waiting
+
+    peer.flush_media()
+    for _ in range(3):
+        peer._push_audio_tick()
+
+    # One 10 ms frame per tick, every tick: the sample clock keeps running.
+    assert [pcm for pcm, _, _ in audio.pushed] == [_AUDIO_SILENT_FRAME] * 3
+
+
+def test_audio_sent_after_a_flush_plays_sample_for_sample() -> None:
+    peer, _, audio = _wired_peer()
+    peer._push_bundle(_av_bundle())
+    peer.flush_media()
+
+    after = np.arange(_AUDIO_FRAME_SAMPLES * 2, dtype=np.int16).reshape(1, -1)
+    info = TrackInfo(name="a", kind=TrackKind.AUDIO, direction=TrackDirection.OUT)
+    peer.send_media(MediaBundle(tracks={"a": TrackData(info=info, data=after)}))
+    peer._push_bundle(*peer._frame_queue.get_nowait())
+    peer._push_audio_tick()
+    peer._push_audio_tick()
+
+    assert b"".join(pcm for pcm, _, _ in audio.pushed) == after.tobytes()
+
+
+def test_a_flush_drops_the_bundles_waiting_for_the_drain_thread() -> None:
+    peer, video, _ = _wired_peer()
+    for _ in range(3):
+        peer.send_media(_av_bundle())
+
+    peer.flush_media()
+
+    assert peer._frame_queue.empty()
+    assert video.pushed == []
+
+
+def test_a_bundle_already_on_its_way_when_the_flush_lands_is_dropped() -> None:
+    peer, video, _ = _wired_peer()
+    peer.send_media(_av_bundle())
+    in_flight = peer._frame_queue.get_nowait()  # the drain thread has taken it
+
+    peer.flush_media()
+    peer._push_bundle(*in_flight)
+
+    assert video.pushed == []
+    assert peer._audio_bufs.get("a") is None
+
+
+def test_audio_of_a_bundle_flushed_mid_push_is_dropped() -> None:
+    # The flush lands between the bundle's check and its audio reaching the buffer.
+    peer, _, _ = _wired_peer()
+    flushes = peer._flushes
+    peer.flush_media()
+
+    peer._enqueue_audio("a", np.ones(_AUDIO_FRAME_SAMPLES, dtype=np.int16), flushes)
+
+    assert peer._audio_bufs.get("a") is None
+
+
+def test_a_flush_clears_every_audio_track() -> None:
+    peer, _, _ = _two_audio_peer()
+    peer._push_bundle(_two_audio_bundle())
+
+    peer.flush_media()
+
+    assert peer._audio_bufs == {}
+
+
+def test_what_a_flush_drops_is_not_counted_as_dropped_media() -> None:
+    peer, _, _ = _wired_peer()
+    for _ in range(3):
+        peer.send_media(_av_bundle())
+    peer._push_bundle(_av_bundle())
+
+    peer.flush_media()
+
+    assert (peer._dropped_bundles, peer._dropped_samples) == (0, 0)
+
+
+def test_the_feed_loop_pushes_through_a_flush_without_a_gap() -> None:
+    peer, _, audio = _wired_peer()
+    for _ in range(20):
+        peer._push_bundle(_av_bundle())
+    thread = threading.Thread(target=peer._audio_feed_loop, daemon=True)
+
+    thread.start()
+    time.sleep(0.05)
+    peer.flush_media()
+    time.sleep(0.1)
+    peer._stop_event.set()
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    # 150 ms of 10 ms ticks, with headroom for a loaded scheduler, every one a full frame.
+    assert len(audio.pushed) >= 10
+    assert all(len(pcm) == _AUDIO_FRAME_SAMPLES * 2 for pcm, _, _ in audio.pushed)
+    assert audio.pushed[-1][0] == _AUDIO_SILENT_FRAME
+
+
 # ── Several audio tracks ─────────────────────────────────────────────────────
 
 
@@ -2365,3 +2470,76 @@ def test_inbound_audio_reaches_the_model_at_the_tracks_declared_rate(
     # One second of audio arrives as one second at the declared rate.
     assert abs(total - declared) <= 48
     assert all(frame.data.size for frame in delivered)
+
+
+def test_a_video_frame_converting_when_a_flush_lands_does_not_reach_the_wire(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    peer, video, _ = _wired_peer()
+    converting = threading.Event()
+    release = threading.Event()
+    convert = peer_module.rgb_to_bgra
+
+    def slow_convert(frame: Any) -> Any:
+        converting.set()
+        release.wait(timeout=5.0)
+        return convert(frame)
+
+    monkeypatch.setattr(peer_module, "rgb_to_bgra", slow_convert)
+    peer.send_media(_av_bundle())
+    drain = threading.Thread(target=peer._push_bundle, args=peer._frame_queue.get_nowait())
+    drain.start()
+    assert converting.wait(timeout=5.0)
+
+    peer.flush_media()
+    release.set()
+    drain.join(timeout=5.0)
+
+    assert video.pushed == []
+
+
+def test_a_flush_waits_for_an_audio_frame_the_feeder_is_pushing() -> None:
+    """The feeder's frame leaves the buffer and reaches the track as one step."""
+    peer = WebRTCPeer()
+    pushing = threading.Event()
+    release = threading.Event()
+
+    class SlowAudioTrack(_FakeAudioTrack):
+        def push_pcm(
+            self, pcm: bytes, sample_rate: int, channels: int, capture_time_us: int | None = None
+        ) -> None:
+            if pcm != _AUDIO_SILENT_FRAME:
+                pushing.set()
+                release.wait(timeout=5.0)
+            super().push_pcm(pcm, sample_rate, channels, capture_time_us)
+
+    audio = SlowAudioTrack()
+    peer._out_tracks["a"] = cast(Any, audio)
+    peer._push_bundle(_av_bundle())
+    peer._push_bundle(_av_bundle())
+    feeder = threading.Thread(target=peer._push_audio_frame, args=("a",))
+    feeder.start()
+    assert pushing.wait(timeout=5.0)
+
+    flushed = threading.Event()
+    flusher = threading.Thread(target=lambda: (peer.flush_media(), flushed.set()))
+    flusher.start()
+    # The frame is on its way to the track, so the flush lands after it.
+    assert not flushed.wait(timeout=0.1)
+    release.set()
+    feeder.join(timeout=5.0)
+    flusher.join(timeout=5.0)
+
+    assert flushed.is_set()
+    assert len(audio.pushed) == 1
+    # The second frame was still buffered at the flush, and is gone.
+    assert peer._audio_bufs == {}
+
+
+def test_a_flush_reports_whether_it_dropped_queued_bundles() -> None:
+    peer, _, _ = _wired_peer()
+    assert peer.flush_media() is False
+
+    peer.send_media(_av_bundle())
+
+    assert peer.flush_media() is True

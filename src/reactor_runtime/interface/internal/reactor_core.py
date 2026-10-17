@@ -118,12 +118,13 @@ class MediaOps:
     open later.
 
     Attributes:
-        flush: Drop queued media and cut playout to black.
+        flush: Drop queued media, then cut playout to black, or with ``True``
+            keep the last frame on screen.
         set_rate: Re-pace queued media at a new frames-per-second immediately.
         set_depth: Bound how many frames may queue between model and wire.
     """
 
-    flush: Callable[[], None]
+    flush: Callable[[bool], None]
     set_rate: Callable[[float], None]
     set_depth: Callable[[int], None]
 
@@ -133,10 +134,10 @@ class OutputStream:
 
     Emission and playout control in one place: :meth:`emit` hands a finished
     output downstream, :attr:`fps` is the live playout rate, and :meth:`flush`
-    drops everything queued and cuts playout to black.
+    drops everything queued and cuts playout to black, or holds the last frame.
 
     There is no single buffer behind this handle — queued media lives
-    downstream, in each connection's own pacer — so every operation fans out
+    downstream, in each connection's own pacer and transport — so every operation fans out
     to all live connections and applies to connections that join later.
     Operations invoked before the runtime binds its consumers (for example
     inside ``load()``) are remembered and applied at bind time.
@@ -214,17 +215,25 @@ class OutputStream:
             await asyncio.to_thread(core._out_media, chunk)
         await asyncio.sleep(0)
 
-    def flush(self) -> None:
-        """Drop queued media on every connection and cut playout to black.
+    def flush(self, *, hold: bool = False) -> None:
+        """Drop queued media on every connection, then cut playout to black or hold it.
 
         Call it when generation resets or restarts, so nothing of the old
         content plays after the cut. Releases a producer blocked in
-        :meth:`emit` and discards the rest of its chunk. The session
-        recording is not flushed — a playout cut is not an archive boundary.
+        :meth:`emit` and discards the rest of its chunk. The audio a
+        transport holds for its wire is dropped too, so the sound stops at
+        the cut. The session recording is not flushed — a playout cut is not
+        an archive boundary.
+
+        Args:
+            hold: Keep the last frame on screen instead of cutting to black,
+                until the next emitted frame replaces it. For a model that
+                cuts what it was saying and carries on rendering, such as an
+                avatar returning to idle.
         """
         ops = self._core._media_ops
         if ops is not None:
-            ops.flush()
+            ops.flush(hold)
 
 
 @dataclass(frozen=True)

@@ -264,6 +264,63 @@ def test_flush_drains_the_queue_and_rearms_the_boundary_black() -> None:
     assert not sink.seen[1].tracks["main"].data.any()
 
 
+def test_a_hold_flush_drains_the_queue_and_sends_no_black() -> None:
+    pacer, sink = make_pacer()
+    shown = np.full((8, 8, 3), 200, dtype=np.uint8)
+    pacer.submit(chunk(video_bundle(np.stack([shown] * 5)), n_frames=5))
+    pacer._emit_one_tick()  # one real frame on screen
+
+    pacer.flush(hold=True)
+    pacer._emit_one_tick()
+    pacer._emit_one_tick()
+
+    # Nothing more reaches the wire, so the client keeps the frame it shows.
+    assert len(sink.seen) == 1
+    assert sink.seen[0].tracks["main"].data.any()
+
+
+def test_a_hold_flush_plays_the_next_frame_without_a_cut() -> None:
+    pacer, sink = make_pacer()
+    pacer.submit(chunk(video_bundle(np.full((4, 4, 3), 1, dtype=np.uint8))))
+    pacer._emit_one_tick()
+    pacer.flush(hold=True)
+
+    pacer.submit(chunk(video_bundle(np.full((4, 4, 3), 2, dtype=np.uint8))))
+    pacer._emit_one_tick()
+
+    assert [int(b.tracks["main"].data[0, 0, 0]) for b in sink.seen] == [1, 2]
+
+
+def test_a_hold_flush_keeps_the_frame_a_gap_fill_repeats() -> None:
+    pacer, sink = make_pacer()
+    pacer.submit(chunk(video_bundle(np.zeros((4, 4, 3), dtype=np.uint8), metadata=b"pose-7")))
+    pacer._emit_one_tick()
+    pacer.flush(hold=True)
+    pacer._emit_one_tick()  # queue empty -> the held frame's gap-fill
+
+    assert [b.tracks["main"].metadata for b in sink.seen] == [b"pose-7", b"pose-7"]
+
+
+def test_a_hold_flush_releases_a_producer_blocked_on_a_full_queue() -> None:
+    pacer, _ = make_pacer(queue_depth=1)
+    frames = np.zeros((1, 4, 4, 3), dtype=np.uint8)
+    pacer.submit(chunk(video_bundle(frames)))
+    pacer._stop.clear()  # a running pacer, so a backpressure submit waits
+    enqueued: list[int] = []
+    producer = threading.Thread(
+        target=lambda: enqueued.append(pacer.submit(chunk(video_bundle(frames), wait=True)))
+    )
+    producer.start()
+    time.sleep(0.05)
+
+    pacer.flush(hold=True)
+    producer.join(timeout=1.0)
+
+    assert not producer.is_alive()
+    assert enqueued == [0]
+    assert pacer._queue.qsize() == 0
+
+
 def test_each_frame_of_a_batch_is_paced_out_with_its_own_metadata() -> None:
     pacer, sink = make_pacer()
     batch = np.zeros((3, 4, 4, 3), dtype=np.uint8)
@@ -480,3 +537,65 @@ def test_a_chunk_without_an_emit_time_adds_no_emit() -> None:
     pacer.submit(chunk(video_bundle(np.zeros((4, 4, 3), dtype=np.uint8))))
 
     assert stages.take() == {}
+
+
+def test_a_hold_flush_cancels_a_pending_boundary_black() -> None:
+    pacer, sink = make_pacer()
+    shown = np.full((8, 8, 3), 200, dtype=np.uint8)
+    pacer.submit(chunk(video_bundle(shown)))
+    pacer._emit_one_tick()
+    pacer.flush()  # arms the boundary black
+
+    pacer.flush(hold=True)
+    pacer._emit_one_tick()
+
+    # The hold keeps the picture: the pending black is not sent.
+    assert len(sink.seen) == 1
+
+
+def test_a_flush_between_ticks_waits_for_a_tick_that_is_handing_over_a_frame() -> None:
+    """A frame taken before the flush is handed over before the flush, never after it."""
+    handing_over = threading.Event()
+    release = threading.Event()
+    seen: list[MediaBundle] = []
+
+    def slow_sink(bundle: MediaBundle) -> None:
+        handing_over.set()
+        release.wait(timeout=5.0)
+        seen.append(bundle)
+
+    pacer = MediaPacer({"main": video_info("main")}, slow_sink, queue_depth=10)
+    pacer.submit(chunk(video_bundle(np.zeros((4, 4, 3), dtype=np.uint8))))
+    tick = threading.Thread(target=pacer._emit_one_tick)
+    tick.start()
+    assert handing_over.wait(timeout=5.0)
+
+    flushed = threading.Event()
+
+    def flush() -> None:
+        with pacer.between_ticks():
+            pacer.flush()
+        flushed.set()
+
+    flusher = threading.Thread(target=flush)
+    flusher.start()
+    # The tick still holds its frame, so the flush cannot land yet.
+    assert not flushed.wait(timeout=0.1)
+    release.set()
+    tick.join(timeout=5.0)
+    flusher.join(timeout=5.0)
+
+    assert flushed.is_set()
+    assert len(seen) == 1
+
+
+def test_forget_last_frame_stops_the_gap_fill() -> None:
+    pacer, sink = make_pacer()
+    pacer.submit(chunk(video_bundle(np.zeros((4, 4, 3), dtype=np.uint8), metadata=b"pose-7")))
+    pacer._emit_one_tick()
+    pacer.flush(hold=True)
+
+    pacer.forget_last_frame()
+    pacer._emit_one_tick()
+
+    assert len(sink.seen) == 1
