@@ -556,7 +556,9 @@ def test_a_hold_flush_reaches_every_connection_as_a_hold() -> None:
     assert held == [ConnId(1), ConnId(2)]
 
 
-def test_a_plain_flush_still_reaches_a_connection_without_the_hold_argument() -> None:
+@pytest.mark.parametrize("hold", [False, True])
+def test_a_flush_still_reaches_a_connection_without_the_hold_argument(hold: bool) -> None:
+    # A hold flush falls back to a plain one: the picture is lost, the queue is not kept.
     class Unaware(FakeConnection):
         """A transport written before the hold flush: its flush takes no argument."""
 
@@ -567,7 +569,7 @@ def test_a_plain_flush_still_reaches_a_connection_without_the_hold_argument() ->
     conn = Unaware(1)
     cm.register(cast(Connection, conn))
 
-    cm.flush_media(hold=False)
+    cm.flush_media(hold=hold)
 
     assert conn.flushed
 

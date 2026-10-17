@@ -32,6 +32,8 @@ class FakePeer:
         self.closed = False
         self.protocol_version = ProtocolVersion.V0
         self.last_config: WebRtcConfig | None = None
+        # Whether flush_media() reports that it dropped queued bundles.
+        self.flush_drops = False
         self.last_tracks: TrackMap | None = None
         self.stats_fail_times = 0
         self.frame_stages = FrameStageWindow()
@@ -58,8 +60,9 @@ class FakePeer:
     def send_media(self, bundle: MediaBundle) -> None:
         self.sent_media.append(bundle)
 
-    def flush_media(self) -> None:
+    def flush_media(self) -> bool:
         self.flushes += 1
+        return self.flush_drops
 
     def resume_track(self, name: str) -> None:
         self.resumed.append(name)

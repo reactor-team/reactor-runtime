@@ -537,3 +537,65 @@ def test_a_chunk_without_an_emit_time_adds_no_emit() -> None:
     pacer.submit(chunk(video_bundle(np.zeros((4, 4, 3), dtype=np.uint8))))
 
     assert stages.take() == {}
+
+
+def test_a_hold_flush_cancels_a_pending_boundary_black() -> None:
+    pacer, sink = make_pacer()
+    shown = np.full((8, 8, 3), 200, dtype=np.uint8)
+    pacer.submit(chunk(video_bundle(shown)))
+    pacer._emit_one_tick()
+    pacer.flush()  # arms the boundary black
+
+    pacer.flush(hold=True)
+    pacer._emit_one_tick()
+
+    # The hold keeps the picture: the pending black is not sent.
+    assert len(sink.seen) == 1
+
+
+def test_a_flush_between_ticks_waits_for_a_tick_that_is_handing_over_a_frame() -> None:
+    """A frame taken before the flush is handed over before the flush, never after it."""
+    handing_over = threading.Event()
+    release = threading.Event()
+    seen: list[MediaBundle] = []
+
+    def slow_sink(bundle: MediaBundle) -> None:
+        handing_over.set()
+        release.wait(timeout=5.0)
+        seen.append(bundle)
+
+    pacer = MediaPacer({"main": video_info("main")}, slow_sink, queue_depth=10)
+    pacer.submit(chunk(video_bundle(np.zeros((4, 4, 3), dtype=np.uint8))))
+    tick = threading.Thread(target=pacer._emit_one_tick)
+    tick.start()
+    assert handing_over.wait(timeout=5.0)
+
+    flushed = threading.Event()
+
+    def flush() -> None:
+        with pacer.between_ticks():
+            pacer.flush()
+        flushed.set()
+
+    flusher = threading.Thread(target=flush)
+    flusher.start()
+    # The tick still holds its frame, so the flush cannot land yet.
+    assert not flushed.wait(timeout=0.1)
+    release.set()
+    tick.join(timeout=5.0)
+    flusher.join(timeout=5.0)
+
+    assert flushed.is_set()
+    assert len(seen) == 1
+
+
+def test_forget_last_frame_stops_the_gap_fill() -> None:
+    pacer, sink = make_pacer()
+    pacer.submit(chunk(video_bundle(np.zeros((4, 4, 3), dtype=np.uint8), metadata=b"pose-7")))
+    pacer._emit_one_tick()
+    pacer.flush(hold=True)
+
+    pacer.forget_last_frame()
+    pacer._emit_one_tick()
+
+    assert len(sink.seen) == 1

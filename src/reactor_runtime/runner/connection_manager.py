@@ -40,6 +40,7 @@ replaced rather than edited.
 
 from __future__ import annotations
 
+import inspect
 import random
 from collections.abc import Callable, Mapping
 from dataclasses import replace
@@ -109,6 +110,23 @@ def _deliver(conn: Connection, operation: str, act: Callable[[Connection], None]
         )
         return False
     return True
+
+
+def _flush_holding(conn: Connection) -> None:
+    """Flush *conn* keeping its picture, or plainly when its transport cannot hold."""
+    if _takes_hold(conn.flush_media):
+        conn.flush_media(hold=True)
+    else:
+        conn.flush_media()
+
+
+def _takes_hold(flush_media: Callable[..., None]) -> bool:
+    """Whether a connection's ``flush_media`` accepts the ``hold`` keyword."""
+    try:
+        params = inspect.signature(flush_media).parameters
+    except (TypeError, ValueError):
+        return False
+    return "hold" in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
 
 
 class ConnectionManager:
@@ -473,11 +491,13 @@ class ConnectionManager:
         """Drop every connection's queued media, then cut playout to black or hold it.
 
         A plain flush calls ``flush_media()`` with no argument, so a connection
-        written before the hold flush existed still takes it.
+        written before the hold flush existed still takes it. A hold flush
+        gives such a connection a plain flush instead: it loses the picture,
+        but still drops what it queued.
         """
         for conn in self._by_id.values():
             if hold:
-                _deliver(conn, "flush_media", lambda c: c.flush_media(hold=True))
+                _deliver(conn, "flush_media", _flush_holding)
             else:
                 _deliver(conn, "flush_media", lambda c: c.flush_media())
 
