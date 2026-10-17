@@ -35,6 +35,8 @@ class FakeRunner:
         self.answered: list[tuple[ConnId, dict[str, str]]] = []
         self.admitted: list[ConnId] = []
         self.claims: dict[ConnId, str] = {}
+        # Ids a test marks as already claimed before its offer arrives.
+        self.held_before_offer: set[ConnId] = set()
 
     def require_session_running(self, sid: str) -> None:
         if not self._running:
@@ -47,9 +49,15 @@ class FakeRunner:
         self.claims[ConnId(self._next)] = transport
         return ConnId(self._next)
 
-    def claim_conn_id(self, conn_id: ConnId, transport: str) -> None:
-        if self.claims.setdefault(conn_id, transport) != transport:
+    def claim_conn_id(self, conn_id: ConnId, transport: str) -> bool:
+        holder = self.claims.setdefault(conn_id, transport)
+        if holder != transport:
             raise ConnectionIdClaimedError(conn_id)
+        return conn_id not in self.held_before_offer
+
+    def release_conn_id(self, conn_id: ConnId, transport: str) -> None:
+        if self.claims.get(conn_id) == transport:
+            del self.claims[conn_id]
 
     def offer_admitted(self, conn_id: ConnId) -> None:
         self.admitted.append(conn_id)
@@ -522,3 +530,61 @@ def test_an_offers_tracks_carry_the_rates_the_model_declares(
     assert fake_peer.last_tracks is not None
     [track] = fake_peer.last_tracks.tracks
     assert (track.info.name, track.info.rate) == ("agent_audio", 24_000.0)
+
+
+@pytest.mark.parametrize("cid", [0, 1000, 10_000, 2**40])
+def test_an_offer_on_an_id_outside_the_addressable_range_is_refused(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    cid: int,
+) -> None:
+    runner = FakeRunner()
+    with _client(runner, fake_peer, factory_for) as client:
+        refused = client.post(
+            f"{_PREFIX}/connections/{cid}/sdp_params", json={"sdp_offer": "the-offer"}
+        )
+
+    assert refused.status_code == 422
+    assert runner.claims == {}
+
+
+def test_an_offer_on_the_legacy_id_is_accepted(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+) -> None:
+    with _client(FakeRunner(), fake_peer, factory_for) as client:
+        accepted = client.post(
+            f"{_PREFIX}/connections/1001/sdp_params", json={"sdp_offer": "the-offer"}
+        )
+
+    assert accepted.status_code == 202
+
+
+def test_a_refused_offer_releases_the_id_it_claimed(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+) -> None:
+    runner = FakeRunner()
+    config = WebRtcConfig(ping_timeout=0.0, max_connections=1)
+    with _client(runner, fake_peer, factory_for, config=config) as client:
+        client.post(f"{_PREFIX}/connections/5001/sdp_params", json={"sdp_offer": "one"})
+        refused = client.post(f"{_PREFIX}/connections/5002/sdp_params", json={"sdp_offer": "two"})
+
+    assert refused.status_code == 503
+    assert runner.claims == {ConnId(5001): "webrtc"}
+
+
+def test_a_refused_reoffer_keeps_the_id_it_already_held(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+) -> None:
+    runner = FakeRunner()
+    runner.claims[ConnId(5002)] = "webrtc"
+    runner.held_before_offer.add(ConnId(5002))
+    config = WebRtcConfig(ping_timeout=0.0, max_connections=1)
+    with _client(runner, fake_peer, factory_for, config=config) as client:
+        client.post(f"{_PREFIX}/connections/5001/sdp_params", json={"sdp_offer": "one"})
+        refused = client.post(f"{_PREFIX}/connections/5002/sdp_params", json={"sdp_offer": "two"})
+
+    assert refused.status_code == 503
+    assert runner.claims[ConnId(5002)] == "webrtc"
