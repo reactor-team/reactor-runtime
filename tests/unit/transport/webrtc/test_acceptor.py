@@ -45,8 +45,9 @@ class FakeSink:
         self.client_stats: list[tuple[ConnId, ClientStatsBatch]] = []
         self.answered: list[tuple[ConnId, dict[str, str]]] = []
 
-    def connection_opened(self, conn: Connection) -> None:
+    def connection_opened(self, conn: Connection) -> bool:
         self.opened.append(conn.id)
+        return True
 
     def connection_closed(self, conn_id: ConnId) -> None:
         self.closed.append(conn_id)
@@ -1022,9 +1023,9 @@ class _OpenedSink(FakeSink):
         super().__init__()
         self.connections: list[Connection] = []
 
-    def connection_opened(self, conn: Connection) -> None:
-        super().connection_opened(conn)
+    def connection_opened(self, conn: Connection) -> bool:
         self.connections.append(conn)
+        return super().connection_opened(conn)
 
 
 async def test_the_samples_of_a_live_wire_reach_the_registry(
