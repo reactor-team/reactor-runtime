@@ -8,7 +8,15 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 
-from reactor_runtime.core import ClientStatsBatch, Connection, ConnId, InputFrame
+from reactor_runtime.core import (
+    ClientStatsBatch,
+    Connection,
+    ConnId,
+    InputFrame,
+    LiveKitConfig,
+    LiveKitRpcMethod,
+    ReplyRoute,
+)
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.transport import SessionNotRunningError, UnknownSessionError
 from reactor_runtime.transport.livekit import LiveKitRouter, livekit_available
@@ -71,7 +79,12 @@ class FakeRunner:
         pass
 
     def command_received(
-        self, conn_id: ConnId, name: str, args: Mapping[str, Any], request_id: str
+        self,
+        conn_id: ConnId,
+        name: str,
+        args: Mapping[str, Any],
+        request_id: str,
+        reply: ReplyRoute = ReplyRoute.PROTOCOL,
     ) -> None:
         pass
 
@@ -115,8 +128,16 @@ class FakeRunner:
 class FakeRoomSession:
     """Stands in for a room connection: records how it was built and driven."""
 
-    def __init__(self, conn_id: ConnId, url: str, token: str, control: Any) -> None:
+    def __init__(
+        self,
+        conn_id: ConnId,
+        url: str,
+        token: str,
+        control: Any,
+        config: LiveKitConfig | None = None,
+    ) -> None:
         self.conn_id = conn_id
+        self.config = config
         self.url = url
         self.token = token
         self.state = RoomState.JOINING
@@ -158,9 +179,9 @@ def rooms(monkeypatch: pytest.MonkeyPatch) -> list[FakeRoomSession]:
     return _built
 
 
-def _client(runner: FakeRunner) -> TestClient:
+def _client(runner: FakeRunner, config: LiveKitConfig | None = None) -> TestClient:
     app = FastAPI()
-    LiveKitRouter().mount(app, runner)
+    LiveKitRouter(config).mount(app, runner)
     return TestClient(app)
 
 
@@ -181,6 +202,16 @@ def test_opening_a_room_connection_mints_its_id_and_starts_the_join(
     assert runner.admitted == [ConnId(4711)]
     (room,) = rooms
     assert (room.conn_id, room.url, room.token, room.started) == (4711, *_ROOM.values(), True)
+
+
+def test_the_room_connection_maps_the_rooms_signals_as_the_manifest_says(
+    rooms: list[FakeRoomSession],
+) -> None:
+    signals = LiveKitConfig(rpc=(LiveKitRpcMethod(method="lk.stop", command="stop"),))
+
+    _client(FakeRunner(), signals).post(_CONNECTIONS, json=_ROOM)
+
+    assert rooms[0].config is signals
 
 
 def test_a_second_room_connection_is_refused_while_one_is_active(
