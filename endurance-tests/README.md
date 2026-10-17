@@ -49,7 +49,7 @@ a trend ends in ERROR rather than in a verdict; a failed count still fails it.
 |---|---|
 | `connection_churn` | One session. Each cycle a client joins, streams a webcam both ways until 60 frames come back, and leaves. The client speaks the v0 JSON control protocol. |
 | `connection_churn_v1` | The same churn with a client that speaks v1 protobuf, as current SDKs do: it also requests the schema and, once a second, pings, sends client stats and a `set_effect` or `set_intensity` command. Every request must be answered without an error (`unanswered_requests`). |
-| `room_participant_churn` | One session connected to a LiveKit room, the room connection open throughout. Each cycle a participant joins the room, requests the schema and runs a command over the Reactor protocol, calls an RPC method that runs a command, sends a data packet on a topic that runs one, and leaves. Every request that has an answer must get it, and the topic command must get none (`unanswered_requests`). Needs a LiveKit server (`LIVEKIT_URL`), and skips without one or against a runtime that serves no LiveKit transport. |
+| `room_participant_churn` | One session connected to a LiveKit room, the room connection open throughout. Each cycle a participant joins the room, requests the schema and runs a command over the Reactor protocol, calls an RPC method that runs a command, sends a data packet on a topic that runs one, publishes a `webcam` track the session reads by name, sends a microphone byte stream on the topic mapped to `mic`, and leaves. Every request that has an answer must get it, and the topic command must get none (`unanswered_requests`). Needs a LiveKit server (`LIVEKIT_URL`), and skips without one or against a runtime that serves no LiveKit transport. |
 
 ## Running it
 
@@ -101,7 +101,7 @@ every PR that touches the runtime:
   recordings, several clients on one session, a control protocol version):
   add a scenario that drives it, or extend an existing one. Today's scenarios
   cover the v0 and v1 control protocols, commands and client stats, and room
-  participants with their RPC and data-topic commands; uploads, clips,
+  participants with their RPC and data-topic commands and media inputs; uploads, clips,
   recordings and several clients on one session have none yet.
 - **A change to what the launcher hooks** (`MediaPacer.stop`,
   `http_server.build_app`, `Runner._connections`, the transport classes the

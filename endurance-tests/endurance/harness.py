@@ -152,13 +152,18 @@ class RuntimeProcess:
         """Return one reading of the probe route."""
         return self.get("/_endurance/probe")
 
-    def settled_probe(self, *, connections: int = 0) -> tuple[dict[str, Any], float]:
+    def settled_probe(
+        self, *, connections: int = 0, tasks: int | None = None
+    ) -> tuple[dict[str, Any], float]:
         """Read the probe once the cycle's client is gone and teardown has finished.
 
         Waits for the registry to fall to *connections*, the ones the scenario
-        keeps open across cycles, then re-reads until every live count is 0.
-        Returns the last reading either way, with the seconds it took: a count
-        that is still nonzero after the timeouts is a leak, not a slow teardown.
+        keeps open across cycles, then re-reads until every live count is 0
+        and, given *tasks*, until the loop runs no more tasks than that: a
+        task still closing what the client held is teardown that has not
+        finished. Returns the last reading either way, with the seconds it
+        took: a count that is still over after the timeouts is a leak, not a
+        slow teardown.
         """
         start = time.monotonic()
         reading = self.probe()
@@ -169,7 +174,11 @@ class RuntimeProcess:
             time.sleep(0.25)
             reading = self.probe()
         settle_start = time.monotonic()
-        while any(reading["live"].values()) and time.monotonic() - settle_start < SETTLE_TIMEOUT_S:
+
+        def settling(reading: dict[str, Any]) -> bool:
+            return any(reading["live"].values()) or (tasks is not None and reading["tasks"] > tasks)
+
+        while settling(reading) and time.monotonic() - settle_start < SETTLE_TIMEOUT_S:
             time.sleep(0.25)
             reading = self.probe()
         return reading, time.monotonic() - start

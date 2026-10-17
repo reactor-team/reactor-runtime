@@ -79,3 +79,20 @@ def test_a_settled_probe_waits_only_for_the_connections_a_scenario_does_not_keep
 
     assert reading == {"registered_connections": 1, "live": {"participants": 0}}
     assert waited < 5.0
+
+
+def test_a_settled_probe_given_a_task_count_waits_for_teardown_tasks_to_finish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    readings = iter(
+        [
+            {"registered_connections": 1, "live": {}, "tasks": 8},
+            {"registered_connections": 1, "live": {}, "tasks": 7},
+        ]
+    )
+    runtime = object.__new__(RuntimeProcess)
+    monkeypatch.setattr(runtime, "probe", lambda: next(readings))
+
+    reading, _ = runtime.settled_probe(connections=1, tasks=7)
+
+    assert reading["tasks"] == 7

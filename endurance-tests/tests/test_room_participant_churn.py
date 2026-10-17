@@ -74,7 +74,8 @@ async def test_room_participant_churn(runtime: RuntimeProcess) -> None:
             participant = RoomParticipant(room, f"participant-{cycle}", _MODEL)
             await participant.run()
             unanswered.append(participant.unanswered)
-            reading, _ = runtime.settled_probe(connections=1)
+            # A participant's readers close their streams as it leaves.
+            reading, _ = runtime.settled_probe(connections=1, tasks=sampler.initial_tasks)
             sampler.sample(cycle=cycle, reading=reading)
             live.update(sampler.samples, retained=retained_cycles(sampler.samples))
             cycle += 1
