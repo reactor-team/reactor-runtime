@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from reactor_runtime.core import LiveKitBlockError
 from reactor_runtime.schema import main, render
 
 _MODEL_SOURCE = '''\
@@ -168,6 +169,34 @@ def test_render_refuses_a_manifest_that_names_no_model(tmp_path: Path) -> None:
 
     with pytest.raises(SystemExit, match=r"missing runtime\.import"):
         render(tmp_path)
+
+
+def _with_livekit_block(model_dir: Path, block: str) -> None:
+    manifest = model_dir / "reactor.yaml"
+    manifest.write_text(manifest.read_text() + "  livekit:\n" + block)
+
+
+def test_render_accepts_a_livekit_block_naming_what_the_model_declares(model_dir: Path) -> None:
+    _with_livekit_block(model_dir, "    rpc:\n      - {method: lk.level, command: set_level}\n")
+
+    assert render(model_dir)["openapi"] == "3.1.0"
+
+
+def test_render_refuses_a_livekit_block_naming_what_the_model_lacks(model_dir: Path) -> None:
+    _with_livekit_block(model_dir, "    rpc:\n      - {method: lk.stop, command: stop}\n")
+
+    with pytest.raises(LiveKitBlockError, match="runs command 'stop'"):
+        render(model_dir)
+
+
+def test_main_reports_a_livekit_block_naming_what_the_model_lacks(
+    model_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _with_livekit_block(model_dir, "    rpc:\n      - {method: lk.stop, command: stop}\n")
+    monkeypatch.setattr(sys, "argv", ["schema", "--path", str(model_dir)])
+
+    with pytest.raises(SystemExit, match="runs command 'stop'"):
+        main()
 
 
 def test_render_preserves_a_model_import_error(tmp_path: Path) -> None:

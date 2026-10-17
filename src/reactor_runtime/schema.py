@@ -28,8 +28,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from reactor_runtime.core import LiveKitBlockError
 from reactor_runtime.interface.model import ModelContract
-from reactor_runtime.manifest import MANIFEST, import_model_class, load_config
+from reactor_runtime.manifest import MANIFEST, check_livekit_block, import_model_class, load_config
 
 _DEFAULT_VERSION = "v0.0.0"
 
@@ -60,6 +61,8 @@ def render(path: Path, version: str = _DEFAULT_VERSION) -> dict[str, Any]:
 
     Raises:
         ValueError: If *version* is not a release tag.
+        LiveKitBlockError: If the manifest's ``runtime.livekit`` block names a
+            command, message, or input track the model does not declare.
         SystemExit: If the directory holds no manifest, or the manifest names no
             model — the same way the runtime's own manifest reader answers.
         Exception: Whatever importing the model's own module raises, with its
@@ -77,6 +80,7 @@ def render(path: Path, version: str = _DEFAULT_VERSION) -> dict[str, Any]:
     finally:
         sys.path[:] = previous_path
     contract = ModelContract.of(model_cls)
+    check_livekit_block(config.livekit, contract)
     return contract.render_schema(tag, config.model_name).to_openapi()
 
 
@@ -110,7 +114,8 @@ def main() -> None:
 
     Raises:
         SystemExit: If an argument is malformed, the directory holds no
-            manifest, or the manifest names no model.
+            manifest, the manifest names no model, or its ``runtime.livekit``
+            block names something the model does not declare.
         Exception: Whatever importing the model's own module raises.
     """
     parser = argparse.ArgumentParser(
@@ -150,7 +155,10 @@ def main() -> None:
     # stdout rerouted to stderr. The reroute is the command's concern, not the
     # library's: a caller of render() keeps its own streams.
     with contextlib.redirect_stdout(sys.stderr):
-        schema = render(path, version)
+        try:
+            schema = render(path, version)
+        except LiveKitBlockError as mismatch:
+            raise SystemExit(str(mismatch)) from mismatch
     document = json.dumps(schema, indent=2)
     if args.out is None:
         print(document)
