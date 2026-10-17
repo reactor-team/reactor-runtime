@@ -162,15 +162,23 @@ class RoomConnection:
         """Do nothing: the room's server manages who receives each track."""
 
     async def close(self) -> None:
-        """Stop pacing and feeding the room, then leave it. Idempotent."""
+        """Stop pacing and feeding the room, then leave it. Idempotent.
+
+        The room is left even when the pacer fails to stop in time, so a
+        connection that closes never stays in the room with a frozen picture.
+        """
         if self._closed:
             return
         self._closed = True
-        await asyncio.to_thread(self._pacer.stop)
-        for out in self._audio.values():
-            if out.pump is not None:
-                out.pump.cancel()
-        await self._on_close()
+        try:
+            await asyncio.to_thread(self._pacer.stop)
+        except RuntimeError:
+            logger.warning("the room pacer did not stop in time", exc_info=True)
+        finally:
+            for out in self._audio.values():
+                if out.pump is not None:
+                    out.pump.cancel()
+            await self._on_close()
 
     def _send_frame(self, bundle: MediaBundle) -> None:
         """Hand one paced frame to the room, on the pacer's thread."""
@@ -202,15 +210,29 @@ class RoomConnection:
             out.source.clear_queue()
 
     async def _pump_audio(self, out: _AudioOut) -> None:
-        """Feed one audio source in order, waiting for its queue to have room."""
-        try:
-            while True:
+        """Feed one audio source in order, waiting for its queue to have room.
+
+        A frame the source refuses is dropped and the pump goes on, so one
+        failure does not silence the track for the rest of the connection.
+        The first failure is logged with its traceback, later ones quietly.
+        """
+        failures = 0
+        while True:
+            try:
                 frame = await out.pending.get()
+            except asyncio.CancelledError:
+                return
+            try:
                 await out.source.capture_frame(frame)
-        except asyncio.CancelledError:
-            return
-        except Exception:
-            logger.exception("feeding an audio track to the room failed")
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                failures += 1
+                self._dropped_audio += 1
+                if failures == 1:
+                    logger.exception("feeding an audio frame to the room failed; dropping it")
+                else:
+                    logger.debug("feeding an audio frame to the room failed; dropping it")
 
 
 def _video_frame(data: np.ndarray) -> rtc.VideoFrame:

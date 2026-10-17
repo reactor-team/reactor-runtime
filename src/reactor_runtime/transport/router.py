@@ -197,6 +197,14 @@ class SessionControl(ConnectionSink, Protocol):
         journal, so it names the cause and never a credential.
         """
 
+    def session_epoch(self) -> int:
+        """Return a number that changes each time a session starts.
+
+        Everything admitted while one session runs shares its number, so a
+        transport holding a connection across requests can tell whether it
+        belongs to the live session or to one that has ended.
+        """
+
     def offer_admitted(self, conn_id: ConnId) -> None:
         """Stamp an admitted connection offer with the live session.
 

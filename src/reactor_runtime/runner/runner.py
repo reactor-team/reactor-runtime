@@ -1238,6 +1238,10 @@ class Runner(ServiceComponent, ConnectionSink):
         """Record a transport this runtime serves, for the descriptor's ``transports`` list."""
         self._transports.append({"protocol": protocol, "version": version})
 
+    def session_epoch(self) -> int:
+        """Return the number of the live session's epoch, which changes at every session start."""
+        return self._offer_epochs.current
+
     def offer_admitted(self, conn_id: ConnId) -> None:
         """Stamp an admitted offer with the session it was admitted into.
 

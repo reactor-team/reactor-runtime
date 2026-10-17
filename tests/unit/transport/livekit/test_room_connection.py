@@ -2,6 +2,7 @@ import asyncio
 from typing import Any, cast
 
 import numpy as np
+import pytest
 from livekit import rtc
 
 from reactor_runtime.core import (
@@ -175,4 +176,51 @@ async def test_media_sent_through_the_connection_is_paced_into_the_room() -> Non
     await asyncio.sleep(0.1)
 
     assert [bytes(f.data)[0] for f in video.frames] == [1, 2]
+    await conn.close()
+
+
+async def test_closing_leaves_the_room_even_when_the_pacer_does_not_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leaves = Leaves()
+    conn, _, _ = make_connection(leaves)
+    conn.start()
+    real_stop = conn._pacer.stop
+
+    def stuck() -> None:
+        raise RuntimeError("the pacer thread did not stop")
+
+    monkeypatch.setattr(conn._pacer, "stop", stuck)
+
+    try:
+        await conn.close()
+        await _settle()
+
+        assert leaves.count == 1
+        assert all(out.pump is not None and out.pump.done() for out in conn._audio.values())
+    finally:
+        await asyncio.to_thread(real_stop)
+
+
+async def test_the_audio_pump_drops_a_refused_frame_and_keeps_feeding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn, _, audio = make_connection()
+    refused = {1}
+    capture = audio.capture_frame
+
+    async def flaky(frame: rtc.AudioFrame) -> None:
+        if np.frombuffer(bytes(frame.data), np.int16)[0] in refused:
+            raise RuntimeError("the source refused the frame")
+        await capture(frame)
+
+    monkeypatch.setattr(audio, "capture_frame", flaky)
+    conn.start()
+
+    for value in range(4):
+        conn._send_frame(bundle(value))
+    await _settle()
+
+    firsts = [np.frombuffer(bytes(f.data), np.int16)[0] for f in audio.frames]
+    assert firsts == [0, 2, 3]
     await conn.close()
