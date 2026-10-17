@@ -159,6 +159,10 @@ SESSION_ID = "00000000-0000-0000-0000-000000000000"
 # A standalone runtime has no cluster; it reports a constant so the v0 client's
 # schema, which requires the field, is satisfied.
 _CLUSTER = "local"
+# The WebRTC transport version the descriptor names when no WebRTC router has
+# registered one, as in a runner driven without the HTTP surface. A mounted
+# router registers its own (``transport.webrtc.version.TRANSPORT_VERSION``),
+# which the descriptor reads first, so the two cannot disagree on a server.
 _WEBRTC_TRANSPORT_VERSION = "1.0"
 _V0_PROTOCOL = "v0"
 # Client track directions are the mirror of the model's: a track the model sends
@@ -1212,11 +1216,32 @@ class Runner(ServiceComponent, ConnectionSink):
         The entry carries *reason*, the connection's id, and the transport, so
         a reader of ``/events`` learns why the connection it asked for never
         opened. The session itself is left as it was.
+
+        A failure for a connection admitted in an earlier session, or reported
+        after its session moved on, is logged and not journalled, the same
+        way :meth:`connection_opened` refuses a wire that connects too late:
+        it belongs to a session that is over.
         """
+        stale_epoch = self._offer_epochs.consume(conn_id)
+        if self._sm.current_state in _STALE_CONNECTION_STATES or stale_epoch:
+            logger.info(
+                "a connection of an earlier session could not be opened",
+                conn_id=conn_id,
+                transport=transport,
+                reason=reason,
+            )
+            return
         logger.info(
             "a connection could not be opened", conn_id=conn_id, transport=transport, reason=reason
         )
         self._sm.send(SessionEvent.ERROR, message=reason, conn_id=conn_id, transport=transport)
+
+    def _selected_transport(self) -> dict[str, str]:
+        """Name WebRTC, at the version its router registered, as the session's transport."""
+        for transport in self._transports:
+            if transport["protocol"] == "webrtc":
+                return dict(transport)
+        return {"protocol": "webrtc", "version": _WEBRTC_TRANSPORT_VERSION}
 
     def add_transport(self, protocol: str, version: str) -> None:
         """Record a transport this runtime serves, for the descriptor's ``transports`` list."""
@@ -1309,10 +1334,7 @@ class Runner(ServiceComponent, ConnectionSink):
             "cluster": _CLUSTER,
             "model": {"name": ""},
             "server_info": {"server_version": _server_version()},
-            "selected_transport": {
-                "protocol": "webrtc",
-                "version": _WEBRTC_TRANSPORT_VERSION,
-            },
+            "selected_transport": self._selected_transport(),
             "transports": [dict(transport) for transport in self._transports],
             "recording": {
                 "enabled": self._cfg.recording.enabled,
