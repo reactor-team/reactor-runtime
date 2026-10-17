@@ -19,7 +19,10 @@ names the stream, as JSON::
 and after its last frame comes one with no samples, ``data`` of shape
 ``(1, 0)``, and ``{"stream_id": "AUDIO_x7Kq", "ended": true}``. A stream ends when
 it closes, when a new stream starts on the same topic while it is open, or when
-its sender leaves.
+its sender leaves. A stream without the attributes is taken to be at the track's
+rate, in mono; one whose ``sample_rate`` is not between
+:data:`MIN_STREAM_RATE` and :data:`MAX_STREAM_RATE`, or whose ``num_channels``
+is not between 1 and :data:`MAX_STREAM_CHANNELS`, is refused.
 
 For each input track, the first participant that feeds it holds it until that
 participant leaves; media from anyone else is dropped.
@@ -46,7 +49,17 @@ logger = get_logger(__name__)
 FRAME_SECONDS = 0.01
 """The length of each audio frame cut from a byte stream."""
 
+MIN_STREAM_RATE = 8_000
+"""The lowest ``sample_rate`` a byte stream may declare."""
+
+MAX_STREAM_RATE = 192_000
+"""The highest ``sample_rate`` a byte stream may declare."""
+
+MAX_STREAM_CHANNELS = 8
+"""The most ``num_channels`` a byte stream may declare."""
+
 _EMPTY = np.empty(0, dtype=np.int16)
+_PCM_S16LE = np.dtype("<i2")
 
 MediaSink = Callable[[ConnId, str, InputFrame], None]
 """Receives each input frame: the sender's connection, the input track, the frame."""
@@ -66,7 +79,7 @@ class StreamFramer:
     """
 
     def __init__(self, rate: int, stream_rate: int, channels: int) -> None:
-        self._channels = max(1, channels)
+        self._channels = channels
         self._frame = max(1, int(rate * FRAME_SECONDS))
         self._bytes = b""
         self._pending: npt.NDArray[np.int16] = _EMPTY
@@ -85,7 +98,7 @@ class StreamFramer:
         self._bytes = data[whole:]
         if not whole:
             return []
-        samples = np.frombuffer(data[:whole], dtype=np.int16)
+        samples = np.frombuffer(data[:whole], dtype=_PCM_S16LE).astype(np.int16, copy=False)
         if self._channels > 1:
             samples = samples.reshape(-1, self._channels).mean(axis=1).round().astype(np.int16)
         return self._frames(self._resample(samples))
@@ -130,6 +143,7 @@ class _Stream:
     track: str
     framer: StreamFramer
     metadata: bytes
+    reader: rtc.ByteStreamReader
 
 
 class RoomInputs:
@@ -175,29 +189,39 @@ class RoomInputs:
         track = self._mapped.get(topic)
         info = self._inputs.get(track or "")
         if track is None or info is None or info.kind is not TrackKind.AUDIO:
-            self._discard(reader, sender)
+            reader.close()
+            return
+        attributes = dict(reader.info.attributes or {})
+        rate = _attribute(
+            attributes, "sample_rate", int(info.rate), MIN_STREAM_RATE, MAX_STREAM_RATE
+        )
+        channels = _attribute(attributes, "num_channels", 1, 1, MAX_STREAM_CHANNELS)
+        if rate is None or channels is None:
+            logger.warning(
+                "refused an input byte stream with an unusable audio format",
+                topic=topic,
+                sample_rate=attributes.get("sample_rate"),
+                num_channels=attributes.get("num_channels"),
+            )
+            reader.close()
             return
         if not self._claim(track, sender):
             logger.debug("dropped a stream for an input track another participant holds")
-            self._discard(reader, sender)
+            reader.close()
             return
         previous = self._streams.get(topic)
         if previous is not None:
             self._end(topic, previous)
-        attributes = dict(reader.info.attributes or {})
         stream = _Stream(
             stream_id=reader.info.stream_id,
             sender=sender,
             conn_id=conn_id,
             track=track,
-            framer=StreamFramer(
-                int(info.rate),
-                _int(attributes.get("sample_rate"), int(info.rate)),
-                _int(attributes.get("num_channels"), 1),
-            ),
+            framer=StreamFramer(int(info.rate), rate, channels),
             metadata=json.dumps(
                 {"stream_id": reader.info.stream_id, "attributes": attributes}
             ).encode(),
+            reader=reader,
         )
         self._streams[topic] = stream
         self._spawn(sender, self._feed(topic, stream, reader))
@@ -248,27 +272,20 @@ class RoomInputs:
         tasks.add(task)
         task.add_done_callback(tasks.discard)
 
-    def _discard(self, reader: rtc.ByteStreamReader, sender: str) -> None:
-        """Read a stream nobody uses to its end, so its chunks do not pile up."""
-
-        async def drain() -> None:
-            async for _ in reader:
-                pass
-
-        self._spawn(sender, drain())
-
     async def _feed(self, topic: str, stream: _Stream, reader: rtc.ByteStreamReader) -> None:
         try:
             async for chunk in reader:
-                # A stream that was superseded is read to its end and dropped.
                 if self._streams.get(topic) is not stream:
-                    continue
+                    # Superseded by a newer stream on the topic, which ended this one.
+                    return
                 for samples in stream.framer.push(chunk):
                     self._push(stream, samples)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.warning("reading an input byte stream failed", topic=topic, exc_info=True)
+        finally:
+            reader.close()
         if self._streams.get(topic) is stream:
             self._end(topic, stream)
 
@@ -276,6 +293,7 @@ class RoomInputs:
         """Send what the stream left, then its end frame, and stop it feeding the track."""
         if self._streams.get(topic) is stream:
             del self._streams[topic]
+        stream.reader.close()
         for samples in stream.framer.flush():
             self._push(stream, samples)
         ended = json.dumps({"stream_id": stream.stream_id, "ended": True}).encode()
@@ -300,9 +318,15 @@ class RoomInputs:
             self._sink(conn_id, target, InputFrame(data=samples.copy()))
 
 
-def _int(value: str | None, default: int) -> int:
-    try:
-        parsed = int(value) if value is not None else default
-    except ValueError:
+def _attribute(
+    attributes: Mapping[str, str], key: str, default: int, low: int, high: int
+) -> int | None:
+    """Read an integer stream attribute: *default* when absent, ``None`` when unusable."""
+    value = attributes.get(key)
+    if value is None:
         return default
-    return parsed if parsed > 0 else default
+    try:
+        parsed = int(value)
+    except ValueError:
+        return None
+    return parsed if low <= parsed <= high else None
