@@ -27,6 +27,7 @@ from reactor_runtime import serve
 from reactor_runtime.core import Health
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.runner import Runner
+from reactor_runtime.transport.livekit import livekit_available
 from reactor_runtime.transport.router import TransportRouter
 
 _build_app = http_server.build_app
@@ -148,7 +149,13 @@ def _live_transport_objects() -> dict[str, int]:
     from reactor_runtime.transport.webrtc.pacer import MediaPacer
     from reactor_runtime.transport.webrtc.peer import WebRTCPeer
 
-    counts = {"connections": 0, "peers": 0, "pacers": 0}
+    participant: type | None = None
+    if livekit_available():
+        from reactor_runtime.transport.livekit.participant import ParticipantConnection
+
+        participant = ParticipantConnection
+
+    counts = {"connections": 0, "peers": 0, "pacers": 0, "participants": 0}
     for obj in gc.get_objects():
         if isinstance(obj, WebRTCConnection):
             counts["connections"] += 1
@@ -156,6 +163,8 @@ def _live_transport_objects() -> dict[str, int]:
             counts["peers"] += 1
         elif isinstance(obj, MediaPacer):
             counts["pacers"] += 1
+        elif participant is not None and isinstance(obj, participant):
+            counts["participants"] += 1
     return counts
 
 

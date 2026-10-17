@@ -152,20 +152,33 @@ class RuntimeProcess:
         """Return one reading of the probe route."""
         return self.get("/_endurance/probe")
 
-    def settled_probe(self) -> tuple[dict[str, Any], float]:
-        """Read the probe once nothing is connected and teardown has finished.
+    def settled_probe(
+        self, *, connections: int = 0, tasks: int | None = None
+    ) -> tuple[dict[str, Any], float]:
+        """Read the probe once the cycle's client is gone and teardown has finished.
 
-        Waits for the registry to empty, then re-reads until every live count is
-        0. Returns the last reading either way, with the seconds it took: a count
-        that is still nonzero after the timeouts is a leak, not a slow teardown.
+        Waits for the registry to fall to *connections*, the ones the scenario
+        keeps open across cycles, then re-reads until every live count is 0
+        and, given *tasks*, until the loop runs no more tasks than that: a
+        task still closing what the client held is teardown that has not
+        finished. Returns the last reading either way, with the seconds it
+        took: a count that is still over after the timeouts is a leak, not a
+        slow teardown.
         """
         start = time.monotonic()
         reading = self.probe()
-        while reading["registered_connections"] > 0 and time.monotonic() - start < CLOSE_TIMEOUT_S:
+        while (
+            reading["registered_connections"] > connections
+            and time.monotonic() - start < CLOSE_TIMEOUT_S
+        ):
             time.sleep(0.25)
             reading = self.probe()
         settle_start = time.monotonic()
-        while any(reading["live"].values()) and time.monotonic() - settle_start < SETTLE_TIMEOUT_S:
+
+        def settling(reading: dict[str, Any]) -> bool:
+            return any(reading["live"].values()) or (tasks is not None and reading["tasks"] > tasks)
+
+        while settling(reading) and time.monotonic() - settle_start < SETTLE_TIMEOUT_S:
             time.sleep(0.25)
             reading = self.probe()
         return reading, time.monotonic() - start
@@ -691,6 +704,7 @@ class ResourceSampler:
                 live_pacers=reading["live"]["pacers"],
                 live_client_stats=reading["client_stats_connections"],
                 tasks=reading["tasks"],
+                live_participants=reading["live"].get("participants", 0),
             )
         self._baseline.freed_by_gc = freed
         self._baseline.holding_after_stop = holding
