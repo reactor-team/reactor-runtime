@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import av
 import numpy as np
 import numpy.typing as npt
 
@@ -85,3 +86,39 @@ def inbound_audio_to_mono(pcm: bytes, channels: int) -> npt.NDArray[np.int16]:
     if channels > 1:
         samples = samples.reshape(-1, channels).mean(axis=1).round().astype(np.int16)
     return samples.reshape(1, -1)
+
+
+class InboundAudioConverter:
+    """Bring one inbound track's mono samples to the track's declared sample rate.
+
+    Samples that arrive at the declared rate pass through untouched. Any other
+    rate is resampled, by a resampler that keeps its state from one frame to
+    the next so the stream stays continuous, and that is rebuilt when the
+    arriving rate changes. Used from one thread at a time.
+
+    Args:
+        target_rate: The sample rate the track declares, in Hz.
+    """
+
+    def __init__(self, target_rate: int) -> None:
+        self._target_rate = target_rate
+        self._source_rate = 0
+        self._resampler: av.AudioResampler | None = None
+
+    def convert(self, samples: npt.NDArray[np.int16], sample_rate: int) -> npt.NDArray[np.int16]:
+        """Return *samples*, ``(1, M)`` at *sample_rate*, as ``(1, K)`` at the declared rate.
+
+        A resampled frame can come out empty while the resampler fills its
+        delay line.
+        """
+        if sample_rate == self._target_rate:
+            return samples
+        if self._resampler is None or sample_rate != self._source_rate:
+            self._resampler = av.AudioResampler(format="s16", layout="mono", rate=self._target_rate)
+            self._source_rate = sample_rate
+        frame = av.AudioFrame.from_ndarray(samples, format="s16", layout="mono")
+        frame.sample_rate = sample_rate
+        out = [chunk.to_ndarray().reshape(-1) for chunk in self._resampler.resample(frame)]
+        if not out:
+            return np.empty((1, 0), dtype=np.int16)
+        return np.concatenate(out).astype(np.int16).reshape(1, -1)

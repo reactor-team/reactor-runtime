@@ -59,12 +59,24 @@ def test_an_audio_subclass_carries_its_buffer_seconds() -> None:
     assert (track.rate, track.buffer_seconds) == (24_000.0, 120.0)
 
 
-@pytest.mark.parametrize("seconds", [0, -1.5, True, "120"])
-def test_a_buffer_seconds_that_is_not_a_positive_number_is_refused(seconds: object) -> None:
+@pytest.mark.parametrize("seconds", [0, -1.5, True, "120", float("nan"), float("inf")])
+def test_a_buffer_seconds_that_is_not_a_finite_positive_number_is_refused(seconds: object) -> None:
     class AgentAudio(Audio):
         buffer_seconds = seconds
 
-    with pytest.raises(ValueError, match="buffer_seconds must be a positive number"):
+    with pytest.raises(ValueError, match="buffer_seconds must be a finite positive number"):
+
+        class In(MediaInput):
+            agent_audio: AgentAudio
+
+
+@pytest.mark.parametrize("rate", [0, float("nan"), float("inf")])
+def test_a_buffer_seconds_needs_a_finite_positive_sample_rate(rate: float) -> None:
+    class AgentAudio(Audio):
+        sample_rate = rate
+        buffer_seconds = 120
+
+    with pytest.raises(ValueError, match="buffer_seconds needs a positive sample_rate"):
 
         class In(MediaInput):
             agent_audio: AgentAudio

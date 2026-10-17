@@ -8,7 +8,8 @@ field name is the track name and the marker is its kind. The shared
 
 from __future__ import annotations
 
-from typing import ClassVar, get_type_hints
+import math
+from typing import ClassVar, cast, get_type_hints
 
 from reactor_runtime.core.values import TrackDirection, TrackInfo, TrackKind
 
@@ -62,7 +63,8 @@ def _resolve_tracks(cls: type, direction: TrackDirection) -> dict[str, TrackInfo
 
     Raises:
         ValueError: If an audio track declares a ``buffer_seconds`` that is not
-            a positive number.
+            a finite positive number, or declares one with a ``sample_rate``
+            that is not.
     """
     try:
         hints = get_type_hints(cls)
@@ -76,6 +78,11 @@ def _resolve_tracks(cls: type, direction: TrackDirection) -> dict[str, TrackInfo
             if issubclass(annotation, Audio):
                 rate = float(annotation.sample_rate)
                 buffer_seconds = _buffer_seconds(name, annotation.buffer_seconds)
+                if buffer_seconds is not None and not _finite_positive(rate):
+                    raise ValueError(
+                        f"track {name!r}: buffer_seconds needs a positive sample_rate, "
+                        f"got {annotation.sample_rate!r}"
+                    )
             tracks[name] = TrackInfo(
                 name=name,
                 kind=annotation.kind,
@@ -89,6 +96,18 @@ def _resolve_tracks(cls: type, direction: TrackDirection) -> dict[str, TrackInfo
 def _buffer_seconds(name: str, value: object) -> float | None:
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
-        raise ValueError(f"track {name!r}: buffer_seconds must be a positive number, got {value!r}")
-    return float(value)
+    if not _finite_positive(value):
+        raise ValueError(
+            f"track {name!r}: buffer_seconds must be a finite positive number, got {value!r}"
+        )
+    return float(cast("int | float", value))
+
+
+def _finite_positive(value: object) -> bool:
+    """Whether *value* is a real number, neither a bool nor infinite nor NaN, above zero."""
+    return (
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0
+    )
