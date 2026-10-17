@@ -435,8 +435,11 @@ class WebRTCPeer:
         self._frame_queue: queue.Queue[tuple[MediaBundle, float, int]] = queue.Queue(
             maxsize=_FRAME_QUEUE_MAX
         )
-        # Bumped by flush_media(), under _audio_lock.
+        # Bumped by flush_media(), under both _video_lock and _audio_lock.
         self._flushes = 0
+        # Held from the last flush-count check to the video frame's push, so a
+        # flush lands before the check or after the frame is on the wire.
+        self._video_lock = threading.Lock()
         self.frame_stages = FrameStageWindow()
         """Where this peer's frames spend their time; see :mod:`.frame_stages`."""
         self.message_stages = MessageStageWindow()
@@ -1006,7 +1009,8 @@ class WebRTCPeer:
         buffer the feeder drains in 10 ms frames via ``track.push_pcm()``.
 
         A bundle queued under an earlier flush count was queued before a
-        flush that has since landed, and is dropped whole.
+        flush that has since landed, and is dropped whole; the count is checked
+        again under the flush's lock right before a video frame is pushed.
         """
         if flushes is not None and flushes != self._flushes:
             return
@@ -1024,8 +1028,12 @@ class WebRTCPeer:
                 # A bundle reaching the wire holds one frame, so it holds one
                 # metadata value: a batch's list is resolved when it is split.
                 metadata = data.metadata if isinstance(data.metadata, bytes) else None
-                # Deliberately unstamped: see the module's Audio/video sync note.
-                self._out_tracks[name].push_video_frame(bgra, width, height, user_data=metadata)
+                with self._video_lock:
+                    # A flush can land while the frame converts.
+                    if flushes is not None and flushes != self._flushes:
+                        return
+                    # Deliberately unstamped: see the module's Audio/video sync note.
+                    self._out_tracks[name].push_video_frame(bgra, width, height, user_data=metadata)
                 if queued_at is not None:
                     pushed_at = time.perf_counter()
                     # output_queue holds three parts: the wait for this thread,
@@ -1151,19 +1159,29 @@ class WebRTCPeer:
         if track is None or track.kind() != rw.MediaKind.Audio:
             return
         paused = name in self._paused_tracks
-        chunk: npt.NDArray[np.int16] | None = None
+        pushed = False
         if not paused:
+            # The model's frame leaves its buffer and reaches the track under
+            # the flush's lock, so a flush lands before the frame is taken or
+            # after it is on the wire, never in between.
             with self._audio_lock:
                 buf = self._audio_bufs.get(name, _EMPTY_AUDIO)
                 if buf.size >= _AUDIO_FRAME_SAMPLES:
                     chunk = buf[:_AUDIO_FRAME_SAMPLES]
                     self._audio_bufs[name] = buf[_AUDIO_FRAME_SAMPLES:]
-        if chunk is not None:
+                    self._push_pcm(track, chunk.tobytes())
+                    pushed = True
+        if pushed:
             self._idle_ticks[name] = 0
-        elif not paused and name in self._idle_ticks:
+            return
+        if not paused and name in self._idle_ticks:
             self._idle_ticks[name] = min(self._idle_ticks[name] + 1, _AUDIO_GRACE_TICKS)
             self._silence_frames[name] = self._silence_frames.get(name, 0) + 1
-        payload = _AUDIO_SILENT_FRAME if chunk is None else chunk.tobytes()
+        self._push_pcm(track, _AUDIO_SILENT_FRAME)
+
+    @staticmethod
+    def _push_pcm(track: Any, payload: bytes) -> None:
+        """Hand one 10 ms frame to *track*, logging a failure rather than raising it."""
         try:
             track.push_pcm(payload, _AUDIO_SAMPLE_RATE, 1)
         except Exception:
@@ -1186,7 +1204,7 @@ class WebRTCPeer:
         except queue.Full:
             self._dropped_bundles += 1
 
-    def flush_media(self) -> None:
+    def flush_media(self) -> bool:
         """Drop the media this peer still holds for the wire.
 
         The bundles waiting for the drain thread are dropped, along with any
@@ -1195,15 +1213,24 @@ class WebRTCPeer:
         The feeder keeps pushing one 10 ms frame per tick, silence until the
         model sends audio again, so each track's sample clock keeps running.
         Nothing dropped here counts as dropped media: the model asked for it.
+
+        Once this returns, no frame queued before it reaches the wire: the
+        last checks before a video push and an audio push share its locks.
+
+        Returns:
+            Whether any queued bundle was dropped.
         """
-        with self._audio_lock:
+        dropped = 0
+        with self._video_lock, self._audio_lock:
             self._flushes += 1
             while True:
                 try:
                     self._frame_queue.get_nowait()
                 except queue.Empty:
                     break
+                dropped += 1
             self._audio_bufs.clear()
+        return dropped > 0
 
     def send_message(self, payload: bytes | str) -> None:
         """Send an already-encoded frame over the data channel (text or binary)."""
