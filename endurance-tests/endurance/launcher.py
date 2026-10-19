@@ -27,8 +27,16 @@ from reactor_runtime import serve
 from reactor_runtime.core import Health
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.runner import Runner
-from reactor_runtime.transport.livekit import livekit_available
 from reactor_runtime.transport.router import TransportRouter
+
+try:
+    from reactor_runtime.transport.livekit import livekit_available
+except ImportError:  # a runtime_ref from before the LiveKit transport
+
+    def livekit_available() -> bool:
+        """Report that this runtime has no LiveKit transport."""
+        return False
+
 
 _build_app = http_server.build_app
 
@@ -144,6 +152,37 @@ def _install_pacer_check() -> None:
     MediaPacer.stop = checked_stop
 
 
+# Commands a transport handed up to be answered nowhere, as a data-topic
+# command is, since start: proof the runtime took a topic packet as a command.
+_topic_commands = 0
+
+
+def _install_command_count() -> None:
+    """Count the commands handed up with no answer, if this runtime has them."""
+    try:
+        from reactor_runtime.core import ReplyRoute
+    except ImportError:  # a runtime_ref from before reply routes
+        return
+    received = Runner.command_received
+
+    def counted(self: Runner, *args: Any, **kwargs: Any) -> None:
+        global _topic_commands
+        reply = kwargs.get("reply", args[4] if len(args) > 4 else ReplyRoute.PROTOCOL)
+        if reply is ReplyRoute.NONE:
+            _topic_commands += 1
+        received(self, *args, **kwargs)
+
+    Runner.command_received = counted
+
+
+def _input_frames(runner: Runner) -> dict[str, float]:
+    """Each input track's frames received this session, if this runtime counts them."""
+    model_input = getattr(runner, "_model_input", None)
+    if model_input is None:
+        return {}
+    return {name: counts["frames_received"] for name, counts in model_input.take().items()}
+
+
 def _live_transport_objects() -> dict[str, int]:
     from reactor_runtime.transport.webrtc.connection import WebRTCConnection
     from reactor_runtime.transport.webrtc.pacer import MediaPacer
@@ -199,6 +238,8 @@ def build_app(
             "stopped_pacers_holding_now": stopped_holding,
             "live_batches": tracked_echo.alive_batches(),
             "live": _live_transport_objects(),
+            "topic_commands": _topic_commands,
+            "input_frames": _input_frames(runner),
             "tasks": len(asyncio.all_tasks()),
         }
 
@@ -212,6 +253,7 @@ def main() -> None:
     # Swapping in the wrapper is the point; ty refuses any assignment to a module function.
     http_server.build_app = build_app  # ty: ignore[invalid-assignment]
     _install_pacer_check()
+    _install_command_count()
     serve.main()
 
 

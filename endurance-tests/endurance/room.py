@@ -105,7 +105,7 @@ class RoomParticipant:
             for reader in self._readers:
                 reader.cancel()
             await self._room.disconnect()
-        self.unanswered.extend(self._unexpected)
+            self.unanswered.extend(self._unexpected)
 
     async def _become_client(self) -> bool:
         """Ask for the schema until it is answered: then the session serves this participant.

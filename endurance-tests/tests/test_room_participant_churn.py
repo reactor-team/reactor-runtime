@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import time
 import uuid
+from typing import Any
 
 import pytest
 from endurance.harness import ResourceSampler, RuntimeProcess, assert_answered
@@ -46,6 +47,21 @@ def _open_room(runtime: RuntimeProcess, session_id: str, room: str) -> None:
     raise AssertionError(f"the room connection was still joining after {_JOIN_WAIT_S:g}s")
 
 
+def _unheard(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
+    """What the runtime did not take from the cycle's participant, between two readings.
+
+    LiveKit accepts a packet, a track, or a stream whether or not the runtime
+    does anything with it, so the runtime's own counts are the proof.
+    """
+    missing = []
+    if after["topic_commands"] - before["topic_commands"] != 1:
+        missing.append("set_effect (topic): the runtime ran no command from the packet")
+    for track in ("webcam", "mic"):
+        if after["input_frames"].get(track, 0) <= before["input_frames"].get(track, 0):
+            missing.append(f"{track}: no frame reached the runtime's input track")
+    return missing
+
+
 async def test_room_participant_churn(runtime: RuntimeProcess) -> None:
     """Release everything a room participant held once it has left, every time."""
     if not LIVEKIT_URL:
@@ -59,7 +75,7 @@ async def test_room_participant_churn(runtime: RuntimeProcess) -> None:
     room = f"endurance-{uuid.uuid4().hex[:8]}"
     _open_room(runtime, session["session_id"], room)
     # Settle with the room connection open, so the task baseline includes what it keeps.
-    runtime.settled_probe(connections=1)
+    previous, _ = runtime.settled_probe(connections=1)
     sampler = ResourceSampler(runtime)
     live = LiveReporter("room-participant-churn", ENDURANCE_DURATION_SECONDS)
     started_at = now_iso()
@@ -73,9 +89,10 @@ async def test_room_participant_churn(runtime: RuntimeProcess) -> None:
                 break
             participant = RoomParticipant(room, f"participant-{cycle}", _MODEL)
             await participant.run()
-            unanswered.append(participant.unanswered)
             # A participant's readers close their streams as it leaves.
             reading, _ = runtime.settled_probe(connections=1, tasks=sampler.initial_tasks)
+            unanswered.append([*participant.unanswered, *_unheard(previous, reading)])
+            previous = reading
             sampler.sample(cycle=cycle, reading=reading)
             live.update(sampler.samples, retained=retained_cycles(sampler.samples))
             cycle += 1
