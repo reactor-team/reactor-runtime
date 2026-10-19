@@ -221,8 +221,9 @@ def test_a_short_h265_track_decodes_each_packet_at_its_presentation_time(
         capture_output=True,
         text=True,
         timeout=120,
-        check=True,
+        check=False,
     )
+    assert run.returncode == 0, run.stderr
     stamps = json.loads(run.stdout.strip().splitlines()[-1])
 
     assert stamps == {"1": [[0, 0]], "2": [[0, 0], [1, 1]]}
