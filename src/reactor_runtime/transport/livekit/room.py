@@ -93,7 +93,9 @@ class RoomSession:
         self._connection: RoomConnection | None = None
         self._join: asyncio.Task[None] | None = None
         self._closing: set[asyncio.Task[None]] = set()
-        self._attempt: asyncio.Task[RoomConnection] | None = None
+        # An abandoned attempt that will leave the room once it settles: set
+        # when the attempt is abandoned, cleared once the room is left.
+        self._leave_pending = False
         self._room.on("disconnected", self._on_disconnected)
 
     @property
@@ -114,8 +116,9 @@ class RoomSession:
         settles, and leaves the room after it: until then the room connection
         still holds the room, and its identity in it.
         """
-        pending = [self._join, self._attempt, *self._closing]
-        return not self.active and all(task is None or task.done() for task in pending)
+        if self.active or self._leave_pending:
+            return False
+        return all(task is None or task.done() for task in (self._join, *self._closing))
 
     @property
     def active(self) -> bool:
@@ -151,9 +154,9 @@ class RoomSession:
         attempt = asyncio.get_running_loop().create_task(
             self._connect_and_publish(), name=f"livekit-attempt-{self.conn_id}"
         )
-        self._attempt = attempt
         done, _ = await asyncio.wait({attempt}, timeout=JOIN_TIMEOUT_SECONDS)
         if not done:
+            self._leave_pending = True
             attempt.add_done_callback(self._leave_when_settled)
             if self.joining:
                 await self._fail(_JOIN_TIMED_OUT, leave=False)
@@ -187,9 +190,15 @@ class RoomSession:
         """Leave the room once an abandoned attempt has finished, whatever its outcome."""
         if not attempt.cancelled():
             attempt.exception()  # retrieved, so an abandoned failure is not reported as lost
-        task = asyncio.get_running_loop().create_task(self._disconnect())
+        task = asyncio.get_running_loop().create_task(self._leave_abandoned())
         self._closing.add(task)
         task.add_done_callback(self._closing.discard)
+
+    async def _leave_abandoned(self) -> None:
+        try:
+            await self._disconnect()
+        finally:
+            self._leave_pending = False
 
     async def _fail(self, reason: str, *, leave: bool = True) -> None:
         """End a join that did not succeed, and report it on the connection.

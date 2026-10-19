@@ -1,5 +1,6 @@
 import asyncio
 import gc
+import weakref
 from typing import Any, cast
 
 import pytest
@@ -236,6 +237,85 @@ async def test_a_timed_out_join_is_settled_only_once_its_attempt_has_left() -> N
 
     assert room.disconnects == 1
     assert session.settled
+
+
+@pytest.mark.usefixtures("short_deadline")
+async def test_a_timed_out_join_is_unsettled_from_its_attempt_ending_until_the_room_is_left(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish, leave = Gate(open_=False), Gate(open_=False)
+    room, control = FakeRoom(publish=publish), FakeControl(_VIDEO_OUT)
+
+    async def disconnect() -> None:
+        await leave.pass_through()
+        room.disconnects += 1
+
+    monkeypatch.setattr(room, "disconnect", disconnect)
+    session = _session(room, control)
+    leave_when_settled = session._leave_when_settled
+    seen_as_the_attempt_ended: list[bool] = []
+
+    def spy(attempt: asyncio.Task[Any]) -> None:
+        seen_as_the_attempt_ended.append(session.settled)
+        leave_when_settled(attempt)
+
+    monkeypatch.setattr(session, "_leave_when_settled", spy)
+    session.start()
+    await asyncio.sleep(0.1)
+    publish.release()
+    await _settle()
+
+    assert seen_as_the_attempt_ended == [False]
+    assert leave.entered
+    assert not session.settled
+
+    leave.release()
+    await _settle()
+
+    assert room.disconnects == 1
+    assert session.settled
+
+
+@pytest.mark.usefixtures("short_deadline")
+async def test_a_join_holds_no_room_connection_once_it_has_left_the_room(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish = Gate(open_=False)
+    room, control = FakeRoom(publish=publish), FakeControl(_VIDEO_OUT)
+    session = _session(room, control)
+    built: list[weakref.ref[Any]] = []
+    publish_tracks = session._publish
+
+    async def spy(tracks: Any) -> Any:
+        connection = await publish_tracks(tracks)
+        built.append(weakref.ref(connection))
+        return connection
+
+    monkeypatch.setattr(session, "_publish", spy)
+    session.start()
+    await asyncio.sleep(0.1)  # past the deadline
+    publish.release()  # the abandoned attempt succeeds late
+    await _settle()
+
+    assert session.settled
+    gc.collect()
+    assert [ref() for ref in built] == [None]
+
+
+async def test_a_left_room_holds_no_room_connection() -> None:
+    room, control = FakeRoom(), FakeControl(_VIDEO_OUT)
+    session = _session(room, control)
+    session.start()
+    await _settle()
+    (connection,) = control.opened
+    ref = weakref.ref(connection)
+
+    await session.leave()
+    control.opened.clear()
+    del connection
+    gc.collect()
+
+    assert ref() is None
 
 
 async def test_a_join_left_mid_connect_is_settled_only_once_it_has_left() -> None:
