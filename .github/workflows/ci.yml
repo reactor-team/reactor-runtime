@@ -160,12 +160,14 @@ jobs:
             | sed -e 's/^test_//' -e 's/\.py$//' | sort | jq -R . | jq -cs .)
           echo "scenarios=$scenarios" >> "$GITHUB_OUTPUT"
 
-  # Two cycles of every endurance scenario: proves the launcher's hooks, the
-  # probe and the scenarios' client still work against this change. It judges
-  # only what each cycle shows on its own: that it streamed in full, that its
-  # requests were answered and that the runtime dropped its connections. The
-  # leak counts and trends need the long runs (endurance-tests.yml), so this
-  # job cannot fail on them. One job per scenario, in parallel, so the smoke
+  # Two cycles of every endurance scenario, or one per variant for a scenario
+  # whose cycles take turns (session_churn's four stops): proves the
+  # launcher's hooks, the probe and the scenarios' client still work against
+  # this change. It judges only what each cycle shows on its own: that it
+  # streamed in full, that its requests were answered, that its session
+  # stopped cleanly and that the runtime dropped its connections. The leak
+  # counts and trends need the long runs (endurance-tests.yml), so this job
+  # cannot fail on them. One job per scenario, in parallel, so the smoke
   # takes as long as its slowest scenario.
   endurance-smoke:
     name: Endurance Smoke (${{ matrix.scenario }})

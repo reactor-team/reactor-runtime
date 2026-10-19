@@ -267,12 +267,7 @@ class BareClient:
         """
         deadline = time.monotonic() + timeout_s
         while not self._dropped.is_set() and time.monotonic() < deadline:
-            try:
-                await self._push_frame(frame)
-            # A channel the runtime closed refuses the send before its state
-            # change arrives here.
-            except RuntimeError:
-                self._dropped.set()
+            await self._push_frame(frame)
         return self._dropped.is_set()
 
     async def run_until_killed(
@@ -732,16 +727,45 @@ def assert_answered(unanswered: list[list[str]]) -> MetricResult:
     Args:
         unanswered: Each cycle's unanswered or refused requests, in cycle order.
     """
-    bad = [(cycle, misses) for cycle, misses in enumerate(unanswered) if misses]
+    return _assert_no_misses(
+        unanswered,
+        name="unanswered_requests",
+        failed="requests went unanswered or were refused",
+        passed="every request of the {n} cycles was answered",
+    )
+
+
+def assert_clean_stops(failures: list[list[str]]) -> MetricResult:
+    """Fail when any cycle's session stop went wrong.
+
+    A stop that was refused, a client the stop did not drop, a session that
+    was not orphaned when an orphaned stop came, or one not ready again
+    after it: each fails the cycle it happened on.
+
+    Args:
+        failures: Each cycle's stop failures, in cycle order.
+    """
+    return _assert_no_misses(
+        failures,
+        name="failed_stops",
+        failed="the session stop went wrong",
+        passed="every one of the {n} stops went through",
+    )
+
+
+def _assert_no_misses(
+    misses_by_cycle: list[list[str]], *, name: str, failed: str, passed: str
+) -> MetricResult:
+    bad = [(cycle, misses) for cycle, misses in enumerate(misses_by_cycle) if misses]
     if bad:
         cycle, misses = bad[0]
         reason = (
-            f"requests went unanswered or were refused on {len(bad)}/{len(unanswered)} cycles "
+            f"{failed} on {len(bad)}/{len(misses_by_cycle)} cycles "
             f"(first at cycle {cycle}: {'; '.join(misses[:3])})"
         )
-        print(f"[unanswered_requests] FAILED: {reason}")
+        print(f"[{name}] FAILED: {reason}")
         return MetricResult(
-            name="unanswered_requests",
+            name=name,
             start=0,
             end=len(bad),
             change=len(bad),
@@ -751,10 +775,10 @@ def assert_answered(unanswered: list[list[str]]) -> MetricResult:
             threshold="always 0",
             first_bad_cycle=cycle,
         )
-    reason = f"every request of the {len(unanswered)} cycles was answered"
-    print(f"[unanswered_requests] ok: {reason}")
+    reason = passed.format(n=len(misses_by_cycle))
+    print(f"[{name}] ok: {reason}")
     return MetricResult(
-        name="unanswered_requests",
+        name=name,
         start=0,
         end=0,
         change=0,

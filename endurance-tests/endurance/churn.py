@@ -16,6 +16,7 @@ from endurance.harness import (
     ResourceSampler,
     RuntimeProcess,
     assert_answered,
+    assert_clean_stops,
     assert_full_streams,
     assert_released,
     gray_frame,
@@ -31,6 +32,18 @@ from endurance.trends import (
 
 
 @dataclass
+class Released:
+    """How long a cycle's connection took to leave the runtime's registry.
+
+    Attributes:
+        seconds: The seconds it took, or ``None`` when it was still there
+            ``CLOSE_TIMEOUT_S`` after its client left.
+    """
+
+    seconds: float | None
+
+
+@dataclass
 class CycleOutcome:
     """What one cycle's client saw.
 
@@ -38,10 +51,17 @@ class CycleOutcome:
         received: The frames that came back.
         unanswered: The requests that were refused or never answered, or
             ``None`` for a client that sends none it waits on.
+        stop_failures: What went wrong stopping the cycle's session, or
+            ``None`` for a cycle that does not stop one.
+        released: The cycle's own reading of its connection leaving the
+            registry, when it waited for that mid-cycle; otherwise the
+            reading after the cycle tells.
     """
 
     received: int
     unanswered: list[str] | None = None
+    stop_failures: list[str] | None = None
+    released: Released | None = None
 
 
 async def run_cycles(
@@ -73,6 +93,8 @@ async def run_cycles(
     received: list[int] = []
     # Each v1 cycle's requests that went unanswered or were refused.
     unanswered: list[list[str]] = []
+    # Each session-stopping cycle's stop failures.
+    stop_failures: list[list[str]] = []
     # Seconds each cycle's connection took to leave the runtime's registry.
     released: list[float | None] = []
     metrics: list[MetricResult] = []
@@ -81,6 +103,8 @@ async def run_cycles(
         checks = [assert_full_streams(received), assert_released(released)]
         if unanswered:
             checks.append(assert_answered(unanswered))
+        if stop_failures:
+            checks.append(assert_clean_stops(stop_failures))
         return checks
 
     try:
@@ -91,8 +115,12 @@ async def run_cycles(
             received.append(outcome.received)
             if outcome.unanswered is not None:
                 unanswered.append(outcome.unanswered)
+            if outcome.stop_failures is not None:
+                stop_failures.append(outcome.stop_failures)
             reading, released_after_s = runtime.settled_probe()
-            released.append(released_after_s)
+            released.append(
+                outcome.released.seconds if outcome.released is not None else released_after_s
+            )
             sampler.sample(cycle=count, reading=reading)
             live.update(sampler.samples, retained=retained_cycles(sampler.samples))
             count += 1

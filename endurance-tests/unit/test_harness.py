@@ -7,6 +7,7 @@ from endurance.harness import (
     RuntimeProcess,
     V1Client,
     assert_answered,
+    assert_clean_stops,
     assert_full_streams,
     assert_released,
 )
@@ -152,3 +153,15 @@ def test_the_owed_notification_settles_its_notice() -> None:
     assert client.collect_unanswered() == ["moderation notice: never arrived"]
     client._on_control_message(_notification("moderation"), True)
     assert client.collect_unanswered() == []
+
+
+def test_a_stop_that_went_wrong_fails_its_cycle_by_name() -> None:
+    result = assert_clean_stops([[], ["moderated_stop: /stop_session answered 409"]])
+    assert result.name == "failed_stops"
+    assert result.status == "fail"
+    assert result.first_bad_cycle == 1
+    assert "moderated_stop" in result.detail
+
+
+def test_a_run_whose_stops_all_went_through_passes() -> None:
+    assert assert_clean_stops([[], [], []]).status == "ok"

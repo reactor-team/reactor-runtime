@@ -31,6 +31,7 @@ Exact counts, which must be 0 on every cycle:
 | `short_cycles` | A cycle whose client got fewer than its 60 frames back: it did not exercise what the scenario claims to. |
 | `unreleased_connections` | A connection still in the runtime's registry 30 s after its client left. The detail reports how long the runtime took to drop the others, which is how fast it notices a client is gone. |
 | `unanswered_requests` | v1 only: a cycle where the publish, the schema request or a command was refused or never answered, or a notice the client was owed (a stop's `session_ended` or `moderation`) never arrived. |
+| `failed_stops` | `session_churn` only: a cycle whose stop was refused, did not drop the client, came to a session that was not orphaned when it should have been, or left the session not ready again. Each names the stop it happened on. |
 | `pacers_holding_output` | A media pacer that still reaches model output after it stopped. Checked the moment it stops, so it does not depend on when garbage collection runs. |
 | `pinned_batches` | Model output the cyclic garbage collector freed: nothing but reference-cycle garbage held it. |
 | `live_connections`, `live_peers`, `live_pacers` | Transport objects still alive after a collection, with no client connected. |
@@ -62,8 +63,8 @@ trend ends in ERROR rather than in a verdict; a failed count still fails it.
 ENDURANCE_DURATION_SECONDS=600 mise run test-endurance
 # One scenario:
 mise run test-endurance endurance-tests/tests/test_connection_churn.py
-# A smoke run, as PR CI does: two cycles, judged only on full streams, answers
-# and released connections.
+# A smoke run, as PR CI does: two cycles, or one per stop for session_churn,
+# judged only on what each cycle shows on its own.
 ENDURANCE_SMOKE_CYCLES=2 mise run test-endurance
 # The room churn, against a local dev LiveKit server.
 LIVEKIT_URL=ws://127.0.0.1:7880 mise run test-endurance endurance-tests/tests/test_room_participant_churn.py

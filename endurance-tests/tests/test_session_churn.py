@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from endurance.churn import CycleOutcome, run_cycles
+import urllib.error
+from collections.abc import Mapping
+
+from endurance.churn import CycleOutcome, Released, run_cycles
 from endurance.harness import CLOSE_TIMEOUT_S, RuntimeProcess, V1Client, gray_frame
 
 DESCRIPTION = (
@@ -34,31 +37,50 @@ async def test_session_churn(runtime: RuntimeProcess) -> None:
         stop = STOPS[n % len(STOPS)]
         session = runtime.request("POST", "/start_session", {"session_id": f"endurance-{n}"})[1]
         client = V1Client(runtime, session["session_id"])
-        missed: list[str] = []
+        failures: list[str] = []
+        released: Released | None = None
         try:
             received = await client.open(frame)
             if stop == "leave_then_stop":
                 client.close()
                 # Stopped once the runtime has dropped the client, so the
                 # session is orphaned rather than streaming.
-                runtime.settled_probe()
+                _, released_after_s = runtime.settled_probe()
+                released = Released(released_after_s)
                 state = runtime.get("/session")["state"]
                 if state != "orphaned":
-                    missed.append(f"{stop}: the session was {state}, not orphaned, at the stop")
-                runtime.request("POST", "/stop_session", {})
+                    failures.append(f"{stop}: the session was {state}, not orphaned, at the stop")
+                _stop(stop, {}, failures)
             else:
                 if notice := _NOTICES.get(stop):
                     client.expect_notice(notice)
-                runtime.request("POST", "/stop_session", _BODIES.get(stop, {}))
-                if not await client.stream_until_dropped(frame, CLOSE_TIMEOUT_S):
-                    missed.append(
-                        f"{stop}: the connection was still open {CLOSE_TIMEOUT_S:g}s after it"
-                    )
-                await client.wait_for_notices(_NOTICE_GRACE_S)
+                if _stop(stop, _BODIES.get(stop, {}), failures):
+                    if not await client.stream_until_dropped(frame, CLOSE_TIMEOUT_S):
+                        failures.append(
+                            f"{stop}: the connection was still open {CLOSE_TIMEOUT_S:g}s after it"
+                        )
+                    await client.wait_for_notices(_NOTICE_GRACE_S)
         finally:
             client.close()
-        runtime.wait_ready(timeout_s=CLOSE_TIMEOUT_S)
-        return CycleOutcome(received=received, unanswered=[*client.collect_unanswered(), *missed])
+        try:
+            runtime.wait_ready(timeout_s=CLOSE_TIMEOUT_S)
+        except TimeoutError:
+            failures.append(f"{stop}: the session was not ready {CLOSE_TIMEOUT_S:g}s after it")
+        return CycleOutcome(
+            received=received,
+            unanswered=client.collect_unanswered(),
+            stop_failures=failures,
+            released=released,
+        )
+
+    def _stop(stop: str, body: Mapping[str, object], failures: list[str]) -> bool:
+        """Stop the session; record a refusal under *stop* and return whether it stopped."""
+        try:
+            runtime.request("POST", "/stop_session", body)
+        except urllib.error.HTTPError as error:
+            failures.append(f"{stop}: /stop_session answered {error.code}")
+            return False
+        return True
 
     await run_cycles(
         runtime,
