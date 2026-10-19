@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, ClassVar, Protocol, runtime_checkable
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -87,6 +87,32 @@ class ConnectionsExhaustedError(RuntimeError):
     """
 
 
+OFFERED_CONN_ID_MIN = 1001
+"""The lowest connection id a client may offer on: ``1001``, kept for legacy
+single-connection callers, below the ids the runtime mints from ``1002``."""
+
+CONN_ID_MAX = 9999
+"""The highest connection id a client may offer on, and the runtime mints."""
+
+
+class ConnectionIdClaimedError(RuntimeError):
+    """Raised when a transport uses a connection id another transport has claimed.
+
+    Every transport of a session takes its connection ids from one space, and
+    the first transport to use an id holds it for the rest of the session. A
+    router maps this to a conflict, so a caller that chose the id itself picks
+    another one.
+
+    Attributes:
+        conn_id: The id that is held by another transport.
+    """
+
+    def __init__(self, conn_id: ConnId) -> None:
+        """Record the id that is held by another transport."""
+        self.conn_id = conn_id
+        super().__init__(f"connection {conn_id} belongs to another transport")
+
+
 class SessionTransitionError(RuntimeError):
     """Raised when a session start or stop is rejected from the current state.
 
@@ -114,8 +140,8 @@ class SessionControl(ConnectionSink, Protocol):
 
     Composes the upward :class:`~reactor_runtime.core.transport.ConnectionSink`
     with the few session-control operations a router needs to admit a
-    connection: guarding that a session is live, minting connection ids
-    centrally so transports cannot collide, and reporting the model's declared
+    connection: guarding that a session is live, minting and claiming
+    connection ids centrally so transports cannot collide, and reporting the model's declared
     track manifest for connection setup. The runner implements it; a router only
     ever holds it as this shape.
     """
@@ -130,8 +156,35 @@ class SessionControl(ConnectionSink, Protocol):
             sid: The session id the request addressed.
         """
 
-    def new_conn_id(self) -> ConnId:
-        """Mint a fresh connection id, unique within the session."""
+    def new_conn_id(self, transport: str) -> ConnId:
+        """Mint a fresh connection id, unique within the session, and claim it for *transport*.
+
+        Raises:
+            ConnectionsExhaustedError: If the session's id space is used up.
+        """
+
+    def claim_conn_id(self, conn_id: ConnId, transport: str) -> bool:
+        """Claim *conn_id* for *transport*, the first time the transport uses it.
+
+        For an id the transport did not mint itself, such as one a client
+        chose and offered. An id stays with the transport that claimed it
+        first until the session ends, so claiming an id the same transport
+        already holds is accepted.
+
+        Returns:
+            Whether the claim is new, so a transport that then refuses the
+            connection knows to :meth:`release_conn_id` it.
+
+        Raises:
+            ConnectionIdClaimedError: If another transport holds *conn_id*.
+        """
+
+    def release_conn_id(self, conn_id: ConnId, transport: str) -> None:
+        """Release a new claim on *conn_id* whose connection *transport* refused.
+
+        So a refused offer does not hold its id for the rest of the session.
+        An id another transport holds is left alone.
+        """
 
     def offer_admitted(self, conn_id: ConnId) -> None:
         """Stamp an admitted connection offer with the live session.
@@ -152,7 +205,14 @@ class TransportRouter(ABC):
     A concrete router adds its route group, owns its acceptor (or accepts
     connections inline), and references the runner only as the
     :class:`SessionControl` surface — never reaching into transport internals.
+
+    Attributes:
+        protocol: The transport's name, such as ``webrtc``. A router that
+            claims connection ids claims them under this name. ``None`` for a
+            router that names no transport.
     """
+
+    protocol: ClassVar[str | None] = None
 
     @abstractmethod
     def mount(self, app: FastAPI, runner: SessionControl) -> None:

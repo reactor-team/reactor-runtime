@@ -14,6 +14,8 @@ from reactor_runtime.transport.router import SessionControl, TransportRouter
 class FakeRouter(TransportRouter):
     """A transport router that records its mount and adds one route."""
 
+    protocol = "fake"
+
     def __init__(self) -> None:
         self.mounted_with: SessionControl | None = None
 

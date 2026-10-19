@@ -32,7 +32,7 @@ replaced rather than edited.
   here: a fan-out can block for seconds inside a connection's pacer waiting for
   queue room, and a lock spanning that wait would hold the event loop out of
   the very disconnect it needs to process.
-* The publisher table, the used-id pool, and the set of connections that do not
+* The publisher table, the id claims, and the set of connections that do not
   occupy the session stay ordinary mutable containers. They are read and
   written only on the event loop, and nothing iterates them from another
   thread.
@@ -59,7 +59,8 @@ from reactor_runtime.core import (
 from reactor_runtime.log import get_logger
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.runner.state_machine import SessionStateMachine
-from reactor_runtime.transport.router import ConnectionsExhaustedError
+from reactor_runtime.runner.system_client import SYSTEM_CONN_ID
+from reactor_runtime.transport.router import ConnectionIdClaimedError, ConnectionsExhaustedError
 
 logger = get_logger(__name__)
 
@@ -68,6 +69,10 @@ logger = get_logger(__name__)
 # legacy single-connection compatibility, so explicit ids start at 1002.
 _MIN_CONN_ID = 1002
 _MAX_CONN_ID = 9999
+
+# Ids no transport can claim or release, whatever it calls itself: the
+# runtime's own system client.
+_RESERVED_IDS = frozenset({SYSTEM_CONN_ID})
 
 # The most times a mint redraws before giving up. Bounding the draw count keeps
 # allocation from spinning the event loop when the id space is dense, without
@@ -168,11 +173,13 @@ class ConnectionManager:
         # by one connection until it releases or drops, and a later claim on a held
         # track is refused.
         self._publishers: dict[str, ConnId] = {}
-        # Ids minted within the current session, so a fresh id never collides
-        # with a live or a since-dropped connection. Scoped to the session: it is
-        # cleared on teardown so ids do not accumulate across sessions and the
-        # full range is available again to the next one.
-        self._used_conn_ids: set[ConnId] = set()
+        # The transport that claimed each id used in the current session, by
+        # minting it or by first using it, so a fresh id never collides with a
+        # live or a since-dropped connection and one transport never takes over
+        # another's id. Scoped to the session: it is cleared on teardown so ids
+        # do not accumulate across sessions and the full range is available
+        # again to the next one.
+        self._claims: dict[ConnId, str] = {}
         # The registered connections that do not count toward occupancy, so a
         # drop sends the same kind of close its register sent as an open.
         self._unoccupying: set[ConnId] = set()
@@ -229,14 +236,15 @@ class ConnectionManager:
             out.append((cid, reading))
         return out
 
-    def new_conn_id(self) -> ConnId:
-        """Mint a fresh random connection id, unique within the session.
+    def new_conn_id(self, transport: str) -> ConnId:
+        """Mint a fresh random connection id, unique within the session, for *transport*.
 
         Drawn at random from ``[1002, 9999]`` and retried until one is free,
         matching the id space a production director allocates. Allocated centrally
-        so connections arriving through several transports cannot collide, and
-        held in the session's used-id pool so a new connection never reuses the id
-        of one that has since dropped; the pool clears on session teardown.
+        so connections arriving through several transports cannot collide. The id
+        is claimed for *transport* until session teardown, so a new connection
+        never reuses the id of one that has since dropped, and a draw skips every
+        id a transport has claimed without minting it.
 
         Raises:
             ConnectionsExhaustedError: If a free id is not drawn within the
@@ -246,10 +254,43 @@ class ConnectionManager:
         """
         for _ in range(_MAX_MINT_ATTEMPTS):
             conn_id = ConnId(random.randint(_MIN_CONN_ID, _MAX_CONN_ID))
-            if conn_id not in self._used_conn_ids:
-                self._used_conn_ids.add(conn_id)
+            if conn_id not in self._claims and conn_id not in _RESERVED_IDS:
+                self._claims[conn_id] = transport
                 return conn_id
         raise ConnectionsExhaustedError
+
+    def claim_conn_id(self, conn_id: ConnId, transport: str) -> bool:
+        """Claim *conn_id* for *transport*, unless another transport holds it.
+
+        For an id the transport did not mint here, such as one a client chose
+        and offered. The claim lasts until session teardown, and claiming an id
+        the same transport already holds is accepted, so a re-offer on a
+        connection's own id is still a reconnect. The system client's id is
+        held by the runtime, so no transport can claim it.
+
+        Returns:
+            Whether the claim is new.
+
+        Raises:
+            ConnectionIdClaimedError: If another transport holds *conn_id*.
+        """
+        if conn_id in _RESERVED_IDS:
+            raise ConnectionIdClaimedError(conn_id)
+        holder = self._claims.get(conn_id)
+        if holder is None:
+            self._claims[conn_id] = transport
+            return True
+        if holder != transport:
+            raise ConnectionIdClaimedError(conn_id)
+        return False
+
+    def release_conn_id(self, conn_id: ConnId, transport: str) -> None:
+        """Release *transport*'s claim on *conn_id*, for a connection it refused.
+
+        A claim held by another transport, or by the runtime, is left alone.
+        """
+        if conn_id not in _RESERVED_IDS and self._claims.get(conn_id) == transport:
+            del self._claims[conn_id]
 
     def register(self, conn: Connection, *, system: bool = False, occupies: bool = True) -> None:
         """Add a connection and advance the session for it.
@@ -321,13 +362,13 @@ class ConnectionManager:
         per-connection losses, because the model learns the session has ended
         through the session-end reactor event, not one disconnect per client. The
         registry is emptied before the closes are awaited so the manager presents
-        as session-less the moment teardown begins. The used-id pool is cleared
+        as session-less the moment teardown begins. The id claims are cleared
         too, so the next session starts with the whole id range free again.
         """
         conns = list(self._by_id.values())
         self._by_id = {}
         self._publishers.clear()
-        self._used_conn_ids.clear()
+        self._claims = {}
         self._unoccupying.clear()
         for conn in conns:
             await conn.close()
