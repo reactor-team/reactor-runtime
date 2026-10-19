@@ -73,8 +73,15 @@ class Connection(Protocol):
         room for it.
         """
 
-    def flush_media(self) -> None:
-        """Drop this connection's queued media and cut playout to black."""
+    def flush_media(self, *, hold: bool = False) -> None:
+        """Drop this connection's queued media, then cut playout to black or hold it.
+
+        Drops what the connection holds for its wire as well as what its pacer
+        queues, audio included, so nothing queued before the flush plays after
+        it. With *hold*, no black frame is sent and the last frame stays on
+        screen until new media arrives. A plain flush is called with no
+        argument.
+        """
 
     def set_media_rate(self, fps: float) -> None:
         """Re-pace this connection's queued media at *fps* immediately."""

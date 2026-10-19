@@ -2,6 +2,7 @@ import logging
 import sys
 import threading
 from collections.abc import Callable, Collection
+from typing import cast
 
 import pytest
 
@@ -75,7 +76,7 @@ class FakeConnection:
         self._outbound()
         self.media.append(chunk)
 
-    def flush_media(self) -> None:
+    def flush_media(self, *, hold: bool = False) -> None:
         self._outbound()
         self.flushed = True
 
@@ -536,6 +537,41 @@ def test_flush_media_reaches_every_connection() -> None:
     cm.flush_media()
     assert a.flushed
     assert b.flushed
+
+
+def test_a_hold_flush_reaches_every_connection_as_a_hold() -> None:
+    held: list[ConnId] = []
+
+    class Holding(FakeConnection):
+        def flush_media(self, *, hold: bool = False) -> None:
+            if hold:
+                held.append(self.id)
+
+    cm, _ = waiting_manager()
+    cm.register(Holding(1))
+    cm.register(Holding(2))
+
+    cm.flush_media(hold=True)
+
+    assert held == [ConnId(1), ConnId(2)]
+
+
+@pytest.mark.parametrize("hold", [False, True])
+def test_a_flush_still_reaches_a_connection_without_the_hold_argument(hold: bool) -> None:
+    # A hold flush falls back to a plain one: the picture is lost, the queue is not kept.
+    class Unaware(FakeConnection):
+        """A transport written before the hold flush: its flush takes no argument."""
+
+        def flush_media(self) -> None:  # type: ignore[ty:invalid-method-override]  # the old shape under test
+            self.flushed = True
+
+    cm, _ = waiting_manager()
+    conn = Unaware(1)
+    cm.register(cast(Connection, conn))
+
+    cm.flush_media(hold=hold)
+
+    assert conn.flushed
 
 
 def test_set_media_rate_reaches_every_connection() -> None:

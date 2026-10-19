@@ -151,6 +151,25 @@ async def test_playout_operations_reach_the_pacer(
     conn.send_media(_video_chunk())
     conn.flush_media()
     assert conn._pacer._queue.qsize() == 0
+    # The peer drops what it holds for the wire on the same flush.
+    assert fake_peer.flushes == 1
+    await conn.close()
+
+
+async def test_a_hold_flush_keeps_the_last_frame_and_still_flushes_the_peer(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    conn = await _connect(fake_peer, factory_for(fake_peer), out_av_tracks)
+    conn.send_media(_video_chunk())
+
+    conn.flush_media(hold=True)
+
+    assert conn._pacer._queue.qsize() == 0
+    # A hold sends nothing, the start-of-connection black included.
+    assert conn._pacer._boundary_black_pending is False
+    assert fake_peer.flushes == 1
     await conn.close()
 
 
@@ -513,4 +532,20 @@ async def test_a_window_that_cost_nothing_is_not_reported(
         await asyncio.sleep(0.05)
 
     assert not [r for r in caplog.records if "outbound media" in r.getMessage()]
+    await conn.close()
+
+
+async def test_a_hold_flush_forgets_the_last_frame_whatever_the_peer_held(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    """The last frame may be in flight to the wire when the peer flushes, so it must not repeat."""
+    conn = await _connect(fake_peer, factory_for(fake_peer), out_av_tracks)
+    conn._pacer._last_frame = _video_chunk().bundle
+
+    conn.flush_media(hold=True)
+
+    assert conn._pacer._last_frame is None
+    assert fake_peer.flushes == 1
     await conn.close()
