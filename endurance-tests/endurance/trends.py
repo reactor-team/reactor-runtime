@@ -381,10 +381,15 @@ def process_metrics(
     The child processes must never outnumber *children_baseline*, the count
     before the first cycle when known. The shared-memory blocks and bytes must
     never rise above the first reading: a block grows to its high-water mark
-    on first use and is then reused. They are judged only where they were
-    measured.
+    on first use and is then reused. They are judged only for a runtime with
+    worker processes, and only where they were measured.
     """
     results = [assert_never_grows(samples, field="child_processes", baseline=children_baseline)]
+    if not children_baseline:
+        # The blocks are counted across the machine: a runtime with no worker
+        # processes holds none, and another run on the machine must not fail it.
+        print("[shm_blocks] not judged: the runtime has no worker processes")
+        return results
     if any(s.shm_blocks is None or s.shm_bytes is None for s in samples):
         print("[shm_blocks] not measured: this platform has no /dev/shm")
         return results
@@ -471,7 +476,8 @@ def trend_metrics(samples: list[Sample]) -> list[MetricResult]:
             min_absolute_delta=3,
             use_median=True,
         ),
-        # Judged only for a runtime whose model runs in processes of its own.
+        # Judged only for a runtime whose model runs in processes of its own,
+        # by the same pair of checks as the runtime's own RSS.
         *(
             [
                 assert_no_sustained_growth(
@@ -480,7 +486,15 @@ def trend_metrics(samples: list[Sample]) -> list[MetricResult]:
                     unit="MB",
                     max_growth_ratio=0.15,
                     min_absolute_delta=5.0,
-                )
+                ),
+                assert_slope_under(
+                    [s.elapsed_s / 3600 for s in warmed],
+                    [s.child_rss_bytes / 1e6 for s in warmed],
+                    name="child_rss_slope",
+                    unit="MB",
+                    max_per_hour=MAX_RSS_MB_PER_HOUR,
+                    min_absolute_delta=5.0,
+                ),
             ]
             if any(s.child_rss_bytes for s in warmed)
             else []

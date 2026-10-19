@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextlib
 import json
 import os
 import socket
@@ -63,6 +64,9 @@ _SHM_BLOCKS = "rr????????_*"
 # later, so this is generous; a connection still registered after it is
 # reported, not waited on forever.
 CLOSE_TIMEOUT_S = 30.0
+# How long the runtime has to exit once asked to: longer than a distributed
+# model's runner gives its workers to shut down.
+STOP_TIMEOUT_S = 45.0
 # How long the probe is re-read after the registry is empty, for a teardown
 # still in flight to finish. A count still nonzero after it is a leak.
 SETTLE_TIMEOUT_S = 10.0
@@ -158,13 +162,19 @@ class RuntimeProcess(RuntimeEndpoint):
         raise TimeoutError("the runtime's session never became ready")
 
     def stop(self) -> None:
-        """Stop the runtime, killing it if it does not exit in time."""
+        """Stop the runtime, killing it and what it started if they do not exit in time."""
+        children = self.process.children(recursive=True)
         self._proc.terminate()
         try:
-            self._proc.wait(timeout=20)
+            self._proc.wait(timeout=STOP_TIMEOUT_S)
         except subprocess.TimeoutExpired:
             self._proc.kill()
             self._proc.wait()
+        # A worker that outlived the runtime would hold its shared memory
+        # into the next scenario.
+        for child in children:
+            with contextlib.suppress(psutil.NoSuchProcess):
+                child.kill()
         self._log.close()
 
     def probe(self) -> dict[str, Any]:
@@ -940,12 +950,18 @@ def shm_usage() -> tuple[int, int] | None:
 
 
 def _children(process: psutil.Process) -> tuple[int, int]:
-    """Return how many processes *process* started, at any depth, and their summed RSS."""
+    """Return how many processes *process* started, at any depth, and their summed RSS.
+
+    A child that exited but was never reaped still counts, with no memory:
+    leaving one behind is a leak too.
+    """
     count = rss = 0
     for child in process.children(recursive=True):
-        # A child can exit between the listing and the read.
         try:
             rss += child.memory_info().rss
+        except psutil.ZombieProcess:
+            pass
+        # A child can exit between the listing and the read.
         except psutil.NoSuchProcess:
             continue
         count += 1

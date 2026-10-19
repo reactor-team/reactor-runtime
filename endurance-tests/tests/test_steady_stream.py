@@ -69,7 +69,9 @@ def _streaming_checks(samples: list[Sample], children_baseline: int) -> list[Met
     ]
 
 
-def _after_close_checks(final: Sample, tasks_baseline: int) -> list[MetricResult]:
+def _after_close_checks(
+    final: Sample, tasks_baseline: int, children_baseline: int
+) -> list[MetricResult]:
     """Check the reading taken once the client has left, each count named as such."""
     return [
         *(
@@ -78,6 +80,12 @@ def _after_close_checks(final: Sample, tasks_baseline: int) -> list[MetricResult
         ),
         assert_never_grows(
             [final], field="tasks", baseline=tasks_baseline, name="tasks_after_close"
+        ),
+        assert_never_grows(
+            [final],
+            field="child_processes",
+            baseline=children_baseline,
+            name="child_processes_after_close",
         ),
     ]
 
@@ -105,7 +113,7 @@ async def test_steady_stream(runtime: RuntimeProcess) -> None:
             results += _streaming_checks(streaming, sampler.initial_children)
         results.append(assert_answered([client.collect_unanswered()]))
         if final is not None:
-            results += _after_close_checks(final, sampler.initial_tasks)
+            results += _after_close_checks(final, sampler.initial_tasks, sampler.initial_children)
         return results
 
     try:

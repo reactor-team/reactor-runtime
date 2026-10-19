@@ -38,11 +38,12 @@ Exact counts, which must be 0 on every cycle:
 | `live_client_stats` | Connections the runtime still keeps client-stats state for, with no client connected. |
 | `live_participants` | Room participant connections still alive after a collection, with no participant in the room. |
 | `tasks` | asyncio tasks on the runtime's loop; must never rise above the reading taken before the first client. |
-| `child_processes` | Processes the runtime started, at any depth; must never rise above the reading taken before the first client. |
-| `shm_blocks`, `shm_bytes` | The distributed package's shared-memory blocks in `/dev/shm` (`rr*`); must never rise above the first reading. Linux only: elsewhere they are not files, and the run says they were not measured. |
+| `child_processes` | Processes the runtime started, at any depth, an exited one nobody reaped included; must never rise above the reading taken before the first client. |
+| `shm_blocks`, `shm_bytes` | The distributed package's shared-memory blocks in `/dev/shm` (`rr*`); must never rise above the first reading. Judged only for a runtime with worker processes, and Linux only: elsewhere they are not files, and the run says they were not measured. The count covers the whole machine, which a CI runner gives to one scenario; run locally, it assumes nothing else on the machine uses the distributed package meanwhile. |
 
 Trends of the runtime process (RSS, CPU per cycle, threads, file
-descriptors, and the RSS of its child processes when it has any): the last third of the run against the middle third, after a
+descriptors, and the RSS of its child processes, with its slope, when it has
+any): the last third of the run against the middle third, after a
 warm-up of `ENDURANCE_WARMUP_SECONDS` (default 120). RSS is also judged by
 its slope over the last two thirds, in MB per hour (`rss_slope`), judged
 only when those samples span 75 minutes or more, as a two-hour run's do; a

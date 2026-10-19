@@ -5,6 +5,11 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
+
+# A runtime from before the distributed package (runtime_ref) has nothing for
+# this scenario to test.
+pytest.importorskip("reactor_runtime.distributed")
+
 from endurance.churn import run_churn
 from endurance.harness import SUITE_DIR, RuntimeProcess, V1Client
 from endurance.report import DEFAULT_OUTPUT_DIR

@@ -1,6 +1,9 @@
 import threading
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 
+import psutil
 import pytest
 from endurance import harness
 from endurance.harness import (
@@ -192,3 +195,24 @@ def test_shm_usage_is_unmeasured_without_a_shm_directory(
 ) -> None:
     monkeypatch.setattr(harness, "SHM_DIR", tmp_path / "missing")
     assert harness.shm_usage() is None
+
+
+class _Child:
+    def __init__(self, rss: int | None, error: type[Exception] | None = None) -> None:
+        self._rss, self._error = rss, error
+
+    def memory_info(self) -> Any:
+        if self._error is not None:
+            raise self._error(1)
+        return SimpleNamespace(rss=self._rss)
+
+
+def test_a_zombie_child_counts_with_no_memory_and_a_gone_one_does_not() -> None:
+    process = SimpleNamespace(
+        children=lambda recursive: [
+            _Child(100),
+            _Child(None, psutil.ZombieProcess),
+            _Child(None, psutil.NoSuchProcess),
+        ]
+    )
+    assert harness._children(cast(psutil.Process, process)) == (2, 100)
