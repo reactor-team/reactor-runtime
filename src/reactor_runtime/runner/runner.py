@@ -524,7 +524,7 @@ class Runner(ServiceComponent, ConnectionSink):
 
     # -- inbound (ConnectionSink) ---------------------------------------------
 
-    def connection_opened(self, conn: Connection) -> None:
+    def connection_opened(self, conn: Connection) -> bool:
         """Register a connection whose wire can carry frames to the client.
 
         The model's playout settings (rate, queue depth) apply to every
@@ -538,6 +538,9 @@ class Runner(ServiceComponent, ConnectionSink):
         by the epoch stamped on the offer at admission; a connection with no
         stamp (a transport that does not stamp, or a directly driven test) is
         gated on state alone.
+
+        Returns:
+            Whether the connection is registered.
         """
         stale_epoch = self._offer_epochs.consume(conn.id)
         if self._sm.current_state in _STALE_CONNECTION_STATES or stale_epoch:
@@ -548,12 +551,13 @@ class Runner(ServiceComponent, ConnectionSink):
             )
             if self._loop is not None:
                 self._spawn_teardown(conn.close())
-            return
+            return False
         self._connections.register(conn)
         if self._media_depth is not None:
             conn.set_media_depth(self._media_depth)
         if self._media_rate is not None:
             conn.set_media_rate(self._media_rate)
+        return True
 
     def connection_closed(self, conn_id: ConnId) -> None:
         """Drop a previously opened connection that has gone away."""

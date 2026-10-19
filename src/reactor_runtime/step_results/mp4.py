@@ -28,6 +28,16 @@ from reactor_runtime.step_results.usage import VideoUsage
 # The rate an audio track plays at when its track declares none.
 _DEFAULT_SAMPLE_RATE = 48_000
 
+# The fewest frames an H.265 track is encoded with B-frames. x265 releases up to
+# 4.3 compute the decode time of the first frames from a value set only once
+# the third frame arrives, so the packets of a shorter track carry a decode
+# time read from uninitialised memory, which the MP4 muxer can refuse
+# ("pts/dts pair unsupported"). Fixed upstream after 4.3:
+# https://github.com/Multicorewareinc/x265/issues/781. A track this short has
+# nothing to reorder, and without B-frames x265 gives each packet its
+# presentation time as its decode time.
+_X265_REORDER_FRAMES = 3
+
 
 def write_mp4(
     path: Path, bundle: MediaBundle, fps: float, config: StepResultsConfig
@@ -121,7 +131,7 @@ def _add_video(
     stream = container.add_stream(
         "libx264" if config.video_codec == "h264" else "libx265",
         rate=rate,
-        options=_video_options(config),
+        options=_video_options(config, len(frames)),
     )
     stream.width = frames.shape[2] + frames.shape[2] % 2
     stream.height = frames.shape[1] + frames.shape[1] % 2
@@ -193,11 +203,14 @@ def _even(frame: npt.NDArray[Any]) -> npt.NDArray[Any]:
     return np.ascontiguousarray(frame, dtype=np.uint8)
 
 
-def _video_options(config: StepResultsConfig) -> dict[str, str]:
-    """Build the private encoder options for the configured video codec."""
+def _video_options(config: StepResultsConfig, frame_count: int) -> dict[str, str]:
+    """Build the private encoder options for the configured video codec and track length."""
     options = {"preset": config.video_preset, "crf": str(config.video_crf)}
     if config.video_codec != "h264":
         # x265 prints a configuration banner to stderr at its default
         # verbosity, which libav's own log level does not reach.
-        options["x265-params"] = "log-level=warning"
+        params = ["log-level=warning"]
+        if frame_count < _X265_REORDER_FRAMES:
+            params.append("bframes=0")
+        options["x265-params"] = ":".join(params)
     return options
