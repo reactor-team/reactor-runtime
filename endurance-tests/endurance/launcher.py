@@ -24,10 +24,19 @@ from fastapi import FastAPI
 
 import reactor_runtime.http.server as http_server
 from reactor_runtime import serve
-from reactor_runtime.core import Health
+from reactor_runtime.core import ConnId, Health
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.runner import Runner
 from reactor_runtime.transport.router import TransportRouter
+
+try:
+    from reactor_runtime.transport.livekit import livekit_available
+except ImportError:  # a runtime_ref from before the LiveKit transport
+
+    def livekit_available() -> bool:
+        """Report that this runtime has no LiveKit transport."""
+        return False
+
 
 _build_app = http_server.build_app
 
@@ -143,12 +152,61 @@ def _install_pacer_check() -> None:
     MediaPacer.stop = checked_stop
 
 
+# Commands answered nowhere, as a data-topic command is, since start, by how
+# they ended: run by the model's handler, or rejected (by the contract, or by
+# the handler failing). The proof the runtime ran a topic packet's command.
+_topic_commands = {"ran": 0, "rejected": 0}
+
+
+def _install_command_count() -> None:
+    """Count how each command answered nowhere ended, if this runtime has them."""
+    try:
+        from reactor_runtime.core import CommandFailure, ReplyRoute
+    except ImportError:  # a runtime_ref from before reply routes
+        return
+    send_addressed = Runner._send_addressed
+    reject_command = Runner._reject_command
+
+    def answered_nowhere(runner: Runner, conn_id: ConnId, request_id: str | None) -> bool:
+        return runner._reply_routes.get((conn_id, request_id or "")) is ReplyRoute.NONE
+
+    def counted_answer(self: Runner, conn_id: ConnId, message: Any, request_id: str | None) -> None:
+        # A failure goes on to _reject_command, which counts it.
+        if not isinstance(message, CommandFailure) and answered_nowhere(self, conn_id, request_id):
+            _topic_commands["ran"] += 1
+        send_addressed(self, conn_id, message, request_id)
+
+    def counted_rejection(
+        self: Runner, conn_id: ConnId, request_id: str, code: str, detail: str
+    ) -> None:
+        if answered_nowhere(self, conn_id, request_id):
+            _topic_commands["rejected"] += 1
+        reject_command(self, conn_id, request_id, code, detail)
+
+    Runner._send_addressed = counted_answer
+    Runner._reject_command = counted_rejection
+
+
+def _input_frames(runner: Runner) -> dict[str, float]:
+    """Each input track's frames received this session, if this runtime counts them."""
+    model_input = getattr(runner, "_model_input", None)
+    if model_input is None:
+        return {}
+    return {name: counts["frames_received"] for name, counts in model_input.take().items()}
+
+
 def _live_transport_objects() -> dict[str, int]:
     from reactor_runtime.transport.webrtc.connection import WebRTCConnection
     from reactor_runtime.transport.webrtc.pacer import MediaPacer
     from reactor_runtime.transport.webrtc.peer import WebRTCPeer
 
-    counts = {"connections": 0, "peers": 0, "pacers": 0}
+    participant: type | None = None
+    if livekit_available():
+        from reactor_runtime.transport.livekit.participant import ParticipantConnection
+
+        participant = ParticipantConnection
+
+    counts = {"connections": 0, "peers": 0, "pacers": 0, "participants": 0}
     for obj in gc.get_objects():
         if isinstance(obj, WebRTCConnection):
             counts["connections"] += 1
@@ -156,6 +214,8 @@ def _live_transport_objects() -> dict[str, int]:
             counts["peers"] += 1
         elif isinstance(obj, MediaPacer):
             counts["pacers"] += 1
+        elif participant is not None and isinstance(obj, participant):
+            counts["participants"] += 1
     return counts
 
 
@@ -190,6 +250,8 @@ def build_app(
             "stopped_pacers_holding_now": stopped_holding,
             "live_batches": tracked_echo.alive_batches(),
             "live": _live_transport_objects(),
+            "topic_commands": dict(_topic_commands),
+            "input_frames": _input_frames(runner),
             "tasks": len(asyncio.all_tasks()),
         }
 
@@ -203,6 +265,7 @@ def main() -> None:
     # Swapping in the wrapper is the point; ty refuses any assignment to a module function.
     http_server.build_app = build_app  # ty: ignore[invalid-assignment]
     _install_pacer_check()
+    _install_command_count()
     serve.main()
 
 

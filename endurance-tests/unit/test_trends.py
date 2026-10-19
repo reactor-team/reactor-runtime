@@ -1,4 +1,5 @@
 import dataclasses
+from typing import Any
 
 import pytest
 from endurance import trends
@@ -15,8 +16,8 @@ from endurance.trends import (
 )
 
 
-def _sample(cycle: int, **overrides: float) -> Sample:
-    fields: dict[str, float] = {
+def _sample(cycle: int, **overrides: Any) -> Sample:
+    fields: dict[str, Any] = {
         "cycle": cycle,
         "elapsed_s": float(cycle * 10),
         "rss_bytes": 300_000_000,
@@ -128,8 +129,19 @@ def test_exact_metrics_cover_every_count() -> None:
         "live_peers",
         "live_pacers",
         "live_client_stats",
+        "live_participants",
         "tasks",
     ]
+
+
+def test_a_participant_left_alive_fails_its_cycle() -> None:
+    samples = _samples(4)
+    samples[2] = dataclasses.replace(samples[2], live_participants=1)
+
+    [participants] = [m for m in exact_metrics(samples) if m.name == "live_participants"]
+
+    assert participants.status == "fail"
+    assert retained_cycles(samples) == 1
 
 
 def test_retained_cycles_count_every_cycle_with_any_nonzero_count() -> None:
