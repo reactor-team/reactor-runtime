@@ -380,9 +380,12 @@ def process_metrics(
 
     The child processes must never outnumber *children_baseline*, the count
     before the first cycle when known. The shared-memory blocks and bytes must
-    never rise above the first reading: a block grows to its high-water mark
-    on first use and is then reused. They are judged only for a runtime with
-    worker processes, and only where they were measured.
+    never rise above the first reading, after the first cycle rather than
+    before it: a worker allocates its result block on its first step, and a
+    block grows to its high-water mark on first use and is then reused. A
+    block leaked per cycle shows from the second cycle on. They are judged
+    only for a runtime with worker processes, and only where they were
+    measured.
     """
     results = [assert_never_grows(samples, field="child_processes", baseline=children_baseline)]
     if not children_baseline:
