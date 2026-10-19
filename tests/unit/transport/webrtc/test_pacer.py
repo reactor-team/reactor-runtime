@@ -291,14 +291,17 @@ def test_a_hold_flush_plays_the_next_frame_without_a_cut() -> None:
     assert [int(b.tracks["main"].data[0, 0, 0]) for b in sink.seen] == [1, 2]
 
 
-def test_a_hold_flush_keeps_the_frame_a_gap_fill_repeats() -> None:
+def test_a_hold_flush_repeats_nothing_until_new_media_arrives() -> None:
+    """The last frame handed over may never reach the wire, so the hold forgets it."""
     pacer, sink = make_pacer()
     pacer.submit(chunk(video_bundle(np.zeros((4, 4, 3), dtype=np.uint8), metadata=b"pose-7")))
     pacer._emit_one_tick()
     pacer.flush(hold=True)
-    pacer._emit_one_tick()  # queue empty -> the held frame's gap-fill
+    pacer._emit_one_tick()  # queue empty: nothing to repeat
+    pacer.submit(chunk(video_bundle(np.zeros((4, 4, 3), dtype=np.uint8), metadata=b"pose-8")))
+    pacer._emit_one_tick()
 
-    assert [b.tracks["main"].metadata for b in sink.seen] == [b"pose-7", b"pose-7"]
+    assert [b.tracks["main"].metadata for b in sink.seen] == [b"pose-7", b"pose-8"]
 
 
 def test_a_hold_flush_releases_a_producer_blocked_on_a_full_queue() -> None:
@@ -587,15 +590,3 @@ def test_a_flush_between_ticks_waits_for_a_tick_that_is_handing_over_a_frame() -
 
     assert flushed.is_set()
     assert len(seen) == 1
-
-
-def test_forget_last_frame_stops_the_gap_fill() -> None:
-    pacer, sink = make_pacer()
-    pacer.submit(chunk(video_bundle(np.zeros((4, 4, 3), dtype=np.uint8), metadata=b"pose-7")))
-    pacer._emit_one_tick()
-    pacer.flush(hold=True)
-
-    pacer.forget_last_frame()
-    pacer._emit_one_tick()
-
-    assert len(sink.seen) == 1

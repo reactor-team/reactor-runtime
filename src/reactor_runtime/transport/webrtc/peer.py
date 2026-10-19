@@ -1204,7 +1204,7 @@ class WebRTCPeer:
         except queue.Full:
             self._dropped_bundles += 1
 
-    def flush_media(self) -> bool:
+    def flush_media(self) -> None:
         """Drop the media this peer still holds for the wire.
 
         The bundles waiting for the drain thread are dropped, along with any
@@ -1216,11 +1216,7 @@ class WebRTCPeer:
 
         Once this returns, no frame queued before it reaches the wire: the
         last checks before a video push and an audio push share its locks.
-
-        Returns:
-            Whether any queued bundle was dropped.
         """
-        dropped = 0
         with self._video_lock, self._audio_lock:
             self._flushes += 1
             while True:
@@ -1228,9 +1224,7 @@ class WebRTCPeer:
                     self._frame_queue.get_nowait()
                 except queue.Empty:
                     break
-                dropped += 1
             self._audio_bufs.clear()
-        return dropped > 0
 
     def send_message(self, payload: bytes | str) -> None:
         """Send an already-encoded frame over the data channel (text or binary)."""

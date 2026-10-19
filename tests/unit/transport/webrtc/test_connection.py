@@ -535,32 +535,17 @@ async def test_a_window_that_cost_nothing_is_not_reported(
     await conn.close()
 
 
-async def test_a_hold_flush_that_drops_frames_in_the_peer_stops_the_gap_fill(
+async def test_a_hold_flush_forgets_the_last_frame_whatever_the_peer_held(
     fake_peer: FakePeer,
     factory_for: Callable[..., WebRtcPeerFactory],
     out_av_tracks: TrackMap,
 ) -> None:
-    """The pacer's last frame may be one the peer dropped, so it must not be repeated."""
+    """The last frame may be in flight to the wire when the peer flushes, so it must not repeat."""
     conn = await _connect(fake_peer, factory_for(fake_peer), out_av_tracks)
     conn._pacer._last_frame = _video_chunk().bundle
-    fake_peer.flush_drops = True
 
     conn.flush_media(hold=True)
 
     assert conn._pacer._last_frame is None
-    await conn.close()
-
-
-async def test_a_hold_flush_with_nothing_dropped_in_the_peer_keeps_the_last_frame(
-    fake_peer: FakePeer,
-    factory_for: Callable[..., WebRtcPeerFactory],
-    out_av_tracks: TrackMap,
-) -> None:
-    conn = await _connect(fake_peer, factory_for(fake_peer), out_av_tracks)
-    last = _video_chunk().bundle
-    conn._pacer._last_frame = last
-
-    conn.flush_media(hold=True)
-
-    assert conn._pacer._last_frame is last
+    assert fake_peer.flushes == 1
     await conn.close()

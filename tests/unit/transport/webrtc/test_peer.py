@@ -2534,12 +2534,3 @@ def test_a_flush_waits_for_an_audio_frame_the_feeder_is_pushing() -> None:
     assert len(audio.pushed) == 1
     # The second frame was still buffered at the flush, and is gone.
     assert peer._audio_bufs == {}
-
-
-def test_a_flush_reports_whether_it_dropped_queued_bundles() -> None:
-    peer, _, _ = _wired_peer()
-    assert peer.flush_media() is False
-
-    peer.send_media(_av_bundle())
-
-    assert peer.flush_media() is True

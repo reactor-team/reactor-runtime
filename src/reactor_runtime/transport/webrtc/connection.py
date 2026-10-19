@@ -258,14 +258,10 @@ class WebRTCConnection:
         The pacer's queue goes first, so nothing more is handed to the peer,
         then what the peer still holds for the wire, both between two pacer
         ticks: once this returns, no frame queued before it reaches the wire.
-        A held flush that dropped frames inside the peer also stops the pacer
-        repeating its last frame, which may be one of them.
         """
         with self._pacer.between_ticks():
             self._pacer.flush(hold=hold)
-            dropped = self._peer.flush_media()
-            if hold and dropped:
-                self._pacer.forget_last_frame()
+            self._peer.flush_media()
 
     def set_media_rate(self, fps: float) -> None:
         """Re-pace this connection's queued media at *fps* immediately."""

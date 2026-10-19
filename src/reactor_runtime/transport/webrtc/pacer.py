@@ -221,7 +221,9 @@ class MediaPacer:
         afterwards. Without *hold* the boundary black is re-armed and the next
         tick emits it. With *hold* nothing is sent until new media arrives, a
         boundary black still pending included, so the client keeps the frame
-        it has, and the last frame stays the one a gap-fill repeats.
+        it has. Either way the last frame is forgotten, and no gap-fill
+        repeats it: the frame the pacer last handed over may still have been
+        on its way to the wire, and a flush further down drops it.
 
         A flush that must land between two ticks, so no frame taken before it
         is handed over after it, runs inside :meth:`between_ticks`.
@@ -233,11 +235,8 @@ class MediaPacer:
                     self._queue.get_nowait()
                 except queue.Empty:
                     break
-            if hold:
-                self._boundary_black_pending = False
-            else:
-                self._boundary_black_pending = True
-                self._last_frame = None
+            self._boundary_black_pending = not hold
+            self._last_frame = None
             self._room.notify_all()
 
     def between_ticks(self) -> threading.Lock:
@@ -248,15 +247,6 @@ class MediaPacer:
         the pacer took before it reaches the sink after it.
         """
         return self._dispatch_lock
-
-    def forget_last_frame(self) -> None:
-        """Stop repeating the last frame as a gap-fill until new media arrives.
-
-        For a held flush that dropped frames further down the wire: the last
-        frame the pacer handed over may be one of them, and must not play.
-        """
-        with self._room:
-            self._last_frame = None
 
     def start(self) -> None:
         """Start the pacing thread, idempotently. A stopped pacer stays stopped."""
