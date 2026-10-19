@@ -197,6 +197,22 @@ class MessageObserver(Protocol):
         """
 
 
+@runtime_checkable
+class InputTrackWatcher(Protocol):
+    """A connection that learns when an input track has no holder any more.
+
+    Optional, beside :class:`Connection`, and checked for with ``isinstance``.
+    An input track has one holder across the session, the first client to feed
+    it. A transport that feeds input tracks for its own clients, and holds back
+    a client that was refused, starts that client once the track is free,
+    whichever transport held it. The runner calls this on the runtime loop,
+    after the holder unpublished the track or closed.
+    """
+
+    def input_track_freed(self, name: str) -> None:
+        """Take that input track *name* is free to claim."""
+
+
 class ReplyRoute(StrEnum):
     """Where the answer to a command a transport hands up goes.
 
@@ -316,6 +332,19 @@ class ConnectionSink(Protocol):
 
         First publisher wins across the session; the outcome is sent back to the
         requesting connection on its control channel, correlated by *request_id*.
+        """
+
+    def claim_input_track(self, conn_id: ConnId, name: str) -> bool:
+        """Claim inbound track *name* for a connection, as a publish request does, unanswered.
+
+        For a transport that learns of a client's media without a publish
+        request on the Reactor protocol. The claim is the same one a publish
+        request takes: the first claim on a track holds it, across every
+        transport of the session, until :meth:`unpublish_track` or the
+        connection closes.
+
+        Returns:
+            Whether the claim was granted.
         """
 
     def unpublish_track(self, conn_id: ConnId, name: str) -> None:

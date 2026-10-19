@@ -51,6 +51,7 @@ from reactor_runtime.core import (
     ConnectionOriginSource,
     ConnId,
     FrameStageSource,
+    InputTrackWatcher,
     MediaChunk,
     MessageObserver,
     MessageStageSource,
@@ -359,9 +360,10 @@ class ConnectionManager:
         leaves and self-looping while others remain. A connection registered as
         not occupying the session closes as a self-loop. The handle is removed
         before the event so a listener reading the live count sees this
-        connection gone. Any tracks the connection still held are released. A
-        drop for an id that is not registered is ignored. The
-        ``CONNECTION_CLOSED`` carries the detail the connection opened with.
+        connection gone. Any tracks the connection still held are released, and
+        each :class:`InputTrackWatcher` is told. A drop for an id that is not
+        registered is ignored. The ``CONNECTION_CLOSED`` carries the detail the
+        connection opened with.
 
         Args:
             cid: The connection to remove.
@@ -378,6 +380,8 @@ class ConnectionManager:
         held = [name for name, owner in self._publishers.items() if owner == cid]
         for name in held:
             del self._publishers[name]
+        for name in held:
+            self._announce_input_freed(name)
 
     async def close_all(self) -> None:
         """Close every connection and empty the registry, for session teardown.
@@ -423,8 +427,9 @@ class ConnectionManager:
         """Release a track previously claimed by this connection.
 
         Only the holding connection can release its track; a release from any other
-        connection is ignored. On release the holder's outbound track is paused and
-        the slot is free for the next claim.
+        connection is ignored. On release the holder's outbound track is paused,
+        the slot is free for the next claim, and each :class:`InputTrackWatcher`
+        is told.
         """
         if self._publishers.get(name) != cid:
             return
@@ -432,6 +437,19 @@ class ConnectionManager:
         conn = self._by_id.get(cid)
         if conn is not None:
             conn.pause_track(name)
+        self._announce_input_freed(name)
+
+    def _announce_input_freed(self, name: str) -> None:
+        """Tell each connection that watches input tracks that *name* is free."""
+        for conn in list(self._by_id.values()):
+            if not isinstance(conn, InputTrackWatcher):
+                continue
+            try:
+                conn.input_track_freed(name)
+            except Exception:
+                logger.exception(
+                    "connection failed to take a freed input track", conn_id=conn.id, track=name
+                )
 
     def resume_track(self, cid: ConnId, name: str) -> None:
         """Resume an outbound track on one connection, at the client's request.

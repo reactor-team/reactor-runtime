@@ -891,6 +891,52 @@ def test_drop_releases_held_tracks() -> None:
     assert cm.publish_track(ConnId(2), "camera") is True
 
 
+class WatchingConnection(FakeConnection):
+    """A connection that records each input track it is told is free."""
+
+    def __init__(self, cid: int, *, fail: bool = False) -> None:
+        super().__init__(cid)
+        self.freed: list[str] = []
+        self._fail = fail
+
+    def input_track_freed(self, name: str) -> None:
+        if self._fail:
+            raise RuntimeError("watcher broke")
+        self.freed.append(name)
+
+
+def test_a_watcher_is_told_when_the_holder_unpublishes_an_input() -> None:
+    cm, _ = waiting_manager()
+    holder, watcher = FakeConnection(1), WatchingConnection(2)
+    cm.register(holder)
+    cm.register(watcher)
+    cm.publish_track(ConnId(1), "camera")
+
+    cm.unpublish_track(ConnId(2), "camera")  # not the holder: nothing is freed
+    assert watcher.freed == []
+    cm.unpublish_track(ConnId(1), "camera")
+
+    assert watcher.freed == ["camera"]
+
+
+def test_a_watcher_is_told_of_each_input_a_closed_holder_held() -> None:
+    cm, _ = waiting_manager()
+    holder, broken, watcher = (
+        FakeConnection(1),
+        WatchingConnection(2, fail=True),
+        WatchingConnection(3),
+    )
+    for conn in (holder, broken, watcher):
+        cm.register(conn)
+    cm.publish_track(ConnId(1), "camera")
+    cm.publish_track(ConnId(1), "mic")
+
+    cm.drop(ConnId(1))
+
+    # A watcher that raises does not keep the others from hearing it.
+    assert watcher.freed == ["camera", "mic"]
+
+
 def test_keepalive_does_not_advance_the_session() -> None:
     cm, sm = waiting_manager()
     cm.register(FakeConnection(1))

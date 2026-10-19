@@ -1,15 +1,18 @@
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from livekit import rtc
 from tests.unit.transport.livekit.test_participant_connection import FakeReader
 from tests.unit.transport.livekit.test_room_join import FakeControl, FakeRoom
 
 from reactor_runtime.core import ConnId, LiveKitConfig, LiveKitRpcMethod, ReplyRoute
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.transport import ConnectionsExhaustedError
+from reactor_runtime.transport.livekit import room as room_module
 from reactor_runtime.transport.livekit.participant import CONTROL_TOPIC, DATA_TOPIC
 from reactor_runtime.transport.livekit.room import RoomSession, RoomState
 
@@ -17,13 +20,31 @@ from reactor_runtime.transport.livekit.room import RoomSession, RoomState
 class ParticipantControl(FakeControl):
     """A session that mints participant ids and records the messages it receives."""
 
-    def __init__(self, *, ids: int = 100, refuse: set[ConnId] | None = None) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        *,
+        ids: int = 100,
+        refuse: set[ConnId] | None = None,
+        tracks: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(tracks)
         self._ids = iter(range(5000, 5000 + ids))
         self._refuse = refuse or set()
         self.received: list[tuple[ConnId, bytes, Channel]] = []
         self.released: list[ConnId] = []
         self.commands: list[tuple[ConnId, str, dict[str, Any], str, ReplyRoute]] = []
+        self.media: list[tuple[ConnId, str, Any]] = []
+        self.input_claims: dict[str, ConnId] = {}
+
+    def media_received(self, conn_id: ConnId, track: str, frame: Any) -> None:
+        self.media.append((conn_id, track, frame))
+
+    def claim_input_track(self, conn_id: ConnId, name: str) -> bool:
+        return self.input_claims.setdefault(name, conn_id) == conn_id
+
+    def unpublish_track(self, conn_id: ConnId, name: str) -> None:
+        if self.input_claims.get(name) == conn_id:
+            del self.input_claims[name]
 
     def new_conn_id(self, transport: str) -> ConnId:
         assert transport == "livekit"
@@ -58,7 +79,7 @@ class ParticipantControl(FakeControl):
 
 
 def _person(identity: str) -> SimpleNamespace:
-    return SimpleNamespace(identity=identity)
+    return SimpleNamespace(identity=identity, track_publications={})
 
 
 async def _settle() -> None:
@@ -298,3 +319,83 @@ async def test_an_rpc_call_runs_its_command_and_is_answered_off_the_protocol_top
     control.opened[1].command_acknowledged(request_id)
 
     assert await asyncio.wait_for(answer, 1) == ""
+
+
+_INPUTS = {
+    "webcam": {"kind": "video", "direction": "in", "rate": 0.0},
+    "mic": {"kind": "audio", "direction": "in", "rate": 24_000.0},
+}
+_MEDIA = LiveKitConfig(media_inputs={"endurance.mic": "mic"})
+
+
+class StuckReader:
+    """A byte stream that never sends a chunk, until it is closed."""
+
+    def __init__(self, stream_id: str, topic: str) -> None:
+        self.info = SimpleNamespace(
+            stream_id=stream_id,
+            topic=topic,
+            size=None,
+            attributes={"sample_rate": "24000", "num_channels": "1"},
+        )
+        self.closed = False
+
+    def __aiter__(self) -> "StuckReader":
+        return self
+
+    async def __anext__(self) -> bytes:
+        await asyncio.Event().wait()
+        raise StopAsyncIteration
+
+    def close(self) -> None:
+        self.closed = True
+
+
+async def test_a_track_subscribed_before_the_room_opened_feeds_its_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started: list[tuple[str, ConnId]] = []
+
+    async def read_video(self: Any, track: Any, target: str, conn_id: ConnId) -> None:
+        started.append((target, conn_id))
+
+    monkeypatch.setattr(room_module.RoomInputs, "_read_video", read_video)
+    room, control = FakeRoom(), ParticipantControl(tracks=_INPUTS)
+    track = SimpleNamespace(name="webcam", kind=rtc.TrackKind.KIND_VIDEO, sid="TR_cam")
+    viewer = SimpleNamespace(
+        identity="viewer", track_publications={"TR_cam": SimpleNamespace(track=track)}
+    )
+    room.remote_participants = {"viewer": viewer}
+
+    await _open(room, control, _MEDIA)
+    await _settle()
+
+    assert started == [("webcam", ConnId(5000))]
+    assert control.input_claims == {"webcam": ConnId(5000)}
+
+
+async def test_a_mapped_stream_from_someone_who_is_not_a_client_is_closed_unread() -> None:
+    room, control = FakeRoom(), ParticipantControl(tracks=_INPUTS)
+    await _open(room, control, _MEDIA)
+    reader = StuckReader("AUDIO_x", "endurance.mic")
+
+    room.stream_handlers["endurance.mic"](reader, "stranger")
+
+    assert reader.closed
+    assert control.media == []
+
+
+async def test_a_participant_that_leaves_mid_stream_ends_it_with_its_end_frame() -> None:
+    room, control = FakeRoom(), ParticipantControl(tracks=_INPUTS)
+    await _open(room, control, _MEDIA)
+    _join(room, "agent")
+    reader = StuckReader("AUDIO_1", "endurance.mic")
+    room.stream_handlers["endurance.mic"](reader, "agent")
+    await _settle()
+
+    _leave(room, "agent")
+
+    assert reader.closed
+    [(conn_id, track, frame)] = control.media
+    assert (conn_id, track, frame.data.shape) == (ConnId(5000), "mic", (1, 0))
+    assert json.loads(frame.metadata) == {"stream_id": "AUDIO_1", "ended": True}
