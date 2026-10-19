@@ -168,8 +168,12 @@ jobs:
           ref="${RUNTIME_REF//[\/\"<>|:*?\\]/-}"
           echo "name=endurance-$SCENARIO${ref:+-$ref}-attempt-$ATTEMPT" >> "$GITHUB_OUTPUT"
 
+      # Bounded: an upload that hangs must not run the job into its timeout,
+      # which would read as a failed run.
       - name: Upload the results
         if: always()
+        timeout-minutes: 10
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.artifact.outputs.name }}

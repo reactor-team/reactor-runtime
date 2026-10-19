@@ -162,9 +162,11 @@ jobs:
 
   # Two cycles of every endurance scenario: proves the launcher's hooks, the
   # probe and the scenarios' client still work against this change. It judges
-  # only that each cycle streamed in full; the leak checks need the long runs
-  # (endurance-tests.yml), so this job cannot fail on them. One job per
-  # scenario, in parallel, so the smoke takes as long as its slowest scenario.
+  # only what each cycle shows on its own: that it streamed in full, that its
+  # requests were answered and that the runtime dropped its connections. The
+  # leak counts and trends need the long runs (endurance-tests.yml), so this
+  # job cannot fail on them. One job per scenario, in parallel, so the smoke
+  # takes as long as its slowest scenario.
   endurance-smoke:
     name: Endurance Smoke (${{ matrix.scenario }})
     needs: endurance-scenarios

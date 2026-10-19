@@ -14,6 +14,7 @@ import collections
 import json
 import os
 import socket
+import statistics
 import subprocess
 import sys
 import threading
@@ -693,7 +694,7 @@ def assert_released(released: list[float | None]) -> MetricResult:
     stuck = [cycle for cycle, seconds in enumerate(released) if seconds is None]
     times = sorted(seconds for seconds in released if seconds is not None)
     timing = (
-        f"dropped in {times[len(times) // 2]:.1f}s median, {times[-1]:.1f}s at worst"
+        f"dropped in {statistics.median(times):.1f}s median, {times[-1]:.1f}s at worst"
         if times
         else ""
     )

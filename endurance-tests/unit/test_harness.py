@@ -56,7 +56,11 @@ def test_a_connection_still_registered_after_the_timeout_fails_its_cycle() -> No
 def test_a_run_whose_connections_all_stayed_reports_no_drop_time() -> None:
     result = assert_released([None])
     assert result.status == "fail"
-    assert "the others" not in result.detail
+    assert "other cycles" not in result.detail
+
+
+def test_the_drop_time_median_of_an_even_count_is_the_mean_of_the_middle_two() -> None:
+    assert "8.0s median, 9.0s at worst" in assert_released([7.0, 9.0]).detail
 
 
 def _client_owed(request_id: str, asked: str, answers: frozenset[str | None]) -> V1Client:
