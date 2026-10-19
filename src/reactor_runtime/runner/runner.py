@@ -159,6 +159,10 @@ SESSION_ID = "00000000-0000-0000-0000-000000000000"
 # A standalone runtime has no cluster; it reports a constant so the v0 client's
 # schema, which requires the field, is satisfied.
 _CLUSTER = "local"
+# The WebRTC transport version the descriptor names when no WebRTC router has
+# registered one, as in a runner driven without the HTTP surface. A mounted
+# router registers its own (``transport.webrtc.version.TRANSPORT_VERSION``),
+# which the descriptor reads first, so the two cannot disagree on a server.
 _WEBRTC_TRANSPORT_VERSION = "1.0"
 _V0_PROTOCOL = "v0"
 # Client track directions are the mirror of the model's: a track the model sends
@@ -340,6 +344,8 @@ class Runner(ServiceComponent, ConnectionSink):
         # first session binds one.
         self._log_binding = 0
         self._accepting = True
+        # The transports mounted on the HTTP surface, as the descriptor lists them.
+        self._transports: list[dict[str, str]] = []
         # The process-shutdown hook, wired by the assembly so the runner can ask
         # the service to bring the process down when the session is terminated
         # (a failed model load, or a crashed model loop). A no-op until then, so
@@ -1204,6 +1210,53 @@ class Runner(ServiceComponent, ConnectionSink):
         """Release a new claim on *conn_id* whose connection *transport* refused."""
         self._connections.release_conn_id(conn_id, transport)
 
+    def connection_failed(self, conn_id: ConnId, transport: str, reason: str) -> None:
+        """Journal a connection a transport could not open, as an ``error`` entry.
+
+        The entry carries *reason*, the connection's id, and the transport, so
+        a reader of ``/events`` learns why the connection it asked for never
+        opened. The session itself is left as it was.
+
+        A failure for a connection admitted in an earlier session, or reported
+        after its session moved on, is logged and not journalled, the same
+        way :meth:`connection_opened` refuses a wire that connects too late:
+        it belongs to a session that is over. So is a failure from a transport
+        that no longer holds the id: claims end with their session, and a
+        connection of the next session may have the id now, with its own stamp.
+        """
+        if self._connections.claim_holder(conn_id) != transport:
+            logger.info(
+                "a connection of an earlier session could not be opened",
+                conn_id=conn_id,
+                transport=transport,
+                reason=reason,
+            )
+            return
+        stale_epoch = self._offer_epochs.consume(conn_id)
+        if self._sm.current_state in _STALE_CONNECTION_STATES or stale_epoch:
+            logger.info(
+                "a connection of an earlier session could not be opened",
+                conn_id=conn_id,
+                transport=transport,
+                reason=reason,
+            )
+            return
+        logger.info(
+            "a connection could not be opened", conn_id=conn_id, transport=transport, reason=reason
+        )
+        self._sm.send(SessionEvent.ERROR, message=reason, conn_id=conn_id, transport=transport)
+
+    def _selected_transport(self) -> dict[str, str]:
+        """Name WebRTC, at the version its router registered, as the session's transport."""
+        for transport in self._transports:
+            if transport["protocol"] == "webrtc":
+                return dict(transport)
+        return {"protocol": "webrtc", "version": _WEBRTC_TRANSPORT_VERSION}
+
+    def add_transport(self, protocol: str, version: str) -> None:
+        """Record a transport this runtime serves, for the descriptor's ``transports`` list."""
+        self._transports.append({"protocol": protocol, "version": version})
+
     def offer_admitted(self, conn_id: ConnId) -> None:
         """Stamp an admitted offer with the session it was admitted into.
 
@@ -1280,6 +1333,10 @@ class Runner(ServiceComponent, ConnectionSink):
         loaded. The ``commands`` list is intentionally empty here — a client
         reads the model's command contract from the ``/schema`` endpoint, not
         from the session descriptor.
+
+        ``selected_transport`` names WebRTC, the transport a client connects
+        over by default, and ``transports`` lists every transport the runtime
+        serves, each as ``{"protocol": ..., "version": ...}``.
         """
         descriptor: dict[str, Any] = {
             "session_id": self._session_id,
@@ -1287,10 +1344,8 @@ class Runner(ServiceComponent, ConnectionSink):
             "cluster": _CLUSTER,
             "model": {"name": ""},
             "server_info": {"server_version": _server_version()},
-            "selected_transport": {
-                "protocol": "webrtc",
-                "version": _WEBRTC_TRANSPORT_VERSION,
-            },
+            "selected_transport": self._selected_transport(),
+            "transports": [dict(transport) for transport in self._transports],
             "recording": {
                 "enabled": self._cfg.recording.enabled,
                 "chunk_seconds": self._cfg.recording.chunk_seconds,
@@ -1953,7 +2008,7 @@ class Runner(ServiceComponent, ConnectionSink):
         finally:
             if self._starting_input_done is done and self._sm.current_state in _RUNNING_STATES:
                 if self._session_start.steps is None:
-                    self._connections.drop(SYSTEM_CONN_ID, system=True)
+                    self._connections.drop(SYSTEM_CONN_ID)
                 if self._bridge is not None:
                     self._bridge.dispatch_reactor_event(StartingInputApplied())
             done.set()

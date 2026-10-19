@@ -9,6 +9,8 @@ from conftest import FakePeer
 from reactor_runtime.core import (
     ClientStatsBatch,
     Connection,
+    ConnectionOrigin,
+    ConnectionOriginSource,
     ConnId,
     InputFrame,
     MediaBundle,
@@ -91,6 +93,9 @@ async def test_is_a_connection(
     assert isinstance(conn, Connection)
     # Its transport samples the wire, so the runner can read what it measured.
     assert isinstance(conn, TransportStatsSource)
+    # Its journal entries name the transport it comes from.
+    assert isinstance(conn, ConnectionOriginSource)
+    assert conn.origin == ConnectionOrigin(transport="webrtc")
 
 
 async def test_outbound_commands_delegate_to_peer(

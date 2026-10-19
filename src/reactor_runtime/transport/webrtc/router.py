@@ -40,7 +40,11 @@ from reactor_runtime.transport.webrtc.config import IceCredentials, IceServer, W
 from reactor_runtime.transport.webrtc.metrics import WebRtcMetrics
 from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpOffer, TrackMap
-from reactor_runtime.transport.webrtc.version import protocol_for_transport
+from reactor_runtime.transport.webrtc.version import (
+    TRANSPORT_NAME,
+    TRANSPORT_VERSION,
+    protocol_for_transport,
+)
 
 _PREFIX = "/sessions/{sid}/transport/webrtc"
 
@@ -271,7 +275,8 @@ class WebRtcRouter(TransportRouter):
     builds connections with; bound to the runner when mounted.
     """
 
-    protocol: ClassVar[str] = "webrtc"
+    protocol: ClassVar[str] = TRANSPORT_NAME
+    version: ClassVar[str] = TRANSPORT_VERSION
 
     def __init__(
         self,
