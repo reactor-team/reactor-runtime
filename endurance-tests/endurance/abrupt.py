@@ -10,7 +10,8 @@ its network.
 Run as ``python -m endurance.abrupt <runtime url> <session id>``: it streams
 as :class:`~endurance.harness.V1Client` does, prints one ``REPORT`` line of
 JSON with the frames received and the requests left unanswered, then streams
-until killed.
+until killed, printing a ``FAILED`` line for each request it finds refused or
+answered wrongly meanwhile.
 """
 
 from __future__ import annotations
@@ -28,8 +29,10 @@ from endurance.harness import SUITE_DIR, RuntimeEndpoint, V1Client, gray_frame
 # How long the process may take to start, connect and get its frames back
 # before it is reported as never having streamed.
 _READY_TIMEOUT_S = 90.0
-# Marks the process's report line on its stdout.
+# Mark the process's report line on its stdout, and each request it found
+# refused or answered wrongly after the report, up to the kill.
 _REPORT_PREFIX = "REPORT "
+_FAILED_PREFIX = "FAILED "
 
 
 class KilledClient:
@@ -96,7 +99,15 @@ class KilledClient:
             if proc.returncode is None:
                 proc.kill()
                 await proc.wait()
-        self.unanswered = report["unanswered"]
+        # What the process found wrong while it streamed on, up to the kill,
+        # is still in the pipe.
+        rest = await proc.stdout.read()
+        later = [
+            json.loads(text[len(_FAILED_PREFIX) :])
+            for line in rest.decode(errors="replace").splitlines()
+            if (text := line.strip()).startswith(_FAILED_PREFIX)
+        ]
+        self.unanswered = [*report["unanswered"], *later]
         return int(report["received"])
 
     @property
@@ -139,11 +150,22 @@ def _exited(proc: asyncio.subprocess.Process) -> bool:
 async def _main(url: str, session_id: str) -> None:
     client = V1Client(RuntimeEndpoint(url), session_id)
 
+    reported = 0
+
     def ready() -> None:
+        nonlocal reported
+        reported = len(client.failures())
         report = {"received": client.received_video, "unanswered": client.unanswered}
         print(_REPORT_PREFIX + json.dumps(report), flush=True)
 
-    await client.run_until_killed(gray_frame(), ready)
+    def tick() -> None:
+        nonlocal reported
+        failures = client.failures()
+        for failure in failures[reported:]:
+            print(_FAILED_PREFIX + json.dumps(failure), flush=True)
+        reported = len(failures)
+
+    await client.run_until_killed(gray_frame(), ready, tick)
 
 
 if __name__ == "__main__":

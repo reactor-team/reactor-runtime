@@ -251,12 +251,16 @@ class BareClient:
             self.close()
 
     async def run_until_killed(
-        self, frame: tuple[bytes, int, int], ready: Callable[[], None]
+        self,
+        frame: tuple[bytes, int, int],
+        ready: Callable[[], None],
+        tick: Callable[[], None] | None = None,
     ) -> None:
         """Stream as :meth:`run` does, call *ready*, then stream on until the process dies.
 
-        Never closes: the connection ends only with the process, the way a
-        client that crashes or loses power leaves.
+        *tick* runs after every frame streamed after *ready*. Never closes:
+        the connection ends only with the process, the way a client that
+        crashes or loses power leaves.
         """
         await self._connect()
         await self._stream_burst(frame)
@@ -264,6 +268,8 @@ class BareClient:
         ready()
         while True:
             await self._send_frame(frame)
+            if tick is not None:
+                tick()
 
     async def _stream_burst(self, frame: tuple[bytes, int, int]) -> None:
         deadline = time.monotonic() + _FRAME_WAIT_S
@@ -550,6 +556,11 @@ class V1Client(BareClient):
         """Close the connection, dropping the channels this client also holds."""
         self._control = self._data = None
         super().close()
+
+    def failures(self) -> list[str]:
+        """Return the requests refused or answered wrongly so far, and frames it could not read."""
+        with self._lock:
+            return list(self._failed)
 
     def _on_control_message(self, data: bytes, binary: bool) -> None:
         message = control_pb2.ControlServerMessage()
