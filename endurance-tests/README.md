@@ -61,7 +61,8 @@ trend ends in ERROR rather than in a verdict; a failed count still fails it.
 ENDURANCE_DURATION_SECONDS=600 mise run test-endurance
 # One scenario:
 mise run test-endurance endurance-tests/tests/test_connection_churn.py
-# A smoke run, as PR CI does: two cycles, judged only on full streams and answers.
+# A smoke run, as PR CI does: two cycles, judged only on full streams, answers
+# and released connections.
 ENDURANCE_SMOKE_CYCLES=2 mise run test-endurance
 # The room churn, against a local dev LiveKit server.
 LIVEKIT_URL=ws://127.0.0.1:7880 mise run test-endurance endurance-tests/tests/test_room_participant_churn.py

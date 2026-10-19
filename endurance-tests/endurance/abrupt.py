@@ -177,6 +177,11 @@ async def _main(url: str, session_id: str) -> None:
         report = {"received": client.received_video, "unanswered": client.unanswered}
         print(_REPORT_PREFIX + json.dumps(report), flush=True)
 
+    # Only refusals and wrong answers are forwarded after the report, not the
+    # requests still pending: one sent shortly before the kill has its answer
+    # cut off by the kill itself, so counting it would fail a runtime that
+    # did nothing wrong. A runtime that does not answer still fails every
+    # cycle, in the requests the report covers: the client waits for those.
     def tick() -> None:
         nonlocal reported
         failures = client.failures()
