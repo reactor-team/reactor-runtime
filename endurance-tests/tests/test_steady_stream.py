@@ -101,7 +101,8 @@ async def test_steady_stream(runtime: RuntimeProcess) -> None:
         await client.wait_for_replies()
         client.close()
         reading, _ = runtime.settled_probe()
-        final = sampler.sample(cycle=count, reading=reading)
+        # Checked on its own: teardown is not another streaming interval.
+        final = sampler.sample(cycle=count, reading=reading, record=False)
         if ENDURANCE_SMOKE_CYCLES:
             metrics = [
                 assert_full_streams(received),
