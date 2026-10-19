@@ -281,8 +281,21 @@
         "type": "object"
       },
       "RoomConnectionRequest": {
-        "description": "Where the room is, and the credential the session's participant joins it with.\n\nThe token is the access token of the session's participant: the room, the\nidentity, and the grants come from it. It is never logged or journalled,\nand a refused request does not repeat it.",
+        "description": "Where the room is, and the credential the session's participant joins it with.\n\nThe token is the access token of the session's participant: the room, the\nidentity, and the grants come from it. It is never logged or journalled,\nand a refused request does not repeat it.\n\n``connection_id`` lets the caller choose the room connection's id, from\nthe range the runtime mints in. Absent, the runtime mints one. An id the\nsession already uses, through this transport or another, is refused with a\n409, since a room connection is never opened again on the same id.",
         "properties": {
+          "connection_id": {
+            "anyOf": [
+              {
+                "maximum": 9999.0,
+                "minimum": 1002.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Connection Id"
+          },
           "token": {
             "format": "password",
             "title": "Token",

@@ -18,7 +18,11 @@ from reactor_runtime.core import (
     ReplyRoute,
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion
-from reactor_runtime.transport import SessionNotRunningError, UnknownSessionError
+from reactor_runtime.transport import (
+    ConnectionIdClaimedError,
+    SessionNotRunningError,
+    UnknownSessionError,
+)
 from reactor_runtime.transport.livekit import LiveKitRouter, livekit_available
 from reactor_runtime.transport.livekit import room as room_module
 from reactor_runtime.transport.livekit.room import RoomState
@@ -30,12 +34,13 @@ _ROOM = {"url": "wss://rooms.example", "token": _TOKEN}
 
 
 class FakeRunner:
-    """A SessionControl that mints ids and records what the router asks of it."""
+    """A SessionControl that mints and claims ids and records what the router asks of it."""
 
     def __init__(self, *, running: bool = True) -> None:
         self._running = running
         self.minted: list[tuple[ConnId, str]] = []
         self.admitted: list[ConnId] = []
+        self.claims: dict[ConnId, str] = {}
         self.epoch = 1
 
     def require_session_running(self, sid: str) -> None:
@@ -47,13 +52,21 @@ class FakeRunner:
     def new_conn_id(self, transport: str) -> ConnId:
         conn_id = ConnId(4711 + len(self.minted))
         self.minted.append((conn_id, transport))
+        self.claims[conn_id] = transport
         return conn_id
 
     def claim_conn_id(self, conn_id: ConnId, transport: str) -> bool:
-        return True
+        holder = self.claims.get(conn_id)
+        if holder is None:
+            self.claims[conn_id] = transport
+            return True
+        if holder != transport:
+            raise ConnectionIdClaimedError(conn_id)
+        return False
 
     def release_conn_id(self, conn_id: ConnId, transport: str) -> None:
-        pass
+        if self.claims.get(conn_id) == transport:
+            del self.claims[conn_id]
 
     def connection_failed(self, conn_id: ConnId, transport: str, reason: str) -> None:
         pass
@@ -211,6 +224,84 @@ def test_opening_a_room_connection_mints_its_id_and_starts_the_join(
     assert runner.admitted == [ConnId(4711)]
     (room,) = rooms
     assert (room.conn_id, room.url, room.token, room.started) == (4711, *_ROOM.values(), True)
+
+
+def test_a_room_connection_opens_on_the_id_the_caller_chose(
+    rooms: list[FakeRoomSession],
+) -> None:
+    runner = FakeRunner()
+
+    response = _client(runner).post(_CONNECTIONS, json={**_ROOM, "connection_id": 5120})
+
+    assert response.status_code == 202
+    assert response.json() == {"connection_id": 5120}
+    assert runner.minted == []
+    assert runner.claims == {ConnId(5120): "livekit"}
+    assert runner.admitted == [ConnId(5120)]
+    (room,) = rooms
+    assert (room.conn_id, room.started) == (5120, True)
+
+
+def test_a_chosen_id_another_transport_holds_is_refused(rooms: list[FakeRoomSession]) -> None:
+    runner = FakeRunner()
+    runner.claims[ConnId(5120)] = "webrtc"
+
+    refused = _client(runner).post(_CONNECTIONS, json={**_ROOM, "connection_id": 5120})
+
+    assert refused.status_code == 409
+    assert refused.json() == {"detail": "connection 5120 belongs to another transport"}
+    assert runner.claims == {ConnId(5120): "webrtc"}
+    assert rooms == []
+
+
+def test_a_chosen_id_a_room_participant_holds_is_refused(rooms: list[FakeRoomSession]) -> None:
+    runner = FakeRunner()
+    runner.claims[ConnId(5120)] = "livekit"
+
+    refused = _client(runner).post(_CONNECTIONS, json={**_ROOM, "connection_id": 5120})
+
+    assert refused.status_code == 409
+    assert refused.json() == {"detail": "connection 5120 is already in use in this session"}
+    assert rooms == []
+
+
+def test_a_room_connection_does_not_open_again_on_its_own_id(
+    rooms: list[FakeRoomSession],
+) -> None:
+    client = _client(FakeRunner())
+    client.post(_CONNECTIONS, json={**_ROOM, "connection_id": 5120})
+    rooms[0].state = RoomState.FAILED
+
+    refused = client.post(_CONNECTIONS, json={**_ROOM, "connection_id": 5120})
+
+    assert refused.status_code == 409
+    assert len(rooms) == 1
+
+
+def test_a_refused_open_claims_no_id(rooms: list[FakeRoomSession]) -> None:
+    runner = FakeRunner()
+    client = _client(runner)
+    client.post(_CONNECTIONS, json=_ROOM)
+
+    refused = client.post(_CONNECTIONS, json={**_ROOM, "connection_id": 5120})
+
+    assert refused.status_code == 409
+    assert ConnId(5120) not in runner.claims
+
+
+def test_a_room_connection_that_cannot_start_releases_its_id(
+    rooms: list[FakeRoomSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(self: FakeRoomSession) -> None:
+        raise RuntimeError("no event loop for the join")
+
+    monkeypatch.setattr(FakeRoomSession, "start", refuse)
+    runner = FakeRunner()
+
+    with pytest.raises(RuntimeError, match="no event loop"):
+        _client(runner).post(_CONNECTIONS, json={**_ROOM, "connection_id": 5120})
+
+    assert runner.claims == {}
 
 
 def test_the_room_connection_maps_the_rooms_signals_as_the_manifest_says(
@@ -396,6 +487,9 @@ def test_another_session_id_is_not_found(rooms: list[FakeRoomSession]) -> None:
         ({"url": "https://rooms.example", "token": _TOKEN}, "url"),
         ({"url": "wss://rooms.example", "token": [_TOKEN]}, "token"),
         ({"url": 7, "token": _TOKEN}, "url"),
+        ({**_ROOM, "connection_id": 1001}, "connection_id"),
+        ({**_ROOM, "connection_id": 10000}, "connection_id"),
+        ({**_ROOM, "connection_id": "a room"}, "connection_id"),
     ],
 )
 def test_a_malformed_body_is_refused_without_repeating_the_token(

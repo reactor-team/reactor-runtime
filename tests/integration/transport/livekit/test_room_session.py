@@ -34,6 +34,7 @@ from reactor_runtime import (
     event,
 )
 from reactor_runtime.core import (
+    ConnId,
     LiveKitConfig,
     LiveKitRpcMethod,
     RuntimeConfig,
@@ -367,6 +368,34 @@ async def test_a_session_has_one_room_connection_at_a_time(
     )
 
     assert second.status_code == 409, second.text
+
+
+async def test_a_room_connection_opens_on_the_id_the_caller_chose(
+    runner: Runner, http: httpx.AsyncClient, room_name: str
+) -> None:
+    runner.start_session({})
+    body = {"url": LIVEKIT_URL, "token": _token(room_name, "model"), "connection_id": 5120}
+
+    response = await http.post(_CONNECTIONS, json=body)
+
+    assert response.status_code == 202, response.text
+    assert response.json() == {"connection_id": 5120}
+    assert await _settled(http, 5120) == {"connection_id": 5120, "state": "open"}
+    (opened,) = _moves(runner, SessionEvent.CONNECTION_OPENED)
+    assert dict(opened.detail) == {"conn_id": 5120, "system": True, "transport": "livekit"}
+
+
+async def test_a_chosen_id_another_transport_holds_is_refused(
+    runner: Runner, http: httpx.AsyncClient, room_name: str
+) -> None:
+    runner.start_session({})
+    runner.claim_conn_id(ConnId(5120), "webrtc")
+    body = {"url": LIVEKIT_URL, "token": _token(room_name, "model"), "connection_id": 5120}
+
+    refused = await http.post(_CONNECTIONS, json=body)
+
+    assert refused.status_code == 409, refused.text
+    assert _moves(runner, SessionEvent.CONNECTION_OPENED) == []
 
 
 async def test_stopping_the_session_leaves_the_room(
