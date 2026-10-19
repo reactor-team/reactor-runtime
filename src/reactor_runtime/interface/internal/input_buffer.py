@@ -96,9 +96,6 @@ class InputBuffer:
         self._max_samples = max_samples
         self._max_frames = max_frames if max_frames is not None else (max_samples or maxlen)
         self._samples = 0
-        # Under a sample bound, the fewest samples a frame of this track has
-        # carried: whether n frames can ever fit is judged by it.
-        self._smallest: int | None = None
         # The sender of each frame a read took, and how long it waited in the
         # buffer in ms, until the step loop takes them (take_read_waits). A
         # model with its own run() may never take them, so they are bounded
@@ -138,9 +135,9 @@ class InputBuffer:
         Raises:
             BufferClosed: The track closed before *n* frames were available.
             TimeoutError: *timeout* elapsed first.
-            ValueError: *n* exceeds the buffer's frame bound, or, under a
-                ``buffer_seconds`` bound, *n* frames of the smallest size the
-                track has delivered cannot fit in it.
+            ValueError: *n* exceeds the buffer's frame bound. Under a
+                ``buffer_seconds`` bound, *n* frames can also fail to fit by
+                their samples; such a read waits, so pass *timeout* to bound it.
         """
         return await asyncio.to_thread(self._read, n, timeout, mode)
 
@@ -150,17 +147,11 @@ class InputBuffer:
             raise ValueError(f"requested {n} frames but the buffer holds at most {frame_bound}")
         with self._condition:
             if not self._condition.wait_for(
-                lambda: len(self._buffer) >= n or self._closed or self._cannot_hold(n),
-                timeout=timeout,
+                lambda: len(self._buffer) >= n or self._closed, timeout=timeout
             ):
                 raise TimeoutError(f"timed out waiting for {n} frame(s) after {timeout}s")
-            if len(self._buffer) < n:
-                if self._closed:
-                    raise BufferClosed("buffer closed")
-                raise ValueError(
-                    f"requested {n} frames but the track's buffer_seconds holds fewer "
-                    f"than that of its smallest frames ({self._smallest} samples)"
-                )
+            if self._closed and len(self._buffer) < n:
+                raise BufferClosed("buffer closed")
             if mode is ReadMode.LATEST:
                 return self._take_latest(n)
             return self._take_fifo(n)
@@ -267,7 +258,6 @@ class InputBuffer:
             self._closed = False
             if through_session is None:
                 self._buffer.clear()
-                self._smallest = None
             else:
                 self._buffer = deque(e for e in self._buffer if e.session > through_session)
             self._samples = sum(_sample_count(entry.frame) for entry in self._buffer)
@@ -298,10 +288,7 @@ class InputBuffer:
                 return 0
             self._buffer.append(_Entry(session, frame, time.perf_counter(), source))
             if self._max_samples is not None:
-                samples = _sample_count(frame)
-                self._samples += samples
-                if samples and (self._smallest is None or samples < self._smallest):
-                    self._smallest = samples
+                self._samples += _sample_count(frame)
             evicted = 0
             while len(self._buffer) > 1 and self._over_bound():
                 gone = self._buffer.popleft()
@@ -318,15 +305,6 @@ class InputBuffer:
         if self._max_samples is not None:
             return self._samples > self._max_samples or len(self._buffer) > self._max_frames
         return len(self._buffer) > self._maxlen
-
-    def _cannot_hold(self, n: int) -> bool:
-        """Whether a sample bound can never hold *n* of the track's smallest frames.
-
-        Caller holds the lock.
-        """
-        if self._max_samples is None or self._smallest is None:
-            return False
-        return n * self._smallest > self._max_samples
 
 
 def _sample_count(frame: InputFrame) -> int:

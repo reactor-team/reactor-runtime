@@ -319,30 +319,35 @@ def test_a_reset_with_no_session_drops_every_frame() -> None:
     assert buffer.available == 0
 
 
-async def test_a_read_more_frames_than_an_exactly_full_sample_bound_holds_fails_at_once() -> None:
-    # 10 ms frames under a 50 ms bound: five fit exactly, a sixth never does.
-    buffer = InputBuffer(max_samples=2_400)
+async def test_a_read_past_the_frame_cap_fails_at_once() -> None:
+    buffer = InputBuffer(max_samples=2_400, max_frames=10)
+
+    with pytest.raises(ValueError, match="holds at most 10"):
+        await buffer.read(11, timeout=5.0)
+
+
+async def test_a_read_more_frames_than_the_samples_can_hold_waits() -> None:
+    # 10 ms frames under a 50 ms bound: five fit, so a read of six waits for
+    # smaller frames, or for its timeout.
+    buffer = InputBuffer(max_samples=2_400, max_frames=50)
     for index in range(5):
         buffer.push(audio(index))
 
-    with pytest.raises(ValueError, match="fewer than that"):
-        await buffer.read(6, timeout=5.0)
+    with pytest.raises(TimeoutError):
+        await buffer.read(6, timeout=0.05)
 
 
-async def test_a_read_waits_while_a_sample_bound_still_has_room() -> None:
-    buffer = InputBuffer(max_samples=2_400)
+async def test_a_read_completes_once_smaller_frames_fit() -> None:
+    buffer = InputBuffer(max_samples=2_400, max_frames=50)
     buffer.push(audio(0))
 
-    with pytest.raises(TimeoutError):
-        await buffer.read(3, timeout=0.05)
+    read = asyncio.create_task(buffer.read(6, timeout=5.0, mode=ReadMode.FIFO))
+    await asyncio.sleep(0.05)
+    assert not read.done()
+    for index in range(1, 6):
+        buffer.push(audio(index, samples=240))
 
-
-async def test_a_read_more_frames_than_one_oversized_frame_leaves_room_for_fails_at_once() -> None:
-    buffer = InputBuffer(max_samples=480)
-    buffer.push(audio(0, samples=960))
-
-    with pytest.raises(ValueError, match="fewer than that"):
-        await buffer.read(2, timeout=5.0)
+    assert [frame.data.shape[-1] for frame in await read] == [480, 240, 240, 240, 240, 240]
 
 
 async def test_a_read_after_a_larger_frame_was_evicted_waits_for_smaller_ones() -> None:
@@ -356,18 +361,6 @@ async def test_a_read_after_a_larger_frame_was_evicted_waits_for_smaller_ones() 
     buffer.push(audio(2, samples=30))
 
     assert [frame.data.shape[-1] for frame in await read] == [30, 30]
-
-
-async def test_a_reset_that_keeps_frames_keeps_judging_by_their_size() -> None:
-    buffer = InputBuffer(max_samples=2_400)
-    buffer.push(audio(0), session=1)
-    for index in range(1, 6):
-        buffer.push(audio(index), session=2)
-
-    buffer.reset(through_session=1)
-
-    with pytest.raises(ValueError, match="fewer than that"):
-        await buffer.read(6, timeout=5.0)
 
 
 def test_frames_with_no_samples_are_held_to_the_frame_cap() -> None:
