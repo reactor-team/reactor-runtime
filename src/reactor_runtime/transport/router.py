@@ -20,7 +20,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import Any, ClassVar, Protocol, runtime_checkable
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from reactor_runtime.core import ConnectionSink, ConnId, SessionState
@@ -200,6 +201,14 @@ class SessionControl(ConnectionSink, Protocol):
         the id is taken for one of an earlier session, and is not journalled.
         """
 
+    def session_epoch(self) -> int:
+        """Return a number that changes each time a session starts.
+
+        Everything admitted while one session runs shares its number, so a
+        transport holding a connection across requests can tell whether it
+        belongs to the live session or to one that has ended.
+        """
+
     def offer_admitted(self, conn_id: ConnId) -> None:
         """Stamp an admitted connection offer with the live session.
 
@@ -210,6 +219,33 @@ class SessionControl(ConnectionSink, Protocol):
 
     def track_map(self) -> Mapping[str, Any]:
         """Return the model's declared track manifest for connection setup."""
+
+
+def add_session_error_handlers(app: FastAPI) -> None:
+    """Render the session-control errors a router's routes raise as client responses.
+
+    The shared mapping every transport's route group answers with: no session
+    running is a 400, a session id the runtime does not host is a 404, and an
+    exhausted id space or connection ceiling is a 503 a client retries. Each
+    router installs it when it mounts; installing it again is harmless.
+    """
+
+    async def _session_not_running(request: Request, exc: Exception) -> Response:
+        return JSONResponse(status_code=400, content={"detail": "No session running"})
+
+    async def _unknown_session(request: Request, exc: Exception) -> Response:
+        return JSONResponse(status_code=404, content={"detail": "Unknown session"})
+
+    async def _connections_exhausted(request: Request, exc: Exception) -> Response:
+        return JSONResponse(status_code=503, content={"detail": "No connection ids left"})
+
+    async def _too_many_connections(request: Request, exc: Exception) -> Response:
+        return JSONResponse(status_code=503, content={"detail": "Connection limit reached"})
+
+    app.add_exception_handler(SessionNotRunningError, _session_not_running)
+    app.add_exception_handler(UnknownSessionError, _unknown_session)
+    app.add_exception_handler(ConnectionsExhaustedError, _connections_exhausted)
+    app.add_exception_handler(TooManyConnectionsError, _too_many_connections)
 
 
 class TransportRouter(ABC):

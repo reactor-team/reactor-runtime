@@ -34,6 +34,7 @@ class FakeRunner:
         self.closed: list[ConnId] = []
         self.answered: list[tuple[ConnId, dict[str, str]]] = []
         self.admitted: list[ConnId] = []
+        self.epoch = 1
         self.claims: dict[ConnId, str] = {}
 
     def require_session_running(self, sid: str) -> None:
@@ -62,6 +63,9 @@ class FakeRunner:
 
     def connection_failed(self, conn_id: ConnId, transport: str, reason: str) -> None:
         pass
+
+    def session_epoch(self) -> int:
+        return self.epoch
 
     def offer_admitted(self, conn_id: ConnId) -> None:
         self.admitted.append(conn_id)

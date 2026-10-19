@@ -20,6 +20,7 @@ from reactor_runtime.serve import (
     main,
     serve,
 )
+from reactor_runtime.service import Service
 from reactor_runtime.transport.webrtc.config import CodecEntry, IceTransportPolicy, WebRtcConfig
 from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.signaling import SdpAnswer, SdpOffer, TrackMap
@@ -85,6 +86,41 @@ def test_assemble_hooks_on_runner_then_http() -> None:
     assert isinstance(components["runner"], Runner)
     assert isinstance(components["http"], HttpServer)
     assert components["http"].depends_on == ("runner",)
+
+
+def _served(service: Service) -> tuple[list[dict[str, str]], set[str]]:
+    """The transports an assembled process lists, and the routes it serves."""
+    components = service._components
+    runner, http = components["runner"], components["http"]
+    assert isinstance(runner, Runner)
+    assert isinstance(http, HttpServer)
+    paths = {getattr(route, "path", "") for route in http._app.routes}
+    return runner.descriptor()["transports"], paths
+
+
+def test_assemble_serves_livekit_beside_webrtc_when_the_extra_is_installed() -> None:
+    transports, paths = _served(
+        _assemble(RuntimeConfig(model_ref="fake:Model"), peer_factory=_UNUSED)
+    )
+
+    assert transports == [
+        {"protocol": "webrtc", "version": "1.0"},
+        {"protocol": "livekit", "version": "1.0"},
+    ]
+    assert "/sessions/{sid}/transport/livekit/connections" in paths
+
+
+def test_assemble_serves_webrtc_alone_without_the_livekit_extra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("reactor_runtime.serve.livekit_available", lambda: False)
+
+    transports, paths = _served(
+        _assemble(RuntimeConfig(model_ref="fake:Model"), peer_factory=_UNUSED)
+    )
+
+    assert transports == [{"protocol": "webrtc", "version": "1.0"}]
+    assert not any("/transport/livekit/" in path for path in paths)
 
 
 def test_assemble_answers_health_with_the_process_aggregate() -> None:

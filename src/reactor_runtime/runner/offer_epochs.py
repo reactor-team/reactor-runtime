@@ -24,6 +24,11 @@ class OfferEpochs:
         self._current = 0
         self._stamps: dict[ConnId, int] = {}
 
+    @property
+    def current(self) -> int:
+        """The live epoch: the number of sessions started so far."""
+        return self._current
+
     def session_started(self) -> None:
         """Move to the next epoch; offers stamped from now on belong to it."""
         self._current += 1
