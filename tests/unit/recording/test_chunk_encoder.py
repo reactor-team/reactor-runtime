@@ -121,6 +121,47 @@ def test_segments_land_on_disk_before_the_recording_ends(tmp_path: Path) -> None
         encoder.stop()
 
 
+def test_a_later_part_continues_the_numbering_and_the_timeline(tmp_path: Path) -> None:
+    # A recording sealed mid-segment resumes in a fresh encoder at the next
+    # boundary. Its segments are numbered from there, its timeline starts there,
+    # and the first part's init decodes them, so a player reading init.mp4 and
+    # every segment in order plays both parts on one timeline.
+    first = _encoder(tmp_path)
+    for _ in range(20):
+        first.feed_video(_frame())
+    size = first.frame_size
+    first.stop()
+    second = ChunkEncoder(
+        output_dir=tmp_path,
+        config=RecordingConfig(enabled=True, chunk_seconds=1),
+        has_audio=False,
+        audio_sample_rate=48_000,
+        frame_rate=_FRAME_RATE,
+        first_segment=1,
+        frame_size=size,
+    )
+    for _ in range(_FRAME_RATE):
+        second.feed_video(_frame(32))
+    second.stop()
+
+    assert sorted(p.name for p in tmp_path.glob("chunk_*.m4s")) == [
+        "chunk_00000.m4s",
+        "chunk_00001.m4s",
+    ]
+    assert (tmp_path / "init_00001.mp4").read_bytes() == (tmp_path / "init.mp4").read_bytes()
+    with _decode(tmp_path) as container:
+        stream = container.streams.video[0]
+        assert stream.time_base is not None
+        times = [
+            float(frame.pts * stream.time_base)
+            for frame in container.decode(stream)
+            if frame.pts is not None
+        ]
+    assert len(times) == 20 + _FRAME_RATE
+    assert times[19] < 20 / _FRAME_RATE
+    assert times[20] == pytest.approx(1.0)
+
+
 # -- frame handling ---------------------------------------------------------
 
 
