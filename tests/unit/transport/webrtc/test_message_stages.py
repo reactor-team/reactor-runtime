@@ -101,3 +101,31 @@ def test_totals_that_went_backwards_are_a_new_channel_and_add_nothing() -> None:
     window.fold(after, before)
 
     assert window.take() == ()
+
+
+def test_the_steps_of_handing_a_message_to_libwebrtc_fold_in_as_parts() -> None:
+    window = MessageStageWindow()
+    before = ChunkingSample(messages_sent=10)
+    after = ChunkingSample(
+        messages_sent=12,
+        enqueue_s=0.001,
+        queue_wait_s=0.010,
+        first_check_s=0.0002,
+        first_build_s=0.0004,
+        first_native_s=0.002,
+        send_s=0.020,
+        native_send_s=0.012,
+    )
+
+    window.fold(after, before)
+
+    stages = {s.name: s for s in window.take()}
+    assert (stages["enqueue"].part_of, stages["enqueue"].messages) == ("", 2)
+    assert math.isclose(stages["enqueue"].total_ms, 1.0)
+    for name, ms in (("first_check", 0.2), ("first_build", 0.4), ("first_native", 2.0)):
+        assert stages[name].part_of == "queue_wait"
+        assert math.isclose(stages[name].total_ms, ms)
+    # Every chunk's native send but the first ones, within send.
+    assert stages["rest_native"].part_of == "send"
+    assert math.isclose(stages["rest_native"].total_ms, 10.0)
+    assert stages["queue_wait"].part_of == ""
