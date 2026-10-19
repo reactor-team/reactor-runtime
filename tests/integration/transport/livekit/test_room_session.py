@@ -777,6 +777,22 @@ async def _heard(client: ProtocolClient, request_id: str) -> dict[str, Any]:
     return next(data for _, rid, _, data in client.model_messages() if rid == request_id)
 
 
+async def _heard_ended(client: ProtocolClient, stream_id: str, label: str) -> dict[str, Any]:
+    """Ask what the model heard until it has heard *stream_id* end.
+
+    The stream and the command travel on different topics, so one can overtake the other.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 15.0
+    attempt = 0
+    while True:
+        heard = await _heard(client, f"{label}-{attempt}")
+        if stream_id in heard["ended"] or loop.time() > deadline:
+            return heard
+        attempt += 1
+        await asyncio.sleep(0.1)
+
+
 async def _stream(client: ProtocolClient, data: bytes, rate: int, channels: int) -> str:
     writer = await client.room.local_participant.stream_bytes(
         "utterance",
@@ -801,8 +817,7 @@ async def test_a_byte_stream_reaches_the_input_track_sample_for_sample(
         speech = (12_000 * np.sin(2 * np.pi * 220 * t)).astype("<i2")
 
         stream_id = await _stream(agent, speech.tobytes(), RATE, 1)
-        await asyncio.sleep(1.0)
-        heard = await _heard(agent, "heard-1")
+        heard = await _heard_ended(agent, stream_id, "heard-1")
 
         assert heard["samples"] == speech.size
         assert heard["digest"] == hashlib.sha256(speech.tobytes()).hexdigest()
@@ -823,8 +838,7 @@ async def test_a_byte_stream_at_another_rate_is_resampled_and_mixed_to_mono(
         stereo = np.stack([tone, tone], axis=1).reshape(-1)
 
         stream_id = await _stream(agent, stereo.tobytes(), 48_000, 2)
-        await asyncio.sleep(1.0)
-        heard = await _heard(agent, "heard-2")
+        heard = await _heard_ended(agent, stream_id, "heard-2")
 
         # One second of audio at the track's 24 kHz, give or take the resampler's edge.
         assert abs(heard["samples"] - RATE) <= 240

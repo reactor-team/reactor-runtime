@@ -138,6 +138,7 @@ class RoomSession:
         self._room.on("participant_disconnected", lambda p: self._remove_participant(p.identity))
         self._room.on("data_received", self._on_data)
         self._room.on("track_subscribed", self._on_track_subscribed)
+        self._room.on("track_unsubscribed", self._on_track_unsubscribed)
         for topic in TOPIC_CHANNELS:
             self._room.register_byte_stream_handler(topic, self._on_byte_stream)
 
@@ -333,7 +334,11 @@ class RoomSession:
     def _register_inputs(self) -> None:
         """Feed the input tracks from the byte stream topics that map to them."""
         inputs = RoomInputs(
-            self._tracks(TrackDirection.IN), self._config.media_inputs, self._control.media_received
+            self._tracks(TrackDirection.IN),
+            self._config.media_inputs,
+            self._control.media_received,
+            self._control.claim_input_track,
+            self._control.unpublish_track,
         )
         self._inputs = inputs
         for topic in inputs.stream_topics:
@@ -345,6 +350,10 @@ class RoomSession:
             reader.close()
             return
         self._inputs.on_byte_stream(reader, identity, conn.id)
+
+    def _on_track_unsubscribed(self, track: rtc.Track, publication: Any, participant: Any) -> None:
+        if self._inputs is not None:
+            self._inputs.on_track_gone(track.sid)
 
     def _on_track_subscribed(self, track: rtc.Track, publication: Any, participant: Any) -> None:
         conn = self._participants.get(participant.identity)
@@ -408,7 +417,7 @@ class RoomSession:
         if conn is None:
             return
         if self._inputs is not None:
-            self._inputs.release(identity)
+            self._inputs.release(identity, conn.id)
         conn.drop()
         self._control.connection_closed(conn.id)
 

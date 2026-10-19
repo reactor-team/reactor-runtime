@@ -24,8 +24,11 @@ rate, in mono; one whose ``sample_rate`` is not between
 :data:`MIN_STREAM_RATE` and :data:`MAX_STREAM_RATE`, or whose ``num_channels``
 is not between 1 and :data:`MAX_STREAM_CHANNELS`, is refused.
 
-For each input track, the first participant that feeds it holds it until that
-participant leaves; media from anyone else is dropped.
+Each input track has one owner across the session, whatever its transport: the
+first client to feed it holds it, as a WebRTC client's publish request does,
+and media from anyone else is dropped. A participant feeding a track holds it
+until it unpublishes that track or leaves; one feeding a byte stream holds it
+until it leaves, since an agent sends one stream per utterance.
 """
 
 from __future__ import annotations
@@ -76,6 +79,22 @@ _PCM_S16LE = np.dtype("<i2")
 
 MediaSink = Callable[[ConnId, str, InputFrame], None]
 """Receives each input frame: the sender's connection, the input track, the frame."""
+
+InputClaim = Callable[[ConnId, str], bool]
+"""Claims an input track for a connection, session-wide; returns whether it was granted."""
+
+InputRelease = Callable[[ConnId, str], None]
+"""Releases a connection's claim on an input track."""
+
+
+@dataclass
+class _TrackFeed:
+    """A remote track that feeds an input track."""
+
+    sender: str
+    conn_id: ConnId
+    target: str
+    task: asyncio.Task[None]
 
 
 class StreamFramer:
@@ -167,6 +186,8 @@ class RoomInputs:
         media_inputs: The manifest's ``media_inputs``: each source and the
             input track it feeds.
         sink: Where each input frame goes.
+        claim: Claims an input track for a client in the session's arbitration.
+        release: Releases a client's claim.
     """
 
     def __init__(
@@ -174,9 +195,13 @@ class RoomInputs:
         inputs: Mapping[str, TrackInfo],
         media_inputs: Mapping[str, str],
         sink: MediaSink,
+        claim: InputClaim,
+        release: InputRelease,
     ) -> None:
         self._inputs = dict(inputs)
         self._sink = sink
+        self._claim_input = claim
+        self._release_input = release
         self._mapped: dict[str, str] = {}
         for source, track in media_inputs.items():
             if source in TOPIC_CHANNELS:
@@ -184,8 +209,10 @@ class RoomInputs:
             elif track in self._inputs:
                 self._mapped[source] = track
         self._reserved = set(self._mapped.values())
-        # Each input track, and the participant that holds it.
-        self._holders: dict[str, str] = {}
+        # Each input track a participant holds through the session, and which.
+        self._held: dict[str, ConnId] = {}
+        # Each remote track feeding an input track, by its track id.
+        self._tracks: dict[str, _TrackFeed] = {}
         # Each byte stream topic, and the stream that currently feeds it.
         self._streams: dict[str, _Stream] = {}
         # The readers each participant's media runs on, so its leaving stops them.
@@ -218,8 +245,8 @@ class RoomInputs:
             )
             reader.close()
             return
-        if not self._claim(track, sender):
-            logger.debug("dropped a stream for an input track another participant holds")
+        if not self._claim(track, conn_id):
+            logger.debug("dropped a stream for an input track another client holds")
             reader.close()
             return
         previous = self._streams.get(topic)
@@ -250,40 +277,80 @@ class RoomInputs:
         is_video = track.kind == rtc.TrackKind.KIND_VIDEO
         if is_video != (info.kind is TrackKind.VIDEO):
             return
-        if not self._claim(target, sender):
+        if not self._claim(target, conn_id):
             return
         if is_video:
-            self._spawn(sender, self._read_video(track, target, conn_id))
+            task = self._spawn(sender, self._read_video(track, target, conn_id))
         else:
-            self._spawn(sender, self._read_audio(track, target, int(info.rate), conn_id))
+            task = self._spawn(sender, self._read_audio(track, target, int(info.rate), conn_id))
+        self._tracks[track.sid] = _TrackFeed(sender, conn_id, target, task)
 
-    def release(self, sender: str) -> None:
-        """Stop a participant that left: end its open streams and free the tracks it held."""
+    def on_track_gone(self, sid: str) -> None:
+        """Stop feeding from a remote track that was unpublished or unsubscribed.
+
+        Its sender's claim on the input track is released, unless the sender
+        still feeds that input another way.
+        """
+        feed = self._tracks.pop(sid, None)
+        if feed is None:
+            return
+        feed.task.cancel()
+        still_feeding = any(
+            other.conn_id == feed.conn_id and other.target == feed.target
+            for other in self._tracks.values()
+        ) or any(
+            stream.conn_id == feed.conn_id and stream.track == feed.target
+            for stream in self._streams.values()
+        )
+        if not still_feeding and self._held.get(feed.target) == feed.conn_id:
+            del self._held[feed.target]
+            self._release_input(feed.conn_id, feed.target)
+
+    def release(self, sender: str, conn_id: ConnId) -> None:
+        """Stop a participant that left: end its open streams and drop the tracks it held.
+
+        The session frees its claims when its connection closes.
+        """
         for topic, stream in list(self._streams.items()):
             if stream.sender == sender:
                 self._end(topic, stream)
         for task in self._readers.pop(sender, set()):
             task.cancel()
-        for track in [t for t, holder in self._holders.items() if holder == sender]:
-            del self._holders[track]
+        for sid in [sid for sid, feed in self._tracks.items() if feed.sender == sender]:
+            del self._tracks[sid]
+        for track in [t for t, holder in self._held.items() if holder == conn_id]:
+            del self._held[track]
 
     def close(self) -> None:
-        """Stop every reader."""
+        """Stop every reader, ending each open stream with its end frame.
+
+        Each stream's reader is closed directly: a reader task cancelled
+        before it first runs never reaches its own cleanup.
+        """
+        for topic, stream in list(self._streams.items()):
+            self._end(topic, stream)
         for tasks in self._readers.values():
             for task in tasks:
                 task.cancel()
         self._readers.clear()
-        self._streams.clear()
+        self._tracks.clear()
 
-    def _claim(self, track: str, sender: str) -> bool:
-        holder = self._holders.setdefault(track, sender)
-        return holder == sender
+    def _claim(self, track: str, conn_id: ConnId) -> bool:
+        """Claim *track* for *conn_id*, or confirm it already holds it."""
+        holder = self._held.get(track)
+        if holder is not None:
+            return holder == conn_id
+        if not self._claim_input(conn_id, track):
+            return False
+        self._held[track] = conn_id
+        return True
 
-    def _spawn(self, sender: str, coro: Coroutine[Any, Any, None]) -> None:
+    def _spawn(self, sender: str, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         task = asyncio.get_running_loop().create_task(coro)
         tasks = self._readers.setdefault(sender, set())
         tasks.add(task)
         task.add_done_callback(tasks.discard)
+        return task
 
     async def _feed(self, topic: str, stream: _Stream, reader: rtc.ByteStreamReader) -> None:
         try:

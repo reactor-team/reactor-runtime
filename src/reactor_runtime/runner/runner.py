@@ -684,6 +684,10 @@ class Runner(ServiceComponent, ConnectionSink):
             ),
         )
 
+    def claim_input_track(self, conn_id: ConnId, name: str) -> bool:
+        """Claim an inbound track for a connection, first come, first served, with no reply."""
+        return self._connections.publish_track(conn_id, name)
+
     def unpublish_track(self, conn_id: ConnId, name: str) -> None:
         """Release an inbound track a connection had claimed."""
         self._connections.unpublish_track(conn_id, name)

@@ -125,11 +125,35 @@ class Sink:
         return [json.loads(f.metadata or b"{}") for _, _, f in self.frames]
 
 
-def inputs(sink: Sink) -> RoomInputs:
+class Claims:
+    """The session's input arbitration: one holder per input track, first come."""
+
+    def __init__(self) -> None:
+        self.holders: dict[str, ConnId] = {}
+
+    def claim(self, conn_id: ConnId, name: str) -> bool:
+        if name in self.holders:
+            return False
+        self.holders[name] = conn_id
+        return True
+
+    def release(self, conn_id: ConnId, name: str) -> None:
+        if self.holders.get(name) == conn_id:
+            del self.holders[name]
+
+    def connection_closed(self, conn_id: ConnId) -> None:
+        for name in [n for n, holder in self.holders.items() if holder == conn_id]:
+            del self.holders[name]
+
+
+def inputs(sink: Sink, claims: Claims | None = None) -> RoomInputs:
+    claims = claims or Claims()
     return RoomInputs(
         {"agent_audio": AGENT, "camera": CAMERA, "mic": MIC},
         {"lk.audio_stream": "agent_audio", "lk.camera_stream": "camera", "reactor.data": "mic"},
         sink,
+        claims.claim,
+        claims.release,
     )
 
 
@@ -201,11 +225,13 @@ async def test_the_first_participant_to_send_holds_the_track() -> None:
 
 async def test_a_participant_that_leaves_ends_its_stream_and_frees_the_track() -> None:
     sink = Sink()
-    room = inputs(sink)
+    claims = Claims()
+    room = inputs(sink, claims)
     stuck = Reader("AUDIO_1", [])
     room.on_byte_stream(cast(Any, stuck), "agent", ConnId(5120))
 
-    room.release("agent")
+    room.release("agent", ConnId(5120))
+    claims.connection_closed(ConnId(5120))
     nxt = Reader("AUDIO_2", [pcm(np.ones(240, np.int16))])
     room.on_byte_stream(cast(Any, nxt), "newcomer", ConnId(10_001))
     nxt.released.set()
@@ -288,6 +314,7 @@ def test_a_protocol_topic_cannot_feed_an_input_track() -> None:
 class Track:
     name: str
     kind: int
+    sid: str = "TR_1"
 
 
 async def test_a_track_named_after_an_input_feeds_it_unless_the_input_is_reserved(
@@ -342,15 +369,75 @@ async def test_a_remote_tracks_queue_is_bounded_and_closed_when_its_sender_leave
     _streams.clear()
     monkeypatch.setattr(rtc, "VideoStream", FakeMediaStream)
     monkeypatch.setattr(rtc, "AudioStream", FakeMediaStream)
-    room = RoomInputs({"camera": CAMERA, "mic": MIC}, {}, Sink())
+    claims = Claims()
+    room = RoomInputs({"camera": CAMERA, "mic": MIC}, {}, Sink(), claims.claim, claims.release)
 
-    room.on_track(cast(Any, Track("mic", rtc.TrackKind.KIND_AUDIO)), "viewer", ConnId(5120))
-    room.on_track(cast(Any, Track("camera", rtc.TrackKind.KIND_VIDEO)), "viewer", ConnId(5120))
+    room.on_track(cast(Any, Track("mic", rtc.TrackKind.KIND_AUDIO, "TR_a")), "viewer", ConnId(5120))
+    room.on_track(
+        cast(Any, Track("camera", rtc.TrackKind.KIND_VIDEO, "TR_v")), "viewer", ConnId(5120)
+    )
     await _settle()
-    room.release("viewer")
+    room.release("viewer", ConnId(5120))
     await _settle()
 
     audio, video = _streams
     assert (audio.capacity, video.capacity) == (AUDIO_QUEUE_FRAMES, VIDEO_QUEUE_FRAMES)
     assert audio.closed
     assert video.closed
+
+
+async def test_a_track_that_stops_frees_its_input_for_another_participant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started: list[tuple[str, ConnId]] = []
+
+    async def read_video(self: Any, track: Any, target: str, conn_id: ConnId) -> None:
+        started.append((target, conn_id))
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(RoomInputs, "_read_video", read_video)
+    claims = Claims()
+    room = RoomInputs({"camera": CAMERA}, {}, Sink(), claims.claim, claims.release)
+    camera = Track("camera", rtc.TrackKind.KIND_VIDEO, "TR_first")
+
+    room.on_track(cast(Any, camera), "first", ConnId(5120))
+    room.on_track(
+        cast(Any, Track("camera", rtc.TrackKind.KIND_VIDEO, "TR_second")), "second", ConnId(5121)
+    )
+    await _settle()
+    room.on_track_gone("TR_first")
+    room.on_track(
+        cast(Any, Track("camera", rtc.TrackKind.KIND_VIDEO, "TR_third")), "second", ConnId(5121)
+    )
+    await _settle()
+
+    assert started == [("camera", ConnId(5120)), ("camera", ConnId(5121))]
+    assert claims.holders == {"camera": ConnId(5121)}
+    room.close()
+
+
+async def test_an_input_another_transport_holds_is_not_fed_from_the_room() -> None:
+    sink = Sink()
+    claims = Claims()
+    claims.claim(ConnId(4001), "agent_audio")  # a WebRTC client published it first
+    room = inputs(sink, claims)
+    reader = Reader("AUDIO_1", [pcm(np.ones(240, np.int16))])
+
+    room.on_byte_stream(cast(Any, reader), "agent", ConnId(5120))
+    reader.released.set()
+    await _settle()
+
+    assert reader.closed
+    assert sink.frames == []
+
+
+async def test_closing_ends_each_open_stream_and_closes_readers_that_never_ran() -> None:
+    sink = Sink()
+    room = inputs(sink)
+    reader = Reader("AUDIO_1", [pcm(np.ones(240, np.int16))])
+    room.on_byte_stream(cast(Any, reader), "agent", ConnId(5120))
+
+    room.close()
+
+    assert reader.closed
+    assert sink.metadata() == [{"stream_id": "AUDIO_1", "ended": True}]

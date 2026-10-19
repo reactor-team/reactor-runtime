@@ -111,6 +111,12 @@ class FakeControl:
     def media_received(self, conn_id: ConnId, track: str, frame: Any) -> None:
         pass
 
+    def claim_input_track(self, conn_id: ConnId, name: str) -> bool:
+        return True
+
+    def unpublish_track(self, conn_id: ConnId, name: str) -> None:
+        pass
+
 
 def _session(room: FakeRoom, control: FakeControl) -> RoomSession:
     return RoomSession(

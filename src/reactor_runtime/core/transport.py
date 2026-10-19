@@ -318,6 +318,19 @@ class ConnectionSink(Protocol):
         requesting connection on its control channel, correlated by *request_id*.
         """
 
+    def claim_input_track(self, conn_id: ConnId, name: str) -> bool:
+        """Claim inbound track *name* for a connection, as a publish request does, unanswered.
+
+        For a transport that learns of a client's media without a publish
+        request on the Reactor protocol. The claim is the same one a publish
+        request takes: the first claim on a track holds it, across every
+        transport of the session, until :meth:`unpublish_track` or the
+        connection closes.
+
+        Returns:
+            Whether the claim was granted.
+        """
+
     def unpublish_track(self, conn_id: ConnId, name: str) -> None:
         """Release an inbound track a connection had claimed."""
 
