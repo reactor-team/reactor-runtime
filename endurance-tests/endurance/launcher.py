@@ -24,7 +24,7 @@ from fastapi import FastAPI
 
 import reactor_runtime.http.server as http_server
 from reactor_runtime import serve
-from reactor_runtime.core import Health
+from reactor_runtime.core import ConnId, Health
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.runner import Runner
 from reactor_runtime.transport.router import TransportRouter
@@ -152,27 +152,39 @@ def _install_pacer_check() -> None:
     MediaPacer.stop = checked_stop
 
 
-# Commands a transport handed up to be answered nowhere, as a data-topic
-# command is, since start: proof the runtime took a topic packet as a command.
-_topic_commands = 0
+# Commands answered nowhere, as a data-topic command is, since start, by how
+# they ended: run by the model's handler, or rejected (by the contract, or by
+# the handler failing). The proof the runtime ran a topic packet's command.
+_topic_commands = {"ran": 0, "rejected": 0}
 
 
 def _install_command_count() -> None:
-    """Count the commands handed up with no answer, if this runtime has them."""
+    """Count how each command answered nowhere ended, if this runtime has them."""
     try:
-        from reactor_runtime.core import ReplyRoute
+        from reactor_runtime.core import CommandFailure, ReplyRoute
     except ImportError:  # a runtime_ref from before reply routes
         return
-    received = Runner.command_received
+    send_addressed = Runner._send_addressed
+    reject_command = Runner._reject_command
 
-    def counted(self: Runner, *args: Any, **kwargs: Any) -> None:
-        global _topic_commands
-        reply = kwargs.get("reply", args[4] if len(args) > 4 else ReplyRoute.PROTOCOL)
-        if reply is ReplyRoute.NONE:
-            _topic_commands += 1
-        received(self, *args, **kwargs)
+    def answered_nowhere(runner: Runner, conn_id: ConnId, request_id: str | None) -> bool:
+        return runner._reply_routes.get((conn_id, request_id or "")) is ReplyRoute.NONE
 
-    Runner.command_received = counted
+    def counted_answer(self: Runner, conn_id: ConnId, message: Any, request_id: str | None) -> None:
+        # A failure goes on to _reject_command, which counts it.
+        if not isinstance(message, CommandFailure) and answered_nowhere(self, conn_id, request_id):
+            _topic_commands["ran"] += 1
+        send_addressed(self, conn_id, message, request_id)
+
+    def counted_rejection(
+        self: Runner, conn_id: ConnId, request_id: str, code: str, detail: str
+    ) -> None:
+        if answered_nowhere(self, conn_id, request_id):
+            _topic_commands["rejected"] += 1
+        reject_command(self, conn_id, request_id, code, detail)
+
+    Runner._send_addressed = counted_answer
+    Runner._reject_command = counted_rejection
 
 
 def _input_frames(runner: Runner) -> dict[str, float]:
@@ -238,7 +250,7 @@ def build_app(
             "stopped_pacers_holding_now": stopped_holding,
             "live_batches": tracked_echo.alive_batches(),
             "live": _live_transport_objects(),
-            "topic_commands": _topic_commands,
+            "topic_commands": dict(_topic_commands),
             "input_frames": _input_frames(runner),
             "tasks": len(asyncio.all_tasks()),
         }

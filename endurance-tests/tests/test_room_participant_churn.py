@@ -54,8 +54,12 @@ def _unheard(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
     does anything with it, so the runtime's own counts are the proof.
     """
     missing = []
-    if after["topic_commands"] - before["topic_commands"] != 1:
-        missing.append("set_effect (topic): the runtime ran no command from the packet")
+    ran = after["topic_commands"]["ran"] - before["topic_commands"]["ran"]
+    rejected = after["topic_commands"]["rejected"] - before["topic_commands"]["rejected"]
+    if rejected:
+        missing.append("set_effect (topic): the runtime rejected the packet's command")
+    elif ran != 1:
+        missing.append(f"set_effect (topic): the runtime ran {ran} commands from the packet, not 1")
     for track in ("webcam", "mic"):
         if after["input_frames"].get(track, 0) <= before["input_frames"].get(track, 0):
             missing.append(f"{track}: no frame reached the runtime's input track")
