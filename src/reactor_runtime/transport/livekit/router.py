@@ -3,9 +3,11 @@
 Mounts the ``/sessions/{sid}/transport/livekit`` route group, shaped like the
 WebRTC one. A caller opens a room connection with the room's URL and an access
 token for the session's participant, and gets its connection id at once: the
-join runs in the background, as a WebRTC negotiation does. The caller polls the
-connection for the outcome of the join, and leaves the room by deleting it. A
-session has at most one room connection at a time.
+join runs in the background, as a WebRTC negotiation does. The caller may
+choose the id, as a WebRTC client chooses the id it offers on, or leave the
+runtime to mint it. The caller polls the connection for the outcome of the
+join, and leaves the room by deleting it. A session has at most one room
+connection at a time.
 
 The LiveKit SDK ships as the runtime's ``livekit`` extra. This module imports
 without it, but the room it joins needs it, so a runtime mounts these routes
@@ -23,11 +25,14 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
-from pydantic import BaseModel, SecretStr, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator
 
-from reactor_runtime.core import LiveKitConfig
+from reactor_runtime.core import ConnId, LiveKitConfig
 from reactor_runtime.transport.livekit.version import TRANSPORT_NAME, TRANSPORT_VERSION
 from reactor_runtime.transport.router import (
+    CONN_ID_MAX,
+    MINTED_CONN_ID_MIN,
+    ConnectionIdClaimedError,
     ErrorDetail,
     SessionControl,
     TransportRouter,
@@ -46,8 +51,9 @@ _GUARD_RESPONSES: dict[int | str, dict[str, Any]] = {
     404: {"model": ErrorDetail},
 }
 
-# Opening a room connection adds a 409 when the session already has one, and a
-# 503 when the session's connection-id space is used up.
+# Opening a room connection adds a 409 when the session already has one or the
+# id the caller chose is in use, and a 503 when the session's connection-id
+# space is used up.
 _OPEN_RESPONSES: dict[int | str, dict[str, Any]] = {
     **_GUARD_RESPONSES,
     409: {"model": ErrorDetail},
@@ -69,10 +75,16 @@ class RoomConnectionRequest(BaseModel):
     The token is the access token of the session's participant: the room, the
     identity, and the grants come from it. It is never logged or journalled,
     and a refused request does not repeat it.
+
+    ``connection_id`` lets the caller choose the room connection's id, from
+    the range the runtime mints in. Absent, the runtime mints one. An id the
+    session already uses, through this transport or another, is refused with a
+    409, since a room connection is never opened again on the same id.
     """
 
     url: str
     token: SecretStr
+    connection_id: int | None = Field(default=None, ge=MINTED_CONN_ID_MIN, le=CONN_ID_MAX)
 
     @field_validator("url")
     @classmethod
@@ -175,14 +187,18 @@ class LiveKitRouter(TransportRouter):
                     await previous.retire()
                 from reactor_runtime.transport.livekit.room import RoomSession
 
-                conn_id = runner.new_conn_id(self.protocol)
-                runner.offer_admitted(conn_id)
-                room = RoomSession(
-                    conn_id, req.url, req.token.get_secret_value(), runner, self._config
-                )
+                conn_id = self._claim(runner, req.connection_id)
+                try:
+                    runner.offer_admitted(conn_id)
+                    room = RoomSession(
+                        conn_id, req.url, req.token.get_secret_value(), runner, self._config
+                    )
+                    room.start()
+                except BaseException:
+                    runner.release_conn_id(conn_id, self.protocol)
+                    raise
                 self._room = room
                 self._room_epoch = epoch
-                room.start()
             return RoomConnectionAccepted(connection_id=conn_id)
 
         async def room_connection_status(sid: str, cid: int) -> Response:
@@ -229,6 +245,26 @@ class LiveKitRouter(TransportRouter):
             responses=_GUARD_RESPONSES,
             route_class_override=_UnechoedValidationRoute,
         )
+
+    def _claim(self, runner: SessionControl, chosen: int | None) -> ConnId:
+        """Return the room connection's id, claimed for this transport: *chosen*, or a minted one.
+
+        A chosen id must be new to the session. One another transport holds
+        is refused, and so is one this transport already holds: a room
+        participant's, or an earlier room connection's.
+        """
+        if chosen is None:
+            return runner.new_conn_id(self.protocol)
+        conn_id = ConnId(chosen)
+        try:
+            claimed_now = runner.claim_conn_id(conn_id, self.protocol)
+        except ConnectionIdClaimedError as claimed:
+            raise HTTPException(status_code=409, detail=str(claimed)) from None
+        if not claimed_now:
+            raise HTTPException(
+                status_code=409, detail=f"connection {conn_id} is already in use in this session"
+            )
+        return conn_id
 
     def _room_for(self, cid: int, epoch: int) -> RoomSession:
         """Return the live session's room connection *cid* names, or answer 404.

@@ -63,15 +63,20 @@ from reactor_runtime.log import get_logger
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.runner.state_machine import SessionStateMachine
 from reactor_runtime.runner.system_client import SYSTEM_CONN_ID
-from reactor_runtime.transport.router import ConnectionIdClaimedError, ConnectionsExhaustedError
+from reactor_runtime.transport.router import (
+    CONN_ID_MAX,
+    MINTED_CONN_ID_MIN,
+    ConnectionIdClaimedError,
+    ConnectionsExhaustedError,
+)
 
 logger = get_logger(__name__)
 
 # Connection ids are minted at random in this inclusive range, the same id space
 # a production director hands out. 1000 is invalid and 1001 is reserved for
 # legacy single-connection compatibility, so explicit ids start at 1002.
-_MIN_CONN_ID = 1002
-_MAX_CONN_ID = 9999
+_MIN_CONN_ID = MINTED_CONN_ID_MIN
+_MAX_CONN_ID = CONN_ID_MAX
 
 # Ids no transport can claim or release, whatever it calls itself: the
 # runtime's own system client.

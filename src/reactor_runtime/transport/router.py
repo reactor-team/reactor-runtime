@@ -92,6 +92,10 @@ OFFERED_CONN_ID_MIN = 1001
 """The lowest connection id a client may offer on: ``1001``, kept for legacy
 single-connection callers, below the ids the runtime mints from ``1002``."""
 
+MINTED_CONN_ID_MIN = 1002
+"""The lowest connection id the runtime mints, and the lowest a caller may
+choose for a connection the runtime would otherwise mint."""
+
 CONN_ID_MAX = 9999
 """The highest connection id a client may offer on, and the runtime mints."""
 
