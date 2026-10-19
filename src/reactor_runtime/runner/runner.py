@@ -1220,8 +1220,18 @@ class Runner(ServiceComponent, ConnectionSink):
         A failure for a connection admitted in an earlier session, or reported
         after its session moved on, is logged and not journalled, the same
         way :meth:`connection_opened` refuses a wire that connects too late:
-        it belongs to a session that is over.
+        it belongs to a session that is over. So is a failure from a transport
+        that no longer holds the id: claims end with their session, and a
+        connection of the next session may have the id now, with its own stamp.
         """
+        if self._connections.claim_holder(conn_id) != transport:
+            logger.info(
+                "a connection of an earlier session could not be opened",
+                conn_id=conn_id,
+                transport=transport,
+                reason=reason,
+            )
+            return
         stale_epoch = self._offer_epochs.consume(conn_id)
         if self._sm.current_state in _STALE_CONNECTION_STATES or stale_epoch:
             logger.info(

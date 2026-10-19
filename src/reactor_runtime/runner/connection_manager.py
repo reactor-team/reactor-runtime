@@ -302,6 +302,10 @@ class ConnectionManager:
             raise ConnectionIdClaimedError(conn_id)
         return False
 
+    def claim_holder(self, conn_id: ConnId) -> str | None:
+        """Return the transport that holds *conn_id* this session, or ``None``."""
+        return self._claims.get(conn_id)
+
     def release_conn_id(self, conn_id: ConnId, transport: str) -> None:
         """Release *transport*'s claim on *conn_id*, for a connection it refused.
 

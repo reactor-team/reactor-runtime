@@ -4696,6 +4696,27 @@ async def test_a_connection_that_fails_after_its_session_ended_is_not_journalled
     assert _moves(started_runner, SessionEvent.ERROR) == []
 
 
+async def test_a_late_failure_on_an_id_the_next_session_reuses_leaves_that_connection_alone(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    conn_id = started_runner.new_conn_id("room")
+    started_runner.offer_admitted(conn_id)
+    started_runner.stop_session()
+    await asyncio.sleep(0.01)
+    started_runner.start_session({})
+    # The next session's WebRTC client offers on the same id.
+    started_runner.claim_conn_id(conn_id, "webrtc")
+    started_runner.offer_admitted(conn_id)
+
+    started_runner.connection_failed(conn_id, "room", "the room could not be joined")
+
+    assert _moves(started_runner, SessionEvent.ERROR) == []
+    # The WebRTC connection's stamp is still there, and still the live session's.
+    assert conn_id in started_runner._offer_epochs._stamps
+    assert started_runner._offer_epochs.consume(conn_id) is False
+
+
 async def test_a_connection_failure_with_no_session_running_is_not_journalled(
     started_runner: Runner,
 ) -> None:
