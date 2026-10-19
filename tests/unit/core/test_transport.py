@@ -11,6 +11,7 @@ from reactor_runtime.core import (
     ConnId,
     InputFrame,
     MediaChunk,
+    ReplyRoute,
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion
 
@@ -72,7 +73,12 @@ class FakeSink:
         self.messages.append((conn_id, payload, channel))
 
     def command_received(
-        self, conn_id: ConnId, name: str, args: Mapping[str, Any], request_id: str
+        self,
+        conn_id: ConnId,
+        name: str,
+        args: Mapping[str, Any],
+        request_id: str,
+        reply: ReplyRoute = ReplyRoute.PROTOCOL,
     ) -> None:
         pass
 

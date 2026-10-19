@@ -6,7 +6,14 @@ import numpy as np
 import pytest
 from conftest import FakePeer
 
-from reactor_runtime.core import ClientStatsBatch, Connection, ConnId, InputFrame, TrackDirection
+from reactor_runtime.core import (
+    ClientStatsBatch,
+    Connection,
+    ConnId,
+    InputFrame,
+    ReplyRoute,
+    TrackDirection,
+)
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.protocol.v1.codec import V1Codec
@@ -58,7 +65,12 @@ class FakeSink:
         self.messages.append((conn_id, payload))
 
     def command_received(
-        self, conn_id: ConnId, name: str, args: Mapping[str, Any], request_id: str
+        self,
+        conn_id: ConnId,
+        name: str,
+        args: Mapping[str, Any],
+        request_id: str,
+        reply: ReplyRoute = ReplyRoute.PROTOCOL,
     ) -> None:
         pass
 

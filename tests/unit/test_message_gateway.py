@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from reactor_runtime.core import ClientStatsBatch, Connection, ConnId, InputFrame
+from reactor_runtime.core import ClientStatsBatch, Connection, ConnId, InputFrame, ReplyRoute
 from reactor_runtime.message_gateway import InboundCommand, MessageGateway
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.protocol.common import dict_to_struct
@@ -37,7 +37,12 @@ class FakeSink:
         pass
 
     def command_received(
-        self, conn_id: ConnId, name: str, args: Mapping[str, Any], request_id: str
+        self,
+        conn_id: ConnId,
+        name: str,
+        args: Mapping[str, Any],
+        request_id: str,
+        reply: ReplyRoute = ReplyRoute.PROTOCOL,
     ) -> None:
         pass
 

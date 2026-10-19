@@ -1,4 +1,5 @@
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any, cast
@@ -6,7 +7,7 @@ from typing import Any, cast
 import pytest
 from livekit import rtc
 
-from reactor_runtime.core import Connection, ConnectionOrigin, ConnId
+from reactor_runtime.core import Connection, ConnectionOrigin, ConnId, MessageObserver
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.transport.livekit import participant as participant_module
 from reactor_runtime.transport.livekit.participant import (
@@ -27,6 +28,17 @@ class FakeLocalParticipant:
         self.stream_delay = stream_delay
         self.blocked = asyncio.Event()
         self.blocked.set()
+        self.calls: list[tuple[str, str, str]] = []
+        self.rpc_errors: list[rtc.RpcError] = []
+        self.answering = asyncio.Event()
+        self.answering.set()
+
+    async def perform_rpc(self, *, destination_identity: str, method: str, payload: str) -> str:
+        self.calls.append((destination_identity, method, payload))
+        await self.answering.wait()
+        if self.rpc_errors:
+            raise self.rpc_errors.pop(0)
+        return ""
 
     async def publish_data(
         self,
@@ -45,6 +57,9 @@ class FakeLocalParticipant:
     ) -> None:
         await asyncio.sleep(self.stream_delay)
         self.sent.append(("stream", topic, data, destination_identities))
+
+
+OUTBOUND = {"playback_finished": ["lk.playback_finished"]}
 
 
 class FakeReader:
@@ -107,6 +122,7 @@ def make(
         cast(Any, local),
         asyncio.get_running_loop(),
         received or Received(),
+        OUTBOUND,
     )
     return conn, local
 
@@ -420,3 +436,234 @@ async def test_a_stream_dropped_before_its_reader_runs_is_still_closed() -> None
     conn.drop()
 
     assert reader.closed
+
+
+# --- RPC: answers to calls the participant made, and calls it receives ------
+
+
+async def test_an_rpc_call_is_answered_with_its_reply_messages_fields() -> None:
+    conn, _ = make()
+    assert isinstance(conn, MessageObserver)
+    reply = conn.expect_reply("rpc-1")
+
+    await asyncio.to_thread(conn.message_sent, "dropped", {"seconds": 1.4}, "rpc-1")
+
+    assert await asyncio.wait_for(reply, 1) == '{"seconds": 1.4}'
+    conn.drop()
+
+
+async def test_an_rpc_call_whose_command_returned_nothing_is_answered_empty() -> None:
+    conn, _ = make()
+    reply = conn.expect_reply("rpc-1")
+
+    conn.command_acknowledged("rpc-1")
+
+    assert await asyncio.wait_for(reply, 1) == ""
+    conn.drop()
+
+
+async def test_an_rpc_call_whose_command_failed_fails_with_the_code() -> None:
+    conn, _ = make()
+    reply = conn.expect_reply("rpc-1")
+
+    conn.command_failed("rpc-1", "not_now", "Not now.")
+
+    with pytest.raises(rtc.RpcError) as failed:
+        await asyncio.wait_for(reply, 1)
+    assert failed.value.code == rtc.RpcError.ErrorCode.APPLICATION_ERROR
+    assert (failed.value.message, failed.value.data) == ("Not now.", "not_now")
+    conn.drop()
+
+
+async def test_an_answer_for_no_waiting_call_is_ignored() -> None:
+    conn, local = make()
+
+    conn.command_acknowledged("protocol-req")
+    conn.message_sent("echoed", {"text": "hi"}, "protocol-req")
+    await _settle()
+
+    assert local.calls == []
+    conn.drop()
+
+
+async def test_a_mapped_message_calls_its_method_with_its_fields() -> None:
+    conn, local = make()
+
+    await asyncio.to_thread(
+        conn.message_sent,
+        "playback_finished",
+        {"playback_position": 3.2, "interrupted": False},
+        None,
+    )
+    await _settle()
+
+    assert local.calls == [
+        ("viewer", "lk.playback_finished", '{"playback_position": 3.2, "interrupted": false}')
+    ]
+    conn.drop()
+
+
+async def test_a_message_that_is_not_mapped_calls_nothing() -> None:
+    conn, local = make()
+
+    conn.message_sent("echoed", {"text": "hi"}, None)
+    await _settle()
+
+    assert local.calls == []
+    conn.drop()
+
+
+async def test_a_method_marked_unsupported_is_called_again_once_the_mark_expires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn, local = make()
+    local.rpc_errors.append(
+        rtc.RpcError(rtc.RpcError.ErrorCode.UNSUPPORTED_METHOD, "not registered yet")
+    )
+    conn.message_sent("playback_finished", {}, None)
+    await _settle()
+
+    monkeypatch.setattr(participant_module, "UNSUPPORTED_RETRY_SECONDS", 0.0)
+    conn.message_sent("playback_finished", {}, None)
+    await _settle()
+
+    assert len(local.calls) == 2
+    conn.drop()
+
+
+async def test_calls_queued_behind_an_unsupported_answer_are_skipped() -> None:
+    conn, local = make()
+    local.answering.clear()
+    local.rpc_errors.append(
+        rtc.RpcError(rtc.RpcError.ErrorCode.UNSUPPORTED_METHOD, "no such method")
+    )
+    for _ in range(3):
+        conn.message_sent("playback_finished", {}, None)
+    await _settle()
+    local.answering.set()
+    await _settle(20)
+
+    assert len(local.calls) == 1
+    conn.drop()
+
+
+async def test_a_reply_to_an_rpc_call_that_stopped_waiting_calls_nothing() -> None:
+    conn, local = make()
+    reply = conn.expect_reply("call-1")
+    reply.cancel()  # the caller's response timeout ended the call
+    await _settle()
+
+    conn.message_sent("playback_finished", {"playback_position": 1.0}, "call-1")
+    await _settle()
+
+    assert local.calls == []
+    conn.drop()
+
+
+async def test_a_protocol_reply_calls_the_methods_its_message_maps_to_whatever_its_id() -> None:
+    conn, local = make()
+
+    conn.message_sent("playback_finished", {"playback_position": 1.0}, "rpc-chosen-by-a-client")
+    await _settle()
+
+    assert len(local.calls) == 1
+    conn.drop()
+
+
+async def test_a_participant_without_the_method_is_not_called_again() -> None:
+    conn, local = make()
+    local.rpc_errors.append(
+        rtc.RpcError(rtc.RpcError.ErrorCode.UNSUPPORTED_METHOD, "no such method")
+    )
+
+    conn.message_sent("playback_finished", {}, None)
+    await _settle()
+    conn.message_sent("playback_finished", {}, None)
+    await _settle()
+
+    assert len(local.calls) == 1
+    conn.drop()
+
+
+async def test_a_call_that_may_not_have_arrived_is_tried_again() -> None:
+    conn, local = make()
+    local.rpc_errors.append(rtc.RpcError(rtc.RpcError.ErrorCode.CONNECTION_TIMEOUT, "timed out"))
+
+    conn.message_sent("playback_finished", {}, None)
+    await asyncio.sleep(0.5)
+
+    assert len(local.calls) == 2
+    conn.drop()
+
+
+async def test_a_call_whose_answer_timed_out_is_not_made_again() -> None:
+    conn, local = make()
+    local.rpc_errors.append(rtc.RpcError(rtc.RpcError.ErrorCode.RESPONSE_TIMEOUT, "no answer"))
+
+    conn.message_sent("playback_finished", {}, None)
+    await asyncio.sleep(0.5)
+
+    assert len(local.calls) == 1
+    conn.drop()
+
+
+async def test_calls_past_the_queue_limit_are_dropped_while_one_is_stalled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(participant_module, "MAX_PENDING_CALLS", 2)
+    conn, local = make()
+    local.answering.clear()
+
+    conn.message_sent("playback_finished", {"playback_position": 0}, None)
+    await _settle()
+    for position in range(1, 5):
+        conn.message_sent("playback_finished", {"playback_position": position}, None)
+    await _settle()
+    # The first call is in flight; two wait; the rest are dropped.
+    local.answering.set()
+    await _settle(20)
+
+    assert [json.loads(payload)["playback_position"] for _, _, payload in local.calls] == [
+        0,
+        1,
+        2,
+    ]
+    conn.drop()
+
+
+async def test_closing_makes_the_calls_queued_before_it() -> None:
+    conn, local = make()
+    local.answering.clear()
+    conn.message_sent("playback_finished", {"playback_position": 1}, None)
+    conn.message_sent("playback_finished", {"playback_position": 2}, None)
+    await _settle()
+
+    closing = asyncio.create_task(conn.close())
+    await _settle()
+    local.answering.set()
+    await closing
+
+    assert [json.loads(payload)["playback_position"] for _, _, payload in local.calls] == [1, 2]
+
+
+async def test_calls_go_out_in_the_order_the_messages_were_sent() -> None:
+    conn, local = make()
+
+    for position in range(5):
+        conn.message_sent("playback_finished", {"playback_position": position}, None)
+    await _settle(20)
+
+    assert [json.loads(payload)["playback_position"] for _, _, payload in local.calls] == list(
+        range(5)
+    )
+    conn.drop()
+
+
+async def test_a_waiting_call_fails_when_the_participant_leaves() -> None:
+    conn, _ = make()
+    reply = conn.expect_reply("rpc-1")
+
+    conn.drop()
+
+    with pytest.raises(rtc.RpcError):
+        await asyncio.wait_for(reply, 1)

@@ -20,15 +20,27 @@ connection of the same identity. What one participant can hold is bounded:
 messages being read or waiting their turn, and :data:`MAX_OUTBOX_BYTES` of
 messages waiting to be sent to it. A message past a bound is dropped and
 logged.
+
+The connection also takes what it is sent as plain data
+(:class:`~reactor_runtime.core.MessageObserver`). That is how a command an RPC
+call ran answers the caller, and how a model message mapped to an RPC method
+calls it on the participant. RPC calls go out through a queue of their own, in
+order, so a slow answer never holds up the protocol's messages. At most
+:data:`MAX_PENDING_CALLS` calls wait; past that, a new call is dropped and
+logged. A method the participant answers is unsupported is not called on it
+for :data:`UNSUPPORTED_RETRY_SECONDS`.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from livekit import rtc
 
@@ -67,12 +79,34 @@ MAX_INBOUND_BYTES = 2 * MAX_STREAMED_MESSAGE_BYTES
 MAX_OUTBOX_BYTES = 2 * MAX_STREAMED_MESSAGE_BYTES
 """How many bytes may wait to be sent to one participant; a message past it is dropped."""
 
+UNSUPPORTED_RETRY_SECONDS = 30.0
+"""How long a method a participant answers is unsupported goes uncalled on it.
+
+Participants often register their methods a moment after they join, so an
+early answer is not taken as final.
+"""
+
+MAX_PENDING_CALLS = 64
+"""How many RPC calls may wait to be made on one participant; a call past it is dropped."""
+
 STREAM_READ_TIMEOUT_SECONDS = 30.0
 """How long one byte stream may take to arrive before it is dropped."""
 
 # How long a closing connection waits for its queued messages to leave, so a
 # notice sent just before the session ends still reaches the participant.
 _CLOSE_DRAIN_SECONDS = 2.0
+
+# The RPC failures worth another try: the call did not reach the participant.
+# A response timeout is not one: the participant acknowledged the call, so its
+# handler ran, and calling again would deliver the message twice.
+_TRANSIENT_RPC_ERRORS = frozenset(
+    {
+        rtc.RpcError.ErrorCode.CONNECTION_TIMEOUT,
+        rtc.RpcError.ErrorCode.SEND_FAILED,
+    }
+)
+_RPC_ATTEMPTS = 3
+_RPC_RETRY_SECONDS = 0.25
 
 
 @dataclass
@@ -108,6 +142,7 @@ class ParticipantConnection:
         participant: rtc.LocalParticipant,
         loop: asyncio.AbstractEventLoop,
         on_message: Callable[[bytes, Channel], None],
+        outbound: Mapping[str, Sequence[str]] | None = None,
     ) -> None:
         """Bind the connection to the participant it speaks to.
 
@@ -118,6 +153,7 @@ class ParticipantConnection:
             loop: The loop the room runs on.
             on_message: Called on the loop with each message the participant
                 sends, in order, while the connection is open.
+            outbound: Each model message that calls RPC methods, and the methods.
         """
         self.id = conn_id
         self.identity = identity
@@ -130,6 +166,16 @@ class ParticipantConnection:
         self._outbox: asyncio.Queue[tuple[str, bytes] | None] = asyncio.Queue()
         self._outbox_bytes = 0
         self._pump = loop.create_task(self._send_all(), name=f"room-participant-{conn_id}")
+        self._outbound = dict(outbound or {})
+        # RPC calls to make, in order: (method, payload); None ends the queue.
+        self._calls: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()
+        self._caller = loop.create_task(self._call_all(), name=f"room-rpc-{conn_id}")
+        # The RPC calls this participant made that wait for their command's answer.
+        self._replies: dict[str, asyncio.Future[str]] = {}
+        # The request id of every command an RPC call ran, until the command is
+        # answered, whether or not its caller still waits: the answer goes to
+        # the call alone, never to the outbound methods.
+        self._rpc_commands: set[str] = set()
         self._closed = False
         # Messages received, in arrival order per topic, until their turn comes.
         self._inbound: dict[Channel, deque[_Inbound]] = {c: deque() for c in Channel}
@@ -141,6 +187,10 @@ class ParticipantConnection:
         self._send_failed = _Warning()
         self._outbox_full = _Warning()
         self._inbound_full = _Warning()
+        self._failed_methods: set[str] = set()
+        # Each method the participant answered is unsupported, and when.
+        self._unsupported: dict[str, float] = {}
+        self._calls_full = _Warning()
 
     @property
     def protocol_version(self) -> ProtocolVersion:
@@ -172,6 +222,51 @@ class ParticipantConnection:
 
     def pause_track(self, name: str) -> None:
         """Do nothing: the room's server manages who receives each track."""
+
+    def expect_reply(self, request_id: str) -> asyncio.Future[str]:
+        """Return the future the answer to command *request_id* resolves, for an RPC call.
+
+        It resolves with the reply message's fields as JSON, or an empty string
+        for an acknowledgement, and fails with an :class:`rtc.RpcError` that
+        carries the failure's code as its data. Call on the room's loop.
+        """
+        future: asyncio.Future[str] = self._loop.create_future()
+        self._rpc_commands.add(request_id)
+        self._replies[request_id] = future
+        future.add_done_callback(lambda _: self._replies.pop(request_id, None))
+        return future
+
+    def message_sent(self, name: str, data: Mapping[str, Any], request_id: str | None) -> None:
+        """Answer the RPC call a reply belongs to, or call the methods a message maps to.
+
+        A reply to an RPC call whose caller stopped waiting is dropped.
+        """
+        payload = json.dumps(dict(data))
+        if request_id is not None and self._answered(request_id):
+            self._resolve(request_id, payload)
+            return
+        for method in self._outbound.get(name, ()):
+            self._call_soon(method, payload)
+
+    def command_acknowledged(self, request_id: str) -> None:
+        """Answer the RPC call whose command returned nothing with an empty string."""
+        if self._answered(request_id):
+            self._resolve(request_id, "")
+
+    def command_failed(self, request_id: str, code: str, message: str) -> None:
+        """Fail the RPC call whose command failed, with the failure's code as the error's data."""
+        if not self._answered(request_id) or self._loop.is_closed():
+            return
+        error = rtc.RpcError(rtc.RpcError.ErrorCode.APPLICATION_ERROR, message, code)
+        self._loop.call_soon_threadsafe(self._settle, request_id, None, error)
+
+    def _answered(self, request_id: str) -> bool:
+        """Whether *request_id* is a command an RPC call ran; it is answered now."""
+        try:
+            self._rpc_commands.remove(request_id)
+        except KeyError:
+            return False
+        return True
 
     def receive_packet(self, data: bytes, channel: Channel) -> None:
         """Take a message the participant sent as a data packet, on the loop."""
@@ -220,18 +315,118 @@ class ParticipantConnection:
             return
         self._closed = True
         self._stop_reading()
-        # Through the loop's callbacks, so the end follows every send scheduled before it.
+        self._fail_replies()
+        # Through the loop's callbacks, so each end follows every send and call
+        # scheduled before it.
         self._loop.call_soon(self._outbox.put_nowait, None)
-        try:
-            await asyncio.wait_for(asyncio.shield(self._pump), timeout=_CLOSE_DRAIN_SECONDS)
-        except TimeoutError:
-            self._pump.cancel()
+        self._loop.call_soon(self._calls.put_nowait, None)
+        pumps = (self._pump, self._caller)
+        _, late = await asyncio.wait(
+            [asyncio.shield(pump) for pump in pumps], timeout=_CLOSE_DRAIN_SECONDS
+        )
+        if late:
+            for pump in pumps:
+                pump.cancel()
 
     def drop(self) -> None:
         """Stop at once, for a participant that has left: nothing queued can reach it."""
         self._closed = True
         self._stop_reading()
         self._pump.cancel()
+        self._caller.cancel()
+        self._fail_replies()
+
+    def _resolve(self, request_id: str, payload: str) -> None:
+        if self._loop.is_closed():
+            return
+        self._loop.call_soon_threadsafe(self._settle, request_id, payload, None)
+
+    def _settle(self, request_id: str, payload: str | None, error: Exception | None) -> None:
+        future = self._replies.get(request_id)
+        if future is None or future.done():
+            return
+        if error is not None:
+            future.set_exception(error)
+        else:
+            future.set_result(payload or "")
+
+    def _fail_replies(self) -> None:
+        for future in list(self._replies.values()):
+            if not future.done():
+                future.set_exception(
+                    rtc.RpcError(rtc.RpcError.ErrorCode.APPLICATION_ERROR, "The session ended.")
+                )
+
+    def _call_soon(self, method: str, payload: str) -> None:
+        if self._closed or self._loop.is_closed():
+            return
+        self._loop.call_soon_threadsafe(self._admit_call, method, payload)
+
+    def _admit_call(self, method: str, payload: str) -> None:
+        """Queue an RPC call, on the loop, unless the method is unsupported or the queue is full."""
+        if self._is_unsupported(method):
+            return
+        if self._calls.qsize() >= MAX_PENDING_CALLS:
+            self._calls_full.log(
+                "dropped a call to %r on participant %r: %d calls already wait",
+                method,
+                self.identity,
+                MAX_PENDING_CALLS,
+            )
+            return
+        self._calls.put_nowait((method, payload))
+
+    async def _call_all(self) -> None:
+        while True:
+            item = await self._calls.get()
+            if item is None:
+                return
+            if self._is_unsupported(item[0]):
+                continue
+            await self._call(*item)
+            if self._calls.qsize() < MAX_PENDING_CALLS // 2:
+                self._calls_full.clear()
+
+    def _is_unsupported(self, method: str) -> bool:
+        marked = self._unsupported.get(method)
+        if marked is None:
+            return False
+        if time.monotonic() - marked >= UNSUPPORTED_RETRY_SECONDS:
+            del self._unsupported[method]
+            return False
+        return True
+
+    async def _call(self, method: str, payload: str) -> None:
+        """Call *method* on the participant, retrying a failure that may be transient."""
+        for attempt in range(_RPC_ATTEMPTS):
+            try:
+                await self._participant.perform_rpc(
+                    destination_identity=self.identity, method=method, payload=payload
+                )
+                return
+            except rtc.RpcError as error:
+                if error.code == rtc.RpcError.ErrorCode.UNSUPPORTED_METHOD:
+                    self._unsupported[method] = time.monotonic()
+                    logger.info(
+                        "participant %r does not support %r; not calling it for %.0f s",
+                        self.identity,
+                        method,
+                        UNSUPPORTED_RETRY_SECONDS,
+                    )
+                    return
+                if error.code in _TRANSIENT_RPC_ERRORS and attempt + 1 < _RPC_ATTEMPTS:
+                    await asyncio.sleep(_RPC_RETRY_SECONDS * (attempt + 1))
+                    continue
+                self._call_failed(method, f"{error.code}: {error.message}")
+                return
+            except Exception as error:
+                self._call_failed(method, str(error) or type(error).__name__)
+                return
+
+    def _call_failed(self, method: str, reason: str) -> None:
+        level = logging.DEBUG if method in self._failed_methods else logging.WARNING
+        self._failed_methods.add(method)
+        logger.log(level, "calling %r on participant %r failed: %s", method, self.identity, reason)
 
     def _stop_reading(self) -> None:
         for task, reader in list(self._readers.items()):

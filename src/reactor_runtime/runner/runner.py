@@ -44,6 +44,8 @@ from reactor_runtime.core import (
     InputFrame,
     LiveKitBlockError,
     MediaChunk,
+    MessageObserver,
+    ReplyRoute,
     RuntimeConfig,
     RuntimeState,
     ServiceComponent,
@@ -283,6 +285,9 @@ class Runner(ServiceComponent, ConnectionSink):
         self._step_recipients_lock = threading.Lock()
         self._connections = ConnectionManager(state_machine=self._sm)
         self._offer_epochs = OfferEpochs()
+        # Where the answer to each transport command off the protocol path goes,
+        # by connection and request id, until the answer is sent.
+        self._reply_routes: dict[tuple[ConnId, str], ReplyRoute] = {}
         # Playout settings the model set through its output handle, remembered
         # so a connection that opens later starts with them.
         self._media_rate: float | None = None
@@ -602,7 +607,12 @@ class Runner(ServiceComponent, ConnectionSink):
         task.add_done_callback(self._inbound.discard)
 
     def command_received(
-        self, conn_id: ConnId, name: str, args: Mapping[str, Any], request_id: str
+        self,
+        conn_id: ConnId,
+        name: str,
+        args: Mapping[str, Any],
+        request_id: str,
+        reply: ReplyRoute = ReplyRoute.PROTOCOL,
     ) -> None:
         """Submit a command a transport received outside the Reactor protocol.
 
@@ -610,10 +620,13 @@ class Runner(ServiceComponent, ConnectionSink):
         session's starting input, has its inline uploads resolved, is checked
         against the contract, and is journalled. It is stamped on arrival, as
         :meth:`message_received` stamps a frame, and scheduled on the runtime
-        loop, so a transport calls this from that loop.
+        loop, so a transport calls this from that loop. Its answer goes where
+        *reply* says.
         """
         if self._loop is None:
             return
+        if reply is not ReplyRoute.PROTOCOL:
+            self._reply_routes[(conn_id, request_id)] = reply
         command = InboundCommand(
             name=name,
             args=dict(args),
@@ -1118,6 +1131,7 @@ class Runner(ServiceComponent, ConnectionSink):
         if not self._sm.send(SessionEvent.START_SESSION, params=dict(params)):
             raise SessionTransitionError("start", self._sm.current_state)
         self._offer_epochs.session_started()
+        self._reply_routes.clear()
         self._model_metrics.session_started()
         self._begin_session_inputs()
 
@@ -1671,23 +1685,46 @@ class Runner(ServiceComponent, ConnectionSink):
             if request_id is not None:
                 self._reject_command(conn_id, request_id, message.code, message.message)
             return
+        route = self._reply_route(conn_id, request_id)
         if message is None:
-            if request_id is None:
+            if request_id is None or route is ReplyRoute.NONE:
+                return
+
+            def acknowledge(observer: MessageObserver) -> None:
+                observer.command_acknowledged(request_id)
+
+            if route is ReplyRoute.OBSERVER:
+                self._connections.observe(conn_id, acknowledge)
                 return
             self._connections.send_command_ack(
                 conn_id,
                 lambda version: self._codec_for(version).encode_command_ack(request_id)[1],
-                observe=lambda observer: observer.command_acknowledged(request_id),
+                observe=acknowledge,
             )
             return
+        if route is ReplyRoute.NONE:
+            return
         data = message.to_wire_format()["data"]
+
+        def observe(observer: MessageObserver) -> None:
+            observer.message_sent(message.name, data, request_id)
+
+        if route is ReplyRoute.OBSERVER:
+            self._connections.observe(conn_id, observe)
+            return
         self._connections.send(
             conn_id,
             lambda version: self._codec_for(version).encode_model_message(
                 message.name, data, request_id=request_id
             )[1],
-            observe=lambda observer: observer.message_sent(message.name, data, request_id),
+            observe=observe,
         )
+
+    def _reply_route(self, conn_id: ConnId, request_id: str | None) -> ReplyRoute:
+        """Take where the answer to *request_id* on *conn_id* goes; it is answered once."""
+        if request_id is None:
+            return ReplyRoute.PROTOCOL
+        return self._reply_routes.pop((conn_id, request_id), ReplyRoute.PROTOCOL)
 
     def _on_handler_failure(
         self, failure: CommandFailure, conn_id: ConnId, request_id: str | None
@@ -1772,14 +1809,25 @@ class Runner(ServiceComponent, ConnectionSink):
         Covers a payload the contract rejects, an upload that cannot be
         resolved, and a handler that raised. The reply is withheld from legacy
         clients, whose commands are fire-and-forget. A connection that observes
-        messages receives the failure as plain data.
+        messages receives the failure as plain data. A command a transport
+        handed up off the protocol path is answered where it asked.
         """
+        route = self._reply_route(conn_id, request_id)
+        if route is ReplyRoute.NONE:
+            return
+
+        def fail(observer: MessageObserver) -> None:
+            observer.command_failed(request_id, code, detail)
+
+        if route is ReplyRoute.OBSERVER:
+            self._connections.observe(conn_id, fail)
+            return
         self._connections.send_command_ack(
             conn_id,
             lambda version: self._codec_for(version).encode_command_error(request_id, code, detail)[
                 1
             ],
-            observe=lambda observer: observer.command_failed(request_id, code, detail),
+            observe=fail,
         )
 
     def _broadcast_moderation_notice(self) -> None:

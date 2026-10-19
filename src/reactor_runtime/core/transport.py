@@ -14,6 +14,7 @@ needs what it is sent as plain data rather than as encoded frames, and
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
+from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
 from reactor_runtime.core.stats import TransportReading
@@ -196,6 +197,25 @@ class MessageObserver(Protocol):
         """
 
 
+class ReplyRoute(StrEnum):
+    """Where the answer to a command a transport hands up goes.
+
+    The answer is the command's reply message, its acknowledgement, or its
+    failure. A failure is journalled whatever the route.
+    """
+
+    PROTOCOL = "protocol"
+    """As a Reactor protocol frame, and as plain data to a :class:`MessageObserver`."""
+    OBSERVER = "observer"
+    """As plain data to the connection's :class:`MessageObserver` alone.
+
+    For a transport that answers the caller on its own wire, such as the
+    reply to a remote procedure call.
+    """
+    NONE = "none"
+    """Nowhere: the signal that carried the command has no answer."""
+
+
 @runtime_checkable
 class ConnectionOriginSource(Protocol):
     """A connection that names the transport it comes from.
@@ -262,16 +282,21 @@ class ConnectionSink(Protocol):
         """
 
     def command_received(
-        self, conn_id: ConnId, name: str, args: Mapping[str, Any], request_id: str
+        self,
+        conn_id: ConnId,
+        name: str,
+        args: Mapping[str, Any],
+        request_id: str,
+        reply: ReplyRoute = ReplyRoute.PROTOCOL,
     ) -> None:
         """Hand up a command that arrived outside the Reactor protocol.
 
         For a transport that maps a signal of its own wire, such as an RPC
         call or a data packet, onto one of the model's commands. The command
         goes through the same contract validation, upload resolution, and
-        dispatch as one decoded from a frame. The transport chooses
-        *request_id*, and a connection that is a :class:`MessageObserver`
-        receives the command's reply, acknowledgement, or failure under it.
+        dispatch as one decoded from a frame, and runs as *conn_id*'s. The
+        transport chooses *request_id*, and *reply* says where the command's
+        reply, acknowledgement, or failure goes under it.
         """
 
     def media_received(self, conn_id: ConnId, track: str, frame: InputFrame) -> None:
