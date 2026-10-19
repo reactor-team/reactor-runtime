@@ -11,6 +11,15 @@ URL the client polls; the bytes for the boundary segment may still be in flight.
 Separately, once that boundary segment has actually landed on disk the recorder
 notifies an external consumer (the runner journals it on ``/events``), so a
 director learns a clip is genuinely fetchable rather than merely requested.
+
+A segment normally closes when the next one starts. A model that stops emitting
+(a pause, say) would leave a requested clip's boundary segment open
+indefinitely, so the recorder seals it instead: once the output has been idle
+for longer than the model's own cadence and a clip is waiting, it closes the
+encoder, which writes the segment out at its real length, and moves the timeline
+up to the next boundary. The next frame opens a fresh encoder there. Every
+segment index keeps covering the stretch of the grid it names; the skipped
+remainder of the sealed segment carries no media.
 """
 
 from __future__ import annotations
@@ -81,6 +90,9 @@ _COMPLETE_MARKER = ".complete"
 # fetchable.
 _INCOMPLETE_MARKER = ".incomplete"
 _END_MARKERS = (_COMPLETE_MARKER, _INCOMPLETE_MARKER)
+# Written beside a segment the recorder sealed while the recording was idle, so
+# the segment is recognised as fetchable before it has a successor.
+_SEALED_PATTERN = "chunk_{:05d}.sealed"
 _HLS_MEDIA_TYPE = "application/vnd.apple.mpegurl"
 
 # How long a finished recording is kept on disk before it is reaped. Clips stay
@@ -92,6 +104,16 @@ _HLS_MEDIA_TYPE = "application/vnd.apple.mpegurl"
 _RETENTION_SECONDS = 300.0
 # How often the reaper sweeps the recordings root for aged-out directories.
 _REAP_INTERVAL_SECONDS = 30.0
+# How long the output must sit idle, at least, before a waiting clip's open
+# segment is sealed. The bound that applies is usually the cadence below: a
+# model hands frames over in emissions, and the gap between two of them is not
+# a pause.
+_IDLE_MIN_SECONDS = 1.0
+# How many of the model's own emission intervals the output must stay idle for
+# before a waiting clip's segment is sealed. Above one, so an emission that runs
+# a little late is not taken for a pause; sealing mid-stream would cost the
+# recording a gap of up to a segment.
+_IDLE_CADENCE_FACTOR = 1.5
 # A recording id is a lowercase UUID. Validating a URL path segment against this
 # shape before joining it onto the recordings root closes the path-traversal
 # vector on ``/clips`` and ``/clips/chunks/{id}/{file}``.
@@ -216,6 +238,11 @@ class Recorder:
     Recording is best-effort: an encoder failure disables the recorder for the
     rest of the session and surfaces as a failed clip request, but never breaks
     the media path it taps.
+
+    A clip requested while the model is not emitting is served without waiting
+    for the model to resume: the open segment is sealed once the output has
+    been idle for longer than the model's cadence, and the recording continues
+    at the next segment boundary when frames return.
     """
 
     def __init__(
@@ -277,6 +304,21 @@ class Recorder:
 
         self._pending: list[tuple[int, ClipResult]] = []
         self._pending_lock = threading.Lock()
+
+        # Held by the model thread while it hands an emission over, and taken
+        # without waiting by the feed worker to seal an idle segment, so a seal
+        # never interleaves with an emission: the timeline the seal reads and
+        # moves is the one the encoder has fully written.
+        self._emission_lock = threading.Lock()
+        # The segment the next encoder starts at, and the size the first one
+        # opened at; both carry a recording across a seal.
+        self._next_segment = 0
+        self._frame_size: tuple[int, int] | None = None
+        # When the model last handed frames over, and how far apart its
+        # emissions run, which is what tells a pause from the gap between two
+        # emissions.
+        self._last_emission_at: float | None = None
+        self._emission_interval = 0.0
 
         # The highest media-segment index already announced as closed, and whether
         # the init segment has been, so each segment is announced exactly once.
@@ -514,6 +556,10 @@ class Recorder:
         self._grid_debt = 0.0
         self._audio_jitter_buf = []
         self._audio_buffered_samples = 0
+        self._next_segment = 0
+        self._frame_size = None
+        self._last_emission_at = None
+        self._emission_interval = 0.0
         with self._pending_lock:
             self._pending = []
         with self._chunk_lock:
@@ -548,6 +594,11 @@ class Recorder:
         """
         if self.disabled:
             return
+        with self._emission_lock:
+            self._feed_chunk(chunk)
+
+    def _feed_chunk(self, chunk: MediaChunk) -> None:
+        """Hand one emission to the feed queue; the body of :meth:`on_chunk`."""
         markers = self._markers
         if markers is None:
             return
@@ -560,6 +611,7 @@ class Recorder:
         if not frames:
             return
         fps = chunk.fps if chunk.fps > 0 else float(RECORDING_FPS)
+        self._note_emission(len(frames) / fps)
         if self._has_audio:
             self._buffer_audio(bundle)
         self._grid_debt += (len(frames) / fps) * RECORDING_FPS
@@ -584,6 +636,20 @@ class Recorder:
             self._count_dropped(grid_frames - fed, grid_frames)
         if fed:
             markers.advance(fed / RECORDING_FPS)
+
+    def _note_emission(self, media_seconds: float) -> None:
+        """Record when an emission arrived and how far apart emissions run.
+
+        The interval is the larger of the wall time since the previous emission
+        and the media the emission carries, so a model slower than real time is
+        judged by its actual cadence and one faster than real time by the media
+        it buffers ahead.
+        """
+        now = time.monotonic()
+        last = self._last_emission_at
+        since = now - last if last is not None else 0.0
+        self._emission_interval = max(media_seconds, since)
+        self._last_emission_at = now
 
     def _claim_slot(self, capacity: int, *, wait: bool, deadline: float) -> _Slot:
         """Ask the feed queue for room for one more grid frame.
@@ -676,6 +742,8 @@ class Recorder:
             has_audio=self._has_audio,
             audio_sample_rate=self._audio_sample_rate,
             frame_rate=RECORDING_FPS,
+            first_segment=self._next_segment,
+            frame_size=self._frame_size,
         )
 
     def _feed_loop(self) -> None:
@@ -691,6 +759,7 @@ class Recorder:
             try:
                 item = self._feed_queue.get(timeout=0.1)
             except queue.Empty:
+                self._seal_if_stalled()
                 continue
             # Room opened the moment the frame left the queue, so a producer
             # waiting on capacity is released before the encode, not after it.
@@ -719,6 +788,87 @@ class Recorder:
                 self._disabled = True
                 self._drain_feed_queue()
                 return
+
+    def _seal_if_stalled(self) -> None:
+        """Seal the open segment when a clip waits on it and the model has gone quiet.
+
+        Runs on the feed worker, the only thread that drives the encoder, while
+        the feed queue is empty. The emission lock is only tried, never waited
+        on: an emission in progress means the model is not idle.
+        """
+        encoder = self._encoder
+        if encoder is None or self._feed_stop.is_set() or not self._idle():
+            return
+        if not self._clip_is_waiting():
+            return
+        if not self._emission_lock.acquire(blocking=False):
+            return
+        try:
+            if self._encoder is encoder and self._feed_queue.empty() and self._idle():
+                self._seal(encoder)
+        finally:
+            self._emission_lock.release()
+
+    def _idle(self) -> bool:
+        """Return whether the model has been silent for longer than its cadence."""
+        last = self._last_emission_at
+        if last is None:
+            return False
+        idle_after = max(_IDLE_MIN_SECONDS, _IDLE_CADENCE_FACTOR * self._emission_interval)
+        return time.monotonic() - last >= idle_after
+
+    def _clip_is_waiting(self) -> bool:
+        """Return whether a requested clip's boundary segment is still open."""
+        session_dir = self._session_dir
+        if session_dir is None:
+            return False
+        with self._pending_lock:
+            boundaries = [idx for idx, _ in self._pending]
+        return any(not self._boundary_ready(session_dir, idx) for idx in boundaries)
+
+    def _seal(self, encoder: ChunkEncoder) -> None:
+        """Close *encoder*, mark its last segment fetchable, and skip to the next boundary.
+
+        Closing writes the open segment out at the length actually recorded. The
+        timeline then moves up to the next boundary, where the next emission
+        opens a fresh encoder, so segment indices keep naming the same stretch
+        of the grid. Audio still buffered belongs to video before the seal and
+        is dropped rather than paired with what follows it.
+        """
+        markers = self._markers
+        session_dir = self._session_dir
+        if markers is None or session_dir is None or markers.now_marker() <= 0:
+            return
+        frame_size = encoder.frame_size
+        if not encoder.stop():
+            logger.error(
+                "recorder could not seal an idle segment; disabling recording",
+                session_id=self._session_id,
+            )
+            self._disabled = True
+            return
+        idle_at = markers.now_marker()
+        next_segment = markers.skip_to_boundary(self._config.chunk_seconds)
+        sealed = next_segment - 1
+        try:
+            (session_dir / _SEALED_PATTERN.format(sealed)).write_text("")
+        except OSError:
+            logger.exception(
+                "failed to mark a sealed segment", session_id=self._session_id, segment=sealed
+            )
+        self._encoder = None
+        self._next_segment = next_segment
+        self._frame_size = frame_size
+        self._grid_debt = 0.0
+        self._audio_jitter_buf = []
+        self._audio_buffered_samples = 0
+        logger.info(
+            "recorder sealed an idle segment for a waiting clip",
+            session_id=self._session_id,
+            segment=sealed,
+            sealed_at=round(idle_at, 3),
+            resumes_at=float(next_segment * self._config.chunk_seconds),
+        )
 
     def _buffer_audio(self, bundle: MediaBundle) -> None:
         """Append a chunk's audio to the jitter buffer, keeping the newest samples.
@@ -997,10 +1147,14 @@ class Recorder:
         boundary = session_dir / f"chunk_{boundary_idx:05d}.m4s"
         if not boundary.is_file():
             return False
-        # A segment is closed once its successor exists (ffmpeg has rolled over)
-        # or the recording itself has finished.
+        # A segment is closed once its successor exists (ffmpeg has rolled over),
+        # the recorder sealed it while idle, or the recording itself has finished.
         successor = session_dir / f"chunk_{boundary_idx + 1:05d}.m4s"
-        return successor.is_file() or (session_dir / _COMPLETE_MARKER).is_file()
+        return (
+            successor.is_file()
+            or (session_dir / _SEALED_PATTERN.format(boundary_idx)).is_file()
+            or (session_dir / _COMPLETE_MARKER).is_file()
+        )
 
     @staticmethod
     def _init_ready(session_dir: Path) -> bool:

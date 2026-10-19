@@ -46,3 +46,20 @@ def test_recording_range_starts_at_zero() -> None:
     start, end = markers.compute_recording_range()
     assert start == 0.0
     assert end == 12.0
+
+
+def test_skip_to_boundary_moves_up_to_the_next_segment() -> None:
+    markers = MarkerBookkeeper()
+    markers.advance(110 / 30)
+    assert markers.skip_to_boundary(4) == 1
+    assert markers.now_marker() == 4.0
+
+
+def test_skip_to_boundary_stays_on_a_boundary_it_already_reached() -> None:
+    # A timeline summed from frame durations lands a hair off the boundary; it
+    # still counts as on it, rather than skipping a whole empty segment.
+    markers = MarkerBookkeeper()
+    for _ in range(120):
+        markers.advance(1 / 30)
+    assert markers.skip_to_boundary(4) == 1
+    assert markers.now_marker() == 4.0

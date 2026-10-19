@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import av
 import numpy as np
 import numpy.typing as npt
 import pytest
@@ -31,6 +32,7 @@ from reactor_runtime.recording import (
     Recorder,
     RecorderDisabledError,
 )
+from reactor_runtime.recording import recorder as recorder_module
 from reactor_runtime.recording.recorder import (
     _AUDIO_BACKLOG_FRAMES,
     _DRAIN_SECONDS,
@@ -98,6 +100,14 @@ def test_manifest_never_serves_the_final_segment_of_an_incomplete_recording(
     _write_segments(tmp_path, "init.mp4", "chunk_00000.m4s", "chunk_00001.m4s", ".incomplete")
     assert isinstance(recorder.manifest(_SID, 0.0, 4.0), ClipManifest)
     assert isinstance(recorder.manifest(_SID, 0.0, 8.0), Gone)
+
+
+def test_manifest_serves_a_segment_sealed_while_idle(tmp_path: Path) -> None:
+    # A segment sealed for a waiting clip has no successor yet and the recording
+    # has not finished, but the seal marker says it is closed.
+    recorder = _serving_recorder(tmp_path)
+    _write_segments(tmp_path, "init.mp4", "chunk_00000.m4s", "chunk_00000.sealed")
+    assert isinstance(recorder.manifest(_SID, 0.0, 3.667), ClipManifest)
 
 
 def test_manifest_is_gone_for_an_unknown_recording(tmp_path: Path) -> None:
@@ -855,6 +865,130 @@ def test_records_a_real_frame_size_with_audio(tmp_path: Path, attempt: int) -> N
                 break
         assert isinstance(manifest, ClipManifest)
         assert recorder._dropped_frames < offered // 4
+    finally:
+        recorder.stop()
+
+
+# -- sealing an idle segment ----------------------------------------------
+
+# How long a test waits for the feed worker to seal, or to prove it did not.
+# Well above the shortened idle threshold the tests set, so a slow host does
+# not fail them, and bounded, so a seal that never comes fails in seconds.
+_SEAL_TIMEOUT_SECONDS = 5.0
+
+
+def _wait_for(condition: Any, timeout: float = _SEAL_TIMEOUT_SECONDS) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.02)
+    return bool(condition())
+
+
+def _video_times(session_dir: Path) -> list[float]:
+    """Decode init.mp4 plus every segment in order; return each frame's time."""
+    parts = [session_dir / "init.mp4", *sorted(session_dir.glob("chunk_*.m4s"))]
+    merged = session_dir.parent / "merged.mp4"
+    merged.write_bytes(b"".join(part.read_bytes() for part in parts))
+    with av.open(str(merged)) as container:
+        stream = container.streams.video[0]
+        assert stream.time_base is not None
+        return [
+            float(frame.pts * stream.time_base)
+            for frame in container.decode(stream)
+            if frame.pts is not None
+        ]
+
+
+@pytest.fixture
+def quick_idle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shorten the idle floor so a seal comes in a fraction of a second."""
+    monkeypatch.setattr(recorder_module, "_IDLE_MIN_SECONDS", 0.2)
+
+
+def _emit(recorder: Recorder, emissions: int, frames: int) -> None:
+    """Hand *emissions* batches of *frames* over back to back, faster than real time.
+
+    Each asks for backpressure, so every frame reaches the recording and the
+    tests can reason about the timeline exactly.
+    """
+    for _ in range(emissions):
+        recorder.on_chunk(
+            MediaChunk(bundle=_batched_bundle(frames), fps=30.0, n_frames=frames, wait=True)
+        )
+
+
+@pytest.mark.usefixtures("quick_idle")
+def test_a_clip_waiting_on_an_idle_segment_is_sealed_and_recording_resumes_after_it(
+    tmp_path: Path,
+) -> None:
+    fired: list[ClipResult] = []
+    recorder = Recorder(
+        RecordingConfig(enabled=True, chunk_seconds=1, recording_dir=str(tmp_path)),
+        on_clip_ready=fired.append,
+    )
+    recorder.start(_SID)
+    try:
+        assert recorder._markers is not None
+        session_dir = tmp_path / _SID
+        # Two thirds of a segment, then the model goes quiet with a clip waiting.
+        _emit(recorder, emissions=10, frames=2)
+        clip = recorder.request_clip(30.0)
+        assert clip.end_marker == pytest.approx(20 / 30)
+
+        assert _wait_for(lambda: fired == [clip])
+        assert isinstance(recorder.manifest(_SID, clip.start_marker, clip.end_marker), ClipManifest)
+        assert (session_dir / "chunk_00000.sealed").is_file()
+        # The rest of the sealed segment is skipped, so the next frame lands on
+        # the boundary where segment 1 begins.
+        assert recorder._markers.now_marker() == 1.0
+
+        _emit(recorder, emissions=1, frames=40)
+        later = recorder.request_clip(1.0)
+        assert later.end_marker == pytest.approx(1.0 + 40 / 30)
+    finally:
+        recorder.stop()
+
+    times = _video_times(session_dir)
+    assert len(times) == 60
+    assert times[19] < 20 / 30
+    assert times[20] == pytest.approx(1.0)
+    assert (session_dir / "chunk_00001.m4s").is_file()
+
+
+@pytest.mark.usefixtures("quick_idle")
+def test_an_idle_segment_with_no_clip_waiting_stays_open(tmp_path: Path) -> None:
+    recorder = Recorder(RecordingConfig(enabled=True, chunk_seconds=1, recording_dir=str(tmp_path)))
+    recorder.start(_SID)
+    try:
+        assert recorder._markers is not None
+        _emit(recorder, emissions=10, frames=2)
+        encoder = recorder._encoder
+        time.sleep(0.6)
+        assert recorder._encoder is encoder
+        assert recorder._markers.now_marker() == pytest.approx(20 / 30)
+        assert not list((tmp_path / _SID).glob("*.sealed"))
+    finally:
+        recorder.stop()
+
+
+@pytest.mark.usefixtures("quick_idle")
+def test_the_gap_between_emissions_is_not_taken_for_a_pause(tmp_path: Path) -> None:
+    # A model hands frames over in emissions with quiet stretches between them.
+    # With a clip waiting the whole time, none of those stretches seals: each is
+    # shorter than the cadence the model itself has shown.
+    recorder = Recorder(RecordingConfig(enabled=True, chunk_seconds=4, recording_dir=str(tmp_path)))
+    recorder.start(_SID)
+    try:
+        _emit(recorder, emissions=1, frames=15)
+        recorder.request_clip(30.0)
+        encoder = recorder._encoder
+        for _ in range(6):
+            time.sleep(0.25)
+            _emit(recorder, emissions=1, frames=15)
+            assert recorder._encoder is encoder
+        assert not list((tmp_path / _SID).glob("*.sealed"))
     finally:
         recorder.stop()
 
