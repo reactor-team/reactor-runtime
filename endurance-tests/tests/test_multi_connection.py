@@ -115,4 +115,10 @@ async def test_multi_connection(runtime: RuntimeProcess) -> None:
             unanswered += [f"successor: {miss}" for miss in successor.collect_unanswered()]
         return CycleOutcome(received=min(received), unanswered=[*unanswered, *missed])
 
-    await run_cycles(runtime, test_name="multi-connection", description=DESCRIPTION, cycle=cycle)
+    await run_cycles(
+        runtime,
+        test_name="multi-connection",
+        description=DESCRIPTION,
+        cycle=cycle,
+        min_smoke_cycles=2,
+    )

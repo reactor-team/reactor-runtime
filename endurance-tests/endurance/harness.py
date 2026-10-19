@@ -236,6 +236,8 @@ class BareClient:
     # The requests a cycle sent that were refused or never answered; ``None``
     # for a client that sends none it waits on.
     unanswered: list[str] | None = None
+    # Whether the client negotiates and maps a ``webcam`` track to send.
+    sends_webcam = True
 
     def __init__(self, runtime: RuntimeEndpoint, session_id: str) -> None:
         self._runtime = runtime
@@ -339,16 +341,19 @@ class BareClient:
         pc = self._factory.create_peer_connection(rw.RtcConfiguration(), observer)
         recv_video = pc.add_transceiver(rw.MediaKind.Video, rw.TransceiverDirection.RecvOnly)
         recv_audio = pc.add_transceiver(rw.MediaKind.Audio, rw.TransceiverDirection.RecvOnly)
-        camera = self._factory.create_video_track("webcam")
-        send_video = pc.add_transceiver(rw.MediaKind.Video, rw.TransceiverDirection.SendOnly)
-        await send_video.set_track(camera)
+        send_video = None
+        if self.sends_webcam:
+            self._camera = self._factory.create_video_track("webcam")
+            send_video = pc.add_transceiver(rw.MediaKind.Video, rw.TransceiverDirection.SendOnly)
+            await send_video.set_track(self._camera)
+            self._keep.append(send_video)
         data = pc.create_data_channel("data")
         control = pc.create_data_channel("control")
         data.on_message(self._on_data_message)
         control.on_message(self._on_control_message)
         control.on_state_change(lambda state: self._on_control_state(state, control_open))
-        self._pc, self._camera = pc, camera
-        self._keep += [observer, recv_video, recv_audio, send_video, data, control]
+        self._pc = pc
+        self._keep += [observer, recv_video, recv_audio, data, control]
 
         offer = await pc.create_offer()
         await pc.set_local_description(offer)
@@ -365,8 +370,16 @@ class BareClient:
                 "kind": "audio",
                 "direction": "recvonly",
             },
-            {"mid": send_video.mid(), "name": "webcam", "kind": "video", "direction": "sendonly"},
         ]
+        if send_video is not None:
+            mapping.append(
+                {
+                    "mid": send_video.mid(),
+                    "name": "webcam",
+                    "kind": "video",
+                    "direction": "sendonly",
+                }
+            )
         self._runtime.request(
             "POST",
             f"{self._base}/connections/{cid}/sdp_params",
@@ -507,7 +520,8 @@ class V1Client(BareClient):
 
     def _start_wire(self, control: Any, data: Any) -> None:
         self._control, self._data = control, data
-        self._publish_webcam()
+        if self.sends_webcam:
+            self._publish_webcam()
         for name in ("main_video", "main_audio"):
             self._send_control(
                 control_pb2.ControlClientMessage(
@@ -575,16 +589,18 @@ class V1Client(BareClient):
             connection.environment.CopyFrom(
                 platform_pb2.ClientEnvironment(sdk_type="endurance", sdk_version="0")
             )
-        return platform_pb2.ClientStats(
-            track_stats=[
-                platform_pb2.ClientTrackStat(
-                    timestamp=now_ms,
-                    track_name="main_video",
-                    kind=platform_pb2.TrackKind.TRACK_KIND_VIDEO,
-                    direction=platform_pb2.TrackDirection.TRACK_DIRECTION_RECVONLY,
-                    video_codec=platform_pb2.VideoCodec.VIDEO_CODEC_VP8,
-                    metrics={"frames_decoded": float(self.received_video), "jitter": 0.01},
-                ),
+        track_stats = [
+            platform_pb2.ClientTrackStat(
+                timestamp=now_ms,
+                track_name="main_video",
+                kind=platform_pb2.TrackKind.TRACK_KIND_VIDEO,
+                direction=platform_pb2.TrackDirection.TRACK_DIRECTION_RECVONLY,
+                video_codec=platform_pb2.VideoCodec.VIDEO_CODEC_VP8,
+                metrics={"frames_decoded": float(self.received_video), "jitter": 0.01},
+            )
+        ]
+        if self.sends_webcam:
+            track_stats.append(
                 platform_pb2.ClientTrackStat(
                     timestamp=now_ms,
                     track_name="webcam",
@@ -592,10 +608,9 @@ class V1Client(BareClient):
                     direction=platform_pb2.TrackDirection.TRACK_DIRECTION_SENDONLY,
                     video_codec=platform_pb2.VideoCodec.VIDEO_CODEC_VP8,
                     metrics={"frames_encoded": float(n * 30)},
-                ),
-            ],
-            connection_stat=connection,
-        )
+                )
+            )
+        return platform_pb2.ClientStats(track_stats=track_stats, connection_stat=connection)
 
     def _send_control(
         self,
@@ -703,11 +718,12 @@ class Viewer(V1Client):
     """A :class:`V1Client` that watches without publishing: it sends no webcam.
 
     It joins a session another client publishes to and counts the output that
-    comes back, as a second participant in a shared session does.
+    comes back, as a second participant in a shared session does. It
+    negotiates only the output tracks, receive-only, and reports stats for
+    them alone, as a client that only watches does.
     """
 
-    def _publish_webcam(self) -> None:
-        """Publish nothing: a viewer only receives."""
+    sends_webcam = False
 
     async def _send_frame(self, frame: tuple[bytes, int, int]) -> None:
         self._on_tick()
