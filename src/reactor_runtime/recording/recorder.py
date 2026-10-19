@@ -301,6 +301,11 @@ class Recorder:
         return self._config.enabled
 
     @property
+    def recording(self) -> bool:
+        """Whether a session is being recorded: started and not yet stopped."""
+        return self._started
+
+    @property
     def disabled(self) -> bool:
         """Whether the recorder cannot currently serve a clip request."""
         return (
