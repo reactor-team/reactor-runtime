@@ -3,8 +3,10 @@
 The engine's chunked data channel keeps running totals of four stages, which a
 stats sample turns into a window's worth: ``queue_wait``, ``send`` and
 ``stall`` for the messages this side sends, and ``reassembly`` for the
-messages it receives. The peer times one more itself, ``loop_wait``: a message
-from reaching the peer's sink until the event loop takes it.
+messages it receives. The engine also times ``handoff`` on a received
+message: the wait for the GIL and the copy into Python. The peer times one
+more itself, ``loop_wait``: a message from reaching the peer's sink until the
+event loop takes it.
 
 Only the data channel that carries commands is timed. A channel without
 chunking has no totals, so it reports no stages.
@@ -23,6 +25,7 @@ STAGES = (
     "send",
     "stall",
     "reassembly",
+    "handoff",
     "loop_wait",
 )
 """Every stage, in the order a message goes through them."""

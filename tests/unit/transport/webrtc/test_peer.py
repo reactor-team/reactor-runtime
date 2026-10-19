@@ -2424,6 +2424,97 @@ async def test_a_first_subscription_leaves_the_others_out() -> None:
     assert "a=mid:0\r\na=inactive" in local
 
 
+class _TimedTrack:
+    """An inbound video track whose engine reports its hand-off totals."""
+
+    def __init__(self) -> None:
+        self.stats = SimpleNamespace(convert_s=0.0, handoff_s=0.0, frames=0)
+
+    def kind(self) -> rw.MediaKind:
+        return rw.MediaKind.Video
+
+    def handoff_stats(self) -> SimpleNamespace:
+        return self.stats
+
+
+class _TimedChannel:
+    def __init__(self) -> None:
+        self.stats = SimpleNamespace(handoff_s=0.0, messages=0)
+
+    def handoff_stats(self) -> SimpleNamespace:
+        return self.stats
+
+
+def test_the_first_fold_counts_the_handoffs_since_the_callback_was_set() -> None:
+    peer = WebRTCPeer()
+    track, channel = _TimedTrack(), _TimedChannel()
+    peer._in_tracks["cam"] = cast(Any, track)
+    peer._data_channel = cast(Any, channel)
+    track.stats = SimpleNamespace(convert_s=0.004, handoff_s=0.002, frames=4)
+    channel.stats = SimpleNamespace(handoff_s=0.003, messages=3)
+
+    peer.fold_handoffs()
+
+    stages = {s.name: s for s in peer.frame_stages.take()["cam"]}
+    assert (stages["sink_convert"].frames, stages["sink_convert"].total_ms) == (
+        4,
+        pytest.approx(4.0),
+    )
+    assert (stages["handoff"].frames, stages["handoff"].total_ms) == (4, pytest.approx(2.0))
+    [handoff] = [s for s in peer.message_stages.take() if s.name == "handoff"]
+    assert (handoff.messages, handoff.total_ms) == (3, pytest.approx(3.0))
+
+
+def test_a_fold_counts_only_the_window_and_restarts_from_zero_after_a_reset() -> None:
+    peer = WebRTCPeer()
+    track, channel = _TimedTrack(), _TimedChannel()
+    peer._in_tracks["cam"] = cast(Any, track)
+    peer._data_channel = cast(Any, channel)
+    track.stats = SimpleNamespace(convert_s=0.004, handoff_s=0.002, frames=4)
+    channel.stats = SimpleNamespace(handoff_s=0.003, messages=3)
+    peer.fold_handoffs()
+    peer.frame_stages.take()
+    peer.message_stages.take()
+
+    track.stats = SimpleNamespace(convert_s=0.006, handoff_s=0.003, frames=6)
+    channel.stats = SimpleNamespace(handoff_s=0.005, messages=5)
+    peer.fold_handoffs()
+    [convert] = [s for s in peer.frame_stages.take()["cam"] if s.name == "sink_convert"]
+    assert (convert.frames, convert.total_ms) == (2, pytest.approx(2.0))
+    [handoff] = [s for s in peer.message_stages.take() if s.name == "handoff"]
+    assert (handoff.messages, handoff.total_ms) == (2, pytest.approx(2.0))
+
+    track.stats = SimpleNamespace(convert_s=0.001, handoff_s=0.001, frames=1)
+    peer.fold_handoffs()
+    [convert] = [s for s in peer.frame_stages.take()["cam"] if s.name == "sink_convert"]
+    assert (convert.frames, convert.total_ms) == (1, pytest.approx(1.0))
+
+
+def test_a_window_without_new_frames_or_messages_adds_no_handoff() -> None:
+    peer = WebRTCPeer()
+    track, channel = _TimedTrack(), _TimedChannel()
+    peer._in_tracks["cam"] = cast(Any, track)
+    peer._data_channel = cast(Any, channel)
+    track.stats = SimpleNamespace(convert_s=0.004, handoff_s=0.002, frames=4)
+    peer.fold_handoffs()
+    peer.frame_stages.take()
+
+    peer.fold_handoffs()
+
+    assert peer.frame_stages.take().get("cam", ()) == ()
+    assert peer.message_stages.take() == ()
+
+
+def test_the_handoffs_are_read_only_from_inbound_video_tracks() -> None:
+    peer = WebRTCPeer()
+    audio = SimpleNamespace(kind=lambda: rw.MediaKind.Audio)
+    peer._in_tracks["mic"] = cast(Any, audio)
+
+    peer.fold_handoffs()
+
+    assert peer.frame_stages.take() == {}
+
+
 async def test_a_message_held_until_the_wire_opens_reports_its_loop_wait() -> None:
     peer = WebRTCPeer()
     peer._loop = asyncio.get_running_loop()
