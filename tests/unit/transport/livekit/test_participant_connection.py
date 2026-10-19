@@ -549,11 +549,24 @@ async def test_calls_queued_behind_an_unsupported_answer_are_skipped() -> None:
 
 async def test_a_reply_to_an_rpc_call_that_stopped_waiting_calls_nothing() -> None:
     conn, local = make()
+    reply = conn.expect_reply("call-1")
+    reply.cancel()  # the caller's response timeout ended the call
+    await _settle()
 
-    conn.message_sent("playback_finished", {"playback_position": 1.0}, "rpc-gone")
+    conn.message_sent("playback_finished", {"playback_position": 1.0}, "call-1")
     await _settle()
 
     assert local.calls == []
+    conn.drop()
+
+
+async def test_a_protocol_reply_calls_the_methods_its_message_maps_to_whatever_its_id() -> None:
+    conn, local = make()
+
+    conn.message_sent("playback_finished", {"playback_position": 1.0}, "rpc-chosen-by-a-client")
+    await _settle()
+
+    assert len(local.calls) == 1
     conn.drop()
 
 

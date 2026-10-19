@@ -172,6 +172,10 @@ class ParticipantConnection:
         self._caller = loop.create_task(self._call_all(), name=f"room-rpc-{conn_id}")
         # The RPC calls this participant made that wait for their command's answer.
         self._replies: dict[str, asyncio.Future[str]] = {}
+        # The request id of every command an RPC call ran, until the command is
+        # answered, whether or not its caller still waits: the answer goes to
+        # the call alone, never to the outbound methods.
+        self._rpc_commands: set[str] = set()
         self._closed = False
         # Messages received, in arrival order per topic, until their turn comes.
         self._inbound: dict[Channel, deque[_Inbound]] = {c: deque() for c in Channel}
@@ -227,31 +231,42 @@ class ParticipantConnection:
         carries the failure's code as its data. Call on the room's loop.
         """
         future: asyncio.Future[str] = self._loop.create_future()
+        self._rpc_commands.add(request_id)
         self._replies[request_id] = future
         future.add_done_callback(lambda _: self._replies.pop(request_id, None))
         return future
 
     def message_sent(self, name: str, data: Mapping[str, Any], request_id: str | None) -> None:
-        """Answer the RPC call a reply belongs to, or call the methods a message maps to."""
+        """Answer the RPC call a reply belongs to, or call the methods a message maps to.
+
+        A reply to an RPC call whose caller stopped waiting is dropped.
+        """
         payload = json.dumps(dict(data))
-        if request_id is not None:
-            if request_id in self._replies:
-                self._resolve(request_id, payload)
-                return
-            if request_id.startswith("rpc-"):
-                # The reply to an RPC call whose caller stopped waiting.
-                return
+        if request_id is not None and self._answered(request_id):
+            self._resolve(request_id, payload)
+            return
         for method in self._outbound.get(name, ()):
             self._call_soon(method, payload)
 
     def command_acknowledged(self, request_id: str) -> None:
         """Answer the RPC call whose command returned nothing with an empty string."""
-        self._resolve(request_id, "")
+        if self._answered(request_id):
+            self._resolve(request_id, "")
 
     def command_failed(self, request_id: str, code: str, message: str) -> None:
         """Fail the RPC call whose command failed, with the failure's code as the error's data."""
+        if not self._answered(request_id) or self._loop.is_closed():
+            return
         error = rtc.RpcError(rtc.RpcError.ErrorCode.APPLICATION_ERROR, message, code)
         self._loop.call_soon_threadsafe(self._settle, request_id, None, error)
+
+    def _answered(self, request_id: str) -> bool:
+        """Whether *request_id* is a command an RPC call ran; it is answered now."""
+        try:
+            self._rpc_commands.remove(request_id)
+        except KeyError:
+            return False
+        return True
 
     def receive_packet(self, data: bytes, channel: Channel) -> None:
         """Take a message the participant sent as a data packet, on the loop."""
