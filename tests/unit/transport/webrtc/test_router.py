@@ -64,6 +64,11 @@ class FakeRunner:
     ) -> None:
         pass
 
+    def command_received(
+        self, conn_id: ConnId, name: str, args: Mapping[str, Any], request_id: str
+    ) -> None:
+        pass
+
     def media_received(self, conn_id: ConnId, track: str, frame: InputFrame) -> None:
         pass
 
