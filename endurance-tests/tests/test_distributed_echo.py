@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import importlib.util
 from collections.abc import Iterator
 
 import pytest
 
 # A runtime from before the distributed package (runtime_ref) has nothing for
-# this scenario to test.
-pytest.importorskip("reactor_runtime.distributed")
-
+# this scenario to test. Only a missing package skips: one that fails to
+# import is a broken runtime, and fails here.
+if importlib.util.find_spec("reactor_runtime.distributed") is None:
+    pytest.skip("this runtime has no distributed package", allow_module_level=True)
 from endurance.churn import run_churn
 from endurance.harness import SUITE_DIR, RuntimeProcess, V1Client
 from endurance.report import DEFAULT_OUTPUT_DIR
+
+import reactor_runtime.distributed  # noqa: F401
 
 DESCRIPTION = (
     "One long-lived session on a model whose engine runs in a worker process behind "
