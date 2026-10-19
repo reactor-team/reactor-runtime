@@ -4717,6 +4717,18 @@ async def test_a_late_failure_on_an_id_the_next_session_reuses_leaves_that_conne
     assert started_runner._offer_epochs.consume(conn_id) is False
 
 
+async def test_a_failure_reported_after_its_transport_released_the_id_is_not_journalled(
+    started_runner: Runner,
+) -> None:
+    started_runner.start_session({})
+    conn_id = started_runner.new_conn_id("room")
+    started_runner.release_conn_id(conn_id, "room")
+
+    started_runner.connection_failed(conn_id, "room", "the room could not be joined")
+
+    assert _moves(started_runner, SessionEvent.ERROR) == []
+
+
 async def test_a_connection_failure_with_no_session_running_is_not_journalled(
     started_runner: Runner,
 ) -> None:

@@ -194,6 +194,10 @@ class SessionControl(ConnectionSink, Protocol):
         reaches the session's journal: an ``error`` entry with *reason*, the
         connection's id, and the transport. *reason* is read by clients of the
         journal, so it names the cause and never a credential.
+
+        Call it while the transport still holds the id's claim, before any
+        :meth:`release_conn_id`: a failure from a transport that does not hold
+        the id is taken for one of an earlier session, and is not journalled.
         """
 
     def offer_admitted(self, conn_id: ConnId) -> None:
