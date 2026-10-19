@@ -9,8 +9,10 @@ the single object that configures one runtime process.
 
 from __future__ import annotations
 
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Protocol, runtime_checkable
 
 from reactor_runtime.core.values import Health
@@ -123,6 +125,96 @@ class StepResultsConfig:
 
 
 @dataclass(frozen=True)
+class LiveKitRpcMethod:
+    """One LiveKit RPC method a room session connects to the model.
+
+    Exactly one of ``command`` and ``message`` is set. A method with a
+    ``command`` is one the session's participant registers: a call to it runs
+    the command and answers with its result. A method with a ``message`` is one
+    the participant calls on others whenever the model sends that message.
+
+    Attributes:
+        method: The RPC method name, matched exactly.
+        command: The command a call to the method runs.
+        message: The message whose sending calls the method.
+    """
+
+    method: str
+    command: str | None = None
+    message: str | None = None
+
+
+class LiveKitBlockError(ValueError):
+    """Raised for a manifest ``runtime.livekit`` block that is malformed or does not fit the model.
+
+    A manifest mistake, told apart from a model that fails to load, so it can
+    be reported as one.
+    """
+
+
+@dataclass(frozen=True)
+class LiveKitConfig:
+    """How a LiveKit room reaches the model, drawn from the manifest's ``livekit:`` block.
+
+    A model with no ``livekit:`` block can still join a room: participants
+    reach it through the Reactor protocol, and remote tracks feed its input
+    tracks by name. The block adds the room's own signals on top of that.
+
+    Attributes:
+        rpc: RPC methods connected to commands or messages.
+        topics: Data topic prefixes. A data packet on ``<prefix>.<command>``
+            runs that command.
+        media_inputs: Byte stream topics or remote track names, each mapped to
+            the declared input track it feeds. Held read-only, and left out of
+            the hash, so the configuration stays hashable.
+    """
+
+    rpc: tuple[LiveKitRpcMethod, ...] = ()
+    topics: tuple[str, ...] = ()
+    media_inputs: Mapping[str, str] = field(default_factory=dict, hash=False)
+
+    def __post_init__(self) -> None:
+        """Hold ``media_inputs`` as a read-only copy of what was passed."""
+        object.__setattr__(self, "media_inputs", MappingProxyType(dict(self.media_inputs)))
+
+    def check(
+        self,
+        *,
+        commands: Collection[str],
+        messages: Collection[str],
+        input_tracks: Collection[str],
+    ) -> None:
+        """Refuse a block that names a command, message, or input track the model lacks.
+
+        Args:
+            commands: The commands the model declares.
+            messages: The messages the model declares.
+            input_tracks: The input tracks the model declares.
+
+        Raises:
+            LiveKitBlockError: Naming the first entry that refers to something
+                the model does not declare.
+        """
+        for entry in self.rpc:
+            if entry.command is not None and entry.command not in commands:
+                raise LiveKitBlockError(
+                    f"runtime.livekit.rpc: method {entry.method!r} runs command "
+                    f"{entry.command!r}, which the model does not declare"
+                )
+            if entry.message is not None and entry.message not in messages:
+                raise LiveKitBlockError(
+                    f"runtime.livekit.rpc: method {entry.method!r} is called for message "
+                    f"{entry.message!r}, which the model does not declare"
+                )
+        for source, track in self.media_inputs.items():
+            if track not in input_tracks:
+                raise LiveKitBlockError(
+                    f"runtime.livekit.media_inputs: {source!r} feeds input track {track!r}, "
+                    "which the model does not declare"
+                )
+
+
+@dataclass(frozen=True)
 class RuntimeConfig:
     """The single configuration object threaded through ``serve``.
 
@@ -147,6 +239,7 @@ class RuntimeConfig:
         orphan_timeout: Seconds a session may stay client-less before it closes.
         recording: The recorder's configuration; disabled by default.
         step_results: How each finished step is saved; disabled by default.
+        livekit: How a LiveKit room reaches the model; empty by default.
     """
 
     model_ref: str
@@ -159,3 +252,4 @@ class RuntimeConfig:
     orphan_timeout: float = 60.0
     recording: RecordingConfig = field(default_factory=RecordingConfig)
     step_results: StepResultsConfig = field(default_factory=StepResultsConfig)
+    livekit: LiveKitConfig = field(default_factory=LiveKitConfig)

@@ -42,6 +42,7 @@ from reactor_runtime.core import (
     Health,
     HealthStatus,
     InputFrame,
+    LiveKitBlockError,
     MediaChunk,
     RuntimeConfig,
     RuntimeState,
@@ -64,7 +65,7 @@ from reactor_runtime.interface.internal.bridge import ModelBridge
 from reactor_runtime.interface.internal.reactor_core import CommandTimes, MediaOps
 from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.log import get_logger, set_session_id, set_state
-from reactor_runtime.manifest import import_model_class
+from reactor_runtime.manifest import check_livekit_block, import_model_class
 from reactor_runtime.message_gateway import InboundCommand, MessageGateway
 from reactor_runtime.metrics import (
     UNKNOWN_COMMAND,
@@ -349,9 +350,12 @@ class Runner(ServiceComponent, ConnectionSink):
         """Resolve and bring up the model, then declare the session ready.
 
         The ordering is deliberate: resolve the class, read its contract from
-        the class, instantiate and load it, build the bridge and bind the
-        outbound path before the model thread spins, spawn it, and only then
-        send ``INITIALIZATION_SUCCESS`` so the session leaves ``CREATED``.
+        the class, check the manifest's ``runtime.livekit`` block against it,
+        instantiate and load it, build the bridge and bind the outbound path
+        before the model thread spins, spawn it, and only then send
+        ``INITIALIZATION_SUCCESS`` so the session leaves ``CREATED``. The
+        block is checked before the load so a mistake in it costs seconds, not
+        a weights load.
 
         Bringing the model up is the one step that can fail outright. A failure
         here is terminal for the process — there is no model to serve — so it is
@@ -373,9 +377,31 @@ class Runner(ServiceComponent, ConnectionSink):
         # state change, no side effect (the bridge is not built yet).
         self._sm.send(SessionEvent.INITIALIZING)
         started_at = time.monotonic()
+
+        def load_failed() -> None:
+            self._model_metrics.load_failed(since=started_at)
+            logger.exception("model failed to load; terminating the session")
+            self._sm.send(SessionEvent.INITIALIZATION_FAIL)
+
         try:
             model_cls = import_model_class(self._cfg.model_ref)
             contract = ModelContract.of(model_cls)
+        except Exception:
+            load_failed()
+            return
+        try:
+            check_livekit_block(self._cfg.livekit, contract)
+        except LiveKitBlockError as mismatch:
+            # A manifest mistake, not a model that failed to load: reported on
+            # its own and kept out of the load-failure count.
+            logger.error(
+                "the manifest's runtime.livekit block does not match the model; "
+                "terminating the session",
+                reason=str(mismatch),
+            )
+            self._sm.send(SessionEvent.INITIALIZATION_FAIL)
+            return
+        try:
             model = model_cls()
             await asyncio.to_thread(model.load, self._cfg.config_path)
             bridge = ModelBridge(model, contract)
@@ -395,9 +421,7 @@ class Runner(ServiceComponent, ConnectionSink):
             )
             bridge.start()
         except Exception:
-            self._model_metrics.load_failed(since=started_at)
-            logger.exception("model failed to load; terminating the session")
-            self._sm.send(SessionEvent.INITIALIZATION_FAIL)
+            load_failed()
             return
         self._model_metrics.loaded(since=started_at)
         self._bridge = bridge

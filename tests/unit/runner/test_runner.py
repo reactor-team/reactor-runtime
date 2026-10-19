@@ -44,6 +44,9 @@ from reactor_runtime.core import (
     EndReason,
     FileUploaded,
     HealthStatus,
+    LiveKitBlockError,
+    LiveKitConfig,
+    LiveKitRpcMethod,
     MediaBundle,
     MediaChunk,
     RecordingConfig,
@@ -321,6 +324,81 @@ async def test_start_failure_terminates_the_session(monkeypatch: pytest.MonkeyPa
 
     assert runner._sm.current_state is SessionState.TERMINATED
     assert runner.health().status is HealthStatus.UNHEALTHY
+
+
+async def test_start_loads_a_model_whose_livekit_block_names_what_it_declares(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_models.clear()
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
+    livekit = LiveKitConfig(
+        rpc=(
+            LiveKitRpcMethod(method="lk.set_mode", command="set_mode"),
+            LiveKitRpcMethod(method="lk.greet", message="greeting"),
+        )
+    )
+    runner = Runner(RuntimeConfig(model_ref="fake:Model", livekit=livekit))
+
+    await runner.start()
+    try:
+        assert runner._sm.current_state is SessionState.READY
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.parametrize(
+    "livekit",
+    [
+        LiveKitConfig(rpc=(LiveKitRpcMethod(method="lk.clear_buffer", command="clear_buffer"),)),
+        LiveKitConfig(rpc=(LiveKitRpcMethod(method="lk.done", message="playback_finished"),)),
+        # `main` is an output track, so nothing can feed it.
+        LiveKitConfig(media_inputs={"lk.audio_stream": "main"}),
+    ],
+)
+async def test_start_refuses_a_livekit_block_naming_what_the_model_lacks(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, livekit: LiveKitConfig
+) -> None:
+    created_models.clear()
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
+    runner = Runner(RuntimeConfig(model_ref="fake:Model", livekit=livekit))
+
+    load_failures: list[float] = []
+    monkeypatch.setattr(
+        runner._model_metrics, "load_failed", lambda *, since: load_failures.append(since)
+    )
+
+    with caplog.at_level(logging.ERROR):
+        await runner.start()
+
+    assert runner._sm.current_state is SessionState.TERMINATED
+    # Checked before the model is built, so no weights load was spent on it.
+    assert created_models == []
+    # A manifest mistake is reported as one, not as a model that failed to load.
+    assert load_failures == []
+    assert any("runtime.livekit block does not match" in r.getMessage() for r in caplog.records)
+    assert not any("model failed to load" in r.getMessage() for r in caplog.records)
+
+
+async def test_a_livekit_block_error_from_the_model_itself_is_a_load_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    class Failing(FakeModel):
+        def load(self, config_path: Path | None) -> None:
+            raise LiveKitBlockError("raised by the model's own load")
+
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: Failing)
+    runner = Runner(RuntimeConfig(model_ref="fake:Model"))
+    load_failures: list[float] = []
+    monkeypatch.setattr(
+        runner._model_metrics, "load_failed", lambda *, since: load_failures.append(since)
+    )
+
+    with caplog.at_level(logging.ERROR):
+        await runner.start()
+
+    assert runner._sm.current_state is SessionState.TERMINATED
+    assert len(load_failures) == 1
+    assert not any("runtime.livekit block does not match" in r.getMessage() for r in caplog.records)
 
 
 def test_every_session_state_has_a_lifecycle_word() -> None:

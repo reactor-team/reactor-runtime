@@ -3,8 +3,9 @@
 The ``reactor.yaml`` manifest is the runtime's one configuration file:
 ``runtime.import`` names the model as a ``"module:Class"`` reference,
 ``runtime.config`` points at the model's own config file, the
-``runtime.recording`` block configures the recorder, and the
-``runtime.step_results`` block says how each finished step is saved. This
+``runtime.recording`` block configures the recorder, the
+``runtime.step_results`` block says how each finished step is saved, and the
+``runtime.livekit`` block says how a LiveKit room reaches the model. This
 module turns that file into
 a :class:`~reactor_runtime.core.RuntimeConfig` and the reference into the model
 class — and it is the only code that does either, so every entry point resolves
@@ -19,12 +20,23 @@ from __future__ import annotations
 
 import importlib
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from reactor_runtime.core import RecordingConfig, RuntimeConfig, StepResultsConfig
+from reactor_runtime.core import (
+    LiveKitBlockError,
+    LiveKitConfig,
+    LiveKitRpcMethod,
+    RecordingConfig,
+    RuntimeConfig,
+    StepResultsConfig,
+    TrackDirection,
+)
 from reactor_runtime.interface.internal.reactor_core import ReactorCore
+
+if TYPE_CHECKING:
+    from reactor_runtime.interface.model.contract import ModelContract
 
 MANIFEST = "reactor.yaml"
 
@@ -35,8 +47,9 @@ def load_config(manifest: Path) -> RuntimeConfig:
     ``runtime.import`` — the ``"module:Class"`` model reference — and
     ``runtime.config`` — the path to the model's own config file — name the
     model, ``model.name`` is the name it is published under, the
-    ``runtime.recording`` block configures the recorder, and the
-    ``runtime.step_results`` block configures step results; the rest of the manifest
+    ``runtime.recording`` block configures the recorder, the
+    ``runtime.step_results`` block configures step results, and the
+    ``runtime.livekit`` block configures room sessions; the rest of the manifest
     describes the model to the platform and is not the runtime's concern. The
     config path is passed to the model verbatim (resolved to an absolute path);
     the runtime never parses its contents.
@@ -47,11 +60,14 @@ def load_config(manifest: Path) -> RuntimeConfig:
     Returns:
         A configuration naming the model the manifest points at, the name it
         publishes under, the path to its config file when present, the
-        recorder's settings, and the step-results settings.
+        recorder's settings, the step-results settings, and the room settings.
 
     Raises:
         SystemExit: If the manifest is not valid YAML, is not a mapping, or
             carries no ``runtime.import``.
+        ValueError: If a block the runtime refuses to guess about has the
+            wrong shape: a ``step_results.queue`` below 1, or a malformed
+            ``livekit`` block.
     """
     try:
         document = yaml.safe_load(manifest.read_text())
@@ -70,6 +86,7 @@ def load_config(manifest: Path) -> RuntimeConfig:
         config_path=_resolve_config_path(runtime, manifest),
         recording=_recording_from_manifest(runtime, document),
         step_results=_step_results_from_manifest(runtime),
+        livekit=_livekit_from_manifest(runtime),
     )
 
 
@@ -195,6 +212,102 @@ def _step_results_from_manifest(runtime: dict[str, Any]) -> StepResultsConfig:
         audio_bitrate_kbps=int(audio.get("bitrate_kbps", defaults.audio_bitrate_kbps)),
         queue=queue,
     )
+
+
+def _livekit_from_manifest(runtime: dict[str, Any]) -> LiveKitConfig:
+    """Parse the manifest's ``runtime.livekit`` block into a :class:`LiveKitConfig`.
+
+    A missing block, or a missing key in it, leaves that part empty. Unlike
+    the recording and step-results blocks, a block of the wrong shape is
+    refused rather than tolerated: every entry connects a room signal to the
+    model, and one that is silently dropped is a signal the model never
+    receives. A key present with no value (``livekit:`` or ``rpc:`` left
+    empty) is refused the same way. Unknown keys are ignored so a manifest
+    can carry forward-looking settings.
+
+    Args:
+        runtime: The manifest's ``runtime`` section.
+
+    Returns:
+        The parsed LiveKit configuration.
+
+    Raises:
+        LiveKitBlockError: The block, or one of its entries, has the wrong shape, or
+            an inbound method is listed twice.
+    """
+    if "livekit" not in runtime:
+        return LiveKitConfig()
+    block = runtime["livekit"]
+    if not isinstance(block, dict):
+        raise LiveKitBlockError("runtime.livekit must be a mapping")
+    return LiveKitConfig(
+        rpc=_livekit_rpc(block["rpc"]) if "rpc" in block else (),
+        topics=_livekit_topics(block["topics"]) if "topics" in block else (),
+        media_inputs=(
+            _livekit_media_inputs(block["media_inputs"]) if "media_inputs" in block else {}
+        ),
+    )
+
+
+def check_livekit_block(config: LiveKitConfig, contract: ModelContract) -> None:
+    """Refuse a ``runtime.livekit`` block that names something *contract* does not declare.
+
+    Raises:
+        LiveKitBlockError: Naming the first command, message, or input track
+            the block refers to that the model lacks.
+    """
+    config.check(
+        commands=contract.commands.keys(),
+        messages=contract.messages.keys(),
+        input_tracks=[
+            name for name, info in contract.tracks.items() if info.direction is TrackDirection.IN
+        ],
+    )
+
+
+def _livekit_rpc(raw: Any) -> tuple[LiveKitRpcMethod, ...]:
+    if not isinstance(raw, list):
+        raise LiveKitBlockError("runtime.livekit.rpc must be a list")
+    entries: list[LiveKitRpcMethod] = []
+    inbound: set[str] = set()
+    for index, item in enumerate(raw):
+        where = f"runtime.livekit.rpc[{index}]"
+        if not isinstance(item, dict):
+            raise LiveKitBlockError(f"{where} must be a mapping")
+        method = item.get("method")
+        if not isinstance(method, str) or not method:
+            raise LiveKitBlockError(f"{where}.method must be a non-empty string")
+        if ("command" in item) == ("message" in item):
+            raise LiveKitBlockError(f"{where} needs exactly one of 'command' and 'message'")
+        key = "command" if "command" in item else "message"
+        target = item.get(key)
+        if not isinstance(target, str) or not target:
+            raise LiveKitBlockError(f"{where}.{key} must be a non-empty string")
+        if key == "message":
+            entries.append(LiveKitRpcMethod(method=method, message=target))
+            continue
+        # A participant keeps one handler per method name.
+        if method in inbound:
+            raise LiveKitBlockError(f"{where}: method {method!r} already runs a command")
+        inbound.add(method)
+        entries.append(LiveKitRpcMethod(method=method, command=target))
+    return tuple(entries)
+
+
+def _livekit_topics(raw: Any) -> tuple[str, ...]:
+    if not isinstance(raw, list) or not all(isinstance(t, str) and t for t in raw):
+        raise LiveKitBlockError("runtime.livekit.topics must be a list of non-empty strings")
+    return tuple(raw)
+
+
+def _livekit_media_inputs(raw: Any) -> dict[str, str]:
+    if not isinstance(raw, dict) or not all(
+        isinstance(k, str) and k and isinstance(v, str) and v for k, v in raw.items()
+    ):
+        raise LiveKitBlockError(
+            "runtime.livekit.media_inputs must map non-empty source names to input track names"
+        )
+    return dict(raw)
 
 
 def _optional_int(value: Any) -> int | None:
