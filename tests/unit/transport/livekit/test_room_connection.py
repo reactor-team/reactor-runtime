@@ -10,6 +10,7 @@ from reactor_runtime.core import (
     ConnectionOrigin,
     ConnectionOriginSource,
     ConnId,
+    InputTrackWatcher,
     MediaBundle,
     MediaChunk,
     TrackData,
@@ -95,6 +96,28 @@ async def test_the_room_connection_is_a_system_connection_that_carries_media() -
     assert conn.origin == ConnectionOrigin(transport="livekit", system=True)
     assert conn.capabilities.carries_video
     assert conn.capabilities.carries_audio
+
+
+async def test_the_room_connection_hands_on_each_freed_input_until_it_closes() -> None:
+    freed: list[str] = []
+    video, audio = FakeVideoSource(), FakeAudioSource()
+    conn = RoomConnection(
+        ConnId(4711),
+        asyncio.get_running_loop(),
+        {"main_video": cast(Any, video)},
+        {"main_audio": cast(Any, audio)},
+        {"main_video": VIDEO, "main_audio": AUDIO},
+        on_close=Leaves(),
+        on_input_freed=freed.append,
+    )
+    assert isinstance(conn, InputTrackWatcher)
+    conn.start()
+
+    conn.input_track_freed("camera")
+    await conn.close()
+    conn.input_track_freed("mic")
+
+    assert freed == ["camera"]
 
 
 async def test_closing_the_room_connection_leaves_the_room_once() -> None:

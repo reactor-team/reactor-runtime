@@ -197,6 +197,22 @@ class MessageObserver(Protocol):
         """
 
 
+@runtime_checkable
+class InputTrackWatcher(Protocol):
+    """A connection that learns when an input track has no holder any more.
+
+    Optional, beside :class:`Connection`, and checked for with ``isinstance``.
+    An input track has one holder across the session, the first client to feed
+    it. A transport that feeds input tracks for its own clients, and holds back
+    a client that was refused, starts that client once the track is free,
+    whichever transport held it. The runner calls this on the runtime loop,
+    after the holder unpublished the track or closed.
+    """
+
+    def input_track_freed(self, name: str) -> None:
+        """Take that input track *name* is free to claim."""
+
+
 class ReplyRoute(StrEnum):
     """Where the answer to a command a transport hands up goes.
 

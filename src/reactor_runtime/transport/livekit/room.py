@@ -344,6 +344,10 @@ class RoomSession:
         for topic in inputs.stream_topics:
             self._room.register_byte_stream_handler(topic, self._on_media_stream)
 
+    def _input_freed(self, name: str) -> None:
+        if self._inputs is not None:
+            self._inputs.input_freed(name)
+
     def _on_media_stream(self, reader: rtc.ByteStreamReader, identity: str) -> None:
         conn = self._participants.get(identity)
         if conn is None or self._inputs is None:
@@ -383,6 +387,7 @@ class RoomSession:
             audio,
             tracks,
             on_close=self._connection_closed,
+            on_input_freed=self._input_freed,
         )
 
     def _add_participant(self, identity: str) -> None:

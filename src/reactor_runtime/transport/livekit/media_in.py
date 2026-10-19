@@ -29,8 +29,8 @@ first client to feed it holds it, as a WebRTC client's publish request does,
 and media from anyone else is dropped. A participant feeding a track holds it
 until it unpublishes that track or leaves; one that has fed a byte stream holds
 it until it leaves, since an agent sends one stream per utterance. A remote
-track refused because another participant holds its input waits, and starts
-feeding the input once that participant frees it.
+track refused because another client holds its input waits, and starts
+feeding the input once that client frees it, whatever its transport.
 """
 
 from __future__ import annotations
@@ -331,6 +331,14 @@ class RoomInputs:
         del self._held[feed.target]
         self._release_input(feed.conn_id, feed.target)
         self._start_waiting(feed.target)
+
+    def input_freed(self, name: str) -> None:
+        """Start a track waiting for input track *name*, which the session has freed.
+
+        The input's holder may be any client of the session, on any transport.
+        """
+        if name not in self._held:
+            self._start_waiting(name)
 
     def release(self, sender: str, conn_id: ConnId) -> None:
         """Stop a participant that left: end its open streams and free the inputs it held.

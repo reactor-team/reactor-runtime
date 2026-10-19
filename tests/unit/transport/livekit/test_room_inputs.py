@@ -436,6 +436,24 @@ async def test_a_refused_track_starts_feeding_once_the_holder_leaves(
     room.close()
 
 
+async def test_a_refused_track_starts_once_another_transport_frees_the_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    room, claims, started = _cameras(monkeypatch)
+    claims.claim(ConnId(4001), "camera")  # a WebRTC client published it first
+    room.on_track(_camera("TR_room"), "agent", ConnId(5120))
+    await _settle()
+    assert started == []
+
+    claims.release(ConnId(4001), "camera")
+    room.input_freed("camera")
+    await _settle()
+
+    assert started == [ConnId(5120)]
+    assert claims.holders == {"camera": ConnId(5120)}
+    room.close()
+
+
 async def test_a_refused_track_that_goes_away_is_not_started(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -81,6 +81,7 @@ class RoomConnection:
         audio: Mapping[str, rtc.AudioSource],
         tracks: Mapping[str, TrackInfo],
         on_close: Callable[[], Awaitable[None]],
+        on_input_freed: Callable[[str], None] | None = None,
     ) -> None:
         """Bind the connection to the sources of its published tracks.
 
@@ -92,9 +93,12 @@ class RoomConnection:
             tracks: The model's output tracks, by name.
             on_close: Leaves the room. Awaited once, when the connection
                 closes, so a session that ends leaves its room.
+            on_input_freed: Takes the name of each input track the session
+                frees, so the room can start a participant it held back.
         """
         self.id = conn_id
         self._on_close = on_close
+        self._on_input_freed = on_input_freed
         self.capabilities = ConnectionCapabilities(
             carries_video=bool(video), carries_audio=bool(audio)
         )
@@ -137,6 +141,11 @@ class RoomConnection:
     def send_media(self, chunk: MediaChunk) -> None:
         """Submit a media chunk to the pacer, which may wait for queue room."""
         self._pacer.submit(chunk)
+
+    def input_track_freed(self, name: str) -> None:
+        """Hand on that input track *name* is free, for a participant waiting on it."""
+        if self._on_input_freed is not None and not self._closed:
+            self._on_input_freed(name)
 
     def flush_media(self, *, hold: bool = False) -> None:
         """Drop the queued media, the audio waiting for the room included.
