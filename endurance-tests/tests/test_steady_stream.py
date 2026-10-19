@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from typing import Any
 
 from endurance.harness import (
     ResourceSampler,
@@ -39,6 +40,24 @@ _STREAMING_FIELDS = ("live_connections", "live_peers", "live_pacers", "live_clie
 # Counts that are 0 while it streams: no pacer has stopped yet, and nothing
 # should leave model output to the cyclic garbage collector.
 _ZERO_WHILE_STREAMING = ("pacers_holding_output", "pinned_batches")
+
+
+# Probes per streaming reading, and the streaming between them. A request
+# in flight can hold a task for a moment, so the reading keeps the fewest
+# tasks any probe saw: a task that leaks shows in every probe.
+_PROBES_PER_READING = 3
+_PROBE_GAP_S = 0.3
+
+
+async def _streaming_probe(
+    runtime: RuntimeProcess, client: V1Client, frame: tuple[bytes, int, int]
+) -> dict[str, Any]:
+    """Read the probe while the client streams, keeping the fewest tasks seen."""
+    readings = [runtime.probe()]
+    for _ in range(_PROBES_PER_READING - 1):
+        await client.stream_for(frame, _PROBE_GAP_S)
+        readings.append(runtime.probe())
+    return {**readings[-1], "tasks": min(reading["tasks"] for reading in readings)}
 
 
 def _streaming_checks(samples: list[Sample]) -> list[MetricResult]:
@@ -95,9 +114,15 @@ async def test_steady_stream(runtime: RuntimeProcess) -> None:
             before = client.received_video
             await client.stream_for(frame, SAMPLE_INTERVAL_S)
             received.append(client.received_video - before)
-            streaming.append(sampler.sample(cycle=count, reading=runtime.probe()))
+            reading = await _streaming_probe(runtime, client, frame)
+            streaming.append(sampler.sample(cycle=count, reading=reading))
             live.update(sampler.samples)
             count += 1
+        if not streaming:
+            raise AssertionError(
+                f"no interval completed in {ENDURANCE_DURATION_SECONDS:g}s: "
+                "raise ENDURANCE_DURATION_SECONDS"
+            )
         await client.wait_for_replies()
         client.close()
         reading, _ = runtime.settled_probe()
