@@ -29,6 +29,8 @@ from endurance.harness import SUITE_DIR, RuntimeEndpoint, V1Client, gray_frame
 # How long the process may take to start, connect and get its frames back
 # before it is reported as never having streamed.
 _READY_TIMEOUT_S = 90.0
+# How much of a failed process's output its error carries.
+_OUTPUT_LINES = 60
 # Mark the process's report line on its stdout, and each request it found
 # refused or answered wrongly after the report, up to the kill.
 _REPORT_PREFIX = "REPORT "
@@ -60,6 +62,7 @@ class KilledClient:
         self._session_id = session_id
         self._log = log
         self._linger_s = linger_s
+        self._log_start = 0
         self.unanswered: list[str] = []
 
     async def run(self, frame: tuple[bytes, int, int]) -> int:
@@ -74,6 +77,8 @@ class KilledClient:
         """
         del frame
         self._log.flush()
+        # Where this process's own output starts in the log the cycles share.
+        self._log_start = self._log.tell()
         proc = await asyncio.create_subprocess_exec(
             sys.executable,
             "-m",
@@ -92,8 +97,8 @@ class KilledClient:
             # have exercised the path it exists for.
             if _exited(proc):
                 raise RuntimeError(
-                    f"the client process exited on its own before it was killed; "
-                    f"see {self._log_name}"
+                    f"the client process exited on its own before it was killed"
+                    f"{self._client_output()}"
                 )
         finally:
             if proc.returncode is None:
@@ -110,9 +115,23 @@ class KilledClient:
         self.unanswered = [*report["unanswered"], *later]
         return int(report["received"])
 
-    @property
-    def _log_name(self) -> str:
-        return Path(self._log.name).name
+    def _client_output(self) -> str:
+        """Return the end of what this cycle's process wrote, its traceback included.
+
+        A failing cycle carries it in its error, so the failure reads in full
+        where the run ran, the PR smoke included, without the log file.
+        """
+        self._log.flush()
+        try:
+            with open(self._log.name, errors="replace") as log:
+                log.seek(self._log_start)
+                lines = log.read().splitlines()[-_OUTPUT_LINES:]
+        except OSError:
+            lines = []
+        name = Path(self._log.name).name
+        if not lines:
+            return f"; it wrote nothing to {name}"
+        return f"; the end of what it wrote to {name}:\n" + "\n".join(lines)
 
     async def _read_report(self, proc: asyncio.subprocess.Process) -> dict[str, Any]:
         """Return the report the process prints once its frames came back.
@@ -128,12 +147,12 @@ class KilledClient:
                 return json.loads(text[len(_REPORT_PREFIX) :])
             except json.JSONDecodeError as error:
                 raise RuntimeError(
-                    f"the client process printed an unreadable report; see {self._log_name}"
+                    f"the client process printed an unreadable report{self._client_output()}"
                 ) from error
         code = await proc.wait()
         raise RuntimeError(
-            f"the client process exited with {code} before its frames came back; "
-            f"see {self._log_name}"
+            f"the client process exited with {code} before its frames came back"
+            f"{self._client_output()}"
         )
 
 
