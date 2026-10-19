@@ -35,8 +35,6 @@ class FakeRunner:
         self.answered: list[tuple[ConnId, dict[str, str]]] = []
         self.admitted: list[ConnId] = []
         self.claims: dict[ConnId, str] = {}
-        # Ids a test marks as already claimed before its offer arrives.
-        self.held_before_offer: set[ConnId] = set()
 
     def require_session_running(self, sid: str) -> None:
         if not self._running:
@@ -50,10 +48,13 @@ class FakeRunner:
         return ConnId(self._next)
 
     def claim_conn_id(self, conn_id: ConnId, transport: str) -> bool:
-        holder = self.claims.setdefault(conn_id, transport)
+        holder = self.claims.get(conn_id)
+        if holder is None:
+            self.claims[conn_id] = transport
+            return True
         if holder != transport:
             raise ConnectionIdClaimedError(conn_id)
-        return conn_id not in self.held_before_offer
+        return False
 
     def release_conn_id(self, conn_id: ConnId, transport: str) -> None:
         if self.claims.get(conn_id) == transport:
@@ -579,8 +580,8 @@ def test_a_refused_reoffer_keeps_the_id_it_already_held(
     factory_for: Callable[..., WebRtcPeerFactory],
 ) -> None:
     runner = FakeRunner()
+    # Claimed by an earlier offer on the same id.
     runner.claims[ConnId(5002)] = "webrtc"
-    runner.held_before_offer.add(ConnId(5002))
     config = WebRtcConfig(ping_timeout=0.0, max_connections=1)
     with _client(runner, fake_peer, factory_for, config=config) as client:
         client.post(f"{_PREFIX}/connections/5001/sdp_params", json={"sdp_offer": "one"})

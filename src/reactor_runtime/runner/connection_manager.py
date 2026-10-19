@@ -70,8 +70,9 @@ logger = get_logger(__name__)
 _MIN_CONN_ID = 1002
 _MAX_CONN_ID = 9999
 
-# Ids no transport can claim: the runtime's own system client.
-_RESERVED_CLAIMS: Mapping[ConnId, str] = {SYSTEM_CONN_ID: "runtime"}
+# Ids no transport can claim or release, whatever it calls itself: the
+# runtime's own system client.
+_RESERVED_IDS = frozenset({SYSTEM_CONN_ID})
 
 # The most times a mint redraws before giving up. Bounding the draw count keeps
 # allocation from spinning the event loop when the id space is dense, without
@@ -178,7 +179,7 @@ class ConnectionManager:
         # another's id. Scoped to the session: it is cleared on teardown so ids
         # do not accumulate across sessions and the full range is available
         # again to the next one.
-        self._claims: dict[ConnId, str] = dict(_RESERVED_CLAIMS)
+        self._claims: dict[ConnId, str] = {}
         # The registered connections that do not count toward occupancy, so a
         # drop sends the same kind of close its register sent as an open.
         self._unoccupying: set[ConnId] = set()
@@ -253,7 +254,7 @@ class ConnectionManager:
         """
         for _ in range(_MAX_MINT_ATTEMPTS):
             conn_id = ConnId(random.randint(_MIN_CONN_ID, _MAX_CONN_ID))
-            if conn_id not in self._claims:
+            if conn_id not in self._claims and conn_id not in _RESERVED_IDS:
                 self._claims[conn_id] = transport
                 return conn_id
         raise ConnectionsExhaustedError
@@ -273,6 +274,8 @@ class ConnectionManager:
         Raises:
             ConnectionIdClaimedError: If another transport holds *conn_id*.
         """
+        if conn_id in _RESERVED_IDS:
+            raise ConnectionIdClaimedError(conn_id)
         holder = self._claims.get(conn_id)
         if holder is None:
             self._claims[conn_id] = transport
@@ -286,7 +289,7 @@ class ConnectionManager:
 
         A claim held by another transport, or by the runtime, is left alone.
         """
-        if self._claims.get(conn_id) == transport:
+        if conn_id not in _RESERVED_IDS and self._claims.get(conn_id) == transport:
             del self._claims[conn_id]
 
     def register(self, conn: Connection, *, system: bool = False, occupies: bool = True) -> None:
@@ -365,7 +368,7 @@ class ConnectionManager:
         conns = list(self._by_id.values())
         self._by_id = {}
         self._publishers.clear()
-        self._claims = dict(_RESERVED_CLAIMS)
+        self._claims = {}
         self._unoccupying.clear()
         for conn in conns:
             await conn.close()

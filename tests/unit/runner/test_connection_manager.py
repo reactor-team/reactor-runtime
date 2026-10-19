@@ -1017,3 +1017,12 @@ async def test_the_system_clients_id_is_held_by_the_runtime_in_every_session() -
 
     with pytest.raises(ConnectionIdClaimedError):
         cm.claim_conn_id(ConnId(0), "webrtc")
+
+
+def test_no_transport_name_can_claim_or_release_the_system_clients_id() -> None:
+    cm, _ = waiting_manager()
+
+    cm.release_conn_id(ConnId(0), "runtime")
+
+    with pytest.raises(ConnectionIdClaimedError):
+        cm.claim_conn_id(ConnId(0), "runtime")
