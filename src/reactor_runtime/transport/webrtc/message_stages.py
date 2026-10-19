@@ -56,6 +56,11 @@ class MessageStageWindow:
 
     def __init__(self) -> None:
         self._totals = StageTotals(STAGES)
+        # rest_native and stall seconds from windows in which no message
+        # finished leaving, held for the next window that has one to spread
+        # them over. Only fold touches them, from the stats sampler.
+        self._held_rest_native_s = 0.0
+        self._held_stall_s = 0.0
 
     def add(self, stage: str, ms: float, messages: int = 1) -> None:
         """Add *messages* messages that spent *ms* milliseconds in *stage*, together.
@@ -75,14 +80,23 @@ class MessageStageWindow:
         ``stall`` is the time the pump stopped, spread over the messages sent
         in the window, so its average is the stall time per message.
         ``rest_native`` is libwebrtc's send of every chunk but each message's
-        first, spread the same way.
+        first, spread the same way. Both run while a message is still leaving,
+        so a window in which none finished holds them for the next one that
+        has a message to spread them over.
         """
         if sample is None or previous is None:
             return
         sent = sample.messages_sent - previous.messages_sent
         received = sample.messages_received - previous.messages_received
+        if sent < 0:
+            self._held_rest_native_s = self._held_stall_s = 0.0
+        if sent == 0:
+            self._held_rest_native_s += sample.native_send_s - previous.native_send_s
+            self._held_stall_s += sample.stall_s - previous.stall_s
         if sent > 0:
-            native_s = sample.native_send_s - previous.native_send_s
+            native_s = sample.native_send_s - previous.native_send_s + self._held_rest_native_s
+            stall_s = sample.stall_s - previous.stall_s + self._held_stall_s
+            self._held_rest_native_s = self._held_stall_s = 0.0
             first_native_s = sample.first_native_s - previous.first_native_s
             for stage, seconds in (
                 ("enqueue", sample.enqueue_s - previous.enqueue_s),
@@ -92,7 +106,7 @@ class MessageStageWindow:
                 ("first_native", first_native_s),
                 ("send", sample.send_s - previous.send_s),
                 ("rest_native", native_s - first_native_s),
-                ("stall", sample.stall_s - previous.stall_s),
+                ("stall", stall_s),
             ):
                 self.add(stage, seconds * 1000.0, sent)
         if received > 0:

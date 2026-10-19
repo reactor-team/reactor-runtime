@@ -129,3 +129,21 @@ def test_the_steps_of_handing_a_message_to_libwebrtc_fold_in_as_parts() -> None:
     assert stages["rest_native"].part_of == "send"
     assert math.isclose(stages["rest_native"].total_ms, 10.0)
     assert stages["queue_wait"].part_of == ""
+
+
+def test_send_and_stall_time_of_a_message_still_leaving_waits_for_its_window() -> None:
+    window = MessageStageWindow()
+    start = ChunkingSample(messages_sent=1)
+    # A long message: its first chunks leave and the pump stalls, but no
+    # message finishes in this window.
+    leaving = ChunkingSample(messages_sent=1, native_send_s=0.004, stall_s=0.010)
+    done = ChunkingSample(messages_sent=2, first_native_s=0.001, native_send_s=0.006, stall_s=0.012)
+
+    window.fold(leaving, start)
+    assert window.take() == ()
+    window.fold(done, leaving)
+
+    stages = {s.name: s for s in window.take()}
+    assert stages["rest_native"].messages == 1
+    assert math.isclose(stages["rest_native"].total_ms, 5.0)
+    assert math.isclose(stages["stall"].total_ms, 12.0)
