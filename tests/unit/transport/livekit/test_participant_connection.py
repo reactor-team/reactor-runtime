@@ -410,3 +410,13 @@ async def test_messages_past_the_outbox_budget_are_dropped_while_the_sender_is_b
     assert [data for _, _, data, _ in local.sent] == [b"aaaa", b"bbbb", b"dddd"]
     assert conn._outbox_bytes == 0
     conn.drop()
+
+
+async def test_a_stream_dropped_before_its_reader_runs_is_still_closed() -> None:
+    conn, _ = make()
+    reader = FakeReader([b"never-read"])
+
+    stream(conn, reader, Channel.DATA)
+    conn.drop()
+
+    assert reader.closed

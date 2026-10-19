@@ -134,7 +134,10 @@ class ParticipantConnection:
         # Messages received, in arrival order per topic, until their turn comes.
         self._inbound: dict[Channel, deque[_Inbound]] = {c: deque() for c in Channel}
         self._inbound_bytes = 0
-        self._readers: set[asyncio.Task[None]] = set()
+        # Each stream being read, by the task reading it: closed directly when
+        # reading stops, since a task cancelled before it first runs never
+        # reaches its own cleanup.
+        self._readers: dict[asyncio.Task[None], rtc.ByteStreamReader] = {}
         self._send_failed = _Warning()
         self._outbox_full = _Warning()
         self._inbound_full = _Warning()
@@ -204,8 +207,8 @@ class ParticipantConnection:
         slot = _Inbound()
         self._inbound[channel].append(slot)
         task = self._loop.create_task(self._read_stream(reader, slot, channel))
-        self._readers.add(task)
-        task.add_done_callback(self._readers.discard)
+        self._readers[task] = reader
+        task.add_done_callback(lambda done: self._readers.pop(done, None))
 
     async def close(self) -> None:
         """Send what is queued, then stop. Idempotent.
@@ -231,7 +234,8 @@ class ParticipantConnection:
         self._pump.cancel()
 
     def _stop_reading(self) -> None:
-        for task in self._readers:
+        for task, reader in list(self._readers.items()):
+            reader.close()
             task.cancel()
         for queue in self._inbound.values():
             queue.clear()
