@@ -27,8 +27,10 @@ is not between 1 and :data:`MAX_STREAM_CHANNELS`, is refused.
 Each input track has one owner across the session, whatever its transport: the
 first client to feed it holds it, as a WebRTC client's publish request does,
 and media from anyone else is dropped. A participant feeding a track holds it
-until it unpublishes that track or leaves; one feeding a byte stream holds it
-until it leaves, since an agent sends one stream per utterance.
+until it unpublishes that track or leaves; one that has fed a byte stream holds
+it until it leaves, since an agent sends one stream per utterance. A remote
+track refused because another participant holds its input waits, and starts
+feeding the input once that participant frees it.
 """
 
 from __future__ import annotations
@@ -95,6 +97,28 @@ class _TrackFeed:
     conn_id: ConnId
     target: str
     task: asyncio.Task[None]
+
+
+@dataclass
+class _WaitingTrack:
+    """A remote track refused because another client holds its input track."""
+
+    track: rtc.Track
+    sender: str
+    conn_id: ConnId
+    target: str
+
+
+@dataclass
+class _Hold:
+    """A participant's claim on an input track.
+
+    A claim a byte stream took lasts until the participant leaves, whatever
+    its tracks do: its sender sends one stream per utterance.
+    """
+
+    conn_id: ConnId
+    streamed: bool = False
 
 
 class StreamFramer:
@@ -210,9 +234,13 @@ class RoomInputs:
                 self._mapped[source] = track
         self._reserved = set(self._mapped.values())
         # Each input track a participant holds through the session, and which.
-        self._held: dict[str, ConnId] = {}
+        self._held: dict[str, _Hold] = {}
         # Each remote track feeding an input track, by its track id.
         self._tracks: dict[str, _TrackFeed] = {}
+        # Each remote track waiting for its input track to be freed, by its
+        # track id, in arrival order: its sender gets no word that it was
+        # refused, so the room starts it once a participant frees the input.
+        self._waiting: dict[str, _WaitingTrack] = {}
         # Each byte stream topic, and the stream that currently feeds it.
         self._streams: dict[str, _Stream] = {}
         # The readers each participant's media runs on, so its leaving stops them.
@@ -245,7 +273,7 @@ class RoomInputs:
             )
             reader.close()
             return
-        if not self._claim(track, conn_id):
+        if not self._claim(track, conn_id, streamed=True):
             logger.debug("dropped a stream for an input track another client holds")
             reader.close()
             return
@@ -274,42 +302,40 @@ class RoomInputs:
         info = self._inputs.get(target or "")
         if target is None or info is None:
             return
-        is_video = track.kind == rtc.TrackKind.KIND_VIDEO
-        if is_video != (info.kind is TrackKind.VIDEO):
+        if (track.kind == rtc.TrackKind.KIND_VIDEO) != (info.kind is TrackKind.VIDEO):
             return
-        if not self._claim(target, conn_id):
-            return
-        if is_video:
-            task = self._spawn(sender, self._read_video(track, target, conn_id))
-        else:
-            task = self._spawn(sender, self._read_audio(track, target, int(info.rate), conn_id))
-        self._tracks[track.sid] = _TrackFeed(sender, conn_id, target, task)
+        if not self._feed_track(track, sender, conn_id, target):
+            logger.debug("a remote track waits for an input track another client holds")
+            self._waiting[track.sid] = _WaitingTrack(track, sender, conn_id, target)
 
     def on_track_gone(self, sid: str) -> None:
         """Stop feeding from a remote track that was unpublished or unsubscribed.
 
         Its sender's claim on the input track is released, unless the sender
-        still feeds that input another way.
+        still feeds that input from another track, or a byte stream took the
+        claim. A track waiting for that input then starts feeding it.
         """
+        self._waiting.pop(sid, None)
         feed = self._tracks.pop(sid, None)
         if feed is None:
             return
         feed.task.cancel()
-        still_feeding = any(
+        hold = self._held.get(feed.target)
+        if hold is None or hold.conn_id != feed.conn_id or hold.streamed:
+            return
+        if any(
             other.conn_id == feed.conn_id and other.target == feed.target
             for other in self._tracks.values()
-        ) or any(
-            stream.conn_id == feed.conn_id and stream.track == feed.target
-            for stream in self._streams.values()
-        )
-        if not still_feeding and self._held.get(feed.target) == feed.conn_id:
-            del self._held[feed.target]
-            self._release_input(feed.conn_id, feed.target)
+        ):
+            return
+        del self._held[feed.target]
+        self._release_input(feed.conn_id, feed.target)
+        self._start_waiting(feed.target)
 
     def release(self, sender: str, conn_id: ConnId) -> None:
-        """Stop a participant that left: end its open streams and drop the tracks it held.
+        """Stop a participant that left: end its open streams and free the inputs it held.
 
-        The session frees its claims when its connection closes.
+        A track waiting for one of those inputs then starts feeding it.
         """
         for topic, stream in list(self._streams.items()):
             if stream.sender == sender:
@@ -318,8 +344,14 @@ class RoomInputs:
             task.cancel()
         for sid in [sid for sid, feed in self._tracks.items() if feed.sender == sender]:
             del self._tracks[sid]
-        for track in [t for t, holder in self._held.items() if holder == conn_id]:
+        for sid in [sid for sid, waiting in self._waiting.items() if waiting.sender == sender]:
+            del self._waiting[sid]
+        freed = [track for track, hold in self._held.items() if hold.conn_id == conn_id]
+        for track in freed:
             del self._held[track]
+            self._release_input(conn_id, track)
+        for track in freed:
+            self._start_waiting(track)
 
     def close(self) -> None:
         """Stop every reader, ending each open stream with its end frame.
@@ -334,16 +366,41 @@ class RoomInputs:
                 task.cancel()
         self._readers.clear()
         self._tracks.clear()
+        self._waiting.clear()
 
-    def _claim(self, track: str, conn_id: ConnId) -> bool:
+    def _claim(self, track: str, conn_id: ConnId, *, streamed: bool = False) -> bool:
         """Claim *track* for *conn_id*, or confirm it already holds it."""
-        holder = self._held.get(track)
-        if holder is not None:
-            return holder == conn_id
+        hold = self._held.get(track)
+        if hold is not None:
+            if hold.conn_id != conn_id:
+                return False
+            hold.streamed = hold.streamed or streamed
+            return True
         if not self._claim_input(conn_id, track):
             return False
-        self._held[track] = conn_id
+        self._held[track] = _Hold(conn_id, streamed)
         return True
+
+    def _feed_track(self, track: rtc.Track, sender: str, conn_id: ConnId, target: str) -> bool:
+        """Start feeding *target* from a remote track, if its sender can claim it."""
+        if not self._claim(target, conn_id):
+            return False
+        if track.kind == rtc.TrackKind.KIND_VIDEO:
+            task = self._spawn(sender, self._read_video(track, target, conn_id))
+        else:
+            rate = int(self._inputs[target].rate)
+            task = self._spawn(sender, self._read_audio(track, target, rate, conn_id))
+        self._tracks[track.sid] = _TrackFeed(sender, conn_id, target, task)
+        return True
+
+    def _start_waiting(self, target: str) -> None:
+        """Start the first track waiting for *target* that can now claim it."""
+        for sid, waiting in list(self._waiting.items()):
+            if waiting.target == target and self._feed_track(
+                waiting.track, waiting.sender, waiting.conn_id, target
+            ):
+                del self._waiting[sid]
+                return
 
     def _spawn(self, sender: str, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         task = asyncio.get_running_loop().create_task(coro)

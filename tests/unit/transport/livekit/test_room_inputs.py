@@ -386,33 +386,93 @@ async def test_a_remote_tracks_queue_is_bounded_and_closed_when_its_sender_leave
     assert video.closed
 
 
-async def test_a_track_that_stops_frees_its_input_for_another_participant(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    started: list[tuple[str, ConnId]] = []
+def _cameras(monkeypatch: pytest.MonkeyPatch) -> tuple[RoomInputs, Claims, list[ConnId]]:
+    started: list[ConnId] = []
 
     async def read_video(self: Any, track: Any, target: str, conn_id: ConnId) -> None:
-        started.append((target, conn_id))
+        started.append(conn_id)
         await asyncio.Event().wait()
 
     monkeypatch.setattr(RoomInputs, "_read_video", read_video)
     claims = Claims()
     room = RoomInputs({"camera": CAMERA}, {}, Sink(), claims.claim, claims.release)
-    camera = Track("camera", rtc.TrackKind.KIND_VIDEO, "TR_first")
+    return room, claims, started
 
-    room.on_track(cast(Any, camera), "first", ConnId(5120))
-    room.on_track(
-        cast(Any, Track("camera", rtc.TrackKind.KIND_VIDEO, "TR_second")), "second", ConnId(5121)
-    )
+
+def _camera(sid: str) -> Any:
+    return cast(Any, Track("camera", rtc.TrackKind.KIND_VIDEO, sid))
+
+
+async def test_a_refused_track_starts_feeding_once_the_holders_track_stops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    room, claims, started = _cameras(monkeypatch)
+    room.on_track(_camera("TR_first"), "first", ConnId(5120))
+    room.on_track(_camera("TR_second"), "second", ConnId(5121))
     await _settle()
+    assert started == [ConnId(5120)]
+
     room.on_track_gone("TR_first")
-    room.on_track(
-        cast(Any, Track("camera", rtc.TrackKind.KIND_VIDEO, "TR_third")), "second", ConnId(5121)
-    )
     await _settle()
 
-    assert started == [("camera", ConnId(5120)), ("camera", ConnId(5121))]
+    assert started == [ConnId(5120), ConnId(5121)]
     assert claims.holders == {"camera": ConnId(5121)}
+    room.close()
+
+
+async def test_a_refused_track_starts_feeding_once_the_holder_leaves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    room, claims, started = _cameras(monkeypatch)
+    room.on_track(_camera("TR_first"), "first", ConnId(5120))
+    room.on_track(_camera("TR_second"), "second", ConnId(5121))
+    await _settle()
+
+    room.release("first", ConnId(5120))
+    await _settle()
+
+    assert started == [ConnId(5120), ConnId(5121)]
+    assert claims.holders == {"camera": ConnId(5121)}
+    room.close()
+
+
+async def test_a_refused_track_that_goes_away_is_not_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    room, claims, started = _cameras(monkeypatch)
+    room.on_track(_camera("TR_first"), "first", ConnId(5120))
+    room.on_track(_camera("TR_second"), "second", ConnId(5121))
+    await _settle()
+    room.on_track_gone("TR_second")
+
+    room.on_track_gone("TR_first")
+    await _settle()
+
+    assert started == [ConnId(5120)]
+    assert claims.holders == {}
+    room.close()
+
+
+async def test_a_claim_a_stream_took_outlasts_a_track_of_the_same_sender(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def read_audio(self: Any, track: Any, target: str, rate: int, conn_id: ConnId) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(RoomInputs, "_read_audio", read_audio)
+    claims = Claims()
+    room = inputs(Sink(), claims)
+    reader = Reader("AUDIO_1", [pcm(np.ones(240, np.int16))])
+    room.on_byte_stream(cast(Any, reader), "agent", ConnId(5120))
+    reader.released.set()
+    await _settle()  # the utterance has ended
+    room.on_track(
+        cast(Any, Track("lk.audio_stream", rtc.TrackKind.KIND_AUDIO, "TR_a")), "agent", ConnId(5120)
+    )
+
+    room.on_track_gone("TR_a")
+
+    assert claims.holders == {"agent_audio": ConnId(5120)}
     room.close()
 
 

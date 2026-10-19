@@ -183,7 +183,7 @@ for frame in await self.media.agent_audio.read(n=8):
     # last frame of the stream, data of shape (1, 0): {"stream_id": "AUDIO_x7Kq", "ended": true}
 ```
 
-A stream ends when it closes, when a new stream starts on the same topic while it is open, or when its sender leaves. An input track has one owner across the session, whatever its transport: the first client to feed it holds it, as a WebRTC client's publish request does, and media from anyone else is dropped. A participant holds a track-fed input until it unpublishes that track or leaves, and a stream-fed one until it leaves.
+A stream ends when it closes, when a new stream starts on the same topic while it is open, or when its sender leaves. An input track has one owner across the session, whatever its transport: the first client to feed it holds it, as a WebRTC client's publish request does, and media from anyone else is dropped. A participant holds a track-fed input until it unpublishes that track or leaves, and one it has fed from a byte stream until it leaves. A remote track refused because another participant holds its input waits, and starts feeding it once that participant frees it.
 
 Scaffold, build, and run it with the CLI:
 
