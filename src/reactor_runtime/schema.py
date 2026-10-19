@@ -61,8 +61,9 @@ def render(path: Path, version: str = _DEFAULT_VERSION) -> dict[str, Any]:
 
     Raises:
         ValueError: If *version* is not a release tag.
-        LiveKitBlockError: If the manifest's ``runtime.livekit`` block names a
-            command, message, or input track the model does not declare.
+        LiveKitBlockError: If the manifest's ``runtime.livekit`` block is
+            malformed, or names a command, message, or input track the model
+            does not declare.
         SystemExit: If the directory holds no manifest, or the manifest names no
             model — the same way the runtime's own manifest reader answers.
         Exception: Whatever importing the model's own module raises, with its
@@ -115,7 +116,7 @@ def main() -> None:
     Raises:
         SystemExit: If an argument is malformed, the directory holds no
             manifest, the manifest names no model, or its ``runtime.livekit``
-            block names something the model does not declare.
+            block is malformed or names something the model does not declare.
         Exception: Whatever importing the model's own module raises.
     """
     parser = argparse.ArgumentParser(

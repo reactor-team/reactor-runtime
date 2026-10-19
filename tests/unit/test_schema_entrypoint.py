@@ -199,6 +199,16 @@ def test_main_reports_a_livekit_block_naming_what_the_model_lacks(
         main()
 
 
+def test_main_reports_a_livekit_block_of_the_wrong_shape(
+    model_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _with_livekit_block(model_dir, "    rpc:\n")
+    monkeypatch.setattr(sys, "argv", ["schema", "--path", str(model_dir)])
+
+    with pytest.raises(SystemExit, match=r"runtime\.livekit\.rpc must be a list"):
+        main()
+
+
 def test_render_preserves_a_model_import_error(tmp_path: Path) -> None:
     (tmp_path / "reactor.yaml").write_text("runtime:\n  import: absent:Demo\n")
 

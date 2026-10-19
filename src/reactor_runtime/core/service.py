@@ -145,7 +145,7 @@ class LiveKitRpcMethod:
 
 
 class LiveKitBlockError(ValueError):
-    """Raised when the manifest's ``runtime.livekit`` block names something the model lacks.
+    """Raised for a manifest ``runtime.livekit`` block that is malformed or does not fit the model.
 
     A manifest mistake, told apart from a model that fails to load, so it can
     be reported as one.

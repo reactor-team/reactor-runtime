@@ -377,10 +377,31 @@ class Runner(ServiceComponent, ConnectionSink):
         # state change, no side effect (the bridge is not built yet).
         self._sm.send(SessionEvent.INITIALIZING)
         started_at = time.monotonic()
+
+        def load_failed() -> None:
+            self._model_metrics.load_failed(since=started_at)
+            logger.exception("model failed to load; terminating the session")
+            self._sm.send(SessionEvent.INITIALIZATION_FAIL)
+
         try:
             model_cls = import_model_class(self._cfg.model_ref)
             contract = ModelContract.of(model_cls)
+        except Exception:
+            load_failed()
+            return
+        try:
             check_livekit_block(self._cfg.livekit, contract)
+        except LiveKitBlockError as mismatch:
+            # A manifest mistake, not a model that failed to load: reported on
+            # its own and kept out of the load-failure count.
+            logger.error(
+                "the manifest's runtime.livekit block does not match the model; "
+                "terminating the session",
+                reason=str(mismatch),
+            )
+            self._sm.send(SessionEvent.INITIALIZATION_FAIL)
+            return
+        try:
             model = model_cls()
             await asyncio.to_thread(model.load, self._cfg.config_path)
             bridge = ModelBridge(model, contract)
@@ -399,20 +420,8 @@ class Runner(ServiceComponent, ConnectionSink):
                 frame_timing=self._on_frame_timing,
             )
             bridge.start()
-        except LiveKitBlockError as mismatch:
-            # A manifest mistake, not a model that failed to load: reported on
-            # its own and kept out of the load-failure count.
-            logger.error(
-                "the manifest's runtime.livekit block does not match the model; "
-                "terminating the session",
-                reason=str(mismatch),
-            )
-            self._sm.send(SessionEvent.INITIALIZATION_FAIL)
-            return
         except Exception:
-            self._model_metrics.load_failed(since=started_at)
-            logger.exception("model failed to load; terminating the session")
-            self._sm.send(SessionEvent.INITIALIZATION_FAIL)
+            load_failed()
             return
         self._model_metrics.loaded(since=started_at)
         self._bridge = bridge

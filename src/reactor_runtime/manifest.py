@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from reactor_runtime.core import (
+    LiveKitBlockError,
     LiveKitConfig,
     LiveKitRpcMethod,
     RecordingConfig,
@@ -238,7 +239,7 @@ def _livekit_from_manifest(runtime: dict[str, Any]) -> LiveKitConfig:
         return LiveKitConfig()
     block = runtime["livekit"]
     if not isinstance(block, dict):
-        raise ValueError("runtime.livekit must be a mapping")
+        raise LiveKitBlockError("runtime.livekit must be a mapping")
     return LiveKitConfig(
         rpc=_livekit_rpc(block["rpc"]) if "rpc" in block else (),
         topics=_livekit_topics(block["topics"]) if "topics" in block else (),
@@ -266,28 +267,28 @@ def check_livekit_block(config: LiveKitConfig, contract: ModelContract) -> None:
 
 def _livekit_rpc(raw: Any) -> tuple[LiveKitRpcMethod, ...]:
     if not isinstance(raw, list):
-        raise ValueError("runtime.livekit.rpc must be a list")
+        raise LiveKitBlockError("runtime.livekit.rpc must be a list")
     entries: list[LiveKitRpcMethod] = []
     inbound: set[str] = set()
     for index, item in enumerate(raw):
         where = f"runtime.livekit.rpc[{index}]"
         if not isinstance(item, dict):
-            raise ValueError(f"{where} must be a mapping")
+            raise LiveKitBlockError(f"{where} must be a mapping")
         method = item.get("method")
         if not isinstance(method, str) or not method:
-            raise ValueError(f"{where}.method must be a non-empty string")
+            raise LiveKitBlockError(f"{where}.method must be a non-empty string")
         if ("command" in item) == ("message" in item):
-            raise ValueError(f"{where} needs exactly one of 'command' and 'message'")
+            raise LiveKitBlockError(f"{where} needs exactly one of 'command' and 'message'")
         key = "command" if "command" in item else "message"
         target = item.get(key)
         if not isinstance(target, str) or not target:
-            raise ValueError(f"{where}.{key} must be a non-empty string")
+            raise LiveKitBlockError(f"{where}.{key} must be a non-empty string")
         if key == "message":
             entries.append(LiveKitRpcMethod(method=method, message=target))
             continue
         # A participant keeps one handler per method name.
         if method in inbound:
-            raise ValueError(f"{where}: method {method!r} already runs a command")
+            raise LiveKitBlockError(f"{where}: method {method!r} already runs a command")
         inbound.add(method)
         entries.append(LiveKitRpcMethod(method=method, command=target))
     return tuple(entries)
@@ -295,7 +296,7 @@ def _livekit_rpc(raw: Any) -> tuple[LiveKitRpcMethod, ...]:
 
 def _livekit_topics(raw: Any) -> tuple[str, ...]:
     if not isinstance(raw, list) or not all(isinstance(t, str) and t for t in raw):
-        raise ValueError("runtime.livekit.topics must be a list of non-empty strings")
+        raise LiveKitBlockError("runtime.livekit.topics must be a list of non-empty strings")
     return tuple(raw)
 
 
@@ -303,7 +304,7 @@ def _livekit_media_inputs(raw: Any) -> dict[str, str]:
     if not isinstance(raw, dict) or not all(
         isinstance(k, str) and k and isinstance(v, str) and v for k, v in raw.items()
     ):
-        raise ValueError(
+        raise LiveKitBlockError(
             "runtime.livekit.media_inputs must map non-empty source names to input track names"
         )
     return dict(raw)
