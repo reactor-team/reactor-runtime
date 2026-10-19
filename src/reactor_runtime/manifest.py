@@ -232,7 +232,7 @@ def _livekit_from_manifest(runtime: dict[str, Any]) -> LiveKitConfig:
         The parsed LiveKit configuration.
 
     Raises:
-        ValueError: The block, or one of its entries, has the wrong shape, or
+        LiveKitBlockError: The block, or one of its entries, has the wrong shape, or
             an inbound method is listed twice.
     """
     if "livekit" not in runtime:
