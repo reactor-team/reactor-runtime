@@ -221,14 +221,17 @@ def _conclusion_lines(result: RunResult) -> list[str]:
         ]
 
     if result.status == "PASS":
-        tested = ", ".join(m.name for m in result.metrics)
+        judged = [m for m in result.metrics if m.status != "not_judged"]
+        tested = ", ".join(m.name for m in judged)
         lines = [
             f"{result.tested} ran {format_duration(result.elapsed_s)} of endurance testing "
             f"across {result.iterations:,} cycles with no retained objects and no sustained "
             f"growth ({tested})."
         ]
         for m in result.metrics:
-            if m.unit == "count" and m.change == 0:
+            if m.status == "not_judged":
+                lines.append(f"{m.name} was not judged: {m.detail}.")
+            elif m.unit == "count" and m.change == 0:
                 lines.append(f"{m.name} stayed at {_format_value(m.end, m.unit)}.")
             else:
                 lines.append(

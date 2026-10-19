@@ -184,6 +184,7 @@ def test_a_step_that_levelled_off_in_the_first_third_reads_flat_on_slope() -> No
         _hours(120), values, name="rss_slope", max_per_hour=20.0, min_absolute_delta=5.0
     )
     assert result.status == "ok"
+    assert "noise floor" in result.detail
 
 
 def test_a_fast_slope_with_a_rise_inside_the_noise_floor_passes() -> None:
