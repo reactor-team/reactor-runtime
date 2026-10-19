@@ -1,3 +1,4 @@
+import asyncio
 import time
 
 import numpy as np
@@ -318,14 +319,14 @@ def test_a_reset_with_no_session_drops_every_frame() -> None:
     assert buffer.available == 0
 
 
-async def test_a_read_more_frames_than_a_full_sample_bound_holds_fails_at_once() -> None:
-    # 10 ms frames under a 50 ms bound: the buffer is full at five frames.
+async def test_a_read_more_frames_than_an_exactly_full_sample_bound_holds_fails_at_once() -> None:
+    # 10 ms frames under a 50 ms bound: five fit exactly, a sixth never does.
     buffer = InputBuffer(max_samples=2_400)
-    for index in range(6):
+    for index in range(5):
         buffer.push(audio(index))
 
-    with pytest.raises(ValueError, match="buffer is full at 5"):
-        await buffer.read(10, timeout=5.0)
+    with pytest.raises(ValueError, match="fewer than that"):
+        await buffer.read(6, timeout=5.0)
 
 
 async def test_a_read_waits_while_a_sample_bound_still_has_room() -> None:
@@ -340,5 +341,38 @@ async def test_a_read_more_frames_than_one_oversized_frame_leaves_room_for_fails
     buffer = InputBuffer(max_samples=480)
     buffer.push(audio(0, samples=960))
 
-    with pytest.raises(ValueError, match="buffer is full at 1"):
+    with pytest.raises(ValueError, match="fewer than that"):
         await buffer.read(2, timeout=5.0)
+
+
+async def test_a_read_after_a_larger_frame_was_evicted_waits_for_smaller_ones() -> None:
+    buffer = InputBuffer(max_samples=100)
+    buffer.push(audio(0, samples=80))
+    buffer.push(audio(1, samples=30))
+
+    read = asyncio.create_task(buffer.read(2, timeout=5.0, mode=ReadMode.FIFO))
+    await asyncio.sleep(0.05)
+    assert not read.done()
+    buffer.push(audio(2, samples=30))
+
+    assert [frame.data.shape[-1] for frame in await read] == [30, 30]
+
+
+async def test_a_reset_that_keeps_frames_keeps_judging_by_their_size() -> None:
+    buffer = InputBuffer(max_samples=2_400)
+    buffer.push(audio(0), session=1)
+    for index in range(1, 6):
+        buffer.push(audio(index), session=2)
+
+    buffer.reset(through_session=1)
+
+    with pytest.raises(ValueError, match="fewer than that"):
+        await buffer.read(6, timeout=5.0)
+
+
+def test_frames_with_no_samples_are_held_to_the_frame_cap() -> None:
+    buffer = InputBuffer(max_samples=2_400, max_frames=10)
+    for _ in range(50):
+        buffer.push(InputFrame(data=np.zeros((1, 0), dtype=np.int16)))
+
+    assert buffer.available == 10

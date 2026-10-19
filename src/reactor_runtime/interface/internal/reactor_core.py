@@ -658,7 +658,11 @@ def _input_buffer(info: TrackInfo) -> InputBuffer:
     """Build the buffer for one input track, bounded as the track declares."""
     if info.buffer_seconds is None:
         return InputBuffer()
-    return InputBuffer(max_samples=math.ceil(info.rate * info.buffer_seconds))
+    # At most one frame per millisecond of the bound, however few samples each carries.
+    return InputBuffer(
+        max_samples=math.ceil(info.rate * info.buffer_seconds),
+        max_frames=math.ceil(info.buffer_seconds * 1000),
+    )
 
 
 def _encode_metadata(

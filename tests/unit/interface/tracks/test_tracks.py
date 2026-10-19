@@ -70,8 +70,8 @@ def test_a_buffer_seconds_that_is_not_a_finite_positive_number_is_refused(second
             agent_audio: AgentAudio
 
 
-@pytest.mark.parametrize("rate", [0, float("nan"), float("inf")])
-def test_a_buffer_seconds_needs_a_finite_positive_sample_rate(rate: float) -> None:
+@pytest.mark.parametrize("rate", [0, float("nan"), float("inf"), True, "24000"])
+def test_a_buffer_seconds_needs_a_finite_positive_sample_rate(rate: object) -> None:
     class AgentAudio(Audio):
         sample_rate = rate
         buffer_seconds = 120

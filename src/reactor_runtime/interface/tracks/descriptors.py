@@ -76,13 +76,14 @@ def _resolve_tracks(cls: type, direction: TrackDirection) -> dict[str, TrackInfo
             rate = 0.0
             buffer_seconds: float | None = None
             if issubclass(annotation, Audio):
-                rate = float(annotation.sample_rate)
                 buffer_seconds = _buffer_seconds(name, annotation.buffer_seconds)
-                if buffer_seconds is not None and not _finite_positive(rate):
+                # Checked before the rate is coerced: float() would accept True or "24000".
+                if buffer_seconds is not None and not _finite_positive(annotation.sample_rate):
                     raise ValueError(
                         f"track {name!r}: buffer_seconds needs a positive sample_rate, "
                         f"got {annotation.sample_rate!r}"
                     )
+                rate = float(annotation.sample_rate)
             tracks[name] = TrackInfo(
                 name=name,
                 kind=annotation.kind,

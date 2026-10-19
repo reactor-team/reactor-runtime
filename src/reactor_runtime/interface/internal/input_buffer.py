@@ -66,15 +66,24 @@ class InputBuffer:
     session that ended keeps any frame already pushed for a later one, and a
     push only counts the frames it evicts from its own session.
 
+    A sample bound also caps the number of frames, so frames that carry no
+    samples, such as a byte stream's end frames, cannot grow it without limit.
+
     Args:
         maxlen: How many frames the buffer holds before evicting the oldest.
             Ignored when *max_samples* is set.
         max_samples: How many audio samples the buffer holds before evicting
             the oldest frames, or ``None`` to bound it by *maxlen* instead.
+        max_frames: Under a sample bound, how many frames the buffer holds
+            whatever their samples. Defaults to *max_samples*.
     """
 
     def __init__(
-        self, maxlen: int = DEFAULT_BUFFER_CAPACITY, *, max_samples: int | None = None
+        self,
+        maxlen: int = DEFAULT_BUFFER_CAPACITY,
+        *,
+        max_samples: int | None = None,
+        max_frames: int | None = None,
     ) -> None:
         # One mutex shared between the plain lock and the condition: simple
         # acquire/release reads take the lock, wait/notify paths take the
@@ -85,7 +94,11 @@ class InputBuffer:
         self._buffer: deque[_Entry] = deque()
         self._maxlen = maxlen
         self._max_samples = max_samples
+        self._max_frames = max_frames if max_frames is not None else (max_samples or maxlen)
         self._samples = 0
+        # Under a sample bound, the fewest samples a frame of this track has
+        # carried: whether n frames can ever fit is judged by it.
+        self._smallest: int | None = None
         # The sender of each frame a read took, and how long it waited in the
         # buffer in ms, until the step loop takes them (take_read_waits). A
         # model with its own run() may never take them, so they are bounded
@@ -94,9 +107,6 @@ class InputBuffer:
         self._read_waits: deque[tuple[ConnId | None, float]] = deque(maxlen=maxlen)
         self._total_received = 0
         self._closed = False
-        # Set when a push had to evict, so the buffer holds all it can until a
-        # read or a reset takes frames out.
-        self._full = False
 
     async def read(
         self,
@@ -129,25 +139,27 @@ class InputBuffer:
             BufferClosed: The track closed before *n* frames were available.
             TimeoutError: *timeout* elapsed first.
             ValueError: *n* exceeds the buffer's frame bound, or, under a
-                ``buffer_seconds`` bound, the buffer is full with fewer than
-                *n* frames, so *n* frames of that size never fit.
+                ``buffer_seconds`` bound, *n* frames of the smallest size the
+                track has delivered cannot fit in it.
         """
         return await asyncio.to_thread(self._read, n, timeout, mode)
 
     def _read(self, n: int, timeout: float | None, mode: ReadMode) -> list[InputFrame]:
-        if self._max_samples is None and n > self._maxlen:
-            raise ValueError(f"requested {n} frames but the buffer holds at most {self._maxlen}")
+        frame_bound = self._maxlen if self._max_samples is None else self._max_frames
+        if n > frame_bound:
+            raise ValueError(f"requested {n} frames but the buffer holds at most {frame_bound}")
         with self._condition:
             if not self._condition.wait_for(
-                lambda: len(self._buffer) >= n or self._closed or self._full, timeout=timeout
+                lambda: len(self._buffer) >= n or self._closed or self._cannot_hold(n),
+                timeout=timeout,
             ):
                 raise TimeoutError(f"timed out waiting for {n} frame(s) after {timeout}s")
             if len(self._buffer) < n:
                 if self._closed:
                     raise BufferClosed("buffer closed")
                 raise ValueError(
-                    f"requested {n} frames but the buffer is full at {len(self._buffer)}: "
-                    "the track's buffer_seconds holds fewer frames than that"
+                    f"requested {n} frames but the track's buffer_seconds holds fewer "
+                    f"than that of its smallest frames ({self._smallest} samples)"
                 )
             if mode is ReadMode.LATEST:
                 return self._take_latest(n)
@@ -159,14 +171,12 @@ class InputBuffer:
         self._note_waits(taken)
         self._buffer.clear()
         self._samples = 0
-        self._full = False
         return [entry.frame for entry in taken]
 
     def _take_fifo(self, n: int) -> list[InputFrame]:
         """Pop the *n* oldest frames. Caller holds the lock."""
         taken = [self._buffer.popleft() for _ in range(n)]
         self._note_waits(taken)
-        self._full = False
         if self._max_samples is not None:
             self._samples -= sum(_sample_count(entry.frame) for entry in taken)
         return [entry.frame for entry in taken]
@@ -233,7 +243,6 @@ class InputBuffer:
         with self._lock:
             self._buffer.clear()
             self._samples = 0
-            self._full = False
 
     def close(self) -> None:
         """Close the track, waking any blocked reader to raise :class:`BufferClosed`."""
@@ -258,12 +267,12 @@ class InputBuffer:
             self._closed = False
             if through_session is None:
                 self._buffer.clear()
+                self._smallest = None
             else:
                 self._buffer = deque(e for e in self._buffer if e.session > through_session)
             self._samples = sum(_sample_count(entry.frame) for entry in self._buffer)
             self._read_waits.clear()
             self._total_received = len(self._buffer)
-            self._full = False
 
     def push(self, frame: InputFrame, source: ConnId | None = None, session: int = 0) -> int:
         """Append a frame from the runtime thread, waking a blocked reader.
@@ -288,7 +297,11 @@ class InputBuffer:
             if self._closed:
                 return 0
             self._buffer.append(_Entry(session, frame, time.perf_counter(), source))
-            self._samples += _sample_count(frame) if self._max_samples is not None else 0
+            if self._max_samples is not None:
+                samples = _sample_count(frame)
+                self._samples += samples
+                if samples and (self._smallest is None or samples < self._smallest):
+                    self._smallest = samples
             evicted = 0
             while len(self._buffer) > 1 and self._over_bound():
                 gone = self._buffer.popleft()
@@ -296,10 +309,6 @@ class InputBuffer:
                     self._samples -= _sample_count(gone.frame)
                 if gone.session == session:
                     evicted += 1
-                self._full = True
-            if self._max_samples is not None and self._samples > self._max_samples:
-                # The newest frame alone is over the bound: nothing more fits.
-                self._full = True
             self._total_received += 1
             self._condition.notify_all()
             return evicted
@@ -307,8 +316,17 @@ class InputBuffer:
     def _over_bound(self) -> bool:
         """Whether the buffer holds more than its bound. Caller holds the lock."""
         if self._max_samples is not None:
-            return self._samples > self._max_samples
+            return self._samples > self._max_samples or len(self._buffer) > self._max_frames
         return len(self._buffer) > self._maxlen
+
+    def _cannot_hold(self, n: int) -> bool:
+        """Whether a sample bound can never hold *n* of the track's smallest frames.
+
+        Caller holds the lock.
+        """
+        if self._max_samples is None or self._smallest is None:
+            return False
+        return n * self._smallest > self._max_samples
 
 
 def _sample_count(frame: InputFrame) -> int:
