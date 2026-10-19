@@ -128,6 +128,9 @@ async def test_steady_stream(runtime: RuntimeProcess) -> None:
         reading, _ = runtime.settled_probe()
         # Checked on its own: teardown is not another streaming interval.
         final = sampler.sample(cycle=count, reading=reading, record=False)
+        # A smoke run judges what its intervals show on their own, as every
+        # scenario's smoke does, so it cannot fail a pull request on a count
+        # or a trend that only a long run can read.
         if ENDURANCE_SMOKE_CYCLES:
             metrics = [
                 assert_full_streams(received),
