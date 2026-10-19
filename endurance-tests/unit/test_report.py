@@ -137,3 +137,10 @@ def test_the_commit_under_test_is_the_swapped_in_runtime_source(
     assert git_commit_sha() == "b" * 40
     monkeypatch.delenv("ENDURANCE_COMMIT_SHA")
     assert git_commit_sha() == "a" * 40
+
+
+def test_a_metric_that_was_not_judged_reads_apart_from_a_stable_one() -> None:
+    result = MetricResult(
+        name="rss_slope", start=0, end=0, change=0, unit="MB", status="not_judged", detail=""
+    )
+    assert (result.emoji, result.status_label) == ("⚪", "Not judged")

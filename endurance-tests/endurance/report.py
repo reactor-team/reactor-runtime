@@ -90,7 +90,7 @@ class MetricResult:
     end: float
     change: float
     unit: str  # "MB" | "%" | "count" | "s" | ""
-    status: str  # "ok" | "fail"
+    status: str  # "ok" | "fail" | "not_judged"
     detail: str
     threshold: str | None = None
     # The first cycle a count was off, for the checks that track one.
@@ -102,12 +102,12 @@ class MetricResult:
     @property
     def emoji(self) -> str:
         """The status as a colored dot."""
-        return "🟢" if self.status == "ok" else "🔴"
+        return {"ok": "🟢", "fail": "🔴"}.get(self.status, "⚪")
 
     @property
     def status_label(self) -> str:
         """The status as a word."""
-        return "Stable" if self.status == "ok" else "FAILED"
+        return {"ok": "Stable", "fail": "FAILED"}.get(self.status, "Not judged")
 
     @property
     def mid_change(self) -> float | None:
