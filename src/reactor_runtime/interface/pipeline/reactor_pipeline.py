@@ -120,6 +120,9 @@ class ReactorPipeline(ReactorApp):
 
         while True:
             await self._live.wait()
+            # The session this run serves. The next one can start before the
+            # reset below, and its frames must survive it.
+            served = self._sessions_started
 
             gen = inference_fn()
             ended_cleanly = False
@@ -149,7 +152,7 @@ class ReactorPipeline(ReactorApp):
                     await self._close_generator(gen, is_async, ended_cleanly=ended_cleanly)
                 finally:
                     for buffer in self._input_buffers.values():
-                        buffer.reset()
+                        buffer.reset(through_session=served)
 
     async def _advance(self, gen: Any, is_async: bool) -> tuple[Output | None, float]:
         """Advance the generator by one yield, timing the work it took.

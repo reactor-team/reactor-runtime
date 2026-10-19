@@ -15,7 +15,7 @@ from reactor_runtime.core import (
     TransportTrackReading,
 )
 from reactor_runtime.runner.client_stats import frame_stages_detail, message_stages_detail
-from reactor_runtime.runner.runtime_stats import ModelOutput, to_detail
+from reactor_runtime.runner.runtime_stats import ModelInput, ModelOutput, to_detail
 
 
 class _Clock:
@@ -236,6 +236,53 @@ def test_a_reading_with_no_connections_carries_the_model_output_alone() -> None:
 
     assert detail["connection_stats"] == []
     assert len(detail["model_output"]) == 1
+    assert detail["model_input"] == []
+
+
+def test_a_reading_carries_each_input_track_as_the_client_sends_it() -> None:
+    detail = to_detail(
+        observed_at_ms=0,
+        model_output={},
+        output_kinds={},
+        readings=(),
+        model_input={"mic": {"frames_received": 130.0, "frames_dropped": 2.0}},
+        input_kinds={"mic": TrackKind.AUDIO},
+    )
+
+    assert detail["model_input"] == [
+        {
+            "track_name": "mic",
+            "kind": "audio",
+            # What the model receives, the client sends.
+            "direction": "sendonly",
+            "metrics": {"frames_received": 130.0, "frames_dropped": 2.0},
+        }
+    ]
+
+
+def test_model_input_counts_received_and_dropped_frames_per_track() -> None:
+    counts = ModelInput()
+    counts.declare(["mic", "camera"])
+    for dropped in (0, 0, 1, 2):
+        counts.received("mic", dropped)
+
+    assert counts.take() == {
+        "mic": {"frames_received": 4.0, "frames_dropped": 3.0},
+        # A declared track that received nothing reads zero rather than being absent.
+        "camera": {"frames_received": 0.0, "frames_dropped": 0.0},
+    }
+
+
+def test_model_input_counts_run_for_the_session_and_reset_with_it() -> None:
+    counts = ModelInput()
+    counts.declare(["mic"])
+    counts.received("mic", 1)
+    counts.take()
+    counts.received("mic", 0)
+
+    assert counts.take()["mic"] == {"frames_received": 2.0, "frames_dropped": 1.0}
+    counts.reset()
+    assert counts.take()["mic"] == {"frames_received": 0.0, "frames_dropped": 0.0}
 
 
 def test_values_json_cannot_carry_are_left_out() -> None:

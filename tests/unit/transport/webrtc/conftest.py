@@ -31,6 +31,7 @@ class FakePeer:
         self.closed = False
         self.protocol_version = ProtocolVersion.V0
         self.last_config: WebRtcConfig | None = None
+        self.last_tracks: TrackMap | None = None
         self.stats_fail_times = 0
         self.frame_stages = FrameStageWindow()
         self.message_stages = MessageStageWindow()
@@ -127,6 +128,7 @@ def factory_for() -> Callable[..., WebRtcPeerFactory]:
         ) -> tuple[FakePeer, SdpAnswer]:
             peer.protocol_version = version
             peer.last_config = config
+            peer.last_tracks = tracks
             return peer, SdpAnswer(answer)
 
         return cast(WebRtcPeerFactory, factory)

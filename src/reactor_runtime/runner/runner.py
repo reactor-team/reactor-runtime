@@ -80,7 +80,7 @@ from reactor_runtime.runner import client_stats, runtime_stats
 from reactor_runtime.runner.client_stats import ClientStatsGate
 from reactor_runtime.runner.connection_manager import ConnectionManager
 from reactor_runtime.runner.offer_epochs import OfferEpochs
-from reactor_runtime.runner.runtime_stats import ModelOutput
+from reactor_runtime.runner.runtime_stats import ModelInput, ModelOutput
 from reactor_runtime.runner.session_start import (
     InvalidSessionStartError,
     SessionStart,
@@ -252,6 +252,8 @@ class Runner(ServiceComponent, ConnectionSink):
         # adds to each connection's reading beside its transport's.
         self._stages = RunnerStages()
         self._output_kinds: dict[str, TrackKind] = {}
+        self._model_input = ModelInput()
+        self._input_kinds: dict[str, TrackKind] = {}
         self._runtime_stats_interval = runtime_stats.INTERVAL_SECONDS
         self._runtime_stats_task: asyncio.Task[None] | None = None
         self._events = EventStream()
@@ -433,6 +435,12 @@ class Runner(ServiceComponent, ConnectionSink):
         }
         self._model_metrics.declare(self._output_kinds.keys())
         self._model_output.declare(self._output_kinds.keys())
+        self._input_kinds = {
+            name: info.kind
+            for name, info in contract.tracks.items()
+            if info.direction is TrackDirection.IN
+        }
+        self._model_input.declare(self._input_kinds.keys())
         self._sm.send(SessionEvent.INITIALIZATION_SUCCESS)
         logger.info(
             "model loaded; session ready",
@@ -584,9 +592,19 @@ class Runner(ServiceComponent, ConnectionSink):
         task.add_done_callback(self._inbound.discard)
 
     def media_received(self, conn_id: ConnId, track: str, frame: InputFrame) -> None:
-        """Route an inbound media frame to its track on the model."""
+        """Route an inbound media frame to its track on the model.
+
+        Frames the track's buffer drops to make room are counted for the
+        session's ``runtime_stats``, so input the model never read is visible.
+        Each frame is pushed for the live session, so a frame of an earlier
+        session that the push evicts is not counted against this one.
+        """
         if self._bridge is not None:
-            self._bridge.push_media(track, frame, conn_id)
+            dropped = self._bridge.push_media(
+                track, frame, source=conn_id, session=self._sessions_posted
+            )
+            if track in self._input_kinds:
+                self._model_input.received(track, dropped)
 
     def keepalive(self, conn_id: ConnId) -> None:
         """Note liveness for a connection."""
@@ -1921,6 +1939,7 @@ class Runner(ServiceComponent, ConnectionSink):
             self._stages.reset()
             with self._step_recipients_lock:
                 self._step_recipients.clear()
+            self._model_input.reset()
             bridge.dispatch_reactor_event(
                 SessionStarted(
                     self._session_id,
@@ -2035,6 +2054,8 @@ class Runner(ServiceComponent, ConnectionSink):
                 model_output=self._model_output.take(),
                 output_kinds=self._output_kinds,
                 readings=self._stages.merge(self._connections.take_stages()),
+                model_input=self._model_input.take(),
+                input_kinds=self._input_kinds,
             ),
         )
 

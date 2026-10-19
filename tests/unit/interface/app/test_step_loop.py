@@ -38,6 +38,7 @@ from reactor_runtime.core.model import (
     StartingInputApplied,
 )
 from reactor_runtime.core.values import CompletedStep, ConnId, InputFrame, MediaChunk
+from reactor_runtime.interface.internal.input_buffer import ReadMode
 from reactor_runtime.interface.internal.reactor_core import CommandEnvelope, ReactorCore
 from reactor_runtime.interface.model.contract import ModelContract
 
@@ -1055,3 +1056,34 @@ async def test_a_steps_report_carries_the_time_of_each_of_its_parts() -> None:
     assert reports
     assert set(reports[0].stages) == {"process_input", "generate", "process_output"}
     assert all(ms >= 0 for ms in reports[0].stages.values())
+
+
+class WithCamera(OnlyGenerate):
+    media: Camera
+
+
+async def test_frames_pushed_for_the_next_session_survive_the_last_sessions_reset(
+    register_model: Callable[[type], None],
+) -> None:
+    """A session can start before the model has finished the last one.
+
+    The runner pushes the new session's frames as soon as it starts; the model
+    resets its input buffers only once its own loop sees the old session end.
+    """
+    register_model(WithCamera)
+    app = WithCamera()
+    _ready(app)
+    task = await _run_for(app, 0)
+    await _go_live(app)
+    await asyncio.sleep(0.01)
+
+    app.push_media("webcam", InputFrame(data=np.zeros((2, 2, 3), np.uint8), pts=1.0), session=1)
+    app.push_media("webcam", InputFrame(data=np.zeros((2, 2, 3), np.uint8), pts=2.0), session=2)
+    await app._dispatch_reactor_event(SessionEnded("s", EndReason.STOPPED))
+    await asyncio.sleep(0.02)
+
+    buffer = app._input_buffers["webcam"]
+    kept = buffer.try_read(buffer.available, ReadMode.FIFO)
+    assert kept is not None
+    assert [frame.pts for frame in kept] == [2.0]
+    await _stop(task)

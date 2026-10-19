@@ -327,7 +327,10 @@ class WebRtcRouter(TransportRouter):
             webrtc_version: Annotated[str | None, Header(alias="reactor-webrtc-version")] = None,
         ) -> OfferAccepted:
             runner.require_session_running(sid)
-            tracks = TrackMap.from_client(entry.model_dump() for entry in req.track_mapping)
+            declared = runner.track_map()
+            tracks = TrackMap.from_client(
+                entry.model_dump() for entry in req.track_mapping
+            ).with_rates({name: float(entry["rate"]) for name, entry in declared.items()})
             conn_id = ConnId(cid)
             runner.offer_admitted(conn_id)
             try:

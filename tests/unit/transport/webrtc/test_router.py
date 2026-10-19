@@ -48,7 +48,10 @@ class FakeRunner:
         self.admitted.append(conn_id)
 
     def track_map(self) -> dict[str, Any]:
-        return {"tracks": [{"name": "main_video", "kind": "video"}]}
+        return {
+            "main_video": {"kind": "video", "direction": "out", "rate": 0.0},
+            "agent_audio": {"kind": "audio", "direction": "in", "rate": 24_000.0},
+        }
 
     def connection_opened(self, conn: Connection) -> None:
         self.opened.append(conn.id)
@@ -132,7 +135,7 @@ def test_register_mints_id_and_returns_track_map(
     assert response.status_code == 201
     body = response.json()
     assert body["connection_id"] == 5001
-    assert body["track_map"] == {"tracks": [{"name": "main_video", "kind": "video"}]}
+    assert body["track_map"] == FakeRunner().track_map()
 
 
 def test_ice_servers_render_configured_servers(
@@ -437,3 +440,20 @@ def test_offer_past_the_connection_ceiling_reports_503(
         # A second, distinct connection is past the single-slot ceiling.
         second = client.post(f"{_PREFIX}/connections/6001/sdp_params", json={"sdp_offer": "two"})
     assert second.status_code == 503
+
+
+def test_an_offers_tracks_carry_the_rates_the_model_declares(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+) -> None:
+    mapping = [{"mid": "0", "name": "agent_audio", "kind": "audio", "direction": "sendonly"}]
+    with _client(FakeRunner(), fake_peer, factory_for) as client:
+        client.post(
+            f"{_PREFIX}/connections/5001/sdp_params",
+            json={"sdp_offer": "the-offer", "track_mapping": mapping},
+        )
+        _poll_answer(client, 5001)
+
+    assert fake_peer.last_tracks is not None
+    [track] = fake_peer.last_tracks.tracks
+    assert (track.info.name, track.info.rate) == ("agent_audio", 24_000.0)
