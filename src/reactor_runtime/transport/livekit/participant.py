@@ -28,7 +28,7 @@ calls it on the participant. RPC calls go out through a queue of their own, in
 order, so a slow answer never holds up the protocol's messages. At most
 :data:`MAX_PENDING_CALLS` calls wait; past that, a new call is dropped and
 logged. A method the participant answers is unsupported is not called on it
-again.
+for :data:`UNSUPPORTED_RETRY_SECONDS`.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -77,6 +78,13 @@ MAX_INBOUND_BYTES = 2 * MAX_STREAMED_MESSAGE_BYTES
 
 MAX_OUTBOX_BYTES = 2 * MAX_STREAMED_MESSAGE_BYTES
 """How many bytes may wait to be sent to one participant; a message past it is dropped."""
+
+UNSUPPORTED_RETRY_SECONDS = 30.0
+"""How long a method a participant answers is unsupported goes uncalled on it.
+
+Participants often register their methods a moment after they join, so an
+early answer is not taken as final.
+"""
 
 MAX_PENDING_CALLS = 64
 """How many RPC calls may wait to be made on one participant; a call past it is dropped."""
@@ -176,7 +184,8 @@ class ParticipantConnection:
         self._outbox_full = _Warning()
         self._inbound_full = _Warning()
         self._failed_methods: set[str] = set()
-        self._unsupported: set[str] = set()
+        # Each method the participant answered is unsupported, and when.
+        self._unsupported: dict[str, float] = {}
         self._calls_full = _Warning()
 
     @property
@@ -225,9 +234,13 @@ class ParticipantConnection:
     def message_sent(self, name: str, data: Mapping[str, Any], request_id: str | None) -> None:
         """Answer the RPC call a reply belongs to, or call the methods a message maps to."""
         payload = json.dumps(dict(data))
-        if request_id is not None and request_id in self._replies:
-            self._resolve(request_id, payload)
-            return
+        if request_id is not None:
+            if request_id in self._replies:
+                self._resolve(request_id, payload)
+                return
+            if request_id.startswith("rpc-"):
+                # The reply to an RPC call whose caller stopped waiting.
+                return
         for method in self._outbound.get(name, ()):
             self._call_soon(method, payload)
 
@@ -336,7 +349,7 @@ class ParticipantConnection:
 
     def _admit_call(self, method: str, payload: str) -> None:
         """Queue an RPC call, on the loop, unless the method is unsupported or the queue is full."""
-        if method in self._unsupported:
+        if self._is_unsupported(method):
             return
         if self._calls.qsize() >= MAX_PENDING_CALLS:
             self._calls_full.log(
@@ -353,9 +366,20 @@ class ParticipantConnection:
             item = await self._calls.get()
             if item is None:
                 return
+            if self._is_unsupported(item[0]):
+                continue
             await self._call(*item)
             if self._calls.qsize() < MAX_PENDING_CALLS // 2:
                 self._calls_full.clear()
+
+    def _is_unsupported(self, method: str) -> bool:
+        marked = self._unsupported.get(method)
+        if marked is None:
+            return False
+        if time.monotonic() - marked >= UNSUPPORTED_RETRY_SECONDS:
+            del self._unsupported[method]
+            return False
+        return True
 
     async def _call(self, method: str, payload: str) -> None:
         """Call *method* on the participant, retrying a failure that may be transient."""
@@ -367,7 +391,13 @@ class ParticipantConnection:
                 return
             except rtc.RpcError as error:
                 if error.code == rtc.RpcError.ErrorCode.UNSUPPORTED_METHOD:
-                    self._unsupported.add(method)
+                    self._unsupported[method] = time.monotonic()
+                    logger.info(
+                        "participant %r does not support %r; not calling it for %.0f s",
+                        self.identity,
+                        method,
+                        UNSUPPORTED_RETRY_SECONDS,
+                    )
                     return
                 if error.code in _TRANSIENT_RPC_ERRORS and attempt + 1 < _RPC_ATTEMPTS:
                     await asyncio.sleep(_RPC_RETRY_SECONDS * (attempt + 1))

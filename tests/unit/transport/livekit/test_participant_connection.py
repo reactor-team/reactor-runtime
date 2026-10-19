@@ -513,6 +513,50 @@ async def test_a_message_that_is_not_mapped_calls_nothing() -> None:
     conn.drop()
 
 
+async def test_a_method_marked_unsupported_is_called_again_once_the_mark_expires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn, local = make()
+    local.rpc_errors.append(
+        rtc.RpcError(rtc.RpcError.ErrorCode.UNSUPPORTED_METHOD, "not registered yet")
+    )
+    conn.message_sent("playback_finished", {}, None)
+    await _settle()
+
+    monkeypatch.setattr(participant_module, "UNSUPPORTED_RETRY_SECONDS", 0.0)
+    conn.message_sent("playback_finished", {}, None)
+    await _settle()
+
+    assert len(local.calls) == 2
+    conn.drop()
+
+
+async def test_calls_queued_behind_an_unsupported_answer_are_skipped() -> None:
+    conn, local = make()
+    local.answering.clear()
+    local.rpc_errors.append(
+        rtc.RpcError(rtc.RpcError.ErrorCode.UNSUPPORTED_METHOD, "no such method")
+    )
+    for _ in range(3):
+        conn.message_sent("playback_finished", {}, None)
+    await _settle()
+    local.answering.set()
+    await _settle(20)
+
+    assert len(local.calls) == 1
+    conn.drop()
+
+
+async def test_a_reply_to_an_rpc_call_that_stopped_waiting_calls_nothing() -> None:
+    conn, local = make()
+
+    conn.message_sent("playback_finished", {"playback_position": 1.0}, "rpc-gone")
+    await _settle()
+
+    assert local.calls == []
+    conn.drop()
+
+
 async def test_a_participant_without_the_method_is_not_called_again() -> None:
     conn, local = make()
     local.rpc_errors.append(
