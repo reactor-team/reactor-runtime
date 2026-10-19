@@ -124,6 +124,8 @@ class FakeRoomSession:
         self.started = False
         self.left = False
         self.retired = False
+        # An abandoned join still connecting or leaving.
+        self.leaving = False
         _built.append(self)
 
     @property
@@ -133,6 +135,10 @@ class FakeRoomSession:
     @property
     def active(self) -> bool:
         return self.state in (RoomState.JOINING, RoomState.OPEN)
+
+    @property
+    def settled(self) -> bool:
+        return not self.active and not self.leaving
 
     def start(self) -> None:
         self.started = True
@@ -239,6 +245,25 @@ async def test_concurrent_opens_while_an_ended_sessions_room_retires_make_one_ro
 
     assert statuses == [202, 409]
     assert len(rooms) == 2
+
+
+def test_a_room_whose_abandoned_join_still_runs_keeps_the_session_at_409(
+    rooms: list[FakeRoomSession],
+) -> None:
+    client = _client(FakeRunner())
+    client.post(_CONNECTIONS, json=_ROOM)
+    rooms[0].state = RoomState.FAILED
+    rooms[0].leaving = True
+
+    refused = client.post(_CONNECTIONS, json=_ROOM)
+    rooms[0].leaving = False
+    again = client.post(_CONNECTIONS, json=_ROOM)
+
+    assert refused.status_code == 409
+    assert refused.json() == {
+        "detail": "the session's last room connection is still leaving the room"
+    }
+    assert again.status_code == 202
 
 
 def test_a_room_connection_can_open_again_once_the_last_one_ended(

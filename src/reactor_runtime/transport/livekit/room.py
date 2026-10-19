@@ -93,6 +93,7 @@ class RoomSession:
         self._connection: RoomConnection | None = None
         self._join: asyncio.Task[None] | None = None
         self._closing: set[asyncio.Task[None]] = set()
+        self._attempt: asyncio.Task[RoomConnection] | None = None
         self._room.on("disconnected", self._on_disconnected)
 
     @property
@@ -104,6 +105,17 @@ class RoomSession:
     def joining(self) -> bool:
         """Whether the join is still in flight."""
         return self.state is RoomState.JOINING
+
+    @property
+    def settled(self) -> bool:
+        """Whether the room connection is over and nothing of it still connects or leaves.
+
+        A join that timed out or was left keeps its attempt running until it
+        settles, and leaves the room after it: until then the room connection
+        still holds the room, and its identity in it.
+        """
+        pending = [self._join, self._attempt, *self._closing]
+        return not self.active and all(task is None or task.done() for task in pending)
 
     @property
     def active(self) -> bool:
@@ -139,6 +151,7 @@ class RoomSession:
         attempt = asyncio.get_running_loop().create_task(
             self._connect_and_publish(), name=f"livekit-attempt-{self.conn_id}"
         )
+        self._attempt = attempt
         done, _ = await asyncio.wait({attempt}, timeout=JOIN_TIMEOUT_SECONDS)
         if not done:
             attempt.add_done_callback(self._leave_when_settled)

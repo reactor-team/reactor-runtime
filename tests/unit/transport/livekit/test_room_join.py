@@ -3,8 +3,12 @@ import gc
 from typing import Any, cast
 
 import pytest
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+from tests.unit.transport.livekit.test_livekit_router import FakeRunner as RouterRunner
 
 from reactor_runtime.core import ConnId, TrackDirection, TrackKind
+from reactor_runtime.transport.livekit import LiveKitRouter
 from reactor_runtime.transport.livekit import room as room_module
 from reactor_runtime.transport.livekit.room import RoomSession, RoomState
 
@@ -214,3 +218,64 @@ async def test_retiring_a_join_ends_it_with_the_session() -> None:
     assert (session.state, session.reason) == (RoomState.CLOSED, "the session ended")
     assert room.disconnects == 1
     assert control.opened == []
+
+
+@pytest.mark.usefixtures("short_deadline")
+async def test_a_timed_out_join_is_settled_only_once_its_attempt_has_left() -> None:
+    publish = Gate(open_=False)
+    room, control = FakeRoom(publish=publish), FakeControl(_VIDEO_OUT)
+    session = _session(room, control)
+
+    session.start()
+    await asyncio.sleep(0.1)
+    assert session.state is RoomState.FAILED
+    assert not session.settled
+
+    publish.release()
+    await _settle()
+
+    assert room.disconnects == 1
+    assert session.settled
+
+
+async def test_a_join_left_mid_connect_is_settled_only_once_it_has_left() -> None:
+    connect = Gate(open_=False)
+    room, control = FakeRoom(connect=connect), FakeControl()
+    session = _session(room, control)
+    session.start()
+    await _settle()
+
+    await session.leave()
+    assert not session.settled
+
+    connect.release()
+    await _settle()
+
+    assert room.disconnects == 1
+    assert session.settled
+
+
+@pytest.mark.usefixtures("short_deadline")
+async def test_the_session_reopens_a_timed_out_room_only_once_the_first_join_has_left(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect = Gate(open_=False)
+    first = FakeRoom(connect=connect)
+    rooms = iter([first, FakeRoom()])
+    monkeypatch.setattr(room_module.rtc, "Room", lambda: next(rooms))
+    app = FastAPI()
+    LiveKitRouter().mount(app, cast(Any, RouterRunner()))
+    path = "/sessions/s1/transport/livekit/connections"
+    body = {"url": "wss://rooms.example", "token": "a-token"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://runtime") as client:
+        assert (await client.post(path, json=body)).status_code == 202
+        await asyncio.sleep(0.1)  # past the deadline: the join failed, its connect still runs
+
+        while_leaving = await client.post(path, json=body)
+        connect.release()
+        await _settle()
+        after = await client.post(path, json=body)
+
+    assert while_leaving.status_code == 409
+    assert first.disconnects == 1
+    assert after.status_code == 202

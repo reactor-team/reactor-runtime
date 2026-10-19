@@ -153,11 +153,18 @@ class LiveKitRouter(TransportRouter):
             async with self._opening:
                 epoch = runner.session_epoch()
                 previous = self._room
-                if previous is not None and previous.active:
-                    if self._room_epoch == epoch:
+                if previous is not None and self._room_epoch == epoch:
+                    if previous.active:
                         raise HTTPException(
                             status_code=409, detail="the session already has a room connection"
                         )
+                    if not previous.settled:
+                        # A join that timed out or was left still holds the room until it settles.
+                        raise HTTPException(
+                            status_code=409,
+                            detail="the session's last room connection is still leaving the room",
+                        )
+                elif previous is not None and previous.active:
                     # Admitted by a session that has ended: its room is retired, not reused.
                     await previous.retire()
                 from reactor_runtime.transport.livekit.room import RoomSession
