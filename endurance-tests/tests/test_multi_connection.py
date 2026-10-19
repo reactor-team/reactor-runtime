@@ -82,7 +82,12 @@ async def test_multi_connection(runtime: RuntimeProcess) -> None:
 
         try:
             received = [await join(publisher)]
-            received += await asyncio.gather(*(join(viewer) for viewer in viewers))
+            # A task group: if one viewer fails to join, the others are
+            # cancelled and awaited before the cleanup below runs, so none
+            # can join after it and stream on into the next cycle.
+            async with asyncio.TaskGroup() as group:
+                joins = [group.create_task(join(viewer)) for viewer in viewers]
+            received += [task.result() for task in joins]
             await expect_registered(1 + VIEWERS, "all joined")
             if n % 2:
                 await leave(publisher)
