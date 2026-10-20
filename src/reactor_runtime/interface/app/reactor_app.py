@@ -93,6 +93,7 @@ from reactor_runtime.interface.internal.reactor_core import (
     ReactorCore,
     RequestId,
     StepEnvelope,
+    StepWithdrawal,
 )
 from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.interface.tracks import Output
@@ -164,6 +165,7 @@ class ReactorApp(ReactorCore):
     _gate_drops: int
     _stepped: bool
     _steps_accepted: int
+    _step_limit: int | None
     _pending_step: tuple[StepEnvelope, asyncio.Future[None]] | None
     _failed_step_calls: dict[tuple[ConnId, str], str]
     _step_posted: asyncio.Event
@@ -531,6 +533,7 @@ class ReactorApp(ReactorCore):
         self._gate_drops = 0
         self._stepped = False
         self._steps_accepted = 0
+        self._step_limit = None
         self._pending_step = None
         self._step_posted = asyncio.Event()
         self._failed_step_calls = {}
@@ -557,6 +560,8 @@ class ReactorApp(ReactorCore):
                 await self._dispatch_command(item)
             elif isinstance(item, StepEnvelope):
                 await self._dispatch_step(item)
+            elif isinstance(item, StepWithdrawal):
+                self._failed_step_calls.pop((item.conn_id, item.request_id), None)
             else:
                 await self._dispatch_reactor_event(item)
 
@@ -566,9 +571,10 @@ class ReactorApp(ReactorCore):
         The queue is not drained while the step runs, so no command, lifecycle
         hook, or later request is dispatched between its frames and its step. A
         request that arrives while no session is running is answered not ready,
-        and one in a session that does not step is refused, both at once. One
-        whose state key or command handler failed is refused with that failure,
-        and its step does not run.
+        and one in a session that does not step is refused, both at once, as is
+        one that arrives after the session took its ``steps``. One whose state
+        key or command handler failed is refused with that failure, and its step
+        does not run.
         """
         failed = self._failed_step_calls.pop((request.conn_id, request.request_id), None)
         if failed is not None:
@@ -586,6 +592,15 @@ class ReactorApp(ReactorCore):
             return
         if not self._stepped:
             self._refuse_step(request, self._sessions_started, "the session is not stepped")
+            return
+        # The runtime ends the session once its last step is reported, but
+        # requests already queued behind that step reach here first.
+        if self._step_limit is not None and self._steps_accepted >= self._step_limit:
+            self._refuse_step(
+                request,
+                self._sessions_started,
+                f"the session already took its {self._step_limit} steps",
+            )
             return
         done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self._pending_step = (request, done)
@@ -755,6 +770,7 @@ class ReactorApp(ReactorCore):
             self._starting_input_pending = event.starting_input
             self._stepped = event.stepped
             self._steps_accepted = 0
+            self._step_limit = event.steps
             self._update_live()
             # The state is written under the step lock, hook or no hook: a step
             # suspended in one of its hooks holds the lock and must not see the

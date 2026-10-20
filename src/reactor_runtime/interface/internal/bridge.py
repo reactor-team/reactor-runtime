@@ -34,6 +34,7 @@ from reactor_runtime.interface.internal.reactor_core import (
     StepEnvelope,
     StepRefusalSink,
     StepSink,
+    StepWithdrawal,
 )
 from reactor_runtime.interface.model.contract import ContractError, ModelContract
 
@@ -191,6 +192,18 @@ class ModelBridge:
                 request_id=request_id,
             )
         )
+
+    def withdraw_step(self, *, conn_id: ConnId, request_id: RequestId) -> None:
+        """Withdraw a step request after some of its calls were submitted, in place of its step.
+
+        The withdrawal reaches the model behind those calls, so the model
+        drops what it keeps for the request once they have run.
+
+        Args:
+            conn_id: The connection that asked for the step.
+            request_id: The request id of the refused request.
+        """
+        self._model.withdraw_step(StepWithdrawal(conn_id, request_id))
 
     # -- inbound: reactor-authoritative, trusted --------------------------
 

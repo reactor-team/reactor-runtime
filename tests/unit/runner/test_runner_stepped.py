@@ -399,6 +399,40 @@ async def test_a_state_value_whose_upload_never_arrives_refuses_the_step(
     assert _journalled_steps(runner) == []
 
 
+async def test_a_request_waiting_for_an_upload_holds_back_the_requests_after_it(
+    runner: Runner,
+) -> None:
+    conn = await _stepped(runner)
+    upload_id = runner.uploads.create_slot("cat.png", "image/png", 3)
+    _send(runner, conn, _request_step("r1", state={"image": {"upload_id": upload_id}}))
+    _send(runner, conn, _request_step("r2"))
+    await asyncio.sleep(0.05)
+    assert conn.sent == []
+
+    runner.uploads.put(upload_id, b"cat")
+    await _until(lambda: len(conn.sent) == 2)
+
+    assert [(m.request_id, m.step_result.index) for m in conn.replies()] == [("r1", 1), ("r2", 2)]
+    assert runner._step_order == {}
+
+
+async def test_one_connections_upload_wait_does_not_hold_back_another_connection(
+    runner: Runner,
+) -> None:
+    conn = await _stepped(runner)
+    other = V1Connection(1003)
+    runner.connection_opened(other)
+    upload_id = runner.uploads.create_slot("cat.png", "image/png", 3)
+    _send(runner, conn, _request_step("r1", state={"image": {"upload_id": upload_id}}))
+    _send(runner, other, _request_step("r2"))
+    await _until(lambda: len(other.sent) == 1)
+
+    assert conn.sent == []
+    assert other.replies()[0].step_result.index == 1
+    runner.uploads.put(upload_id, b"cat")
+    await _until(lambda: len(conn.sent) == 1)
+
+
 # -- refusals --------------------------------------------------------------------
 
 
@@ -574,6 +608,25 @@ async def test_an_unexpected_handler_error_answers_its_step_without_its_detail(
     assert models[-1].inputs == []
 
 
+async def test_a_refused_request_after_a_failed_handler_leaves_nothing_behind(
+    runner: Runner,
+) -> None:
+    conn = await _stepped(runner)
+    for index in range(5):
+        _send(
+            runner,
+            conn,
+            _request_step(f"r{index}", commands=[("reject_note", {}), ("note", {"text": 3})]),
+        )
+    _send(runner, conn, _request_step("last"))
+    await _until(lambda: len(conn.sent) == 6)
+
+    *refused, last = conn.replies()
+    assert [_refusal(m).split(":")[0] for m in refused] == ["commands[1] is refused"] * 5
+    assert last.step_result.index == 1
+    assert models[-1]._failed_step_calls == {}
+
+
 async def test_a_command_failure_answers_only_its_own_step(runner: Runner) -> None:
     conn = await _stepped(runner)
     _send(runner, conn, _request_step("r1", commands=[("reject_note", {})]))
@@ -635,6 +688,26 @@ async def test_a_stepped_session_closes_after_its_steps(runner: Runner) -> None:
     await _until(lambda: runner._sm.current_state is SessionState.READY)
     results = [m for m in conn.replies() if m.WhichOneof("payload") == "step_result"]
     assert [m.step_result.index for m in results] == [1, 2]
+
+
+async def test_requests_queued_beyond_the_sessions_steps_are_not_generated(
+    runner: Runner,
+) -> None:
+    conn = await _stepped(runner, steps=1)
+    for index in range(10):
+        _send(runner, conn, _request_step(f"r{index}"))
+    await _until(lambda: len(conn.sent) == 10)
+    await _until(lambda: runner._sm.current_state is SessionState.READY)
+
+    first, *rest = conn.replies()
+    assert (first.request_id, first.step_result.index) == ("r0", 1)
+    assert {m.step_result.failure_code for m in rest} <= {
+        step_pb2.STEP_FAILURE_CODE_REFUSED,
+        step_pb2.STEP_FAILURE_CODE_NOT_READY,
+    }
+    assert all(m.step_result.index == 0 for m in rest)
+    assert len(models[-1].inputs) == 1
+    assert runner._steps_completed == 1
 
 
 async def test_a_stepped_session_with_steps_waits_for_a_client(runner: Runner) -> None:

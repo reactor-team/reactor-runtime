@@ -23,7 +23,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
 from typing import Any, Protocol
 
 from reactor_runtime.codes import INVALID_COMMAND, UNRESOLVED_UPLOAD
@@ -342,6 +342,9 @@ class Runner(ServiceComponent, ConnectionSink):
         self._bridge: ModelBridge | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._inbound: set[asyncio.Task[None]] = set()
+        # Each connection's step requests run one at a time, in arrival order:
+        # its lock, and how many requests hold or wait for it.
+        self._step_order: dict[ConnId, tuple[asyncio.Lock, int]] = {}
         self._teardown: set[asyncio.Task[None]] = set()
         self._orphan_task: asyncio.Task[None] | None = None
         self._session_id = SESSION_ID
@@ -1650,10 +1653,34 @@ class Runner(ServiceComponent, ConnectionSink):
 
         A request waits behind the starting input as a client's command does,
         so the model sees the starting input, and its ``StartingInputApplied``,
-        before the first requested step.
+        before the first requested step. A connection's requests are submitted
+        one at a time, in the order they arrived, so one that waits for an
+        upload holds back the requests sent after it.
         """
-        await self._starting_input_done.wait()
-        await self._submit_step(step)
+        async with self._in_step_order(step.conn_id):
+            await self._starting_input_done.wait()
+            await self._submit_step(step)
+
+    @contextlib.asynccontextmanager
+    async def _in_step_order(self, conn_id: ConnId) -> AsyncIterator[None]:
+        """Hold *conn_id*'s step order until the request in hand is submitted.
+
+        Each message is handled on its own task, and the tasks start in the
+        order the messages arrived, so taking the lock before the first await
+        queues the requests in that order. The entry goes once no request of the
+        connection holds or waits for it.
+        """
+        lock, users = self._step_order.get(conn_id, (asyncio.Lock(), 0))
+        self._step_order[conn_id] = (lock, users + 1)
+        try:
+            async with lock:
+                yield
+        finally:
+            _, users = self._step_order[conn_id]
+            if users == 1:
+                del self._step_order[conn_id]
+            else:
+                self._step_order[conn_id] = (lock, users - 1)
 
     async def _submit_step(
         self, step: InboundStep, *, upload_wait: float = _UPLOAD_RESOLVE_TIMEOUT_SECONDS
@@ -1677,12 +1704,23 @@ class Runner(ServiceComponent, ConnectionSink):
         when an entry's upload does not arrive or it fails the contract, or
         when a media input frame names a track the model does not take or
         cannot be decoded; the entries submitted before the refused one stay
-        applied. Neither is journalled or counted toward the session's steps.
+        applied, and the model is told the step is withdrawn. Neither is
+        journalled or counted toward the session's steps.
         A request with no entries and no frames runs a step on the model's
         current state.
         """
-        if self._bridge is None:
+        bridge = self._bridge
+        if bridge is None:
             return
+        posted = False
+
+        def refuse(reason: str) -> None:
+            # Calls already posted are followed by the withdrawal instead of the
+            # step, so what the model keeps for the request is let go.
+            if posted:
+                bridge.withdraw_step(conn_id=step.conn_id, request_id=step.request_id)
+            self._refuse_step(step.conn_id, step.request_id, reason)
+
         # The session's state first: the start it would read the mode from
         # outlives its session, so outside one it is the previous session's.
         if self._sm.current_state not in _RUNNING_STATES:
@@ -1720,12 +1758,12 @@ class Runner(ServiceComponent, ConnectionSink):
                 self._command_metrics.unresolved_upload(label)
                 refusal = f"{key} references an unresolved upload"
                 self._sm.send(SessionEvent.ERROR, message=f"step request: {refusal}")
-                self._refuse_step(step.conn_id, step.request_id, refusal)
+                refuse(refusal)
                 return
             started_at = step.received_at
             if uploads or inline:
                 started_at += time.monotonic() - resolve_started
-            outcome = await self._bridge.submit_command(
+            outcome = await bridge.submit_command(
                 name,
                 resolved,
                 conn_id=step.conn_id,
@@ -1736,16 +1774,17 @@ class Runner(ServiceComponent, ConnectionSink):
                 self._command_metrics.rejected(label, since=started_at)
                 refusal = _refused(key, outcome)
                 self._sm.send(SessionEvent.ERROR, message=f"step request: {refusal}")
-                self._refuse_step(step.conn_id, step.request_id, refusal)
+                refuse(refusal)
                 return
+            posted = True
             self._command_metrics.accepted(label, since=started_at)
             self._sm.send(SessionEvent.COMMAND, name=name, args=args, conn_id=step.conn_id)
         try:
             media_input = self._decode_media_input(step.media_input)
         except _StepInputError as error:
-            self._refuse_step(step.conn_id, step.request_id, str(error))
+            refuse(str(error))
             return
-        self._bridge.submit_step(media_input, conn_id=step.conn_id, request_id=step.request_id)
+        bridge.submit_step(media_input, conn_id=step.conn_id, request_id=step.request_id)
 
     def _decode_media_input(
         self, media_input: tuple[step_pb2.TrackFrames, ...]
@@ -2455,6 +2494,7 @@ class Runner(ServiceComponent, ConnectionSink):
                     self._session_id,
                     starting_input=self._session_start.starting_input is not None,
                     stepped=self._session_start.generation is Generation.STEPPED,
+                    steps=self._session_start.steps,
                 )
             )
         if transition.is_session_end:

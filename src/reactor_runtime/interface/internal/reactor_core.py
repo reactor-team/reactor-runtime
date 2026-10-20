@@ -312,8 +312,24 @@ class StepEnvelope:
     request_id: RequestId
 
 
-Inbound = CommandEnvelope | StepEnvelope | ReactorEvent
-"""One item of the model's inbound queue: a command, a step request, or a reactor event."""
+@dataclass(frozen=True)
+class StepWithdrawal:
+    """A step request the runtime refused after posting some of its calls.
+
+    It follows those calls on the inbound queue, in place of the step, so the
+    model lets go of what it keeps for the request.
+
+    Attributes:
+        conn_id: The connection that asked for the step.
+        request_id: The request id of the refused step request.
+    """
+
+    conn_id: ConnId
+    request_id: RequestId
+
+
+Inbound = CommandEnvelope | StepEnvelope | StepWithdrawal | ReactorEvent
+"""One item of the model's inbound queue: a command, a step request, its withdrawal, or an event."""
 
 
 class ReactorCore:
@@ -598,6 +614,10 @@ class ReactorCore:
         after every command posted before it.
         """
         self._enqueue(step)
+
+    def withdraw_step(self, withdrawal: StepWithdrawal) -> None:
+        """Enqueue the withdrawal of a step request whose calls were posted without its step."""
+        self._enqueue(withdrawal)
 
     def post_reactor_event(self, event: ReactorEvent) -> None:
         """Enqueue a reactor-authoritative event onto the model loop."""
