@@ -147,3 +147,21 @@ def test_send_and_stall_time_of_a_message_still_leaving_waits_for_its_window() -
     assert stages["rest_native"].messages == 1
     assert math.isclose(stages["rest_native"].total_ms, 5.0)
     assert math.isclose(stages["stall"].total_ms, 12.0)
+
+
+def test_a_new_channel_drops_the_send_and_stall_time_held_from_the_old_one() -> None:
+    window = MessageStageWindow()
+    start = ChunkingSample(messages_sent=5)
+    leaving = ChunkingSample(messages_sent=5, native_send_s=0.004, stall_s=0.010)
+    # The channel opened again: its totals start over.
+    reopened = ChunkingSample(messages_sent=0)
+    done = ChunkingSample(messages_sent=1, native_send_s=0.002, stall_s=0.003)
+
+    window.fold(leaving, start)
+    window.fold(reopened, leaving)
+    window.fold(done, reopened)
+
+    stages = {s.name: s for s in window.take()}
+    assert stages["rest_native"].messages == 1
+    assert math.isclose(stages["rest_native"].total_ms, 2.0)
+    assert math.isclose(stages["stall"].total_ms, 3.0)
