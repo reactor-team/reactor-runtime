@@ -8,6 +8,7 @@ the suite skips cleanly when the wheel is absent.
 
 import asyncio
 import logging
+import queue
 import threading
 import time
 from collections.abc import Callable
@@ -2148,6 +2149,36 @@ async def test_close_skips_a_chunked_channel_that_is_no_longer_open() -> None:
     await peer.close()
 
     assert data.drain_timeouts == []
+
+
+async def test_close_drops_the_media_the_pumps_had_not_taken() -> None:
+    """A closed peer lives until a garbage collection; it must not keep frames that long."""
+    peer = WebRTCPeer()
+    peer._out_tracks["v"] = cast(Any, _FakeTrack())
+    for _ in range(3):
+        peer.send_media(_video_bundle("v"))
+    peer._audio_bufs["a"] = np.zeros(480, np.int16)
+
+    await peer.close()
+
+    assert peer._frame_queue.empty()
+    assert peer._audio_bufs == {}
+
+
+def test_a_bundle_queued_as_the_peer_closes_is_dropped() -> None:
+    peer = WebRTCPeer()
+    peer._out_tracks["v"] = cast(Any, _FakeTrack())
+
+    class _ClosingQueue(queue.Queue[Any]):
+        # The teardown lands between send_media's stop check and its put.
+        def put_nowait(self, item: Any) -> None:
+            peer._stop_event.set()
+            super().put_nowait(item)
+
+    peer._frame_queue = _ClosingQueue()
+    peer.send_media(_video_bundle("v"))
+
+    assert peer._frame_queue.empty()
 
 
 async def test_close_is_idempotent() -> None:
