@@ -1,3 +1,4 @@
+import asyncio
 import gc
 import sys
 from collections.abc import Iterator
@@ -6,7 +7,7 @@ from types import ModuleType
 
 import numpy as np
 import pytest
-from endurance.launcher import path_to_output, reaches_output
+from endurance.launcher import _executor_threads, path_to_output, reaches_output
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -108,3 +109,9 @@ def test_the_path_to_a_held_batch_names_its_holders() -> None:
     joined = " -> ".join(path)
     assert "last_frame" in joined
     assert "'video'" in joined
+
+
+async def test_the_executor_count_is_the_default_executor_workers() -> None:
+    assert _executor_threads() == 0
+    await asyncio.to_thread(lambda: None)
+    assert _executor_threads() == 1

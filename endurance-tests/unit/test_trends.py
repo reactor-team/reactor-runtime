@@ -197,6 +197,31 @@ def test_a_steady_worker_leak_the_ratio_passes_fails_on_slope() -> None:
     assert results["child_rss_slope"].status == "fail"
 
 
+def test_the_default_executor_growing_to_its_cap_late_is_not_a_thread_leak() -> None:
+    # The pool reaches its cap of 8 an hour and a half into a two-hour run,
+    # as it did on a runner: every new thread is one of its workers.
+    samples = [
+        _sample(
+            i,
+            elapsed_s=i * 60.0,
+            num_threads=18 + min(8, max(0, i - 90)),
+            executor_threads=1 + min(8, max(0, i - 90)),
+        )
+        for i in range(120)
+    ]
+    results = {m.name: m for m in trend_metrics(samples)}
+    assert results["num_threads"].status == "ok"
+
+
+def test_threads_growing_outside_the_default_executor_still_fail() -> None:
+    samples = [
+        _sample(i, elapsed_s=i * 60.0, num_threads=18 + min(8, max(0, i - 90)), executor_threads=1)
+        for i in range(120)
+    ]
+    results = {m.name: m for m in trend_metrics(samples)}
+    assert results["num_threads"].status == "fail"
+
+
 def test_retained_cycles_count_every_cycle_with_any_nonzero_count() -> None:
     samples = _samples(5)
     samples[1] = dataclasses.replace(samples[1], pinned_batches=1)

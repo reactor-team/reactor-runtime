@@ -1037,6 +1037,7 @@ class ResourceSampler:
                 child_rss_bytes=children_rss,
                 shm_blocks=shm[0] if shm else None,
                 shm_bytes=shm[1] if shm else None,
+                executor_threads=reading.get("executor_threads", 0),
             )
         self._baseline.freed_by_gc = freed
         self._baseline.holding_after_stop = holding

@@ -195,6 +195,12 @@ def _input_frames(runner: Runner) -> dict[str, float]:
     return {name: counts["frames_received"] for name, counts in model_input.take().items()}
 
 
+def _executor_threads() -> int:
+    """The worker threads of the running loop's default executor, none if it has not started."""
+    executor = getattr(asyncio.get_running_loop(), "_default_executor", None)
+    return len(getattr(executor, "_threads", ()))
+
+
 def _live_transport_objects() -> dict[str, int]:
     from reactor_runtime.transport.webrtc.connection import WebRTCConnection
     from reactor_runtime.transport.webrtc.pacer import MediaPacer
@@ -259,6 +265,7 @@ def build_app(
             "topic_commands": dict(_topic_commands),
             "input_frames": _input_frames(runner),
             "tasks": len(asyncio.all_tasks()),
+            "executor_threads": _executor_threads(),
         }
 
     return app

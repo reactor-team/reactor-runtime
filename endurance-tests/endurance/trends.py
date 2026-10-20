@@ -99,6 +99,11 @@ class Sample:
     # their bytes; None on a platform with no /dev/shm.
     shm_blocks: int | None = None
     shm_bytes: int | None = None
+    # Worker threads of the loop's default executor, which asyncio.to_thread
+    # runs on: part of num_threads. The pool starts a worker only when every
+    # one it has is busy and never stops one, so it grows to its cap
+    # (min(32, CPUs + 4)) whenever the runtime's load first needs them.
+    executor_threads: int = 0
 
 
 def cpu_deltas(samples: list[Sample]) -> list[float]:
@@ -463,8 +468,11 @@ def trend_metrics(samples: list[Sample]) -> list[MetricResult]:
         ),
         # Medians: a cycle can catch the previous one's native threads and
         # sockets still being torn down, a one-sample blip a mean would carry.
+        # The default executor's workers are left out: the pool grows to its
+        # cap when the load first needs it, at a time no warm-up can predict,
+        # and a pool that stops at its cap holds no leak.
         assert_no_sustained_growth(
-            [float(s.num_threads) for s in warmed],
+            [float(s.num_threads - s.executor_threads) for s in warmed],
             name="num_threads",
             unit="count",
             max_growth_ratio=0.15,
