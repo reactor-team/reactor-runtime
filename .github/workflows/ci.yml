@@ -144,14 +144,38 @@ jobs:
         env:
           LIVEKIT_URL: ws://127.0.0.1:7880
 
+  endurance-scenarios:
+    name: List the endurance scenarios
+    runs-on: ubuntu-latest
+    outputs:
+      scenarios: ${{ steps.scenarios.outputs.scenarios }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: List the scenarios
+        id: scenarios
+        run: |
+          set -euo pipefail
+          scenarios=$(find endurance-tests/tests -maxdepth 1 -name 'test_*.py' -printf '%f\n' \
+            | sed -e 's/^test_//' -e 's/\.py$//' | sort | jq -R . | jq -cs .)
+          echo "scenarios=$scenarios" >> "$GITHUB_OUTPUT"
+
   # Two cycles of every endurance scenario: proves the launcher's hooks, the
   # probe and the scenarios' client still work against this change. It judges
-  # only that each cycle streamed in full; the leak checks need the long runs
-  # (endurance-tests.yml), so this job cannot fail on them.
+  # only what each cycle shows on its own: that it streamed in full, that its
+  # requests were answered and that the runtime dropped its connections. The
+  # leak counts and trends need the long runs (endurance-tests.yml), so this
+  # job cannot fail on them. One job per scenario, in parallel, so the smoke
+  # takes as long as its slowest scenario.
   endurance-smoke:
-    name: Endurance Smoke
+    name: Endurance Smoke (${{ matrix.scenario }})
+    needs: endurance-scenarios
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: ${{ fromJSON(needs.endurance-scenarios.outputs.scenarios) }}
     steps:
       - uses: actions/checkout@v7
 
@@ -162,13 +186,14 @@ jobs:
       # A LiveKit server for the room churn, in dev mode: it accepts tokens
       # signed with the key `devkey` and the secret `secret`.
       - name: Start a LiveKit server
+        if: matrix.scenario == 'room_participant_churn'
         run: |
           docker run -d --name livekit --network host livekit/livekit-server:v1.13.10 \
             --dev --bind 127.0.0.1 --node-ip 127.0.0.1
           for _ in $(seq 30); do curl -sf http://127.0.0.1:7880/ && exit 0; sleep 1; done
           docker logs livekit; exit 1
 
-      - run: mise run test-endurance
+      - run: mise run test-endurance "endurance-tests/tests/test_${{ matrix.scenario }}.py"
         env:
           ENDURANCE_SMOKE_CYCLES: "2"
           LIVEKIT_URL: ws://127.0.0.1:7880

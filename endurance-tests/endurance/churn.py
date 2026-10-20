@@ -8,14 +8,14 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
+from typing import Protocol
 
 from endurance.harness import (
-    BareClient,
     ResourceSampler,
     RuntimeProcess,
-    V1Client,
     assert_answered,
     assert_full_streams,
+    assert_released,
     gray_frame,
 )
 from endurance.report import LiveReporter, MetricResult, finish_and_check, now_iso
@@ -28,17 +28,33 @@ from endurance.trends import (
 )
 
 
+class ChurnClient(Protocol):
+    """One cycle's client, as the churn drives it."""
+
+    @property
+    def unanswered(self) -> list[str] | None:
+        """The requests the cycle sent that were refused or never answered.
+
+        ``None`` for a client that sends none it waits on.
+        """
+        ...
+
+    async def run(self, frame: tuple[bytes, int, int]) -> int:
+        """Connect, stream *frame*, leave, and return the frames that came back."""
+        ...
+
+
 async def run_churn(
     runtime: RuntimeProcess,
     *,
     test_name: str,
     description: str,
-    client: Callable[[RuntimeProcess, str], BareClient],
+    client: Callable[[RuntimeProcess, str], ChurnClient],
 ) -> None:
     """Churn *client* connections on one session until the run's deadline, then check.
 
     Each cycle a new client from *client* joins, streams until its frames come
-    back, and closes; the runtime is read once teardown has finished.
+    back, and leaves; the runtime is read once teardown has finished.
     """
     session = runtime.request("POST", "/start_session", {})[1]
     version = session["server_info"]["server_version"]
@@ -54,10 +70,12 @@ async def run_churn(
     received: list[int] = []
     # Each v1 cycle's requests that went unanswered or were refused.
     unanswered: list[list[str]] = []
+    # Seconds each cycle's connection took to leave the runtime's registry.
+    released: list[float | None] = []
     metrics: list[MetricResult] = []
 
     def stream_checks() -> list[MetricResult]:
-        checks = [assert_full_streams(received)]
+        checks = [assert_full_streams(received), assert_released(released)]
         if unanswered:
             checks.append(assert_answered(unanswered))
         return checks
@@ -68,9 +86,10 @@ async def run_churn(
                 break
             connection = client(runtime, session["session_id"])
             received.append(await connection.run(frame))
-            if isinstance(connection, V1Client):
+            if connection.unanswered is not None:
                 unanswered.append(connection.unanswered)
-            reading, _ = runtime.settled_probe()
+            reading, released_after_s = runtime.settled_probe()
+            released.append(released_after_s)
             sampler.sample(cycle=cycle, reading=reading)
             live.update(sampler.samples, retained=retained_cycles(sampler.samples))
             cycle += 1

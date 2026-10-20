@@ -2,11 +2,13 @@ import threading
 
 import pytest
 from endurance.harness import (
+    CLOSE_TIMEOUT_S,
     FRAMES_PER_CYCLE,
     RuntimeProcess,
     V1Client,
     assert_answered,
     assert_full_streams,
+    assert_released,
 )
 
 
@@ -34,6 +36,31 @@ def test_a_refused_or_unanswered_request_fails_its_cycle() -> None:
     assert result.status == "fail"
     assert result.first_bad_cycle == 1
     assert "invalid_command" in result.detail
+
+
+def test_a_run_whose_connections_were_all_dropped_passes_and_reports_how_fast() -> None:
+    result = assert_released([7.0, 7.5, 9.0])
+    assert result.status == "ok"
+    assert "7.5s median, 9.0s at worst" in result.detail
+
+
+def test_a_connection_still_registered_after_the_timeout_fails_its_cycle() -> None:
+    result = assert_released([7.0, None, 8.0])
+    assert result.status == "fail"
+    assert result.first_bad_cycle == 1
+    assert f"still registered {CLOSE_TIMEOUT_S:g}s after its client left on 1/3 cycles" in (
+        result.detail
+    )
+
+
+def test_a_run_whose_connections_all_stayed_reports_no_drop_time() -> None:
+    result = assert_released([None])
+    assert result.status == "fail"
+    assert "other cycles" not in result.detail
+
+
+def test_the_drop_time_median_of_an_even_count_is_the_mean_of_the_middle_two() -> None:
+    assert "8.0s median, 9.0s at worst" in assert_released([7.0, 9.0]).detail
 
 
 def _client_owed(request_id: str, asked: str, answers: frozenset[str | None]) -> V1Client:
@@ -78,6 +105,7 @@ def test_a_settled_probe_waits_only_for_the_connections_a_scenario_does_not_keep
     reading, waited = runtime.settled_probe(connections=1)
 
     assert reading == {"registered_connections": 1, "live": {"participants": 0}}
+    assert waited is not None
     assert waited < 5.0
 
 

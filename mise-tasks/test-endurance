@@ -3,4 +3,15 @@
 set -euo pipefail
 mise run //proto:gen
 uv sync --locked
-uv run --no-sync pytest -v -s endurance-tests/tests "$@"
+# The scenario files named on the command line, or every scenario when none
+# is; other arguments go to pytest either way.
+named=false
+for arg in "$@"; do
+  case "$arg" in
+    *.py | *.py::*) named=true ;;
+  esac
+done
+if [ "$named" = false ]; then
+  set -- "$@" endurance-tests/tests
+fi
+uv run --no-sync pytest -v -s "$@"
