@@ -537,7 +537,7 @@ async def test_a_chunking_client_exchanges_messages_past_the_plain_limits() -> N
         await client.accept_answer(answer.sdp)
         assert await _reached(connected), "the peers never connected"
         assert client.data.is_chunked()
-        # Both sides declare the engine's 64 MiB, so that is the step-result bound.
+        # This side's chunking declares 64 MiB, the step-result bound it checks first.
         assert peer.message_chunking
         assert peer.max_message_size == 64 * 1024 * 1024
 

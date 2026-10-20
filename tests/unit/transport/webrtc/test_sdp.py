@@ -8,7 +8,6 @@ import pytest
 
 from reactor_runtime.transport.webrtc.sdp import (
     bump_session_version,
-    declared_dc_chunking,
     deduplicate_bundle_pts,
     embed_ice_candidates,
     set_media_direction,
@@ -176,22 +175,3 @@ def test_bump_session_version_leaves_a_description_with_no_origin_alone() -> Non
 def test_bump_session_version_leaves_an_unparsable_origin_alone() -> None:
     sdp = "v=0\r\no=- session two IN IP4 127.0.0.1\r\n"
     assert bump_session_version(sdp, 1) == sdp
-
-
-@pytest.mark.parametrize(
-    ("line", "declared"),
-    [
-        ("a=x-reactor-dc-chunking:1 max-message-size=1048576", (True, 1048576)),
-        ("a=x-reactor-dc-chunking:1 future=1; max-message-size=42", (True, 42)),
-        ("a=x-reactor-dc-chunking:1", (True, None)),
-        ("a=x-reactor-dc-chunking:2 max-message-size=42", (False, None)),
-        ("a=x-reactor-dc-chunking:1 max-message-size=lots", (False, None)),
-        ("a=x-reactor-dc-chunking:1 max-message-size", (False, None)),
-        ("a=x-something-else:1", (False, None)),
-    ],
-)
-def test_the_declared_chunking_limit_is_read_from_the_session_section(
-    line: str, declared: tuple[bool, int | None]
-) -> None:
-    sdp = f"v=0\r\n{line}\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n"
-    assert declared_dc_chunking(sdp) == declared

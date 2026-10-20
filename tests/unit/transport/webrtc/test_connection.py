@@ -124,7 +124,7 @@ async def test_step_results_and_the_negotiated_size_come_from_the_peer(
     fake_peer.max_message_size = 1234
     fake_peer.message_chunking = False
 
-    conn.send_step_result(b"result")
+    assert await conn.send_step_result(b"result") is True
 
     assert fake_peer.messages == [b"result"]
     assert conn.max_message_size == 1234

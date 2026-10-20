@@ -158,7 +158,7 @@ async def test_a_participant_negotiates_no_chunking_so_its_step_requests_are_ref
 async def test_a_step_result_goes_to_the_participant_on_the_data_topic() -> None:
     conn, local = make()
 
-    conn.send_step_result(b"result")
+    assert await conn.send_step_result(b"result") is True
     await _settle()
 
     assert [(topic, data) for _, topic, data, _ in local.sent] == [(DATA_TOPIC, b"result")]

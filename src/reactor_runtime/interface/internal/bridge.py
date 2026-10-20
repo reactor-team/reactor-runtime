@@ -169,6 +169,7 @@ class ModelBridge:
         *,
         conn_id: ConnId,
         request_id: RequestId,
+        max_message_size: int | None = None,
     ) -> tuple[str, CommandOutcome] | None:
         """Check a step request's calls, then admit them and the step, or none of it.
 
@@ -187,6 +188,8 @@ class ModelBridge:
                 name.
             conn_id: The connection that asked for the step.
             request_id: The request id the step's response carries.
+            max_message_size: The largest message the connection takes, carried
+                to the step's result.
 
         Returns:
             ``None`` when the request was admitted, else the first call that
@@ -207,6 +210,7 @@ class ModelBridge:
                 media_input={track: tuple(frames) for track, frames in media_input.items()},
                 conn_id=conn_id,
                 request_id=request_id,
+                max_message_size=max_message_size,
             )
         )
         return None

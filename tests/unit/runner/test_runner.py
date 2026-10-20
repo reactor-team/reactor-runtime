@@ -214,8 +214,9 @@ class FakeConnection:
     max_message_size = 64 * 1024 * 1024
     message_chunking = True
 
-    def send_step_result(self, payload: bytes | str) -> None:
+    async def send_step_result(self, payload: bytes) -> bool:
         self.send_message(payload)
+        return True
 
     def send_message(self, payload: bytes | str) -> None:
         self.sent.append(payload)

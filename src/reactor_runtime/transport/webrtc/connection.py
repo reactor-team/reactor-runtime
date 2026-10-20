@@ -251,9 +251,13 @@ class WebRTCConnection:
         """Whether the data channel negotiated chunked messages with this client."""
         return self._peer.message_chunking
 
-    def send_step_result(self, payload: bytes | str) -> None:
-        """Send an already-encoded step result on the data channel, where step requests arrive."""
-        self._peer.send_message(payload)
+    async def send_step_result(self, payload: bytes) -> bool:
+        """Send an already-encoded step result on the data channel, where step requests arrive.
+
+        The media engine decides whether the message fits; see
+        :meth:`WebRTCPeer.send_step_result`.
+        """
+        return await self._peer.send_step_result(payload)
 
     def send_control(self, payload: bytes | str) -> None:
         """Send an already-encoded control frame (text or binary) to this client."""

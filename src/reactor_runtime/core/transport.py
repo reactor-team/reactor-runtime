@@ -84,12 +84,18 @@ class Connection(Protocol):
         the steps a connection without it requests.
         """
 
-    def send_step_result(self, payload: bytes | str) -> None:
+    async def send_step_result(self, payload: bytes) -> bool:
         """Send an already-encoded step result to this client.
 
         It travels the channel the step request came in on, after every frame
-        sent before it, so a client reads a step's replies in order. The caller
-        has checked the frame against :attr:`max_message_size`.
+        sent before it, and a connection's results go out in the order they
+        were sent. While the connection's queue is full the send waits for it
+        to drain, so a result is not lost to a burst.
+
+        Returns:
+            ``False`` when the connection refused the message as larger than it
+            takes, so nothing was sent; ``True`` otherwise, including when the
+            connection closed first.
         """
 
     def send_media(self, chunk: MediaChunk) -> None:

@@ -142,8 +142,9 @@ class V1Connection:
     max_message_size = 64 * 1024 * 1024
     message_chunking = True
 
-    def send_step_result(self, payload: bytes | str) -> None:
+    async def send_step_result(self, payload: bytes) -> bool:
         self.send_message(payload)
+        return True
 
     def send_message(self, payload: bytes | str) -> None:
         self.sent.append(payload)
@@ -1008,7 +1009,6 @@ async def test_a_failed_step_is_answered_with_its_error_and_no_files(
 async def test_a_result_too_large_for_the_connection_is_answered_without_media_and_counted(
     runner: Runner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(runner_module, "_STEP_MIN_MESSAGE_SIZE", 0)
     conn = await _stepped(runner)
     conn.max_message_size = 16
     _send(runner, conn, _request_step("r1"))
@@ -1020,7 +1020,8 @@ async def test_a_result_too_large_for_the_connection_is_answered_without_media_a
     assert (result.step, result.failure_code) == (1, step_pb2.STEP_FAILURE_CODE_RESULT_TOO_LARGE)
     assert result.elapsed_seconds > 0
     assert re.fullmatch(
-        r"step 1's result is (at least )?\d+ bytes; this connection takes at most 16", result.error
+        r"step 1's result is (at least )?\d+ bytes, more than this connection takes in one message",
+        result.error,
     )
     assert (list(result.tracks), list(result.files)) == ([], [])
     assert _journalled_steps(runner) == [SessionEvent.STEP_COMPLETED]
@@ -1039,7 +1040,6 @@ async def test_media_that_outgrows_the_connection_is_answered_without_encoding_i
         raise AssertionError("a result whose frames cannot fit was encoded")
 
     monkeypatch.setattr(runner_module, "track_frames", must_not_encode)
-    monkeypatch.setattr(runner_module, "_STEP_MIN_MESSAGE_SIZE", 0)
     conn = await _stepped(runner)
     # The model's 2x2 RGB frame is 12 bytes of media alone.
     conn.max_message_size = 8
@@ -1049,7 +1049,8 @@ async def test_media_that_outgrows_the_connection_is_answered_without_encoding_i
     result = conn.replies()[0].step_result
     assert (result.step, result.failure_code) == (1, step_pb2.STEP_FAILURE_CODE_RESULT_TOO_LARGE)
     assert re.fullmatch(
-        r"step 1's result is at least \d+ bytes; this connection takes at most 8", result.error
+        r"step 1's result is at least \d+ bytes, more than this connection takes in one message",
+        result.error,
     )
 
 
@@ -1074,17 +1075,27 @@ async def test_a_step_result_s_frames_are_encoded_off_the_runtime_loop(
     assert loop_thread not in encoded_on
 
 
-async def test_a_connection_whose_messages_are_too_small_is_refused_a_step(runner: Runner) -> None:
+async def test_a_step_result_with_media_is_serialized_off_the_runtime_loop(
+    runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loop_thread = threading.get_ident()
+    serialized_on: list[int] = []
+    codec = runner._step_codec
+    encode = codec.encode_step_result
+
+    def recording(request_id: str, result: step_pb2.StepResult) -> Any:
+        if result.tracks:
+            serialized_on.append(threading.get_ident())
+        return encode(request_id, result)
+
+    monkeypatch.setattr(codec, "encode_step_result", recording)
     conn = await _stepped(runner)
-    conn.max_message_size = 16
     _send(runner, conn, _request_step("r1"))
     await _until(lambda: len(conn.sent) == 1)
 
-    error = _refusal(conn.replies()[0])
-    assert error == (
-        "this connection's data-channel chunking takes at most 16 bytes a message; "
-        "a stepped session needs at least 262144"
-    )
+    assert list(conn.replies()[0].step_result.tracks)
+    assert serialized_on
+    assert loop_thread not in serialized_on
 
 
 async def test_a_connection_without_chunking_is_refused_a_step(runner: Runner) -> None:

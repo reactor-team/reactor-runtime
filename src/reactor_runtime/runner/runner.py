@@ -25,6 +25,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from reactor_runtime.codes import INVALID_COMMAND, UNRESOLVED_UPLOAD
@@ -114,12 +115,6 @@ from reactor_runtime.upload_store import UnknownUploadError, UploadStore
 from reactor_wire.v1 import platform_pb2, step_pb2
 
 _RUNNING_STATES = frozenset({SessionState.WAITING, SessionState.STREAMING, SessionState.ORPHANED})
-
-# The smallest message a stepped connection may take: what one plain
-# data-channel message carries. Below it, a client's declared chunking limit
-# would not leave room even for the short result that says a step's media did
-# not fit.
-_STEP_MIN_MESSAGE_SIZE = 256 * 1024
 
 # The states a stale wire can land in. An offer is only admitted while a
 # session runs, so a connection whose negotiation completes after the session
@@ -217,6 +212,20 @@ _WIRE_TRACK_KINDS = {
     platform_pb2.TRACK_KIND_VIDEO: TrackKind.VIDEO,
     platform_pb2.TRACK_KIND_AUDIO: TrackKind.AUDIO,
 }
+
+
+@dataclass(frozen=True)
+class _EncodedResult:
+    """A requested step's result as the model's thread encoded it, without its files.
+
+    Exactly one is set: *frame*, the v1 frame ready to send; *oversized*, the
+    size of media that does not fit the connection, never copied; or *error*,
+    why the media cannot be carried as frames.
+    """
+
+    frame: bytes | None = None
+    oversized: int = 0
+    error: str | None = None
 
 
 class _StepInputError(ValueError):
@@ -363,6 +372,9 @@ class Runner(ServiceComponent, ConnectionSink):
         # the codec for each target connection, so a mixed-version session is
         # addressed in each client's own version.
         self._codecs: dict[ProtocolVersion, Codec] = {}
+        # Only v1 carries step traffic. Built once here, since the model's
+        # thread encodes step results with it too.
+        self._step_codec = select(ProtocolVersion.V1)
         # Which client stats batches are journalled: each connection's last
         # accepted time, to drop a batch that follows it too soon.
         self._client_stats = ClientStatsGate()
@@ -993,44 +1005,58 @@ class Runner(ServiceComponent, ConnectionSink):
                 if step.session == self._sessions_posted:
                     messages = tuple(self._step_messages)
                     self._step_messages.clear()
-        tracks = self._encode_step_tracks(step)
+        encoded = self._encode_step_result(step)
         loop = self._loop
         if loop is not None:
-            loop.call_soon_threadsafe(self._record_step, step, messages, recipients, tracks)
+            loop.call_soon_threadsafe(self._record_step, step, messages, recipients, encoded)
 
-    def _encode_step_tracks(
-        self, step: CompletedStep
-    ) -> list[step_pb2.TrackFrames] | FrameEncodingError | None:
-        """Encode a requested step's media as its result's frames, on the model's thread.
+    def _encode_step_result(self, step: CompletedStep) -> _EncodedResult | None:
+        """Encode a requested step's result, on the model's thread.
 
-        Copying the media is a step result's heaviest work, so it happens here,
-        before the hop that keeps the step's replies in order, and not on the
-        runtime loop every connection shares. Media that cannot fit the
-        requesting connection's messages is left for the loop to answer as too
-        large; the limit read here only spares the copy, and the loop checks it
-        again.
+        Copying and serializing a step's media is a result's heaviest work, so
+        all of it happens here, before the hop that keeps the step's replies in
+        order, and not on the runtime loop every connection shares: the loop
+        gets the finished frame. Media larger than the connection took when the
+        request was admitted is not copied at all. The step's files are left
+        out, since whether the step store takes the step is decided on the loop.
 
         Returns:
-            The frames, the reason they cannot be encoded, or ``None`` for a
-            step no client requested or whose media does not fit.
+            The encoded result, or ``None`` for a step no client requested.
         """
         request = step.request
         if request is None:
             return None
-        limit = self._connections.max_message_size(request.conn_id)
-        if limit is not None and media_size(step.bundle) > limit:
-            return None
+        limit = request.max_message_size
+        size = media_size(step.bundle)
+        if limit is not None and size > limit:
+            return _EncodedResult(oversized=size)
         try:
-            return track_frames(step.bundle, video_fps=step.fps)
+            tracks = track_frames(step.bundle, video_fps=step.fps)
         except FrameEncodingError as error:
-            return error
+            return _EncodedResult(error=str(error))
+        result = step_pb2.StepResult(
+            step=request.index,
+            tracks=tracks,
+            # The default loop, the only one a stepped session runs, always
+            # measures the step, so a missing time does not happen in practice.
+            elapsed_seconds=step.elapsed or 0.0,
+            error=step.error,
+            failure_code=(
+                step_pb2.STEP_FAILURE_CODE_FAILED
+                if step.error is not None
+                else step_pb2.STEP_FAILURE_CODE_UNSPECIFIED
+            ),
+        )
+        _, frame = self._step_codec.encode_step_result(request.request_id, result)
+        assert isinstance(frame, bytes)
+        return _EncodedResult(frame=frame)
 
     def _record_step(
         self,
         step: CompletedStep,
         messages: tuple[dict[str, Any], ...] = (),
         recipients: tuple[ConnId, ...] = (),
-        tracks: list[step_pb2.TrackFrames] | FrameEncodingError | None = None,
+        encoded: _EncodedResult | None = None,
     ) -> None:
         """Number a reported step, journal it, and close a session that reached its steps.
 
@@ -1089,7 +1115,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 step.stages,
             )
         if step.request is not None:
-            self._send_step_result(step, self._steps_completed, saved=saved, tracks=tracks)
+            self._send_step_result(step, self._steps_completed, saved=saved, encoded=encoded)
         limit = self._session_start.steps
         if (
             limit is not None
@@ -1821,15 +1847,6 @@ class Runner(ServiceComponent, ConnectionSink):
                 "WebRTC connection that negotiated data-channel chunking",
             )
             return
-        limit = self._connections.max_message_size(step.conn_id)
-        if limit is not None and limit < _STEP_MIN_MESSAGE_SIZE:
-            self._refuse_step(
-                step.conn_id,
-                step.request_id,
-                f"this connection's data-channel chunking takes at most {limit} bytes a "
-                f"message; a stepped session needs at least {_STEP_MIN_MESSAGE_SIZE}",
-            )
-            return
 
         def refuse(entry: str, reason: str) -> None:
             self._sm.send(SessionEvent.ERROR, message=f"step request: {reason}")
@@ -1860,7 +1877,11 @@ class Runner(ServiceComponent, ConnectionSink):
         # Nothing awaits from here to the step, so the whole request is posted
         # or none of it is.
         rejected = bridge.submit_step(
-            calls, media_input, conn_id=step.conn_id, request_id=step.request_id
+            calls,
+            media_input,
+            conn_id=step.conn_id,
+            request_id=step.request_id,
+            max_message_size=self._connections.max_message_size(step.conn_id),
         )
         if rejected is not None:
             key, outcome = rejected
@@ -1995,7 +2016,7 @@ class Runner(ServiceComponent, ConnectionSink):
         index: int,
         *,
         saved: bool,
-        tracks: list[step_pb2.TrackFrames] | FrameEncodingError | None = None,
+        encoded: _EncodedResult | None = None,
     ) -> None:
         """Answer a requested step with its result, built from the step's report.
 
@@ -2015,83 +2036,73 @@ class Runner(ServiceComponent, ConnectionSink):
         A step that ran always answers with its number and elapsed time. One
         whose model reported a failure answers ``FAILED`` with the model's
         message, as does one whose media cannot be carried as frames. One whose
-        result is larger than the connection negotiated answers
-        ``RESULT_TOO_LARGE`` with no media or files, and the session goes on.
+        result is larger than the connection takes, by its own limit or by the
+        media engine's refusal, answers ``RESULT_TOO_LARGE`` with no media or
+        files, and the session goes on.
 
-        *tracks* are the frames the model's thread already encoded (see
-        :meth:`_encode_step_tracks`); without them they are encoded here.
+        *encoded* is the result the model's thread encoded (see
+        :meth:`_encode_step_result`); without it, it is encoded here.
         """
         request = step.request
         assert request is not None
-        # The default loop, the only one a stepped session runs, always
-        # measures the step, so a missing time does not happen in practice.
+        if encoded is None:
+            encoded = self._encode_step_result(step)
+            assert encoded is not None
         elapsed = step.elapsed or 0.0
+        request_id = request.request_id
 
-        def too_large(
-            version: ProtocolVersion, size: int, limit: int, *, at_least: bool = False
-        ) -> tuple[Channel, bytes | str]:
+        def too_large(size: int, *, at_least: bool = False) -> bytes:
             logger.warning("a step result does not fit one message", step=index, size=size)
             measured = f"at least {size}" if at_least else f"{size}"
-            return self._codec_for(version).encode_step_result(
-                request.request_id,
+            _, frame = self._step_codec.encode_step_result(
+                request_id,
                 step_pb2.StepResult(
                     step=index,
                     elapsed_seconds=elapsed,
                     failure_code=step_pb2.STEP_FAILURE_CODE_RESULT_TOO_LARGE,
                     error=(
-                        f"step {index}'s result is {measured} bytes; "
-                        f"this connection takes at most {limit}"
+                        f"step {index}'s result is {measured} bytes, "
+                        "more than this connection takes in one message"
                     ),
                 ),
             )
+            assert isinstance(frame, bytes)
+            return frame
 
-        # Frames alone that outgrow one message are answered without copying
-        # them: a step's media can be far larger than any message.
-        limit = self._connections.max_message_size(request.conn_id)
-        size = media_size(step.bundle)
-        if limit is not None and size > limit:
-            self._connections.send_step_reply(
-                request.conn_id, lambda version: too_large(version, size, limit, at_least=True)
-            )
-            return
-        if tracks is None:
-            try:
-                tracks = track_frames(step.bundle, video_fps=step.fps)
-            except FrameEncodingError as error:
-                tracks = error
-        if isinstance(tracks, FrameEncodingError):
-            error = tracks
-            logger.error("a step's output could not be encoded", step=index, error=str(error))
-            failed = step_pb2.StepResult(
-                step=index,
-                elapsed_seconds=elapsed,
-                failure_code=step_pb2.STEP_FAILURE_CODE_FAILED,
-                error=f"step {index}'s output could not be encoded: {error}",
-            )
-            self._connections.send_step_reply(
-                request.conn_id,
-                lambda version: self._codec_for(version).encode_step_result(
-                    request.request_id, failed
+        if encoded.error is not None:
+            logger.error("a step's output could not be encoded", step=index, error=encoded.error)
+            _, failed = self._step_codec.encode_step_result(
+                request_id,
+                step_pb2.StepResult(
+                    step=index,
+                    elapsed_seconds=elapsed,
+                    failure_code=step_pb2.STEP_FAILURE_CODE_FAILED,
+                    error=f"step {index}'s output could not be encoded: {encoded.error}",
                 ),
             )
+            self._connections.send_step_reply(request.conn_id, lambda _: (Channel.DATA, failed))
             return
-        result = step_pb2.StepResult(
-            step=index,
-            tracks=tracks,
-            elapsed_seconds=elapsed,
-            files=_step_file_refs(step) if saved else (),
-            error=step.error,
-            failure_code=(
-                step_pb2.STEP_FAILURE_CODE_FAILED
-                if step.error is not None
-                else step_pb2.STEP_FAILURE_CODE_UNSPECIFIED
-            ),
+        if encoded.frame is None:
+            # Frames alone that outgrow one message were never copied.
+            answer = too_large(encoded.oversized, at_least=True)
+            self._connections.send_step_reply(request.conn_id, lambda _: (Channel.DATA, answer))
+            return
+        frame = encoded.frame
+        refs = _step_file_refs(step) if saved else ()
+        if refs:
+            # Serialized protobuf messages merge when concatenated: the files
+            # join the result the model's thread encoded. Only a saved step
+            # that kept files pays this copy on the loop.
+            _, files = self._step_codec.encode_step_result(
+                request_id, step_pb2.StepResult(files=refs)
+            )
+            assert isinstance(files, bytes)
+            frame += files
+        task = asyncio.get_running_loop().create_task(
+            self._connections.send_step_result(request.conn_id, frame, too_large)
         )
-        self._connections.send_step_result(
-            request.conn_id,
-            lambda version: self._codec_for(version).encode_step_result(request.request_id, result),
-            too_large,
-        )
+        self._inbound.add(task)
+        task.add_done_callback(self._inbound.discard)
 
     def _inline_upload_fields(self, name: str, args: Mapping[str, Any]) -> dict[str, TypeSpec]:
         """Return the present arguments of command *name* whose type carries an upload.

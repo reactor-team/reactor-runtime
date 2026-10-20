@@ -218,9 +218,10 @@ class ParticipantConnection:
         """
         return False
 
-    def send_step_result(self, payload: bytes | str) -> None:
+    async def send_step_result(self, payload: bytes) -> bool:
         """Send a step result as a data message; none is sent while steps are refused."""
         self._enqueue(DATA_TOPIC, payload)
+        return True
 
     def send_media(self, chunk: MediaChunk) -> None:
         """Do nothing: the session's media reaches the room through the room connection."""

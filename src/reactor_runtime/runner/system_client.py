@@ -50,8 +50,9 @@ class SystemConnection:
         """Report no chunking; the system client never requests a step."""
         return False
 
-    def send_step_result(self, payload: bytes | str) -> None:
+    async def send_step_result(self, payload: bytes) -> bool:
         """Drop a step result."""
+        return True
 
     def send_media(self, chunk: MediaChunk) -> None:
         """Drop a media chunk; the fan-out never sends one to a connection without media."""

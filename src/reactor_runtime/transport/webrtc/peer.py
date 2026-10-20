@@ -148,7 +148,6 @@ from reactor_runtime.transport.webrtc.message_stages import MessageStageWindow
 from reactor_runtime.transport.webrtc.sdp import (
     Candidate,
     bump_session_version,
-    declared_dc_chunking,
     deduplicate_bundle_pts,
     embed_ice_candidates,
     set_media_direction,
@@ -221,12 +220,15 @@ _AUDIO_GRACE_TICKS = 300  # 3 s
 # model's process gets to exit, since a teardown also runs on that path.
 _CLOSE_DRAIN_S = 5.0
 
-# The largest message a plain data channel carries, and the largest this side
-# accepts on a chunked one: libwebrtc's SCTP limit, and the receive limit the
-# media engine's chunking declares (the binding's default, which _get_factory
-# keeps). A peer that declares chunking without a limit is held to the plain one.
+# The largest message a plain data channel carries: libwebrtc's SCTP limit.
 _PLAIN_MAX_MESSAGE_SIZE = 256 * 1024
+# The largest message this side's chunking declares, set on the media engine.
+# A client may declare less; the engine then refuses the send, and that refusal
+# is what decides a step result does not fit.
 _CHUNKED_MAX_MESSAGE_SIZE = 64 * 1024 * 1024
+# How long a step result waits at a time for a full chunked queue to drain
+# before it is offered again. It keeps waiting while the connection is open.
+_STEP_RESULT_DRAIN_S = 5.0
 
 # Shared media engine: one PeerConnectionFactory per process (libwebrtc requires
 # this). Audio isolation between peers is achieved at the track level via
@@ -250,7 +252,7 @@ def _get_factory(config: WebRtcConfig) -> rw.PeerConnectionFactory:
                 builder = rw.PeerConnectionFactoryBuilder()
                 builder.with_dtls_in_stun(config.warp)
                 if config.dc_chunking:
-                    builder.with_dc_chunking()
+                    builder.with_dc_chunking(max_message_size=_CHUNKED_MAX_MESSAGE_SIZE)
                 _factory = builder.build()
     return _factory
 
@@ -418,6 +420,7 @@ class WebRTCPeer:
         # (channel label, refusal) pairs already warned about: a model that
         # oversends on every step would otherwise log a warning per frame.
         self._refusals_warned: set[tuple[str, type[Exception]]] = set()
+        self._step_results = asyncio.Lock()
 
         # OUT tracks (model to client) by track name, attached before the answer.
         self._out_tracks: dict[str, rw.Track] = {}
@@ -1329,19 +1332,42 @@ class WebRTCPeer:
 
     @property
     def max_message_size(self) -> int:
-        """The largest message, in bytes, the data channel delivers to the client.
+        """The largest message, in bytes, this side sends on the data channel.
 
-        On a chunked channel it is the smaller of this side's limit and the one
-        the client's offer declared; on a plain channel it is what one SCTP
-        message takes.
+        On a chunked channel it is the limit this side's chunking declares; the
+        client may take less, which :meth:`send_step_result` learns from the
+        media engine. On a plain channel it is what one SCTP message takes.
         """
-        if not self.message_chunking:
-            return _PLAIN_MAX_MESSAGE_SIZE
-        _, declared = declared_dc_chunking(self._offer_sdp)
-        return min(
-            _CHUNKED_MAX_MESSAGE_SIZE,
-            declared if declared is not None else _PLAIN_MAX_MESSAGE_SIZE,
-        )
+        return _CHUNKED_MAX_MESSAGE_SIZE if self.message_chunking else _PLAIN_MAX_MESSAGE_SIZE
+
+    async def send_step_result(self, payload: bytes) -> bool:
+        """Send a step result on the data channel, reporting whether the engine took it.
+
+        The media engine refuses a message larger than both sides' chunking
+        allows, and this reports that refusal instead of losing the result.
+        While the channel's queue is full the result waits for it to drain and
+        is offered again, for as long as the connection is open. Results go out
+        one at a time, in the order they were sent.
+
+        Returns:
+            ``False`` when the engine refused the message as too large;
+            ``True`` once it is queued, or when the connection closed first.
+        """
+        async with self._step_results:
+            while True:
+                channel = self._data_channel
+                if self._stop_event.is_set() or channel is None:
+                    return True
+                try:
+                    channel.send(payload, binary=True)
+                except rw.DataChannelMessageTooLarge:
+                    return False
+                except rw.DataChannelQueueFull:
+                    await channel.drain(timeout=_STEP_RESULT_DRAIN_S)
+                    continue
+                except Exception:
+                    logger.debug("step result send failed", exc_info=True)
+                return True
 
     def send_message(self, payload: bytes | str) -> None:
         """Send an already-encoded frame over the data channel (text or binary)."""

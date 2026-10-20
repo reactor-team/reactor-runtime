@@ -148,8 +148,9 @@ class RoomConnection:
         """Report no chunking; the room connection never requests a step."""
         return False
 
-    def send_step_result(self, payload: bytes | str) -> None:
+    async def send_step_result(self, payload: bytes) -> bool:
         """Drop a step result."""
+        return True
 
     def send_media(self, chunk: MediaChunk) -> None:
         """Submit a media chunk to the pacer, which may wait for queue room."""

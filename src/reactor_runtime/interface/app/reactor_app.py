@@ -500,7 +500,12 @@ class ReactorApp(ReactorCore):
                 self._refuse_step(request, session, str(refused) or type(refused).__name__)
                 return
             self._steps_accepted += 1
-            accepted = RequestedStep(request.conn_id, request.request_id, self._steps_accepted)
+            accepted = RequestedStep(
+                request.conn_id,
+                request.request_id,
+                self._steps_accepted,
+                max_message_size=request.max_message_size,
+            )
             outcome = self._generate(input)
             returned = await self.process_output(outcome)
         self._report_step(_step_report(returned, outcome), session, request=accepted)

@@ -571,31 +571,24 @@ class ConnectionManager:
         _, frame = encode(conn.protocol_version)
         conn.send_message(frame)
 
-    def send_step_result(
-        self,
-        cid: ConnId,
-        encode: Callable[[ProtocolVersion], tuple[Channel, bytes | str]],
-        too_large: Callable[[ProtocolVersion, int, int], tuple[Channel, bytes | str]],
+    async def send_step_result(
+        self, cid: ConnId, frame: bytes, too_large: Callable[[int], bytes]
     ) -> None:
-        """Send a step's result to one connection, or a small one that says it does not fit.
+        """Send a step's encoded result to one connection, or a small one that says it does not fit.
 
-        The encoded result is measured against the largest message the
-        connection negotiated. One that fits goes out whole through the
-        connection's step-result send; one that does not is never sent, and
-        *too_large*, given the version, the result's size, and the limit,
-        renders the media-free result that goes on the data channel instead.
-        A v0 client cannot request a step, so it is sent nothing.
+        A result larger than the connection takes, whether it is over the
+        connection's own limit or the media engine refuses it, is never sent:
+        *too_large*, given the result's size, renders the media-free result
+        that goes out instead. A connection whose queue is full is waited on,
+        so the result is not lost. A v0 client cannot request a step, so it is
+        sent nothing.
         """
         conn = self._by_id.get(cid)
         if conn is None or conn.protocol_version is ProtocolVersion.V0:
             return
-        _, frame = encode(conn.protocol_version)
-        limit = conn.max_message_size
-        if len(frame) > limit:
-            _, answer = too_large(conn.protocol_version, len(frame), limit)
-            conn.send_step_result(answer)
+        if len(frame) <= conn.max_message_size and await conn.send_step_result(frame):
             return
-        conn.send_step_result(frame)
+        await conn.send_step_result(too_large(len(frame)))
 
     def max_message_size(self, cid: ConnId) -> int | None:
         """Return the largest message a registered connection takes; ``None`` when unknown."""
