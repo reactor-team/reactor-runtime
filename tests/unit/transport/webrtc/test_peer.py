@@ -2180,6 +2180,44 @@ async def test_a_lost_peer_drops_the_media_the_pumps_had_not_taken() -> None:
     assert peer._audio_bufs == {}
 
 
+async def test_audio_enqueued_after_a_loss_is_dropped() -> None:
+    """A bundle the drain thread dequeued before the loss can still reach its audio after."""
+    peer = WebRTCPeer()
+    peer._loop = asyncio.get_running_loop()
+
+    peer._report_loss()
+    peer._enqueue_audio("a", np.ones(480, np.int16))
+
+    assert peer._audio_bufs == {}
+
+
+def test_audio_enqueueing_across_a_loss_is_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An enqueue paused under the audio lock finishes before the loss drops the buffers."""
+    peer = WebRTCPeer()
+    entered, release = threading.Event(), threading.Event()
+    concatenate = np.concatenate
+
+    def paused_concatenate(*args: Any, **kwargs: Any) -> Any:
+        entered.set()
+        release.wait(5)
+        return concatenate(*args, **kwargs)
+
+    monkeypatch.setattr(peer_module.np, "concatenate", paused_concatenate)
+    enqueue = threading.Thread(target=peer._enqueue_audio, args=("a", np.ones(480, np.int16)))
+    enqueue.start()
+    assert entered.wait(5)
+    loss = threading.Thread(target=peer._report_loss)
+    loss.start()
+    # The loss waits on the lock the enqueue holds.
+    time.sleep(0.05)
+    assert loss.is_alive()
+    release.set()
+    enqueue.join(5)
+    loss.join(5)
+
+    assert peer._audio_bufs == {}
+
+
 def test_a_bundle_queued_as_the_peer_closes_is_dropped() -> None:
     peer = WebRTCPeer()
     peer._out_tracks["v"] = cast(Any, _FakeTrack())

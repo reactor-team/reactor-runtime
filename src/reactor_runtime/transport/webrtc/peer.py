@@ -1125,11 +1125,15 @@ class WebRTCPeer:
 
         Samples from a bundle queued before a flush that landed while the
         bundle was being pushed are dropped; the check shares the flush's lock.
+        So are samples of a bundle still converting when the peer is done:
+        the check shares the lock its buffers are dropped under.
         """
         if not samples.size:
             return
         with self._audio_lock:
             if flushes is not None and flushes != self._flushes:
+                return
+            if self._stop_event.is_set():
                 return
             buf = self._audio_bufs.get(name, _EMPTY_AUDIO)
             buf = np.concatenate([buf, samples])
@@ -1287,7 +1291,10 @@ class WebRTCPeer:
         left in its queue and every sample left in its audio buffers.
         """
         self._empty_frame_queue()
-        self._audio_bufs.clear()
+        # Under the lock an in-flight enqueue holds: one that got in first is
+        # dropped here, and one after this sees the stop and adds nothing.
+        with self._audio_lock:
+            self._audio_bufs.clear()
 
     def _empty_frame_queue(self) -> None:
         """Drop every bundle waiting for the drain thread."""
