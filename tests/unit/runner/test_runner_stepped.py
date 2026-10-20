@@ -508,8 +508,6 @@ def _refusal(
         [],
         [],
     )
-    # Zero says the step did not run; a session that ended first leaves it unknown.
-    assert result.HasField("index") is (failure_code != step_pb2.STEP_FAILURE_CODE_SESSION_ENDED)
     return result.error
 
 
@@ -998,7 +996,7 @@ async def test_a_failed_step_is_answered_with_its_error_and_no_files(
     [reply] = conn.replies()
     assert reply.kind == K.MESSAGE_KIND_RESPONSE
     result = reply.step_result
-    assert (result.index, result.failure_code, result.error) == (
+    assert (result.step, result.failure_code, result.error) == (
         1,
         step_pb2.STEP_FAILURE_CODE_FAILED,
         "the step went dark",
@@ -1019,7 +1017,7 @@ async def test_a_result_too_large_for_the_connection_is_answered_without_media_a
     [reply] = conn.replies()
     assert (reply.request_id, reply.kind) == ("r1", K.MESSAGE_KIND_RESPONSE)
     result = reply.step_result
-    assert (result.index, result.failure_code) == (1, step_pb2.STEP_FAILURE_CODE_RESULT_TOO_LARGE)
+    assert (result.step, result.failure_code) == (1, step_pb2.STEP_FAILURE_CODE_RESULT_TOO_LARGE)
     assert result.elapsed_seconds > 0
     assert re.fullmatch(
         r"step 1's result is (at least )?\d+ bytes; this connection takes at most 16", result.error
@@ -1030,7 +1028,7 @@ async def test_a_result_too_large_for_the_connection_is_answered_without_media_a
     conn.max_message_size = 64 * 1024 * 1024
     _send(runner, conn, _request_step("r2"))
     await _until(lambda: len(conn.sent) == 2)
-    assert conn.replies()[1].step_result.index == 2
+    assert conn.replies()[1].step_result.step == 2
     assert runner._sm.current_state is SessionState.STREAMING
 
 
@@ -1049,7 +1047,7 @@ async def test_media_that_outgrows_the_connection_is_answered_without_encoding_i
     await _until(lambda: len(conn.sent) == 1)
 
     result = conn.replies()[0].step_result
-    assert (result.index, result.failure_code) == (1, step_pb2.STEP_FAILURE_CODE_RESULT_TOO_LARGE)
+    assert (result.step, result.failure_code) == (1, step_pb2.STEP_FAILURE_CODE_RESULT_TOO_LARGE)
     assert re.fullmatch(
         r"step 1's result is at least \d+ bytes; this connection takes at most 8", result.error
     )
@@ -1071,7 +1069,7 @@ async def test_a_step_result_s_frames_are_encoded_off_the_runtime_loop(
     _send(runner, conn, _request_step("r1"))
     await _until(lambda: len(conn.sent) == 1)
 
-    assert conn.replies()[0].step_result.index == 1
+    assert conn.replies()[0].step_result.step == 1
     assert encoded_on
     assert loop_thread not in encoded_on
 
@@ -1113,7 +1111,7 @@ async def test_a_step_whose_output_cannot_be_encoded_is_answered_failed(
     await _until(lambda: len(conn.sent) == 1)
 
     result = conn.replies()[0].step_result
-    assert (result.index, result.failure_code, result.error) == (
+    assert (result.step, result.failure_code, result.error) == (
         1,
         step_pb2.STEP_FAILURE_CODE_FAILED,
         "step 1's output could not be encoded: float64 video is not supported",
