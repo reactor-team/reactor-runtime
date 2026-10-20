@@ -123,8 +123,8 @@ class Harness:
             addressed=lambda *args: self.addressed.append(args),
             media=lambda chunk: None,
             step=self.reports.append,
-            step_refusal=self.refusals.append,
         )
+        app._bind_step_refusal(self.refusals.append)
         self.queue: asyncio.Queue[Any] = asyncio.Queue()
         app._inbound_q = self.queue
         self.tasks: list[asyncio.Task[None]] = []

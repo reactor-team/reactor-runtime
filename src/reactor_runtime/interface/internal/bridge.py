@@ -274,9 +274,9 @@ class ModelBridge:
             media=media,
             media_ops=media_ops,
             step=step,
-            step_refusal=step_refusal,
         )
         self._model._bind_timing(command_timing=command_timing, frame_timing=frame_timing)
+        self._model._bind_step_refusal(step_refusal)
         if failure is not None:
             self._model.bind_failure(failure)
         self._outbound_bound = True

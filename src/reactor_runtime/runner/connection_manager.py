@@ -554,6 +554,7 @@ class ConnectionManager:
         conn = self._by_id.get(cid)
         if conn is not None and isinstance(conn, MessageObserver):
             _observe(conn, observe)
+
     def send_step_reply(
         self, cid: ConnId, encode: Callable[[ProtocolVersion], tuple[Channel, bytes | str]]
     ) -> None:

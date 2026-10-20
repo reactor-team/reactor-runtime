@@ -497,6 +497,14 @@ class ReactorCore:
         self._out_command_timing = command_timing
         self._out_frame_timing = frame_timing
 
+    def _bind_step_refusal(self, step_refusal: StepRefusalSink | None) -> None:
+        """Bind the sink for refused step requests. Called once by the bridge.
+
+        Kept apart from :meth:`bind_output` for the reason :meth:`_bind_timing`
+        is: a model's override of that keeps working.
+        """
+        self._out_step_refusal = step_refusal
+
     def bind_output(
         self,
         *,
@@ -505,7 +513,6 @@ class ReactorCore:
         media: MediaSink,
         media_ops: MediaOps | None = None,
         step: StepSink | None = None,
-        step_refusal: StepRefusalSink | None = None,
     ) -> None:
         """Bind the outbound sinks. Called once before the loop starts.
 
@@ -525,7 +532,6 @@ class ReactorCore:
         self._out_media = media
         self._media_ops = media_ops
         self._out_step = step
-        self._out_step_refusal = step_refusal
         if media_ops is not None:
             if self.buffer_size is not None:
                 media_ops.set_depth(self.buffer_size)
@@ -544,17 +550,10 @@ class ReactorCore:
     # -- thread-safe ingress (called by the bridge from the runtime thread) ---
 
     def submit_command(
-        self,
-        command: Command,
-        conn_id: ConnId | None,
-        request_id: RequestId | None,
-        *,
-        step_request_id: RequestId | None = None,
+        self, command: Command, conn_id: ConnId | None, request_id: RequestId | None
     ) -> None:
         """Enqueue a validated command onto the model loop."""
-        self._enqueue(
-            CommandEnvelope(command, conn_id, request_id, step_request_id=step_request_id)
-        )
+        self._enqueue(CommandEnvelope(command, conn_id, request_id))
 
     def _submit_command_at(
         self,
@@ -574,13 +573,11 @@ class ReactorCore:
         dispatcher reports apart from parsing. Kept apart from
         :meth:`submit_command`, which a model may override with the signature
         it was written against: a command for such a model goes through its
-        override, untimed.
+        override, untimed. *step_request_id* names the step request that
+        carries the command, so a failure of its handler answers that step.
         """
         if type(self).submit_command is not ReactorCore.submit_command:
-            if step_request_id is None:
-                self.submit_command(command, conn_id, request_id)
-            else:
-                self.submit_command(command, conn_id, request_id, step_request_id=step_request_id)
+            self.submit_command(command, conn_id, request_id)
             return
         self._enqueue(
             CommandEnvelope(
