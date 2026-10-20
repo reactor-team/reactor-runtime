@@ -49,6 +49,9 @@ its slope over the last two thirds, in MB per hour (`rss_slope`), judged
 only when those samples span 75 minutes or more, as a two-hour run's do; a
 shorter run reports the rate as ⚪ Not judged. A run too short to judge a
 trend ends in ERROR rather than in a verdict; a failed count still fails it.
+The runtime runs with `MALLOC_ARENA_MAX=2` unless the environment sets it:
+with glibc's default of up to 8 arenas per core, each keeping the most memory
+it ever held, RSS climbs to a plateau set by the core count, not by a leak.
 
 ## Scenarios
 

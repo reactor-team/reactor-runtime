@@ -118,6 +118,12 @@ class RuntimeProcess(RuntimeEndpoint):
         self.port = _free_port()
         super().__init__(f"http://127.0.0.1:{self.port}")
         env = {
+            # Two malloc arenas unless the caller sets its own count. glibc
+            # opens arenas as threads contend, up to 8 per core, and each keeps
+            # the most it ever held: a runner's 4 cores took the runtime from
+            # 550 MB to 1.5 GB in 30 minutes, a plateau set by the allocator
+            # that the RSS trends read as a leak.
+            "MALLOC_ARENA_MAX": "2",
             **os.environ,
             "PORT": str(self.port),
             "HOST": "127.0.0.1",
