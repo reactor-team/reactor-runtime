@@ -457,11 +457,14 @@ async def runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
 
 
 async def _until(predicate: Callable[[], bool]) -> None:
-    for _ in range(400):
+    # Generous: a first step on a fresh runner starts the model's thread and
+    # resolves uploads, which a loaded CI host can take seconds over. A passing
+    # test returns at the first poll that sees the condition.
+    for _ in range(2000):
         if predicate():
             return
         await asyncio.sleep(0.005)
-    raise AssertionError("condition not reached within 2 s")
+    raise AssertionError("condition not reached within 10 s")
 
 
 def _request_step(
