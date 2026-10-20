@@ -105,8 +105,8 @@ class Harness:
             addressed=lambda *args: None,
             media=lambda chunk: None,
             step=self.reports.append,
-            step_refusal=self.refusals.append,
         )
+        self.app._bind_step_refusal(self.refusals.append)
         self.queue: asyncio.Queue[Any] = asyncio.Queue()
         self.app._inbound_q = self.queue
         self.tasks: list[asyncio.Task[None]] = []
@@ -393,7 +393,7 @@ class Connection:
 
     def send_media(self, chunk: MediaChunk) -> None: ...
 
-    def flush_media(self) -> None: ...
+    def flush_media(self, *, hold: bool = False) -> None: ...
 
     def set_media_rate(self, fps: float) -> None: ...
 
