@@ -109,13 +109,21 @@ async def test_room_participant_churn(runtime: RuntimeProcess) -> None:
             )
         metrics = [assert_answered(unanswered)]
         if not ENDURANCE_SMOKE_CYCLES:
-            metrics += exact_metrics(sampler.samples, tasks_baseline=sampler.initial_tasks)
+            metrics += exact_metrics(
+                sampler.samples,
+                tasks_baseline=sampler.initial_tasks,
+                children_baseline=sampler.initial_children,
+            )
             metrics += trend_metrics(sampler.samples)
     finally:
         if not metrics and sampler.samples:
             metrics = [
                 assert_answered(unanswered),
-                *exact_metrics(sampler.samples, tasks_baseline=sampler.initial_tasks),
+                *exact_metrics(
+                    sampler.samples,
+                    tasks_baseline=sampler.initial_tasks,
+                    children_baseline=sampler.initial_children,
+                ),
             ]
         finish_and_check(
             test_name="room-participant-churn",
