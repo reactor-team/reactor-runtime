@@ -42,11 +42,15 @@ message TrackFrames {
 
 // Request to run one step of a stepped session. Every field is optional: an
 // empty request runs the step on the model's current state, which commands
-// sent before it may have changed. The runtime applies the request as
+// sent before it may have changed. The runtime checks the whole request
+// first: every upload it references, every call against the model's contract,
+// and every frame against its input track. A request that fails a check is
+// refused (REFUSED) and changes nothing. A request that passes is applied as
 // individual calls, in order: the state, then the commands, then the media
-// input, and then runs the step. A call that fails stops the request before
-// the step runs (REFUSED or COMMAND_FAILED); the calls applied before it stay
-// applied.
+// input, and then the step runs. A call whose handler fails stops the request
+// before the step runs (COMMAND_FAILED); the calls applied before it stay
+// applied. Another client's commands may run between a request's calls and
+// its step.
 //
 // Every request ends in exactly one response, a StepResult with the request's
 // request_id. Requests are handled in the order they arrive: one sent before
@@ -55,15 +59,20 @@ message RequestStep {
   // Values for the model's state fields, keyed by field name. Each key runs as
   // the model's set_<key> command, in ascending key order, before commands.
   google.protobuf.Struct state = 1;
-  // Commands to run after the state, in order.
+  // Commands to run after the state, in order. A call carries no request id of
+  // its own: its handler's success is answered by the StepResult alone, and a
+  // message its handler returns reaches the client uncorrelated, like a
+  // broadcast addressed to it.
   repeated Command commands = 2;
-  // Frames to write to the model's input tracks, one entry per track.
+  // Frames to write to the model's input tracks, one entry per track. A track
+  // takes at most as many frames as its input buffer holds; a request with
+  // more is refused.
   repeated TrackFrames media_input = 3;
 }
 
 // A file the model kept with a step, beside its media. The bytes are not in
 // the message: the step's result is saved with the file, and a client reads it
-// from the step results of the session, by the step's index and the file's
+// from the step results of the session, by the step's number and the file's
 // name.
 message StepFileRef {
   // The file's name, one path segment.
@@ -81,9 +90,11 @@ enum StepFailureCode {
   // The step ran and worked.
   STEP_FAILURE_CODE_UNSPECIFIED = 0;
   // The request, one of its calls, or the model's process_input() refused the
-  // step: the session does not step, a call does not fit the model's
-  // contract, an upload never arrived, or a frame cannot be decoded. The step
-  // did not run and takes no number.
+  // step: the session does not step or already took its steps, a call does not
+  // fit the model's contract, an upload never arrived, or a track's frames
+  // cannot be decoded or do not fit its input buffer. The step did not run and
+  // takes no number. A request the runtime refuses before applying it changes
+  // nothing; entry names the call or track at fault.
   STEP_FAILURE_CODE_REFUSED = 1;
   // The session cannot run a step yet. The step did not run and takes no
   // number.
@@ -91,23 +102,25 @@ enum StepFailureCode {
   // The step ran, and the model reported a failure. It takes a number.
   STEP_FAILURE_CODE_FAILED = 3;
   // The step ran, but its result does not fit in one message on this
-  // connection. It takes a number, and the result carries no media.
+  // connection, or the connection refused to send it. It takes a number, and
+  // the result carries no media.
   STEP_FAILURE_CODE_RESULT_TOO_LARGE = 4;
   // The handler of one of the request's state keys or commands failed. The
   // calls before it stay applied, the ones after it are skipped, and the step
   // did not run and takes no number.
   STEP_FAILURE_CODE_COMMAND_FAILED = 5;
   // The session ended before the step's result could be sent. Whether the step
-  // ran is unknown to the client, so the result carries no index.
+  // ran is unknown to the client, so the result carries no step number.
   STEP_FAILURE_CODE_SESSION_ENDED = 6;
 }
 
 // The outcome of one step request: what the model produced, per output track,
 // or why it produced nothing. The response to a RequestStep.
 message StepResult {
-  // The step's number in the session, counted from 1. Zero when the step did
-  // not run. Absent for SESSION_ENDED, where whether the step ran is unknown.
-  optional uint64 index = 1;
+  // The step's number in the session, counted from 1: the step of
+  // step_completed, result.json, and the session's step routes. Zero when the
+  // step did not run, or, for SESSION_ENDED, when whether it ran is unknown.
+  uint64 step = 1;
   repeated TrackFrames tracks = 2;
   // Seconds the step's generate() took, or the time the model reported for the
   // step. A saved step records the same value as generate_s in its
@@ -125,4 +138,12 @@ message StepResult {
   optional string error = 5;
   // What kind of failure error describes; unspecified when the step worked.
   StepFailureCode failure_code = 6;
+  // For COMMAND_FAILED, the stable code the failing handler raised, the code
+  // of its CommandError, which a client branches on; internal_error for an
+  // unplanned failure. Unset for every other outcome.
+  optional string code = 7;
+  // The entry of the request at fault, for COMMAND_FAILED and for a request
+  // the runtime refused: "state.<key>", "commands[<i>]", or
+  // "media_input[<i>]". Unset when no single entry is at fault.
+  optional string entry = 8;
 }
