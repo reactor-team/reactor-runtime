@@ -201,6 +201,13 @@ def _executor_threads() -> int:
     return len(getattr(executor, "_threads", ()))
 
 
+def _step_requests(runner: Runner) -> int:
+    """Count the step requests whose state the runner or the model still keeps."""
+    model = runner._bridge._model if runner._bridge is not None else None
+    failed = getattr(model, "_failed_step_calls", {})
+    return len(runner._step_order) + len(failed)
+
+
 def _live_transport_objects() -> dict[str, int]:
     from reactor_runtime.transport.webrtc.connection import WebRTCConnection
     from reactor_runtime.transport.webrtc.pacer import MediaPacer
@@ -264,6 +271,7 @@ def build_app(
             "live": _live_transport_objects(),
             "topic_commands": dict(_topic_commands),
             "input_frames": _input_frames(runner),
+            "step_requests": _step_requests(runner),
             "tasks": len(asyncio.all_tasks()),
             "executor_threads": _executor_threads(),
         }

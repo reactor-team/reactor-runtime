@@ -37,6 +37,7 @@ Exact counts, which must be 0 on every cycle:
 | `live_connections`, `live_peers`, `live_pacers` | Transport objects still alive after a collection, with no client connected. |
 | `live_client_stats` | Connections the runtime still keeps client-stats state for, with no client connected. |
 | `live_participants` | Room participant connections still alive after a collection, with no participant in the room. |
+| `live_step_requests` | Step requests whose order the runtime still keeps for a connection, or whose failure the model still keeps, with no client connected. |
 | `tasks` | asyncio tasks on the runtime's loop; must never rise above the reading taken before the first client. |
 | `child_processes` | Processes the runtime started, at any depth, an exited one nobody reaped included; must never rise above the reading taken before the first client. |
 | `shm_blocks`, `shm_bytes` | The distributed package's shared-memory blocks in `/dev/shm` (`rr*`); must never rise above the first reading. Judged only for a runtime with worker processes, and Linux only: elsewhere they are not files, and the run says they were not measured. The count covers the whole machine, which a CI runner gives to one scenario; run locally, it assumes nothing else on the machine uses the distributed package meanwhile. |
@@ -65,6 +66,7 @@ it ever held, RSS climbs to a plateau set by the core count, not by a leak.
 | `steady_stream` | One v1 client stays connected for the whole run, streaming while it pings, sends client stats and a command once a second. The runtime is read every 15 s as it streams: what the live connection holds (`live_*`, `tasks`) must never rise above the first reading, `pacers_holding_output` and `pinned_batches` stay 0, and every interval gets 60 frames back. Once the client leaves, the reading after teardown must be 0 on every count (`*_after_close`), with the tasks back to the reading before it joined. The trends judge the streaming readings. |
 | `distributed_echo` | The v1 connection churn on `model-distributed/`, where the echo's engine runs in a worker process behind a `DistributedRunner`, so every frame crosses to the worker and back through shared memory. |
 | `abrupt_disconnect` | The v1 churn, with each client in its own process (`endurance/abrupt.py`), killed with `SIGKILL` a moment after its frames came back instead of closing. The runtime learns the client is gone only from the wire going silent, as it does when a client crashes or loses its network. |
+| `stepped_session_churn` | One long-lived stepped session. Each cycle a v1 client requests 10 steps one after another, each setting the effect through `state` and carrying one webcam frame in `media_input`, waits for every result, and closes. Every step must run (`short_cycles`) and every request must get its result (`unanswered_requests`). |
 
 ## Running it
 
@@ -121,9 +123,10 @@ every PR that touches the runtime:
   cover the v0 and v1 control protocols, commands and client stats, a client
   that dies without closing, sessions started and stopped, with and without a
   close reason or a moderation verdict, several clients on one session, one
-  connection streaming for hours, a model run in worker processes, and room
-  participants with their RPC and data-topic commands and media inputs;
-  uploads, clips and recordings have none yet.
+  connection streaming for hours, a model run in worker processes, stepped
+  sessions and their step requests, and room participants with their RPC and
+  data-topic commands and media inputs; uploads, clips and recordings have
+  none yet.
 - **A change to what the launcher hooks** (`MediaPacer.stop`,
   `http_server.build_app`, `Runner._connections`, the transport classes the
   probe counts): update `endurance/launcher.py` in the same PR.
