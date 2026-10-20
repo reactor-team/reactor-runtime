@@ -258,10 +258,21 @@ message ClientConnectionStat {
 // The stages, in the order a command goes through them. The side that
 // reports a stage is the side that times it:
 //
-//   queue_wait  The message waits in the sender's chunk queue until its first
-//               chunk leaves it. Sender.
+//   enqueue     From the sender's send call until the message is in its chunk
+//               queue: the channel state check, the wait for the queue's lock
+//               and the copy into it. Sender.
+//   queue_wait  From the message being in the chunk queue (when enqueue ends)
+//               until its first chunk leaves it. Sender.
+//   first_check Part of queue_wait: reading libwebrtc's buffered amount before
+//               taking the message's first chunk. Sender.
+//   first_build Part of queue_wait: cutting the message's first chunk off the
+//               queue. Sender.
+//   first_native Part of queue_wait: libwebrtc's send of the message's first
+//               chunk. Sender.
 //   send        From the message's first chunk to its last being handed to
 //               SCTP. Sender.
+//   rest_native Part of send: libwebrtc's send of every chunk after the
+//               message's first. Sender.
 //   stall       The time the sender's chunk pump stopped because SCTP's buffer
 //               was full, per message sent. Sender.
 //   reassembly  From the message's first chunk arriving to its last. Receiver.
@@ -285,8 +296,11 @@ message ClientConnectionStat {
 // A part says which stage it is inside in `part_of`: adding both counts that
 // time twice.
 //
-// queue_wait, send, stall and reassembly come from the chunked channel; a
-// channel without chunking reports none of them.
+// enqueue, queue_wait and their parts, send, rest_native, stall and
+// reassembly come from the chunked channel; a channel without chunking reports
+// none of them. queue_wait starts when enqueue ends, so a sender that times
+// enqueue reports a smaller queue_wait than one that does not, for the same
+// wait.
 message MessageStage {
   string name = 1;
   double total_ms = 2;
