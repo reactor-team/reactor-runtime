@@ -55,6 +55,7 @@ trend ends in ERROR rather than in a verdict; a failed count still fails it.
 | `connection_churn_v1` | The same churn with a client that speaks v1 protobuf, as current SDKs do: it also requests the schema and, once a second, pings, sends client stats and a `set_effect` or `set_intensity` command. Every request must be answered without an error (`unanswered_requests`). |
 | `room_participant_churn` | One session connected to a LiveKit room, the room connection open throughout. Each cycle a participant joins the room, requests the schema and runs a command over the Reactor protocol, calls an RPC method that runs a command, sends a data packet on a topic that runs one, publishes a `webcam` track the session reads by name, sends a microphone byte stream on the topic mapped to `mic`, and leaves. Every request that has an answer must get it, and the topic command must get none; the runtime's own counts must also show that the model's handler ran the topic command, which the runtime did not reject, and that frames arrived on both inputs, since LiveKit accepts a packet, a track, or a stream whether or not the runtime uses it (`unanswered_requests`). Needs a LiveKit server (`LIVEKIT_URL`), and skips without one or against a runtime that serves no LiveKit transport. |
 | `session_churn` | Each cycle starts a session under a fresh id, a v1 client streams until its 60 frames come back, and the session is stopped: in turn a plain stop, the client leaving first and the orphaned session stopped after, a stop with a close reason, and a moderated stop. The last two owe the client its `session_ended` or `moderation` notice before the connection closes. The runtime is read once the session is ready again. |
+| `multi_connection` | One session shared by several clients. Each cycle a v1 client publishes the webcam, and three v1 viewers that publish nothing, receive-only with no webcam track negotiated, join and each get 60 frames of the same output. They leave in two steps, in turn the viewers first or the publisher first; when the publisher leaves first, a new publisher takes over the webcam while the viewers stay, and must be granted it. |
 | `abrupt_disconnect` | The v1 churn, with each client in its own process (`endurance/abrupt.py`), killed with `SIGKILL` a moment after its frames came back instead of closing. The runtime learns the client is gone only from the wire going silent, as it does when a client crashes or loses its network. |
 
 ## Running it
@@ -110,9 +111,9 @@ every PR that touches the runtime:
   add a scenario that drives it, or extend an existing one. Today's scenarios
   cover the v0 and v1 control protocols, commands and client stats, a client
   that dies without closing, sessions started and stopped, with and without a
-  close reason or a moderation verdict, and room participants with their RPC
-  and data-topic commands and media inputs; uploads, clips, recordings and
-  several clients on one session have none yet.
+  close reason or a moderation verdict, several clients on one session, and
+  room participants with their RPC and data-topic commands and media inputs;
+  uploads, clips and recordings have none yet.
 - **A change to what the launcher hooks** (`MediaPacer.stop`,
   `http_server.build_app`, `Runner._connections`, the transport classes the
   probe counts): update `endurance/launcher.py` in the same PR.
