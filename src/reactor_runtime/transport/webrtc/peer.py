@@ -984,6 +984,9 @@ class WebRTCPeer:
             self._data_open = False
             self._control_open = False
         self._release_wire()
+        # The connection does not close a peer that reported its own loss, so
+        # the teardown's emptying never runs for it.
+        self._drop_outbound_media()
         self._fire(self._cb_disconnect)
 
     def _drain_channels(self) -> None:
@@ -1274,6 +1277,17 @@ class WebRTCPeer:
             self._flushes += 1
             self._empty_frame_queue()
             self._audio_bufs.clear()
+
+    def _drop_outbound_media(self) -> None:
+        """Drop what the pumps had not taken yet, once the peer is done.
+
+        A peer that is done is not freed by its refcount: the connection's
+        pacer holds its send_media, and its callbacks hold the connection, so
+        the peer lives until a garbage collection, and so would every frame
+        left in its queue and every sample left in its audio buffers.
+        """
+        self._empty_frame_queue()
+        self._audio_bufs.clear()
 
     def _empty_frame_queue(self) -> None:
         """Drop every bundle waiting for the drain thread."""
@@ -1672,12 +1686,7 @@ class WebRTCPeer:
                 thread.join(timeout=1.0)
         self._frame_thread = None
         self._audio_thread = None
-        # What the pumps had not taken yet. A closed peer is not freed by its
-        # refcount: the connection's pacer holds its send_media, and its
-        # callbacks hold the connection, so the peer lives until a garbage
-        # collection, and so would every frame left here.
-        self._empty_frame_queue()
-        self._audio_bufs.clear()
+        self._drop_outbound_media()
 
 
 async def libwebrtc_peer_factory(

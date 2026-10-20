@@ -2165,6 +2165,21 @@ async def test_close_drops_the_media_the_pumps_had_not_taken() -> None:
     assert peer._audio_bufs == {}
 
 
+async def test_a_lost_peer_drops_the_media_the_pumps_had_not_taken() -> None:
+    """The connection does not close a peer that reported its loss, so the loss drops it."""
+    peer = WebRTCPeer()
+    peer._loop = asyncio.get_running_loop()
+    peer._out_tracks["v"] = cast(Any, _FakeTrack())
+    for _ in range(3):
+        peer.send_media(_video_bundle("v"))
+    peer._audio_bufs["a"] = np.zeros(480, np.int16)
+
+    peer._report_loss()
+
+    assert peer._frame_queue.empty()
+    assert peer._audio_bufs == {}
+
+
 def test_a_bundle_queued_as_the_peer_closes_is_dropped() -> None:
     peer = WebRTCPeer()
     peer._out_tracks["v"] = cast(Any, _FakeTrack())
