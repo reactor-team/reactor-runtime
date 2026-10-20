@@ -131,6 +131,7 @@ def test_exact_metrics_cover_every_count() -> None:
         "live_client_stats",
         "live_participants",
         "tasks",
+        "child_processes",
     ]
 
 
@@ -142,6 +143,83 @@ def test_a_participant_left_alive_fails_its_cycle() -> None:
 
     assert participants.status == "fail"
     assert retained_cycles(samples) == 1
+
+
+def test_exact_metrics_judge_shared_memory_where_it_was_measured() -> None:
+    samples = [_sample(i, child_processes=1, shm_blocks=2, shm_bytes=4_000_000) for i in range(3)]
+    names = [m.name for m in exact_metrics(samples, children_baseline=1)]
+    assert names[-3:] == ["child_processes", "shm_blocks", "shm_bytes"]
+
+
+def test_shared_memory_is_not_judged_for_a_runtime_without_workers() -> None:
+    # The blocks are counted across the machine: another run's must not
+    # fail a scenario whose runtime holds none.
+    samples = [_sample(i, shm_blocks=2 + i, shm_bytes=4_000_000) for i in range(3)]
+    names = [m.name for m in exact_metrics(samples, children_baseline=0)]
+    assert "shm_blocks" not in names
+
+
+def test_a_shared_memory_block_left_each_cycle_fails() -> None:
+    samples = [
+        _sample(i, child_processes=1, shm_blocks=2 + i, shm_bytes=4_000_000) for i in range(3)
+    ]
+    results = {m.name: m for m in exact_metrics(samples, children_baseline=1)}
+    assert results["shm_blocks"].status == "fail"
+    assert results["shm_bytes"].status == "ok"
+
+
+def test_a_child_process_past_the_baseline_fails() -> None:
+    samples = [_sample(i, child_processes=2) for i in range(3)]
+    results = {m.name: m for m in exact_metrics(samples, children_baseline=1)}
+    assert results["child_processes"].status == "fail"
+
+
+def test_child_rss_is_judged_only_when_the_runtime_has_children(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(trends, "ENDURANCE_WARMUP_SECONDS", 0.0)
+    assert "child_rss" not in [m.name for m in trend_metrics(_samples(15))]
+    with_children = [_sample(i, child_rss_bytes=200_000_000) for i in range(15)]
+    names = [m.name for m in trend_metrics(with_children)]
+    assert "child_rss" in names
+    assert "child_rss_slope" in names
+
+
+def test_a_steady_worker_leak_the_ratio_passes_fails_on_slope() -> None:
+    # A worker starting at 135 MB and growing 30 MB an hour over a two-hour
+    # run: under the 15% ratio, but a slope over the limit.
+    samples = [
+        _sample(i, elapsed_s=i * 60.0, child_rss_bytes=int((135 + 0.5 * i) * 1e6))
+        for i in range(120)
+    ]
+    results = {m.name: m for m in trend_metrics(samples)}
+    assert results["child_rss"].status == "ok"
+    assert results["child_rss_slope"].status == "fail"
+
+
+def test_the_default_executor_growing_to_its_cap_late_is_not_a_thread_leak() -> None:
+    # The pool reaches its cap of 8 an hour and a half into a two-hour run,
+    # as it did on a runner: every new thread is one of its workers.
+    samples = [
+        _sample(
+            i,
+            elapsed_s=i * 60.0,
+            num_threads=18 + min(8, max(0, i - 90)),
+            executor_threads=1 + min(8, max(0, i - 90)),
+        )
+        for i in range(120)
+    ]
+    results = {m.name: m for m in trend_metrics(samples)}
+    assert results["num_threads"].status == "ok"
+
+
+def test_threads_growing_outside_the_default_executor_still_fail() -> None:
+    samples = [
+        _sample(i, elapsed_s=i * 60.0, num_threads=18 + min(8, max(0, i - 90)), executor_threads=1)
+        for i in range(120)
+    ]
+    results = {m.name: m for m in trend_metrics(samples)}
+    assert results["num_threads"].status == "fail"
 
 
 def test_retained_cycles_count_every_cycle_with_any_nonzero_count() -> None:

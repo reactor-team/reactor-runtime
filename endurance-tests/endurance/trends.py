@@ -90,6 +90,20 @@ class Sample:
     # Room participant connections alive after the probe's collection, with
     # no participant in the room.
     live_participants: int = 0
+    # Processes the runtime started, at any depth: a model's worker ranks and
+    # the helpers they bring.
+    child_processes: int = 0
+    # Those processes' resident memory, summed.
+    child_rss_bytes: int = 0
+    # Shared-memory blocks the distributed package holds in /dev/shm, and
+    # their bytes; None on a platform with no /dev/shm.
+    shm_blocks: int | None = None
+    shm_bytes: int | None = None
+    # Worker threads of the loop's default executor, which asyncio.to_thread
+    # runs on: part of num_threads. The pool starts a worker only when every
+    # one it has is busy and never stops one, so it grows to its cap
+    # (min(32, CPUs + 4)) whenever the runtime's load first needs them.
+    executor_threads: int = 0
 
 
 def cpu_deltas(samples: list[Sample]) -> list[float]:
@@ -364,16 +378,51 @@ def retained_cycles(samples: list[Sample]) -> int:
     return sum(1 for s in samples if any(getattr(s, field) for field in ZERO_FIELDS))
 
 
+def process_metrics(
+    samples: list[Sample], *, children_baseline: int | None = None
+) -> list[MetricResult]:
+    """Return the counts of what the runtime holds outside its own process.
+
+    The child processes must never outnumber *children_baseline*, the count
+    before the first cycle when known. The shared-memory blocks and bytes must
+    never rise above the first reading, after the first cycle rather than
+    before it: a worker allocates its result block on its first step, and a
+    block grows to its high-water mark on first use and is then reused. A
+    block leaked per cycle shows from the second cycle on. They are judged
+    only for a runtime with worker processes, and only where they were
+    measured.
+    """
+    results = [assert_never_grows(samples, field="child_processes", baseline=children_baseline)]
+    if not children_baseline:
+        # The blocks are counted across the machine: a runtime with no worker
+        # processes holds none, and another run on the machine must not fail it.
+        print("[shm_blocks] not judged: the runtime has no worker processes")
+        return results
+    if any(s.shm_blocks is None or s.shm_bytes is None for s in samples):
+        print("[shm_blocks] not measured: this platform has no /dev/shm")
+        return results
+    return [
+        *results,
+        assert_never_grows(samples, field="shm_blocks"),
+        assert_never_grows(samples, field="shm_bytes", unit="bytes"),
+    ]
+
+
 def exact_metrics(
-    samples: list[Sample], *, tasks_baseline: int | None = None
+    samples: list[Sample],
+    *,
+    tasks_baseline: int | None = None,
+    children_baseline: int | None = None,
 ) -> list[MetricResult]:
     """Return the exact counts over every cycle: a retained object fails the cycle it shows in.
 
-    *tasks_baseline* is the task count before the first cycle, when known.
+    *tasks_baseline* and *children_baseline* are the task and child process
+    counts before the first cycle, when known.
     """
     return [
         *(assert_always_zero(samples, field=field) for field in ZERO_FIELDS),
         assert_never_grows(samples, field="tasks", baseline=tasks_baseline),
+        *process_metrics(samples, children_baseline=children_baseline),
     ]
 
 
@@ -419,8 +468,11 @@ def trend_metrics(samples: list[Sample]) -> list[MetricResult]:
         ),
         # Medians: a cycle can catch the previous one's native threads and
         # sockets still being torn down, a one-sample blip a mean would carry.
+        # The default executor's workers are left out: the pool grows to its
+        # cap when the load first needs it, at a time no warm-up can predict,
+        # and a pool that stops at its cap holds no leak.
         assert_no_sustained_growth(
-            [float(s.num_threads) for s in warmed],
+            [float(s.num_threads - s.executor_threads) for s in warmed],
             name="num_threads",
             unit="count",
             max_growth_ratio=0.15,
@@ -434,5 +486,28 @@ def trend_metrics(samples: list[Sample]) -> list[MetricResult]:
             max_growth_ratio=0.15,
             min_absolute_delta=3,
             use_median=True,
+        ),
+        # Judged only for a runtime whose model runs in processes of its own,
+        # by the same pair of checks as the runtime's own RSS.
+        *(
+            [
+                assert_no_sustained_growth(
+                    [s.child_rss_bytes / 1e6 for s in warmed],
+                    name="child_rss",
+                    unit="MB",
+                    max_growth_ratio=0.15,
+                    min_absolute_delta=5.0,
+                ),
+                assert_slope_under(
+                    [s.elapsed_s / 3600 for s in warmed],
+                    [s.child_rss_bytes / 1e6 for s in warmed],
+                    name="child_rss_slope",
+                    unit="MB",
+                    max_per_hour=MAX_RSS_MB_PER_HOUR,
+                    min_absolute_delta=5.0,
+                ),
+            ]
+            if any(s.child_rss_bytes for s in warmed)
+            else []
         ),
     ]

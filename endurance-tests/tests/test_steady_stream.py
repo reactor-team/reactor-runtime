@@ -21,6 +21,7 @@ from endurance.trends import (
     Sample,
     assert_always_zero,
     assert_never_grows,
+    process_metrics,
     trend_metrics,
 )
 
@@ -60,14 +61,17 @@ async def _streaming_probe(
     return {**readings[-1], "tasks": min(reading["tasks"] for reading in readings)}
 
 
-def _streaming_checks(samples: list[Sample]) -> list[MetricResult]:
+def _streaming_checks(samples: list[Sample], children_baseline: int) -> list[MetricResult]:
     return [
         *(assert_always_zero(samples, field=field) for field in _ZERO_WHILE_STREAMING),
         *(assert_never_grows(samples, field=field) for field in _STREAMING_FIELDS),
+        *process_metrics(samples, children_baseline=children_baseline),
     ]
 
 
-def _after_close_checks(final: Sample, tasks_baseline: int) -> list[MetricResult]:
+def _after_close_checks(
+    final: Sample, tasks_baseline: int, children_baseline: int
+) -> list[MetricResult]:
     """Check the reading taken once the client has left, each count named as such."""
     return [
         *(
@@ -76,6 +80,12 @@ def _after_close_checks(final: Sample, tasks_baseline: int) -> list[MetricResult
         ),
         assert_never_grows(
             [final], field="tasks", baseline=tasks_baseline, name="tasks_after_close"
+        ),
+        assert_never_grows(
+            [final],
+            field="child_processes",
+            baseline=children_baseline,
+            name="child_processes_after_close",
         ),
     ]
 
@@ -100,10 +110,10 @@ async def test_steady_stream(runtime: RuntimeProcess) -> None:
     def checks() -> list[MetricResult]:
         results = [assert_full_streams(received)]
         if streaming:
-            results += _streaming_checks(streaming)
+            results += _streaming_checks(streaming, sampler.initial_children)
         results.append(assert_answered([client.collect_unanswered()]))
         if final is not None:
-            results += _after_close_checks(final, sampler.initial_tasks)
+            results += _after_close_checks(final, sampler.initial_tasks, sampler.initial_children)
         return results
 
     try:

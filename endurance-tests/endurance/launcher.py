@@ -195,6 +195,12 @@ def _input_frames(runner: Runner) -> dict[str, float]:
     return {name: counts["frames_received"] for name, counts in model_input.take().items()}
 
 
+def _executor_threads() -> int:
+    """The worker threads of the running loop's default executor, none if it has not started."""
+    executor = getattr(asyncio.get_running_loop(), "_default_executor", None)
+    return len(getattr(executor, "_threads", ()))
+
+
 def _live_transport_objects() -> dict[str, int]:
     from reactor_runtime.transport.webrtc.connection import WebRTCConnection
     from reactor_runtime.transport.webrtc.pacer import MediaPacer
@@ -228,6 +234,12 @@ def build_app(
     """Build the runtime's app, with the probe route added."""
     app = _build_app(runner, transports, process_health, metrics)
 
+    @app.get("/_endurance/input_frames")
+    async def input_frames() -> dict[str, float]:
+        # The probe collects garbage and walks every object; this is cheap
+        # enough to poll while a client waits for its media to arrive.
+        return _input_frames(runner)
+
     @app.get("/_endurance/probe")
     async def probe() -> dict[str, Any]:
         import tracked_echo
@@ -253,6 +265,7 @@ def build_app(
             "topic_commands": dict(_topic_commands),
             "input_frames": _input_frames(runner),
             "tasks": len(asyncio.all_tasks()),
+            "executor_threads": _executor_threads(),
         }
 
     return app
@@ -260,8 +273,10 @@ def build_app(
 
 def main() -> None:
     """Install the probe and the pacer check, then run the runtime."""
-    # examples/echo, which the tracked model subclasses.
+    # examples/echo, which the tracked model subclasses, and the tracked model,
+    # which the probe reads and a model in another directory subclasses.
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples" / "echo"))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "model"))
     # Swapping in the wrapper is the point; ty refuses any assignment to a module function.
     http_server.build_app = build_app  # ty: ignore[invalid-assignment]
     _install_pacer_check()

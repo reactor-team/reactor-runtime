@@ -14,6 +14,7 @@ import asyncio
 import json
 import os
 import time
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -41,11 +42,14 @@ COMMAND_TOPIC = "endurance.set_effect"
 MIC_TOPIC = "endurance.mic"
 """The byte stream topic the endurance model maps to its ``mic`` input track."""
 
-# The webcam track's frames, for long enough that the session subscribes and
-# decodes some, and the microphone stream: 100 ms at 24 kHz, so the runtime
-# resamples it to the track's rate.
+# The webcam track's frames, and the microphone stream: 100 ms at 24 kHz, so
+# the runtime resamples it to the track's rate. The webcam sends until the
+# runtime has counted a frame of it, since how long the session takes to
+# subscribe to a new track varies: a fixed burst missed it once in thousands.
 _WEBCAM_SIZE = (64, 48)
-_WEBCAM_FRAMES = 45
+_WEBCAM_FRAME_S = 0.03
+# How often the webcam reads the runtime's count while it sends.
+_WEBCAM_CHECK_S = 0.25
 _MIC_RATE = 24_000
 _MIC_SAMPLES = 2_400
 
@@ -76,11 +80,22 @@ class RoomParticipant:
     command, which must answer nothing.
     """
 
-    def __init__(self, room: str, identity: str, model: str) -> None:
-        """Create the participant *identity* in *room*, speaking to the session as *model*."""
+    def __init__(
+        self,
+        room: str,
+        identity: str,
+        model: str,
+        input_frames: Callable[[], dict[str, float]],
+    ) -> None:
+        """Create the participant *identity* in *room*, speaking to the session as *model*.
+
+        *input_frames* reads the runtime's frames received per input track,
+        so the webcam sends until one of its frames has arrived.
+        """
         self._room_name = room
         self._identity = identity
         self._model = model
+        self._input_frames = input_frames
         self._room = rtc.Room()
         # Each reply by request id, as (topic, payload name).
         self._replies: dict[str, tuple[str, str | None]] = {}
@@ -168,18 +183,29 @@ class RoomParticipant:
         await asyncio.sleep(_QUIET_S)
 
     async def _feed_media(self) -> None:
-        """Publish a webcam track and send a microphone stream, then take the track down."""
+        """Publish a webcam track and send a microphone stream, then take the track down.
+
+        The webcam sends until the runtime has counted one of its frames, or
+        for ``_REPLY_WAIT_S``; the cycle's own check reports a track that got none.
+        """
         local = self._room.local_participant
         width, height = _WEBCAM_SIZE
+        before = (await asyncio.to_thread(self._input_frames)).get("webcam", 0)
         source = rtc.VideoSource(width, height)
         track = rtc.LocalVideoTrack.create_video_track("webcam", source)
         publication = await local.publish_track(
             track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_CAMERA)
         )
         frame = rtc.VideoFrame(width, height, rtc.VideoBufferType.RGB24, bytes(width * height * 3))
-        for _ in range(_WEBCAM_FRAMES):
+        deadline = time.monotonic() + _REPLY_WAIT_S
+        next_check = time.monotonic() + _WEBCAM_CHECK_S
+        while time.monotonic() < deadline:
             source.capture_frame(frame)
-            await asyncio.sleep(0.03)
+            await asyncio.sleep(_WEBCAM_FRAME_S)
+            if time.monotonic() >= next_check:
+                if (await asyncio.to_thread(self._input_frames)).get("webcam", 0) > before:
+                    break
+                next_check = time.monotonic() + _WEBCAM_CHECK_S
         tone = np.sin(2 * np.pi * 440 * np.arange(_MIC_SAMPLES) / _MIC_RATE)
         await local.send_bytes(
             (8_000 * tone).astype(np.int16).tobytes(),

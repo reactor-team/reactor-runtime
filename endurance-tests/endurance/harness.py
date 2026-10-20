@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextlib
 import json
 import os
 import socket
@@ -51,12 +52,21 @@ _RESPONSE = common_pb2.MessageKind.MESSAGE_KIND_RESPONSE
 _NOTIFICATION = common_pb2.MessageKind.MESSAGE_KIND_NOTIFICATION
 
 SUITE_DIR = Path(__file__).resolve().parent.parent
+# The model every scenario serves unless it names another.
+MODEL_DIR = SUITE_DIR / "model"
+# Where the distributed package's shared-memory blocks live on Linux, named
+# ``rr`` and 8 hex digits, ``_`` and a generation number.
+SHM_DIR = Path("/dev/shm")
+_SHM_BLOCKS = "rr????????_*"
 
 # How long a closed connection may take to leave the runtime's registry. The
 # runtime notices a client that closed its peer connection only some seconds
 # later, so this is generous; a connection still registered after it is
 # reported, not waited on forever.
 CLOSE_TIMEOUT_S = 30.0
+# How long the runtime has to exit once asked to: longer than a distributed
+# model's runner gives its workers to shut down.
+STOP_TIMEOUT_S = 45.0
 # How long the probe is re-read after the registry is empty, for a teardown
 # still in flight to finish. A count still nonzero after it is a leak.
 SETTLE_TIMEOUT_S = 10.0
@@ -100,11 +110,20 @@ class RuntimeEndpoint:
 class RuntimeProcess(RuntimeEndpoint):
     """The runtime under test, in its own process, with the probe route mounted."""
 
-    def __init__(self, log_path: Path) -> None:
-        """Start the runtime on a free local port, its output going to *log_path*."""
+    def __init__(self, log_path: Path, *, model_dir: Path = MODEL_DIR) -> None:
+        """Start the runtime on a free local port, its output going to *log_path*.
+
+        It serves the model in *model_dir*, read from its ``reactor.yaml``.
+        """
         self.port = _free_port()
         super().__init__(f"http://127.0.0.1:{self.port}")
         env = {
+            # Two malloc arenas unless the caller sets its own count. glibc
+            # opens arenas as threads contend, up to 8 per core, and each keeps
+            # the most it ever held: a runner's 4 cores took the runtime from
+            # 550 MB to 1.5 GB in 30 minutes, a plateau set by the allocator
+            # that the RSS trends read as a leak.
+            "MALLOC_ARENA_MAX": "2",
             **os.environ,
             "PORT": str(self.port),
             "HOST": "127.0.0.1",
@@ -113,7 +132,7 @@ class RuntimeProcess(RuntimeEndpoint):
         self._log = log_path.open("w")
         self._proc = subprocess.Popen(
             [sys.executable, str(SUITE_DIR / "endurance" / "launcher.py")],
-            cwd=SUITE_DIR / "model",
+            cwd=model_dir,
             env=env,
             stdout=self._log,
             stderr=subprocess.STDOUT,
@@ -149,18 +168,26 @@ class RuntimeProcess(RuntimeEndpoint):
         raise TimeoutError("the runtime's session never became ready")
 
     def stop(self) -> None:
-        """Stop the runtime, killing it if it does not exit in time."""
+        """Stop the runtime, killing it and what it started if they do not exit in time."""
+        children = self.process.children(recursive=True)
         self._proc.terminate()
         try:
-            self._proc.wait(timeout=20)
+            self._proc.wait(timeout=STOP_TIMEOUT_S)
         except subprocess.TimeoutExpired:
             self._proc.kill()
             self._proc.wait()
+        # A worker that outlived the runtime would hold its shared memory
+        # into the next scenario.
+        reap(children)
         self._log.close()
 
     def probe(self) -> dict[str, Any]:
         """Return one reading of the probe route."""
         return self.get("/_endurance/probe")
+
+    def input_frames(self) -> dict[str, float]:
+        """Return each input track's frames received this session, without a full probe."""
+        return self.get("/_endurance/input_frames")
 
     def wait_registered(self, count: int) -> dict[str, Any]:
         """Wait until at most *count* connections are registered, or ``CLOSE_TIMEOUT_S``.
@@ -911,6 +938,74 @@ class _Baseline:
     holding_after_stop: int
 
 
+def reap(processes: list[psutil.Process]) -> None:
+    """Kill *processes*, a runtime's descendants, leaving its shared memory unlinked.
+
+    The workers go first, and are waited for. Python's multiprocessing
+    resource tracker, one of the descendants, unlinks the shared-memory
+    blocks the workers registered once it sees them exit, so it gets
+    ``STOP_TIMEOUT_S`` to finish on its own before anything still alive is
+    killed: killed alongside the workers, it would leave their blocks behind.
+    """
+    trackers = [p for p in processes if _is_resource_tracker(p)]
+    workers = [p for p in processes if p not in trackers]
+    _kill_and_wait(workers)
+    _, alive = psutil.wait_procs(trackers, timeout=STOP_TIMEOUT_S)
+    _kill_and_wait(alive)
+
+
+def _is_resource_tracker(process: psutil.Process) -> bool:
+    try:
+        return any("resource_tracker" in part for part in process.cmdline())
+    except psutil.Error:
+        return False
+
+
+def _kill_and_wait(processes: list[psutil.Process]) -> None:
+    for process in processes:
+        with contextlib.suppress(psutil.NoSuchProcess):
+            process.kill()
+    psutil.wait_procs(processes, timeout=STOP_TIMEOUT_S)
+
+
+def shm_usage() -> tuple[int, int] | None:
+    """Return the distributed package's shared-memory blocks and their bytes.
+
+    ``None`` on a platform with no ``/dev/shm``, where the blocks are not
+    files to count.
+    """
+    if not SHM_DIR.is_dir():
+        return None
+    blocks = size = 0
+    for path in SHM_DIR.glob(_SHM_BLOCKS):
+        # A block can be unlinked between the listing and the stat.
+        try:
+            size += path.stat().st_size
+        except FileNotFoundError:
+            continue
+        blocks += 1
+    return blocks, size
+
+
+def _children(process: psutil.Process) -> tuple[int, int]:
+    """Return how many processes *process* started, at any depth, and their summed RSS.
+
+    A child that exited but was never reaped still counts, with no memory:
+    leaving one behind is a leak too.
+    """
+    count = rss = 0
+    for child in process.children(recursive=True):
+        try:
+            rss += child.memory_info().rss
+        except psutil.ZombieProcess:
+            pass
+        # A child can exit between the listing and the read.
+        except psutil.NoSuchProcess:
+            continue
+        count += 1
+    return count, rss
+
+
 class ResourceSampler:
     """Takes one ``Sample`` of the runtime process per settled cycle."""
 
@@ -927,6 +1022,8 @@ class ResourceSampler:
         # The session's tasks before any client: a task the first connection
         # leaves behind must count against this, not hide in the first sample.
         self.initial_tasks: int = first["tasks"]
+        # The model's worker processes are up by now: one more is a leak.
+        self.initial_children: int = _children(self._process)[0]
         self._baseline = _Baseline(
             freed_by_gc=first["batches_freed_by_gc"],
             holding_after_stop=first["pacers_holding_after_stop"],
@@ -945,6 +1042,8 @@ class ResourceSampler:
         """
         freed = reading["batches_freed_by_gc"]
         holding = reading["pacers_holding_after_stop"]
+        children, children_rss = _children(self._process)
+        shm = shm_usage()
         with self._process.oneshot():
             cpu = self._process.cpu_times()
             sample = Sample(
@@ -968,6 +1067,11 @@ class ResourceSampler:
                 live_client_stats=reading["client_stats_connections"],
                 tasks=reading["tasks"],
                 live_participants=reading["live"].get("participants", 0),
+                child_processes=children,
+                child_rss_bytes=children_rss,
+                shm_blocks=shm[0] if shm else None,
+                shm_bytes=shm[1] if shm else None,
+                executor_threads=reading.get("executor_threads", 0),
             )
         self._baseline.freed_by_gc = freed
         self._baseline.holding_after_stop = holding
