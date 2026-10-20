@@ -417,6 +417,10 @@ class WebRTCPeer:
         # binding stops delivering frames once a track is dropped, so a receiver
         # that is only referenced from its own frame callback would go silent.
         self._in_tracks: dict[str, rw.Track] = {}
+        # The engine's hand-off totals at the previous fold, per inbound video
+        # track and for the data channel (see fold_handoffs).
+        self._frame_handoffs_seen: dict[str, rw.HandoffStats] = {}
+        self._message_handoffs_seen: rw.MessageHandoffStats | None = None
         # Counters that match inbound tracks to IN track metadata by arrival order.
         self._in_video_seen = 0
         self._in_audio_seen = 0
@@ -724,6 +728,49 @@ class WebRTCPeer:
             return matching[seen].name
         return f"{kind.value}-{seen + 1}"
 
+    def fold_handoffs(self) -> None:
+        """Add the engine's hand-offs since the previous fold to this window's stages.
+
+        The engine keeps running totals since a callback was set: on each
+        inbound video track, ``sink_convert`` and ``handoff`` over its frames,
+        and ``handoff`` on the data channel over its messages. A window's worth
+        is the difference since the previous fold. The first fold counts
+        everything so far, and a count that went backwards (a callback set
+        again) counts from zero.
+        """
+        for name, track in list(self._in_tracks.items()):
+            if track.kind() != rw.MediaKind.Video:
+                continue
+            try:
+                now = track.handoff_stats()
+            except Exception:
+                logger.debug("handoff_stats failed on track %s", name, exc_info=True)
+                continue
+            before = self._frame_handoffs_seen.get(name)
+            self._frame_handoffs_seen[name] = now
+            convert_s, handoff_s, frames = now.convert_s, now.handoff_s, now.frames
+            if before is not None and frames >= before.frames:
+                convert_s -= before.convert_s
+                handoff_s -= before.handoff_s
+                frames -= before.frames
+            self.frame_stages.add(name, "sink_convert", convert_s * 1000.0, frames)
+            self.frame_stages.add(name, "handoff", handoff_s * 1000.0, frames)
+        channel = self._data_channel
+        if channel is None:
+            return
+        try:
+            now = channel.handoff_stats()
+        except Exception:
+            logger.debug("handoff_stats failed on the data channel", exc_info=True)
+            return
+        before = self._message_handoffs_seen
+        self._message_handoffs_seen = now
+        handoff_s, messages = now.handoff_s, now.messages
+        if before is not None and messages >= before.messages:
+            handoff_s -= before.handoff_s
+            messages -= before.messages
+        self.message_stages.add("handoff", handoff_s * 1000.0, messages)
+
     def _make_video_sink(
         self, name: str
     ) -> Callable[[bytes, int, int, rw.FrameMetadata | None], None]:
@@ -966,6 +1013,8 @@ class WebRTCPeer:
         self._control_channel = None
         self._out_tracks.clear()
         self._in_tracks.clear()
+        self._frame_handoffs_seen.clear()
+        self._message_handoffs_seen = None
 
     def _fire(self, callback: Callable[..., None] | None, *args: Any) -> None:
         """Invoke an inbound callback on the asyncio loop, if one is registered."""

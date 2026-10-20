@@ -464,6 +464,31 @@ async def test_stage_times_add_up_across_samples_until_taken(
     assert conn.take_frame_stages(["main_video"]) == {}
 
 
+async def test_every_sample_folds_the_engine_hand_offs(
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    class HandingOffPeer(FakePeer):
+        """A peer whose engine converted 30 more frames, in 30 ms, at every fold."""
+
+        def fold_handoffs(self) -> None:
+            self.frame_stages.add("main_video", "sink_convert", 30.0, 30)
+
+    peer = HandingOffPeer()
+    conn = await _connect(peer, factory_for(peer), out_av_tracks, ping_timeout=0.0)
+    conn._STATS_INTERVAL_SECONDS = 0.01
+
+    peer.fire_connected()
+    await asyncio.sleep(0.05)
+    await conn.close()
+    stages = conn.take_frame_stages(["main_video"])
+
+    [sink_convert] = stages["main_video"]
+    assert sink_convert.name == "sink_convert"
+    assert sink_convert.frames >= 30
+    assert sink_convert.total_ms == pytest.approx(sink_convert.frames * 1.0)
+
+
 async def test_stats_carry_the_frames_the_pacer_dropped(
     factory_for: Callable[..., WebRtcPeerFactory],
     out_av_tracks: TrackMap,

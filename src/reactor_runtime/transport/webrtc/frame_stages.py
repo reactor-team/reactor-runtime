@@ -7,6 +7,9 @@ itself, frame by frame: ``delivery`` (decoder to the runner), ``output_pacing``
 ``loop_wait`` within ``delivery``; ``feed_wait``, ``to_bgra`` and ``ingest``
 within ``output_queue``. ``emit`` runs from the model's ``emit`` call until
 the chunk reaches the output pacer.
+The engine times two on an inbound video track, between the decoder and the
+runtime's sink: ``sink_convert`` (its sink converting the decoded frame) and
+``handoff`` (the wait for the GIL and the copy into Python).
 libwebrtc times others as running totals, which a stats sample turns into a
 window's worth: ``encode`` on an outbound track, ``jitter_buffer`` and
 ``decode`` on an inbound one. On an inbound video track, libwebrtc also
@@ -33,6 +36,8 @@ STAGES = (
     "pacer",
     "jitter_buffer",
     "decode",
+    "sink_convert",
+    "handoff",
     "to_rgb",
     "loop_wait",
     "delivery",
