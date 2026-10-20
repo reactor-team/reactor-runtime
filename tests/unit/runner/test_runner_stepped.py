@@ -699,13 +699,18 @@ async def test_requests_queued_beyond_the_sessions_steps_are_not_generated(
     await _until(lambda: len(conn.sent) == 10)
     await _until(lambda: runner._sm.current_state is SessionState.READY)
 
-    first, *rest = conn.replies()
-    assert (first.request_id, first.step_result.index) == ("r0", 1)
-    assert {m.step_result.failure_code for m in rest} <= {
+    # Replies to different requests are correlated by request id, not order:
+    # a refusal leaves from the model's thread, ahead of a result still on its
+    # way through the runtime loop.
+    replies = {m.request_id: m.step_result for m in conn.replies()}
+    first = replies.pop("r0")
+    rest = list(replies.values())
+    assert (first.index, first.failure_code) == (1, step_pb2.STEP_FAILURE_CODE_UNSPECIFIED)
+    assert {m.failure_code for m in rest} <= {
         step_pb2.STEP_FAILURE_CODE_REFUSED,
         step_pb2.STEP_FAILURE_CODE_NOT_READY,
     }
-    assert all(m.step_result.index == 0 for m in rest)
+    assert all(m.index == 0 for m in rest)
     assert len(models[-1].inputs) == 1
     assert runner._steps_completed == 1
 
