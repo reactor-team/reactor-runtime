@@ -57,7 +57,8 @@ Commands:
 
 Each step sends exactly one frame on `main_video`. When the step carried
 `webcam` frames, it is the last of them, pixels unchanged; when it carried
-none, it is a 16x16 black uint8 RGB frame. The frame's metadata is the step's
+none, it is the last webcam frame an earlier step of the session carried, and
+a 16x16 black uint8 RGB frame only before the first. The frame's metadata is the step's
 report, as UTF-8 JSON:
 
 ```json
@@ -83,8 +84,9 @@ the runtime keeps none for a failed step, so its report travels on its frame
 alone. A step with no state, commands, or frames runs on the current state.
 
 In a streamed session each turn of the loop is one step: it sends the newest
-webcam frame that arrived since the last turn, or the black frame when none
-did, at up to 30 fps.
+webcam frame that arrived since the last turn, or the one before when none
+did, at up to 30 fps, so the picture holds steady while the loop outpaces the
+camera. Before the first webcam frame arrives, it sends the black frame.
 
 ## From a client
 
@@ -110,7 +112,7 @@ out.array                  # the frame pushed above, unchanged
 out.metadata               # b'{"label": "first", "tags": ["a"], "media_input": 1, ...}'
 [report] = result.files    # report.json, application/json
 
-await reactor.step()       # label and overlay hold, tags are empty, a black frame
+await reactor.step()       # label and overlay hold, tags are empty, the same frame again
 failed = await reactor.step(commands=[StepCommand("fail", {"reason": "on purpose"})])
 failed.error               # "on purpose"
 ```

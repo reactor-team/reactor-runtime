@@ -83,6 +83,8 @@ class StepInput:
         tags: The values ``tag`` received for this step, in the order sent.
         overlay: The uploaded file in force for the step, if any.
         failure: The reason ``fail`` gave for this step, if it was sent.
+        previous: The last webcam frame an earlier step of the session
+            carried, sent again when this step carried none.
     """
 
     frames: list[InputFrame]
@@ -90,6 +92,7 @@ class StepInput:
     tags: list[str]
     overlay: UploadedFile | None
     failure: str | None
+    previous: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -118,6 +121,7 @@ class SteppedEcho(ReactorApp):
         super().__init__()
         self.tags: list[str] = []
         self.failure: str | None = None
+        self.last_frame: np.ndarray | None = None
 
     @event(name="tag", description="Attach a value to the current step's report.")
     def tag(self, value: str = InputField(description="The value to report.")) -> None:
@@ -131,9 +135,10 @@ class SteppedEcho(ReactorApp):
 
     @session_started
     def on_session_started(self) -> None:
-        """Start each session with no tags and no failure pending."""
+        """Start each session with no tags, no failure pending, and no frame to repeat."""
         self.tags = []
         self.failure = None
+        self.last_frame = None
 
     # -- the step -------------------------------------------------------------
 
@@ -143,7 +148,8 @@ class SteppedEcho(ReactorApp):
         The tags and the failure belong to one step, so they are handed over
         and cleared here; the next step starts without them. The label and the
         overlay are state, so every step reads them until a client changes
-        them. A step never waits for a frame: one with none is still a step.
+        them. A step never waits for a frame: one with none is still a step,
+        and sends the session's last webcam frame again.
         """
         webcam = cast(InputBuffer, self.media.webcam)
         frames = webcam.try_read(webcam.available, mode=ReadMode.FIFO) or []
@@ -153,19 +159,29 @@ class SteppedEcho(ReactorApp):
             tags=self.tags,
             overlay=self.state.overlay,
             failure=self.failure,
+            previous=self.last_frame,
         )
         self.tags = []
         self.failure = None
+        if frames:
+            self.last_frame = frames[-1].data
         return step
 
     def generate(self, input: StepInput) -> EchoResult:
-        """Pick the frame to send back and write the report."""
+        """Pick the frame to send back and write the report.
+
+        A step with no frame of its own sends the session's last webcam frame
+        again, so a streamed picture holds its size while the loop outpaces the
+        camera; only before the first webcam frame does it send black.
+        """
+        last_metadata = None
         if input.frames:
             frame = input.frames[-1].data
             last_metadata = input.frames[-1].metadata
+        elif input.previous is not None:
+            frame = input.previous
         else:
             frame = np.zeros((BLACK_SIZE, BLACK_SIZE, 3), dtype=np.uint8)
-            last_metadata = None
         report = build_report(input, last_metadata)
         return EchoResult(frame=frame, report=report, failure=input.failure)
 

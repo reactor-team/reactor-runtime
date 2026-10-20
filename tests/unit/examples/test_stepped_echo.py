@@ -92,6 +92,11 @@ def test_manifest_resolves_to_the_app_class_and_keeps_every_step() -> None:
 # -- steps, through the model's own loop ---------------------------------------
 
 
+def _source(frame: InputFrame) -> Callable[[], InputFrame]:
+    """Wrap a frame as the checked source a step envelope carries."""
+    return lambda: frame
+
+
 class Harness:
     """The app in a stepped session, its inbound queue drained and its loop running."""
 
@@ -133,7 +138,7 @@ class Harness:
         """Post a step request the way the runtime does: its commands, then the step."""
         for name, args in commands:
             self.command(name, **args)
-        media_input = {"webcam": tuple(frames)} if frames else {}
+        media_input = {"webcam": tuple(_source(frame) for frame in frames)} if frames else {}
         self.queue.put_nowait(
             StepEnvelope(media_input=media_input, conn_id=CLIENT, request_id=request_id)
         )
@@ -202,7 +207,7 @@ async def test_media_input_counts_what_the_input_buffer_held(harness: Harness) -
     np.testing.assert_array_equal(frame, _frame(129))
 
 
-async def test_a_step_without_webcam_frames_sends_a_black_frame(harness: Harness) -> None:
+async def test_a_first_step_without_webcam_frames_sends_a_black_frame(harness: Harness) -> None:
     harness.step("r1")
     await harness.settle()
 
@@ -211,6 +216,23 @@ async def test_a_step_without_webcam_frames_sends_a_black_frame(harness: Harness
     assert frame.dtype == np.uint8
     assert not frame.any()
     assert (metadata["media_input"], metadata["input_metadata"]) == (0, None)
+
+
+async def test_a_step_without_webcam_frames_sends_the_last_one_again(harness: Harness) -> None:
+    harness.step("r1", frames=[InputFrame(data=_frame(7), metadata=b"m")])
+    harness.step("r2")
+    await harness.settle()
+
+    frame, metadata = _video(harness.reports[1])
+    np.testing.assert_array_equal(frame, _frame(7))
+    assert (metadata["media_input"], metadata["input_metadata"]) == (0, None)
+
+
+async def test_a_new_session_starts_without_a_frame_to_repeat() -> None:
+    app = SteppedEcho()
+    app.last_frame = _frame(7)
+    app.on_session_started()
+    assert app.last_frame is None
 
 
 async def test_a_last_frame_without_metadata_reports_null(harness: Harness) -> None:
@@ -336,7 +358,7 @@ async def test_an_overlay_upload_reaches_the_step_and_its_report(harness: Harnes
     assert reported == [{"name": "cat.png", "mime_type": "image/png", "size": 6}] * 2
 
 
-async def test_a_streamed_turn_sends_what_arrived_since_the_last_one_or_black() -> None:
+async def test_a_streamed_turn_sends_what_arrived_since_the_last_one_or_repeats_it() -> None:
     app = SteppedEcho()
     app._on_loop_ready()
     app.bind_output(
@@ -357,7 +379,7 @@ async def test_a_streamed_turn_sends_what_arrived_since_the_last_one_or_black() 
     frame, metadata = await turn()
     assert (int(frame[0, 0, 0]), metadata["media_input"]) == (2, 2)
     frame, metadata = await turn()
-    assert (frame.shape, metadata["media_input"]) == ((16, 16, 3), 0)
+    assert (frame.shape, int(frame[0, 0, 0]), metadata["media_input"]) == (_frame(2).shape, 2, 0)
 
 
 async def test_output_is_one_frame_on_main_video() -> None:
@@ -383,8 +405,9 @@ class Connection:
         self.protocol_version = V1
         self.sent: list[bytes | str] = []
 
-    def send_step_result(self, payload: bytes | str) -> None:
+    async def send_step_result(self, payload: bytes) -> bool:
         self.sent.append(payload)
+        return True
 
     def send_message(self, payload: bytes | str) -> None:
         self.sent.append(payload)
@@ -508,7 +531,7 @@ async def test_a_client_step_is_answered_with_the_frame_its_report_and_report_js
 
     [reply] = conn.results()
     result = reply.step_result
-    assert (reply.request_id, result.index) == ("r1", 1)
+    assert (reply.request_id, result.step) == ("r1", 1)
     assert result.failure_code == step_pb2.STEP_FAILURE_CODE_UNSPECIFIED
     assert not result.HasField("error")
     [track] = result.tracks
@@ -541,7 +564,7 @@ async def test_a_failed_client_step_carries_its_error_and_no_files(runner: Runne
     await _until(lambda: len(conn.sent) == 1)
 
     result = conn.results()[0].step_result
-    assert (result.index, result.failure_code, result.error) == (
+    assert (result.step, result.failure_code, result.error) == (
         1,
         step_pb2.STEP_FAILURE_CODE_FAILED,
         "nope",
