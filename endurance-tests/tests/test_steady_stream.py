@@ -125,7 +125,9 @@ async def test_steady_stream(runtime: RuntimeProcess) -> None:
             )
         await client.wait_for_replies()
         client.close()
-        reading, _ = runtime.settled_probe()
+        # Settled on the tasks too: tasks_after_close is judged on this one
+        # reading, and a task still closing the connection is not a leak.
+        reading, _ = runtime.settled_probe(tasks=sampler.initial_tasks)
         # Checked on its own: teardown is not another streaming interval.
         final = sampler.sample(cycle=count, reading=reading, record=False)
         # A smoke run judges what its intervals show on their own, as every
