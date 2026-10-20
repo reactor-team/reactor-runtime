@@ -60,6 +60,10 @@ async def test_session_churn(runtime: RuntimeProcess) -> None:
                             f"{stop}: the connection was still open {CLOSE_TIMEOUT_S:g}s after it"
                         )
                     await client.wait_for_notices(_NOTICE_GRACE_S)
+                elif notice:
+                    # A stop that did not happen owed no notice: the refusal
+                    # is counted once, under failed_stops.
+                    client.forget_notice(notice)
         finally:
             client.close()
         try:
@@ -79,6 +83,11 @@ async def test_session_churn(runtime: RuntimeProcess) -> None:
             runtime.request("POST", "/stop_session", body)
         except urllib.error.HTTPError as error:
             failures.append(f"{stop}: /stop_session answered {error.code}")
+            return False
+        # A stop that hangs past the request's timeout, or a connection the
+        # runtime refuses: URLError and TimeoutError are both OSErrors.
+        except OSError as error:
+            failures.append(f"{stop}: /stop_session did not answer: {error}")
             return False
         return True
 

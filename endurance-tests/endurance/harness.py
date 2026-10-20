@@ -609,6 +609,11 @@ class V1Client(BareClient):
         with self._lock:
             self._owed_notices.add(payload)
 
+    def forget_notice(self, payload: str) -> None:
+        """Stop counting the notification *payload* as owed, as when its stop was refused."""
+        with self._lock:
+            self._owed_notices.discard(payload)
+
     def collect_unanswered(self) -> list[str]:
         """Return the requests and notices still unanswered, refreshing :attr:`unanswered`."""
         with self._lock:

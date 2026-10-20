@@ -155,6 +155,14 @@ def test_the_owed_notification_settles_its_notice() -> None:
     assert client.collect_unanswered() == []
 
 
+def test_a_forgotten_notice_is_no_longer_owed() -> None:
+    client = _client_owed("schema", "request_schema", frozenset({"model_schema"}))
+    client._answered("schema", "model_schema", None)
+    client.expect_notice("session_ended")
+    client.forget_notice("session_ended")
+    assert client.collect_unanswered() == []
+
+
 def test_a_stop_that_went_wrong_fails_its_cycle_by_name() -> None:
     result = assert_clean_stops([[], ["moderated_stop: /stop_session answered 409"]])
     assert result.name == "failed_stops"
