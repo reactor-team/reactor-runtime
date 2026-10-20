@@ -574,6 +574,9 @@ class StepRefusal:
             :attr:`CompletedStep.session` is.
         reason: Why the step did not run.
         kind: Which kind of refusal it is.
+        code: For :attr:`StepRefusalKind.COMMAND_FAILED`, the code of the
+            failing handler's :class:`CommandError`, or ``internal_error``.
+        entry: The request's entry at fault, such as ``commands[2]``, when one is.
     """
 
     conn_id: ConnId
@@ -581,6 +584,8 @@ class StepRefusal:
     session: int
     reason: str
     kind: StepRefusalKind = StepRefusalKind.REFUSED
+    code: str | None = None
+    entry: str | None = None
 
 
 @dataclass(frozen=True)

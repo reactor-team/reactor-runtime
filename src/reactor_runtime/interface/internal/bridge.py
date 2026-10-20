@@ -19,13 +19,14 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from reactor_runtime.core.model import ReactorEvent
+from reactor_runtime.core.model import Command, ReactorEvent
 from reactor_runtime.core.values import ConnId, InputFrame
 from reactor_runtime.interface.internal.reactor_core import (
     AddressedSink,
     BroadcastSink,
     CommandTimingSink,
     FailureSink,
+    FrameSource,
     FrameTimingSink,
     MediaOps,
     MediaSink,
@@ -34,7 +35,6 @@ from reactor_runtime.interface.internal.reactor_core import (
     StepEnvelope,
     StepRefusalSink,
     StepSink,
-    StepWithdrawal,
 )
 from reactor_runtime.interface.model.contract import ContractError, ModelContract
 
@@ -111,27 +111,23 @@ class ModelBridge:
         request_id: RequestId | None,
         received_at: float | None = None,
         held_ms: float = 0.0,
-        step_request_id: RequestId | None = None,
     ) -> CommandOutcome:
         """Validate a client command against the contract and admit it.
 
-        The single place request-time validation runs. A payload that fails the
-        contract is rejected here and never reaches the model; a valid one is
-        turned into a typed command and enqueued with its addressing for a reply.
+        A payload that fails the contract is rejected here and never reaches
+        the model; a valid one is turned into a typed command and enqueued with
+        its addressing for a reply.
 
         Args:
             name: The command name from the wire.
             raw_args: The raw argument mapping from the wire.
             conn_id: The connection that sent it, when known.
             request_id: The request id to correlate a reply against, or ``None``
-                for a command no reply answers, such as one a step request carries.
+                for a command no reply answers.
             received_at: When the command reached the runtime, on the
                 monotonic clock, so the model can report how long it waited.
             held_ms: How long the command was held for the session's starting
                 input after it arrived, so the model reports that wait apart.
-            step_request_id: The id of the step request that carries the
-                command, when it is one of a step's state keys or commands. A
-                failure of its handler is then answered in that step's result.
 
         Returns:
             An accepted outcome when the command was valid and enqueued, else a
@@ -141,9 +137,7 @@ class ModelBridge:
             command = self._contract.validate(name, raw_args)
         except ContractError as error:
             return CommandOutcome.reject(error.field, error.reason)
-        self._model._submit_command_at(
-            command, conn_id, request_id, received_at, held_ms, step_request_id=step_request_id
-        )
+        self._model._submit_command_at(command, conn_id, request_id, received_at, held_ms)
         return CommandOutcome.accept()
 
     def check_command(self, name: str, raw_args: dict[str, Any]) -> CommandOutcome:
@@ -169,22 +163,44 @@ class ModelBridge:
 
     def submit_step(
         self,
-        media_input: Mapping[str, Sequence[InputFrame]],
+        calls: Sequence[tuple[str, str, dict[str, Any]]],
+        media_input: Mapping[str, Sequence[FrameSource]],
         *,
         conn_id: ConnId,
         request_id: RequestId,
-    ) -> None:
-        """Admit a step whose state values and commands were submitted ahead of it.
+    ) -> tuple[str, CommandOutcome] | None:
+        """Check a step request's calls, then admit them and the step, or none of it.
 
-        The step reaches the model after every command submitted before it;
-        the model writes *media_input* to its input tracks and runs the step.
+        Every call is checked against the contract first. A request whose
+        calls all pass is admitted whole: each call is posted as a command
+        that carries the request's id and its entry, then the step, with
+        nothing between them, so the step reaches the model after every
+        command submitted before it. A request with a call that fails posts
+        nothing.
 
         Args:
-            media_input: The decoded frames to write to each input track, by
+            calls: The request's calls in order, each as its entry (such as
+                ``state.prompt`` or ``commands[2]``), the command name, and
+                its arguments with every upload resolved.
+            media_input: The checked frames to write to each input track, by
                 name.
             conn_id: The connection that asked for the step.
             request_id: The request id the step's response carries.
+
+        Returns:
+            ``None`` when the request was admitted, else the first call that
+            failed the contract, as its entry and the rejected outcome.
         """
+        checked: list[tuple[str, Command]] = []
+        for entry, name, raw_args in calls:
+            try:
+                checked.append((entry, self._contract.validate(name, raw_args)))
+            except ContractError as error:
+                return entry, CommandOutcome.reject(error.field, error.reason)
+        for entry, command in checked:
+            self._model._submit_command_at(
+                command, conn_id, None, step_request_id=request_id, step_entry=entry
+            )
         self._model.submit_step(
             StepEnvelope(
                 media_input={track: tuple(frames) for track, frames in media_input.items()},
@@ -192,18 +208,25 @@ class ModelBridge:
                 request_id=request_id,
             )
         )
+        return None
 
-    def withdraw_step(self, *, conn_id: ConnId, request_id: RequestId) -> None:
-        """Withdraw a step request after some of its calls were submitted, in place of its step.
-
-        The withdrawal reaches the model behind those calls, so the model
-        drops what it keeps for the request once they have run.
+    def input_overflow(self, track: str, frames: int, samples: int = 0) -> str | None:
+        """Say how *track*'s input buffer is bounded, when *frames* do not fit it together.
 
         Args:
-            conn_id: The connection that asked for the step.
-            request_id: The request id of the refused request.
+            track: The input track's name.
+            frames: How many frames would be written to it at once.
+            samples: How many audio samples those frames carry.
+
+        Returns:
+            The bound in words when the frames do not all fit, so some would
+            be evicted before the model reads them; ``None`` when they fit or
+            the track takes no input.
         """
-        self._model.withdraw_step(StepWithdrawal(conn_id, request_id))
+        buffer = self._model._input_buffers.get(track)
+        if buffer is None or buffer.holds(frames, samples):
+            return None
+        return buffer.describe_bound()
 
     # -- inbound: reactor-authoritative, trusted --------------------------
 

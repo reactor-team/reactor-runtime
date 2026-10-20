@@ -258,6 +258,8 @@ class CommandEnvelope:
         step_request_id: The request id of the step request that carries this
             command, when it is one of a step's state keys or commands. A
             failure of its handler then answers that step instead.
+        step_entry: The entry of the step request the command came from, such
+            as ``state.prompt`` or ``commands[2]``, named in that answer.
     """
 
     command: Command
@@ -267,6 +269,7 @@ class CommandEnvelope:
     submitted_at: float | None = None
     held_ms: float = 0.0
     step_request_id: RequestId | None = None
+    step_entry: str | None = None
 
 
 @dataclass(frozen=True)
@@ -293,43 +296,34 @@ class CommandTimes:
     finished: float
 
 
+FrameSource = Callable[[], InputFrame]
+"""Produces one checked input frame. Called on the model's thread, where the copy happens."""
+
+
 @dataclass(frozen=True)
 class StepEnvelope:
-    """A client's request for one step of a stepped session, decoded.
+    """A client's request for one step of a stepped session, checked.
 
     The request's state values and commands reach the model as ordinary
     commands, posted ahead of it.
 
     Attributes:
         media_input: The frames to write to each input track before the
-            step, by track name, in the order the client sent them.
+            step, by track name, in the order the client sent them. Each was
+            checked when the request was admitted; it is decoded on the
+            model's thread, so copying a request's media never stalls the
+            runtime loop.
         conn_id: The connection that asked for the step.
         request_id: The request id every reply to the step carries.
     """
 
-    media_input: Mapping[str, tuple[InputFrame, ...]]
+    media_input: Mapping[str, tuple[FrameSource, ...]]
     conn_id: ConnId
     request_id: RequestId
 
 
-@dataclass(frozen=True)
-class StepWithdrawal:
-    """A step request the runtime refused after posting some of its calls.
-
-    It follows those calls on the inbound queue, in place of the step, so the
-    model lets go of what it keeps for the request.
-
-    Attributes:
-        conn_id: The connection that asked for the step.
-        request_id: The request id of the refused step request.
-    """
-
-    conn_id: ConnId
-    request_id: RequestId
-
-
-Inbound = CommandEnvelope | StepEnvelope | StepWithdrawal | ReactorEvent
-"""One item of the model's inbound queue: a command, a step request, its withdrawal, or an event."""
+Inbound = CommandEnvelope | StepEnvelope | ReactorEvent
+"""One item of the model's inbound queue: a command, a step request, or a reactor event."""
 
 
 class ReactorCore:
@@ -580,6 +574,7 @@ class ReactorCore:
         held_ms: float = 0.0,
         *,
         step_request_id: RequestId | None = None,
+        step_entry: str | None = None,
     ) -> None:
         """Enqueue a validated command with when it reached the runtime. Called by the bridge.
 
@@ -590,7 +585,8 @@ class ReactorCore:
         :meth:`submit_command`, which a model may override with the signature
         it was written against: a command for such a model goes through its
         override, untimed. *step_request_id* names the step request that
-        carries the command, so a failure of its handler answers that step.
+        carries the command, so a failure of its handler answers that step, and
+        *step_entry* the request's entry it came from.
         """
         if type(self).submit_command is not ReactorCore.submit_command:
             self.submit_command(command, conn_id, request_id)
@@ -604,6 +600,7 @@ class ReactorCore:
                 time.monotonic(),
                 held_ms,
                 step_request_id,
+                step_entry,
             )
         )
 
@@ -614,10 +611,6 @@ class ReactorCore:
         after every command posted before it.
         """
         self._enqueue(step)
-
-    def withdraw_step(self, withdrawal: StepWithdrawal) -> None:
-        """Enqueue the withdrawal of a step request whose calls were posted without its step."""
-        self._enqueue(withdrawal)
 
     def post_reactor_event(self, event: ReactorEvent) -> None:
         """Enqueue a reactor-authoritative event onto the model loop."""

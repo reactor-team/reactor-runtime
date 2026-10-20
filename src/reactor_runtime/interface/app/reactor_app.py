@@ -93,7 +93,6 @@ from reactor_runtime.interface.internal.reactor_core import (
     ReactorCore,
     RequestId,
     StepEnvelope,
-    StepWithdrawal,
 )
 from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.interface.tracks import Output
@@ -167,7 +166,7 @@ class ReactorApp(ReactorCore):
     _steps_accepted: int
     _step_limit: int | None
     _pending_step: tuple[StepEnvelope, asyncio.Future[None]] | None
-    _failed_step_calls: dict[tuple[ConnId, str], str]
+    _failed_step_calls: dict[tuple[ConnId, str], StepRefusal]
     _step_posted: asyncio.Event
 
     def __init_subclass__(cls, **kwargs: object) -> None:
@@ -491,8 +490,8 @@ class ReactorApp(ReactorCore):
             for track, frames in request.media_input.items():
                 buffer = self._input_buffers.get(track)
                 if buffer is not None:
-                    for frame in frames:
-                        buffer.push(frame, request.conn_id, session)
+                    for decode in frames:
+                        buffer.push(decode(), request.conn_id, session)
             try:
                 input = await self.process_input()
             except ApplicationError as refused:
@@ -513,11 +512,15 @@ class ReactorApp(ReactorCore):
         kind: StepRefusalKind = StepRefusalKind.REFUSED,
     ) -> None:
         """Tell the client its step did not run, and why."""
-        logger.debug("requested step refused", reason=reason, kind=kind)
+        self._send_step_refusal(
+            StepRefusal(request.conn_id, request.request_id, session, reason, kind)
+        )
+
+    def _send_step_refusal(self, refusal: StepRefusal) -> None:
+        """Hand a refusal to the bound sink, if one is bound."""
+        logger.debug("requested step refused", reason=refusal.reason, kind=refusal.kind)
         if self._out_step_refusal is not None:
-            self._out_step_refusal(
-                StepRefusal(request.conn_id, request.request_id, session, reason, kind)
-            )
+            self._out_step_refusal(refusal)
 
     # -- engine hooks ---------------------------------------------------------
 
@@ -560,8 +563,6 @@ class ReactorApp(ReactorCore):
                 await self._dispatch_command(item)
             elif isinstance(item, StepEnvelope):
                 await self._dispatch_step(item)
-            elif isinstance(item, StepWithdrawal):
-                self._failed_step_calls.pop((item.conn_id, item.request_id), None)
             else:
                 await self._dispatch_reactor_event(item)
 
@@ -578,9 +579,7 @@ class ReactorApp(ReactorCore):
         """
         failed = self._failed_step_calls.pop((request.conn_id, request.request_id), None)
         if failed is not None:
-            self._refuse_step(
-                request, self._sessions_started, failed, kind=StepRefusalKind.COMMAND_FAILED
-            )
+            self._send_step_refusal(replace(failed, session=self._sessions_started))
             return
         if not self._session_active:
             self._refuse_step(
@@ -915,7 +914,15 @@ class ReactorApp(ReactorCore):
             # after it are skipped, so there is no later one to report.
             self._failed_step_calls.setdefault(
                 (envelope.conn_id, envelope.step_request_id),
-                f"{type(envelope.command).name} failed ({failure.code}): {failure.message}",
+                StepRefusal(
+                    envelope.conn_id,
+                    envelope.step_request_id,
+                    self._sessions_started,
+                    f"{type(envelope.command).name} failed ({failure.code}): {failure.message}",
+                    StepRefusalKind.COMMAND_FAILED,
+                    code=failure.code,
+                    entry=envelope.step_entry,
+                ),
             )
         self._reply(envelope.conn_id, failure, envelope.request_id)
 

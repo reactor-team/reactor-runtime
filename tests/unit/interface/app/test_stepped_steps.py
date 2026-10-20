@@ -8,6 +8,7 @@ would have sent.
 from __future__ import annotations
 
 import asyncio
+import functools
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -155,7 +156,8 @@ class Harness:
             self.command(name, **args)
         media_input = {
             "webcam": tuple(
-                InputFrame(data=np.full((2, 2, 3), i, dtype=np.uint8)) for i in range(frames)
+                functools.partial(InputFrame, data=np.full((2, 2, 3), i, dtype=np.uint8))
+                for i in range(frames)
             )
         }
         self.post(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import Callable, Sequence
 from typing import Any, cast
 
@@ -29,6 +30,7 @@ from reactor_runtime.core import (
     CompletedStep,
     ConnectionCapabilities,
     ConnId,
+    InputFrame,
     MediaBundle,
     MediaChunk,
     RequestedStep,
@@ -39,6 +41,7 @@ from reactor_runtime.core import (
 from reactor_runtime.interface.internal.input_buffer import InputBuffer
 from reactor_runtime.message_gateway import InboundStep
 from reactor_runtime.protocol.common import dict_to_struct
+from reactor_runtime.runner import runner as runner_module
 from reactor_runtime.runner.runner import Runner
 from reactor_runtime.runner.session_start import InvalidSessionStartError
 from reactor_runtime.upload_store import UnknownUploadError
@@ -300,7 +303,7 @@ async def test_a_requested_step_is_answered_with_its_result_on_the_data_channel(
     assert result.request_id == "r1"
     assert result.kind == K.MESSAGE_KIND_RESPONSE
     assert result.WhichOneof("payload") == "step_result"
-    assert result.step_result.index == 1
+    assert result.step_result.step == 1
     assert result.step_result.failure_code == step_pb2.STEP_FAILURE_CODE_UNSPECIFIED
     assert not result.step_result.HasField("error")
     assert conn.control == []
@@ -332,7 +335,7 @@ async def test_steps_are_numbered_from_one(runner: Runner) -> None:
         _send(runner, conn, _request_step(request_id))
     await _until(lambda: len(conn.sent) == 3)
     results = [m for m in conn.replies() if m.WhichOneof("payload") == "step_result"]
-    assert [(m.request_id, m.step_result.index) for m in results] == [
+    assert [(m.request_id, m.step_result.step) for m in results] == [
         ("r1", 1),
         ("r2", 2),
         ("r3", 3),
@@ -352,7 +355,7 @@ async def test_an_empty_request_runs_a_step_on_the_current_state(runner: Runner)
 
     [reply] = conn.replies()
     assert (reply.request_id, reply.WhichOneof("payload")) == ("r1", "step_result")
-    assert reply.step_result.index == 1
+    assert reply.step_result.step == 1
     assert models[-1].inputs == [("a forest", [], [])]
 
 
@@ -412,7 +415,7 @@ async def test_a_request_waiting_for_an_upload_holds_back_the_requests_after_it(
     runner.uploads.put(upload_id, b"cat")
     await _until(lambda: len(conn.sent) == 2)
 
-    assert [(m.request_id, m.step_result.index) for m in conn.replies()] == [("r1", 1), ("r2", 2)]
+    assert [(m.request_id, m.step_result.step) for m in conn.replies()] == [("r1", 1), ("r2", 2)]
     assert runner._step_order == {}
 
 
@@ -428,7 +431,7 @@ async def test_one_connections_upload_wait_does_not_hold_back_another_connection
     await _until(lambda: len(other.sent) == 1)
 
     assert conn.sent == []
-    assert other.replies()[0].step_result.index == 1
+    assert other.replies()[0].step_result.step == 1
     runner.uploads.put(upload_id, b"cat")
     await _until(lambda: len(conn.sent) == 1)
 
@@ -444,7 +447,7 @@ def _refusal(
     assert message.WhichOneof("payload") == "step_result"
     result = message.step_result
     assert result.failure_code == failure_code
-    assert (result.index, result.elapsed_seconds, list(result.tracks), list(result.files)) == (
+    assert (result.step, result.elapsed_seconds, list(result.tracks), list(result.files)) == (
         0,
         0.0,
         [],
@@ -470,7 +473,7 @@ def _journalled_steps(runner: Runner) -> list[SessionEvent]:
     ]
 
 
-async def test_a_step_with_an_invalid_command_is_refused_and_keeps_what_came_before(
+async def test_a_step_with_an_invalid_command_is_refused_and_changes_nothing(
     runner: Runner,
 ) -> None:
     conn = await _stepped(runner)
@@ -489,8 +492,9 @@ async def test_a_step_with_an_invalid_command_is_refused_and_keeps_what_came_bef
     [reply] = conn.replies()
     assert reply.request_id == "r1"
     assert _refusal(reply).startswith("commands[0] is refused: text")
+    assert reply.step_result.entry == "commands[0]"
     model = models[-1]
-    assert model.state.prompt == "a lake"
+    assert model.state.prompt == "a forest"
     assert model.notes == []
     assert model.inputs == []
     [error] = _journalled_errors(runner)
@@ -528,7 +532,53 @@ async def test_a_step_whose_frames_do_not_fit_is_refused(
     _send(runner, conn, _request_step("r1", media_input=[entry]))
     await _until(lambda: len(conn.sent) == 1)
     assert _refusal(conn.replies()[0]).startswith(reason)
+    assert conn.replies()[0].step_result.entry == "media_input[0]"
     assert _journalled_steps(runner) == []
+
+
+async def test_a_step_with_more_frames_than_its_track_holds_is_refused(runner: Runner) -> None:
+    conn = await _stepped(runner)
+    frames = step_pb2.TrackFrames(track="webcam", frames=[_frame(i % 256) for i in range(129)])
+    _send(runner, conn, _request_step("r1", state={"prompt": "a lake"}, media_input=[frames]))
+    await _until(lambda: len(conn.sent) == 1)
+
+    reason = _refusal(conn.replies()[0])
+    assert (
+        reason
+        == "media_input[0] holds 129 frames for 'webcam', whose input buffer holds 128 frames"
+    )
+    assert models[-1].state.prompt == "a forest"
+    assert models[-1].inputs == []
+
+
+async def test_a_steps_frames_are_decoded_on_the_models_thread(
+    runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    threads: list[int] = []
+    decode = runner_module.decode_frame
+
+    def recording_decode(frame: step_pb2.Frame, kind: Any) -> Any:
+        threads.append(threading.get_ident())
+        return decode(frame, kind)
+
+    monkeypatch.setattr(runner_module, "decode_frame", recording_decode)
+    conn = await _stepped(runner)
+    frames = step_pb2.TrackFrames(track="webcam", frames=[_frame(7)])
+    _send(runner, conn, _request_step("r1", media_input=[frames]))
+    await _until(lambda: len(conn.sent) == 1)
+
+    assert models[-1].inputs == [("a forest", [], [7])]
+    assert threads
+    assert threading.get_ident() not in threads
+
+
+async def test_a_stepped_session_drops_live_track_frames(runner: Runner) -> None:
+    conn = await _stepped(runner)
+    runner.media_received(conn.id, "webcam", InputFrame(data=np.full((2, 2, 3), 9, np.uint8)))
+    _send(runner, conn, _request_step("r1"))
+    await _until(lambda: len(conn.sent) == 1)
+
+    assert models[-1].inputs == [("a forest", [], [])]
 
 
 class _RecordingStore:
@@ -559,7 +609,7 @@ async def test_a_step_the_model_refuses_is_answered_and_not_counted(runner: Runn
     _send(runner, conn, _request_step("r2", state={"prompt": "a lake"}))
     await _until(lambda: runner._sm.current_state is not SessionState.STREAMING)
     results = [m.step_result for m in conn.replies()]
-    assert [(r.index, r.failure_code) for r in results] == [
+    assert [(r.step, r.failure_code) for r in results] == [
         (0, step_pb2.STEP_FAILURE_CODE_REFUSED),
         (1, step_pb2.STEP_FAILURE_CODE_UNSPECIFIED),
     ]
@@ -590,6 +640,7 @@ async def test_a_failing_command_handler_answers_its_step_and_the_step_does_not_
     assert reply.request_id == "r1"
     error = _refusal(reply, step_pb2.STEP_FAILURE_CODE_COMMAND_FAILED)
     assert error == "reject_note failed (no_notes): notes are closed"
+    assert (reply.step_result.code, reply.step_result.entry) == ("no_notes", "commands[1]")
     assert models[-1].notes == ["kept"]
     assert models[-1].inputs == []
     assert _journalled_steps(runner) == []
@@ -623,7 +674,7 @@ async def test_a_refused_request_after_a_failed_handler_leaves_nothing_behind(
 
     *refused, last = conn.replies()
     assert [_refusal(m).split(":")[0] for m in refused] == ["commands[1] is refused"] * 5
-    assert last.step_result.index == 1
+    assert last.step_result.step == 1
     assert models[-1]._failed_step_calls == {}
 
 
@@ -639,7 +690,7 @@ async def test_a_command_failure_answers_only_its_own_step(runner: Runner) -> No
         "r1",
         step_pb2.STEP_FAILURE_CODE_COMMAND_FAILED,
     )
-    assert (second.request_id, second.step_result.failure_code, second.step_result.index) == (
+    assert (second.request_id, second.step_result.failure_code, second.step_result.step) == (
         "r2",
         step_pb2.STEP_FAILURE_CODE_UNSPECIFIED,
         1,
@@ -657,7 +708,7 @@ async def test_a_step_the_model_reports_as_failed_is_answered_failed_with_its_nu
     [reply] = conn.replies()
     result = reply.step_result
     assert result.failure_code == step_pb2.STEP_FAILURE_CODE_FAILED
-    assert result.index == 1
+    assert result.step == 1
     assert result.error == "the model ran out of memory"
 
 
@@ -687,7 +738,7 @@ async def test_a_stepped_session_closes_after_its_steps(runner: Runner) -> None:
     _send(runner, conn, _request_step("r2"))
     await _until(lambda: runner._sm.current_state is SessionState.READY)
     results = [m for m in conn.replies() if m.WhichOneof("payload") == "step_result"]
-    assert [m.step_result.index for m in results] == [1, 2]
+    assert [m.step_result.step for m in results] == [1, 2]
 
 
 async def test_requests_queued_beyond_the_sessions_steps_are_not_generated(
@@ -705,12 +756,12 @@ async def test_requests_queued_beyond_the_sessions_steps_are_not_generated(
     replies = {m.request_id: m.step_result for m in conn.replies()}
     first = replies.pop("r0")
     rest = list(replies.values())
-    assert (first.index, first.failure_code) == (1, step_pb2.STEP_FAILURE_CODE_UNSPECIFIED)
+    assert (first.step, first.failure_code) == (1, step_pb2.STEP_FAILURE_CODE_UNSPECIFIED)
     assert {m.failure_code for m in rest} <= {
         step_pb2.STEP_FAILURE_CODE_REFUSED,
         step_pb2.STEP_FAILURE_CODE_NOT_READY,
     }
-    assert all(m.index == 0 for m in rest)
+    assert all(m.step == 0 for m in rest)
     assert len(models[-1].inputs) == 1
     assert runner._steps_completed == 1
 

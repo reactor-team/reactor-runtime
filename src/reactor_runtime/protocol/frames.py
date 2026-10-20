@@ -29,6 +29,18 @@ class FrameEncodingError(ValueError):
 class FrameCodec(Protocol):
     """Turns a wire frame of one encoding into the array a model reads."""
 
+    def check(self, frame: step_pb2.Frame, kind: TrackKind) -> tuple[int, ...]:
+        """Check the frame fits the encoding and the track kind, without copying its samples.
+
+        Returns:
+            The shape :meth:`decode` returns for the frame.
+
+        Raises:
+            FrameEncodingError: The frame's dtype, shape, or bytes do not fit
+                the encoding and the track kind.
+        """
+        ...
+
     def decode(self, frame: step_pb2.Frame, kind: TrackKind) -> npt.NDArray[Any]:
         """Return the frame's samples as an array of the track kind's shape.
 
@@ -50,11 +62,10 @@ _RAW_LAYOUT: dict[TrackKind, tuple[str, int]] = {
 class RawFrames:
     """The uncompressed encoding: the samples as they are, row-major and little-endian."""
 
-    def decode(self, frame: step_pb2.Frame, kind: TrackKind) -> npt.NDArray[Any]:
-        """Return the frame's samples, checked against the track kind's layout.
+    def check(self, frame: step_pb2.Frame, kind: TrackKind) -> tuple[int, ...]:
+        """Check the frame against the track kind's layout, and return its decoded shape.
 
-        Audio with several channels is mixed down to ``(1, M)`` mono, the shape
-        a model reads audio in from any transport.
+        Audio with several channels decodes to ``(1, M)`` mono.
         """
         dtype, rank = _RAW_LAYOUT[kind]
         if frame.dtype != dtype:
@@ -75,6 +86,20 @@ class RawFrames:
                 f"a raw {kind} frame of shape {list(shape)} is {expected} bytes, "
                 f"got {len(frame.data)}"
             )
+        if kind is TrackKind.AUDIO:
+            return (1, shape[1])
+        return shape
+
+    def decode(self, frame: step_pb2.Frame, kind: TrackKind) -> npt.NDArray[Any]:
+        """Return the frame's samples, checked against the track kind's layout.
+
+        Audio with several channels is mixed down to ``(1, M)`` mono, the shape
+        a model reads audio in from any transport.
+        """
+        self.check(frame, kind)
+        dtype, _ = _RAW_LAYOUT[kind]
+        shape = tuple(int(size) for size in frame.shape)
+        wire = np.dtype(dtype).newbyteorder("<")
         samples = np.frombuffer(frame.data, dtype=wire).reshape(shape).astype(dtype)
         if kind is TrackKind.AUDIO and shape[0] > 1:
             samples = samples.mean(axis=0, keepdims=True).round().astype(np.int16)
@@ -83,6 +108,22 @@ class RawFrames:
 
 FRAME_CODECS: dict[int, FrameCodec] = {step_pb2.FRAME_ENCODING_RAW: RawFrames()}
 """The codec for each ``FrameEncoding`` the runtime reads, by its enum value."""
+
+
+def check_frame(frame: step_pb2.Frame, kind: TrackKind) -> tuple[int, ...]:
+    """Check one wire frame of a *kind* track without copying its samples.
+
+    A frame that passes decodes with :func:`decode_frame`, so the copy can
+    happen later, on another thread.
+
+    Returns:
+        The shape of the samples :func:`decode_frame` returns for it.
+
+    Raises:
+        FrameEncodingError: The encoding is unspecified or unknown, or the
+            frame does not fit it.
+    """
+    return _codec(frame).check(frame, kind)
 
 
 def decode_frame(frame: step_pb2.Frame, kind: TrackKind) -> InputFrame:
@@ -94,15 +135,19 @@ def decode_frame(frame: step_pb2.Frame, kind: TrackKind) -> InputFrame:
         FrameEncodingError: The encoding is unspecified or unknown, or the
             frame does not fit it.
     """
+    return InputFrame(
+        data=_codec(frame).decode(frame, kind),
+        metadata=frame.metadata if frame.HasField("metadata") else None,
+        capture_time_us=frame.capture_time_us if frame.HasField("capture_time_us") else None,
+    )
+
+
+def _codec(frame: step_pb2.Frame) -> FrameCodec:
     codec = FRAME_CODECS.get(frame.encoding)
     if codec is None:
         name = step_pb2.FrameEncoding.Name(frame.encoding) if _known(frame.encoding) else None
         raise FrameEncodingError(f"frame encoding {name or frame.encoding} is not supported")
-    return InputFrame(
-        data=codec.decode(frame, kind),
-        metadata=frame.metadata if frame.HasField("metadata") else None,
-        capture_time_us=frame.capture_time_us if frame.HasField("capture_time_us") else None,
-    )
+    return codec
 
 
 def _known(value: int) -> bool:

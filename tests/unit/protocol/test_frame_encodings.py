@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from reactor_runtime.core.values import TrackKind
-from reactor_runtime.protocol.frames import FrameEncodingError, decode_frame
+from reactor_runtime.protocol.frames import FrameEncodingError, check_frame, decode_frame
 from reactor_wire.v1 import step_pb2
 
 RAW = step_pb2.FRAME_ENCODING_RAW
@@ -94,3 +94,23 @@ def test_bytes_that_do_not_fill_the_shape_are_refused() -> None:
     frame.data = frame.data[:-1]
     with pytest.raises(FrameEncodingError, match="is 12 bytes, got 11"):
         decode_frame(frame, TrackKind.VIDEO)
+
+
+@pytest.mark.parametrize(
+    ("array", "kind"),
+    [
+        (np.zeros((2, 3, 3), dtype=np.uint8), TrackKind.VIDEO),
+        (np.zeros((1, 5), dtype=np.int16), TrackKind.AUDIO),
+        (np.zeros((2, 5), dtype=np.int16), TrackKind.AUDIO),
+    ],
+)
+def test_a_checked_frame_has_the_shape_it_decodes_to(array: np.ndarray, kind: TrackKind) -> None:
+    frame = _raw(array)
+    assert check_frame(frame, kind) == decode_frame(frame, kind).data.shape
+
+
+def test_a_check_refuses_what_decoding_refuses() -> None:
+    frame = _raw(np.zeros((2, 3, 3), dtype=np.uint8))
+    frame.data = frame.data[:-1]
+    with pytest.raises(FrameEncodingError, match="bytes"):
+        check_frame(frame, TrackKind.VIDEO)
