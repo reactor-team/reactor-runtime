@@ -181,6 +181,10 @@ class RuntimeProcess(RuntimeEndpoint):
         """Return one reading of the probe route."""
         return self.get("/_endurance/probe")
 
+    def input_frames(self) -> dict[str, float]:
+        """Return each input track's frames received this session, without a full probe."""
+        return self.get("/_endurance/input_frames")
+
     def wait_registered(self, count: int) -> dict[str, Any]:
         """Wait until at most *count* connections are registered, or ``CLOSE_TIMEOUT_S``.
 

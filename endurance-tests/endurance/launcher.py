@@ -228,6 +228,12 @@ def build_app(
     """Build the runtime's app, with the probe route added."""
     app = _build_app(runner, transports, process_health, metrics)
 
+    @app.get("/_endurance/input_frames")
+    async def input_frames() -> dict[str, float]:
+        # The probe collects garbage and walks every object; this is cheap
+        # enough to poll while a client waits for its media to arrive.
+        return _input_frames(runner)
+
     @app.get("/_endurance/probe")
     async def probe() -> dict[str, Any]:
         import tracked_echo

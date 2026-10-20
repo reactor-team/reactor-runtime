@@ -91,7 +91,9 @@ async def test_room_participant_churn(runtime: RuntimeProcess) -> None:
         while not sampler.deadline_reached():
             if ENDURANCE_SMOKE_CYCLES and cycle >= ENDURANCE_SMOKE_CYCLES:
                 break
-            participant = RoomParticipant(room, f"participant-{cycle}", _MODEL)
+            participant = RoomParticipant(
+                room, f"participant-{cycle}", _MODEL, input_frames=runtime.input_frames
+            )
             await participant.run()
             # A participant's readers close their streams as it leaves.
             reading, _ = runtime.settled_probe(connections=1, tasks=sampler.initial_tasks)
