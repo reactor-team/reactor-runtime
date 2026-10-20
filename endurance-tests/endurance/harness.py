@@ -178,9 +178,7 @@ class RuntimeProcess(RuntimeEndpoint):
             self._proc.wait()
         # A worker that outlived the runtime would hold its shared memory
         # into the next scenario.
-        for child in children:
-            with contextlib.suppress(psutil.NoSuchProcess):
-                child.kill()
+        reap(children)
         self._log.close()
 
     def probe(self) -> dict[str, Any]:
@@ -938,6 +936,36 @@ def gray_frame(width: int = 640, height: int = 480) -> tuple[bytes, int, int]:
 class _Baseline:
     freed_by_gc: int
     holding_after_stop: int
+
+
+def reap(processes: list[psutil.Process]) -> None:
+    """Kill *processes*, a runtime's descendants, leaving its shared memory unlinked.
+
+    The workers go first, and are waited for. Python's multiprocessing
+    resource tracker, one of the descendants, unlinks the shared-memory
+    blocks the workers registered once it sees them exit, so it gets
+    ``STOP_TIMEOUT_S`` to finish on its own before anything still alive is
+    killed: killed alongside the workers, it would leave their blocks behind.
+    """
+    trackers = [p for p in processes if _is_resource_tracker(p)]
+    workers = [p for p in processes if p not in trackers]
+    _kill_and_wait(workers)
+    _, alive = psutil.wait_procs(trackers, timeout=STOP_TIMEOUT_S)
+    _kill_and_wait(alive)
+
+
+def _is_resource_tracker(process: psutil.Process) -> bool:
+    try:
+        return any("resource_tracker" in part for part in process.cmdline())
+    except psutil.Error:
+        return False
+
+
+def _kill_and_wait(processes: list[psutil.Process]) -> None:
+    for process in processes:
+        with contextlib.suppress(psutil.NoSuchProcess):
+            process.kill()
+    psutil.wait_procs(processes, timeout=STOP_TIMEOUT_S)
 
 
 def shm_usage() -> tuple[int, int] | None:

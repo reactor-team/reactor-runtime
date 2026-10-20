@@ -216,3 +216,49 @@ def test_a_zombie_child_counts_with_no_memory_and_a_gone_one_does_not() -> None:
         ]
     )
     assert harness._children(cast(psutil.Process, process)) == (2, 100)
+
+
+# A runtime that ignores SIGTERM, with a worker attached to a shared-memory
+# block it created, as a distributed model's ranks are.
+_RUNTIME_WITH_A_WORKER = """
+import multiprocessing as mp, signal, sys, time
+from multiprocessing import shared_memory
+
+def worker(name):
+    block = shared_memory.SharedMemory(name=name)
+    time.sleep(600)
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    block = shared_memory.SharedMemory(create=True, size=4096)
+    mp.get_context("spawn").Process(target=worker, args=(block.name,)).start()
+    print(block.name, flush=True)
+    time.sleep(600)
+"""
+
+
+def test_reaping_a_killed_runtime_leaves_its_shared_memory_unlinked(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+    import time
+    from multiprocessing import shared_memory
+
+    script = tmp_path / "runtime.py"
+    script.write_text(_RUNTIME_WITH_A_WORKER)
+    runtime = subprocess.Popen([sys.executable, str(script)], stdout=subprocess.PIPE, text=True)
+    assert runtime.stdout is not None
+    name = runtime.stdout.readline().strip()
+    parent = psutil.Process(runtime.pid)
+    deadline = time.monotonic() + 10
+    while len(parent.children(recursive=True)) < 2 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    children = parent.children(recursive=True)
+    assert any(harness._is_resource_tracker(child) for child in children)
+
+    runtime.kill()
+    runtime.wait()
+    harness.reap(children)
+
+    assert not any(child.is_running() for child in children)
+    with pytest.raises(FileNotFoundError):
+        shared_memory.SharedMemory(name=name)
