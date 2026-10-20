@@ -419,6 +419,24 @@ async def test_a_request_waiting_for_an_upload_holds_back_the_requests_after_it(
     assert runner._step_order == {}
 
 
+async def test_a_command_waiting_for_an_upload_holds_back_a_step_sent_after_it(
+    runner: Runner,
+) -> None:
+    conn = await _stepped(runner)
+    upload_id = runner.uploads.create_slot("cat.png", "image/png", 3)
+    _send(runner, conn, _command("c1", "set_image", image={"upload_id": upload_id}))
+    _send(runner, conn, _request_step("r1"))
+    await asyncio.sleep(0.05)
+    assert conn.sent == []
+
+    runner.uploads.put(upload_id, b"cat")
+    await _until(lambda: len(conn.sent) == 2)
+
+    kinds = [(m.request_id, m.WhichOneof("payload")) for m in conn.replies()]
+    assert kinds == [("c1", None), ("r1", "step_result")]
+    assert runner._step_order == {}
+
+
 async def test_one_connections_upload_wait_does_not_hold_back_another_connection(
     runner: Runner,
 ) -> None:
@@ -764,6 +782,21 @@ async def test_requests_queued_beyond_the_sessions_steps_are_not_generated(
     assert all(m.step == 0 for m in rest)
     assert len(models[-1].inputs) == 1
     assert runner._steps_completed == 1
+
+
+async def test_requests_queued_beyond_the_sessions_steps_apply_none_of_their_calls(
+    runner: Runner,
+) -> None:
+    conn = await _stepped(runner, steps=1)
+    for index in range(10):
+        _send(runner, conn, _request_step(f"r{index}", commands=[("note", {"text": f"n{index}"})]))
+    # The session closes its client once its step is reported, so the replies
+    # to the requests still in flight have no connection to go to.
+    await _until(lambda: runner._sm.current_state is SessionState.READY)
+    await asyncio.sleep(0.05)
+
+    assert models[-1].notes == ["n0"]
+    assert len(models[-1].inputs) == 1
 
 
 async def test_a_stepped_session_with_steps_waits_for_a_client(runner: Runner) -> None:

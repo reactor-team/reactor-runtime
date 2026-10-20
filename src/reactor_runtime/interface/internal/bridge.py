@@ -96,7 +96,8 @@ class ModelBridge:
 
         True for a model that runs the default step loop of ``ReactorApp``. A
         model that drives its own ``run()``, such as a ``ReactorPipeline``,
-        has no step to run on request.
+        has no step to run on request; one that overrides ``submit_command()``
+        cannot tie a failed handler to its step.
         """
         return self._model.supports_stepped()
 

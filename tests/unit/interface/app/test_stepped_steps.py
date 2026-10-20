@@ -363,6 +363,11 @@ def test_only_the_default_step_loop_supports_stepped_sessions() -> None:
         def inference(self) -> Any:
             yield None
 
+    class OwnCommands(Stepper):
+        def submit_command(self, command: Any, conn_id: Any, request_id: Any) -> None:
+            super().submit_command(command, conn_id, request_id)
+
     assert Stepper.supports_stepped()
     assert not OwnLoop.supports_stepped()
     assert not Pipeline.supports_stepped()
+    assert not OwnCommands.supports_stepped()

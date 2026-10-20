@@ -448,9 +448,11 @@ class ReactorApp(ReactorCore):
         """Return whether the class runs the default step loop a stepped session needs.
 
         A class that overrides ``run()`` drives its own loop, so it has no step
-        to run on request.
+        to run on request. A class that overrides ``submit_command()`` takes a
+        command without the step request that carries it, so a failed handler
+        could not stop its step.
         """
-        return cls.run is ReactorApp.run
+        return cls.run is ReactorApp.run and cls.submit_command is ReactorCore.submit_command
 
     def _generate(self, input: Any) -> StepOutcome:
         """Call ``generate()`` and build the step's outcome, the one place one is built.
@@ -581,30 +583,34 @@ class ReactorApp(ReactorCore):
         if failed is not None:
             self._send_step_refusal(replace(failed, session=self._sessions_started))
             return
-        if not self._session_active:
-            self._refuse_step(
-                request,
-                self._sessions_started,
-                "no session is running",
-                kind=StepRefusalKind.NOT_READY,
-            )
-            return
-        if not self._stepped:
-            self._refuse_step(request, self._sessions_started, "the session is not stepped")
-            return
-        # The runtime ends the session once its last step is reported, but
-        # requests already queued behind that step reach here first.
-        if self._step_limit is not None and self._steps_accepted >= self._step_limit:
-            self._refuse_step(
-                request,
-                self._sessions_started,
-                f"the session already took its {self._step_limit} steps",
-            )
+        refused = self._step_closed()
+        if refused is not None:
+            reason, kind = refused
+            self._refuse_step(request, self._sessions_started, reason, kind=kind)
             return
         done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self._pending_step = (request, done)
         self._step_posted.set()
         await done
+
+    def _step_closed(self) -> tuple[str, StepRefusalKind] | None:
+        """Say why the session takes no step now, or ``None`` when it takes one.
+
+        Nothing but a step changes this between a request's calls and its step,
+        so the answer for a request's first call is the answer for its step.
+        """
+        if not self._session_active:
+            return "no session is running", StepRefusalKind.NOT_READY
+        if not self._stepped:
+            return "the session is not stepped", StepRefusalKind.REFUSED
+        # The runtime ends the session once its last step is reported, but
+        # requests already queued behind that step reach here first.
+        if self._step_limit is not None and self._steps_accepted >= self._step_limit:
+            return (
+                f"the session already took its {self._step_limit} steps",
+                StepRefusalKind.REFUSED,
+            )
+        return None
 
     # -- command dispatch -----------------------------------------------------
 
@@ -631,19 +637,24 @@ class ReactorApp(ReactorCore):
         to the runtime's command timing sink.
 
         One of a step request's calls is skipped once an earlier call of the
-        same request failed, so a request stops at its first failure.
+        same request failed, so a request stops at its first failure. It is
+        also skipped when the session takes no step now, for example once it
+        took its ``steps``, so a request its step refuses changes nothing.
         """
         step = envelope.step_request_id
-        if (
-            step is not None
-            and envelope.conn_id is not None
-            and (envelope.conn_id, step) in self._failed_step_calls
-        ):
-            logger.debug(
-                "skipping a step request's call after an earlier one failed",
-                command=type(envelope.command).name,
-            )
-            return
+        if step is not None and envelope.conn_id is not None:
+            if (envelope.conn_id, step) in self._failed_step_calls:
+                logger.debug(
+                    "skipping a step request's call after an earlier one failed",
+                    command=type(envelope.command).name,
+                )
+                return
+            if self._step_closed() is not None:
+                logger.debug(
+                    "skipping a step request's call the session takes no step for",
+                    command=type(envelope.command).name,
+                )
+                return
         taken = time.monotonic()
         async with self._step_lock:
             session = self._sessions_started

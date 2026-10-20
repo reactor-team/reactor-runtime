@@ -1216,7 +1216,9 @@ class Runner(ServiceComponent, ConnectionSink):
 
         Only the default step loop of ``ReactorApp`` runs a step per request. A
         model that drives its own ``run()``, a ``ReactorPipeline`` among them,
-        is refused rather than started in a mode it would ignore.
+        is refused rather than started in a mode it would ignore, and so is a
+        model that overrides ``submit_command()``, which drops the step request
+        a command belongs to.
 
         Raises:
             InvalidSessionStartError: Naming the model and why it cannot step.
@@ -1226,7 +1228,8 @@ class Runner(ServiceComponent, ConnectionSink):
         if not self._bridge.supports_stepped:
             raise InvalidSessionStartError(
                 f"generation 'stepped' needs a model that runs the default ReactorApp step "
-                f"loop; {self._bridge.contract.model} drives its own run()"
+                f"loop and command path; {self._bridge.contract.model} drives its own run() "
+                f"or overrides submit_command()"
             )
 
     def _check_starting_input(self, start: SessionStart) -> None:
@@ -1535,10 +1538,18 @@ class Runner(ServiceComponent, ConnectionSink):
         A client that connects while the starting input still runs, for
         example while a starting command waits for its upload, has its commands
         held until the list is done, so the model sees the starting input first.
+        In a stepped session a command also takes its place in the connection's
+        step order, so a step request sent after a command that waits for an
+        upload does not run before it.
         """
         held_from = time.monotonic()
-        await self._starting_input_done.wait()
-        await self._submit_command(command, held_ms=(time.monotonic() - held_from) * 1000.0)
+        if command.conn_id is None or self._session_start.generation is not Generation.STEPPED:
+            await self._starting_input_done.wait()
+            await self._submit_command(command, held_ms=(time.monotonic() - held_from) * 1000.0)
+            return
+        async with self._in_step_order(command.conn_id):
+            await self._starting_input_done.wait()
+            await self._submit_command(command, held_ms=(time.monotonic() - held_from) * 1000.0)
 
     async def _submit_command(
         self,
@@ -1674,11 +1685,11 @@ class Runner(ServiceComponent, ConnectionSink):
 
     @contextlib.asynccontextmanager
     async def _in_step_order(self, conn_id: ConnId) -> AsyncIterator[None]:
-        """Hold *conn_id*'s step order until the request in hand is submitted.
+        """Hold *conn_id*'s step order until the step request or command in hand is submitted.
 
         Each message is handled on its own task, and the tasks start in the
         order the messages arrived, so taking the lock before the first await
-        queues the requests in that order. The entry goes once no request of the
+        queues the messages in that order. The entry goes once no message of the
         connection holds or waits for it.
         """
         lock, users = self._step_order.get(conn_id, (asyncio.Lock(), 0))
