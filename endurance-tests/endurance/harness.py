@@ -267,6 +267,12 @@ class BareClient:
         await self._settle()
         return self.received_video
 
+    async def stream_for(self, frame: tuple[bytes, int, int], seconds: float) -> None:
+        """Stream on for *seconds*."""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            await self._send_frame(frame)
+
     async def wait_for_replies(self) -> None:
         """Wait, as a closing client does, for the replies it is still owed."""
         await self._settle()
@@ -930,8 +936,13 @@ class ResourceSampler:
         """Whether the run's duration has passed."""
         return time.monotonic() - self._start >= self._duration_s
 
-    def sample(self, *, cycle: int, reading: dict[str, Any]) -> Sample:
-        """Record the runtime process and a settled probe *reading* as one sample."""
+    def sample(self, *, cycle: int, reading: dict[str, Any], record: bool = True) -> Sample:
+        """Take the runtime process and a settled probe *reading* as one sample.
+
+        The sample joins :attr:`samples`, which the trends and the reports
+        read, unless *record* is false: a reading that is not a cycle of the
+        run, such as the one after teardown, is only returned.
+        """
         freed = reading["batches_freed_by_gc"]
         holding = reading["pacers_holding_after_stop"]
         with self._process.oneshot():
@@ -960,5 +971,6 @@ class ResourceSampler:
             )
         self._baseline.freed_by_gc = freed
         self._baseline.holding_after_stop = holding
-        self.samples.append(sample)
+        if record:
+            self.samples.append(sample)
         return sample
