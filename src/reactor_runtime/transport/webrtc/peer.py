@@ -1630,8 +1630,13 @@ class WebRTCPeer:
             return None
         return ChunkingSample(
             messages_sent=totals.messages_sent,
+            enqueue_s=totals.enqueue_s,
             queue_wait_s=totals.queue_wait_s,
+            first_check_s=totals.first_check_s,
+            first_build_s=totals.first_build_s,
+            first_native_s=totals.first_native_s,
             send_s=totals.send_s,
+            native_send_s=totals.native_send_s,
             stall_s=totals.stall_s,
             messages_received=totals.messages_received,
             reassembly_s=totals.reassembly_s,

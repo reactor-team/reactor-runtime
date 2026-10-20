@@ -101,3 +101,67 @@ def test_totals_that_went_backwards_are_a_new_channel_and_add_nothing() -> None:
     window.fold(after, before)
 
     assert window.take() == ()
+
+
+def test_the_steps_of_handing_a_message_to_libwebrtc_fold_in_as_parts() -> None:
+    window = MessageStageWindow()
+    before = ChunkingSample(messages_sent=10)
+    after = ChunkingSample(
+        messages_sent=12,
+        enqueue_s=0.001,
+        queue_wait_s=0.010,
+        first_check_s=0.0002,
+        first_build_s=0.0004,
+        first_native_s=0.002,
+        send_s=0.020,
+        native_send_s=0.012,
+    )
+
+    window.fold(after, before)
+
+    stages = {s.name: s for s in window.take()}
+    assert (stages["enqueue"].part_of, stages["enqueue"].messages) == ("", 2)
+    assert math.isclose(stages["enqueue"].total_ms, 1.0)
+    for name, ms in (("first_check", 0.2), ("first_build", 0.4), ("first_native", 2.0)):
+        assert stages[name].part_of == "queue_wait"
+        assert math.isclose(stages[name].total_ms, ms)
+    # Every chunk's native send but the first ones, within send.
+    assert stages["rest_native"].part_of == "send"
+    assert math.isclose(stages["rest_native"].total_ms, 10.0)
+    assert stages["queue_wait"].part_of == ""
+
+
+def test_send_and_stall_time_of_a_message_still_leaving_waits_for_its_window() -> None:
+    window = MessageStageWindow()
+    start = ChunkingSample(messages_sent=1)
+    # A long message: its first chunks leave and the pump stalls, but no
+    # message finishes in this window.
+    leaving = ChunkingSample(messages_sent=1, native_send_s=0.004, stall_s=0.010)
+    done = ChunkingSample(messages_sent=2, first_native_s=0.001, native_send_s=0.006, stall_s=0.012)
+
+    window.fold(leaving, start)
+    assert window.take() == ()
+    window.fold(done, leaving)
+
+    stages = {s.name: s for s in window.take()}
+    assert stages["rest_native"].messages == 1
+    assert math.isclose(stages["rest_native"].total_ms, 5.0)
+    assert math.isclose(stages["stall"].total_ms, 12.0)
+
+
+def test_a_new_channel_drops_the_send_and_stall_time_held_from_the_old_one() -> None:
+    window = MessageStageWindow()
+    start = ChunkingSample(messages_sent=5)
+    leaving = ChunkingSample(messages_sent=5, native_send_s=0.004, stall_s=0.010)
+    # The channel opened again: its totals start over.
+    reopened = ChunkingSample(messages_sent=0)
+    done = ChunkingSample(messages_sent=1, native_send_s=0.002, stall_s=0.003)
+
+    window.fold(leaving, start)
+    window.fold(reopened, leaving)
+    window.fold(done, reopened)
+
+    stages = {s.name: s for s in window.take()}
+    assert stages["rest_native"].messages == 1
+    assert math.isclose(stages["rest_native"].total_ms, 2.0)
+    assert math.isclose(stages["stall"].total_ms, 3.0)

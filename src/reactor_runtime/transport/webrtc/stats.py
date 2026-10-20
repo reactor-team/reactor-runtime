@@ -183,16 +183,28 @@ class ChunkingSample:
 
     Attributes:
         messages_sent: Messages whose last chunk went to SCTP.
-        queue_wait_s: From ``send`` to the message's first chunk leaving the queue.
+        enqueue_s: From ``send`` until the message is in the queue.
+        queue_wait_s: From the message being in the queue to its first chunk
+            leaving it.
+        first_check_s: Within ``queue_wait_s``: reading the native buffered
+            amount before the message's first chunk.
+        first_build_s: Within ``queue_wait_s``: cutting the first chunk off the queue.
+        first_native_s: Within ``queue_wait_s``: the native send of the first chunk.
         send_s: From a message's first chunk to its last going to SCTP.
+        native_send_s: The native send of every chunk, first ones included.
         stall_s: The time the chunk pump stopped because SCTP's buffer was full.
         messages_received: Messages the reassembler completed.
         reassembly_s: From a message's first chunk arriving to its last.
     """
 
     messages_sent: int = 0
+    enqueue_s: float = 0.0
     queue_wait_s: float = 0.0
+    first_check_s: float = 0.0
+    first_build_s: float = 0.0
+    first_native_s: float = 0.0
     send_s: float = 0.0
+    native_send_s: float = 0.0
     stall_s: float = 0.0
     messages_received: int = 0
     reassembly_s: float = 0.0
