@@ -179,19 +179,20 @@ def test_a_steady_leak_the_ratio_check_passes_fails_on_slope() -> None:
 
 
 def test_a_step_that_levelled_off_in_the_first_third_reads_flat_on_slope() -> None:
-    values = [300.0] * 10 + [350.0] * 50
+    values = [300.0] * 20 + [350.0] * 100
     result = assert_slope_under(
-        _hours(60), values, name="rss_slope", max_per_hour=20.0, min_absolute_delta=5.0
+        _hours(120), values, name="rss_slope", max_per_hour=20.0, min_absolute_delta=5.0
     )
     assert result.status == "ok"
+    assert "noise floor" in result.detail
 
 
 def test_a_fast_slope_with_a_rise_inside_the_noise_floor_passes() -> None:
-    # An hour climbing 24 MB/h: over the limit, but the fitted rise over the
-    # last forty minutes is under a 20 MB floor.
-    values = [300.0 + 0.4 * i for i in range(60)]
+    # Two hours climbing 24 MB/h: over the limit, but the fitted rise over the
+    # last eighty minutes is under a 40 MB floor.
+    values = [300.0 + 0.4 * i for i in range(120)]
     result = assert_slope_under(
-        _hours(60), values, name="rss_slope", max_per_hour=20.0, min_absolute_delta=20.0
+        _hours(120), values, name="rss_slope", max_per_hour=20.0, min_absolute_delta=40.0
     )
     assert result.status == "ok"
     assert "noise floor" in result.detail
@@ -205,7 +206,18 @@ def test_memory_swinging_over_a_few_minutes_is_not_judged() -> None:
     result = assert_slope_under(
         hours, values, name="rss_slope", max_per_hour=20.0, min_absolute_delta=5.0
     )
-    assert result.status == "ok"
+    assert result.status == "not_judged"
+    assert "not judged" in result.detail
+
+
+def test_an_hour_long_run_reports_its_slope_without_judging_it() -> None:
+    # A steep climb over forty minutes of fit is still within what a healthy
+    # runtime's swing reads as over that stretch.
+    values = [300.0 + i for i in range(60)]
+    result = assert_slope_under(
+        _hours(60), values, name="rss_slope", max_per_hour=20.0, min_absolute_delta=5.0
+    )
+    assert result.status == "not_judged"
     assert "not judged" in result.detail
 
 
@@ -222,3 +234,12 @@ def test_a_task_the_first_cycle_left_counts_against_the_pre_run_baseline() -> No
     result = assert_never_grows(samples, field="tasks", baseline=6)
     assert result.status == "fail"
     assert "from 6 to 7" in result.detail
+
+
+def test_a_two_hour_release_run_has_its_rss_slope_judged() -> None:
+    # The release run's length with the default warm-up: if a longer warm-up
+    # or a shorter minimum span made the fit fall short, the slope would stop
+    # being judged on every release.
+    samples = [_sample(i, elapsed_s=i * 10.0) for i in range(2 * 3600 // 10)]
+    slope = next(m for m in trend_metrics(samples) if m.name == "rss_slope")
+    assert slope.status == "ok"

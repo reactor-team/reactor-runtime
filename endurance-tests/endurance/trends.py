@@ -39,10 +39,13 @@ MIN_TREND_SAMPLES = 6
 # limit relative to the run's own length loosens as the run grows.
 MAX_RSS_MB_PER_HOUR = 20.0
 # Shortest stretch of samples, in hours, a slope is judged over. RSS swings by
-# about a batch as the allocator takes and returns memory, and over a few
-# minutes a line fitted through that swing reads as a fast climb; over half an
-# hour or more the swing averages out.
-MIN_SLOPE_SPAN_HOURS = 0.5
+# about a batch as the allocator takes and returns memory, and a line fitted
+# through that swing reads as a climb or a fall that shrinks as the stretch
+# grows: on a healthy two-hour run, the steepest climb was 85 MB/h over 30
+# minutes, 18 MB/h over 60 and 9 MB/h over 70. So a slope is judged only over
+# 75 minutes or more, which a run of about two hours reaches: the release
+# runs are judged, shorter manual runs only report the rate.
+MIN_SLOPE_SPAN_HOURS = 1.25
 
 
 @dataclasses.dataclass
@@ -200,9 +203,9 @@ def assert_slope_under(
     before them reads as flat. It fails only when the slope is over the limit
     and the line also rises more than *min_absolute_delta* across those
     samples, so on a short run a few MB of noise cannot read as a fast rate.
-    A fit over less than :data:`MIN_SLOPE_SPAN_HOURS` is reported but never
-    fails: over a few minutes, memory that swings up and down fits a steep
-    line too.
+    A fit over less than :data:`MIN_SLOPE_SPAN_HOURS` is reported as not
+    judged and never fails: memory that swings up and down by about a batch
+    fits a steep line over anything shorter.
 
     Args:
         hours: When each sample was taken, in hours.
@@ -247,14 +250,15 @@ def assert_slope_under(
         )
     else:
         reason = f"{slope:+,.1f} {unit}/h, under the {max_per_hour:g} {unit}/h limit"
-    print(f"[{name}] {'LEAK?' if is_leak else 'ok'}: {reason}")
+    status = "fail" if is_leak else ("ok" if judged else "not_judged")
+    print(f"[{name}] {'LEAK?' if is_leak else status.replace('_', ' ')}: {reason}")
     return MetricResult(
         name=name,
         start=ys[0],
         end=ys[-1],
         change=rise,
         unit=unit,
-        status="fail" if is_leak else "ok",
+        status=status,
         detail=reason,
         threshold=f"slope > {max_per_hour:g} {unit}/h (min rise {min_absolute_delta:g} {unit})",
     )
