@@ -147,6 +147,24 @@ async def test_a_participant_is_a_connection_that_carries_messages_only() -> Non
     conn.drop()
 
 
+async def test_a_participant_negotiates_no_chunking_so_its_step_requests_are_refused() -> None:
+    conn, _ = make()
+
+    assert conn.message_chunking is False
+    assert conn.max_message_size == MAX_PACKET_BYTES
+    conn.drop()
+
+
+async def test_a_step_result_goes_to_the_participant_on_the_data_topic() -> None:
+    conn, local = make()
+
+    conn.send_step_result(b"result")
+    await _settle()
+
+    assert [(topic, data) for _, topic, data, _ in local.sent] == [(DATA_TOPIC, b"result")]
+    conn.drop()
+
+
 async def test_data_and_control_messages_go_to_that_participant_on_their_topics() -> None:
     conn, local = make()
 

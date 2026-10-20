@@ -1817,8 +1817,8 @@ class Runner(ServiceComponent, ConnectionSink):
             self._refuse_step(
                 step.conn_id,
                 step.request_id,
-                "a stepped session needs a connection that negotiated data-channel chunking; "
-                "without it a message is limited to 256 KiB, too small for a step's result",
+                "this connection cannot carry a step's result; a stepped session needs a "
+                "WebRTC connection that negotiated data-channel chunking",
             )
             return
         limit = self._connections.max_message_size(step.conn_id)

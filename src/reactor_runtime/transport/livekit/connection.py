@@ -138,6 +138,19 @@ class RoomConnection:
     def send_control(self, payload: bytes | str) -> None:
         """Drop a control frame."""
 
+    @property
+    def max_message_size(self) -> int:
+        """Accept any size: nothing sent to the room connection leaves the process."""
+        return 0x7FFF_FFFF_FFFF_FFFF
+
+    @property
+    def message_chunking(self) -> bool:
+        """Report no chunking; the room connection never requests a step."""
+        return False
+
+    def send_step_result(self, payload: bytes | str) -> None:
+        """Drop a step result."""
+
     def send_media(self, chunk: MediaChunk) -> None:
         """Submit a media chunk to the pacer, which may wait for queue room."""
         self._pacer.submit(chunk)
