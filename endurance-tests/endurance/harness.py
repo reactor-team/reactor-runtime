@@ -239,16 +239,36 @@ class BareClient:
         self._pc: Any = None
         self._camera: Any = None
         self._keep: list[Any] = []
+        # Set from a libwebrtc thread once the peer connection is gone.
+        self._dropped = threading.Event()
 
     async def run(self, frame: tuple[bytes, int, int]) -> int:
         """Connect, stream until enough frames came back, and close; return the frames received."""
-        await self._connect()
         try:
-            await self._stream_burst(frame)
-            await self._settle()
-            return self.received_video
+            return await self.open(frame)
         finally:
             self.close()
+
+    async def open(self, frame: tuple[bytes, int, int]) -> int:
+        """Connect and stream until enough frames came back; return the frames received.
+
+        The connection stays open, for the caller to close or to keep streaming on.
+        """
+        await self._connect()
+        await self._stream_burst(frame)
+        await self._settle()
+        return self.received_video
+
+    async def stream_until_dropped(self, frame: tuple[bytes, int, int], timeout_s: float) -> bool:
+        """Stream on until the runtime drops the connection; return whether it did in time.
+
+        Only webcam frames are sent: a request sent now could not be answered
+        before the connection closes, so none is.
+        """
+        deadline = time.monotonic() + timeout_s
+        while not self._dropped.is_set() and time.monotonic() < deadline:
+            await self._push_frame(frame)
+        return self._dropped.is_set()
 
     async def run_until_killed(
         self,
@@ -262,9 +282,7 @@ class BareClient:
         the connection ends only with the process, the way a client that
         crashes or loses power leaves.
         """
-        await self._connect()
-        await self._stream_burst(frame)
-        await self._settle()
+        await self.open(frame)
         ready()
         while True:
             await self._send_frame(frame)
@@ -277,9 +295,12 @@ class BareClient:
             await self._send_frame(frame)
 
     async def _send_frame(self, frame: tuple[bytes, int, int]) -> None:
+        self._on_tick()
+        await self._push_frame(frame)
+
+    async def _push_frame(self, frame: tuple[bytes, int, int]) -> None:
         bgra, width, height = frame
         self._camera.push_video_frame(bgra, width, height)
-        self._on_tick()
         await asyncio.sleep(1 / _FPS)
 
     def close(self) -> None:
@@ -299,6 +320,7 @@ class BareClient:
         observer = rw.PeerConnectionObserver()
         observer.on_ice_candidate = ice.append
         observer.on_track = self._on_track
+        observer.on_connection_state_change = self._on_state
         pc = self._factory.create_peer_connection(rw.RtcConfiguration(), observer)
         recv_video = pc.add_transceiver(rw.MediaKind.Video, rw.TransceiverDirection.RecvOnly)
         recv_audio = pc.add_transceiver(rw.MediaKind.Audio, rw.TransceiverDirection.RecvOnly)
@@ -309,9 +331,7 @@ class BareClient:
         control = pc.create_data_channel("control")
         data.on_message(self._on_data_message)
         control.on_message(self._on_control_message)
-        control.on_state_change(
-            lambda state: control_open.set() if state == rw.DataChannelState.Open else None
-        )
+        control.on_state_change(lambda state: self._on_control_state(state, control_open))
         self._pc, self._camera = pc, camera
         self._keep += [observer, recv_video, recv_audio, send_video, data, control]
 
@@ -408,6 +428,23 @@ class BareClient:
     def _on_control_message(self, data: bytes, binary: bool) -> None:
         """Read a control-channel frame from the runtime; v0 reads none."""
 
+    def _on_control_state(self, state: rw.DataChannelState, control_open: threading.Event) -> None:
+        if state == rw.DataChannelState.Open:
+            control_open.set()
+        # The runtime closes the channels as it closes the connection, ahead
+        # of the peer connection's own state change.
+        elif state == rw.DataChannelState.Closing or state == rw.DataChannelState.Closed:
+            self._dropped.set()
+
+    def _on_state(self, state: rw.PeerConnectionState) -> None:
+        # The binding hands each callback a fresh enum instance: compare by value.
+        if (
+            state == rw.PeerConnectionState.Disconnected
+            or state == rw.PeerConnectionState.Failed
+            or state == rw.PeerConnectionState.Closed
+        ):
+            self._dropped.set()
+
     def _on_track(self, kind: rw.MediaKind, track: rw.Track) -> None:
         self._keep.append(track)
         if kind == rw.MediaKind.Video:
@@ -447,6 +484,8 @@ class V1Client(BareClient):
         # it, until its reply arrives.
         self._pending: dict[str, tuple[str, frozenset[str | None]]] = {}
         self._failed: list[str] = []
+        # Notifications the runtime owes this client, by payload name.
+        self._owed_notices: set[str] = set()
         self._next_tick = 0.0
         self._sent = 0
         self.unanswered = []
@@ -562,10 +601,48 @@ class V1Client(BareClient):
         with self._lock:
             return list(self._failed)
 
+    def expect_notice(self, payload: str) -> None:
+        """Count a control notification with *payload* as owed until it arrives.
+
+        :meth:`collect_unanswered` lists it as unanswered if it never does.
+        """
+        with self._lock:
+            self._owed_notices.add(payload)
+
+    def forget_notice(self, payload: str) -> None:
+        """Stop counting the notification *payload* as owed, as when its stop was refused."""
+        with self._lock:
+            self._owed_notices.discard(payload)
+
+    def collect_unanswered(self) -> list[str]:
+        """Return the requests and notices still unanswered, refreshing :attr:`unanswered`."""
+        with self._lock:
+            self.unanswered = [
+                *self._failed,
+                *(f"{asked} ({rid}): no reply" for rid, (asked, _) in self._pending.items()),
+                *(f"{payload} notice: never arrived" for payload in sorted(self._owed_notices)),
+            ]
+            return self.unanswered
+
+    async def wait_for_notices(self, timeout_s: float) -> None:
+        """Wait up to *timeout_s* for every owed notification to arrive."""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            with self._lock:
+                if not self._owed_notices:
+                    return
+            await asyncio.sleep(0.05)
+
     def _on_control_message(self, data: bytes, binary: bool) -> None:
         message = control_pb2.ControlServerMessage()
-        if self._parse(message, data, "control"):
-            self._answered(message.request_id, message.WhichOneof("payload"), message)
+        if not self._parse(message, data, "control"):
+            return
+        payload = message.WhichOneof("payload")
+        if message.kind == _NOTIFICATION:
+            with self._lock:
+                self._owed_notices.discard(payload or "")
+            return
+        self._answered(message.request_id, payload, message)
 
     def _on_data_message(self, data: bytes, binary: bool) -> None:
         message = data_pb2.DataServerMessage()
@@ -601,11 +678,7 @@ class V1Client(BareClient):
                 if not self._pending:
                     break
             await asyncio.sleep(0.05)
-        with self._lock:
-            self.unanswered = [
-                *self._failed,
-                *(f"{asked} ({rid}): no reply" for rid, (asked, _) in self._pending.items()),
-            ]
+        self.collect_unanswered()
 
 
 def assert_full_streams(received: list[int]) -> MetricResult:
@@ -659,16 +732,45 @@ def assert_answered(unanswered: list[list[str]]) -> MetricResult:
     Args:
         unanswered: Each cycle's unanswered or refused requests, in cycle order.
     """
-    bad = [(cycle, misses) for cycle, misses in enumerate(unanswered) if misses]
+    return _assert_no_misses(
+        unanswered,
+        name="unanswered_requests",
+        failed="requests went unanswered or were refused",
+        passed="every request of the {n} cycles was answered",
+    )
+
+
+def assert_clean_stops(failures: list[list[str]]) -> MetricResult:
+    """Fail when any cycle's session stop went wrong.
+
+    A stop that was refused, a client the stop did not drop, a session that
+    was not orphaned when an orphaned stop came, or one not ready again
+    after it: each fails the cycle it happened on.
+
+    Args:
+        failures: Each cycle's stop failures, in cycle order.
+    """
+    return _assert_no_misses(
+        failures,
+        name="failed_stops",
+        failed="the session stop went wrong",
+        passed="every one of the {n} stops went through",
+    )
+
+
+def _assert_no_misses(
+    misses_by_cycle: list[list[str]], *, name: str, failed: str, passed: str
+) -> MetricResult:
+    bad = [(cycle, misses) for cycle, misses in enumerate(misses_by_cycle) if misses]
     if bad:
         cycle, misses = bad[0]
         reason = (
-            f"requests went unanswered or were refused on {len(bad)}/{len(unanswered)} cycles "
+            f"{failed} on {len(bad)}/{len(misses_by_cycle)} cycles "
             f"(first at cycle {cycle}: {'; '.join(misses[:3])})"
         )
-        print(f"[unanswered_requests] FAILED: {reason}")
+        print(f"[{name}] FAILED: {reason}")
         return MetricResult(
-            name="unanswered_requests",
+            name=name,
             start=0,
             end=len(bad),
             change=len(bad),
@@ -678,10 +780,10 @@ def assert_answered(unanswered: list[list[str]]) -> MetricResult:
             threshold="always 0",
             first_bad_cycle=cycle,
         )
-    reason = f"every request of the {len(unanswered)} cycles was answered"
-    print(f"[unanswered_requests] ok: {reason}")
+    reason = passed.format(n=len(misses_by_cycle))
+    print(f"[{name}] ok: {reason}")
     return MetricResult(
-        name="unanswered_requests",
+        name=name,
         start=0,
         end=0,
         change=0,
