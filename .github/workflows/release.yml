@@ -24,11 +24,6 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  # Keep this in step with the other workflows; the toolchain pin lives here so
-  # a bump is a one-line change rather than a per-job edit.
-  MISE_VERSION: "2026.6.14"
-
 jobs:
   decide:
     name: Decide the release kind
@@ -42,9 +37,14 @@ jobs:
           # The decision reads the tag set, so the full history must be present.
           fetch-depth: 0
 
+      - name: Read mise pin
+        shell: bash
+        run: bash .github/scripts/mise-pin.sh >> "$GITHUB_ENV"
+
       - uses: jdx/mise-action@v4
         with:
           version: ${{ env.MISE_VERSION }}
+          sha256: ${{ env.MISE_SHA256 }}
 
       - name: Read the version and pick the release kind
         id: kind
@@ -79,9 +79,14 @@ jobs:
           # the history and the tag set must both be present.
           fetch-depth: 0
 
+      - name: Read mise pin
+        shell: bash
+        run: bash .github/scripts/mise-pin.sh >> "$GITHUB_ENV"
+
       - uses: jdx/mise-action@v4
         with:
           version: ${{ env.MISE_VERSION }}
+          sha256: ${{ env.MISE_SHA256 }}
 
       # PEP 440 orders `X.Y.Z.devN` below `X.Y.Z`, so every pre-release of a
       # version sorts under the release that later closes it. The stamp lives in
@@ -135,9 +140,14 @@ jobs:
           # the full history and tag set must be present.
           fetch-depth: 0
 
+      - name: Read mise pin
+        shell: bash
+        run: bash .github/scripts/mise-pin.sh >> "$GITHUB_ENV"
+
       - uses: jdx/mise-action@v4
         with:
           version: ${{ env.MISE_VERSION }}
+          sha256: ${{ env.MISE_SHA256 }}
 
       # The HTTP contract dictates the floor for this release's version bump:
       # a breaking contract diff since the previous release mandates a minor

@@ -18,11 +18,6 @@ on:
 permissions:
   contents: read
 
-env:
-  # The mise release CI standardizes on; every job installs the toolchain at
-  # this pin, so bump it here once rather than per job.
-  MISE_VERSION: "2026.6.14"
-
 jobs:
   proto:
     name: Proto
@@ -32,9 +27,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Read mise pin
+        shell: bash
+        run: bash .github/scripts/mise-pin.sh >> "$GITHUB_ENV"
+
       - uses: jdx/mise-action@v4
         with:
           version: ${{ env.MISE_VERSION }}
+          sha256: ${{ env.MISE_SHA256 }}
 
       - run: mise run //proto:lint
       - run: mise run //proto:breaking
@@ -61,9 +61,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Read mise pin
+        shell: bash
+        run: bash .github/scripts/mise-pin.sh >> "$GITHUB_ENV"
+
       - uses: jdx/mise-action@v4
         with:
           version: ${{ env.MISE_VERSION }}
+          sha256: ${{ env.MISE_SHA256 }}
 
       - run: mise run http-spec-check
       - run: mise run http-breaking
@@ -74,9 +79,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Read mise pin
+        shell: bash
+        run: bash .github/scripts/mise-pin.sh >> "$GITHUB_ENV"
+
       - uses: jdx/mise-action@v4
         with:
           version: ${{ env.MISE_VERSION }}
+          sha256: ${{ env.MISE_SHA256 }}
+
+      - name: Test mise pin reader
+        run: python3 .github/scripts/test-mise-pin.py
+
+      - name: Test review bootstrap
+        run: python3 .github/scripts/test-mise-review-bootstrap.py
 
       - run: mise run lint
         env:
@@ -88,9 +104,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Read mise pin
+        shell: bash
+        run: bash .github/scripts/mise-pin.sh >> "$GITHUB_ENV"
+
       - uses: jdx/mise-action@v4
         with:
           version: ${{ env.MISE_VERSION }}
+          sha256: ${{ env.MISE_SHA256 }}
 
       - run: mise run install-locked
       # Generate the wire bindings from the in-repo proto (no released wheel or
@@ -108,9 +129,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Read mise pin
+        shell: bash
+        run: bash .github/scripts/mise-pin.sh >> "$GITHUB_ENV"
+
       - uses: jdx/mise-action@v4
         with:
           version: ${{ env.MISE_VERSION }}
+          sha256: ${{ env.MISE_SHA256 }}
 
       # The workflow matrix above fans out the supported versions; this leg runs
       # the single nox session dedicated to its version. Keep the matrix list in
@@ -127,9 +153,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Read mise pin
+        shell: bash
+        run: bash .github/scripts/mise-pin.sh >> "$GITHUB_ENV"
+
       - uses: jdx/mise-action@v4
         with:
           version: ${{ env.MISE_VERSION }}
+          sha256: ${{ env.MISE_SHA256 }}
 
       # A LiveKit server for the LiveKit transport's tests, in dev mode: it
       # accepts tokens signed with the key `devkey` and the secret `secret`.
@@ -181,9 +212,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Read mise pin
+        shell: bash
+        run: bash .github/scripts/mise-pin.sh >> "$GITHUB_ENV"
+
       - uses: jdx/mise-action@v4
         with:
           version: ${{ env.MISE_VERSION }}
+          sha256: ${{ env.MISE_SHA256 }}
 
       # A LiveKit server for the room churn, in dev mode: it accepts tokens
       # signed with the key `devkey` and the secret `secret`.
