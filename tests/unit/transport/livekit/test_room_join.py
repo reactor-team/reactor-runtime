@@ -12,6 +12,7 @@ from reactor_runtime.core import ConnId, TrackDirection, TrackKind
 from reactor_runtime.transport.livekit import LiveKitRouter
 from reactor_runtime.transport.livekit import room as room_module
 from reactor_runtime.transport.livekit.room import RoomSession, RoomState, _masked
+from reactor_runtime.transport.router import IceServerEntry, TurnCredentials
 
 _VIDEO_OUT = {
     "main_video": {
@@ -72,6 +73,7 @@ class FakeRoom:
         self.local_participant = FakeParticipant(publish or Gate())
         self.remote_participants: dict[str, Any] = {}
         self.disconnects = 0
+        self.connect_options: list[Any] = []
         self.handlers: dict[str, Any] = {}
         self.stream_handlers: dict[str, Any] = {}
 
@@ -81,7 +83,8 @@ class FakeRoom:
     def register_byte_stream_handler(self, topic: str, handler: Any) -> None:
         self.stream_handlers[topic] = handler
 
-    async def connect(self, url: str, token: str) -> None:
+    async def connect(self, url: str, token: str, options: Any = None) -> None:
+        self.connect_options.append(options)
         await self.connect_gate.pass_through()
 
     async def disconnect(self) -> None:
@@ -118,9 +121,23 @@ class FakeControl:
         pass
 
 
-def _session(room: FakeRoom, control: FakeControl) -> RoomSession:
+_TURN = IceServerEntry(
+    uris=["turn:turn.example:3478?transport=udp"],
+    credentials=TurnCredentials(username="turn-user", password="turn-pass-word"),
+)
+_STUN = IceServerEntry(uris=["stun:stun.example:3478"])
+
+
+def _session(
+    room: FakeRoom, control: FakeControl, ice_servers: tuple[IceServerEntry, ...] = ()
+) -> RoomSession:
     return RoomSession(
-        ConnId(4711), "wss://rooms.example", "a-token", cast(Any, control), room=cast(Any, room)
+        ConnId(4711),
+        "wss://rooms.example",
+        "a-token",
+        cast(Any, control),
+        room=cast(Any, room),
+        ice_servers=ice_servers,
     )
 
 
@@ -186,6 +203,71 @@ async def test_a_refused_connect_keeps_the_token_out_of_the_reason(error: str, r
 
     assert session.reason == f"the LiveKit room could not be joined: {reason}"
     assert control.failed == [(ConnId(4711), "livekit", session.reason)]
+
+
+async def test_the_join_gathers_against_the_caller_s_ice_servers() -> None:
+    room, control = FakeRoom(), FakeControl()
+    room.connect_gate.release()
+    session = _session(room, control, ice_servers=(_TURN, _STUN))
+
+    session.start()
+    await _settle()
+
+    (options,) = room.connect_options
+    servers = [(list(s.urls), s.username, s.password) for s in options.rtc_config.ice_servers]
+    assert servers == [
+        (["turn:turn.example:3478?transport=udp"], "turn-user", "turn-pass-word"),
+        (["stun:stun.example:3478"], "", ""),
+    ]
+    await session.leave()
+
+
+async def test_without_ice_servers_the_join_passes_no_options() -> None:
+    room, control = FakeRoom(), FakeControl()
+    room.connect_gate.release()
+    session = _session(room, control)
+
+    session.start()
+    await _settle()
+
+    assert room.connect_options == [None]
+    await session.leave()
+
+
+async def test_a_refused_connect_keeps_the_turn_credentials_out_of_the_reason() -> None:
+    room, control = FakeRoom(), FakeControl()
+    room.connect_gate.release(RuntimeError("turn-user:turn-pass-word was refused"))
+    session = _session(room, control, ice_servers=(_TURN,))
+
+    session.start()
+    await _settle()
+
+    assert (
+        session.reason == "the LiveKit room could not be joined: [redacted]:[redacted] was refused"
+    )
+
+
+def test_masking_a_secret_that_contains_another_leaves_no_part_of_it() -> None:
+    assert _masked("refused turn-secret", "turn", "turn-secret") == "refused [redacted]"
+    assert _masked("refused turn-secret", "turn-secret", "turn") == "refused [redacted]"
+
+
+async def test_a_refused_connect_masks_a_password_that_contains_the_username() -> None:
+    room, control = FakeRoom(), FakeControl()
+    room.connect_gate.release(RuntimeError("credentials turn-secret were refused"))
+    overlapping = IceServerEntry(
+        uris=["turn:turn.example:3478"],
+        credentials=TurnCredentials(username="turn", password="turn-secret"),
+    )
+    session = _session(room, control, ice_servers=(overlapping,))
+
+    session.start()
+    await _settle()
+
+    assert (
+        session.reason
+        == "the LiveKit room could not be joined: credentials [redacted] were refused"
+    )
 
 
 def test_masking_leaves_text_without_a_token_as_it_is() -> None:

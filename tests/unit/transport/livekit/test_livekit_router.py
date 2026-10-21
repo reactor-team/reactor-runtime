@@ -31,6 +31,8 @@ _SID = "s1"
 _CONNECTIONS = f"/sessions/{_SID}/transport/livekit/connections"
 _TOKEN = "eyJ.a-credential.sig"
 _ROOM = {"url": "wss://rooms.example", "token": _TOKEN}
+_TURN_PASSWORD = "turn-pass-word"
+_TURN_CREDENTIALS = {"username": "turn-user", "password": _TURN_PASSWORD}
 
 
 class FakeRunner:
@@ -151,9 +153,12 @@ class FakeRoomSession:
         token: str,
         control: Any,
         config: LiveKitConfig | None = None,
+        *,
+        ice_servers: Any = (),
     ) -> None:
         self.conn_id = conn_id
         self.config = config
+        self.ice_servers = list(ice_servers)
         self.url = url
         self.token = token
         self.state = RoomState.JOINING
@@ -240,6 +245,30 @@ def test_a_room_connection_opens_on_the_id_the_caller_chose(
     assert runner.admitted == [ConnId(5120)]
     (room,) = rooms
     assert (room.conn_id, room.started) == (5120, True)
+
+
+def test_a_room_connection_joins_through_the_ice_servers_the_caller_supplies(
+    rooms: list[FakeRoomSession],
+) -> None:
+    servers = [
+        {"uris": ["turn:turn.example:3478?transport=udp"], "credentials": _TURN_CREDENTIALS},
+        {"uris": ["stun:stun.example:3478"]},
+    ]
+
+    response = _client(FakeRunner()).post(_CONNECTIONS, json={**_ROOM, "ice_servers": servers})
+
+    assert response.status_code == 202
+    (room,) = rooms
+    assert [entry.model_dump(exclude_none=True) for entry in room.ice_servers] == servers
+
+
+def test_a_room_connection_without_ice_servers_joins_through_the_livekit_server_s(
+    rooms: list[FakeRoomSession],
+) -> None:
+    _client(FakeRunner()).post(_CONNECTIONS, json=_ROOM)
+
+    (room,) = rooms
+    assert room.ice_servers == []
 
 
 @pytest.mark.parametrize("chosen", [1002, 4999])
@@ -503,6 +532,17 @@ def test_another_session_id_is_not_found(rooms: list[FakeRoomSession]) -> None:
         ({**_ROOM, "connection_id": 1001}, "connection_id"),
         ({**_ROOM, "connection_id": 10000}, "connection_id"),
         ({**_ROOM, "connection_id": "a room"}, "connection_id"),
+        ({**_ROOM, "ice_servers": "turn:turn.example:3478"}, "ice_servers"),
+        ({**_ROOM, "ice_servers": [{"credentials": _TURN_CREDENTIALS}]}, "ice_servers"),
+        (
+            {
+                **_ROOM,
+                "ice_servers": [
+                    {"uris": ["turn:turn.example"], "credentials": {"password": _TURN_PASSWORD}}
+                ],
+            },
+            "ice_servers",
+        ),
     ],
 )
 def test_a_malformed_body_is_refused_without_repeating_the_token(
@@ -512,7 +552,8 @@ def test_a_malformed_body_is_refused_without_repeating_the_token(
 
     assert response.status_code == 422
     assert _TOKEN not in response.text
-    assert [error["loc"] for error in response.json()["detail"]] == [["body", field]]
+    assert _TURN_PASSWORD not in response.text
+    assert [error["loc"][:2] for error in response.json()["detail"]] == [["body", field]]
     assert rooms == []
 
 

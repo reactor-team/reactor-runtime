@@ -28,6 +28,7 @@ from reactor_runtime.transport.router import (
     OFFERED_CONN_ID_MIN,
     ConnectionIdClaimedError,
     ErrorDetail,
+    IceServerEntry,
     SessionControl,
     TransportRouter,
     add_session_error_handlers,
@@ -105,25 +106,6 @@ class TrackMappingEntry(BaseModel):
     name: str
     kind: str
     direction: str
-
-
-class TurnCredentials(BaseModel):
-    """TURN authentication for an ICE server; absent on a plain STUN server."""
-
-    username: str
-    password: str
-
-
-class IceServerEntry(BaseModel):
-    """One STUN/TURN server offered for this connection's candidate gathering.
-
-    Mirrors the wire shape the platform already uses for ICE servers:
-    ``{uris, credentials: {username, password}}``, with ``credentials`` absent
-    for a STUN server.
-    """
-
-    uris: list[str]
-    credentials: TurnCredentials | None = None
 
 
 # RFC 8445 §15.4: ice-char = ALPHA / DIGIT / "+" / "/". Anchored, so a value

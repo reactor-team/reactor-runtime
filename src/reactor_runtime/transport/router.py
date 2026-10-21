@@ -39,6 +39,29 @@ class ErrorDetail(BaseModel):
     detail: str
 
 
+class TurnCredentials(BaseModel):
+    """TURN authentication for an ICE server; absent on a plain STUN server.
+
+    A credential: a transport never logs or journals it, and a refused request
+    does not repeat it.
+    """
+
+    username: str
+    password: str
+
+
+class IceServerEntry(BaseModel):
+    """One STUN/TURN server a connection gathers its ICE candidates against.
+
+    The wire shape every transport's routes take ICE servers in:
+    ``{uris, credentials: {username, password}}``, with ``credentials`` absent
+    for a STUN server.
+    """
+
+    uris: list[str]
+    credentials: TurnCredentials | None = None
+
+
 class SessionNotRunningError(RuntimeError):
     """Raised by :meth:`SessionControl.require_session_running` when no session is live.
 
