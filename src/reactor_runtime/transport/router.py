@@ -88,16 +88,42 @@ class ConnectionsExhaustedError(RuntimeError):
     """
 
 
+# Connection ids. Every connection of a session, through any transport, takes
+# its id from one space, 1001 to 9999. An id has one of two sources:
+#
+# - The caller chooses it: the id a WebRTC offer is made on, or the
+#   ``connection_id`` of a room connection. Any free id from 1002 to 9999 is
+#   valid, and 1001 stays offerable for legacy single-connection callers.
+# - The runtime mints it, for a connection it opens with no caller's choice:
+#   each room participant, a room connection opened without an id, and a
+#   connection registered through the WebRTC routes.
+#
+# The two sources keep to separate ranges. The runtime mints only from 5000 to
+# 9999, and a caller that mints ids of its own keeps to 1002 to 4999. Two
+# minters then never draw the same id, even before either has seen the other's
+# connection. The split is by source, not by transport: one transport takes
+# ids from both, because a room connection's id can come from its caller while
+# its participants' ids come from the runtime.
+#
+# The claim rule works on top of the split: the first transport to use an id
+# holds it for the session, and another transport's use of it is refused
+# (:class:`ConnectionIdClaimedError`). That stops one transport from replacing
+# another's connection; the split stops two minters from colliding at all.
+
 OFFERED_CONN_ID_MIN = 1001
 """The lowest connection id a client may offer on: ``1001``, kept for legacy
-single-connection callers, below the ids the runtime mints from ``1002``."""
+single-connection callers."""
 
-MINTED_CONN_ID_MIN = 1002
-"""The lowest connection id the runtime mints, and the lowest a caller may
-choose for a connection the runtime would otherwise mint."""
+CHOSEN_CONN_ID_MIN = 1002
+"""The lowest connection id a caller may choose for a connection the runtime
+would otherwise mint, such as a room connection's ``connection_id``."""
+
+MINTED_CONN_ID_MIN = 5000
+"""The lowest connection id the runtime mints itself. Ids below it are left to
+callers that mint their own."""
 
 CONN_ID_MAX = 9999
-"""The highest connection id a client may offer on, and the runtime mints."""
+"""The highest connection id a caller may offer on or choose, and the runtime mints."""
 
 
 class ConnectionIdClaimedError(RuntimeError):
@@ -164,6 +190,10 @@ class SessionControl(ConnectionSink, Protocol):
     def new_conn_id(self, transport: str) -> ConnId:
         """Mint a fresh connection id, unique within the session, and claim it for *transport*.
 
+        For a connection no caller chose an id for. The id comes from the
+        runtime's own range, :data:`MINTED_CONN_ID_MIN` to :data:`CONN_ID_MAX`
+        (see the connection id notes at the top of this module).
+
         Raises:
             ConnectionsExhaustedError: If the session's id space is used up.
         """
@@ -172,9 +202,9 @@ class SessionControl(ConnectionSink, Protocol):
         """Claim *conn_id* for *transport*, the first time the transport uses it.
 
         For an id the transport did not mint itself, such as one a client
-        chose and offered. An id stays with the transport that claimed it
-        first until the session ends, so claiming an id the same transport
-        already holds is accepted.
+        chose and offered, from anywhere in the session's id space. An id
+        stays with the transport that claimed it first until the session
+        ends, so claiming an id the same transport already holds is accepted.
 
         Returns:
             Whether the claim is new, so a transport that then refuses the

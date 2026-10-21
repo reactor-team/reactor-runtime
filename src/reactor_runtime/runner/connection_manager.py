@@ -72,9 +72,10 @@ from reactor_runtime.transport.router import (
 
 logger = get_logger(__name__)
 
-# Connection ids are minted at random in this inclusive range, the same id space
-# a production director hands out. 1000 is invalid and 1001 is reserved for
-# legacy single-connection compatibility, so explicit ids start at 1002.
+# The runtime mints connection ids at random in this inclusive range, its own
+# part of the session's id space. Ids below it are left to callers that mint
+# their own, so the two never draw the same id; the notes on connection ids in
+# reactor_runtime.transport.router say how the space is shared.
 _MIN_CONN_ID = MINTED_CONN_ID_MIN
 _MAX_CONN_ID = CONN_ID_MAX
 
@@ -263,12 +264,15 @@ class ConnectionManager:
     def new_conn_id(self, transport: str) -> ConnId:
         """Mint a fresh random connection id, unique within the session, for *transport*.
 
-        Drawn at random from ``[1002, 9999]`` and retried until one is free,
-        matching the id space a production director allocates. Allocated centrally
-        so connections arriving through several transports cannot collide. The id
-        is claimed for *transport* until session teardown, so a new connection
-        never reuses the id of one that has since dropped, and a draw skips every
-        id a transport has claimed without minting it.
+        Drawn at random from ``[5000, 9999]`` and retried until one is free.
+        The runtime mints only in that range, so an id it mints never meets
+        one a caller minted itself from ``[1002, 4999]``, even before the
+        caller's connection reaches the session. Allocated centrally so
+        connections arriving through several transports cannot collide. The
+        id is claimed for *transport* until session teardown, so a new
+        connection never reuses the id of one that has since dropped, and a
+        draw skips every id a transport has claimed without minting it, such
+        as a caller's chosen id that falls in the runtime's range.
 
         Raises:
             ConnectionsExhaustedError: If a free id is not drawn within the

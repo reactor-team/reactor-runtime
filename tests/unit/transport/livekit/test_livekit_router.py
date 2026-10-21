@@ -242,6 +242,19 @@ def test_a_room_connection_opens_on_the_id_the_caller_chose(
     assert (room.conn_id, room.started) == (5120, True)
 
 
+@pytest.mark.parametrize("chosen", [1002, 4999])
+def test_a_chosen_id_below_the_runtimes_minted_range_opens(
+    rooms: list[FakeRoomSession], chosen: int
+) -> None:
+    runner = FakeRunner()
+
+    response = _client(runner).post(_CONNECTIONS, json={**_ROOM, "connection_id": chosen})
+
+    assert response.status_code == 202
+    assert response.json() == {"connection_id": chosen}
+    assert runner.claims == {ConnId(chosen): "livekit"}
+
+
 def test_a_chosen_id_another_transport_holds_is_refused(rooms: list[FakeRoomSession]) -> None:
     runner = FakeRunner()
     runner.claims[ConnId(5120)] = "webrtc"

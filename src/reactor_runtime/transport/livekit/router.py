@@ -30,8 +30,8 @@ from pydantic import BaseModel, Field, SecretStr, field_validator
 from reactor_runtime.core import ConnId, LiveKitConfig
 from reactor_runtime.transport.livekit.version import TRANSPORT_NAME, TRANSPORT_VERSION
 from reactor_runtime.transport.router import (
+    CHOSEN_CONN_ID_MIN,
     CONN_ID_MAX,
-    MINTED_CONN_ID_MIN,
     ConnectionIdClaimedError,
     ErrorDetail,
     SessionControl,
@@ -76,15 +76,16 @@ class RoomConnectionRequest(BaseModel):
     identity, and the grants come from it. It is never logged or journalled,
     and a refused request does not repeat it.
 
-    ``connection_id`` lets the caller choose the room connection's id, from
-    the range the runtime mints in. Absent, the runtime mints one. An id the
-    session already uses, through this transport or another, is refused with a
-    409, since a room connection is never opened again on the same id.
+    ``connection_id`` lets the caller choose the room connection's id: any id
+    from 1002 to 9999. Absent, the runtime mints one from its own range, 5000
+    to 9999, so a caller that mints its ids itself keeps to 1002 to 4999. An id
+    the session already uses, through this transport or another, is refused
+    with a 409, since a room connection is never opened again on the same id.
     """
 
     url: str
     token: SecretStr
-    connection_id: int | None = Field(default=None, ge=MINTED_CONN_ID_MIN, le=CONN_ID_MAX)
+    connection_id: int | None = Field(default=None, ge=CHOSEN_CONN_ID_MIN, le=CONN_ID_MAX)
 
     @field_validator("url")
     @classmethod

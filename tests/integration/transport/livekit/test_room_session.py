@@ -316,6 +316,7 @@ async def test_a_room_connection_joins_the_room_and_publishes_the_output(
 ) -> None:
     runner.start_session({})
     conn_id = await _open(http, _token(room_name, "model"))
+    assert 5000 <= conn_id <= 9999
     assert await _settled(http, conn_id) == {"connection_id": conn_id, "state": "open"}
 
     # The room connection occupies the session as a system connection.
@@ -583,7 +584,7 @@ async def test_each_participant_is_a_client_named_by_its_identity(
     (opened,) = _participants(runner)
     conn_id = opened.detail["conn_id"]
     assert dict(opened.detail) == {"conn_id": conn_id, "transport": "livekit", "identity": "viewer"}
-    assert 1002 <= conn_id <= 9999
+    assert 5000 <= conn_id <= 9999
     assert conn_id != room_id
     assert (opened.from_state, opened.to_state) == (SessionState.STREAMING, SessionState.STREAMING)
 

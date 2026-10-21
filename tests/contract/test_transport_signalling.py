@@ -4,9 +4,9 @@ A consumer relaying signalling for a client posts SDP offers and trickle-ICE
 batches to ``/sessions/{sid}/transport/webrtc/...`` with the fixed all-zero
 session id, expects exactly ``202`` for both, and reads the SDP answer off the
 ``/events`` journal (the ``connection_answered`` self-loop) rather than
-polling. Connection ids are minted by the runtime in ``[1002, 9999]``; id
-``1001`` is reserved for legacy single-connection callers and must stay
-addressable.
+polling. Connection ids are minted by the runtime in ``[5000, 9999]``, and a
+caller may choose any id in ``[1002, 9999]``; id ``1001`` is reserved for legacy
+single-connection callers and must stay addressable.
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ async def test_register_mints_an_id_in_the_locked_range(harness: Harness) -> Non
 
     assert response.status_code == 201
     body = response.json()
-    assert 1002 <= body["connection_id"] <= 9999
+    assert 5000 <= body["connection_id"] <= 9999
     assert "track_map" in body
 
 

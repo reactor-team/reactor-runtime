@@ -27,6 +27,7 @@ from reactor_runtime.core import (
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.runner import ConnectionManager, SessionStateMachine
 from reactor_runtime.transport import ConnectionIdClaimedError, ConnectionsExhaustedError
+from reactor_runtime.transport.router import CONN_ID_MAX, MINTED_CONN_ID_MIN
 
 
 class FakeConnection:
@@ -236,7 +237,21 @@ def test_new_conn_id_is_random_in_range_and_unique() -> None:
     cm, _ = waiting_manager()
     ids = [cm.new_conn_id("webrtc") for _ in range(50)]
     assert len(set(ids)) == 50
-    assert all(1002 <= int(cid) <= 9999 for cid in ids)
+    assert all(5000 <= int(cid) <= 9999 for cid in ids)
+
+
+def test_new_conn_id_mints_only_in_the_runtimes_range() -> None:
+    assert (MINTED_CONN_ID_MIN, CONN_ID_MAX) == (5000, 9999)
+    cm, _ = waiting_manager()
+    ids = {int(cm.new_conn_id("room")) for _ in range(500)}
+    assert min(ids) >= MINTED_CONN_ID_MIN
+
+
+def test_claim_conn_id_accepts_an_id_below_the_runtimes_range() -> None:
+    # A caller that mints its own ids keeps below 5000; its ids stay claimable.
+    cm, _ = waiting_manager()
+    assert cm.claim_conn_id(ConnId(1002), "webrtc")
+    assert cm.claim_conn_id(ConnId(4999), "room")
 
 
 def test_new_conn_id_is_not_reused_after_a_drop() -> None:
