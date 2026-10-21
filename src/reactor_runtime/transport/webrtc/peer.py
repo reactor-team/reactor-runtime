@@ -984,6 +984,9 @@ class WebRTCPeer:
             self._data_open = False
             self._control_open = False
         self._release_wire()
+        # The connection does not close a peer that reported its own loss, so
+        # the teardown's emptying never runs for it.
+        self._drop_outbound_media()
         self._fire(self._cb_disconnect)
 
     def _drain_channels(self) -> None:
@@ -1122,11 +1125,15 @@ class WebRTCPeer:
 
         Samples from a bundle queued before a flush that landed while the
         bundle was being pushed are dropped; the check shares the flush's lock.
+        So are samples of a bundle still converting when the peer is done:
+        the check shares the lock its buffers are dropped under.
         """
         if not samples.size:
             return
         with self._audio_lock:
             if flushes is not None and flushes != self._flushes:
+                return
+            if self._stop_event.is_set():
                 return
             buf = self._audio_bufs.get(name, _EMPTY_AUDIO)
             buf = np.concatenate([buf, samples])
@@ -1252,6 +1259,10 @@ class WebRTCPeer:
             self._frame_queue.put_nowait((bundle, time.perf_counter(), self._flushes))
         except queue.Full:
             self._dropped_bundles += 1
+        # Closed between the check above and the put: the teardown has emptied
+        # the queue already, and no drain thread will take this bundle now.
+        if self._stop_event.is_set():
+            self._empty_frame_queue()
 
     def flush_media(self) -> None:
         """Drop the media this peer still holds for the wire.
@@ -1268,12 +1279,30 @@ class WebRTCPeer:
         """
         with self._video_lock, self._audio_lock:
             self._flushes += 1
-            while True:
-                try:
-                    self._frame_queue.get_nowait()
-                except queue.Empty:
-                    break
+            self._empty_frame_queue()
             self._audio_bufs.clear()
+
+    def _drop_outbound_media(self) -> None:
+        """Drop what the pumps had not taken yet, once the peer is done.
+
+        A peer that is done is not freed by its refcount: the connection's
+        pacer holds its send_media, and its callbacks hold the connection, so
+        the peer lives until a garbage collection, and so would every frame
+        left in its queue and every sample left in its audio buffers.
+        """
+        self._empty_frame_queue()
+        # Under the lock an in-flight enqueue holds: one that got in first is
+        # dropped here, and one after this sees the stop and adds nothing.
+        with self._audio_lock:
+            self._audio_bufs.clear()
+
+    def _empty_frame_queue(self) -> None:
+        """Drop every bundle waiting for the drain thread."""
+        while True:
+            try:
+                self._frame_queue.get_nowait()
+            except queue.Empty:
+                break
 
     def send_message(self, payload: bytes | str) -> None:
         """Send an already-encoded frame over the data channel (text or binary)."""
@@ -1664,6 +1693,7 @@ class WebRTCPeer:
                 thread.join(timeout=1.0)
         self._frame_thread = None
         self._audio_thread = None
+        self._drop_outbound_media()
 
 
 async def libwebrtc_peer_factory(
