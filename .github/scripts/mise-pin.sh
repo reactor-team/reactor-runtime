@@ -35,12 +35,12 @@ awk -v checksum_key="mise_sha256_$platform" '
     version = read_value($0, "min_version")
     if (version !~ /^[0-9]+\.[0-9]+\.[0-9]+$/) fail("invalid min_version")
   }
-  section == "metadata" && /^[ \t]*mise_sha256_[a-z0-9_]+[ \t]*=/ {
+  section == "metadata" && /^[ \t]*mise_sha256_(linux_x64|linux_arm64|macos_x64|macos_arm64|windows_x64)[ \t]*=/ {
     key = $0
     sub(/^[ \t]*/, "", key)
     sub(/[ \t]*=.*/, "", key)
     value = read_value($0, key)
-    if (length(value) != 64 || value ~ /[^0-9a-fA-F]/) fail("invalid " key)
+    if (length(value) != 64 || value ~ /[^0-9a-f]/) fail("invalid " key)
     if (key == checksum_key) checksum = value
   }
   END {

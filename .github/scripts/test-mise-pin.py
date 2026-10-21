@@ -81,6 +81,7 @@ class MisePinTests(unittest.TestCase):
             "duplicate checksum": CONFIG + digest,
             "short checksum": CONFIG.replace(HASHES["linux_x64"], "a" * 63),
             "nonhex checksum": CONFIG.replace(HASHES["linux_x64"], "z" * 64),
+            "uppercase checksum": CONFIG.replace(HASHES["linux_x64"], "A" * 64),
             "misplaced checksum": CONFIG.replace("[_]\n", "[tools]\n"),
             "misplaced version": "[tools]\n" + CONFIG,
         }
@@ -89,6 +90,14 @@ class MisePinTests(unittest.TestCase):
                 result = self._run_helper(config)
                 assert result.returncode != 0
                 assert result.stdout == ""
+
+    def test_unrelated_checksum_metadata_is_ignored(self):
+        """Read supported checksum keys without limiting other metadata."""
+        config = CONFIG + 'mise_sha256_notes = "release notes"\n'
+        config += 'mise_sha256_linux_riscv64 = "not a supported runner"\n'
+        result = self._run_helper(config)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == f"MISE_VERSION={VERSION}\nMISE_SHA256={HASHES['linux_x64']}\n"
 
     def test_unsupported_or_missing_runner(self):
         """Reject runners without a pinned binary."""
