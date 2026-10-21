@@ -18,6 +18,18 @@ import threading
 _BOUNDARY_EPSILON = 1e-6
 
 
+def end_segment(end: float, chunk_seconds: int) -> int:
+    """Return the index of the segment a range ending at *end* finishes in.
+
+    A range ending on a boundary finishes in the segment before it, including
+    when floating point puts *end* a hair past the boundary. Every place that
+    maps an end marker to a segment uses this, so they all agree.
+    """
+    if chunk_seconds <= 0:
+        return 0
+    return max(0, math.ceil(end / chunk_seconds - _BOUNDARY_EPSILON) - 1)
+
+
 class MarkerBookkeeper:
     """Tracks how much media time has been recorded.
 

@@ -993,6 +993,136 @@ def test_the_gap_between_emissions_is_not_taken_for_a_pause(tmp_path: Path) -> N
         recorder.stop()
 
 
+@pytest.mark.usefixtures("quick_idle")
+def test_a_clip_ending_on_a_boundary_is_announced_after_the_seal(tmp_path: Path) -> None:
+    # Summed frame durations put the end marker a hair past the boundary; the
+    # clip still waits on the segment the seal closes, so it is announced.
+    fired: list[ClipResult] = []
+    recorder = Recorder(
+        RecordingConfig(enabled=True, chunk_seconds=4, recording_dir=str(tmp_path)),
+        on_clip_ready=fired.append,
+    )
+    recorder.start(_SID)
+    try:
+        _emit(recorder, emissions=60, frames=2)
+        clip = recorder.request_clip(30.0)
+        assert clip.end_marker != 4.0
+        assert clip.end_marker == pytest.approx(4.0)
+        assert _wait_for(lambda: fired == [clip])
+    finally:
+        recorder.stop()
+
+
+def _av_emit(recorder: Recorder, frames: int, rate: int | None) -> None:
+    """Hand one emission over, with audio at *rate* or video alone when ``None``."""
+    bundle = _batched_av_bundle(frames, rate=rate) if rate else _batched_bundle(frames)
+    recorder.on_chunk(MediaChunk(bundle=bundle, fps=30.0, n_frames=frames, wait=True))
+
+
+@pytest.mark.usefixtures("quick_idle")
+@pytest.mark.parametrize(("before", "after"), [(48_000, None), (None, 24_000)])
+def test_a_resumed_part_records_the_tracks_the_session_started_with(
+    tmp_path: Path, before: int | None, after: int | None
+) -> None:
+    # The emission that opens a later part decides nothing about the tracks: a
+    # video-only emission after a seal keeps the session's audio, and audio
+    # appearing after a seal does not change the init the recording serves.
+    fired: list[ClipResult] = []
+    recorder = Recorder(
+        RecordingConfig(enabled=True, chunk_seconds=1, recording_dir=str(tmp_path)),
+        on_clip_ready=fired.append,
+    )
+    recorder.start(_SID)
+    session_dir = tmp_path / _SID
+    try:
+        for _ in range(10):
+            _av_emit(recorder, frames=2, rate=before)
+        clip = recorder.request_clip(30.0)
+        assert _wait_for(lambda: fired == [clip])
+        resolved = (recorder._has_audio, recorder._audio_sample_rate)
+
+        _av_emit(recorder, frames=40, rate=after)
+        assert (recorder._has_audio, recorder._audio_sample_rate) == resolved
+    finally:
+        recorder.stop()
+
+    part_init = (session_dir / "init_00001.mp4").read_bytes()
+    assert part_init == (session_dir / "init.mp4").read_bytes()
+    assert isinstance(recorder.manifest(_SID, 1.0, 2.0), ClipManifest)
+
+
+def test_a_part_whose_init_differs_is_withheld(tmp_path: Path) -> None:
+    # Only init.mp4 is served, so a later part with a different init could not
+    # be decoded: its segments are neither announced nor served.
+    fired: list[tuple[str, int]] = []
+    recorder = _serving_recorder(tmp_path)
+    recorder._on_chunk_ready = lambda rec, idx: fired.append((rec, idx))
+    session_dir = _write_segments(
+        tmp_path,
+        "init.mp4",
+        "chunk_00000.m4s",
+        "chunk_00000.sealed",
+        "part_00001.start",
+        "chunk_00001.m4s",
+        "chunk_00002.m4s",
+    )
+    (session_dir / "init_00001.mp4").write_bytes(b"other")
+    recorder._session_dir = session_dir
+    recorder._session_id = _SID
+
+    recorder._fire_ready_chunks()
+    assert fired == [(_SID, -1), (_SID, 0)]
+    assert recorder._disabled is True
+    assert isinstance(recorder.manifest(_SID, 0.0, 4.0), ClipManifest)
+    assert isinstance(recorder.manifest(_SID, 4.0, 8.0), Gone)
+
+
+def test_a_pause_is_not_learned_as_the_models_cadence(tmp_path: Path) -> None:
+    # A gap past the idle threshold was a pause; the emission after it keeps the
+    # cadence the model showed before it, so the next pause is caught as soon.
+    recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
+    recorder._emission_interval = 0.5
+    recorder._last_emission_at = time.monotonic() - 600.0
+    recorder._note_emission(0.5)
+    assert recorder._emission_interval == 0.5
+
+    recorder._last_emission_at = time.monotonic() - 0.9
+    recorder._note_emission(0.5)
+    assert recorder._emission_interval == pytest.approx(0.9, abs=0.05)
+
+
+@pytest.mark.usefixtures("quick_idle")
+def test_a_clip_requested_while_idle_is_predicted_ready_at_once(tmp_path: Path) -> None:
+    recorder = Recorder(RecordingConfig(enabled=True, chunk_seconds=4, recording_dir=str(tmp_path)))
+    recorder.start(_SID)
+    try:
+        _emit(recorder, emissions=10, frames=2)
+        assert _wait_for(recorder._idle)
+        before_ms = time.time() * 1000
+        clip = recorder.request_clip(30.0)
+        # Media-time arithmetic would put it 3.3 s out, at the 4 s boundary.
+        assert clip.predicted_ready_at_ms <= before_ms + 100
+    finally:
+        recorder.stop()
+
+
+def test_stop_waits_for_a_seal_in_progress(tmp_path: Path) -> None:
+    # A seal holds the emission lock while its encoder closes; stop() must wait
+    # for it rather than close the same encoder alongside it.
+    recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
+    recorder.start(_SID)
+    recorder._emission_lock.acquire()
+    stopping = threading.Thread(target=recorder.stop)
+    try:
+        stopping.start()
+        time.sleep(0.3)
+        assert stopping.is_alive()
+    finally:
+        recorder._emission_lock.release()
+        stopping.join(timeout=5.0)
+    assert not stopping.is_alive()
+
+
 # -- retention -------------------------------------------------------------
 
 

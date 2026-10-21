@@ -34,6 +34,12 @@ _MANIFEST_FILENAME = "manifest.m3u8"
 _PART_INIT_PATTERN = "init_{:05d}.mp4"
 _PART_MANIFEST_PATTERN = "manifest_{:05d}.m3u8"
 
+
+def part_init_filename(first_segment: int) -> str:
+    """Return the name of the init a part starting at *first_segment* writes."""
+    return _INIT_FILENAME if first_segment == 0 else _PART_INIT_PATTERN.format(first_segment)
+
+
 # The output pixel format and profile. With rgb24 input and no explicit choice,
 # libx264 selects yuv444p (Hi444PP), which many decoders and uploaders reject;
 # yuv420p with the Main profile is the universally-compatible sub-profile.
@@ -285,7 +291,7 @@ class ChunkEncoder:
         """
         config = self._config
         first = self._first_segment
-        init_name = _INIT_FILENAME if first == 0 else _PART_INIT_PATTERN.format(first)
+        init_name = part_init_filename(first)
         manifest_name = _MANIFEST_FILENAME if first == 0 else _PART_MANIFEST_PATTERN.format(first)
         container = av.open(
             str(self._output_dir / manifest_name),

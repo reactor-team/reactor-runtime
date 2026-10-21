@@ -43,8 +43,12 @@ import numpy.typing as npt
 
 from reactor_runtime.core import MediaBundle, MediaChunk, RecordingConfig, TrackKind
 from reactor_runtime.log import get_logger
-from reactor_runtime.recording.chunk_encoder import ChunkEncoder, EncoderStoppedError
-from reactor_runtime.recording.markers import MarkerBookkeeper
+from reactor_runtime.recording.chunk_encoder import (
+    ChunkEncoder,
+    EncoderStoppedError,
+    part_init_filename,
+)
+from reactor_runtime.recording.markers import MarkerBookkeeper, end_segment
 
 logger = get_logger(__name__)
 
@@ -93,6 +97,11 @@ _END_MARKERS = (_COMPLETE_MARKER, _INCOMPLETE_MARKER)
 # Written beside a segment the recorder sealed while the recording was idle, so
 # the segment is recognised as fetchable before it has a successor.
 _SEALED_PATTERN = "chunk_{:05d}.sealed"
+# Written when a seal fixes where the next part starts, before any of its frames
+# are encoded, so the segments from there on are known to need that part's init
+# checked against ``init.mp4`` before they are served.
+_PART_MARKER_GLOB = "part_*.start"
+_PART_MARKER_PATTERN = "part_{:05d}.start"
 _HLS_MEDIA_TYPE = "application/vnd.apple.mpegurl"
 
 # How long a finished recording is kept on disk before it is reaped. Clips stay
@@ -167,6 +176,13 @@ class ClipResult:
     so ``end_marker`` may point inside a segment ffmpeg is still writing. The
     client polls ``playlist_url`` until the manifest endpoint answers ``200``.
 
+    Markers are positions on the recording's segment grid. A recording sealed
+    while the model was idle skips the rest of the sealed segment, up to
+    ``chunk_seconds`` per seal, and that skipped stretch holds no media. So
+    ``end_marker - start_marker`` can exceed the media a clip holds, and a full
+    recording's ``end_marker`` counts every skipped stretch. Use the markers to
+    address segments, not to measure duration.
+
     Attributes:
         session_id: The recording id the clip belongs to.
         kind: ``"snap"`` for a tail clip, ``"recording"`` for the whole session.
@@ -174,7 +190,9 @@ class ClipResult:
         end_marker: Clip end, in seconds on the recording timeline.
         now_marker: The timeline position when the request was resolved.
         predicted_ready_at_ms: Unix epoch in milliseconds when the boundary
-            segment is expected to be servable.
+            segment is expected to be servable: when the media timeline
+            reaches the next segment boundary, or at once when the model is
+            already idle and the segment is about to be sealed.
         playlist_url: A path-only ``/clips?...`` URL the client absolutises.
     """
 
@@ -319,6 +337,9 @@ class Recorder:
         # emissions.
         self._last_emission_at: float | None = None
         self._emission_interval = 0.0
+        # Whether this session already reported a later part whose init differs
+        # from the first one's, so the error is logged once.
+        self._part_mismatch_logged = False
 
         # The highest media-segment index already announced as closed, and whether
         # the init segment has been, so each segment is announced exactly once.
@@ -350,11 +371,9 @@ class Recorder:
     @property
     def disabled(self) -> bool:
         """Whether the recorder cannot currently serve a clip request."""
-        return (
-            self._disabled
-            or not self._started
-            or (self._encoder is not None and self._encoder.failed)
-        )
+        # Read once: a seal on the feed worker can clear it between two reads.
+        encoder = self._encoder
+        return self._disabled or not self._started or (encoder is not None and encoder.failed)
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -442,7 +461,13 @@ class Recorder:
                     session_id=self._session_id,
                     queued=self._feed_queue.qsize(),
                 )
-        closed = self._encoder.stop() if self._encoder is not None else True
+        # A seal holds the emission lock until its encoder has closed, so taking
+        # it here waits out a seal still writing its segment instead of closing
+        # the same encoder a second time and finalising before the first close
+        # has written its trailer.
+        with self._emission_lock:
+            encoder = self._encoder
+            closed = encoder.stop() if encoder is not None else True
         if feed_thread is not None:
             feed_thread.join(timeout=2.0)
         # Mark the recording finished so its final segment is servable, then fire
@@ -560,6 +585,7 @@ class Recorder:
         self._frame_size = None
         self._last_emission_at = None
         self._emission_interval = 0.0
+        self._part_mismatch_logged = False
         with self._pending_lock:
             self._pending = []
         with self._chunk_lock:
@@ -643,12 +669,17 @@ class Recorder:
         The interval is the larger of the wall time since the previous emission
         and the media the emission carries, so a model slower than real time is
         judged by its actual cadence and one faster than real time by the media
-        it buffers ahead.
+        it buffers ahead. A gap at least as long as the idle threshold was a
+        pause, sealed or not, so it is not learned as cadence: learning it would
+        stretch the next threshold by the length of the pause.
         """
         now = time.monotonic()
         last = self._last_emission_at
         since = now - last if last is not None else 0.0
-        self._emission_interval = max(media_seconds, since)
+        if since >= self._idle_after():
+            self._emission_interval = max(media_seconds, self._emission_interval)
+        else:
+            self._emission_interval = max(media_seconds, since)
         self._last_emission_at = now
 
     def _claim_slot(self, capacity: int, *, wait: bool, deadline: float) -> _Slot:
@@ -713,7 +744,30 @@ class Recorder:
         return [data]
 
     def _build_encoder(self, bundle: MediaBundle) -> None:
-        """Resolve the tracks to record and spawn the encoder from a real frame."""
+        """Spawn the encoder from a real frame, resolving the tracks on the first.
+
+        The tracks, whether audio is recorded, and its sample rate are resolved
+        once per session, from the first emission. A later part, opened after a
+        seal, reuses them whatever the emission that opens it carries: they
+        decide the init segment, and every part must match the first one's.
+        """
+        if self._video_track is None:
+            self._resolve_tracks(bundle)
+            if self._video_track is None:
+                return
+        assert self._session_dir is not None
+        self._encoder = ChunkEncoder(
+            output_dir=self._session_dir,
+            config=self._config,
+            has_audio=self._has_audio,
+            audio_sample_rate=self._audio_sample_rate,
+            frame_rate=RECORDING_FPS,
+            first_segment=self._next_segment,
+            frame_size=self._frame_size,
+        )
+
+    def _resolve_tracks(self, bundle: MediaBundle) -> None:
+        """Pick the video and audio tracks to record from *bundle*."""
         video_name = self._config.video_track
         if video_name is None or bundle.get_track(video_name) is None:
             videos = bundle.get_tracks_by_kind(TrackKind.VIDEO)
@@ -734,17 +788,6 @@ class Recorder:
         self._has_audio = audio_name is not None and audio_td is not None
         if self._has_audio and audio_td is not None and audio_td.info.rate > 0:
             self._audio_sample_rate = int(audio_td.info.rate)
-
-        assert self._session_dir is not None
-        self._encoder = ChunkEncoder(
-            output_dir=self._session_dir,
-            config=self._config,
-            has_audio=self._has_audio,
-            audio_sample_rate=self._audio_sample_rate,
-            frame_rate=RECORDING_FPS,
-            first_segment=self._next_segment,
-            frame_size=self._frame_size,
-        )
 
     def _feed_loop(self) -> None:
         """Drain the feed queue into the encoder, disabling on encoder failure.
@@ -809,13 +852,16 @@ class Recorder:
         finally:
             self._emission_lock.release()
 
+    def _idle_after(self) -> float:
+        """Return how long the output must stay silent before it counts as idle."""
+        return max(_IDLE_MIN_SECONDS, _IDLE_CADENCE_FACTOR * self._emission_interval)
+
     def _idle(self) -> bool:
         """Return whether the model has been silent for longer than its cadence."""
         last = self._last_emission_at
         if last is None:
             return False
-        idle_after = max(_IDLE_MIN_SECONDS, _IDLE_CADENCE_FACTOR * self._emission_interval)
-        return time.monotonic() - last >= idle_after
+        return time.monotonic() - last >= self._idle_after()
 
     def _clip_is_waiting(self) -> bool:
         """Return whether a requested clip's boundary segment is still open."""
@@ -851,6 +897,7 @@ class Recorder:
         next_segment = markers.skip_to_boundary(self._config.chunk_seconds)
         sealed = next_segment - 1
         try:
+            (session_dir / _PART_MARKER_PATTERN.format(next_segment)).write_text("")
             (session_dir / _SEALED_PATTERN.format(sealed)).write_text("")
         except OSError:
             logger.exception(
@@ -985,6 +1032,11 @@ class Recorder:
         now = markers.now_marker()
         cs = float(self._config.chunk_seconds)
         wait_s = max(0.0, (math.floor(now / cs) + 1) * cs - now) if cs > 0 else 0.0
+        if self._idle():
+            # The model has already gone quiet, so the open segment is sealed on
+            # the feed worker's next pass rather than when media reaches the
+            # boundary.
+            wait_s = 0.0
         predicted_ready_at_ms = round((time.time() + wait_s) * 1000)
         query = urlencode(
             {"session_id": self._session_id, "start": f"{start:.3f}", "end": f"{end:.3f}"}
@@ -1059,6 +1111,19 @@ class Recorder:
             while self._boundary_ready(session_dir, self._announced_chunk_idx + 1):
                 self._announced_chunk_idx += 1
                 ready.append(self._announced_chunk_idx)
+            next_idx = self._announced_chunk_idx + 1
+            if (
+                not self._part_mismatch_logged
+                and _part_init(session_dir, next_idx) is _PartInit.MISMATCH
+            ):
+                self._part_mismatch_logged = True
+                self._disabled = True
+                logger.error(
+                    "a resumed recording part wrote an init that differs from init.mp4; "
+                    "disabling recording and withholding its segments",
+                    session_id=recording_id,
+                    segment=next_idx,
+                )
         for idx in ready:
             try:
                 callback(recording_id, idx)
@@ -1097,10 +1162,14 @@ class Recorder:
         if not session_dir.is_dir():
             return Gone()
         chunk_start_idx = max(0, math.floor(start / cs))
-        chunk_end_idx = max(chunk_start_idx, math.ceil(end / cs) - 1)
+        chunk_end_idx = max(chunk_start_idx, end_segment(end, cs))
         if not self._boundary_ready(session_dir, chunk_end_idx):
-            # A recording that ended incomplete will never close this boundary.
+            # A recording that ended incomplete will never close this boundary,
+            # and a part whose init differs from the first one's cannot be
+            # decoded with the init the manifest names.
             if (session_dir / _INCOMPLETE_MARKER).is_file():
+                return Gone()
+            if _part_init(session_dir, chunk_end_idx) is _PartInit.MISMATCH:
                 return Gone()
             return Pending()
         lines = [
@@ -1150,11 +1219,12 @@ class Recorder:
         # A segment is closed once its successor exists (ffmpeg has rolled over),
         # the recorder sealed it while idle, or the recording itself has finished.
         successor = session_dir / f"chunk_{boundary_idx + 1:05d}.m4s"
-        return (
+        closed = (
             successor.is_file()
             or (session_dir / _SEALED_PATTERN.format(boundary_idx)).is_file()
             or (session_dir / _COMPLETE_MARKER).is_file()
         )
+        return closed and _part_init(session_dir, boundary_idx) is _PartInit.OK
 
     @staticmethod
     def _init_ready(session_dir: Path) -> bool:
@@ -1172,6 +1242,43 @@ class Recorder:
         return (session_dir / "chunk_00000.m4s").is_file()
 
 
+class _PartInit(Enum):
+    """Whether the segment's part can be decoded with the served ``init.mp4``."""
+
+    OK = "ok"
+    """The segment belongs to the first part, or its part's init matches."""
+    PENDING = "pending"
+    """The segment's part has not written its init yet."""
+    MISMATCH = "mismatch"
+    """The segment's part wrote an init that differs from ``init.mp4``."""
+
+
+def _part_init(session_dir: Path, segment: int) -> _PartInit:
+    """Check the init of the part *segment* was encoded in against ``init.mp4``.
+
+    Parts are found from the markers a seal writes before a part's first frame,
+    so a segment is attributed to its part even while that part's init has not
+    reached the disk.
+    """
+    starts = []
+    for marker in session_dir.glob(_PART_MARKER_GLOB):
+        try:
+            starts.append(int(marker.name.removeprefix("part_").removesuffix(".start")))
+        except ValueError:
+            continue
+    part = max((start for start in starts if start <= segment), default=0)
+    if part == 0:
+        return _PartInit.OK
+    try:
+        part_init = (session_dir / part_init_filename(part)).read_bytes()
+        first_init = (session_dir / _INIT_FILENAME).read_bytes()
+    except OSError:
+        return _PartInit.PENDING
+    if not part_init:
+        return _PartInit.PENDING
+    return _PartInit.OK if part_init == first_init else _PartInit.MISMATCH
+
+
 def _ended_at(session_dir: Path) -> float | None:
     """Return when the recording in *session_dir* ended, or ``None`` if it has not."""
     for name in _END_MARKERS:
@@ -1184,6 +1291,4 @@ def _ended_at(session_dir: Path) -> float | None:
 
 def _boundary_index(end: float, chunk_seconds: int) -> int:
     """Return the index of the segment that contains the clip's end marker."""
-    if chunk_seconds <= 0:
-        return 0
-    return max(0, math.ceil(end / chunk_seconds) - 1)
+    return end_segment(end, chunk_seconds)
