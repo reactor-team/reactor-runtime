@@ -9,8 +9,9 @@ bindings package at build time instead.
 proto/
 ├── reactor_wire/v1/       ← .proto sources (package reactor_wire.v1)
 │   ├── common.proto       ← framing shared by every channel message
-│   ├── data.proto         ← data channel: model Command / ModelMessage
+│   ├── data.proto         ← data channel: model Command / ModelMessage, step traffic
 │   ├── control.proto      ← control channel: platform + track traffic
+│   ├── step.proto         ← stepped generation: RequestStep, StepResult
 │   ├── model.proto, platform.proto, track.proto
 └── packaging/
     └── pyproject.toml      ← template for the published reactor-wire wheel
