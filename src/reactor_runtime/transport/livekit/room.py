@@ -92,10 +92,12 @@ def _masked(text: str, *secrets: str) -> str:
     and journalled, so every secret is masked out of the error's text before
     it becomes one. A token is URL-safe, so its form in a URL is the token
     itself.
+
+    Longer secrets are masked first: one secret can contain another, and
+    masking the shorter first would leave the rest of the longer in the text.
     """
-    for secret in secrets:
-        if secret:
-            text = text.replace(secret, _MASK)
+    for secret in sorted(filter(None, secrets), key=len, reverse=True):
+        text = text.replace(secret, _MASK)
     return _ACCESS_TOKEN_PARAM.sub(rf"\g<1>{_MASK}", text)
 
 

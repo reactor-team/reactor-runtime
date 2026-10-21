@@ -247,6 +247,29 @@ async def test_a_refused_connect_keeps_the_turn_credentials_out_of_the_reason() 
     )
 
 
+def test_masking_a_secret_that_contains_another_leaves_no_part_of_it() -> None:
+    assert _masked("refused turn-secret", "turn", "turn-secret") == "refused [redacted]"
+    assert _masked("refused turn-secret", "turn-secret", "turn") == "refused [redacted]"
+
+
+async def test_a_refused_connect_masks_a_password_that_contains_the_username() -> None:
+    room, control = FakeRoom(), FakeControl()
+    room.connect_gate.release(RuntimeError("credentials turn-secret were refused"))
+    overlapping = IceServerEntry(
+        uris=["turn:turn.example:3478"],
+        credentials=TurnCredentials(username="turn", password="turn-secret"),
+    )
+    session = _session(room, control, ice_servers=(overlapping,))
+
+    session.start()
+    await _settle()
+
+    assert (
+        session.reason
+        == "the LiveKit room could not be joined: credentials [redacted] were refused"
+    )
+
+
 def test_masking_leaves_text_without_a_token_as_it_is() -> None:
     assert _masked("unauthorized", "a-token") == "unauthorized"
     assert _masked("wss://rooms.example/rtc?room=a", "a-token") == "wss://rooms.example/rtc?room=a"
