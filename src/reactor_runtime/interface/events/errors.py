@@ -19,6 +19,10 @@ class CommandError(Exception):
     runtime logs it with its traceback and answers with a generic code, so the
     detail stays out of the reply.
 
+    Raising is the only way to refuse. A handler that sends an error message and
+    returns has succeeded as far as the runtime is concerned: the command is
+    acknowledged, and its caller resolves as on success.
+
     Example::
 
         @event(name="generate")

@@ -239,7 +239,8 @@ class ParticipantConnection:
     def message_sent(self, name: str, data: Mapping[str, Any], request_id: str | None) -> None:
         """Answer the RPC call a reply belongs to, or call the methods a message maps to.
 
-        A reply to an RPC call whose caller stopped waiting is dropped.
+        The calls run in the background, so the model's ``send`` returns at
+        once. A reply to an RPC call whose caller stopped waiting is dropped.
         """
         payload = json.dumps(dict(data))
         if request_id is not None and self._answered(request_id):
@@ -254,7 +255,11 @@ class ParticipantConnection:
             self._resolve(request_id, "")
 
     def command_failed(self, request_id: str, code: str, message: str) -> None:
-        """Fail the RPC call whose command failed, with the failure's code as the error's data."""
+        """Fail the RPC call whose command failed.
+
+        The caller gets an ``RpcError`` with code 1500 (``APPLICATION_ERROR``),
+        the failure's message as its message, and the failure's code as its data.
+        """
         if not self._answered(request_id) or self._loop.is_closed():
             return
         error = rtc.RpcError(rtc.RpcError.ErrorCode.APPLICATION_ERROR, message, code)

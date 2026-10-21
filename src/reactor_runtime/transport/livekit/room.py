@@ -10,7 +10,8 @@ failure is reported on the connection and journalled.
 A room connection never ends the session. When the caller leaves the room, the
 room closes, the session's participant is removed, or the connection to the
 room is lost after the SDK's own reconnection attempts, the room connection
-closes, and the session goes on without it. When the session ends, its
+closes, and the session goes on without it; a session left with no connection
+ends after the orphan timeout, as any session does. When the session ends, its
 teardown closes the room connection, which leaves the room.
 
 Every other participant is a client of the session, from the moment the room
@@ -24,8 +25,9 @@ participant connection closes before it.
 The room's own signals reach the model as the manifest's ``runtime.livekit``
 block maps them (:class:`RoomSignals`): an RPC call to a mapped method runs its
 command and answers with the result, and a data packet on a mapped topic runs
-its command and answers nothing. Participants' tracks and byte streams feed the
-model's input tracks (:class:`RoomInputs`).
+its command and answers nothing. Neither is answered on the Reactor protocol's
+topics. Participants' tracks and byte streams feed the model's input tracks
+(:class:`RoomInputs`).
 """
 
 from __future__ import annotations
