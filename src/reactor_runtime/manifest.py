@@ -252,6 +252,9 @@ def _livekit_from_manifest(runtime: dict[str, Any]) -> LiveKitConfig:
 def check_livekit_block(config: LiveKitConfig, contract: ModelContract) -> None:
     """Refuse a ``runtime.livekit`` block that names something *contract* does not declare.
 
+    The runtime runs this when the model loads, so a wrong block stops the
+    model from loading instead of failing in a session.
+
     Raises:
         LiveKitBlockError: Naming the first command, message, or input track
             the block refers to that the model lacks.

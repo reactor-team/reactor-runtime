@@ -40,10 +40,13 @@ class Audio(Track):
             buffer_seconds = 120
 
     Attributes:
-        sample_rate: Native sample rate in Hz.
+        sample_rate: Native sample rate in Hz. An input track's audio
+            arrives at this rate on every transport.
         buffer_seconds: How many seconds of audio an input track buffers
             before dropping the oldest, or ``None`` to buffer 128 frames.
-            Ignored on an output track.
+            The buffer also holds at most one frame per millisecond of the
+            bound, and a ``read()`` of more frames than that raises
+            ``ValueError``. Ignored on an output track.
     """
 
     kind = TrackKind.AUDIO

@@ -115,10 +115,11 @@ class ModelMessage:
     Use :func:`MessageField` to attach a description to a field.
 
     A subclass of a message inherits every field of its parents, and a field it
-    declares again replaces the parent's. The fields a subclass adds are
-    keyword-only in its constructor. The parent is a message in its own right
-    and stays in the registry; a shared base that should not be published is a
-    plain mixin, not a :class:`ModelMessage` subclass.
+    declares again replaces the parent's, default and constraints included. The
+    fields a subclass adds are keyword-only in its constructor. The parent is a
+    message in its own right and stays in the registry; a shared base that
+    should not be published is a plain mixin, not a :class:`ModelMessage`
+    subclass.
     """
 
     name: ClassVar[str]
