@@ -286,6 +286,40 @@ def test_a_fast_slope_with_a_rise_inside_the_noise_floor_passes() -> None:
     assert "noise floor" in result.detail
 
 
+def test_a_climb_levelling_off_late_passes_the_slope_check() -> None:
+    # A climb that slows each third, 72, then 36, then 21 MB/h: the fitted
+    # slope is over the limit, but the thirds rise +36 MB, then +19 MB.
+    values = (
+        [200.0 + 1.2 * i for i in range(40)]
+        + [248.0 + 0.6 * i for i in range(40)]
+        + [272.0 + 0.35 * i for i in range(40)]
+    )
+    result = assert_slope_under(
+        _hours(120), values, name="rss_slope", max_per_hour=20.0, min_absolute_delta=5.0
+    )
+    assert result.status == "ok"
+    assert "levelling off" in result.detail
+
+
+def test_a_leak_climbing_faster_at_the_end_fails_the_slope_check() -> None:
+    values = [555.0] * 40 + [575.0] * 40 + [609.0] * 40
+    result = assert_slope_under(
+        _hours(120), values, name="rss_slope", max_per_hour=20.0, min_absolute_delta=5.0
+    )
+    assert result.status == "fail"
+    assert "not levelling off" in result.detail
+
+
+def test_a_leak_slowing_only_slightly_still_fails_the_slope_check() -> None:
+    # Thirds rising +30 MB, then +25 MB: the noise in a steady leak, not a
+    # plateau being reached.
+    values = [300.0] * 40 + [330.0] * 40 + [355.0] * 40
+    result = assert_slope_under(
+        _hours(120), values, name="rss_slope", max_per_hour=20.0, min_absolute_delta=5.0
+    )
+    assert result.status == "fail"
+
+
 def test_memory_swinging_over_a_few_minutes_is_not_judged() -> None:
     # A five-minute run whose RSS swings by a batch: a steep fitted line, but
     # no rate to judge yet.

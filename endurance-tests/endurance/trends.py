@@ -46,6 +46,13 @@ MAX_RSS_MB_PER_HOUR = 20.0
 # 75 minutes or more, which a run of about two hours reaches: the release
 # runs are judged, shorter manual runs only report the rate.
 MIN_SLOPE_SPAN_HOURS = 1.25
+# A slope over the limit still passes when the climb is levelling off: the
+# last third rose at most this fraction of what the middle third rose. A
+# leak climbs about as much in each third, a plateau being reached less and
+# less: a healthy two-hour run read +20.7 MB/h with thirds rising +29 MB,
+# then +15 MB. The margin under 1 keeps the noise in a leak's thirds from
+# passing it.
+MAX_SETTLING_RATIO = 2 / 3
 
 
 @dataclasses.dataclass
@@ -222,7 +229,11 @@ def assert_slope_under(
     samples, so on a short run a few MB of noise cannot read as a fast rate.
     A fit over less than :data:`MIN_SLOPE_SPAN_HOURS` is reported as not
     judged and never fails: memory that swings up and down by about a batch
-    fits a steep line over anything shorter.
+    fits a steep line over anything shorter. A slope over the limit also
+    passes when the climb is levelling off, the rise from the middle third
+    to the last at most :data:`MAX_SETTLING_RATIO` of the rise from the
+    first third to the middle: memory reaching a plateau late in the run
+    fits a line as steep as a leak's.
 
     Args:
         hours: When each sample was taken, in hours.
@@ -249,7 +260,15 @@ def assert_slope_under(
     span = xs[-1] - xs[0]
     rise = slope * span
     judged = span >= MIN_SLOPE_SPAN_HOURS
-    is_leak = judged and slope > max_per_hour and rise > min_absolute_delta
+    # The same three windows the ratio check compares.
+    third = n // 3
+    first_avg = _mean(values[:third])
+    middle_avg = _mean(values[third : 2 * third])
+    last_avg = _mean(values[-third:])
+    middle_rise, last_rise = middle_avg - first_avg, last_avg - middle_avg
+    settling = middle_rise > 0 and last_rise <= MAX_SETTLING_RATIO * middle_rise
+    over_limit = judged and slope > max_per_hour and rise > min_absolute_delta
+    is_leak = over_limit and not settling
     if not judged:
         reason = (
             f"{slope:+,.1f} {unit}/h over {span * 60:.0f} min, not judged: "
@@ -258,7 +277,13 @@ def assert_slope_under(
     elif is_leak:
         reason = (
             f"climbing {slope:+,.1f} {unit}/h over the end of the run, "
-            f"above the {max_per_hour:g} {unit}/h limit"
+            f"above the {max_per_hour:g} {unit}/h limit, and not levelling off: "
+            f"the thirds rose {middle_rise:+,.1f} {unit}, then {last_rise:+,.1f} {unit}"
+        )
+    elif over_limit:
+        reason = (
+            f"{slope:+,.1f} {unit}/h, above the {max_per_hour:g} {unit}/h limit but levelling "
+            f"off: the thirds rose {middle_rise:+,.1f} {unit}, then {last_rise:+,.1f} {unit}"
         )
     elif rise <= min_absolute_delta:
         reason = (
@@ -277,7 +302,10 @@ def assert_slope_under(
         unit=unit,
         status=status,
         detail=reason,
-        threshold=f"slope > {max_per_hour:g} {unit}/h (min rise {min_absolute_delta:g} {unit})",
+        threshold=(
+            f"slope > {max_per_hour:g} {unit}/h (min rise {min_absolute_delta:g} {unit}), "
+            f"unless the last third rose at most {MAX_SETTLING_RATIO:.0%} of the middle's rise"
+        ),
     )
 
 
