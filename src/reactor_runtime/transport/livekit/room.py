@@ -33,6 +33,7 @@ topics. Participants' tracks and byte streams feed the model's input tracks
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from enum import StrEnum
@@ -73,6 +74,23 @@ _ROOM_LOST = "the LiveKit room connection closed ({reason})"
 _LEFT = "the room was left on request"
 _SESSION_ENDED = "the session ended"
 
+_MASK = "[redacted]"
+_ACCESS_TOKEN_PARAM = re.compile(r"(access_token=)[^&#\s\"']+")
+
+
+def _masked(text: str, token: str) -> str:
+    """Return *text* with the room token, and any URL's ``access_token`` value, masked.
+
+    The SDK's error for a refused connect can repeat the signalling URL it
+    dialled, and that URL carries the token as its ``access_token`` query
+    parameter. A join's reason is served to the caller and journalled, so
+    the token is masked out of the error's text before it becomes one. A
+    token is URL-safe, so its form in a URL is the token itself.
+    """
+    if token:
+        text = text.replace(token, _MASK)
+    return _ACCESS_TOKEN_PARAM.sub(rf"\g<1>{_MASK}", text)
+
 
 class RoomState(StrEnum):
     """Where a room connection is in its life."""
@@ -98,7 +116,8 @@ class RoomSession:
         conn_id: The connection id minted for the room connection.
         url: The LiveKit server URL.
         token: The access token for the session's participant. A credential:
-            it is used to join and never logged.
+            it is used to join, never logged, and masked out of a failed
+            join's :attr:`reason`.
         control: The runner's session-control surface.
         config: The manifest's ``runtime.livekit`` block.
         room: The room to join; a fresh ``rtc.Room`` unless one is given.
@@ -214,7 +233,8 @@ class RoomSession:
             return
         error = attempt.exception()
         if error is not None:
-            await self._fail(_JOIN_REFUSED.format(cause=str(error) or type(error).__name__))
+            cause = _masked(str(error), self._token) or type(error).__name__
+            await self._fail(_JOIN_REFUSED.format(cause=cause))
             return
         connection = attempt.result()
         self._connection = connection
