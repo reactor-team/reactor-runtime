@@ -57,6 +57,7 @@ Source = "https://github.com/reactor-team/reactor-runtime"
 
 [dependency-groups]
 dev = [
+    "certifi>=2026.10.19",
     "httpx>=0.28.1",
     # The LiveKit transport and the token minting its tests use.
     "livekit==1.1.21",

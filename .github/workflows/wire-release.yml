@@ -76,6 +76,7 @@ jobs:
           cp proto/packaging/pyproject.toml "${pkg}/pyproject.toml"
           cp -r src/reactor_wire "${pkg}/reactor_wire"
           sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" "${pkg}/pyproject.toml"
+          python -m pip install --quiet --upgrade "pip==26.2.2"
           python -m pip install --quiet build
           python -m build --wheel "${pkg}" --outdir dist/
           tar -czf "dist/reactor-wire-${VERSION}-protos.tar.gz" proto
