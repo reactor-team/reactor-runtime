@@ -10,15 +10,17 @@
 
 ---
 
-Reactor Runtime turns an inference pipeline into a real-time, interactive media and data stream. You write `load()` and `generate()`; the runtime drives them one step at a time and handles the session lifecycle, the WebRTC media transport, and the wire protocol that connects clients to your model. Viewers watch frames as they are generated and change what the model is doing mid-stream, with no restart and no re-queue.
+Reactor Runtime turns an inference pipeline into a real-time, interactive media and data stream. You write `load()` and `generate()`; the runtime drives them one step at a time and handles the session lifecycle, the media transport (WebRTC, or a LiveKit room), and the wire protocol that connects clients to your model. Viewers watch frames as they are generated and change what the model is doing mid-stream, with no restart and no re-queue.
 
 ## Highlights
 
 - 📡 **Real-time streaming.** Frames reach clients over WebRTC as your model produces them, not after a whole video is done. The runtime paces playout from the time each step took, so a model needs no rate limiter of its own.
 - 🎮 **Live interaction.** Clients send commands mid-generation: change a prompt, move a camera, adjust a parameter. The next frame reflects it.
 - 🔌 **No transport code.** You never import a WebRTC library, manage a WebSocket, or encode video. The runtime ships its own media engine as a wheel, so a plain Python container is all a model needs.
+- 🏠 **LiveKit rooms.** A session can join a LiveKit room: the model's tracks are published there, and every participant in the room is a client.
 - ✅ **Typed, validated commands.** Declare the commands your model accepts with standard Python types and constraints. The runtime validates every payload before your handler runs and compiles the surface into an OpenAPI schema that drives typed client SDKs.
-- 🔎 **Traceable logs.** `get_logger()` writes structured records — readable `key=value` in a terminal, JSON for a log pipeline. Every record a session writes carries that session's id automatically, so one filter recovers everything a single run logged.
+- 🗂️ **Step results.** Start a session with its input and a number of steps, and keep each step's output as a folder of files.
+- 🔎 **Traceable logs.** `get_logger()` writes structured records, and every record a session writes carries its id, so one filter recovers a whole run.
 - 📦 **One container, anywhere.** The `reactor` CLI scaffolds a workspace, builds a small image, and runs it locally. The same image deploys to [Reactor](https://reactor.inc)'s GPU cloud unchanged.
 
 ## How it works
@@ -52,9 +54,7 @@ class MyModel(ReactorApp):
 
 That is a complete application. The runtime calls `generate()` in a loop for as long as someone is watching and emits what it returns. Every public field on `MyState` is a command the client can send: here `set_prompt` and `set_paused`, validated from the fields, and the next step reads the new values.
 
-State and message classes can be subclassed. A subclass keeps every field of its parents and adds its own, so `class SeededState(MyState): seed: int = InputField(default=0)` exposes `set_prompt`, `set_paused`, and `set_seed`. A field declared again in the subclass replaces the parent's, default and constraints included. The fields a subclass adds are keyword-only in its constructor, which lets a required field follow an inherited one that has a default. A private field (leading underscore) always needs a default, because the state is built from defaults when a session starts.
-
-A step is three calls, and `generate()` is the one you must write. `process_input()` runs before it, reading `self.state` and the media tracks, and decides whether a step can happen: return the input `generate()` gets, or raise `ApplicationError("reason")` to skip the step without touching the model. `process_output(outcome)` runs after it, with the result or the error, and returns the media to emit; send a message from there with `await self.send()` and it reaches the client before the step's frames. Both have defaults, so the model above writes neither.
+A step is three calls, and `generate()` is the one you must write. `process_input()` runs before it and decides whether a step can happen: return the input `generate()` gets, or raise `ApplicationError("reason")` to skip the step. `process_output(outcome)` runs after it, with the result or the error, and returns the media to emit; a message sent there with `await self.send()` reaches the client before the step's frames. Both have defaults, so the model above writes neither.
 
 ```python
 from reactor_runtime import ApplicationError, MessageField, ModelMessage, StepOutcome
@@ -81,47 +81,11 @@ class MyModel(ReactorApp):
         return outcome.to_output()
 ```
 
-`generate()` fails by raising, and the runtime hands the exception to `process_output()` as `outcome.error` rather than letting it escape. That is where you decide. Recover an error you expect from your model: reset it, send a message, return `None`, and the loop goes on to the next step. Re-raise anything else, as the example does: a raise out of `process_output()` is a crash of the model, not of the step. The runtime logs the traceback, stops dispatching commands, ends the session with an error the client sees, and does not restart the loop, which is what an uncaught exception in a hand-written `run()` does too. The default `process_output()` re-raises, so a failing model ends loudly instead of serving nothing in silence. A refusal from `process_input()` is not a failure and never reaches `process_output()`.
+`generate()` fails by raising, and the exception reaches `process_output()` as `outcome.error`. Recover an error you expect there and return `None` to go on to the next step. Re-raise anything else to end the session with an error, as the default `process_output()` does.
 
-```python
-    async def process_output(self, outcome: StepOutcome) -> Output | None:
-        if isinstance(outcome.error, RolloutExhausted):   # an error the model is known to raise
-            self.engine.reset()
-            self.output.flush()
-            await self.send(WorldRestarted(reason="rollout window reached"))
-            return None                                   # nothing to show; the next step starts over
-        if outcome.error is not None:
-            raise outcome.error                           # anything else is a bug: end the loop
-        return outcome.to_output()
-```
+Commands and lifecycle hooks such as `@session_started` and `@connected` run between steps, never during one. A command handler refuses by raising `CommandError(code, message)`, which fails the caller's own request. For a loop that is not one step per emit, override `run()` and write it against `emit()`, `send()`, and `complete_step()`.
 
-`self.output.flush()` drops everything queued for the clients, the audio the transport still holds included, and cuts the picture to black. A model that stops what it was saying and carries on rendering keeps the picture instead:
-
-```python
-self.output.flush(hold=True)   # drop the queued media, keep the last frame on screen
-```
-
-Command handlers and lifecycle hooks run between steps, never during one. A model has one method per lifecycle hook kind (`@session_started`, `@session_ended`, `@connected`, `@disconnected`, `@file_uploaded`). A subclass extends an inherited hook by overriding that method and calling `super()`; the override runs whether or not it repeats the decorator. Marking a second method with the same kind, in one class or in a subclass, fails when the class is defined, so a hook is never dropped in silence. The default `run()` is the loop that drives the three hooks, and it reports each step that runs with `complete_step()`, which is what the runtime counts a session's steps by. To write that report yourself, for example to keep extra files with the step, return a `StepCompleted(output=..., files=...)` from `process_output()` instead of the `Output`. Override `run()` to write your own loop against `emit()`, `send()`, `complete_step()`, `@event`, `self.connected`, and the tracks; `process_input()`, `generate()`, and `process_output()` are then not called, and your loop calls `complete_step(StepCompleted(output=...))` each time it finishes a unit of work. Do that for a loop that is not one step per emit, such as a renderer that emits several times per step or a model that must block on an input.
-
-A command handler refuses by raising `CommandError(code, message)`: `code` is a short, stable token the client branches on, and `message` reaches the client unchanged, so write it for them and name the codes in the command's description. The runtime answers that command's request with the failure, so the caller learns on its own call, no other client in the session hears about a command it did not send, and the runtime records that the command failed. Do not refuse by sending an error message and returning: the runtime counts that as success and acknowledges the command. Any other exception a handler raises reaches the client as an internal error with a fixed message, so catch what a check raises and raise a `CommandError` with a code of its own. The waypoint example's `set_image` does both.
-
-An input track buffers the newest 128 frames and drops the oldest when it is full. How much audio that holds depends on the frame size the transport delivers, so an audio input track can bound its buffer in seconds instead. Its audio arrives at the declared `sample_rate` on every transport:
-
-```python
-class AgentAudio(Audio):
-    sample_rate = 24_000
-    buffer_seconds = 120      # the newest 120 s of audio, whatever the frame size
-
-
-class MyInput(MediaInput):
-    agent_audio: AgentAudio
-```
-
-Frames a full buffer drops are counted per track in the session's `runtime_stats`. A `buffer_seconds` bound also holds at most one frame per millisecond of it, and a `read()` of more frames than that fails with `ValueError`. A read of frames whose samples do not fit waits for smaller frames, so pass `timeout` to bound it.
-
-A session can start with its setup already in hand: `POST /start_session` takes a `starting_input` of state values and commands, which the runtime applies on the normal command path before any client connects. A system client sends them, a connection the runtime opens itself, so a handler that takes `client` gets a `ClientInfo` whose `system` is true. The step loop takes its first step only once every starting command has landed, uploads included, so no step runs on the defaults the starting input replaces. In a live session the system client then leaves and the loop waits for a viewer, as it always does; a model with its own `run()` sees the system client connect like any client. A live session stays `waiting` while its starting input applies, because the system client does not occupy it, and `/events` journals the system client's `connection_opened` and `connection_closed` as `waiting -> waiting`. A session with `steps` is occupied by the system client until it ends, so it streams with no other client. `steps` is a whole number from 1 to 10,000. The runtime ends it itself once the model has reported that many steps, with a normal stop whose close reason is "Session ended: the requested steps are complete." A session with `steps` has no client to correct its starting input, so a starting command the runtime cannot apply (an upload whose bytes never arrive, or arguments the contract refuses) ends it at once with the reason `start_refused` and the refusal as its close reason. If the handler of a starting command fails instead, by raising `CommandError` or any other exception, every step the model has not reported yet is recorded with the handler's message, so a session at step 3 of 4 saves steps 3 and 4 with that error, and the session ends with the reason `error`. The model keeps running and takes the next session.
-
-A model can keep each step it reports as a folder of files, turned on in `reactor.yaml`:
+A session can also start with its setup in hand and run a set number of steps: `POST /start_session` takes a `starting_input` of state values and commands, and `steps`, and the session ends once the model has reported that many. Each step can be kept as a folder of files, turned on in `reactor.yaml`:
 
 ```yaml
 runtime:
@@ -132,11 +96,9 @@ runtime:
     queue: 8
 ```
 
-Every track of the step's output becomes its own stream in one `output.mp4`, beside the extra `files` the step carried and a `result.json` that lists them, with the measured length, frame count, frame rate, and size of each video track in its `usage`. `queue` bounds how many steps the model reports may wait to be saved; a step that finds it full is not saved, so saving never holds the model up. The steps a failed starting command records are saved past that bound, so each of them gets its folder. Each step is its own encode, so this suits a model that finishes a step every few seconds rather than every frame.
+A step's tracks are saved as one `output.mp4`, with a `result.json` that lists the step's files, and `GET /sessions/{id}/steps` serves the folders.
 
-When step results are on, `GET /sessions/{id}/steps` lists a session's saved folders by the session's own id; each stays readable for five minutes after it is written, after the session ends too.
-
-A session can also join a LiveKit room, where every other participant is a client. Participants that speak the Reactor protocol need nothing more. For the room's own signals, the model says in `reactor.yaml` which RPC methods, data topics, and byte streams reach which of its commands, messages, and input tracks:
+A session can join a LiveKit room. The room connection publishes the model's output tracks, and every other participant in the room is a client of the session. The model's `reactor.yaml` says which RPC methods, data topics, and byte streams reach which of its commands, messages, and input tracks:
 
 ```yaml
 runtime:
@@ -151,41 +113,12 @@ runtime:
       lk.audio_stream: agent_audio     # byte streams on this topic feed agent_audio
 ```
 
-The runtime checks the block against the model when it loads: every command, message, and input track it names must exist, and a method can run only one command. A mistake stops the model from loading, so it shows at deploy time rather than in a session.
-
-The LiveKit SDK is an optional part of the runtime. A model that connects to rooms lists it in its workspace's `requirements.txt`, and `build.runtime_version` still picks the release:
-
-```text
-reactor-runtime[livekit]
-```
-
-A running session connects to a room through a connection of its own, the way a WebRTC client connects. The token is the credential of the session's participant: the room, the identity, and the grants come from it, and it never reaches the journal.
+The LiveKit SDK is an optional part of the runtime, so a model that joins rooms lists `reactor-runtime[livekit]` in its `requirements.txt`. A running session joins a room through a connection of its own:
 
 ```text
 POST /sessions/{session_id}/transport/livekit/connections
 {"url": "wss://example.livekit.cloud", "token": "eyJhbGciOi..."}
-
-202 {"connection_id": 4711}
 ```
-
-A caller that keeps its own record of a session's connections can choose the id, with `"connection_id"` in the body, as a WebRTC client chooses the id it offers on. An id the session already uses, through any transport, answers `409`.
-
-The join runs in the background. A `GET` on the connection answers `202` while it runs, then reports `open`, `failed`, or `closed` with a reason, and a `DELETE` leaves the room. The room connection is a system connection: once the join succeeds it publishes one LiveKit track per output track, named after it, and occupies the session, so the session streams and the step loop runs whether or not anyone in the room is watching. A session has one room connection at a time. Losing the room closes the room connection and leaves the session running, so the session ends like any session left without a connection, after the orphan timeout.
-
-Every other participant in the room is a client of the session, with a connection of its own: the model gets `@connected` when it joins and `@disconnected` when it leaves, and the journal names its identity in the room. A participant speaks the Reactor protocol as data messages on two topics, `reactor.data` and `reactor.control`, the two families a WebRTC client sends on its two data channels; a message larger than 15,000 bytes travels as a byte stream on the same topic. Messages from a participant reach the session in the order they arrived on their topic. A message is at most 8 MiB, a participant has at most 8 byte streams open at once, and a message past either bound is dropped. A command's reply reaches the participant that sent it, and a broadcast reaches every participant. When the room connection closes, its participants' connections close with it.
-
-The `runtime.livekit` block reaches the room's own signals. A call to an RPC method listed with a `command` runs that command for the caller, and answers with the reply message's fields as JSON, an empty string when the handler returns nothing, or an `RpcError` with code `1500`, the failure's message, and its code as the error's `data`. To fail the call, raise `CommandError`. Sending a message listed with a `message` calls that method on each participant the message reaches, with the message's fields as the JSON payload; `send` returns at once, a participant that did not register the method is not called on it for the next 30 s, and at most 64 calls wait for one participant, past which a call is dropped. A data packet on `<prefix>.<command>` runs the command with the packet's JSON object as its arguments and answers nothing. Neither a call nor a packet is answered on the Reactor protocol's topics. A command an RPC method runs is reachable only through that method.
-
-A participant feeds the model's input tracks in two ways. A remote track published under an input track's name feeds it, which needs the subscribe grant in the session's token. A byte stream on a topic `media_inputs` maps feeds the mapped track, without that grant: its `pcm_s16le` bytes are cut into 10 ms frames at the track's declared rate, in mono, using the stream's `sample_rate` and `num_channels` attributes. Without them a stream is taken to be at the track's rate, in mono; a stream that declares a rate outside 8 to 192 kHz, or more than 8 channels, is refused. A track named in `media_inputs` is fed only by its mapped source. Each frame of a stream says which stream it came from, and the stream's last frame carries no samples, so a model can tell where one utterance ends and which buffered frames belong to it:
-
-```python
-for frame in await self.media.agent_audio.read(n=8):
-    info = json.loads(frame.metadata)
-    # {"stream_id": "AUDIO_x7Kq", "attributes": {"sample_rate": "24000", "num_channels": "1"}}
-    # last frame of the stream, data of shape (1, 0): {"stream_id": "AUDIO_x7Kq", "ended": true}
-```
-
-A stream ends when it closes, when a new stream starts on the same topic while it is open, or when its sender leaves. An input track has one owner across the session, whatever its transport: the first client to feed it holds it, as a WebRTC client's publish request does, and media from anyone else is dropped. A participant holds a track-fed input until it unpublishes that track or leaves, and one it has fed from a byte stream until it leaves. A remote track refused because another client holds its input waits, and starts feeding it once that client frees it.
 
 Scaffold, build, and run it with the CLI:
 
@@ -207,7 +140,7 @@ logger = get_logger(__name__)
 logger.info("scene changed", prompt=self.prompt)
 ```
 
-Records render as `key=value` text by default, or as one JSON object per line under `REACTOR_LOG_FORMAT=json`. While a session is live, its id is stamped on every record, so tracing one run's logs never requires threading an id through your call sites. Every record also carries the lifecycle phase it was written in, at both granularities: `state`, the session state machine's word, and `runtime_state`, the coarse word the health endpoint serves — so the logs of one phase — loading weights, a live session, teardown — are filterable by whichever vocabulary you are reading off another surface. The stamp is applied where records are written rather than where they are made, so a plain `logging.getLogger(__name__)` and the libraries your model imports are covered too.
+Records render as `key=value` text, or as one JSON object per line under `REACTOR_LOG_FORMAT=json`. Every record written during a session carries its id and the runtime's lifecycle state, including the records of `logging.getLogger()` and of the libraries your model imports.
 
 ## Install
 
@@ -225,6 +158,8 @@ Not on macOS, or pinning a release in CI? See [Install the CLI](https://docs.rea
 - [Runtime overview](https://docs.reactor.inc/deploy/development/overview): what the runtime handles, and the outline of a model
 - [Model anatomy](https://docs.reactor.inc/deploy/development/reactor-app/model-anatomy): every member of a `ReactorApp`, line by line
 - [The step loop](https://docs.reactor.inc/deploy/development/reactor-app/step-loop): `process_input()`, `generate()`, `process_output()`, and the frame rate
+- [Events and messages](https://docs.reactor.inc/deploy/development/reactor-app/events-and-messages): commands, refusals with `CommandError`, and messages to clients
+- [Video and audio tracks](https://docs.reactor.inc/deploy/development/reactor-app/video-and-audio-tracks): output and input tracks, and how input is buffered
 - [Starter example](./examples/starter/README.md): the model `reactor init` scaffolds: one class, `generate()` alone, the smallest complete `ReactorApp`
 - [Echo example](./examples/echo/README.md): the client's webcam and microphone in, an effect applied, both sent back, in batches
 - [Waypoint example](./examples/waypoint/README.md): a world model on a GPU, seeded from an upload and steered live

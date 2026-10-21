@@ -32,10 +32,18 @@ them.
   the package is consumed inside the image the CLI builds.
 - Documentation links point at the public docs site, https://docs.reactor.inc —
   the model-authoring (runtime) pages under `https://docs.reactor.inc/deploy`.
-- The README must not fall behind the code. A PR that changes the authoring
-  surface, the CLI workflow, or what the project does updates `README.md` in
-  the same PR, and review flags a PR that changes behaviour the README
-  describes without touching it.
+- The README introduces the runtime: what it is, what it can do, and how to
+  start. It names features; it does not document them. Limits, defaults, error
+  codes, edge cases, and per-transport behaviour are not README material.
+- Most changes leave the README alone: a fix, a new option, a new limit, a new
+  error code, a refactor, a new test. Change it when a main feature lands, with
+  one Highlights bullet or one short paragraph and at most one example, or when
+  something it already says becomes wrong.
+- The code is the reference. A change that adds or changes behaviour documents
+  it in the docstring of the symbol, route, or model that owns it, with its
+  limits, defaults, and failure behaviour spelled out there.
+- Review flags a PR that adds README prose beyond these rules, and a PR whose
+  behaviour change leaves the owning docstring out of date.
 
 ## Examples
 
@@ -114,6 +122,9 @@ contract — what the caller can rely on — not the implementation.
   signature does not.
 - This is the public surface model authors read. Write for them, not for
   maintainers of this repo.
+- Docstrings of the public surface, with the HTTP models in `api/openapi.json`,
+  are the reference documentation. State a limit, a default, or a failure mode
+  where the symbol is defined, not only in prose elsewhere.
 
 ## Comments
 
