@@ -1,4 +1,4 @@
-from reactor_runtime.recording.markers import MarkerBookkeeper
+from reactor_runtime.recording.markers import MarkerBookkeeper, end_segment
 
 
 def test_timeline_starts_at_zero_and_unstarted() -> None:
@@ -63,3 +63,16 @@ def test_skip_to_boundary_stays_on_a_boundary_it_already_reached() -> None:
         markers.advance(1 / 30)
     assert markers.skip_to_boundary(4) == 1
     assert markers.now_marker() == 4.0
+
+
+def test_end_segment_puts_a_range_ending_on_a_boundary_in_the_segment_before_it() -> None:
+    # Summed frame durations land a hair past the boundary; the range still ends
+    # in segment 0, the segment a seal at that position closes.
+    end = 0.0
+    for _ in range(60):
+        end += 2 / 30
+    assert end != 4.0
+    assert end_segment(end, 4) == 0
+    assert end_segment(4.0, 4) == 0
+    assert end_segment(4.001, 4) == 1
+    assert end_segment(3.667, 4) == 0
