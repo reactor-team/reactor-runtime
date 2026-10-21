@@ -21,7 +21,7 @@ permissions:
 env:
   # The mise release CI standardizes on; every job installs the toolchain at
   # this pin, so bump it here once rather than per job.
-  MISE_VERSION: "2026.6.14"
+  MISE_VERSION: "2026.10.17"
 
 jobs:
   proto:

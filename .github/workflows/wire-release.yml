@@ -23,7 +23,7 @@ permissions:
 
 env:
   # Shared with the other workflows; bump the toolchain pin in one place.
-  MISE_VERSION: "2026.6.14"
+  MISE_VERSION: "2026.10.17"
 
 jobs:
   release:

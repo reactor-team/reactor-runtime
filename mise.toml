@@ -3,6 +3,7 @@
 # as they land. Run `mise run <task>` or `make <target>` (a thin shim forwards to
 # mise). `mise install` installs the pinned toolchain; `mise lock` refreshes the
 # committed mise.lock.
+min_version = "2026.10.17"
 monorepo_root = true
 
 [monorepo]

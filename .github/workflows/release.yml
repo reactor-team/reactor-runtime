@@ -27,7 +27,7 @@ concurrency:
 env:
   # Keep this in step with the other workflows; the toolchain pin lives here so
   # a bump is a one-line change rather than a per-job edit.
-  MISE_VERSION: "2026.6.14"
+  MISE_VERSION: "2026.10.17"
 
 jobs:
   decide:
