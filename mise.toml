@@ -6,6 +6,14 @@
 min_version = "2026.10.17"
 monorepo_root = true
 
+# SHA256 checksums for the mise binaries used by CI.
+[_]
+mise_sha256_linux_x64 = "fe6dd17e68e09682b31d2e7bb7bb755d22636ac1af5d94621e300f2ca9e9fe8a"
+mise_sha256_linux_arm64 = "e90904144ba4377c5fbe385f429830282c68f3b4f9c690bf6c5a2ae9b74a809b"
+mise_sha256_macos_x64 = "dac5d6db5e315d8e4f096c6ead9279d342e09fdcb5c373d0df5c7dcce8195746"
+mise_sha256_macos_arm64 = "9e27709db5eb1e900d83149418d3067309f2a5004d4994d94246ab658ba4a3ce"
+mise_sha256_windows_x64 = "d38bd78b63ca1e913e1d55cbd1633b45e9b01f2735ac81b1915f84f75a3eb5cd"
+
 [monorepo]
 # proto is the one module today (proto sources + buf config). The root carries
 # the Python tasks. An empty config_roots drops mise to deprecated auto-discovery,

@@ -21,10 +21,6 @@ on:
 permissions:
   contents: write
 
-env:
-  # Shared with the other workflows; bump the toolchain pin in one place.
-  MISE_VERSION: "2026.10.17"
-
 jobs:
   release:
     name: Build and publish the wire-protocol package
@@ -35,9 +31,14 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
+      - name: Read mise pin
+        shell: bash
+        run: bash .github/scripts/mise-pin.sh >> "$GITHUB_ENV"
+
       - uses: jdx/mise-action@v4
         with:
           version: ${{ env.MISE_VERSION }}
+          sha256: ${{ env.MISE_SHA256 }}
 
       # Authoritative compatibility gate: the about-to-be-released sources must
       # not break the previously published wire/v* artifact.
