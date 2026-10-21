@@ -17,7 +17,7 @@ Reactor Runtime turns an inference pipeline into a real-time, interactive media 
 - 📡 **Real-time streaming.** Frames reach clients over WebRTC as your model produces them, not after a whole video is done. The runtime paces playout from the time each step took, so a model needs no rate limiter of its own.
 - 🎮 **Live interaction.** Clients send commands mid-generation: change a prompt, move a camera, adjust a parameter. The next frame reflects it.
 - 🔌 **No transport code.** You never import a WebRTC library, manage a WebSocket, or encode video. The runtime ships its own media engine as a wheel, so a plain Python container is all a model needs.
-- 🏠 **LiveKit rooms.** A session can join a LiveKit room: the model's tracks are published there, and every participant in the room is a client.
+- 🏠 **LiveKit rooms.** A session can join a LiveKit room: the model's tracks are published there, and every other participant in the room is a client.
 - ✅ **Typed, validated commands.** Declare the commands your model accepts with standard Python types and constraints. The runtime validates every payload before your handler runs and compiles the surface into an OpenAPI schema that drives typed client SDKs.
 - 🗂️ **Step results.** Start a session with its input and a number of steps, and keep each step's output as a folder of files.
 - 🔎 **Traceable logs.** `get_logger()` writes structured records, and every record a session writes carries its id, so one filter recovers a whole run.
