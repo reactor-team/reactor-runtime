@@ -315,7 +315,7 @@
         "type": "object"
       },
       "RoomConnectionStatus": {
-        "description": "How a room connection's join ended, and whether the connection has closed since.\n\n``open`` once the join succeeded and the room connection is a connection\nof the session; ``failed`` when the join did not succeed; ``closed`` once\nthe room was left or lost. ``reason`` names the cause of a failure or a\nclose.",
+        "description": "How a room connection's join ended, and whether the connection has closed since.\n\n``open`` once the join succeeded and the room connection is a connection\nof the session; ``failed`` when the join did not succeed; ``closed`` once\nthe room was left or lost. ``reason`` names the cause of a failure or a\nclose, and never repeats the room's token.",
         "properties": {
           "connection_id": {
             "title": "Connection Id",

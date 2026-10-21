@@ -107,7 +107,7 @@ class RoomConnectionStatus(BaseModel):
     ``open`` once the join succeeded and the room connection is a connection
     of the session; ``failed`` when the join did not succeed; ``closed`` once
     the room was left or lost. ``reason`` names the cause of a failure or a
-    close.
+    close, and never repeats the room's token.
     """
 
     connection_id: int

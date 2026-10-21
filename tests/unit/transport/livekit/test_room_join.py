@@ -11,7 +11,7 @@ from tests.unit.transport.livekit.test_livekit_router import FakeRunner as Route
 from reactor_runtime.core import ConnId, TrackDirection, TrackKind
 from reactor_runtime.transport.livekit import LiveKitRouter
 from reactor_runtime.transport.livekit import room as room_module
-from reactor_runtime.transport.livekit.room import RoomSession, RoomState
+from reactor_runtime.transport.livekit.room import RoomSession, RoomState, _masked
 
 _VIDEO_OUT = {
     "main_video": {
@@ -160,6 +160,41 @@ async def test_a_refused_connect_fails_the_join_and_leaves_the_room() -> None:
     assert session.reason == "the LiveKit room could not be joined: unauthorized"
     assert control.failed == [(ConnId(4711), "livekit", session.reason)]
     assert room.disconnects == 1
+
+
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        (
+            "failed to connect to wss://rooms.example/rtc?access_token=a-token&auto_subscribe=1",
+            "failed to connect to wss://rooms.example/rtc?access_token=[redacted]&auto_subscribe=1",
+        ),
+        ("the server refused a-token", "the server refused [redacted]"),
+        (
+            "dialled ws://other.example/rtc?access_token=another-token",
+            "dialled ws://other.example/rtc?access_token=[redacted]",
+        ),
+    ],
+)
+async def test_a_refused_connect_keeps_the_token_out_of_the_reason(error: str, reason: str) -> None:
+    room, control = FakeRoom(), FakeControl()
+    room.connect_gate.release(RuntimeError(error))
+    session = _session(room, control)
+
+    session.start()
+    await _settle()
+
+    assert session.reason == f"the LiveKit room could not be joined: {reason}"
+    assert control.failed == [(ConnId(4711), "livekit", session.reason)]
+
+
+def test_masking_leaves_text_without_a_token_as_it_is() -> None:
+    assert _masked("unauthorized", "a-token") == "unauthorized"
+    assert _masked("wss://rooms.example/rtc?room=a", "a-token") == "wss://rooms.example/rtc?room=a"
+
+
+def test_masking_with_no_token_still_masks_an_access_token_parameter() -> None:
+    assert _masked("ws://h/rtc?access_token=x.y.z", "") == "ws://h/rtc?access_token=[redacted]"
 
 
 @pytest.mark.usefixtures("short_deadline")
