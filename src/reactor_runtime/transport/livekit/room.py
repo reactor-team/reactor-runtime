@@ -35,7 +35,7 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from enum import StrEnum
 from typing import Any
 
@@ -61,7 +61,11 @@ from reactor_runtime.transport.livekit.media_in import RoomInputs
 from reactor_runtime.transport.livekit.participant import TOPIC_CHANNELS, ParticipantConnection
 from reactor_runtime.transport.livekit.signals import RoomSignals, payload_args
 from reactor_runtime.transport.livekit.version import TRANSPORT_NAME
-from reactor_runtime.transport.router import ConnectionsExhaustedError, SessionControl
+from reactor_runtime.transport.router import (
+    ConnectionsExhaustedError,
+    IceServerEntry,
+    SessionControl,
+)
 
 logger = get_logger(__name__)
 
@@ -78,17 +82,20 @@ _MASK = "[redacted]"
 _ACCESS_TOKEN_PARAM = re.compile(r"(access_token=)[^&#\s\"']+")
 
 
-def _masked(text: str, token: str) -> str:
-    """Return *text* with the room token, and any URL's ``access_token`` value, masked.
+def _masked(text: str, *secrets: str) -> str:
+    """Return *text* with every one of *secrets*, and any URL's ``access_token`` value, masked.
 
-    The SDK's error for a refused connect can repeat the signalling URL it
-    dialled, and that URL carries the token as its ``access_token`` query
-    parameter. A join's reason is served to the caller and journalled, so
-    the token is masked out of the error's text before it becomes one. A
-    token is URL-safe, so its form in a URL is the token itself.
+    The secrets are the room token and the TURN credentials of the caller's
+    ICE servers. The SDK's error for a refused connect can repeat the
+    signalling URL it dialled, and that URL carries the token as its
+    ``access_token`` query parameter. A join's reason is served to the caller
+    and journalled, so every secret is masked out of the error's text before
+    it becomes one. A token is URL-safe, so its form in a URL is the token
+    itself.
     """
-    if token:
-        text = text.replace(token, _MASK)
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, _MASK)
     return _ACCESS_TOKEN_PARAM.sub(rf"\g<1>{_MASK}", text)
 
 
@@ -121,6 +128,11 @@ class RoomSession:
         control: The runner's session-control surface.
         config: The manifest's ``runtime.livekit`` block.
         room: The room to join; a fresh ``rtc.Room`` unless one is given.
+        ice_servers: The STUN/TURN servers the caller supplies for the join to
+            gather against, in place of the servers the LiveKit server offers.
+            Empty, the join gathers against the LiveKit server's own. Their
+            TURN credentials are secrets, like the token, and are masked out
+            of a failed join's :attr:`reason`.
     """
 
     def __init__(
@@ -132,12 +144,25 @@ class RoomSession:
         config: LiveKitConfig | None = None,
         *,
         room: rtc.Room | None = None,
+        ice_servers: Sequence[IceServerEntry] = (),
     ) -> None:
         self.conn_id = conn_id
         self.state = RoomState.JOINING
         self.reason: str | None = None
         self._url = url
         self._token = token
+        self._ice_servers = [
+            rtc.IceServer(
+                urls=entry.uris,
+                username=entry.credentials.username if entry.credentials else "",
+                password=entry.credentials.password if entry.credentials else "",
+            )
+            for entry in ice_servers
+        ]
+        self._secrets = (
+            token,
+            *(secret for entry in self._ice_servers for secret in (entry.username, entry.password)),
+        )
         self._control = control
         self._config = config or LiveKitConfig()
         self._signals = RoomSignals(self._config)
@@ -233,7 +258,7 @@ class RoomSession:
             return
         error = attempt.exception()
         if error is not None:
-            cause = _masked(str(error), self._token) or type(error).__name__
+            cause = _masked(str(error), *self._secrets) or type(error).__name__
             await self._fail(_JOIN_REFUSED.format(cause=cause))
             return
         connection = attempt.result()
@@ -257,7 +282,13 @@ class RoomSession:
         )
 
     async def _connect_and_publish(self) -> RoomConnection:
-        await self._room.connect(self._url, self._token)
+        if self._ice_servers:
+            options = rtc.RoomOptions(
+                rtc_config=rtc.RtcConfiguration(ice_servers=self._ice_servers)
+            )
+            await self._room.connect(self._url, self._token, options)
+        else:
+            await self._room.connect(self._url, self._token)
         self._register_methods()
         self._register_inputs()
         return await self._publish(self._tracks(TrackDirection.OUT))

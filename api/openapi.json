@@ -206,7 +206,7 @@
         "type": "object"
       },
       "IceServerEntry": {
-        "description": "One STUN/TURN server offered for this connection's candidate gathering.\n\nMirrors the wire shape the platform already uses for ICE servers:\n``{uris, credentials: {username, password}}``, with ``credentials`` absent\nfor a STUN server.",
+        "description": "One STUN/TURN server a connection gathers its ICE candidates against.\n\nThe wire shape every transport's routes take ICE servers in:\n``{uris, credentials: {username, password}}``, with ``credentials`` absent\nfor a STUN server.",
         "properties": {
           "credentials": {
             "anyOf": [
@@ -281,7 +281,7 @@
         "type": "object"
       },
       "RoomConnectionRequest": {
-        "description": "Where the room is, and the credential the session's participant joins it with.\n\nThe token is the access token of the session's participant: the room, the\nidentity, and the grants come from it. It is never logged or journalled,\nand a refused request does not repeat it.\n\n``connection_id`` lets the caller choose the room connection's id: any id\nfrom 1002 to 9999. Absent, the runtime mints one from its own range, 5000\nto 9999, so a caller that mints its ids itself keeps to 1002 to 4999. An id\nthe session already uses, through this transport or another, is refused\nwith a 409, since a room connection is never opened again on the same id.",
+        "description": "Where the room is, and the credential the session's participant joins it with.\n\nThe token is the access token of the session's participant: the room, the\nidentity, and the grants come from it. It is never logged or journalled,\nand a refused request does not repeat it.\n\n``connection_id`` lets the caller choose the room connection's id: any id\nfrom 1002 to 9999. Absent, the runtime mints one from its own range, 5000\nto 9999, so a caller that mints its ids itself keeps to 1002 to 4999. An id\nthe session already uses, through this transport or another, is refused\nwith a 409, since a room connection is never opened again on the same id.\n\n``ice_servers`` lets the caller supply the STUN/TURN servers the room\nconnection gathers against, for a network where the servers the LiveKit\nserver offers do not reach it. Given, they replace those servers; absent or\nempty, the room connection gathers against the LiveKit server's own. Their\nTURN credentials are treated like the token: never logged or journalled,\nand not repeated by a refused request.",
         "properties": {
           "connection_id": {
             "anyOf": [
@@ -295,6 +295,20 @@
               }
             ],
             "title": "Connection Id"
+          },
+          "ice_servers": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/IceServerEntry"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ice Servers"
           },
           "token": {
             "format": "password",
@@ -721,7 +735,7 @@
         "type": "object"
       },
       "TurnCredentials": {
-        "description": "TURN authentication for an ICE server; absent on a plain STUN server.",
+        "description": "TURN authentication for an ICE server; absent on a plain STUN server.\n\nA credential: a transport never logs or journals it, and a refused request\ndoes not repeat it.",
         "properties": {
           "password": {
             "title": "Password",

@@ -386,6 +386,25 @@ async def test_a_room_connection_opens_on_the_id_the_caller_chose(
     assert dict(opened.detail) == {"conn_id": 5120, "system": True, "transport": "livekit"}
 
 
+async def test_a_room_connection_opens_through_the_ice_servers_the_caller_supplies(
+    runner: Runner, http: httpx.AsyncClient, room_name: str
+) -> None:
+    # The local server answers on its host candidates, so the join opens even
+    # though nothing answers on the caller's STUN server.
+    runner.start_session({})
+    body = {
+        "url": LIVEKIT_URL,
+        "token": _token(room_name, "model"),
+        "ice_servers": [{"uris": ["stun:127.0.0.1:3479"]}],
+    }
+
+    response = await http.post(_CONNECTIONS, json=body)
+
+    assert response.status_code == 202, response.text
+    conn_id = int(response.json()["connection_id"])
+    assert await _settled(http, conn_id) == {"connection_id": conn_id, "state": "open"}
+
+
 async def test_a_chosen_id_another_transport_holds_is_refused(
     runner: Runner, http: httpx.AsyncClient, room_name: str
 ) -> None:

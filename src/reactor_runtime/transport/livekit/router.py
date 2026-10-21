@@ -34,6 +34,7 @@ from reactor_runtime.transport.router import (
     CONN_ID_MAX,
     ConnectionIdClaimedError,
     ErrorDetail,
+    IceServerEntry,
     SessionControl,
     TransportRouter,
     add_session_error_handlers,
@@ -81,11 +82,19 @@ class RoomConnectionRequest(BaseModel):
     to 9999, so a caller that mints its ids itself keeps to 1002 to 4999. An id
     the session already uses, through this transport or another, is refused
     with a 409, since a room connection is never opened again on the same id.
+
+    ``ice_servers`` lets the caller supply the STUN/TURN servers the room
+    connection gathers against, for a network where the servers the LiveKit
+    server offers do not reach it. Given, they replace those servers; absent or
+    empty, the room connection gathers against the LiveKit server's own. Their
+    TURN credentials are treated like the token: never logged or journalled,
+    and not repeated by a refused request.
     """
 
     url: str
     token: SecretStr
     connection_id: int | None = Field(default=None, ge=CHOSEN_CONN_ID_MIN, le=CONN_ID_MAX)
+    ice_servers: list[IceServerEntry] | None = None
 
     @field_validator("url")
     @classmethod
@@ -192,7 +201,12 @@ class LiveKitRouter(TransportRouter):
                 try:
                     runner.offer_admitted(conn_id)
                     room = RoomSession(
-                        conn_id, req.url, req.token.get_secret_value(), runner, self._config
+                        conn_id,
+                        req.url,
+                        req.token.get_secret_value(),
+                        runner,
+                        self._config,
+                        ice_servers=req.ice_servers or (),
                     )
                     room.start()
                 except BaseException:
