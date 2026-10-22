@@ -10,6 +10,7 @@ the route and the check exist only in a runtime started from here.
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import gc
 import sys
 import threading
@@ -261,6 +262,10 @@ def build_app(
         # Collect, so garbage from this cycle is counted in this cycle's
         # reading rather than whenever the next collection runs.
         gc.collect()
+        # DIAG: hand glibc's free heap back to the OS, so the RSS read next
+        # measures live memory rather than what the allocator keeps cached.
+        if sys.platform == "linux":
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
         return {
             "registered_connections": runner._connections.count,
             "client_stats_connections": len(runner._client_stats._accepted_at),
