@@ -10,9 +10,10 @@ from __future__ import annotations
 import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from endurance.harness import (
+    FRAMES_PER_CYCLE,
     ResourceSampler,
     RuntimeProcess,
     assert_answered,
@@ -71,6 +72,8 @@ async def run_cycles(
     description: str,
     cycle: Callable[[int], Awaitable[CycleOutcome]],
     min_smoke_cycles: int = 0,
+    expected: int = FRAMES_PER_CYCLE,
+    unit: str = "frames",
 ) -> None:
     """Run *cycle* until the run's deadline, reading the runtime after each, then check.
 
@@ -78,7 +81,8 @@ async def run_cycles(
     read when its client is gone and teardown has finished, and that reading
     is the cycle's sample. A smoke run takes ``ENDURANCE_SMOKE_CYCLES``
     cycles, or *min_smoke_cycles* when that is more: a scenario whose cycles
-    take turns passes their count, so a smoke run reaches every one.
+    take turns passes their count, so a smoke run reaches every one. Every
+    cycle must get *expected* *unit* back.
     """
     smoke_cycles = max(ENDURANCE_SMOKE_CYCLES, min_smoke_cycles) if ENDURANCE_SMOKE_CYCLES else 0
     version = runtime.get("/session")["server_info"]["server_version"]
@@ -100,7 +104,10 @@ async def run_cycles(
     metrics: list[MetricResult] = []
 
     def stream_checks() -> list[MetricResult]:
-        checks = [assert_full_streams(received), assert_released(released)]
+        checks = [
+            assert_full_streams(received, expected=expected, unit=unit),
+            assert_released(released),
+        ]
         if unanswered:
             checks.append(assert_answered(unanswered))
         if stop_failures:
@@ -188,13 +195,17 @@ async def run_churn(
     test_name: str,
     description: str,
     client: Callable[[RuntimeProcess, str], ChurnClient],
+    start: dict[str, Any] | None = None,
+    expected: int = FRAMES_PER_CYCLE,
+    unit: str = "frames",
 ) -> None:
     """Churn *client* connections on one session until the run's deadline, then check.
 
-    Each cycle a new client from *client* joins, streams until its frames come
-    back, and leaves; the runtime is read once teardown has finished.
+    The session starts with *start*. Each cycle a new client from *client*
+    joins, runs until it got *expected* frames, or step results, back, and
+    leaves; the runtime is read once teardown has finished.
     """
-    session = runtime.request("POST", "/start_session", {})[1]
+    session = runtime.request("POST", "/start_session", start or {})[1]
     frame = gray_frame()
 
     async def cycle(_: int) -> CycleOutcome:
@@ -202,4 +213,11 @@ async def run_churn(
         received = await connection.run(frame)
         return CycleOutcome(received=received, unanswered=connection.unanswered)
 
-    await run_cycles(runtime, test_name=test_name, description=description, cycle=cycle)
+    await run_cycles(
+        runtime,
+        test_name=test_name,
+        description=description,
+        cycle=cycle,
+        expected=expected,
+        unit=unit,
+    )

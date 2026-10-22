@@ -44,6 +44,7 @@ from reactor_wire.v1 import (
     data_pb2,
     model_pb2,
     platform_pb2,
+    step_pb2,
     track_pb2,
 )
 
@@ -763,20 +764,126 @@ class Viewer(V1Client):
         await asyncio.sleep(1 / _FPS)
 
 
-def assert_full_streams(received: list[int]) -> MetricResult:
-    """Fail when any cycle got fewer than ``FRAMES_PER_CYCLE`` frames back.
+# Steps a stepped client requests, one at a time, before it disconnects.
+STEPS_PER_CYCLE = 10
+# How long a stepped client waits for one step's result.
+_STEP_WAIT_S = 10.0
+
+
+class StepClient(BareClient):
+    """A client of a stepped session, speaking v1 as current SDKs do.
+
+    It requests :data:`STEPS_PER_CYCLE` steps one after another, each setting
+    the model's effect through ``state`` and carrying one small webcam frame in
+    ``media_input``, waits for each step's result, and closes. A stepped
+    session streams nothing and drops live input, so nothing else is sent.
+    :attr:`unanswered` lists the requests that got no result or a failed one.
+    """
+
+    def __init__(self, runtime: RuntimeProcess, session_id: str) -> None:
+        """Create a client for *session_id*; nothing connects until :meth:`run`."""
+        super().__init__(runtime, session_id)
+        self._data: Any = None
+        self._control: Any = None
+        self._lock = threading.Lock()
+        self._results: dict[str, step_pb2.StepResult] = {}
+        self._failed: list[str] = []
+        self.unanswered: list[str] = []
+
+    async def run(self, frame: tuple[bytes, int, int]) -> int:
+        """Connect, request every step in turn, and close; return the steps that ran."""
+        await self._connect()
+        ran = 0
+        unanswered: list[str] = []
+        try:
+            webcam = _raw_frame(np.full((48, 64, 3), 128, dtype=np.uint8))
+            for n in range(STEPS_PER_CYCLE):
+                request_id = f"step-{n}"
+                state = struct_pb2.Struct()
+                state.update({"effect": _EFFECTS[n % len(_EFFECTS)]})
+                self._data.send(
+                    data_pb2.DataClientMessage(
+                        request_id=request_id,
+                        kind=_REQUEST,
+                        request_step=step_pb2.RequestStep(
+                            state=state,
+                            media_input=[step_pb2.TrackFrames(track="webcam", frames=[webcam])],
+                        ),
+                    ).SerializeToString(),
+                    binary=True,
+                )
+                result = await self._result(request_id)
+                if result is None:
+                    unanswered.append(f"request_step ({request_id}): no reply")
+                elif result.failure_code:
+                    unanswered.append(f"request_step ({request_id}): {result.error}")
+                else:
+                    ran += 1
+            with self._lock:
+                self.unanswered = [*unanswered, *self._failed]
+            return ran
+        finally:
+            self.close()
+
+    async def _result(self, request_id: str) -> step_pb2.StepResult | None:
+        deadline = time.monotonic() + _STEP_WAIT_S
+        while time.monotonic() < deadline:
+            with self._lock:
+                if request_id in self._results:
+                    return self._results.pop(request_id)
+            await asyncio.sleep(0.01)
+        return None
+
+    def _start_wire(self, control: Any, data: Any) -> None:
+        # The control channel stays open beside the data channel, as an SDK's does.
+        self._control, self._data = control, data
+
+    def close(self) -> None:
+        """Close the connection, dropping the channels this client also holds."""
+        self._control = self._data = None
+        super().close()
+
+    def _on_data_message(self, data: bytes, binary: bool) -> None:
+        message = data_pb2.DataServerMessage()
+        try:
+            message.ParseFromString(bytes(data))
+        except DecodeError:
+            with self._lock:
+                self._failed.append("an undecodable frame on data")
+            return
+        if message.WhichOneof("payload") == "step_result":
+            with self._lock:
+                self._results[message.request_id] = message.step_result
+
+
+def _raw_frame(rgb: np.ndarray) -> step_pb2.Frame:
+    """Return *rgb* as one raw wire frame."""
+    return step_pb2.Frame(
+        encoding=step_pb2.FRAME_ENCODING_RAW,
+        dtype="uint8",
+        shape=list(rgb.shape),
+        data=rgb.tobytes(),
+    )
+
+
+def assert_full_streams(
+    received: list[int], *, expected: int = FRAMES_PER_CYCLE, unit: str = "frames"
+) -> MetricResult:
+    """Fail when any cycle got fewer than *expected* frames, or step results, back.
 
     A cycle that did not stream its full burst did not exercise what the
     scenario claims to, so a run with one is not a pass.
 
     Args:
-        received: The frames each cycle got back, in cycle order.
+        received: What each cycle got back, in cycle order.
+        expected: What every cycle must get back.
+        unit: What is counted, for the report.
     """
-    short = [(cycle, n) for cycle, n in enumerate(received) if n < FRAMES_PER_CYCLE]
+    short = [(cycle, n) for cycle, n in enumerate(received) if n < expected]
     if short:
         cycle, n = short[0]
         reason = (
-            f"fewer than {FRAMES_PER_CYCLE} frames came back on {len(short)}/{len(received)} "
+            f"fewer than {expected} {unit} came back on {len(short)}/{len(received)} "
             f"cycles (first at cycle {cycle}: {n})"
         )
         print(f"[short_cycles] FAILED: {reason}")
@@ -791,7 +898,7 @@ def assert_full_streams(received: list[int]) -> MetricResult:
             threshold="always 0",
             first_bad_cycle=cycle,
         )
-    reason = f"every one of the {len(received)} cycles got its {FRAMES_PER_CYCLE} frames back"
+    reason = f"every one of the {len(received)} cycles got its {expected} {unit} back"
     print(f"[short_cycles] ok: {reason}")
     return MetricResult(
         name="short_cycles",
@@ -1072,6 +1179,7 @@ class ResourceSampler:
                 shm_blocks=shm[0] if shm else None,
                 shm_bytes=shm[1] if shm else None,
                 executor_threads=reading.get("executor_threads", 0),
+                live_step_requests=reading.get("step_requests", 0),
             )
         self._baseline.freed_by_gc = freed
         self._baseline.holding_after_stop = holding

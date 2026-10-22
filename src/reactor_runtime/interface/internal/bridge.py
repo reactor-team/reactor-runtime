@@ -15,21 +15,25 @@ so nothing here reaches into model internals beyond the handful of entrypoints
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from reactor_runtime.core.model import ReactorEvent
+from reactor_runtime.core.model import Command, ReactorEvent
 from reactor_runtime.core.values import ConnId, InputFrame
 from reactor_runtime.interface.internal.reactor_core import (
     AddressedSink,
     BroadcastSink,
     CommandTimingSink,
     FailureSink,
+    FrameSource,
     FrameTimingSink,
     MediaOps,
     MediaSink,
     ReactorCore,
     RequestId,
+    StepEnvelope,
+    StepRefusalSink,
     StepSink,
 )
 from reactor_runtime.interface.model.contract import ContractError, ModelContract
@@ -86,6 +90,17 @@ class ModelBridge:
         """The model's contract."""
         return self._contract
 
+    @property
+    def supports_stepped(self) -> bool:
+        """Whether the model can serve a stepped session.
+
+        True for a model that runs the default step loop of ``ReactorApp``. A
+        model that drives its own ``run()``, such as a ``ReactorPipeline``,
+        has no step to run on request; one that overrides ``submit_command()``
+        cannot tie a failed handler to its step.
+        """
+        return self._model.supports_stepped()
+
     # -- inbound: user-authored, validated --------------------------------
 
     async def submit_command(
@@ -94,21 +109,22 @@ class ModelBridge:
         raw_args: dict[str, Any],
         *,
         conn_id: ConnId | None,
-        request_id: RequestId,
+        request_id: RequestId | None,
         received_at: float | None = None,
         held_ms: float = 0.0,
     ) -> CommandOutcome:
         """Validate a client command against the contract and admit it.
 
-        The single place request-time validation runs. A payload that fails the
-        contract is rejected here and never reaches the model; a valid one is
-        turned into a typed command and enqueued with its addressing for a reply.
+        A payload that fails the contract is rejected here and never reaches
+        the model; a valid one is turned into a typed command and enqueued with
+        its addressing for a reply.
 
         Args:
             name: The command name from the wire.
             raw_args: The raw argument mapping from the wire.
             conn_id: The connection that sent it, when known.
-            request_id: The request id to correlate a reply against.
+            request_id: The request id to correlate a reply against, or ``None``
+                for a command no reply answers.
             received_at: When the command reached the runtime, on the
                 monotonic clock, so the model can report how long it waited.
             held_ms: How long the command was held for the session's starting
@@ -145,6 +161,73 @@ class ModelBridge:
         except ContractError as error:
             return CommandOutcome.reject(error.field, error.reason)
         return CommandOutcome.accept()
+
+    def submit_step(
+        self,
+        calls: Sequence[tuple[str, str, dict[str, Any]]],
+        media_input: Mapping[str, Sequence[FrameSource]],
+        *,
+        conn_id: ConnId,
+        request_id: RequestId,
+    ) -> tuple[str, CommandOutcome] | None:
+        """Check a step request's calls, then admit them and the step, or none of it.
+
+        Every call is checked against the contract first. A request whose
+        calls all pass is admitted whole: each call is posted as a command
+        that carries the request's id and its entry, then the step, with
+        nothing between them, so the step reaches the model after every
+        command submitted before it. A request with a call that fails posts
+        nothing.
+
+        Args:
+            calls: The request's calls in order, each as its entry (such as
+                ``state.prompt`` or ``commands[2]``), the command name, and
+                its arguments with every upload resolved.
+            media_input: The checked frames to write to each input track, by
+                name.
+            conn_id: The connection that asked for the step.
+            request_id: The request id the step's response carries.
+
+        Returns:
+            ``None`` when the request was admitted, else the first call that
+            failed the contract, as its entry and the rejected outcome.
+        """
+        checked: list[tuple[str, Command]] = []
+        for entry, name, raw_args in calls:
+            try:
+                checked.append((entry, self._contract.validate(name, raw_args)))
+            except ContractError as error:
+                return entry, CommandOutcome.reject(error.field, error.reason)
+        for entry, command in checked:
+            self._model._submit_command_at(
+                command, conn_id, None, step_request_id=request_id, step_entry=entry
+            )
+        self._model.submit_step(
+            StepEnvelope(
+                media_input={track: tuple(frames) for track, frames in media_input.items()},
+                conn_id=conn_id,
+                request_id=request_id,
+            )
+        )
+        return None
+
+    def input_overflow(self, track: str, frames: int, samples: int = 0) -> str | None:
+        """Say how *track*'s input buffer is bounded, when *frames* do not fit it together.
+
+        Args:
+            track: The input track's name.
+            frames: How many frames would be written to it at once.
+            samples: How many audio samples those frames carry.
+
+        Returns:
+            The bound in words when the frames do not all fit, so some would
+            be evicted before the model reads them; ``None`` when they fit or
+            the track takes no input.
+        """
+        buffer = self._model._input_buffers.get(track)
+        if buffer is None or buffer.holds(frames, samples):
+            return None
+        return buffer.describe_bound()
 
     # -- inbound: reactor-authoritative, trusted --------------------------
 
@@ -185,6 +268,7 @@ class ModelBridge:
         step: StepSink | None = None,
         command_timing: CommandTimingSink | None = None,
         frame_timing: FrameTimingSink | None = None,
+        step_refusal: StepRefusalSink | None = None,
     ) -> None:
         """Wire the model's outbound paths down into the runner. Call once.
 
@@ -200,7 +284,8 @@ class ModelBridge:
         loop, at most once, on the model thread — it is how the owner learns
         the model died rather than idled. ``step`` receives each
         :class:`~reactor_runtime.core.CompletedStep` the model reports, on the
-        model thread.
+        model thread. ``step_refusal`` receives, on the model thread, each
+        step a client requested that the model refused.
 
         Args:
             broadcast: Sink for a message sent to all clients.
@@ -213,6 +298,7 @@ class ModelBridge:
             command_timing: Sink for how long each command waited and ran.
             frame_timing: Sink for a frame's time in a stage only the model
                 sees, for the connection that sent the frame.
+            step_refusal: Sink for each requested step the model refused.
 
         Raises:
             RuntimeError: If outbound has already been bound.
@@ -227,6 +313,7 @@ class ModelBridge:
             step=step,
         )
         self._model._bind_timing(command_timing=command_timing, frame_timing=frame_timing)
+        self._model._bind_step_refusal(step_refusal)
         if failure is not None:
             self._model.bind_failure(failure)
         self._outbound_bound = True

@@ -252,10 +252,16 @@ class SessionStarted(ReactorEvent):
         starting_input: Whether a starting input follows. When one does, the
             step loop takes no step until :class:`StartingInputApplied`
             arrives, so its first step sees the state the starting input set.
+        stepped: Whether the session is stepped: the step loop runs one step
+            per client request instead of streaming, and emits no media.
+        steps: The most steps the session takes, or ``None`` when it has no
+            bound. A stepped session refuses a request once it took them all.
     """
 
     session_id: str
     starting_input: bool = False
+    stepped: bool = False
+    steps: int | None = None
 
 
 @dataclass(frozen=True)

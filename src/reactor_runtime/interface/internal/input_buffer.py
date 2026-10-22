@@ -300,6 +300,21 @@ class InputBuffer:
             self._condition.notify_all()
             return evicted
 
+    def holds(self, frames: int, samples: int = 0) -> bool:
+        """Whether *frames* frames, carrying *samples* audio samples, fit the bound together.
+
+        Frames that fit can all be pushed and none of them evicted by another.
+        """
+        if self._max_samples is not None:
+            return frames <= self._max_frames and samples <= self._max_samples
+        return frames <= self._maxlen
+
+    def describe_bound(self) -> str:
+        """Name the bound in words, for a message to a client."""
+        if self._max_samples is not None:
+            return f"{self._max_samples} samples in at most {self._max_frames} frames"
+        return f"{self._maxlen} frames"
+
     def _over_bound(self) -> bool:
         """Whether the buffer holds more than its bound. Caller holds the lock."""
         if self._max_samples is not None:

@@ -104,6 +104,9 @@ class Sample:
     # one it has is busy and never stops one, so it grows to its cap
     # (min(32, CPUs + 4)) whenever the runtime's load first needs them.
     executor_threads: int = 0
+    # Step requests the runtime or the model still keeps state for, with no
+    # client connected: a connection's request order, or a request's failure.
+    live_step_requests: int = 0
 
 
 def cpu_deltas(samples: list[Sample]) -> list[float]:
@@ -370,6 +373,7 @@ ZERO_FIELDS = (
     "live_pacers",
     "live_client_stats",
     "live_participants",
+    "live_step_requests",
 )
 
 

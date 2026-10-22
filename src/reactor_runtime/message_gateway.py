@@ -4,7 +4,8 @@ The one place where "what does this payload mean" lives. A payload that arrived
 on any connection is decoded here through the wire :class:`~reactor_runtime.protocol.Codec`
 — the single seam the JSON-to-protobuf swap touches — and routed by what it is:
 a ping marks liveness, a command is handed onward as a decoded
-:class:`InboundCommand` whose ``request_id`` is guaranteed present.
+:class:`InboundCommand` whose ``request_id`` is guaranteed present, and a step
+request as a decoded :class:`InboundStep`.
 
 The gateway is transport-neutral: a WebSocket frame and a WebRTC data-channel
 frame decode the same way. It does no validation — that belongs to the model
@@ -25,7 +26,7 @@ from google.protobuf.message import DecodeError
 from reactor_runtime.core import ConnectionSink, ConnId
 from reactor_runtime.protocol import Channel, Codec, ProtocolVersion, select
 from reactor_runtime.protocol.common import struct_to_dict
-from reactor_wire.v1 import control_pb2, data_pb2
+from reactor_wire.v1 import control_pb2, data_pb2, step_pb2
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,52 @@ CommandHandler = Callable[[InboundCommand], Awaitable[None]]
 """Receives each decoded command. Owns upload resolution and submission."""
 
 
+@dataclass(frozen=True)
+class StepCommand:
+    """One command of a step request, decoded but not validated.
+
+    Attributes:
+        name: The command name.
+        args: The command arguments as a plain mapping.
+        uploads: Argument name to the ``upload_id`` it references, unresolved.
+    """
+
+    name: str
+    args: Mapping[str, Any]
+    uploads: Mapping[str, str]
+
+
+@dataclass(frozen=True)
+class InboundStep:
+    """A decoded request for one step of a stepped session.
+
+    Attributes:
+        state: Values for the model's state fields, keyed by field name.
+        commands: The commands to run after the state, in order.
+        media_input: The frames for each input track, still encoded.
+        conn_id: The connection the request arrived on.
+        request_id: The correlation id, carried from the client when supplied
+            and minted here when absent.
+        received_at: When the frame carrying the request reached the runtime,
+            on a monotonic clock.
+    """
+
+    state: Mapping[str, Any]
+    commands: tuple[StepCommand, ...]
+    media_input: tuple[step_pb2.TrackFrames, ...]
+    conn_id: ConnId
+    request_id: str
+    received_at: float
+
+
+StepHandler = Callable[[InboundStep], Awaitable[None]]
+"""Receives each decoded step request. Owns validation, decoding, and submission."""
+
+
+async def _ignore_step(step: InboundStep) -> None:
+    logger.debug("MessageGateway dropped a step request: no step handler is bound")
+
+
 class MessageGateway:
     """Decodes inbound frames and routes them by what they mean.
 
@@ -78,6 +125,7 @@ class MessageGateway:
         *,
         sink: ConnectionSink,
         on_command: CommandHandler,
+        on_step: StepHandler = _ignore_step,
     ) -> None:
         """Bind the gateway to its upward sink and command handler.
 
@@ -87,6 +135,7 @@ class MessageGateway:
         """
         self._sink = sink
         self._on_command = on_command
+        self._on_step = on_step
         self._codecs: dict[ProtocolVersion, Codec] = {}
 
     def _codec_for(self, version: ProtocolVersion) -> Codec:
@@ -141,6 +190,32 @@ class MessageGateway:
                     name=command.type,
                     args=struct_to_dict(command.data),
                     uploads={param: ref.upload_id for param, ref in command.uploads.items()},
+                    conn_id=conn_id,
+                    request_id=message.request_id or _new_request_id(),
+                    received_at=received_at,
+                )
+            )
+            return
+
+        if (
+            isinstance(message, data_pb2.DataClientMessage)
+            and message.WhichOneof("payload") == "request_step"
+        ):
+            request = message.request_step
+            await self._on_step(
+                InboundStep(
+                    state=struct_to_dict(request.state),
+                    commands=tuple(
+                        StepCommand(
+                            name=command.type,
+                            args=struct_to_dict(command.data),
+                            uploads={
+                                param: ref.upload_id for param, ref in command.uploads.items()
+                            },
+                        )
+                        for command in request.commands
+                    ),
+                    media_input=tuple(request.media_input),
                     conn_id=conn_id,
                     request_id=message.request_id or _new_request_id(),
                     received_at=received_at,

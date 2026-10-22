@@ -30,6 +30,7 @@ from reactor_runtime.interface.internal.reactor_core import (
     MediaOps,
     MediaSink,
     RequestId,
+    StepEnvelope,
     StepSink,
 )
 from reactor_runtime.interface.model.contract import ModelContract
@@ -137,6 +138,63 @@ def test_check_command_validates_without_admitting(monkeypatch: pytest.MonkeyPat
     assert valid.accepted is True
     assert (refused.accepted, refused.field) == (False, "prompt")
     assert admitted == []
+
+
+def test_submit_step_posts_its_calls_then_the_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    bridge, model = make_bridge()
+    posted: list[Any] = []
+    monkeypatch.setattr(model, "_enqueue", posted.append)
+    camera = frame()
+
+    rejected = bridge.submit_step(
+        [("state.prompt", "set_prompt", {"prompt": "hi"})],
+        {"camera": [lambda: camera]},
+        conn_id=ConnId(1002),
+        request_id="s1",
+    )
+
+    assert rejected is None
+    call, step = posted
+    assert isinstance(call, CommandEnvelope)
+    assert (call.request_id, call.step_request_id, call.step_entry) == (None, "s1", "state.prompt")
+    assert isinstance(step, StepEnvelope)
+    assert [source() for source in step.media_input["camera"]] == [camera]
+    assert (step.conn_id, step.request_id) == (ConnId(1002), "s1")
+
+
+def test_submit_step_with_an_invalid_call_posts_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    bridge, model = make_bridge()
+    posted: list[Any] = []
+    monkeypatch.setattr(model, "_enqueue", posted.append)
+
+    rejected = bridge.submit_step(
+        [
+            ("state.prompt", "set_prompt", {"prompt": "hi"}),
+            ("commands[0]", "set_prompt", {"prompt": ""}),
+        ],
+        {},
+        conn_id=ConnId(1002),
+        request_id="s1",
+    )
+
+    assert rejected is not None
+    entry, outcome = rejected
+    assert (entry, outcome.accepted, outcome.field) == ("commands[0]", False, "prompt")
+    assert posted == []
+
+
+def test_input_overflow_names_the_bound_frames_do_not_fit() -> None:
+    bridge, _ = make_bridge()
+
+    assert bridge.input_overflow("camera", 128) is None
+    assert bridge.input_overflow("camera", 129) == "128 frames"
+    assert bridge.input_overflow("nowhere", 10_000) is None
+
+
+def test_the_bridge_says_whether_the_model_can_step() -> None:
+    bridge, _ = make_bridge()
+    # EchoModel drives its own run(), so it has no step to run on request.
+    assert bridge.supports_stepped is False
 
 
 # --- routing across the three inbound faces ------------------------------
