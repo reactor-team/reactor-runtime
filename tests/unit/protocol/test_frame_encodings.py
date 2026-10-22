@@ -163,6 +163,8 @@ def test_a_video_payload_that_is_not_an_image_cannot_be_encoded() -> None:
     ],
 )
 def test_an_empty_frame_cannot_be_encoded(data: np.ndarray, kind: TrackKind) -> None:
+    # One frame with no samples is not a frame. An audio track with no samples
+    # is still encoded, as a track with no frames: see track_frames below.
     with pytest.raises(FrameEncodingError, match="cannot be shaped"):
         encode_frame(data, kind)
 
@@ -246,4 +248,42 @@ def test_metadata_that_does_not_cover_the_batch_cannot_be_encoded() -> None:
     batch = np.zeros((2, 2, 2, 3), dtype=np.uint8)
     bundle = MediaBundle(tracks={"v": _track("v", TrackKind.VIDEO, batch, [b"only one"])})
     with pytest.raises(FrameEncodingError, match="1 metadata entries for 2 frames"):
+        track_frames(bundle)
+
+
+@pytest.mark.parametrize(
+    "silence",
+    [
+        np.zeros((1, 0), dtype=np.int16),
+        np.zeros((0,), dtype=np.float32),
+        np.zeros((2, 0), dtype=np.int16),
+    ],
+)
+def test_an_audio_track_with_no_samples_has_no_frames(silence: np.ndarray) -> None:
+    # (1, 0) is how a model says it has no audio this step; examples/echo does.
+    # The step keeps its video, and its audio track goes out with no frames.
+    bundle = MediaBundle(
+        tracks={
+            "main_video": _track("main_video", TrackKind.VIDEO, np.zeros((2, 2, 3), np.uint8)),
+            "main_audio": TrackData(
+                info=TrackInfo(name="main_audio", kind=TrackKind.AUDIO, rate=48000.0),
+                data=silence,
+            ),
+        }
+    )
+    video, audio = track_frames(bundle)
+    assert (video.track, len(video.frames)) == ("main_video", 1)
+    assert (audio.track, audio.kind, len(audio.frames), audio.rate) == (
+        "main_audio",
+        platform_pb2.TRACK_KIND_AUDIO,
+        0,
+        48000.0,
+    )
+
+
+def test_a_video_track_with_an_empty_frame_cannot_be_encoded() -> None:
+    bundle = MediaBundle(
+        tracks={"v": _track("v", TrackKind.VIDEO, np.zeros((0, 4, 3), dtype=np.uint8))}
+    )
+    with pytest.raises(FrameEncodingError, match="cannot be shaped"):
         track_frames(bundle)

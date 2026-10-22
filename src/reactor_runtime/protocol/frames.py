@@ -243,8 +243,10 @@ def track_frames(
 
     A batched video track, ``(N, H, W, 3)``, becomes its ``N`` frames in order,
     each with its own metadata; a single value of metadata goes on every one.
-    An unbatched video track and an audio track are one frame each. A step
-    without media has no tracks.
+    An unbatched video track and an audio track are one frame each. An audio
+    track with no samples, such as ``(1, 0)``, has no frames: an empty audio
+    payload is how a model says it has no audio for the step, and the streamed
+    path takes it the same way. A step without media has no tracks.
 
     Each entry carries the rate its frames play at: *video_fps*, the step's own
     rate, for a video track, falling back to the track's declared rate, and
@@ -289,6 +291,10 @@ def media_size(bundle: MediaBundle | None) -> int:
 def _frames_of(track: TrackData) -> list[tuple[npt.NDArray[Any], bytes | None]]:
     """Split one track's payload into its frames, each with the metadata it carries."""
     data = track.data
+    if track.info.kind is TrackKind.AUDIO and np.size(data) == 0:
+        # No audio this step: the track goes out with no frames, so the step
+        # keeps its video instead of failing. Empty video stays an error.
+        return []
     if track.info.kind is TrackKind.VIDEO and data.ndim == 4:
         count = data.shape[0]
         metadata = track.metadata
