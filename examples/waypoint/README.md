@@ -84,3 +84,32 @@ The model sends one message, `waypoint_status`, on connect, as the reply to
 `set_image` and `reset`, and every 50 steps: whether a seed is set, whether
 generation is paused, and the index of the last completed step. Each frame on
 `main_video` carries `{"step": n}` as metadata.
+
+## Stepped session
+
+The application writes the three step hooks and leaves `run()` to the
+runtime, so the same code serves a stepped session, where the world advances
+one step per client request instead of streaming. Start the session with
+`"generation": "stepped"`; each request sets the controls through `state` and
+runs any command, and its result carries the step's four frames on
+`main_video`, each with its `{"step": n}` metadata. A step `process_input`
+refuses, while paused or before a seed, answers `REFUSED` and takes no number.
+With the Python SDK, from the release that adds stepped sessions
+(`Reactor.step()`):
+
+```python
+from reactor_sdk import Reactor, StepCommand
+
+reactor = Reactor("waypoint", local=True, generation="stepped")
+await reactor.connect()
+
+seed = await reactor.upload_file("seed.png")
+result = await reactor.step(commands=[StepCommand("set_image", {"image": seed})])
+frames = result.track("main_video").frames        # four frames, the first step
+
+result = await reactor.step(state={"action": "forward", "mouse_x": 0.2})
+result = await reactor.step()                      # the controls hold
+```
+
+The `waypoint_status` that `set_image` and `reset` return reaches the client
+as a message of its own, apart from the step's result.
