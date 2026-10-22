@@ -16,11 +16,11 @@ namespace = true
 # gates the pin against proto/, so a release cannot ship a schema older than the
 # sources it was built from.
 [tool.reactor-wire]
-version = "1.20261016.15"
+version = "1.20261022.18"
 
 [project]
 name = "reactor-runtime"
-version = "3.8.3"
+version = "3.9.0"
 description = "A Python framework for building real-time, interactive video models"
 readme = "README.md"
 license = "Apache-2.0"
