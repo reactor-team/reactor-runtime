@@ -571,6 +571,35 @@ class ConnectionManager:
         _, frame = encode(conn.protocol_version)
         conn.send_message(frame)
 
+    async def send_step_result(
+        self, cid: ConnId, frame: bytes, too_large: Callable[[int], bytes]
+    ) -> None:
+        """Send a step's encoded result to one connection, or a small one that says it does not fit.
+
+        A result larger than the connection takes, whether it is over the
+        connection's own limit or the media engine refuses it, is never sent:
+        *too_large*, given the result's size, renders the media-free result
+        that goes out instead. A connection whose queue is full is waited on,
+        so the result is not lost. A v0 client cannot request a step, so it is
+        sent nothing.
+        """
+        conn = self._by_id.get(cid)
+        if conn is None or conn.protocol_version is ProtocolVersion.V0:
+            return
+        if len(frame) <= conn.max_message_size and await conn.send_step_result(frame):
+            return
+        await conn.send_step_result(too_large(len(frame)))
+
+    def max_message_size(self, cid: ConnId) -> int | None:
+        """Return the largest message a registered connection takes; ``None`` when unknown."""
+        conn = self._by_id.get(cid)
+        return None if conn is None else conn.max_message_size
+
+    def message_chunking(self, cid: ConnId) -> bool:
+        """Whether a registered connection negotiated chunked messages; ``False`` when unknown."""
+        conn = self._by_id.get(cid)
+        return conn is not None and conn.message_chunking
+
     def send_control(self, cid: ConnId, encode: Callable[[ProtocolVersion], bytes | str]) -> None:
         """Encode and send a control frame to one connection in its codec, if registered.
 

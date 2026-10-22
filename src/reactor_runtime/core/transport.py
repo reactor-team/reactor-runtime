@@ -67,6 +67,37 @@ class Connection(Protocol):
         binary frame) — so the connection carries both.
         """
 
+    @property
+    def max_message_size(self) -> int:
+        """The largest message, in bytes, this connection can deliver to its client.
+
+        What the connection negotiated with the client, read once the wire is
+        connected. A step result larger than this is not sent.
+        """
+
+    @property
+    def message_chunking(self) -> bool:
+        """Whether the connection negotiated carrying a large message in chunks.
+
+        Without chunking a message is bounded by what the wire takes in one
+        piece, too small for most step results, so a stepped session refuses
+        the steps a connection without it requests.
+        """
+
+    async def send_step_result(self, payload: bytes) -> bool:
+        """Send an already-encoded step result to this client.
+
+        It travels the channel the step request came in on, after every frame
+        sent before it, and a connection's results go out in the order they
+        were sent. While the connection's queue is full the send waits for it
+        to drain, so a result is not lost to a burst.
+
+        Returns:
+            ``False`` when the connection refused the message as larger than it
+            takes, so nothing was sent; ``True`` otherwise, including when the
+            connection closed first.
+        """
+
     def send_media(self, chunk: MediaChunk) -> None:
         """Hand a media chunk to the connection, or do nothing when it carries no media.
 

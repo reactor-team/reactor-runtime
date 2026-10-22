@@ -107,6 +107,9 @@ class _FakeChannel:
     def __init__(self, label: str = "data", state: Any = None, *, chunked: bool = False) -> None:
         self.sent: list[tuple[bytes, bool]] = []
         self.send_error: Exception | None = None
+        # Raised once each, in order, before send_error is.
+        self.send_errors: list[Exception] = []
+        self.drains: list[float] = []
         self.drain_timeouts: list[float] = []
         self._chunked = chunked
         self._label = label
@@ -123,9 +126,15 @@ class _FakeChannel:
         return self._chunked
 
     def send(self, data: bytes, binary: bool = True) -> None:
+        if self.send_errors:
+            raise self.send_errors.pop(0)
         if self.send_error is not None:
             raise self.send_error
         self.sent.append((data, binary))
+
+    async def drain(self, timeout: float = 30.0) -> bool:  # noqa: ASYNC109 (reactor_webrtc's signature)
+        self.drains.append(timeout)
+        return True
 
     def on_message(self, callback: Callable[[bytes, bool], None]) -> None:
         pass
@@ -1151,7 +1160,8 @@ def _record_factory_builds(monkeypatch: pytest.MonkeyPatch) -> list[object]:
         def with_dtls_in_stun(self, enabled: bool) -> None:
             recorded.append(enabled)
 
-        def with_dc_chunking(self) -> None:
+        def with_dc_chunking(self, *, max_message_size: int) -> None:
+            assert max_message_size == peer_module._CHUNKED_MAX_MESSAGE_SIZE
             recorded.append("dc_chunking")
 
         def build(self) -> object:
@@ -2709,3 +2719,72 @@ def test_a_flush_waits_for_an_audio_frame_the_feeder_is_pushing() -> None:
     assert len(audio.pushed) == 1
     # The second frame was still buffered at the flush, and is gone.
     assert peer._audio_bufs == {}
+
+
+# -- the message size and step results ------------------------------------------
+
+
+@pytest.mark.parametrize(("chunked", "expected"), [(True, 64 * 1024 * 1024), (False, 256 * 1024)])
+def test_the_largest_message_is_this_sides_limit(chunked: bool, expected: int) -> None:
+    peer = WebRTCPeer()
+    data: Any = _FakeChannel(chunked=chunked)
+    peer._data_channel = data
+    assert peer.message_chunking is chunked
+    assert peer.max_message_size == expected
+
+
+async def test_a_step_result_the_engine_takes_is_sent() -> None:
+    peer = WebRTCPeer()
+    data = _FakeChannel(chunked=True)
+    peer._data_channel = cast(Any, data)
+
+    assert await peer.send_step_result(b"result") is True
+    assert data.sent == [(b"result", True)]
+
+
+async def test_a_step_result_the_engine_finds_too_large_is_reported() -> None:
+    peer = WebRTCPeer()
+    data = _FakeChannel(chunked=True)
+    data.send_error = rw.DataChannelMessageTooLarge("larger than the client takes")
+    peer._data_channel = cast(Any, data)
+
+    assert await peer.send_step_result(b"result") is False
+    assert data.sent == []
+
+
+async def test_a_step_result_waits_for_a_full_queue_and_is_sent_again() -> None:
+    peer = WebRTCPeer()
+    data = _FakeChannel(chunked=True)
+    data.send_errors = [rw.DataChannelQueueFull("queue full"), rw.DataChannelQueueFull("still")]
+    peer._data_channel = cast(Any, data)
+
+    assert await peer.send_step_result(b"result") is True
+    assert data.sent == [(b"result", True)]
+    assert data.drains == [peer_module._STEP_RESULT_DRAIN_S] * 2
+
+
+async def test_step_results_go_out_in_the_order_they_were_sent() -> None:
+    peer = WebRTCPeer()
+    data = _FakeChannel(chunked=True)
+    data.send_errors = [rw.DataChannelQueueFull("queue full")]
+    peer._data_channel = cast(Any, data)
+
+    await asyncio.gather(peer.send_step_result(b"first"), peer.send_step_result(b"second"))
+
+    assert [payload for payload, _ in data.sent] == [b"first", b"second"]
+
+
+async def test_a_step_result_for_a_closed_peer_is_dropped() -> None:
+    peer = WebRTCPeer()
+    data = _FakeChannel(chunked=True)
+    peer._data_channel = cast(Any, data)
+    peer._stop_event.set()
+
+    assert await peer.send_step_result(b"result") is True
+    assert data.sent == []
+
+
+def test_a_peer_without_a_data_channel_reports_the_plain_limit() -> None:
+    peer = WebRTCPeer()
+    assert peer.message_chunking is False
+    assert peer.max_message_size == 256 * 1024

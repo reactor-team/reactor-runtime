@@ -66,6 +66,13 @@ class FakeConnection:
         if self._on_outbound is not None:
             self._on_outbound()
 
+    max_message_size = 64 * 1024 * 1024
+    message_chunking = True
+
+    async def send_step_result(self, payload: bytes) -> bool:
+        self.send_message(payload)
+        return True
+
     def send_message(self, payload: bytes | str) -> None:
         self._outbound()
         self.messages.append(payload)
@@ -106,6 +113,13 @@ class SilentConnection(FakeConnection):
     The recording fake accumulates one entry per call, which a fan-out spinning
     for the length of a churn loop turns into millions of them.
     """
+
+    max_message_size = 64 * 1024 * 1024
+    message_chunking = True
+
+    async def send_step_result(self, payload: bytes) -> bool:
+        self.send_message(payload)
+        return True
 
     def send_message(self, payload: bytes | str) -> None:
         pass
@@ -1155,3 +1169,68 @@ def test_a_v0_connection_is_sent_no_step_reply() -> None:
     manager.send_step_reply(conn.id, _refuse_to_encode_response)
 
     assert conn.messages == []
+
+
+def _too_large(size: int) -> bytes:
+    return f"too large: {size}".encode()
+
+
+async def test_a_step_result_that_fits_goes_out_whole() -> None:
+    manager, _ = waiting_manager()
+    conn = FakeConnection(1, protocol_version=ProtocolVersion.V1)
+    conn.max_message_size = 6
+    manager.register(conn)
+
+    await manager.send_step_result(conn.id, b"result", _too_large)
+
+    assert conn.messages == [b"result"]
+
+
+async def test_a_step_result_over_the_connections_limit_is_replaced_by_its_too_large_answer() -> (
+    None
+):
+    manager, _ = waiting_manager()
+    conn = FakeConnection(1, protocol_version=ProtocolVersion.V1)
+    conn.max_message_size = 5
+    manager.register(conn)
+
+    await manager.send_step_result(conn.id, b"result", _too_large)
+
+    assert conn.messages == [b"too large: 6"]
+
+
+class EngineRefusingConnection(FakeConnection):
+    """A connection whose media engine refuses its first step result as too large."""
+
+    def __init__(self, cid: int) -> None:
+        super().__init__(cid, protocol_version=ProtocolVersion.V1)
+        self.refusals = 1
+
+    async def send_step_result(self, payload: bytes) -> bool:
+        if self.refusals:
+            self.refusals -= 1
+            return False
+        return await super().send_step_result(payload)
+
+
+async def test_a_step_result_the_engine_refuses_is_answered_as_too_large() -> None:
+    manager, _ = waiting_manager()
+    conn = EngineRefusingConnection(1)
+    manager.register(conn)
+
+    await manager.send_step_result(conn.id, b"result", _too_large)
+
+    assert conn.messages == [b"too large: 6"]
+
+
+def test_message_chunking_reads_the_connection_and_is_false_for_an_unknown_one() -> None:
+    manager, _ = waiting_manager()
+    conn = FakeConnection(1, protocol_version=ProtocolVersion.V1)
+    conn.message_chunking = False
+    manager.register(conn)
+    chunked = FakeConnection(2, protocol_version=ProtocolVersion.V1)
+    manager.register(chunked)
+
+    assert manager.message_chunking(conn.id) is False
+    assert manager.message_chunking(chunked.id) is True
+    assert manager.message_chunking(ConnId(3)) is False

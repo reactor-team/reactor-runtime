@@ -115,6 +115,22 @@ async def test_outbound_commands_delegate_to_peer(
     assert fake_peer.ice == [IceCandidate("cand", "0", 0)]
 
 
+async def test_step_results_and_the_negotiated_size_come_from_the_peer(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    conn = await _connect(fake_peer, factory_for(fake_peer), out_av_tracks)
+    fake_peer.max_message_size = 1234
+    fake_peer.message_chunking = False
+
+    assert await conn.send_step_result(b"result") is True
+
+    assert fake_peer.messages == [b"result"]
+    assert conn.max_message_size == 1234
+    assert conn.message_chunking is False
+
+
 def _video_chunk(fps: float = 200.0) -> MediaChunk:
     info = TrackInfo(name="main_video", kind=TrackKind.VIDEO)
     data = np.zeros((4, 4, 3), dtype=np.uint8)

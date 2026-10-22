@@ -241,6 +241,24 @@ class WebRTCConnection:
         """Send an already-encoded frame (text or binary) to this client."""
         self._peer.send_message(payload)
 
+    @property
+    def max_message_size(self) -> int:
+        """The largest message, in bytes, the data channel delivers to this client."""
+        return self._peer.max_message_size
+
+    @property
+    def message_chunking(self) -> bool:
+        """Whether the data channel negotiated chunked messages with this client."""
+        return self._peer.message_chunking
+
+    async def send_step_result(self, payload: bytes) -> bool:
+        """Send an already-encoded step result on the data channel, where step requests arrive.
+
+        The media engine decides whether the message fits; see
+        :meth:`WebRTCPeer.send_step_result`.
+        """
+        return await self._peer.send_step_result(payload)
+
     def send_control(self, payload: bytes | str) -> None:
         """Send an already-encoded control frame (text or binary) to this client."""
         self._peer.send_control(payload)

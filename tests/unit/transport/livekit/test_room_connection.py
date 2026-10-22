@@ -96,6 +96,7 @@ async def test_the_room_connection_is_a_system_connection_that_carries_media() -
     assert conn.origin == ConnectionOrigin(transport="livekit", system=True)
     assert conn.capabilities.carries_video
     assert conn.capabilities.carries_audio
+    assert conn.message_chunking is False
 
 
 async def test_the_room_connection_hands_on_each_freed_input_until_it_closes() -> None:

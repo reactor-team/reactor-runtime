@@ -40,6 +40,20 @@ class SystemConnection:
     def send_message(self, payload: bytes | str) -> None:
         """Drop a data frame."""
 
+    @property
+    def max_message_size(self) -> int:
+        """Accept any size: nothing sent to the system client leaves the process."""
+        return 0x7FFF_FFFF_FFFF_FFFF
+
+    @property
+    def message_chunking(self) -> bool:
+        """Report no chunking; the system client never requests a step."""
+        return False
+
+    async def send_step_result(self, payload: bytes) -> bool:
+        """Drop a step result."""
+        return True
+
     def send_media(self, chunk: MediaChunk) -> None:
         """Drop a media chunk; the fan-out never sends one to a connection without media."""
 

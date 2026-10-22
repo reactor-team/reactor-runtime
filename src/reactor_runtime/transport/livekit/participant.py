@@ -205,6 +205,24 @@ class ParticipantConnection:
         """Send a control message to this participant, from any thread."""
         self._enqueue(CONTROL_TOPIC, payload)
 
+    @property
+    def max_message_size(self) -> int:
+        """The largest message sent to the participant as a single data packet."""
+        return MAX_PACKET_BYTES
+
+    @property
+    def message_chunking(self) -> bool:
+        """Report no chunking, so a stepped session refuses this participant's step requests.
+
+        A step's result does not travel over a room yet.
+        """
+        return False
+
+    async def send_step_result(self, payload: bytes) -> bool:
+        """Send a step result as a data message; none is sent while steps are refused."""
+        self._enqueue(DATA_TOPIC, payload)
+        return True
+
     def send_media(self, chunk: MediaChunk) -> None:
         """Do nothing: the session's media reaches the room through the room connection."""
 

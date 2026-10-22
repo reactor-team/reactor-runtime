@@ -1,13 +1,19 @@
-"""Decoding the frames a step request carries."""
+"""The frames a step request carries in, and a step result carries out."""
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
-from reactor_runtime.core.values import TrackKind
-from reactor_runtime.protocol.frames import FrameEncodingError, check_frame, decode_frame
-from reactor_wire.v1 import step_pb2
+from reactor_runtime.core.values import MediaBundle, TrackData, TrackInfo, TrackKind
+from reactor_runtime.protocol.frames import (
+    FrameEncodingError,
+    check_frame,
+    decode_frame,
+    encode_frame,
+    track_frames,
+)
+from reactor_wire.v1 import platform_pb2, step_pb2
 
 RAW = step_pb2.FRAME_ENCODING_RAW
 
@@ -114,3 +120,130 @@ def test_a_check_refuses_what_decoding_refuses() -> None:
     frame.data = frame.data[:-1]
     with pytest.raises(FrameEncodingError, match="bytes"):
         check_frame(frame, TrackKind.VIDEO)
+
+
+# -- encoding a step's output -----------------------------------------------------
+
+
+def test_an_encoded_video_frame_decodes_back_to_itself() -> None:
+    image = np.arange(4 * 5 * 3, dtype=np.uint8).reshape(4, 5, 3)
+    frame = encode_frame(image, TrackKind.VIDEO, metadata=b"m")
+    assert (frame.encoding, frame.dtype, list(frame.shape)) == (RAW, "uint8", [4, 5, 3])
+    assert frame.metadata == b"m"
+    np.testing.assert_array_equal(decode_frame(frame, TrackKind.VIDEO).data, image)
+
+
+def test_encoded_audio_keeps_its_channels_and_scales_floats() -> None:
+    stereo = np.array([[0.5, -1.0], [1.0, 0.0]], dtype=np.float32)
+    frame = encode_frame(stereo, TrackKind.AUDIO)
+    assert list(frame.shape) == [2, 2]
+    np.testing.assert_array_equal(
+        np.frombuffer(frame.data, dtype="<i2").reshape(2, 2), [[16383, -32767], [32767, 0]]
+    )
+
+
+def test_one_dimensional_audio_is_one_channel() -> None:
+    frame = encode_frame(np.array([1, 2, 3], dtype=np.int16), TrackKind.AUDIO)
+    assert list(frame.shape) == [1, 3]
+    assert not frame.HasField("metadata")
+
+
+def test_a_video_payload_that_is_not_an_image_cannot_be_encoded() -> None:
+    with pytest.raises(FrameEncodingError, match="cannot be shaped"):
+        encode_frame(np.zeros((4, 4), dtype=np.uint8), TrackKind.VIDEO)
+
+
+@pytest.mark.parametrize(
+    ("data", "kind"),
+    [
+        (np.zeros((0, 4, 3), dtype=np.uint8), TrackKind.VIDEO),
+        (np.zeros((4, 0, 3), dtype=np.uint8), TrackKind.VIDEO),
+        (np.zeros((1, 0), dtype=np.int16), TrackKind.AUDIO),
+        (np.zeros((0,), dtype=np.float32), TrackKind.AUDIO),
+    ],
+)
+def test_an_empty_frame_cannot_be_encoded(data: np.ndarray, kind: TrackKind) -> None:
+    with pytest.raises(FrameEncodingError, match="cannot be shaped"):
+        encode_frame(data, kind)
+
+
+@pytest.mark.parametrize(
+    ("data", "kind"),
+    [
+        (np.full((1, 1, 3), "red"), TrackKind.VIDEO),
+        (np.array(["loud", "quiet"], dtype=object), TrackKind.AUDIO),
+    ],
+)
+def test_a_payload_that_does_not_convert_is_a_frame_encoding_error(
+    data: np.ndarray, kind: TrackKind
+) -> None:
+    # Not a bare numpy error: the runtime answers a step whose media fails this
+    # way as FAILED, and only knows to through FrameEncodingError.
+    with pytest.raises(FrameEncodingError, match="cannot be carried"):
+        encode_frame(data, kind)
+
+
+def _track(
+    name: str, kind: TrackKind, data: np.ndarray, metadata: bytes | list[bytes] | None = None
+) -> TrackData:
+    return TrackData(info=TrackInfo(name=name, kind=kind), data=data, metadata=metadata)
+
+
+def test_a_batched_video_track_becomes_its_frames_each_with_its_metadata() -> None:
+    batch = np.stack([np.full((2, 2, 3), i, dtype=np.uint8) for i in range(3)])
+    bundle = MediaBundle(
+        tracks={"main_video": _track("main_video", TrackKind.VIDEO, batch, [b"0", b"1", b"2"])}
+    )
+    [entry] = track_frames(bundle)
+    assert (entry.track, entry.kind) == ("main_video", platform_pb2.TRACK_KIND_VIDEO)
+    assert [f.metadata for f in entry.frames] == [b"0", b"1", b"2"]
+    assert [decode_frame(f, TrackKind.VIDEO).data[0, 0, 0] for f in entry.frames] == [0, 1, 2]
+
+
+def test_one_metadata_value_goes_on_every_frame_of_a_batch() -> None:
+    batch = np.zeros((2, 2, 2, 3), dtype=np.uint8)
+    bundle = MediaBundle(tracks={"v": _track("v", TrackKind.VIDEO, batch, b"same")})
+    [entry] = track_frames(bundle)
+    assert [f.metadata for f in entry.frames] == [b"same", b"same"]
+
+
+def test_each_output_track_is_its_own_entry() -> None:
+    bundle = MediaBundle(
+        tracks={
+            "v": _track("v", TrackKind.VIDEO, np.zeros((2, 2, 3), dtype=np.uint8)),
+            "a": _track("a", TrackKind.AUDIO, np.zeros((1, 480), dtype=np.int16)),
+        }
+    )
+    entries = track_frames(bundle)
+    assert [(e.track, e.kind, len(e.frames)) for e in entries] == [
+        ("v", platform_pb2.TRACK_KIND_VIDEO, 1),
+        ("a", platform_pb2.TRACK_KIND_AUDIO, 1),
+    ]
+
+
+def test_each_entry_carries_the_rate_its_frames_play_at() -> None:
+    bundle = MediaBundle(
+        tracks={
+            "v": TrackData(
+                info=TrackInfo(name="v", kind=TrackKind.VIDEO, rate=30.0),
+                data=np.zeros((2, 2, 3), dtype=np.uint8),
+            ),
+            "a": TrackData(
+                info=TrackInfo(name="a", kind=TrackKind.AUDIO, rate=48000.0),
+                data=np.zeros((1, 480), dtype=np.int16),
+            ),
+        }
+    )
+    assert [e.rate for e in track_frames(bundle, video_fps=24.0)] == [24.0, 48000.0]
+    assert [e.rate for e in track_frames(bundle)] == [30.0, 48000.0]
+
+
+def test_a_step_without_media_has_no_tracks() -> None:
+    assert track_frames(None) == []
+
+
+def test_metadata_that_does_not_cover_the_batch_cannot_be_encoded() -> None:
+    batch = np.zeros((2, 2, 2, 3), dtype=np.uint8)
+    bundle = MediaBundle(tracks={"v": _track("v", TrackKind.VIDEO, batch, [b"only one"])})
+    with pytest.raises(FrameEncodingError, match="1 metadata entries for 2 frames"):
+        track_frames(bundle)

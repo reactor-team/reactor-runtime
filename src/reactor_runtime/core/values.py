@@ -543,11 +543,16 @@ class RequestedStep:
             to it carries.
         index: The step's number in its session, counted from 1. Only an
             accepted step takes one.
+        max_message_size: The largest message the connection took when the
+            request was admitted, so the step's result is sized against it
+            without reading the connection from the model's thread; ``None``
+            when unknown.
     """
 
     conn_id: ConnId
     request_id: str
     index: int
+    max_message_size: int | None = None
 
 
 class StepRefusalKind(StrEnum):

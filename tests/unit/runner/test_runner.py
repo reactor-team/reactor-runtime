@@ -211,6 +211,13 @@ class FakeConnection:
         self.media_depth: int | None = None
         self.flushed = False
 
+    max_message_size = 64 * 1024 * 1024
+    message_chunking = True
+
+    async def send_step_result(self, payload: bytes) -> bool:
+        self.send_message(payload)
+        return True
+
     def send_message(self, payload: bytes | str) -> None:
         self.sent.append(payload)
 
