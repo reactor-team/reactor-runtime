@@ -49,7 +49,8 @@ its slope over the last two thirds, in MB per hour (`rss_slope`), judged
 only when those samples span 75 minutes or more, as a two-hour run's do; a
 shorter run reports the rate as ⚪ Not judged. A slope over the limit still
 passes when the climb is levelling off: the last third rose at most two
-thirds of what the middle third rose. A run too short to judge a
+thirds of what the middle third rose, and a line fitted over the last third
+alone climbs no faster than the limit. A run too short to judge a
 trend ends in ERROR rather than in a verdict; a failed count still fails it.
 The runtime runs with `MALLOC_ARENA_MAX=2` unless the environment sets it:
 with glibc's default of up to 8 arenas per core, each keeping the most memory

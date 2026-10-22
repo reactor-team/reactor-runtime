@@ -277,12 +277,12 @@ def test_a_fast_slope_with_a_rise_inside_the_noise_floor_passes() -> None:
 
 
 def test_a_climb_levelling_off_late_passes_the_slope_check() -> None:
-    # A climb that slows each third, 72, then 36, then 21 MB/h: the fitted
-    # slope is over the limit, but the thirds rise +36 MB, then +19 MB.
+    # A climb that slows each third, 72, then 36, then 15 MB/h: the fitted
+    # slope is over the limit, but the thirds rise +36 MB, then +17 MB.
     values = (
         [200.0 + 1.2 * i for i in range(40)]
         + [248.0 + 0.6 * i for i in range(40)]
-        + [272.0 + 0.35 * i for i in range(40)]
+        + [272.0 + 0.25 * i for i in range(40)]
     )
     result = assert_slope_under(
         _hours(120), values, name="rss_slope", max_per_hour=20.0, min_absolute_delta=5.0
@@ -293,6 +293,18 @@ def test_a_climb_levelling_off_late_passes_the_slope_check() -> None:
 
 def test_a_leak_climbing_faster_at_the_end_fails_the_slope_check() -> None:
     values = [555.0] * 40 + [575.0] * 40 + [609.0] * 40
+    result = assert_slope_under(
+        _hours(120), values, name="rss_slope", max_per_hour=20.0, min_absolute_delta=5.0
+    )
+    assert result.status == "fail"
+    assert "not levelling off" in result.detail
+
+
+def test_a_step_in_the_middle_third_does_not_hide_a_tail_still_climbing() -> None:
+    # A one-time step of 200 MB at the start of the middle third, then a
+    # steady 60 MB/h climb: the thirds rise +219.5 MB, then +40 MB, but the
+    # last third climbs as fast as the middle did.
+    values = [300.0] * 40 + [500.0 + i for i in range(40)] + [540.0 + i for i in range(40)]
     result = assert_slope_under(
         _hours(120), values, name="rss_slope", max_per_hour=20.0, min_absolute_delta=5.0
     )
