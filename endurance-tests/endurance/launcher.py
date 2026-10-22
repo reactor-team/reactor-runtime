@@ -206,7 +206,7 @@ def _step_requests(runner: Runner) -> int:
     """Count the step requests whose state the runner or the model still keeps."""
     model = runner._bridge._model if runner._bridge is not None else None
     failed = getattr(model, "_failed_step_calls", {})
-    return len(runner._step_order) + len(failed)
+    return len(runner._steps.order) + len(failed)
 
 
 def _live_transport_objects() -> dict[str, int]:

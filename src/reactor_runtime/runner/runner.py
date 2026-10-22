@@ -18,18 +18,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import functools
 import importlib.metadata
 import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Coroutine, Mapping
 from typing import Any, Protocol
-
-import numpy as np
-import numpy.typing as npt
 
 from reactor_runtime.codes import INVALID_COMMAND, UNRESOLVED_UPLOAD
 from reactor_runtime.core import (
@@ -60,8 +55,6 @@ from reactor_runtime.core import (
     SessionStarted,
     SessionState,
     StartingInputApplied,
-    StepRefusal,
-    StepRefusalKind,
     TrackDirection,
     TrackKind,
     Transition,
@@ -71,12 +64,12 @@ from reactor_runtime.core import (
 )
 from reactor_runtime.event_stream import EventStream
 from reactor_runtime.interface.events.messages import ModelMessage
-from reactor_runtime.interface.internal.bridge import CommandOutcome, ModelBridge
-from reactor_runtime.interface.internal.reactor_core import CommandTimes, FrameSource, MediaOps
+from reactor_runtime.interface.internal.bridge import ModelBridge
+from reactor_runtime.interface.internal.reactor_core import CommandTimes, MediaOps
 from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.log import get_logger, set_session_id, set_state
 from reactor_runtime.manifest import check_livekit_block, import_model_class
-from reactor_runtime.message_gateway import InboundCommand, InboundStep, MessageGateway
+from reactor_runtime.message_gateway import InboundCommand, MessageGateway
 from reactor_runtime.metrics import (
     UNKNOWN_COMMAND,
     CommandMetrics,
@@ -85,14 +78,6 @@ from reactor_runtime.metrics import (
     RuntimeMetrics,
 )
 from reactor_runtime.protocol import Channel, Codec, ProtocolVersion, select
-from reactor_runtime.protocol.frames import (
-    FrameEncodingError,
-    check_frame,
-    decode_frame,
-    decoded_frame,
-    media_size,
-    track_frames,
-)
 from reactor_runtime.recording import ClipResult, Recorder, RecorderError
 from reactor_runtime.runner import client_stats, runtime_stats
 from reactor_runtime.runner.client_stats import ClientStatsGate
@@ -108,16 +93,16 @@ from reactor_runtime.runner.session_start import (
 )
 from reactor_runtime.runner.stages import RunnerStages
 from reactor_runtime.runner.state_machine import SessionStateMachine
+from reactor_runtime.runner.stepped import EncodedResult, StepHost, StepRequests, refused
 from reactor_runtime.runner.system_client import SYSTEM_CONN_ID, SystemConnection
 from reactor_runtime.runner.upload_resolution import declares_upload, resolve_uploads
-from reactor_runtime.step_results import SavedStep, StepStore, content_type_of
+from reactor_runtime.step_results import SavedStep, StepStore
 from reactor_runtime.transport.router import (
     SessionNotRunningError,
     SessionTransitionError,
     UnknownSessionError,
 )
 from reactor_runtime.upload_store import UnknownUploadError, UploadStore
-from reactor_wire.v1 import platform_pb2, step_pb2
 
 _RUNNING_STATES = frozenset({SessionState.WAITING, SessionState.STREAMING, SessionState.ORPHANED})
 
@@ -171,12 +156,6 @@ def _recording_id_from(params: Mapping[str, Any]) -> str:
 # fails in reasonable time.
 _UPLOAD_RESOLVE_TIMEOUT_SECONDS = 10.0
 
-# The wire code a step the model did not run is answered with, by why it did not.
-_REFUSAL_CODES: dict[StepRefusalKind, step_pb2.StepFailureCode] = {
-    StepRefusalKind.REFUSED: step_pb2.STEP_FAILURE_CODE_REFUSED,
-    StepRefusalKind.NOT_READY: step_pb2.STEP_FAILURE_CODE_NOT_READY,
-    StepRefusalKind.COMMAND_FAILED: step_pb2.STEP_FAILURE_CODE_COMMAND_FAILED,
-}
 
 # A runtime process hosts exactly one session, so its id is fixed rather than
 # minted: an all-zero UUID every client addresses. Routes still carry and
@@ -211,56 +190,6 @@ _STEPS_CLOSE_REASON = "Session ended: the requested steps are complete."
 _STEP_MESSAGES_LIMIT = 256
 
 logger = get_logger(__name__)
-
-# The runtime's track kind for each kind a wire message names.
-_WIRE_TRACK_KINDS = {
-    platform_pb2.TRACK_KIND_VIDEO: TrackKind.VIDEO,
-    platform_pb2.TRACK_KIND_AUDIO: TrackKind.AUDIO,
-}
-
-
-@dataclass(frozen=True)
-class _EncodedResult:
-    """A requested step's result as the model's thread encoded it, without its files.
-
-    Exactly one is set: *frame*, the v1 frame ready to send; *oversized*, the
-    size of media that does not fit the connection, never copied; or *error*,
-    why the media cannot be carried as frames.
-    """
-
-    frame: bytes | None = None
-    oversized: int = 0
-    error: str | None = None
-
-
-class _StepInputError(ValueError):
-    """A step request's input frames cannot be written to the model's tracks."""
-
-    def __init__(self, entry: str, message: str) -> None:
-        super().__init__(message)
-        self.entry = entry
-
-
-def _refused(key: str, outcome: CommandOutcome) -> str:
-    """Return why the command written under *key* failed the contract."""
-    reason = str(outcome.reason)
-    # A constraint's reason already opens with the field it names.
-    if not reason.startswith(f"{outcome.field}:"):
-        reason = f"{outcome.field}: {reason}"
-    return f"{key} is refused: {reason}"
-
-
-def _step_file_refs(step: CompletedStep) -> list[step_pb2.StepFileRef]:
-    """Reference each extra file a saved step keeps, as its step result is saved.
-
-    A failed step keeps no files, so its result references none.
-    """
-    if step.error is not None:
-        return []
-    return [
-        step_pb2.StepFileRef(name=name, content_type=content_type_of(name), size=len(data))
-        for name, data in step.files.items()
-    ]
 
 
 def _server_version() -> str:
@@ -377,21 +306,36 @@ class Runner(ServiceComponent, ConnectionSink):
         # the codec for each target connection, so a mixed-version session is
         # addressed in each client's own version.
         self._codecs: dict[ProtocolVersion, Codec] = {}
-        # Only v1 carries step traffic. Built once here, since the model's
-        # thread encodes step results with it too.
-        self._step_codec = select(ProtocolVersion.V1)
         # Which client stats batches are journalled: each connection's last
         # accepted time, to drop a batch that follows it too soon.
         self._client_stats = ClientStatsGate()
+        # The stepped path: a client's step requests, in each connection's
+        # arrival order, and the StepResult that answers each.
+        self._steps = StepRequests(
+            StepHost(
+                bridge=lambda: self._bridge,
+                session_running=lambda: self._sm.current_state in _RUNNING_STATES,
+                generation=lambda: self._session_start.generation,
+                sessions_posted=lambda: self._sessions_posted,
+                starting_input_done=lambda: self._starting_input_done,
+                connections=self._connections,
+                journal=self._sm.send,
+                resolve_uploads=self._resolve_command_uploads,
+                command_metrics=self._command_metrics,
+                command_label=self._command_label,
+                codec_for=self._codec_for,
+                spawn=self._spawn,
+            ),
+            upload_wait=_UPLOAD_RESOLVE_TIMEOUT_SECONDS,
+        )
         self._gateway = MessageGateway(
-            sink=self, on_command=self._submit_client_command, on_step=self._submit_client_step
+            sink=self,
+            on_command=self._submit_client_command,
+            on_step=self._steps.submit_client_step,
         )
         self._bridge: ModelBridge | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._inbound: set[asyncio.Task[None]] = set()
-        # Each connection's step requests run one at a time, in arrival order:
-        # its lock, and how many requests hold or wait for it.
-        self._step_order: dict[ConnId, tuple[asyncio.Lock, int]] = {}
         self._teardown: set[asyncio.Task[None]] = set()
         self._orphan_task: asyncio.Task[None] | None = None
         self._session_id = SESSION_ID
@@ -514,7 +458,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 step=self._on_step_completed,
                 command_timing=self._on_command_timing,
                 frame_timing=self._on_frame_timing,
-                step_refusal=self._on_step_refusal,
+                step_refusal=self._steps.on_refusal,
             )
             bridge.start()
         except Exception:
@@ -1038,58 +982,17 @@ class Runner(ServiceComponent, ConnectionSink):
                 if step.session == self._sessions_posted:
                     messages = tuple(self._step_messages)
                     self._step_messages.clear()
-        encoded = self._encode_step_result(step)
+        encoded = self._steps.encode_result(step)
         loop = self._loop
         if loop is not None:
             loop.call_soon_threadsafe(self._record_step, step, messages, recipients, encoded)
-
-    def _encode_step_result(self, step: CompletedStep) -> _EncodedResult | None:
-        """Encode a requested step's result, on the model's thread.
-
-        Copying and serializing a step's media is a result's heaviest work, so
-        all of it happens here, before the hop that keeps the step's replies in
-        order, and not on the runtime loop every connection shares: the loop
-        gets the finished frame. Media larger than the connection took when the
-        request was admitted is not copied at all. The step's files are left
-        out, since whether the step store takes the step is decided on the loop.
-
-        Returns:
-            The encoded result, or ``None`` for a step no client requested.
-        """
-        request = step.request
-        if request is None:
-            return None
-        limit = request.max_message_size
-        size = media_size(step.bundle)
-        if limit is not None and size > limit:
-            return _EncodedResult(oversized=size)
-        try:
-            tracks = track_frames(step.bundle, video_fps=step.fps)
-        except FrameEncodingError as error:
-            return _EncodedResult(error=str(error))
-        result = step_pb2.StepResult(
-            step=request.index,
-            tracks=tracks,
-            # The default loop, the only one a stepped session runs, always
-            # measures the step, so a missing time does not happen in practice.
-            elapsed_seconds=step.elapsed or 0.0,
-            error=step.error,
-            failure_code=(
-                step_pb2.STEP_FAILURE_CODE_FAILED
-                if step.error is not None
-                else step_pb2.STEP_FAILURE_CODE_UNSPECIFIED
-            ),
-        )
-        _, frame = self._step_codec.encode_step_result(request.request_id, result)
-        assert isinstance(frame, bytes)
-        return _EncodedResult(frame=frame)
 
     def _record_step(
         self,
         step: CompletedStep,
         messages: tuple[dict[str, Any], ...] = (),
         recipients: tuple[ConnId, ...] = (),
-        encoded: _EncodedResult | None = None,
+        encoded: EncodedResult | None = None,
     ) -> None:
         """Number a reported step, journal it, and close a session that reached its steps.
 
@@ -1124,7 +1027,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 current_session=self._sessions_posted,
             )
             if step.request is not None:
-                self._end_step_request(step.request.conn_id, step.request.request_id)
+                self._steps.end_request(step.request.conn_id, step.request.request_id)
             return
         if self._steps_failed:
             # The failure took the messages sent before it, so these were sent
@@ -1134,7 +1037,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 messages=len(messages),
             )
             if step.request is not None:
-                self._end_step_request(step.request.conn_id, step.request.request_id)
+                self._steps.end_request(step.request.conn_id, step.request.request_id)
             return
         saved = self._save_step(step, messages)
         if step.stages and step.bundle is not None:
@@ -1148,7 +1051,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 step.stages,
             )
         if step.request is not None:
-            self._send_step_result(step, self._steps_completed, saved=saved, encoded=encoded)
+            self._steps.send_result(step, self._steps_completed, saved=saved, encoded=encoded)
         limit = self._session_start.steps
         if (
             limit is not None
@@ -1391,7 +1294,7 @@ class Runner(ServiceComponent, ConnectionSink):
         for key, name, args in checks:
             outcome = self._bridge.check_command(name, args)
             if not outcome.accepted:
-                return _refused(key, outcome)
+                return refused(key, outcome)
         return None
 
     def stop_session(self, *, moderated: bool = False, reason: str = "") -> None:
@@ -1665,7 +1568,7 @@ class Runner(ServiceComponent, ConnectionSink):
             await self._starting_input_done.wait()
             await self._submit_command(command, held_ms=(time.monotonic() - held_from) * 1000.0)
             return
-        async with self._in_step_order(command.conn_id):
+        async with self._steps.order.hold(command.conn_id):
             await self._starting_input_done.wait()
             await self._submit_command(command, held_ms=(time.monotonic() - held_from) * 1000.0)
 
@@ -1788,366 +1691,9 @@ class Runner(ServiceComponent, ConnectionSink):
             args[param] = await resolve_uploads(spec, args[param], fetch)
         return args
 
-    async def _submit_client_step(self, step: InboundStep) -> None:
-        """Submit a client's step request once the session's starting input is submitted.
-
-        A request waits behind the starting input as a client's command does,
-        so the model sees the starting input, and its ``StartingInputApplied``,
-        before the first requested step. A connection's requests are submitted
-        one at a time, in the order they arrived, so one that waits for an
-        upload holds back the requests sent after it.
-        """
-        async with self._in_step_order(step.conn_id):
-            await self._starting_input_done.wait()
-            await self._submit_step(step)
-
-    @contextlib.asynccontextmanager
-    async def _in_step_order(self, conn_id: ConnId) -> AsyncIterator[None]:
-        """Hold *conn_id*'s step order until the step request or command in hand is submitted.
-
-        Each message is handled on its own task, and the tasks start in the
-        order the messages arrived, so taking the lock before the first await
-        queues the messages in that order. The entry goes once no message of the
-        connection holds or waits for it.
-        """
-        lock, users = self._step_order.get(conn_id, (asyncio.Lock(), 0))
-        self._step_order[conn_id] = (lock, users + 1)
-        try:
-            async with lock:
-                yield
-        finally:
-            _, users = self._step_order[conn_id]
-            if users == 1:
-                del self._step_order[conn_id]
-            else:
-                self._step_order[conn_id] = (lock, users - 1)
-
-    async def _submit_step(
-        self, step: InboundStep, *, upload_wait: float = _UPLOAD_RESOLVE_TIMEOUT_SECONDS
-    ) -> None:
-        """Check a step request whole, then hand it to the model as plain calls and its step.
-
-        Each ``state`` key becomes the model's ``set_<key>`` command, in
-        ascending key order, then each of the request's commands follows, in
-        order. Every call has its uploads resolved, whether referenced in its
-        ``uploads`` map or inline in an argument (a ``state`` value of an
-        upload-typed field carries its file as an inline ``{"upload_id": ...}``
-        reference), and is checked against the contract; every frame is checked
-        against its input track, and each track's frames against its buffer.
-        Only a request that passes every check reaches the model: its calls are
-        posted and journalled, each carrying the step's request id and its
-        entry, so a handler that fails answers the step with
-        ``COMMAND_FAILED``: the calls after it are skipped and the step does
-        not run.
-
-        A request that does not run is answered with a ``StepResult`` that
-        takes no number. It is ``NOT_READY`` when the session is not running.
-        It is ``REFUSED`` when the session does not step or the connection did
-        not negotiate data-channel chunking, or takes less than one plain
-        message (256 KiB) a message, and, naming the entry, when an entry's
-        upload does not arrive or it fails the contract, or when a media input
-        entry names a track the model does not take, holds a frame that cannot
-        be decoded, or holds more than the track's buffer does; such a request
-        changes nothing. Neither is journalled or counted toward the session's
-        steps. A request with no entries and no frames runs a step on the
-        model's current state.
-        """
-        bridge = self._bridge
-        if bridge is None:
-            return
-        # The session's state first: the start it would read the mode from
-        # outlives its session, so outside one it is the previous session's.
-        if self._sm.current_state not in _RUNNING_STATES:
-            self._refuse_step(
-                step.conn_id,
-                step.request_id,
-                "the session is not running a step yet",
-                failure_code=step_pb2.STEP_FAILURE_CODE_NOT_READY,
-            )
-            return
-        if self._session_start.generation is not Generation.STEPPED:
-            self._refuse_step(
-                step.conn_id,
-                step.request_id,
-                "this session is not stepped; start it with generation 'stepped' to request steps",
-            )
-            return
-        if not self._connections.message_chunking(step.conn_id):
-            self._refuse_step(
-                step.conn_id,
-                step.request_id,
-                "this connection cannot carry a step's result; a stepped session needs a "
-                "WebRTC connection that negotiated data-channel chunking",
-            )
-            return
-
-        def refuse(entry: str, reason: str) -> None:
-            self._sm.send(SessionEvent.ERROR, message=f"step request: {reason}")
-            self._refuse_step(step.conn_id, step.request_id, reason, entry=entry)
-
-        entries = [
-            (f"state.{key}", f"set_{key}", {key: value}, {})
-            for key, value in sorted(step.state.items())
-        ]
-        entries += [
-            (f"commands[{index}]", command.name, dict(command.args), dict(command.uploads))
-            for index, command in enumerate(step.commands)
-        ]
-        calls: list[tuple[str, str, dict[str, Any]]] = []
-        for key, name, args, uploads in entries:
-            try:
-                resolved = await self._resolve_command_uploads(name, args, uploads, upload_wait)
-            except UnknownUploadError:
-                self._command_metrics.unresolved_upload(self._command_label(name))
-                refuse(key, f"{key} references an unresolved upload")
-                return
-            calls.append((key, name, resolved))
-        try:
-            media_input = self._check_media_input(step.media_input, step.pictures)
-        except _StepInputError as error:
-            refuse(error.entry, str(error))
-            return
-        # Nothing awaits from here to the step, so the whole request is posted
-        # or none of it is.
-        rejected = bridge.submit_step(
-            calls,
-            media_input,
-            conn_id=step.conn_id,
-            request_id=step.request_id,
-            max_message_size=self._connections.max_message_size(step.conn_id),
-        )
-        if rejected is not None:
-            key, outcome = rejected
-            name = next(name for entry, name, _ in calls if entry == key)
-            self._command_metrics.rejected(self._command_label(name), since=step.received_at)
-            refuse(key, _refused(key, outcome))
-            return
-        # Counted and journalled as a client's own command is, so a step's
-        # calls show up in the same metrics and errors.
-        for _, name, args, _ in entries:
-            self._command_metrics.accepted(self._command_label(name), since=step.received_at)
-            self._sm.send(SessionEvent.COMMAND, name=name, args=args, conn_id=step.conn_id)
-
-    def _check_media_input(
-        self,
-        media_input: tuple[step_pb2.TrackFrames, ...],
-        pictures: Mapping[tuple[int, int], npt.NDArray[np.uint8]],
-    ) -> dict[str, list[FrameSource]]:
-        """Check a step request's media input, by the input track each entry belongs to.
-
-        Every frame is checked without copying its samples; the copy happens
-        when the model's thread calls the source this returns for it. A frame
-        the transport already decoded is read as its picture in *pictures*,
-        keyed by ``(entry, position)``, which only a video track takes.
-
-        Raises:
-            _StepInputError: An entry names a track the model does not take, a
-                track twice, or a kind the track is not, holds a frame that
-                cannot be decoded, or holds more than the track's buffer does.
-        """
-        assert self._bridge is not None
-        tracks = {
-            name: info
-            for name, info in self._bridge.contract.tracks.items()
-            if info.direction is TrackDirection.IN
-        }
-        checked: dict[str, list[FrameSource]] = {}
-        for index, entry in enumerate(media_input):
-            where = f"media_input[{index}]"
-            info = tracks.get(entry.track)
-            if info is None:
-                raise _StepInputError(
-                    where,
-                    f"{where} names {entry.track!r}, which is not an input track of the model",
-                )
-            if entry.track in checked:
-                raise _StepInputError(where, f"{where} names {entry.track!r} a second time")
-            kind = _WIRE_TRACK_KINDS.get(entry.kind)
-            if entry.kind != platform_pb2.TRACK_KIND_UNSPECIFIED and kind is not info.kind:
-                raise _StepInputError(
-                    where, f"{where} says {entry.track!r} is not a {info.kind} track"
-                )
-            frames: list[FrameSource] = []
-            samples = 0
-            for position, frame in enumerate(entry.frames):
-                picture = pictures.get((index, position))
-                if picture is not None:
-                    if info.kind is not TrackKind.VIDEO:
-                        raise _StepInputError(
-                            where,
-                            f"{where}.frames[{position}]: an encoded video frame cannot go "
-                            f"to {info.kind} track {entry.track!r}",
-                        )
-                    frames.append(functools.partial(decoded_frame, frame, picture))
-                    continue
-                try:
-                    shape = check_frame(frame, info.kind)
-                except FrameEncodingError as error:
-                    raise _StepInputError(where, f"{where}.frames[{position}]: {error}") from None
-                if info.kind is TrackKind.AUDIO:
-                    samples += shape[-1]
-                frames.append(functools.partial(decode_frame, frame, info.kind))
-            bound = self._bridge.input_overflow(entry.track, len(frames), samples)
-            if bound is not None:
-                raise _StepInputError(
-                    where,
-                    f"{where} holds {len(frames)} frames for {entry.track!r}, "
-                    f"whose input buffer holds {bound}",
-                )
-            checked[entry.track] = frames
-        return checked
-
-    def _refuse_step(
-        self,
-        conn_id: ConnId,
-        request_id: str,
-        reason: str,
-        *,
-        failure_code: step_pb2.StepFailureCode = step_pb2.STEP_FAILURE_CODE_REFUSED,
-        code: str | None = None,
-        entry: str | None = None,
-    ) -> None:
-        """Answer a step request without a result, on the data channel.
-
-        The answer is a ``StepResult`` with no number, no elapsed time, and no
-        media, carrying *failure_code* and *reason* as its error, the failing
-        handler's *code*, and the request's *entry* at fault. Nothing is
-        journalled or counted for it.
-        """
-        logger.debug(
-            "step request did not run",
-            conn_id=conn_id,
-            reason=reason,
-            failure_code=step_pb2.StepFailureCode.Name(failure_code),
-        )
-        result = step_pb2.StepResult(
-            failure_code=failure_code, error=reason, code=code, entry=entry
-        )
-        self._connections.send_step_reply(
-            conn_id,
-            lambda version: self._codec_for(version).encode_step_result(request_id, result),
-        )
-
-    def _on_step_refusal(self, refusal: StepRefusal) -> None:
-        """Answer a step request the model did not run.
-
-        Called on the model's thread and sent from it, so the answer goes out
-        behind any reply to the commands the model handled before the step. A
-        refusal from an earlier session is answered as a session that ended,
-        since that session's state is gone.
-        """
-        if refusal.session != self._sessions_posted:
-            self._end_step_request(refusal.conn_id, refusal.request_id)
-            return
-        self._refuse_step(
-            refusal.conn_id,
-            refusal.request_id,
-            refusal.reason,
-            failure_code=_REFUSAL_CODES[refusal.kind],
-            code=refusal.code,
-            entry=refusal.entry,
-        )
-
-    def _end_step_request(self, conn_id: ConnId, request_id: str) -> None:
-        """Answer a step request whose session ended before its result could go out."""
-        self._refuse_step(
-            conn_id,
-            request_id,
-            "the session ended before the step's result was sent",
-            failure_code=step_pb2.STEP_FAILURE_CODE_SESSION_ENDED,
-        )
-
-    def _send_step_result(
-        self,
-        step: CompletedStep,
-        index: int,
-        *,
-        saved: bool,
-        encoded: _EncodedResult | None = None,
-    ) -> None:
-        """Answer a requested step with its result, built from the step's report.
-
-        The result is the report's media, one entry per output track, so what
-        the client receives is what the step reported and what a saved step
-        keeps, with the seconds its ``generate()`` took (or what the model
-        reported), the same measurement a saved step records as
-        ``generate_s``. When the step store took the step (*saved*), the
-        result names each extra file the model kept with it, which the client
-        reads from the session's step results; the bytes stay out of the
-        message, so a file counts toward the message's size only by its name,
-        media type, and size. It goes out as one message, before the store has
-        written the step: the files are readable once the step's
-        ``result.json`` is, and a save that fails keeps none, saying why in
-        ``save_error``.
-
-        A step that ran always answers with its number and elapsed time. One
-        whose model reported a failure answers ``FAILED`` with the model's
-        message, as does one whose media cannot be carried as frames. One whose
-        result is larger than the connection takes, by its own limit or by the
-        media engine's refusal, answers ``RESULT_TOO_LARGE`` with no media or
-        files, and the session goes on.
-
-        *encoded* is the result the model's thread encoded (see
-        :meth:`_encode_step_result`); without it, it is encoded here.
-        """
-        request = step.request
-        assert request is not None
-        if encoded is None:
-            encoded = self._encode_step_result(step)
-            assert encoded is not None
-        elapsed = step.elapsed or 0.0
-        request_id = request.request_id
-
-        def too_large(size: int, *, at_least: bool = False) -> bytes:
-            logger.warning("a step result does not fit one message", step=index, size=size)
-            measured = f"at least {size}" if at_least else f"{size}"
-            _, frame = self._step_codec.encode_step_result(
-                request_id,
-                step_pb2.StepResult(
-                    step=index,
-                    elapsed_seconds=elapsed,
-                    failure_code=step_pb2.STEP_FAILURE_CODE_RESULT_TOO_LARGE,
-                    error=(
-                        f"step {index}'s result is {measured} bytes, "
-                        "more than this connection takes in one message"
-                    ),
-                ),
-            )
-            assert isinstance(frame, bytes)
-            return frame
-
-        if encoded.error is not None:
-            logger.error("a step's output could not be encoded", step=index, error=encoded.error)
-            _, failed = self._step_codec.encode_step_result(
-                request_id,
-                step_pb2.StepResult(
-                    step=index,
-                    elapsed_seconds=elapsed,
-                    failure_code=step_pb2.STEP_FAILURE_CODE_FAILED,
-                    error=f"step {index}'s output could not be encoded: {encoded.error}",
-                ),
-            )
-            self._connections.send_step_reply(request.conn_id, lambda _: (Channel.DATA, failed))
-            return
-        if encoded.frame is None:
-            # Frames alone that outgrow one message were never copied.
-            answer = too_large(encoded.oversized, at_least=True)
-            self._connections.send_step_reply(request.conn_id, lambda _: (Channel.DATA, answer))
-            return
-        frame = encoded.frame
-        refs = _step_file_refs(step) if saved else ()
-        if refs:
-            # Serialized protobuf messages merge when concatenated: the files
-            # join the result the model's thread encoded. Only a saved step
-            # that kept files pays this copy on the loop.
-            _, files = self._step_codec.encode_step_result(
-                request_id, step_pb2.StepResult(files=refs)
-            )
-            assert isinstance(files, bytes)
-            frame += files
-        task = asyncio.get_running_loop().create_task(
-            self._connections.send_step_result(request.conn_id, frame, too_large)
-        )
+    def _spawn(self, coro: Coroutine[Any, Any, None]) -> None:
+        """Run *coro* as a task on the runtime loop that the runner tracks until it ends."""
+        task = asyncio.get_running_loop().create_task(coro)
         self._inbound.add(task)
         task.add_done_callback(self._inbound.discard)
 
