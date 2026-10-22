@@ -98,7 +98,7 @@ runtime:
 
 A step's tracks are saved as one `output.mp4`, with a `result.json` that lists the step's files, and `GET /sessions/{id}/steps` serves the folders.
 
-A session can also be stepped: `POST /start_session` with `"generation": "stepped"` runs one step per `RequestStep` a client sends on the data channel instead of streaming, and answers each request with a `StepResult`. The model code is the same in both modes; a model that overrides `run()` or `submit_command()` cannot be stepped.
+A session can also be stepped: `POST /start_session` with `"generation": "stepped"` runs one step per `RequestStep` a client sends on the data channel instead of streaming, and answers each request with a `StepResult` that carries the step's media, so a stepped client must negotiate data-channel chunking. The model code is the same in both modes; a model that overrides `run()` or `submit_command()` cannot be stepped.
 
 A session can join a LiveKit room. The room connection publishes the model's output tracks, and every other participant in the room is a client of the session. The model's `reactor.yaml` says which RPC methods, data topics, and byte streams reach which of its commands, messages, and input tracks:
 
