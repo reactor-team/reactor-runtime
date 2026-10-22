@@ -315,6 +315,23 @@ async def test_a_model_with_its_own_loop_cannot_start_a_stepped_session(
 # -- one step, end to end ------------------------------------------------------
 
 
+async def test_a_session_started_as_soon_as_the_runtime_is_ready_runs_its_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No settle between start() and the session: the model thread may not have
+    # run yet, and the session must still reach the model.
+    runner = await _runner(monkeypatch)
+    try:
+        conn = await _stepped(runner)
+        _send(runner, conn, _request_step("r1"))
+        await _until(lambda: len(conn.sent) == 1)
+
+        result = conn.replies()[0].step_result
+        assert (result.step, result.failure_code) == (1, step_pb2.STEP_FAILURE_CODE_UNSPECIFIED)
+    finally:
+        await runner.stop()
+
+
 async def test_a_requested_step_is_answered_with_its_result_on_the_data_channel(
     runner: Runner,
 ) -> None:
