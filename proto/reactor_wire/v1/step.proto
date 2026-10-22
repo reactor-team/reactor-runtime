@@ -49,12 +49,13 @@ message TrackFrames {
 // individual calls, in order: the state, then the commands, then the media
 // input, and then the step runs. A call whose handler fails stops the request
 // before the step runs (COMMAND_FAILED); the calls applied before it stay
-// applied. Another client's commands may run between a request's calls and
-// its step.
+// applied. Nothing else runs between a request's calls and its step, not even
+// another client's command.
 //
 // Every request ends in exactly one response, a StepResult with the request's
-// request_id. Requests are handled in the order they arrive: one sent before
-// the previous one's result runs after it.
+// request_id. A connection's requests and commands are handled in the order
+// they arrive, even when one waits for an upload: a request sent before the
+// previous one's result runs after it, and after every command sent before it.
 message RequestStep {
   // Values for the model's state fields, keyed by field name. Each key runs as
   // the model's set_<key> command, in ascending key order, before commands.
