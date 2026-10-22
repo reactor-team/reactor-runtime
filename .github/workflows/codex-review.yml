@@ -331,6 +331,10 @@ jobs:
         with:
           version: ${{ env.MISE_VERSION }}
           sha256: ${{ env.MISE_SHA256 }}
+          # Keep setup independent of the PR's minimum version and tool config.
+          working_directory: ${{ runner.temp }}
+          install: false
+          env: false
 
       - name: Resolve deterministic review scope
         id: scope

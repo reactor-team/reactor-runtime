@@ -2,6 +2,7 @@
 # Copyright (c) 2026 Reactor Technologies, Inc. All rights reserved.
 """Check that reviews bootstrap mise independently of the target PR files."""
 
+import json
 import os
 import re
 import shutil
@@ -60,6 +61,82 @@ class MiseReviewBootstrapTests(unittest.TestCase):
         read = _step("Read mise pin")
         assert "shell: bash" in read
         assert 'run: bash .mise-bootstrap/.github/scripts/mise-pin.sh >> "$GITHUB_ENV"' in read
+
+    def test_action_does_not_load_pr_configuration(self):
+        """Install the trusted mise binary without reading or installing PR tools."""
+        setup = _step("Set up mise")
+        for field in (
+            "working_directory: ${{ runner.temp }}",
+            "install: false",
+            "env: false",
+            "version: ${{ env.MISE_VERSION }}",
+            "sha256: ${{ env.MISE_SHA256 }}",
+        ):
+            assert field in setup
+        ci_steps = re.split(
+            r"^      - ", (ROOT / ".github/workflows/ci.yml").read_text(), flags=re.MULTILINE
+        )
+        checks = [
+            step for step in ci_steps if ".github/scripts/test-mise-review-bootstrap.py" in step
+        ]
+        assert len(checks) == 1
+        assert re.search(r"^          MISE_REVIEW_TEST_BINARY: mise$", checks[0], re.MULTILINE)
+
+    @unittest.skipUnless(
+        os.environ.get("MISE_REVIEW_TEST_BINARY"),
+        "Set MISE_REVIEW_TEST_BINARY to test with an explicit mise binary",
+    )
+    def test_action_commands_ignore_future_pr_config(self):
+        """Keep higher floors and unknown TOML outside the action subprocesses."""
+        binary = shutil.which(os.environ["MISE_REVIEW_TEST_BINARY"])
+        assert binary is not None, "MISE_REVIEW_TEST_BINARY must name an executable mise binary"
+        setup = _step("Set up mise")
+        inputs = dict(re.findall(r"^          ([a-z_]+): (.+)$", setup, re.MULTILINE))
+        for config in (
+            'min_version = "2099.1.1"\n[env]\nPR_ONLY_ENV = "present"\n',
+            'min_version = "2099.1.1"\nfuture_syntax = [\n',
+        ):
+            with self.subTest(config=config), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                target = root / "pr"
+                runner_temp = root / "runner-temp"
+                target.mkdir()
+                runner_temp.mkdir()
+                pin = target / "mise.toml"
+                pin.write_text(config)
+                env = {
+                    "PATH": os.environ["PATH"],
+                    "HOME": str(root / "home"),
+                    "MISE_DATA_DIR": str(root / "data"),
+                    "MISE_CACHE_DIR": str(root / "cache"),
+                    "MISE_CONFIG_DIR": str(root / "config"),
+                    "MISE_TRUSTED_CONFIG_PATHS": str(target),
+                    "MISE_AUTO_INSTALL": "false",
+                }
+                baseline = subprocess.run(
+                    [binary, "ls"], cwd=target, env=env, capture_output=True, check=False
+                )
+                assert baseline.returncode != 0
+                if "PR_ONLY_ENV" in config:
+                    assert b"mise version 2099.1.1 is required" in baseline.stderr
+                cwd = (
+                    runner_temp
+                    if inputs.get("working_directory") == "${{ runner.temp }}"
+                    else target
+                )
+                commands = [["--version"], ["ls"]]
+                if inputs.get("install", "true") != "false":
+                    commands.insert(1, ["install"])
+                if inputs.get("env", "true") != "false":
+                    commands.append(["env", "--json"])
+                for command in [*commands, ["env", "--json"]]:
+                    result = subprocess.run(
+                        [binary, *command], cwd=cwd, env=env, capture_output=True, check=False
+                    )
+                    assert result.returncode == 0, result.stderr.decode()
+                    if command == ["env", "--json"]:
+                        assert "PR_ONLY_ENV" not in json.loads(result.stdout)
+                assert pin.read_text() == config
 
     def test_old_target_uses_trusted_pin_and_rejects_invalid_config(self):
         """Run the workflow reader when the target has no bootstrap files."""
