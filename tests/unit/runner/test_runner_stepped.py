@@ -45,7 +45,7 @@ from reactor_runtime.interface.internal.input_buffer import InputBuffer
 from reactor_runtime.message_gateway import InboundStep
 from reactor_runtime.protocol.common import dict_to_struct
 from reactor_runtime.protocol.frames import FrameEncodingError
-from reactor_runtime.runner import runner as runner_module
+from reactor_runtime.runner import stepped as stepped_module
 from reactor_runtime.runner.runner import Runner
 from reactor_runtime.runner.session_start import InvalidSessionStartError
 from reactor_runtime.upload_store import UnknownUploadError
@@ -454,7 +454,7 @@ async def test_a_request_waiting_for_an_upload_holds_back_the_requests_after_it(
     await _until(lambda: len(conn.sent) == 2)
 
     assert [(m.request_id, m.step_result.step) for m in conn.replies()] == [("r1", 1), ("r2", 2)]
-    assert runner._step_order == {}
+    assert len(runner._steps.order) == 0
 
 
 async def test_a_command_waiting_for_an_upload_holds_back_a_step_sent_after_it(
@@ -472,7 +472,7 @@ async def test_a_command_waiting_for_an_upload_holds_back_a_step_sent_after_it(
 
     kinds = [(m.request_id, m.WhichOneof("payload")) for m in conn.replies()]
     assert kinds == [("c1", None), ("r1", "step_result")]
-    assert runner._step_order == {}
+    assert len(runner._steps.order) == 0
 
 
 async def test_one_connections_upload_wait_does_not_hold_back_another_connection(
@@ -611,13 +611,13 @@ async def test_a_steps_frames_are_decoded_on_the_models_thread(
     runner: Runner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     threads: list[int] = []
-    decode = runner_module.decode_frame
+    decode = stepped_module.decode_frame
 
     def recording_decode(frame: step_pb2.Frame, kind: Any) -> Any:
         threads.append(threading.get_ident())
         return decode(frame, kind)
 
-    monkeypatch.setattr(runner_module, "decode_frame", recording_decode)
+    monkeypatch.setattr(stepped_module, "decode_frame", recording_decode)
     conn = await _stepped(runner)
     frames = step_pb2.TrackFrames(track="webcam", frames=[_frame(7)])
     _send(runner, conn, _request_step("r1", media_input=[frames]))
@@ -867,7 +867,7 @@ async def test_a_step_request_in_a_streamed_session_is_refused(runner: Runner) -
 async def test_a_step_request_after_the_session_stops_is_not_ready(runner: Runner) -> None:
     conn = await _stepped(runner)
     runner.stop_session()
-    await runner._submit_step(
+    await runner._steps.submit(
         InboundStep(
             state={},
             commands=(),
@@ -895,7 +895,7 @@ async def test_a_step_request_after_a_streamed_session_stops_is_not_ready(
     conn = V1Connection(1002)
     runner.connection_opened(conn)
     runner.stop_session()
-    await runner._submit_step(
+    await runner._steps.submit(
         InboundStep(
             state={},
             commands=(),
@@ -1039,7 +1039,7 @@ async def test_media_that_outgrows_the_connection_is_answered_without_encoding_i
     def must_not_encode(*_: object, **__: object) -> list[step_pb2.TrackFrames]:
         raise AssertionError("a result whose frames cannot fit was encoded")
 
-    monkeypatch.setattr(runner_module, "track_frames", must_not_encode)
+    monkeypatch.setattr(stepped_module, "track_frames", must_not_encode)
     conn = await _stepped(runner)
     # The model's 2x2 RGB frame is 12 bytes of media alone.
     conn.max_message_size = 8
@@ -1059,13 +1059,13 @@ async def test_a_step_result_s_frames_are_encoded_off_the_runtime_loop(
 ) -> None:
     loop_thread = threading.get_ident()
     encoded_on: list[int] = []
-    encode = runner_module.track_frames
+    encode = stepped_module.track_frames
 
     def recording(*args: Any, **kwargs: Any) -> list[step_pb2.TrackFrames]:
         encoded_on.append(threading.get_ident())
         return encode(*args, **kwargs)
 
-    monkeypatch.setattr(runner_module, "track_frames", recording)
+    monkeypatch.setattr(stepped_module, "track_frames", recording)
     conn = await _stepped(runner)
     _send(runner, conn, _request_step("r1"))
     await _until(lambda: len(conn.sent) == 1)
@@ -1080,7 +1080,7 @@ async def test_a_step_result_with_media_is_serialized_off_the_runtime_loop(
 ) -> None:
     loop_thread = threading.get_ident()
     serialized_on: list[int] = []
-    codec = runner._step_codec
+    codec = runner._steps._codec
     encode = codec.encode_step_result
 
     def recording(request_id: str, result: step_pb2.StepResult) -> Any:
@@ -1116,7 +1116,7 @@ async def test_a_step_whose_output_cannot_be_encoded_is_answered_failed(
     def unencodable(bundle: Any, **_: Any) -> list[step_pb2.TrackFrames]:
         raise FrameEncodingError("float64 video is not supported")
 
-    monkeypatch.setattr("reactor_runtime.runner.runner.track_frames", unencodable)
+    monkeypatch.setattr("reactor_runtime.runner.stepped.track_frames", unencodable)
     conn = await _stepped(runner)
     _send(runner, conn, _request_step("r1"))
     await _until(lambda: len(conn.sent) == 1)
