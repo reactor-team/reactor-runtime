@@ -287,3 +287,18 @@ def test_a_video_track_with_an_empty_frame_cannot_be_encoded() -> None:
     )
     with pytest.raises(FrameEncodingError, match="cannot be shaped"):
         track_frames(bundle)
+
+
+@pytest.mark.parametrize("shape", [(0, 480), (0, 0), (1, 0, 2)])
+def test_an_empty_audio_track_of_another_shape_cannot_be_encoded(shape: tuple[int, ...]) -> None:
+    # Only (0,) and (channels, 0) say "no audio"; any other empty shape is malformed.
+    bundle = MediaBundle(
+        tracks={
+            "a": TrackData(
+                info=TrackInfo(name="a", kind=TrackKind.AUDIO, rate=48000.0),
+                data=np.zeros(shape, dtype=np.int16),
+            )
+        }
+    )
+    with pytest.raises(FrameEncodingError, match="cannot be shaped"):
+        track_frames(bundle)

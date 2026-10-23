@@ -288,10 +288,20 @@ def media_size(bundle: MediaBundle | None) -> int:
     )
 
 
+def _has_no_samples(data: npt.NDArray[Any]) -> bool:
+    """Whether audio is a well-formed payload of no samples, ``(0,)`` or ``(channels, 0)``.
+
+    Any other empty shape, such as ``(0, 480)`` or ``(1, 0, 2)``, is malformed
+    and is left to :func:`encode_frame` to reject.
+    """
+    shape = np.shape(data)
+    return shape == (0,) or (len(shape) == 2 and shape[0] > 0 and shape[1] == 0)
+
+
 def _frames_of(track: TrackData) -> list[tuple[npt.NDArray[Any], bytes | None]]:
     """Split one track's payload into its frames, each with the metadata it carries."""
     data = track.data
-    if track.info.kind is TrackKind.AUDIO and np.size(data) == 0:
+    if track.info.kind is TrackKind.AUDIO and _has_no_samples(data):
         # No audio this step: the track goes out with no frames, so the step
         # keeps its video instead of failing. Empty video stays an error.
         return []
