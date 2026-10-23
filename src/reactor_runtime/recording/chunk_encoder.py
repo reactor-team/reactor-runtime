@@ -2,7 +2,9 @@
 
 The encoder is lazy: the first :meth:`ChunkEncoder.feed_video` opens the output
 from the frame's shape. Output is HLS-fMP4 (``init.mp4`` + ``chunk_NNNNN.m4s``)
-written straight into the served directory. Every recording carries an audio
+written straight into the served directory. One recording can span several
+encoders, each a *part* that picks up the segment numbering and the timeline
+where the previous part's grid left off. Every recording carries an audio
 track — a video-only model gets a silent one, so each segment holds both streams
 whatever the model emits.
 """
@@ -26,6 +28,17 @@ logger = get_logger(__name__)
 _INIT_FILENAME = "init.mp4"
 _SEGMENT_PATTERN = "chunk_%05d.m4s"
 _MANIFEST_FILENAME = "manifest.m3u8"
+# A later part writes its own init and playlist under these names, so it never
+# overwrites the first part's: ``init.mp4`` is the one the recording is served
+# with, and a later part's init is byte-identical to it.
+_PART_INIT_PATTERN = "init_{:05d}.mp4"
+_PART_MANIFEST_PATTERN = "manifest_{:05d}.m3u8"
+
+
+def part_init_filename(first_segment: int) -> str:
+    """Return the name of the init a part starting at *first_segment* writes."""
+    return _INIT_FILENAME if first_segment == 0 else _PART_INIT_PATTERN.format(first_segment)
+
 
 # The output pixel format and profile. With rgb24 input and no explicit choice,
 # libx264 selects yuv444p (Hi444PP), which many decoders and uploaders reject;
@@ -78,6 +91,12 @@ class ChunkEncoder:
     feed encodes and muxes; :meth:`stop` drains the encoders and writes the
     trailer, which is what closes the final segment.
 
+    An encoder opened at *first_segment* above zero continues a recording an
+    earlier encoder stopped: its segments are numbered from *first_segment* and
+    its timeline starts at ``first_segment * chunk_seconds``, so every segment
+    still covers the stretch of the grid its index names, and the earlier
+    part's ``init.mp4`` decodes it.
+
     The recorded timeline is media time, not wall-clock time: a frame is stamped
     at the next position on a fixed *frame_rate* grid and an audio block at the
     sample that follows the last one. The recorder resamples each chunk onto that
@@ -97,8 +116,26 @@ class ChunkEncoder:
         has_audio: bool,
         audio_sample_rate: int,
         frame_rate: int = 30,
+        *,
+        first_segment: int = 0,
+        frame_size: tuple[int, int] | None = None,
     ) -> None:
-        """Record the output directory and encode settings; open the output lazily."""
+        """Record the output directory and encode settings; open the output lazily.
+
+        Args:
+            output_dir: The directory the init and chunk segments are written into.
+            config: The recording settings.
+            has_audio: Whether the model's audio is fed; a recording without it
+                carries a silent track.
+            audio_sample_rate: The sample rate of the fed audio.
+            frame_rate: The fixed grid frames are stamped on.
+            first_segment: The index of the first segment this encoder writes,
+                and the grid position its timeline starts at.
+            frame_size: The ``(width, height)`` to encode at, ahead of the
+                configured target size and the first frame's shape. A later part
+                passes the size the first part opened with, which is what keeps
+                its init identical to the first part's.
+        """
         self._output_dir = Path(output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._config = config
@@ -108,6 +145,8 @@ class ChunkEncoder:
         # One grid slot of audio: what the recorder pairs with each frame, and
         # what a video-only recording gets as silence in its place.
         self._samples_per_frame = round(audio_sample_rate / frame_rate)
+        self._first_segment = first_segment
+        self._frame_size = frame_size
 
         self._container: av.container.OutputContainer | None = None
         self._video: av.VideoStream | None = None
@@ -115,8 +154,8 @@ class ChunkEncoder:
         # The next grid position for each stream. Video counts frames, audio
         # counts samples, and both advance only by what was actually encoded, so
         # the two timelines stay locked to each other.
-        self._video_pts = 0
-        self._audio_pts = 0
+        self._video_pts = first_segment * config.chunk_seconds * frame_rate
+        self._audio_pts = first_segment * config.chunk_seconds * audio_sample_rate
         self._lock = threading.Lock()
         self._failed = False
         self._stopped = False
@@ -125,6 +164,11 @@ class ChunkEncoder:
     def output_dir(self) -> Path:
         """The directory the init and chunk segments are written into."""
         return self._output_dir
+
+    @property
+    def frame_size(self) -> tuple[int, int] | None:
+        """Return the ``(width, height)`` the output opened at, or ``None`` before it opened."""
+        return self._frame_size if self._container is not None else None
 
     @property
     def failed(self) -> bool:
@@ -155,7 +199,9 @@ class ChunkEncoder:
                 raise RuntimeError("ChunkEncoder is in a failed state")
             if self._container is None:
                 width, height = self._config.target_width, self._config.target_height
-                if width and height:
+                if self._frame_size is not None:
+                    self._open(*self._frame_size)
+                elif width and height:
                     self._open(int(width), int(height))
                 else:
                     self._open(int(frame.shape[1]), int(frame.shape[0]))
@@ -237,13 +283,18 @@ class ChunkEncoder:
     def _open(self, width: int, height: int) -> None:
         """Open the HLS output and add the video and audio streams.
 
-        The muxer numbers segments from zero, which the marker math and the
-        manifest endpoint already assume. The ``.m3u8`` it writes alongside them
-        is ignored — the ``/clips`` endpoint composes its own manifest.
+        The muxer numbers segments from *first_segment*, so segment ``n`` covers
+        ``[n, n + 1) * chunk_seconds`` on the recording timeline, which the
+        marker math and the manifest endpoint assume. The ``.m3u8`` it writes
+        alongside them is ignored — the ``/clips`` endpoint composes its own
+        manifest.
         """
         config = self._config
+        first = self._first_segment
+        init_name = part_init_filename(first)
+        manifest_name = _MANIFEST_FILENAME if first == 0 else _PART_MANIFEST_PATTERN.format(first)
         container = av.open(
-            str(self._output_dir / _MANIFEST_FILENAME),
+            str(self._output_dir / manifest_name),
             mode="w",
             format="hls",
             options={
@@ -251,8 +302,15 @@ class ChunkEncoder:
                 "hls_time": str(config.chunk_seconds),
                 "hls_list_size": "0",
                 "hls_flags": "independent_segments",
-                "hls_fmp4_init_filename": _INIT_FILENAME,
+                "hls_fmp4_init_filename": init_name,
                 "hls_segment_filename": str(self._output_dir / _SEGMENT_PATTERN),
+                "start_number": str(first),
+                # Each fragment's decode time is the packet's own timestamp. The
+                # fMP4 muxer otherwise rebases a stream to zero and records the
+                # offset as an edit list in the init segment, so a later part
+                # would restart its segments at zero and ship an init the first
+                # part's does not match.
+                "hls_segment_options": "movflags=+frag_discont",
             },
         )
         video = container.add_stream(
@@ -277,12 +335,14 @@ class ChunkEncoder:
         self._container = container
         self._video = video
         self._audio = audio
+        self._frame_size = (width, height)
         logger.info(
             "recorder encoder opened",
             width=width,
             height=height,
             frame_rate=self._frame_rate,
             audio=self._has_audio,
+            first_segment=first,
         )
 
     def _write_video(self, frame: npt.NDArray[Any]) -> None:
