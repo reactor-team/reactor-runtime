@@ -4,7 +4,7 @@
 #
 # reactor-runtime is the runtime itself. Its version is pinned here; bump
 # this line to upgrade, and reactor.yaml's build.runtime_version to match.
-reactor-runtime==3.9.0
+reactor-runtime==3.9.1
 
 # The model half: Overworld's inference engine for Waypoint, pinned to a tag.
 # It brings torch and its CUDA stack with it.
