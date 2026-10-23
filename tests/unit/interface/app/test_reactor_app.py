@@ -1,4 +1,5 @@
 import asyncio
+import threading
 import time
 from typing import Any
 
@@ -271,6 +272,44 @@ async def test_client_send_routes_addressed_without_a_request_id() -> None:
     assert client is not None
     await client.send(BrightnessSet(value=9))
     assert addressed == [(ConnId(1001), BrightnessSet(value=9), None)]
+
+
+def test_events_posted_before_the_model_loop_runs_are_delivered_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The runtime is ready as soon as the model thread is spawned, so an event can
+    # arrive before the thread's loop runs. Hold the loop back to post in that
+    # window: the session start and the command must still reach the model.
+    model = Model()
+    addressed: Addressed = []
+    model.bind_output(
+        broadcast=lambda message: None,
+        addressed=lambda conn_id, message, request_id: addressed.append(
+            (conn_id, message, request_id)
+        ),
+        media=lambda chunk: None,
+    )
+    gate = threading.Event()
+    run = model._run
+
+    def held_run() -> None:
+        gate.wait(5)
+        run()
+
+    monkeypatch.setattr(model, "_run", held_run)
+    model.start_thread()
+    try:
+        model.post_reactor_event(ClientConnected(ConnId(1001), 1))
+        model.submit_command(_cmd("set_value", value=42), ConnId(1001), "req-9")
+        gate.set()
+        deadline = time.monotonic() + 2
+        while model.value != 42 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert model.value == 42
+        assert (ConnId(1001), BrightnessSet(value=42), "req-9") in addressed
+    finally:
+        model.stop()
+        time.sleep(0.1)
 
 
 def test_loops_drain_the_queues_on_the_model_thread() -> None:

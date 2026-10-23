@@ -640,7 +640,13 @@ class ReactorCore:
         return buffer.push(frame, source, session)
 
     def _enqueue(self, item: Inbound) -> None:
-        """Thread-safe put onto the inbound queue, dropped before the loop runs."""
+        """Thread-safe put onto the inbound queue.
+
+        The queue exists from :meth:`start_thread` on, so an item posted after
+        the thread is spawned but before its loop runs waits on the loop and
+        is delivered, in order, once the loop starts. Only an item posted
+        before the thread is spawned, or after the loop closed, is dropped.
+        """
         queue = self._inbound_q
         if queue is None or self._loop.is_closed():
             return
@@ -650,7 +656,13 @@ class ReactorCore:
     # -- thread lifecycle (start_thread is the only thing that spawns) --------
 
     def start_thread(self) -> None:
-        """Spawn the model thread running its own asyncio loop."""
+        """Spawn the model thread running its own asyncio loop.
+
+        The inbound queue is made here, before the thread runs, not on the
+        thread: the runtime is ready, and posts events, as soon as this
+        returns, which can be before the thread's loop starts.
+        """
+        self._inbound_q = asyncio.Queue()
         self._thread = threading.Thread(target=self._run, name="model", daemon=True)
         self._thread.start()
 
@@ -676,7 +688,9 @@ class ReactorCore:
         tasks are cancelled, so the owner can end the session rather than keep
         serving a dead loop. Cancellation is the normal stop and reports nothing.
         """
-        self._inbound_q = asyncio.Queue()
+        # start_thread made the queue; a loop run without it makes its own.
+        if self._inbound_q is None:
+            self._inbound_q = asyncio.Queue()
         self._loop_task = asyncio.current_task()
         self._on_loop_ready()
         tasks = [asyncio.create_task(coro) for coro in self._background_coros()]
