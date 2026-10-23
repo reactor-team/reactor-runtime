@@ -14,6 +14,7 @@ import pytest
 
 from reactor_runtime import (
     ApplicationError,
+    Audio,
     CommandError,
     InputField,
     InputState,
@@ -118,6 +119,25 @@ class StepModel(ReactorApp):
 
 
 _KEPT_FILES = {"depth.png": b"\x89PNG....", "notes.bin": b"abc"}
+
+
+class VideoAndAudio(Output):
+    main_video: Video
+    main_audio: Audio
+
+
+class SilentStepModel(StepModel):
+    """Returns video and no audio, an empty ``(1, 0)`` array, as examples/echo does."""
+
+    # It declares an audio output the base model does not have.
+    def generate(  # type: ignore[ty:invalid-method-override]
+        self, input: tuple[str, list[str], list[int]]
+    ) -> VideoAndAudio:
+        self.inputs.append(input)
+        return VideoAndAudio(
+            main_video=np.zeros((2, 2, 3), dtype=np.uint8),
+            main_audio=np.zeros((1, 0), dtype=np.int16),
+        )
 
 
 class OwnLoop(StepModel):
@@ -328,6 +348,27 @@ async def test_a_session_started_as_soon_as_the_runtime_is_ready_runs_its_step(
 
         result = conn.replies()[0].step_result
         assert (result.step, result.failure_code) == (1, step_pb2.STEP_FAILURE_CODE_UNSPECIFIED)
+    finally:
+        await runner.stop()
+
+
+async def test_a_step_whose_audio_is_empty_keeps_its_video_and_does_not_fail(
+    monkeypatch: pytest.MonkeyPatch, register_model: Callable[[type], None]
+) -> None:
+    register_model(SilentStepModel)
+    runner = await _runner(monkeypatch, SilentStepModel)
+    try:
+        conn = await _stepped(runner)
+        _send(runner, conn, _request_step("r1"))
+        await _until(lambda: len(conn.sent) == 1)
+
+        result = conn.replies()[0].step_result
+        assert (result.step, result.failure_code) == (1, step_pb2.STEP_FAILURE_CODE_UNSPECIFIED)
+        assert not result.HasField("error")
+        assert [(t.track, len(t.frames)) for t in result.tracks] == [
+            ("main_video", 1),
+            ("main_audio", 0),
+        ]
     finally:
         await runner.stop()
 
