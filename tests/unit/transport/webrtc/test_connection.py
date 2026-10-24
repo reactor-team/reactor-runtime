@@ -2,6 +2,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 
+import av
 import numpy as np
 import pytest
 from conftest import FakePeer
@@ -31,7 +32,7 @@ from reactor_runtime.transport.webrtc import (
     WebRtcPeerFactory,
 )
 from reactor_runtime.transport.webrtc.signaling import IceCandidate
-from reactor_wire.v1 import control_pb2, platform_pb2
+from reactor_wire.v1 import control_pb2, data_pb2, platform_pb2, step_pb2
 
 
 async def _connect(
@@ -256,6 +257,59 @@ async def test_a_client_stats_frame_goes_to_on_client_stats_not_on_message(
 
     assert [stat.track_name for batch in batches for stat in batch.track_stats] == ["main_video"]
     assert messages == [ping]
+
+
+async def test_an_encoded_step_reaches_on_message_decoded_or_is_refused_to_the_client(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    conn = await _connect(fake_peer, factory_for(fake_peer), out_av_tracks)
+    fake_peer.protocol_version = ProtocolVersion.V1
+    messages: list[bytes | str] = []
+    conn.on_message(lambda payload, version, channel: messages.append(payload))
+
+    codec = av.CodecContext.create("libx264", "w")
+    codec.width, codec.height, codec.pix_fmt = 32, 32, "yuv420p"
+    codec.options = {"g": "4", "bf": "0", "tune": "zerolatency", "x264-params": "scenecut=0"}
+    picture = np.full((32, 32, 3), 90, dtype=np.uint8)
+    packets = [bytes(p) for p in codec.encode(av.VideoFrame.from_ndarray(picture, format="rgb24"))]
+    packets += [bytes(p) for p in codec.encode(None)]
+
+    def step(request_id: str, data: bytes) -> bytes | str:
+        frame = step_pb2.Frame(
+            encoding=step_pb2.FRAME_ENCODING_H264, dtype="uint8", shape=[32, 32, 3], data=data
+        )
+        _, payload = V1Codec().encode(
+            data_pb2.DataClientMessage(
+                request_id=request_id,
+                request_step=step_pb2.RequestStep(
+                    media_input=[step_pb2.TrackFrames(track="webcam", frames=[frame])]
+                ),
+            )
+        )
+        return payload
+
+    fake_peer.fire_message(step("data_1", packets[0]))
+    fake_peer.fire_message(step("data_2", b"\x00\x00\x01\x41 not an idr"))
+    for _ in range(100):
+        if len(messages) == 1 and len(fake_peer.messages) == 1:
+            break
+        await asyncio.sleep(0.01)
+
+    (delivered,) = messages
+    assert isinstance(delivered, bytes)
+    decoded = data_pb2.DataClientMessage.FromString(delivered)
+    (frame,) = decoded.request_step.media_input[0].frames
+    assert decoded.request_id == "data_1"
+    assert frame.encoding == step_pb2.FRAME_ENCODING_RAW
+    assert list(frame.shape) == [32, 32, 3]
+    assert len(frame.data) == 32 * 32 * 3
+    (refused,) = fake_peer.messages
+    assert isinstance(refused, bytes)
+    answer = data_pb2.DataServerMessage.FromString(refused)
+    assert answer.request_id == "data_2"
+    assert answer.step_result.failure_code == step_pb2.STEP_FAILURE_CODE_REFUSED
 
 
 async def test_send_control_delegates_to_peer(

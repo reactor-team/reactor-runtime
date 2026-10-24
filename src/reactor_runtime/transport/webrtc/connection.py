@@ -31,6 +31,7 @@ from reactor_runtime.core import (
     TransportReading,
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion
+from reactor_runtime.transport.step_frames import StepFrameGate
 from reactor_runtime.transport.webrtc.client_stats import read_client_stats
 from reactor_runtime.transport.webrtc.config import WebRtcConfig
 from reactor_runtime.transport.webrtc.pacer import MediaPacer
@@ -102,6 +103,9 @@ class WebRTCConnection:
         )
 
         self._on_message: Callable[[bytes | str, ProtocolVersion, Channel], None] | None = None
+        # Decodes the encoded frames of a step request before it goes up, in
+        # arrival order; a request it cannot decode is answered here.
+        self._steps = StepFrameGate(self._forward_message, self.send_message)
         self._on_media: Callable[[str, InputFrame], None] | None = None
         self._on_ping: Callable[[], None] | None = None
         self._on_client_stats: Callable[[ClientStatsBatch], None] | None = None
@@ -187,7 +191,12 @@ class WebRTCConnection:
         return self._peer.protocol_version
 
     def on_message(self, callback: Callable[[bytes | str, ProtocolVersion, Channel], None]) -> None:
-        """Register the sink for inbound frames, with the codec version and channel."""
+        """Register the sink for inbound frames, with the codec version and channel.
+
+        A step request whose media carries encoded frames reaches it with
+        those frames decoded to raw ones; one that does not decode is refused
+        to the client and does not reach it.
+        """
         self._on_message = callback
 
     def on_media(self, callback: Callable[[str, InputFrame], None]) -> None:
@@ -335,6 +344,11 @@ class WebRTCConnection:
             if self._on_client_stats is not None:
                 self._on_client_stats(batch)
             return
+        self._steps.submit(payload, version, channel)
+
+    def _forward_message(
+        self, payload: bytes | str, version: ProtocolVersion, channel: Channel
+    ) -> None:
         if self._on_message is not None:
             self._on_message(payload, version, channel)
 
@@ -470,6 +484,7 @@ class WebRTCConnection:
 
     def _cancel_tasks(self) -> None:
         self._pacer.stop()
+        self._steps.close()
         for task in (self._watchdog_task, self._stats_task):
             if task is not None:
                 task.cancel()
