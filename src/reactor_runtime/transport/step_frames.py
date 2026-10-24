@@ -119,15 +119,54 @@ def _encoding_name(value: int) -> str:
 _IDR_NAL = 5
 """The NAL unit type of an IDR slice: the access unit an H.264 decoder can start at."""
 
+_VCL_NALS = frozenset(range(1, 6))
+"""NAL unit types that carry a picture's slices (coded slice data, non-IDR and IDR)."""
 
-def _nal_types(data: bytes) -> set[int]:
-    """The NAL unit types of an Annex B access unit, read after each start code."""
-    types = set()
+_ACCESS_UNIT_START_NALS = frozenset({6, 7, 8, 9})
+"""SEI, SPS, PPS and access unit delimiter: after a picture's slices, each starts the
+next access unit (H.264 7.4.1.2.3)."""
+
+
+def _nal_units(data: bytes) -> list[bytes]:
+    """The NAL units of an Annex B byte stream, without their start codes.
+
+    A unit's trailing zero bytes are the leading byte of a four-byte start code
+    or padding; a unit's own bytes never end in zero (rbsp_trailing_bits).
+    """
+    units = []
     at = data.find(b"\x00\x00\x01")
-    while at != -1 and at + 3 < len(data):
-        types.add(data[at + 3] & 0x1F)
-        at = data.find(b"\x00\x00\x01", at + 3)
-    return types
+    while at != -1:
+        start = at + 3
+        following = data.find(b"\x00\x00\x01", start)
+        unit = data[start : len(data) if following == -1 else following].rstrip(b"\x00")
+        if unit:
+            units.append(unit)
+        at = following
+    return units
+
+
+def _access_unit(data: bytes) -> tuple[int | None, str | None]:
+    """Read *data* as one access unit: the type of its first slice, or what is wrong with it.
+
+    Returns ``(first_vcl_type, None)`` for one access unit with a picture, or
+    ``(None, problem)``. A picture begins at a slice whose ``first_mb_in_slice``
+    is 0 (its first bit set, the one-bit code for 0), so a second such slice,
+    or an SEI, SPS, PPS or delimiter after a slice, starts another access unit.
+    """
+    first_vcl: int | None = None
+    for unit in _nal_units(data):
+        kind = unit[0] & 0x1F
+        if kind in _VCL_NALS:
+            starts_picture = len(unit) > 1 and bool(unit[1] & 0x80)
+            if first_vcl is not None and starts_picture:
+                return None, "holds more than one picture"
+            if first_vcl is None:
+                first_vcl = kind
+        elif first_vcl is not None and kind in _ACCESS_UNIT_START_NALS:
+            return None, "holds more than one access unit"
+    if first_vcl is None:
+        return None, "holds no picture"
+    return first_vcl, None
 
 
 def _decode_h264(entry: step_pb2.TrackFrames, where: str) -> StepFrameRefusal | None:
@@ -135,25 +174,30 @@ def _decode_h264(entry: step_pb2.TrackFrames, where: str) -> StepFrameRefusal | 
     positions = [
         p for p, f in enumerate(entry.frames) if f.encoding == step_pb2.FRAME_ENCODING_H264
     ]
-    first = entry.frames[positions[0]]
-    # A decoder handed a stream that starts past its keyframe conceals the
-    # missing reference and returns pictures anyway, so the start is checked
-    # rather than left to the decoder.
-    if first.data and _IDR_NAL not in _nal_types(first.data):
-        return StepFrameRefusal(
-            f"{where}.frames[{positions[0]}]",
-            "a track's H.264 frames must start at a keyframe (an IDR access unit)",
-        )
+    # Each frame is checked as one access unit before anything decodes: a
+    # decoder takes two concatenated pictures as one packet and returns only
+    # one of them, and handed a stream that starts past its keyframe it
+    # conceals the missing reference and returns pictures anyway.
+    for index, position in enumerate(positions):
+        data = entry.frames[position].data
+        if not data:
+            return StepFrameRefusal(f"{where}.frames[{position}]", "an H.264 frame carries no data")
+        first_vcl, problem = _access_unit(data)
+        if problem is not None:
+            return StepFrameRefusal(
+                f"{where}.frames[{position}]",
+                f"the H.264 frame {problem}; each frame is one access unit",
+            )
+        if index == 0 and first_vcl != _IDR_NAL:
+            return StepFrameRefusal(
+                f"{where}.frames[{position}]",
+                "a track's H.264 frames must start at a keyframe (an IDR access unit)",
+            )
     decoder = av.CodecContext.create("h264", "r")
     decoded: dict[int, av.VideoFrame] = {}
     try:
         for position in positions:
-            frame = entry.frames[position]
-            if not frame.data:
-                return StepFrameRefusal(
-                    f"{where}.frames[{position}]", "an H.264 frame carries no data"
-                )
-            packet = av.Packet(frame.data)
+            packet = av.Packet(entry.frames[position].data)
             # The position rides through the decoder as the packet's pts, so each
             # picture finds the frame it came from even when the decoder reorders.
             packet.pts = position

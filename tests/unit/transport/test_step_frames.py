@@ -169,6 +169,38 @@ def test_frames_that_do_not_start_at_a_keyframe_are_refused() -> None:
     assert "keyframe" in refusal.reason
 
 
+def test_a_frame_holding_a_p_frame_then_an_idr_is_refused() -> None:
+    # A decoder would take the two as one packet and keep only the second picture.
+    packets = _encode(_pictures(8))
+    refusal = decode_step_frames(_step(_h264(packets[1] + packets[4])))
+
+    assert refusal is not None
+    assert refusal.entry == "media_input[0].frames[0]"
+    assert "more than one access unit" in refusal.reason
+
+
+def test_a_frame_holding_two_pictures_is_refused() -> None:
+    packets = _encode(_pictures(4))
+    refusal = decode_step_frames(_step(_h264(packets[0] + packets[1])))
+
+    assert refusal is not None
+    assert refusal.entry == "media_input[0].frames[0]"
+    assert "more than one picture" in refusal.reason
+
+
+def test_a_frame_with_no_picture_is_refused() -> None:
+    from reactor_runtime.transport.step_frames import _nal_units
+
+    (first, *_) = _encode(_pictures(4))
+    parameter_sets = b"".join(
+        b"\x00\x00\x00\x01" + unit for unit in _nal_units(first) if unit[0] & 0x1F in (7, 8)
+    )
+    refusal = decode_step_frames(_step(_h264(parameter_sets)))
+
+    assert refusal is not None
+    assert "holds no picture" in refusal.reason
+
+
 def test_a_frame_that_decodes_to_another_size_is_refused() -> None:
     (packet,) = _encode(_pictures(1))
     refusal = decode_step_frames(_step(_h264(packet, shape=[720, 1280, 3])))
