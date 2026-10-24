@@ -12,6 +12,13 @@ enum FrameEncoding {
   // Uncompressed samples in row-major order, described by dtype and shape:
   // uint8 RGB for video, little-endian int16 PCM for audio.
   FRAME_ENCODING_RAW = 1;
+  // One H.264 access unit (Annex B) of a video track. dtype and shape describe
+  // the frame it decodes to: uint8 RGB, (height, width, 3). The encoded frames
+  // of a track in one request are one stream in decode order, starting at a
+  // keyframe; each decodes to exactly one frame, which keeps the encoded
+  // frame's metadata and capture time. The receiver decodes them before it
+  // checks the request, and refuses the request when it cannot.
+  FRAME_ENCODING_H264 = 2;
 }
 
 // One frame of a track: a video image or a block of audio samples.
