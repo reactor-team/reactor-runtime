@@ -3637,6 +3637,21 @@ async def test_a_model_that_failed_to_load_is_measured(monkeypatch: pytest.Monke
         await runner.stop()
 
 
+async def test_a_load_is_measured_from_an_import_the_assembly_began(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
+    runner = Runner(RuntimeConfig(model_ref="fake:Model"), load_started=time.monotonic() - 30.0)
+
+    await runner.start()
+    try:
+        load = _metric(runner, "runtime_model_load_seconds_sum", outcome="ok")
+        assert load is not None
+        assert load >= 30.0
+    finally:
+        await runner.stop()
+
+
 async def test_emitted_media_is_counted_in_frames_per_track(started_runner: Runner) -> None:
     started_runner.start_session({})
     bundle = MediaBundle(

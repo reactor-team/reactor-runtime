@@ -46,7 +46,7 @@ class ParticipantControl(FakeControl):
         if self.input_claims.get(name) == conn_id:
             del self.input_claims[name]
 
-    def new_conn_id(self, transport: str) -> ConnId:
+    def new_conn_id(self, transport: str, sid: str | None = None) -> ConnId:
         assert transport == "livekit"
         try:
             return ConnId(next(self._ids))

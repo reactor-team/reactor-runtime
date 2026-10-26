@@ -25,8 +25,9 @@ def runner_event_to_dict(event: TransitionEvent) -> dict[str, Any]:
     Returns:
         A plain dict whose ``type`` is ``"transition"``, whose ``event``/
         ``from``/``to`` name the move, whose ``ts`` is the move's Unix epoch
-        millisecond timestamp, and whose ``detail`` carries the move's payload
-        verbatim.
+        millisecond timestamp, whose ``session_id`` names the session the
+        move belongs to (``null`` outside one), and whose ``detail`` carries
+        the move's payload verbatim.
     """
     transition = event.transition
     return {
@@ -35,6 +36,7 @@ def runner_event_to_dict(event: TransitionEvent) -> dict[str, Any]:
         "from": transition.from_state.name.lower(),
         "to": transition.to_state.name.lower(),
         "ts": transition.ts_ms,
+        "session_id": event.session_id,
         "detail": dict(transition.detail),
     }
 

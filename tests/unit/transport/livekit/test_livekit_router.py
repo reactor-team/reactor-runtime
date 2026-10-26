@@ -51,7 +51,7 @@ class FakeRunner:
         if sid != _SID:
             raise UnknownSessionError
 
-    def new_conn_id(self, transport: str) -> ConnId:
+    def new_conn_id(self, transport: str, sid: str | None = None) -> ConnId:
         conn_id = ConnId(4711 + len(self.minted))
         self.minted.append((conn_id, transport))
         self.claims[conn_id] = transport
@@ -73,7 +73,10 @@ class FakeRunner:
     def connection_failed(self, conn_id: ConnId, transport: str, reason: str) -> None:
         pass
 
-    def session_epoch(self) -> int:
+    def transport_conn_id(self, sid: str, cid: int) -> ConnId:
+        return ConnId(cid)
+
+    def session_epoch(self, sid: str | None = None) -> int:
         return self.epoch
 
     def offer_admitted(self, conn_id: ConnId) -> None:
@@ -157,6 +160,7 @@ class FakeRoomSession:
         ice_servers: Any = (),
     ) -> None:
         self.conn_id = conn_id
+        self.control = control
         self.config = config
         self.ice_servers = list(ice_servers)
         self.url = url
@@ -570,3 +574,51 @@ def test_livekit_is_unavailable_when_the_sdk_is_not_installed(
 
 def test_livekit_is_available_in_the_development_environment() -> None:
     assert livekit_available() is True
+
+
+class HostRunner(FakeRunner):
+    """A SessionControl hosting two sessions, minting ids per session and keying them apart."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.local: dict[str, int] = {"s1": 0, "s2": 0}
+        self.keys: dict[tuple[str, int], ConnId] = {}
+        self.epochs = {"s1": 1, "s2": 1}
+
+    def require_session_running(self, sid: str) -> None:
+        if sid not in self.local:
+            raise UnknownSessionError
+
+    def new_conn_id(self, transport: str, sid: str | None = None) -> ConnId:
+        assert sid is not None, "a host mints within a named session"
+        self.local[sid] += 1
+        return ConnId(4710 + self.local[sid])
+
+    def transport_conn_id(self, sid: str, cid: int) -> ConnId:
+        return self.keys.setdefault((sid, cid), ConnId(len(self.keys) + 1))
+
+    def session_epoch(self, sid: str | None = None) -> int:
+        assert sid is not None
+        return self.epochs[sid]
+
+
+def test_each_hosted_session_has_its_own_room_connection(rooms: list[FakeRoomSession]) -> None:
+    runner = HostRunner()
+    client = _client(runner)
+
+    one = client.post("/sessions/s1/transport/livekit/connections", json=_ROOM)
+    two = client.post("/sessions/s2/transport/livekit/connections", json=_ROOM)
+
+    assert (one.status_code, two.status_code) == (202, 202)
+    # Each session addresses its connection by its own id, as on a runtime of its own.
+    assert one.json() == two.json() == {"connection_id": 4711}
+    first, second = rooms
+    assert first.conn_id != second.conn_id
+    assert runner.keys == {("s1", 4711): first.conn_id, ("s2", 4711): second.conn_id}
+    # A participant id a room mints is minted in the room's own session and keyed apart.
+    assert first.control.new_conn_id("livekit") != second.control.new_conn_id("livekit")
+    assert runner.local == {"s1": 2, "s2": 2}
+    # Another session starting does not make this session's room connection unknown.
+    runner.epochs["s2"] += 1
+    assert client.get("/sessions/s1/transport/livekit/connections/4711").status_code == 202
+    assert client.get("/sessions/s2/transport/livekit/connections/4711").status_code == 404

@@ -11,6 +11,7 @@ routers and acceptors it mounts.
 from __future__ import annotations
 
 import asyncio
+import socket
 from collections.abc import Callable
 
 import uvicorn
@@ -28,6 +29,7 @@ from reactor_runtime.http.routes import (
 from reactor_runtime.log import get_logger
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.runner import Runner
+from reactor_runtime.runner.session_host import SessionHost
 from reactor_runtime.transport.router import TransportRouter
 
 logger = get_logger(__name__)
@@ -42,7 +44,7 @@ _HTTP_SHUTDOWN_SECONDS = 2
 
 
 def build_app(
-    runner: Runner,
+    runner: Runner | SessionHost,
     transports: list[TransportRouter],
     process_health: Callable[[], Health],
     metrics: RuntimeMetrics,
@@ -123,10 +125,12 @@ class HttpServer(ServiceComponent):
     def __init__(
         self,
         cfg: RuntimeConfig,
-        runner: Runner,
+        runner: Runner | SessionHost,
         transports: list[TransportRouter],
         process_health: Callable[[], Health],
         metrics: RuntimeMetrics,
+        *,
+        listeners: list[socket.socket] | None = None,
     ) -> None:
         """Assemble the app from the route groups and each transport's routes.
 
@@ -139,8 +143,13 @@ class HttpServer(ServiceComponent):
                 process rather than any one component.
             metrics: The registry ``/metrics`` renders, injected by the assembly
                 that also hands it to the components which observe on it.
+            listeners: Sockets already bound to the configured address and
+                listening, which the server takes over instead of binding
+                its own; connections queued on them are answered once it
+                serves.
         """
         self._cfg = cfg
+        self._listeners = listeners
         self._app = build_app(runner, transports, process_health, metrics)
         self._server: uvicorn.Server | None = None
         self._serve_task: asyncio.Task[None] | None = None
@@ -166,7 +175,7 @@ class HttpServer(ServiceComponent):
             timeout_graceful_shutdown=_HTTP_SHUTDOWN_SECONDS,
         )
         self._server = _ServerWithoutSignals(config)
-        self._serve_task = asyncio.create_task(self._server.serve())
+        self._serve_task = asyncio.create_task(self._server.serve(self._listeners))
         await self._await_bound(self._server, self._serve_task)
 
     @staticmethod

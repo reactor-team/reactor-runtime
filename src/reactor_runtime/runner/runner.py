@@ -283,6 +283,15 @@ def _no_shutdown(*, failure: bool = False) -> None:
     """Default process-shutdown hook — a no-op until the service wires one in."""
 
 
+class _LiveKitBlockMismatchError(Exception):
+    """The manifest's ``runtime.livekit`` block does not match the model's contract.
+
+    Raised by the check itself, so it is told apart from a
+    :class:`LiveKitBlockError` the model's own load raises, which is a load
+    failure like any other.
+    """
+
+
 class Runner(ServiceComponent, ConnectionSink):
     """Orchestrates one model and its session, transport- and platform-neutral.
 
@@ -295,7 +304,13 @@ class Runner(ServiceComponent, ConnectionSink):
     name = "runner"
     depends_on: tuple[str, ...] = ()
 
-    def __init__(self, cfg: RuntimeConfig, metrics: RuntimeMetrics | None = None) -> None:
+    def __init__(
+        self,
+        cfg: RuntimeConfig,
+        metrics: RuntimeMetrics | None = None,
+        *,
+        load_started: float | None = None,
+    ) -> None:
         """Wire the session machinery and local components that need no model.
 
         The bridge is built later, in :meth:`start`, once the model class is
@@ -307,8 +322,13 @@ class Runner(ServiceComponent, ConnectionSink):
                 built without one records on a registry of its own, so the
                 instruments are always live and only the assembled process
                 serves them.
+            load_started: The :func:`time.monotonic` reading at which the
+                assembly began importing the model's class ahead of
+                :meth:`start`, so the measured load includes that import.
+                ``None`` measures from :meth:`start`.
         """
         self._cfg = cfg
+        self._load_started = load_started
         self._metrics = metrics or RuntimeMetrics(version=_server_version(), model=cfg.model_ref)
         self._sm = SessionStateMachine()
         # The log's state context starts at the machine's starting state, so the
@@ -399,6 +419,10 @@ class Runner(ServiceComponent, ConnectionSink):
         # reused process never share a directory and the logs of one session are
         # never read as another's. The construction value is an unused placeholder.
         self._recording_id = SESSION_ID
+        # The id journal facts are tagged with: the live session's own id from
+        # its start until the next start, so the facts its teardown and its
+        # late writers produce still name it, and None before the first.
+        self._event_session_id: str | None = None
         # The shape the live session started with — its starting input and its
         # step limit — resolved at the start transition like the recording id,
         # so a rejected start cannot replace it.
@@ -467,22 +491,11 @@ class Runner(ServiceComponent, ConnectionSink):
         # window rather than nothing until READY. A self-loop on CREATED: no
         # state change, no side effect (the bridge is not built yet).
         self._sm.send(SessionEvent.INITIALIZING)
-        started_at = time.monotonic()
-
-        def load_failed() -> None:
-            self._model_metrics.load_failed(since=started_at)
-            logger.exception("model failed to load; terminating the session")
-            self._sm.send(SessionEvent.INITIALIZATION_FAIL)
+        started_at = self._load_started if self._load_started is not None else time.monotonic()
 
         try:
-            model_cls = import_model_class(self._cfg.model_ref)
-            contract = ModelContract.of(model_cls)
-        except Exception:
-            load_failed()
-            return
-        try:
-            check_livekit_block(self._cfg.livekit, contract)
-        except LiveKitBlockError as mismatch:
+            bridge, model_name = await self._open_model()
+        except _LiveKitBlockMismatchError as mismatch:
             # A manifest mistake, not a model that failed to load: reported on
             # its own and kept out of the load-failure count.
             logger.error(
@@ -492,31 +505,14 @@ class Runner(ServiceComponent, ConnectionSink):
             )
             self._sm.send(SessionEvent.INITIALIZATION_FAIL)
             return
-        try:
-            model = model_cls()
-            await asyncio.to_thread(model.load, self._cfg.config_path)
-            bridge = ModelBridge(model, contract)
-            bridge.bind_outbound(
-                broadcast=self._broadcast_message,
-                addressed=self._send_addressed,
-                media=self._emit_media,
-                media_ops=MediaOps(
-                    flush=self._flush_media,
-                    set_rate=self._set_media_rate,
-                    set_depth=self._set_media_depth,
-                ),
-                failure=self._on_model_failure,
-                step=self._on_step_completed,
-                command_timing=self._on_command_timing,
-                frame_timing=self._on_frame_timing,
-                step_refusal=self._on_step_refusal,
-            )
-            bridge.start()
         except Exception:
-            load_failed()
+            self._model_metrics.load_failed(since=started_at)
+            logger.exception("model failed to load; terminating the session")
+            self._sm.send(SessionEvent.INITIALIZATION_FAIL)
             return
         self._model_metrics.loaded(since=started_at)
         self._bridge = bridge
+        contract = bridge.contract
         self._command_metrics.declare(contract.commands)
         self._output_kinds = {
             name: info.kind
@@ -534,10 +530,56 @@ class Runner(ServiceComponent, ConnectionSink):
         self._sm.send(SessionEvent.INITIALIZATION_SUCCESS)
         logger.info(
             "model loaded; session ready",
-            model=type(model).__name__,
+            model=model_name,
             tracks=len(contract.tracks),
             commands=len(contract.commands),
         )
+
+    async def _open_model(self) -> tuple[ModelBridge, str]:
+        """Load the model and start it behind a bridge bound to this runner.
+
+        Resolves the class, reads its contract, checks the manifest's
+        ``runtime.livekit`` block against it, instantiates and loads it off
+        the event loop, binds the outbound path, and spawns the model thread.
+
+        Returns:
+            The started bridge and the model class's name.
+
+        Raises:
+            _LiveKitBlockMismatchError: If the manifest's ``runtime.livekit`` block
+                does not match the model's contract. Anything else raised is
+                a model that failed to load.
+        """
+        model_cls = import_model_class(self._cfg.model_ref)
+        contract = ModelContract.of(model_cls)
+        try:
+            check_livekit_block(self._cfg.livekit, contract)
+        except LiveKitBlockError as mismatch:
+            raise _LiveKitBlockMismatchError(str(mismatch)) from mismatch
+        model = model_cls()
+        await asyncio.to_thread(model.load, self._cfg.config_path)
+        bridge = ModelBridge(model, contract)
+        bridge.bind_outbound(**self._outbound_sinks())
+        bridge.start()
+        return bridge, type(model).__name__
+
+    def _outbound_sinks(self) -> dict[str, Any]:
+        """Return the sinks the model's outbound path is bound to, by keyword."""
+        return {
+            "broadcast": self._broadcast_message,
+            "addressed": self._send_addressed,
+            "media": self._emit_media,
+            "media_ops": MediaOps(
+                flush=self._flush_media,
+                set_rate=self._set_media_rate,
+                set_depth=self._set_media_depth,
+            ),
+            "failure": self._on_model_failure,
+            "step": self._on_step_completed,
+            "command_timing": self._on_command_timing,
+            "frame_timing": self._on_frame_timing,
+            "step_refusal": self._on_step_refusal,
+        }
 
     async def drain(self) -> None:
         """Stop accepting new sessions and let an active one end on grace.
@@ -1361,7 +1403,9 @@ class Runner(ServiceComponent, ConnectionSink):
                 return _refused(key, outcome)
         return None
 
-    def stop_session(self, *, moderated: bool = False, reason: str = "") -> None:
+    def stop_session(
+        self, *, moderated: bool = False, reason: str = "", session_id: str | None = None
+    ) -> None:
         """Close the active session, leaving the model loaded and ready again.
 
         Not idempotent, like :meth:`start_session`: a stop is legal only from a
@@ -1384,10 +1428,16 @@ class Runner(ServiceComponent, ConnectionSink):
         Args:
             moderated: Whether the stop enforces a moderation verdict.
             reason: The platform's close reason, empty for a plain stop.
+            session_id: The session to stop. Optional, since a runner hosts
+                one; when given it must be the transport id or the session's
+                own id.
 
         Raises:
             SessionTransitionError: If there is no running session to stop.
+            UnknownSessionError: If *session_id* names another session.
         """
+        if session_id is not None and self._sm.current_state in _RUNNING_STATES:
+            self._require_own_id(session_id)
         end_reason = EndReason.MODERATED if moderated else EndReason.STOPPED
         detail: dict[str, Any] = {"reason": end_reason}
         if reason:
@@ -1395,11 +1445,13 @@ class Runner(ServiceComponent, ConnectionSink):
         if not self._sm.send(SessionEvent.STOP_SESSION, **detail):
             raise SessionTransitionError("stop", self._sm.current_state)
 
-    def new_conn_id(self, transport: str) -> ConnId:
+    def new_conn_id(self, transport: str, sid: str | None = None) -> ConnId:
         """Mint a fresh connection id and claim it for *transport*.
 
         The connection manager is the single owner of the id namespace, so the
         runner forwards rather than keeping a second counter that could diverge.
+        *sid* names the session the connection joins; a runner hosts one, so it
+        is accepted and not read.
         """
         return self._connections.new_conn_id(transport)
 
@@ -1465,9 +1517,13 @@ class Runner(ServiceComponent, ConnectionSink):
         """Record a transport this runtime serves, for the descriptor's ``transports`` list."""
         self._transports.append({"protocol": protocol, "version": version})
 
-    def session_epoch(self) -> int:
+    def session_epoch(self, sid: str | None = None) -> int:
         """Return the number of the live session's epoch, which changes at every session start."""
         return self._offer_epochs.current
+
+    def transport_conn_id(self, sid: str, cid: int) -> ConnId:
+        """Return *cid* as the transport's key: a runner's one session owns every id."""
+        return ConnId(cid)
 
     def offer_admitted(self, conn_id: ConnId) -> None:
         """Stamp an admitted offer with the session it was admitted into.
@@ -1494,6 +1550,49 @@ class Runner(ServiceComponent, ConnectionSink):
             raise SessionNotRunningError
         if sid != self._session_id:
             raise UnknownSessionError
+
+    def _require_own_id(self, session_id: str) -> None:
+        """Accept the transport id or the running session's own id, else raise.
+
+        Raises:
+            UnknownSessionError: If *session_id* is neither.
+        """
+        if session_id not in (self._session_id, self._recording_id):
+            raise UnknownSessionError
+
+    def capacity(self) -> tuple[int, int]:
+        """Return how many sessions this process hosts at once, and how many are free."""
+        return 1, 1 if self._sm.current_state is SessionState.READY else 0
+
+    def sessions(self) -> list[dict[str, Any]]:
+        """Describe the session this runner hosts while it runs or closes, as a list."""
+        if self._sm.current_state not in _RUNNING_STATES | {SessionState.CLOSING}:
+            return []
+        return [self.descriptor()]
+
+    def reserve_upload(
+        self, sid: str, name: str, mime_type: str, size: int, upload_id: str | None = None
+    ) -> str:
+        """Reserve an upload slot in the session's store, under *upload_id* or a minted id.
+
+        Raises:
+            UploadIdTakenError: If *upload_id* is already reserved.
+        """
+        return self._uploads.create_slot(name, mime_type, size, upload_id)
+
+    def upload_store_holding(self, upload_id: str) -> UploadStore:
+        """Return the upload store a slot named *upload_id* would be reserved in."""
+        return self._uploads
+
+    def event_session(self, sid: str) -> str:
+        """Return the id the journal tags the events of the session *sid* addresses with.
+
+        The transport id stands for the session that runs, or ran last; any
+        other value is taken as a session's own id.
+        """
+        if sid == self._session_id and self._event_session_id is not None:
+            return self._event_session_id
+        return sid
 
     def track_map(self) -> Mapping[str, Any]:
         """Return the model's declared track manifest for connection setup.
@@ -1534,7 +1633,7 @@ class Runner(ServiceComponent, ConnectionSink):
         """The store saved steps are kept in, or ``None`` when step results are off."""
         return self._step_store
 
-    def descriptor(self) -> dict[str, Any]:
+    def descriptor(self, session_id: str | None = None) -> dict[str, Any]:
         """Describe the session in the shape the client validates against.
 
         The client requires a fixed session shape — ``cluster``, ``model``,
@@ -1551,7 +1650,15 @@ class Runner(ServiceComponent, ConnectionSink):
         serves, each as ``{"protocol": ..., "version": ...}``.
         ``generation`` names how the live session generates, ``"streamed"`` or
         ``"stepped"``, and reads ``"streamed"`` outside a session.
+
+        *session_id*, when given, must be the transport id or the running
+        session's own id.
+
+        Raises:
+            UnknownSessionError: If *session_id* names another session.
         """
+        if session_id is not None:
+            self._require_own_id(session_id)
         descriptor: dict[str, Any] = {
             "session_id": self._session_id,
             "state": self._sm.current_state.name.lower(),
@@ -2507,11 +2614,12 @@ class Runner(ServiceComponent, ConnectionSink):
             params = transition.detail.get("params", {})
             self._recording_id = _recording_id_from(params)
             self._session_start = parse_session_start(params)
-            self._log_binding = set_session_id(self._recording_id)
+            self._event_session_id = self._recording_id
+            self._log_binding = self._bind_log_session(self._recording_id)
             with self._step_messages_lock:
                 self._step_messages.clear()
         if transition.from_state is not transition.to_state:
-            _stamp_log_state(transition.to_state)
+            self._stamp_log_state(transition.to_state)
         log = logger.debug if transition.event in JOURNAL_EVENTS else logger.info
         # The fixed transport id (SESSION_ID) is deliberately not a field here:
         # one constant value per process carries nothing, and squatting on
@@ -2522,7 +2630,7 @@ class Runner(ServiceComponent, ConnectionSink):
             from_state=transition.from_state.name.lower(),
             to_state=transition.to_state.name.lower(),
         )
-        self._events.emit(TransitionEvent(transition))
+        self._events.emit(TransitionEvent(transition, self._event_session_id))
         if self._bridge is not None:
             self._dispatch_reactor_events(transition, self._bridge)
         if (
@@ -2561,6 +2669,14 @@ class Runner(ServiceComponent, ConnectionSink):
             # exits clean.
             crashed = transition.detail.get("reason") is EndReason.ERROR
             self.request_shutdown(failure=crashed)
+
+    def _stamp_log_state(self, state: SessionState) -> None:
+        """Stamp *state* on the process's log records."""
+        _stamp_log_state(state)
+
+    def _bind_log_session(self, session_id: str) -> int:
+        """Stamp *session_id* on the process's log records, returning the binding."""
+        return set_session_id(session_id)
 
     def _begin_session_inputs(self) -> None:
         """Connect the system client and submit the starting input, as the session asks.

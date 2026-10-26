@@ -6,11 +6,22 @@ What an author subclasses. Declaring the subclass assembles its
 ``set_<field>`` command. :class:`StepOutcome` is what one call to
 ``generate()`` did, built by the runtime and read by the application.
 :class:`StepCompleted` reports a finished step to the runtime.
+:class:`BatchedReactorApp` serves several sessions with one model and one
+batched step.
 """
 
+from reactor_runtime.interface.app.batched_app import BatchedReactorApp, JoinPolicy, SessionExecutor
 from reactor_runtime.interface.app.input_state import InputState
 from reactor_runtime.interface.app.outcome import StepOutcome
 from reactor_runtime.interface.app.reactor_app import ReactorApp
 from reactor_runtime.interface.app.step_completed import StepCompleted
 
-__all__ = ["InputState", "ReactorApp", "StepCompleted", "StepOutcome"]
+__all__ = [
+    "BatchedReactorApp",
+    "InputState",
+    "JoinPolicy",
+    "ReactorApp",
+    "SessionExecutor",
+    "StepCompleted",
+    "StepOutcome",
+]

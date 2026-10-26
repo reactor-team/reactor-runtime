@@ -1,0 +1,26 @@
+$schema: reactor/v2
+
+# `reactor build` / `reactor run` read this file: `model:` describes the model,
+# `runtime:` names the class to serve and the config it reads, and `build:`
+# defines the image every build produces.
+model:
+  name: batch
+  version: v0.0.1
+  description: |
+    A small recurrent network painting a video per session, from the
+    session's own seed. Up to four sessions share one process and one
+    forward pass per step.
+
+runtime:
+  import: batch:Batch
+  config: config.yaml
+  # Each finished step is kept as a folder: its frame in output.mp4, and the
+  # frame's fingerprint in frame.sha256. Every session's steps wait in the one
+  # queue, so it holds 64 for each of the four sessions.
+  step_results:
+    enabled: true
+    queue: 256
+
+build:
+  # Must match the `reactor-runtime==<version>` pin in requirements.txt.
+  runtime_version: "3.11.0"

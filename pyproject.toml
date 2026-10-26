@@ -151,6 +151,7 @@ extra-paths = [
     "examples/echo",
     "examples/waypoint",
     "examples/stepped_echo",
+    "examples/batch",
     "tests/unit/transport/webrtc",
     "tests/contract",
     "endurance-tests",

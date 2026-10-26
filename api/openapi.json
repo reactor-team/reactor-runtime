@@ -1,6 +1,25 @@
 {
   "components": {
     "schemas": {
+      "Capacity": {
+        "description": "How many sessions the process hosts at once, and how many it can still start.",
+        "properties": {
+          "free": {
+            "title": "Free",
+            "type": "integer"
+          },
+          "slots": {
+            "title": "Slots",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "slots",
+          "free"
+        ],
+        "title": "Capacity",
+        "type": "object"
+      },
       "CreateUploadRequest": {
         "description": "Metadata a client announces to reserve an upload slot.\n\n``upload_id`` is optional: when omitted the store mints one, and when present\nthe slot is reserved under that exact id so a caller can seed bytes a later\nreference already names.",
         "properties": {
@@ -88,8 +107,11 @@
         "type": "object"
       },
       "HealthResponse": {
-        "description": "The process verdict, the lifecycle word behind it, and why.\n\n``status`` is the machine-checkable verdict a probe branches on; ``state``\nsays what the process is doing, which a probe reads to tell a runtime that\ncannot serve yet from one that is finished; ``detail`` explains an unhealthy\nverdict.",
+        "description": "The process verdict, the lifecycle word behind it, and why.\n\n``status`` is the machine-checkable verdict a probe branches on; ``state``\nsays what the process is doing, which a probe reads to tell a runtime that\ncannot serve yet from one that is finished; ``detail`` explains an unhealthy\nverdict; ``capacity`` says how many sessions the process hosts at once and\nhow many more it can start.",
         "properties": {
+          "capacity": {
+            "$ref": "#/components/schemas/Capacity"
+          },
           "detail": {
             "anyOf": [
               {
@@ -111,7 +133,8 @@
         "required": [
           "status",
           "state",
-          "detail"
+          "detail",
+          "capacity"
         ],
         "title": "HealthResponse",
         "type": "object"
@@ -463,6 +486,28 @@
         "title": "SdpParamsRequest",
         "type": "object"
       },
+      "SessionList": {
+        "description": "Every session the process holds, running or closing, and the capacity they fill.",
+        "properties": {
+          "capacity": {
+            "$ref": "#/components/schemas/Capacity"
+          },
+          "sessions": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Sessions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "capacity",
+          "sessions"
+        ],
+        "title": "SessionList",
+        "type": "object"
+      },
       "StepFile": {
         "description": "One file kept in a step's folder.",
         "properties": {
@@ -688,7 +733,7 @@
         "type": "object"
       },
       "StopSessionRequest": {
-        "description": "Optional qualifiers on a session stop.\n\n``moderate`` marks the stop as a content-moderation verdict: the session\nends as moderated and clients are notified before their connections close.\n``reason`` is the platform's human-readable description of why the session\nis ending: when set, clients receive a session-ended notice carrying it\nverbatim before their connections close. A moderated stop outranks it \u2014\nclients see only the moderation notice. The body itself is optional \u2014 a\nbare ``POST /stop_session`` is a plain stop.",
+        "description": "Optional qualifiers on a session stop.\n\n``moderate`` marks the stop as a content-moderation verdict: the session\nends as moderated and clients are notified before their connections close.\n``reason`` is the platform's human-readable description of why the session\nis ending: when set, clients receive a session-ended notice carrying it\nverbatim before their connections close. A moderated stop outranks it \u2014\nclients see only the moderation notice. ``session_id`` names the session\nto stop; a runtime hosting one session takes a stop without it, and one\nhosting several requires it. The body itself is optional \u2014 a bare\n``POST /stop_session`` is a plain stop of a single-session runtime.",
         "properties": {
           "moderate": {
             "default": false,
@@ -700,6 +745,17 @@
             "maxLength": 64,
             "title": "Reason",
             "type": "string"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
           }
         },
         "title": "StopSessionRequest",
@@ -1080,6 +1136,24 @@
     "/session": {
       "get": {
         "operationId": "get_session_session_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "session_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Session Id"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -1092,9 +1166,57 @@
               }
             },
             "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Get Session"
+      }
+    },
+    "/sessions": {
+      "get": {
+        "operationId": "list_sessions_sessions_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Sessions"
       }
     },
     "/sessions/{session_id}/steps": {
@@ -1270,6 +1392,78 @@
           }
         },
         "summary": "Get Step File"
+      }
+    },
+    "/sessions/{sid}/events": {
+      "get": {
+        "description": "Stream the facts of the session `sid` from the egress journal, replayed from `since` or `Last-Event-ID`. The id is not checked against the sessions the runtime knows: an unknown id is answered 200 with a stream that stays open and carries no event until a session of that id is journaled.",
+        "operationId": "session_events_sessions__sid__events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sid",
+            "required": true,
+            "schema": {
+              "title": "Sid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "since",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Since"
+            }
+          },
+          {
+            "in": "header",
+            "name": "last-event-id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Last-Event-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "One session's facts from the egress journal, as SSE."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Session Events"
       }
     },
     "/sessions/{sid}/transport/livekit/connections": {
@@ -2081,6 +2275,7 @@
     },
     "/start_session": {
       "post": {
+        "description": "Start a session. The body may name a `session_id`; absent, one is minted, and the descriptor returned carries it. A runtime hosting several sessions takes it as the session's id, which must be a lowercase UUID (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`); any other value is a 400.",
         "operationId": "start_session_start_session_post",
         "requestBody": {
           "content": {
@@ -2185,6 +2380,26 @@
               }
             },
             "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Not Found"
           },
           "409": {
             "content": {

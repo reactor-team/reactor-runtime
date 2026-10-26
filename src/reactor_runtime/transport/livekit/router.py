@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 from collections.abc import Callable, Coroutine
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -164,8 +164,9 @@ class LiveKitRouter(TransportRouter):
 
     def __init__(self, config: LiveKitConfig | None = None) -> None:
         self._config = config or LiveKitConfig()
-        self._room: RoomSession | None = None
-        self._room_epoch = 0
+        # Each session's latest room connection, by session id: the room, the
+        # session epoch it was opened in, and the id the caller addresses it by.
+        self._rooms: dict[str, tuple[RoomSession, int, int]] = {}
         # One open at a time: retiring an ended session's room yields, and a
         # second open must not pass the check meanwhile.
         self._opening = asyncio.Lock()
@@ -179,9 +180,11 @@ class LiveKitRouter(TransportRouter):
         ) -> RoomConnectionAccepted:
             runner.require_session_running(sid)
             async with self._opening:
-                epoch = runner.session_epoch()
-                previous = self._room
-                if previous is not None and self._room_epoch == epoch:
+                self._forget_settled()
+                epoch = runner.session_epoch(sid)
+                held = self._rooms.get(sid)
+                previous = held[0] if held is not None else None
+                if previous is not None and held is not None and held[1] == epoch:
                     if previous.active:
                         raise HTTPException(
                             status_code=409, detail="the session already has a room connection"
@@ -197,14 +200,16 @@ class LiveKitRouter(TransportRouter):
                     await previous.retire()
                 from reactor_runtime.transport.livekit.room import RoomSession
 
-                conn_id = self._claim(runner, req.connection_id)
+                cid = self._claim(runner, sid, req.connection_id)
+                conn_id = runner.transport_conn_id(sid, cid)
                 try:
                     runner.offer_admitted(conn_id)
                     room = RoomSession(
                         conn_id,
                         req.url,
                         req.token.get_secret_value(),
-                        runner,
+                        # Forwards every other member of the surface to the runtime's own.
+                        cast(SessionControl, _SessionControl(runner, sid)),
                         self._config,
                         ice_servers=req.ice_servers or (),
                     )
@@ -212,13 +217,12 @@ class LiveKitRouter(TransportRouter):
                 except BaseException:
                     runner.release_conn_id(conn_id, self.protocol)
                     raise
-                self._room = room
-                self._room_epoch = epoch
-            return RoomConnectionAccepted(connection_id=conn_id)
+                self._rooms[sid] = (room, epoch, cid)
+            return RoomConnectionAccepted(connection_id=cid)
 
         async def room_connection_status(sid: str, cid: int) -> Response:
             runner.require_session_running(sid)
-            room = self._room_for(cid, runner.session_epoch())
+            room = self._room_for(sid, cid, runner.session_epoch(sid))
             if room.joining:
                 return Response(status_code=202)
             status = RoomConnectionStatus.model_validate(
@@ -228,7 +232,7 @@ class LiveKitRouter(TransportRouter):
 
         async def leave_room(sid: str, cid: int) -> Response:
             runner.require_session_running(sid)
-            await self._room_for(cid, runner.session_epoch()).leave()
+            await self._room_for(sid, cid, runner.session_epoch(sid)).leave()
             return Response(status_code=204)
 
         # Every route answers a malformed request without repeating it, since
@@ -261,33 +265,61 @@ class LiveKitRouter(TransportRouter):
             route_class_override=_UnechoedValidationRoute,
         )
 
-    def _claim(self, runner: SessionControl, chosen: int | None) -> ConnId:
-        """Return the room connection's id, claimed for this transport: *chosen*, or a minted one.
+    def _claim(self, runner: SessionControl, sid: str, chosen: int | None) -> int:
+        """Return the room connection's id in session *sid*, claimed for this transport.
 
-        A chosen id must be new to the session. One another transport holds
-        is refused, and so is one this transport already holds: a room
-        participant's, or an earlier room connection's.
+        *chosen*, or one minted within the session. A chosen id must be new to
+        the session. One another transport holds is refused, and so is one this
+        transport already holds: a room participant's, or an earlier room
+        connection's.
         """
         if chosen is None:
-            return runner.new_conn_id(self.protocol)
-        conn_id = ConnId(chosen)
+            return int(runner.new_conn_id(self.protocol, sid))
+        conn_id = runner.transport_conn_id(sid, chosen)
         try:
             claimed_now = runner.claim_conn_id(conn_id, self.protocol)
         except ConnectionIdClaimedError as claimed:
             raise HTTPException(status_code=409, detail=str(claimed)) from None
         if not claimed_now:
             raise HTTPException(
-                status_code=409, detail=f"connection {conn_id} is already in use in this session"
+                status_code=409, detail=f"connection {chosen} is already in use in this session"
             )
-        return conn_id
+        return chosen
 
-    def _room_for(self, cid: int, epoch: int) -> RoomSession:
-        """Return the live session's room connection *cid* names, or answer 404.
+    def _room_for(self, sid: str, cid: int, epoch: int) -> RoomSession:
+        """Return session *sid*'s room connection *cid* names, or answer 404.
 
         A room an ended session opened is not the live session's connection,
         whatever its id.
         """
-        room = self._room
-        if room is None or room.conn_id != cid or self._room_epoch != epoch:
+        held = self._rooms.get(sid)
+        if held is None or held[2] != cid or held[1] != epoch:
             raise HTTPException(status_code=404, detail="Unknown connection")
-        return room
+        return held[0]
+
+    def _forget_settled(self) -> None:
+        """Drop the room connections that are over, so ended sessions hold none."""
+        for sid, (room, _, _) in list(self._rooms.items()):
+            if room.settled:
+                del self._rooms[sid]
+
+
+class _SessionControl:
+    """The session-control surface as one session's room sees it.
+
+    A room mints an id for every participant that becomes a client. In a
+    runtime hosting several sessions those ids are minted within the room's own
+    session and keyed for the transport, as the room connection's id is; every
+    other call is the runtime's own.
+    """
+
+    def __init__(self, runner: SessionControl, sid: str) -> None:
+        self._runner = runner
+        self._sid = sid
+
+    def new_conn_id(self, transport: str, sid: str | None = None) -> ConnId:
+        local = self._runner.new_conn_id(transport, self._sid)
+        return self._runner.transport_conn_id(self._sid, int(local))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._runner, name)

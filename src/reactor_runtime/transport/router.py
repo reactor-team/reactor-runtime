@@ -210,12 +210,15 @@ class SessionControl(ConnectionSink, Protocol):
             sid: The session id the request addressed.
         """
 
-    def new_conn_id(self, transport: str) -> ConnId:
+    def new_conn_id(self, transport: str, sid: str | None = None) -> ConnId:
         """Mint a fresh connection id, unique within the session, and claim it for *transport*.
 
         For a connection no caller chose an id for. The id comes from the
         runtime's own range, :data:`MINTED_CONN_ID_MIN` to :data:`CONN_ID_MAX`
-        (see the connection id notes at the top of this module).
+        (see the connection id notes at the top of this module). *sid* names
+        the session the connection joins: a runtime hosting several sessions
+        mints within that session's id space and requires it, and one hosting
+        a single session reads no more than its own.
 
         Raises:
             ConnectionsExhaustedError: If the session's id space is used up.
@@ -258,12 +261,30 @@ class SessionControl(ConnectionSink, Protocol):
         the id is taken for one of an earlier session, and is not journalled.
         """
 
-    def session_epoch(self) -> int:
+    def session_epoch(self, sid: str | None = None) -> int:
         """Return a number that changes each time a session starts.
+
+        *sid* names the session in a runtime hosting several: the number is then
+        that session's own, which no other session's start changes.
 
         Everything admitted while one session runs shares its number, so a
         transport holding a connection across requests can tell whether it
         belongs to the live session or to one that has ended.
+        """
+
+    def transport_conn_id(self, sid: str, cid: int) -> ConnId:
+        """Return the id the transport keys the connection *cid* of session *sid* by.
+
+        *cid* is the id the client addresses its connection with, whether the
+        runtime minted it or the caller chose it. It is unique within its
+        session only, so a runtime hosting several sessions binds each
+        ``(sid, cid)`` pair to an id of its own and reports every later fact
+        about that connection back to *sid*'s session under *cid*. A runtime
+        hosting one session keys the connection by *cid* itself.
+
+        Every later call about the connection takes the id this returns: the
+        claim and its release, :meth:`offer_admitted`,
+        :meth:`connection_failed`, and the sink facts.
         """
 
     def offer_admitted(self, conn_id: ConnId) -> None:
