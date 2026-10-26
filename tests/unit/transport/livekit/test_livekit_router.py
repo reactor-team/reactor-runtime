@@ -51,7 +51,7 @@ class FakeRunner:
         if sid != _SID:
             raise UnknownSessionError
 
-    def new_conn_id(self, transport: str) -> ConnId:
+    def new_conn_id(self, transport: str, sid: str | None = None) -> ConnId:
         conn_id = ConnId(4711 + len(self.minted))
         self.minted.append((conn_id, transport))
         self.claims[conn_id] = transport
@@ -72,6 +72,9 @@ class FakeRunner:
 
     def connection_failed(self, conn_id: ConnId, transport: str, reason: str) -> None:
         pass
+
+    def transport_conn_id(self, sid: str, cid: int) -> ConnId:
+        return ConnId(cid)
 
     def session_epoch(self) -> int:
         return self.epoch

@@ -278,6 +278,10 @@ class SessionControl(ConnectionSink, Protocol):
         ``(sid, cid)`` pair to an id of its own and reports every later fact
         about that connection back to *sid*'s session under *cid*. A runtime
         hosting one session keys the connection by *cid* itself.
+
+        Every later call about the connection takes the id this returns: the
+        claim and its release, :meth:`offer_admitted`,
+        :meth:`connection_failed`, and the sink facts.
         """
 
     def offer_admitted(self, conn_id: ConnId) -> None:

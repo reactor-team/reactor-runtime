@@ -6,10 +6,11 @@ from typing import cast
 import pytest
 from fastapi.testclient import TestClient
 
-from reactor_runtime.core import ConnId, RuntimeConfig
+from reactor_runtime.core import ConnId, LiveKitConfig, RuntimeConfig
 from reactor_runtime.http import HttpServer
 from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.runner import Runner
+from reactor_runtime.runner.session_host import SessionHost
 from reactor_runtime.serve import (
     _apply_env,
     _assemble,
@@ -123,6 +124,34 @@ def test_assemble_serves_webrtc_alone_without_the_livekit_extra(
 
     assert transports == [{"protocol": "webrtc", "version": "1.0"}]
     assert not any("/transport/livekit/" in path for path in paths)
+
+
+def test_assemble_serves_webrtc_alone_beside_a_session_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("reactor_runtime.serve.batched_capacity", lambda ref: 3)
+
+    service = _assemble(RuntimeConfig(model_ref="fake:Model"), peer_factory=_UNUSED)
+
+    host, http = service._components["runner"], service._components["http"]
+    assert isinstance(host, SessionHost)
+    assert isinstance(http, HttpServer)
+    paths = {getattr(route, "path", "") for route in http._app.routes}
+    assert not any("/transport/livekit/" in path for path in paths)
+    assert all(
+        slot.descriptor()["transports"] == [{"protocol": "webrtc", "version": "1.0"}]
+        for slot in host.slots
+    )
+
+
+def test_assemble_refuses_a_livekit_block_for_a_session_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("reactor_runtime.serve.batched_capacity", lambda ref: 3)
+    cfg = RuntimeConfig(model_ref="fake:Model", livekit=LiveKitConfig(topics=("avatar",)))
+
+    with pytest.raises(SystemExit, match=r"runtime\.livekit block needs the LiveKit transport"):
+        _assemble(cfg, peer_factory=_UNUSED)
 
 
 def test_assemble_answers_health_with_the_process_aggregate() -> None:

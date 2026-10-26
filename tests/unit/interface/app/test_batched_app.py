@@ -387,6 +387,48 @@ def test_media_reaches_the_buffers_of_its_own_session(
         app.stop()
 
 
+def test_a_single_session_runtime_pushes_media_as_a_reactor_app_is_pushed(
+    register_model: Callable[[type], None],
+) -> None:
+    register_model(Watching)
+    app = Watching()
+    try:
+        sinks = _serve(app, hosted=False)
+        app.post_reactor_event(SessionStarted("only"))
+        app.post_reactor_event(ClientConnected(ConnId(1001), 1))
+        _wait(lambda: 0 in app._sessions)
+        pixel = np.full((2, 2, 3), 9, dtype=np.uint8)
+
+        evicted = app.push_media("webcam", InputFrame(data=pixel, pts=0.0), ConnId(1001), 1)
+
+        assert evicted == 0
+        _wait(lambda: any(f >= 90 for f in sinks.frames(0)))
+        buffer = app._sessions[0].buffers["webcam"]
+        _wait(lambda: buffer.take_read_waits() == [] and buffer.available == 0)
+    finally:
+        app.stop()
+
+
+def test_a_read_frames_wait_is_not_kept_past_its_step(
+    register_model: Callable[[type], None],
+) -> None:
+    register_model(Watching)
+    app = Watching()
+    try:
+        sinks = _serve(app)
+        _open(app, 1, "a")
+        _wait(lambda: 1 in app._sessions)
+        buffer = app._sessions[1].buffers["webcam"]
+        for value in range(1, 6):
+            pixel = np.full((2, 2, 3), value, dtype=np.uint8)
+            app.push_session_media(1, "webcam", InputFrame(data=pixel, pts=0.0), ConnId(1001))
+            _wait(lambda value=value: value * 10 in {f - f % 10 for f in sinks.frames(1)})
+
+        _wait(lambda: not buffer._read_waits)
+    finally:
+        app.stop()
+
+
 def test_max_sessions_must_be_positive() -> None:
     with pytest.raises(TypeError, match="max_sessions"):
 

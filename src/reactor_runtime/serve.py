@@ -31,7 +31,7 @@ import time
 from pathlib import Path
 
 from reactor_runtime import log
-from reactor_runtime.core import RuntimeConfig, RuntimeState, SessionState
+from reactor_runtime.core import LiveKitConfig, RuntimeConfig, RuntimeState, SessionState
 from reactor_runtime.http import HttpServer
 from reactor_runtime.manifest import MANIFEST, load_config
 from reactor_runtime.metrics import RuntimeMetrics
@@ -360,6 +360,31 @@ def _session_slots(cfg: RuntimeConfig) -> int:
     return min(declared, cap)
 
 
+def _refuse_livekit(cfg: RuntimeConfig, slots: int) -> None:
+    """Leave the LiveKit transport out of a runtime hosting several sessions, saying why.
+
+    A LiveKit room connection belongs to the process rather than to one
+    session, so the transport is not served beside a session host: its routes
+    are not mounted and the descriptor does not list it. A manifest that maps
+    room signals in a ``runtime.livekit`` block asks for the transport
+    outright, so it is refused at start instead.
+
+    Raises:
+        SystemExit: If the manifest has a ``runtime.livekit`` block.
+    """
+    if cfg.livekit != LiveKitConfig():
+        raise SystemExit(
+            f"the manifest's runtime.livekit block needs the LiveKit transport, which a "
+            f"runtime hosting {slots} sessions does not serve; drop the block, or serve "
+            f"the model with REACTOR_MAX_SESSIONS=1"
+        )
+    if livekit_available():
+        logger.warning(
+            "the LiveKit transport is not served: this runtime hosts several sessions",
+            slots=slots,
+        )
+
+
 def _assemble(
     cfg: RuntimeConfig,
     webrtc: WebRtcConfig | None = None,
@@ -381,6 +406,8 @@ def _assemble(
     so ``/health`` answers for every component of the process. A model that
     declares more than one session is served by a :class:`SessionHost`, which
     hosts them all on one loaded model; every other model by a :class:`Runner`.
+    A session host serves WebRTC alone: the LiveKit transport is not mounted
+    beside it (see :func:`_refuse_livekit`).
     The metrics
     registry is created
     here too, the one place that knows the identity of the process, and handed
@@ -420,7 +447,9 @@ def _assemble(
     transports: list[TransportRouter] = [
         WebRtcRouter(webrtc or WebRtcConfig(), peer_factory, metrics)
     ]
-    if livekit_available():
+    if slots > 1:
+        _refuse_livekit(cfg, slots)
+    elif livekit_available():
         transports.append(LiveKitRouter(cfg.livekit))
     service.add(
         HttpServer(

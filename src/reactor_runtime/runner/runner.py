@@ -283,6 +283,15 @@ def _no_shutdown(*, failure: bool = False) -> None:
     """Default process-shutdown hook — a no-op until the service wires one in."""
 
 
+class _LiveKitBlockMismatchError(Exception):
+    """The manifest's ``runtime.livekit`` block does not match the model's contract.
+
+    Raised by the check itself, so it is told apart from a
+    :class:`LiveKitBlockError` the model's own load raises, which is a load
+    failure like any other.
+    """
+
+
 class Runner(ServiceComponent, ConnectionSink):
     """Orchestrates one model and its session, transport- and platform-neutral.
 
@@ -484,14 +493,9 @@ class Runner(ServiceComponent, ConnectionSink):
         self._sm.send(SessionEvent.INITIALIZING)
         started_at = self._load_started if self._load_started is not None else time.monotonic()
 
-        def load_failed() -> None:
-            self._model_metrics.load_failed(since=started_at)
-            logger.exception("model failed to load; terminating the session")
-            self._sm.send(SessionEvent.INITIALIZATION_FAIL)
-
         try:
             bridge, model_name = await self._open_model()
-        except LiveKitBlockError as mismatch:
+        except _LiveKitBlockMismatchError as mismatch:
             # A manifest mistake, not a model that failed to load: reported on
             # its own and kept out of the load-failure count.
             logger.error(
@@ -502,7 +506,9 @@ class Runner(ServiceComponent, ConnectionSink):
             self._sm.send(SessionEvent.INITIALIZATION_FAIL)
             return
         except Exception:
-            load_failed()
+            self._model_metrics.load_failed(since=started_at)
+            logger.exception("model failed to load; terminating the session")
+            self._sm.send(SessionEvent.INITIALIZATION_FAIL)
             return
         self._model_metrics.loaded(since=started_at)
         self._bridge = bridge
@@ -540,12 +546,16 @@ class Runner(ServiceComponent, ConnectionSink):
             The started bridge and the model class's name.
 
         Raises:
-            LiveKitBlockError: If the manifest's ``runtime.livekit`` block does
-                not match the model's contract.
+            _LiveKitBlockMismatchError: If the manifest's ``runtime.livekit`` block
+                does not match the model's contract. Anything else raised is
+                a model that failed to load.
         """
         model_cls = import_model_class(self._cfg.model_ref)
         contract = ModelContract.of(model_cls)
-        check_livekit_block(self._cfg.livekit, contract)
+        try:
+            check_livekit_block(self._cfg.livekit, contract)
+        except LiveKitBlockError as mismatch:
+            raise _LiveKitBlockMismatchError(str(mismatch)) from mismatch
         model = model_cls()
         await asyncio.to_thread(model.load, self._cfg.config_path)
         bridge = ModelBridge(model, contract)

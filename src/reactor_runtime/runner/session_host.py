@@ -15,6 +15,11 @@ The host answers the same session-control surface a runner does, keyed by the
 session id the caller chose at the start, or the id the host minted for it.
 Every slot journals onto one egress stream, each fact tagged with its session.
 
+A host serves streamed sessions over WebRTC. A start that asks for a stepped
+session is refused, since the batch steps every session together rather than
+one step per request, and the LiveKit transport is not mounted beside a host,
+since its room connection belongs to the process rather than to one session.
+
 Isolation follows the slots. A session that is stopped, times out, or fails in
 its own ``process_input()``, ``process_output()``, or batch result ends
 alone. A model loop that crashes ends every session and the
@@ -37,6 +42,8 @@ from reactor_runtime.core import (
     CommandFailure,
     CompletedStep,
     Connection,
+    ConnectionOrigin,
+    ConnectionOriginSource,
     ConnId,
     EndReason,
     FrameStage,
@@ -44,7 +51,12 @@ from reactor_runtime.core import (
     Health,
     HealthStatus,
     InputFrame,
+    InputTrackWatcher,
     MediaChunk,
+    MessageObserver,
+    MessageStage,
+    MessageStageSource,
+    ReplyRoute,
     RuntimeConfig,
     RuntimeState,
     SessionEvent,
@@ -74,7 +86,7 @@ from reactor_runtime.runner.runner import (
     ShutdownHook,
     _no_shutdown,
 )
-from reactor_runtime.runner.session_start import InvalidSessionStartError
+from reactor_runtime.runner.session_start import Generation, InvalidSessionStartError, SessionStart
 from reactor_runtime.step_results import SavedStep, StepStore
 from reactor_runtime.transport.router import (
     SessionNotRunningError,
@@ -190,17 +202,36 @@ class _SessionConnection:
         conn = self._conn
         return conn.take_frame_stages(tracks) if isinstance(conn, FrameStageSource) else {}
 
+    def take_message_stages(self) -> tuple[MessageStage, ...]:
+        """Take the transport's message stage times, if it times its messages."""
+        conn = self._conn
+        return conn.take_message_stages() if isinstance(conn, MessageStageSource) else ()
+
     def send_message(self, payload: bytes | str) -> None:
         """Send an encoded frame to the client."""
         self._conn.send_message(payload)
+
+    @property
+    def max_message_size(self) -> int:
+        """The largest message the wire delivers to the client."""
+        return self._conn.max_message_size
+
+    @property
+    def message_chunking(self) -> bool:
+        """Whether the wire carries a large message in chunks."""
+        return self._conn.message_chunking
+
+    async def send_step_result(self, payload: bytes) -> bool:
+        """Send an encoded step result to the client."""
+        return await self._conn.send_step_result(payload)
 
     def send_media(self, chunk: MediaChunk) -> None:
         """Hand a media chunk to the wire."""
         self._conn.send_media(chunk)
 
-    def flush_media(self) -> None:
-        """Drop the wire's queued media."""
-        self._conn.flush_media()
+    def flush_media(self, *, hold: bool = False) -> None:
+        """Drop the wire's queued media, then cut to black or hold the last frame."""
+        self._conn.flush_media(hold=hold)
 
     def set_media_rate(self, fps: float) -> None:
         """Re-pace the wire's queued media."""
@@ -225,6 +256,78 @@ class _SessionConnection:
     async def close(self) -> None:
         """Tear the wire down."""
         await self._conn.close()
+
+
+class _ObservedSessionConnection(_SessionConnection):
+    """A session's view of a connection that also takes what it is sent as plain data."""
+
+    def message_sent(self, name: str, data: Mapping[str, Any], request_id: str | None) -> None:
+        """Take a model message sent to the connection."""
+        assert isinstance(self._conn, MessageObserver)
+        self._conn.message_sent(name, data, request_id)
+
+    def command_acknowledged(self, request_id: str) -> None:
+        """Take the end of a command whose handler returned nothing."""
+        assert isinstance(self._conn, MessageObserver)
+        self._conn.command_acknowledged(request_id)
+
+    def command_failed(self, request_id: str, code: str, message: str) -> None:
+        """Take the failure of a command the connection sent."""
+        assert isinstance(self._conn, MessageObserver)
+        self._conn.command_failed(request_id, code, message)
+
+
+class _WatchingSessionConnection(_SessionConnection):
+    """A session's view of a connection that learns when an input track is free."""
+
+    def input_track_freed(self, name: str) -> None:
+        """Take that input track *name* is free to claim."""
+        assert isinstance(self._conn, InputTrackWatcher)
+        self._conn.input_track_freed(name)
+
+
+class _OriginSessionConnection(_SessionConnection):
+    """A session's view of a connection that names the transport it comes from."""
+
+    @property
+    def origin(self) -> ConnectionOrigin:
+        """Where the connection comes from."""
+        assert isinstance(self._conn, ConnectionOriginSource)
+        return self._conn.origin
+
+
+_VIEW_CLASSES: dict[tuple[bool, bool, bool], type[_SessionConnection]] = {}
+
+
+def _session_view(conn: Connection, conn_id: ConnId) -> _SessionConnection:
+    """Return *conn* under its session's id, with exactly the optional capabilities it has.
+
+    The runner finds a connection's optional capabilities by ``isinstance``,
+    so the view offers one only when the connection it stands for does.
+    """
+    flags = (
+        isinstance(conn, MessageObserver),
+        isinstance(conn, InputTrackWatcher),
+        isinstance(conn, ConnectionOriginSource),
+    )
+    view = _VIEW_CLASSES.get(flags)
+    if view is None:
+        bases = [
+            base
+            for flag, base in zip(
+                flags,
+                (_ObservedSessionConnection, _WatchingSessionConnection, _OriginSessionConnection),
+                strict=True,
+            )
+            if flag
+        ]
+        view = (
+            type("_SessionConnectionView", (*bases, _SessionConnection), {})
+            if bases
+            else (_SessionConnection)
+        )
+        _VIEW_CLASSES[flags] = view
+    return view(conn, conn_id)
 
 
 @dataclasses.dataclass
@@ -255,9 +358,15 @@ class _SessionBridge(ModelBridge):
         raw_args: dict[str, Any],
         *,
         conn_id: ConnId | None,
-        request_id: RequestId,
+        request_id: RequestId | None,
+        received_at: float | None = None,
+        held_ms: float = 0.0,
     ) -> CommandOutcome:
-        """Validate a client command and admit it to this slot's session."""
+        """Validate a client command and admit it to this slot's session.
+
+        The command is admitted untimed: *received_at* and *held_ms* are
+        accepted and not read.
+        """
         try:
             command = self.contract.validate(name, raw_args)
         except ContractError as error:
@@ -281,10 +390,22 @@ class _SessionBridge(ModelBridge):
         if self._key is not None:
             self._host.model.post_session_event(self._key, event)
 
-    def push_media(self, track: str, frame: InputFrame) -> None:
-        """Route an inbound frame to this slot's session."""
-        if self._key is not None:
-            self._host.model.push_session_media(self._key, track, frame)
+    @property
+    def supports_stepped(self) -> bool:
+        """A session hosted beside others is never stepped: the batch steps them together."""
+        return False
+
+    def push_media(
+        self, track: str, frame: InputFrame, source: ConnId | None = None, session: int = 0
+    ) -> int:
+        """Route an inbound frame to this slot's session.
+
+        Returns:
+            How many of the session's buffered frames the track's bound evicted.
+        """
+        if self._key is None:
+            return 0
+        return self._host.model.push_session_media(self._key, track, frame, source)
 
     def bind_outbound(self, **sinks: Any) -> None:
         """Accept the slot's sinks; the host routes the model's output to the slot itself."""
@@ -325,6 +446,18 @@ class _SessionSlot(Runner):
     def _bind_log_session(self, session_id: str) -> int:
         """Leave the process-wide log binding alone; the host scopes each session's work."""
         return 0
+
+    def _check_generation(self, start: SessionStart) -> None:
+        """Refuse a stepped session: a hosted session steps with the batch, not on request.
+
+        Raises:
+            InvalidSessionStartError: If *start* asks for a stepped session.
+        """
+        if start.generation is Generation.STEPPED:
+            raise InvalidSessionStartError(
+                "generation 'stepped' is not served by a runtime hosting several sessions "
+                "of a BatchedReactorApp; start it streamed"
+            )
 
     def start_session(self, params: Mapping[str, Any]) -> None:
         """Open a session under the id in *params*, which is also its transport id."""
@@ -398,9 +531,9 @@ class _SessionSlot(Runner):
         """Record a step the model reported for this slot's session."""
         self._on_step_completed(step)
 
-    def flush(self) -> None:
-        """Cut this slot's playout."""
-        self._flush_media()
+    def flush(self, hold: bool = False) -> None:
+        """Cut this slot's playout to black, or hold its last frame."""
+        self._flush_media(hold)
 
     def set_rate(self, fps: float) -> None:
         """Re-pace this slot's connections."""
@@ -677,8 +810,8 @@ class SessionHost:
         if route is not None:
             act(route.slot)
 
-    def _route_flush(self) -> None:
-        self._for_each_or_current(lambda slot: slot.flush())
+    def _route_flush(self, hold: bool = False) -> None:
+        self._for_each_or_current(lambda slot: slot.flush(hold))
 
     def _route_rate(self, fps: float) -> None:
         self._for_each_or_current(lambda slot: slot.set_rate(fps))
@@ -870,11 +1003,20 @@ class SessionHost:
         if slot.sm_state not in _RUNNING_STATES:
             raise SessionNotRunningError
 
-    def new_conn_id(self, sid: str | None = None) -> ConnId:
-        """Mint a connection id within *sid*'s session."""
+    def new_conn_id(self, transport: str, sid: str | None = None) -> ConnId:
+        """Mint a connection id within *sid*'s session and claim it there for *transport*.
+
+        The id is unique within that session only, as on a runtime of its own,
+        so two sessions can be handed the same number; a transport addresses
+        the connection through :meth:`transport_conn_id`.
+
+        Raises:
+            SessionIdRequiredError: If no session id is given.
+            UnknownSessionError: If no slot runs *sid*.
+        """
         if sid is None:
             raise SessionIdRequiredError
-        return self._require_slot(sid).new_conn_id()
+        return self._require_slot(sid).new_conn_id(transport)
 
     def transport_conn_id(self, sid: str, cid: int) -> ConnId:
         """Return the transport's id for connection *cid* of *sid*, binding it to its slot.
@@ -890,6 +1032,50 @@ class SessionHost:
         self._claimed[(sid, cid)] = transport_id
         self._conn_routes[transport_id] = _ConnRoute(slot, ConnId(cid))
         return transport_id
+
+    def _conn_route(self, conn_id: ConnId) -> _ConnRoute:
+        """Return where the transport's connection *conn_id* belongs.
+
+        Raises:
+            UnknownSessionError: If no running session holds the connection.
+        """
+        route = self._conn_routes.get(conn_id)
+        if route is None:
+            raise UnknownSessionError
+        return route
+
+    def claim_conn_id(self, conn_id: ConnId, transport: str) -> bool:
+        """Claim the transport's connection *conn_id* for *transport* in its session.
+
+        Returns:
+            Whether the claim is new.
+
+        Raises:
+            UnknownSessionError: If no running session holds the connection.
+            ConnectionIdClaimedError: If another transport holds the id in
+                that session.
+        """
+        route = self._conn_route(conn_id)
+        return route.slot.claim_conn_id(route.conn_id, transport)
+
+    def release_conn_id(self, conn_id: ConnId, transport: str) -> None:
+        """Release a new claim on the transport's connection *conn_id* in its session."""
+        route = self._conn_routes.get(conn_id)
+        if route is not None:
+            route.slot.release_conn_id(route.conn_id, transport)
+
+    def connection_failed(self, conn_id: ConnId, transport: str, reason: str) -> None:
+        """Journal, in its session, a connection the transport could not open."""
+        self._to_slot(conn_id, lambda slot, cid: slot.connection_failed(cid, transport, reason))
+
+    def session_epoch(self) -> int:
+        """Return a number that changes each time any slot starts a session."""
+        return sum(slot.session_epoch() for slot in self._slots)
+
+    def add_transport(self, protocol: str, version: str) -> None:
+        """Record a transport the runtime serves, in every slot's descriptor."""
+        for slot in self._slots:
+            slot.add_transport(protocol, version)
 
     def track_map(self) -> Mapping[str, Any]:
         """Return the model's declared track manifest."""
@@ -908,16 +1094,21 @@ class SessionHost:
         """Stamp an admitted offer in its session's slot."""
         self._to_slot(conn_id, lambda slot, cid: slot.offer_admitted(cid))
 
-    def connection_opened(self, conn: Connection) -> None:
-        """Register a live connection with its session's slot."""
+    def connection_opened(self, conn: Connection) -> bool:
+        """Register a live connection with its session's slot.
+
+        Returns:
+            Whether the connection is registered. One no running session
+            claimed, or one its slot refuses, is closed.
+        """
         route = self._conn_routes.get(conn.id)
         if route is None:
             logger.warning("refusing a connection no session claimed", conn_id=conn.id)
             if self._slots[0]._loop is not None:
                 self._slots[0]._spawn_teardown(conn.close())
-            return
+            return False
         with session_scope(route.slot.hosted_id):
-            route.slot.connection_opened(_SessionConnection(conn, route.conn_id))
+            return route.slot.connection_opened(_session_view(conn, route.conn_id))
 
     def connection_closed(self, conn_id: ConnId) -> None:
         """Drop a connection from its session's slot."""
@@ -934,6 +1125,31 @@ class SessionHost:
         self._to_slot(
             conn_id, lambda slot, cid: slot.message_received(cid, payload, version, channel)
         )
+
+    def command_received(
+        self,
+        conn_id: ConnId,
+        name: str,
+        args: Mapping[str, Any],
+        request_id: str,
+        reply: ReplyRoute = ReplyRoute.PROTOCOL,
+    ) -> None:
+        """Hand a command that arrived outside the Reactor protocol to its session."""
+        self._to_slot(
+            conn_id, lambda slot, cid: slot.command_received(cid, name, args, request_id, reply)
+        )
+
+    def claim_input_track(self, conn_id: ConnId, name: str) -> bool:
+        """Claim an inbound track for a connection within its session.
+
+        Returns:
+            Whether the claim was granted; a connection no session holds is refused.
+        """
+        route = self._conn_routes.get(conn_id)
+        if route is None:
+            return False
+        with session_scope(route.slot.hosted_id):
+            return route.slot.claim_input_track(route.conn_id, name)
 
     def media_received(self, conn_id: ConnId, track: str, frame: InputFrame) -> None:
         """Route an inbound media frame to its session."""

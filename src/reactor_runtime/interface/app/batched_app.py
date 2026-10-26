@@ -76,6 +76,7 @@ from reactor_runtime.interface.internal.reactor_core import (
     STEP_SESSION,
     CommandEnvelope,
     RequestId,
+    _input_buffer,
 )
 from reactor_runtime.interface.tracks import MediaInput
 from reactor_runtime.log import get_logger, release_session_id, session_scope
@@ -213,6 +214,11 @@ class BatchedReactorApp(ReactorApp):
     step is then a batch of one, and a failure of that one session ends the
     model loop and the process, as it does for a :class:`ReactorApp`.
 
+    A runtime hosting several sessions serves them streamed, over WebRTC: a
+    start with ``generation: "stepped"`` is refused, and the LiveKit transport
+    is not served. Under one session the model drives its own ``run()``, so a
+    stepped start is refused there too.
+
     Class attributes:
         max_sessions: How many sessions the process hosts at once. The runtime
             reads it before the model loads, admits a session while fewer are
@@ -339,7 +345,7 @@ class BatchedReactorApp(ReactorApp):
             async with self._step_lock:
                 inputs = await self._collect_inputs(batch)
                 if inputs:
-                    outcomes, batch_error = self._generate(inputs)
+                    outcomes, batch_error = self._generate_batch(inputs)
                     for session, outcome in outcomes:
                         returned = await self._collect_output(session, outcome, batch_error)
                         if returned is not _FAILED:
@@ -371,9 +377,13 @@ class BatchedReactorApp(ReactorApp):
                     self._fail_session(session, error, "process_input")
                 else:
                     session.last_refusal = None
+            # The waits of the frames this read took are not reported per
+            # session; taking them keeps a long session from accumulating them.
+            for buffer in session.buffers.values():
+                buffer.take_read_waits()
         return inputs
 
-    def _generate(
+    def _generate_batch(
         self, inputs: dict[_Session, Any]
     ) -> tuple[list[tuple[_Session, StepOutcome]], Exception | None]:
         """Run ``generate_batch()`` once and split what it did into one outcome per session.
@@ -488,14 +498,21 @@ class BatchedReactorApp(ReactorApp):
             self._sessions[key] = self._new_session(key, event.session_id)
         self._enqueue_scoped(key, event)
 
-    def push_session_media(self, key: SessionKey, track: str, frame: InputFrame) -> None:
-        """Route an inbound frame into the session *key*'s buffer for *track*."""
+    def push_session_media(
+        self, key: SessionKey, track: str, frame: InputFrame, source: ConnId | None = None
+    ) -> int:
+        """Route an inbound frame from *source* into the session *key*'s buffer for *track*.
+
+        Returns:
+            How many of the session's buffered frames the track's bound evicted.
+        """
         session = self._sessions.get(key)
         if session is None:
-            return
+            return 0
         buffer = session.buffers.get(track)
-        if buffer is not None:
-            buffer.push(frame)
+        if buffer is None:
+            return 0
+        return buffer.push(frame, source)
 
     def submit_command(
         self, command: Command, conn_id: ConnId | None, request_id: RequestId | None
@@ -507,9 +524,15 @@ class BatchedReactorApp(ReactorApp):
         """Enqueue a reactor event for the one session a single-session runner hosts."""
         self.post_session_event(_SOLE, event)
 
-    def push_media(self, track: str, frame: InputFrame) -> None:
-        """Route an inbound frame to the one session a single-session runner hosts."""
-        self.push_session_media(_SOLE, track, frame)
+    def push_media(
+        self, track: str, frame: InputFrame, source: ConnId | None = None, session: int = 0
+    ) -> int:
+        """Route an inbound frame to the one session a single-session runner hosts.
+
+        Returns:
+            How many of the session's buffered frames the track's bound evicted.
+        """
+        return self.push_session_media(_SOLE, track, frame, source)
 
     def _enqueue_scoped(self, key: SessionKey, item: CommandEnvelope | ReactorEvent) -> None:
         """Thread-safe put of an item for the session *key* now holds onto the inbound queue."""
@@ -527,7 +550,7 @@ class BatchedReactorApp(ReactorApp):
         buffers: dict[str, InputBuffer] = {}
         media: MediaInput | None = None
         if holder is not None:
-            buffers = {name: InputBuffer() for name in holder[1].__tracks__}
+            buffers = {name: _input_buffer(info) for name, info in holder[1].__tracks__.items()}
             media = holder[1](**buffers)
         return _Session(key=key, session_id=session_id, buffers=buffers, media=media)
 

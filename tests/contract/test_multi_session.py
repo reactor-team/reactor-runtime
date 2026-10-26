@@ -272,7 +272,6 @@ async def test_transport_routes_resolve_the_addressed_session() -> None:
         assert (await rt.client.post(prefix.format(NOPE))).status_code == 404
         alpha = (await rt.client.post(prefix.format(ALPHA))).json()["connection_id"]
         beta = (await rt.client.post(prefix.format(BETA))).json()["connection_id"]
-        assert alpha != beta
         for sid, cid in ((ALPHA, alpha), (BETA, beta)):
             offer = {"sdp_offer": f"offer-{sid}", "track_mapping": []}
             response = await rt.client.post(f"{prefix.format(sid)}/{cid}/sdp_params", json=offer)
@@ -428,8 +427,8 @@ async def test_sessions_on_two_slots_connect_on_the_same_unregistered_connection
                 moves[1:]
                 == [
                     ("connection_answered", {"conn_id": 1001, "answer": answer}),
-                    ("connection_opened", {"conn_id": 1001}),
-                    ("connection_closed", {"conn_id": 1001}),
+                    ("connection_opened", {"conn_id": 1001, "transport": "webrtc"}),
+                    ("connection_closed", {"conn_id": 1001, "transport": "webrtc"}),
                 ][: count - 1]
             )
 
@@ -489,3 +488,56 @@ async def test_a_step_saved_after_its_slot_moves_on_is_journaled_under_its_own_s
             (ALPHA, 7)
         ]
         assert _states(rt.host) == {WATCHED: "waiting", BETA: "waiting"}
+
+
+async def test_a_stepped_start_is_refused_and_the_slot_stays_free() -> None:
+    async with hosting() as rt:
+        response = await _start(rt.client, session_id=ALPHA, generation="stepped")
+
+        assert response.status_code == 400
+        assert "generation 'stepped' is not served" in response.json()["detail"]
+        assert _states(rt.host) == {}
+        assert (await rt.client.get("/health")).json()["capacity"]["free"] == _SLOTS
+
+
+async def test_registered_connections_of_two_sessions_share_a_minted_id_apart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each slot mints from the runtime's own range, so two sessions can draw one number."""
+    monkeypatch.setattr(
+        "reactor_runtime.runner.connection_manager.random.randint", lambda low, high: 5000
+    )
+    async with hosting() as rt:
+        for sid in (ALPHA, BETA):
+            assert (await _start(rt.client, session_id=sid)).status_code == 200
+        minted = {
+            sid: (await rt.client.post(f"/sessions/{sid}/transport/webrtc/connections")).json()[
+                "connection_id"
+            ]
+            for sid in (ALPHA, BETA)
+        }
+        assert minted == {ALPHA: 5000, BETA: 5000}
+
+        for sid in (ALPHA, BETA):
+            path = f"/sessions/{sid}/transport/webrtc/connections/{minted[sid]}"
+            offer = {"sdp_offer": f"offer-{sid}", "track_mapping": []}
+            assert (await rt.client.post(f"{path}/sdp_params", json=offer)).status_code == 202
+        await _until(lambda: {f"offer-{ALPHA}", f"offer-{BETA}"} <= set(rt.peers))
+        rt.peers[f"offer-{ALPHA}"].fire_connected()
+        await _until(lambda: _states(rt.host) == {ALPHA: "streaming", BETA: "waiting"})
+
+
+async def test_a_connection_failure_is_journaled_in_its_own_session() -> None:
+    async with hosting() as rt:
+        for sid in (ALPHA, BETA):
+            assert (await _start(rt.client, session_id=sid)).status_code == 200
+        key = rt.host.transport_conn_id(BETA, 1500)
+        assert rt.host.claim_conn_id(key, "webrtc")
+
+        rt.host.connection_failed(key, "webrtc", "the far end refused")
+
+        frames = await read_sse(rt.app, f"/sessions/{BETA}/events?since=0", count=2)
+        assert frames[-1].payload["detail"]["message"] == "the far end refused"
+        assert frames[-1].payload["detail"]["conn_id"] == 1500
+        alpha = await read_sse(rt.app, f"/sessions/{ALPHA}/events?since=0", count=1)
+        assert all(frame.payload["event"] != "error" for frame in alpha)
