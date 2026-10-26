@@ -300,3 +300,27 @@ def test_get_state_reports_what_is_stamped() -> None:
     set_state(None, None)
     assert get_state() is None
     assert get_runtime_state() is None
+
+
+def test_each_hosted_session_reads_its_own_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    from reactor_runtime.log import clear_session_state, session_scope, set_session_state
+
+    log, buffer = configured_logger(monkeypatch, "json")
+    set_state("ready", "available")
+    set_session_state("s-a", "streaming", "serving")
+    set_session_state("s-b", "orphaned", "serving")
+    try:
+        with session_scope("s-a"):
+            log.info("a")
+        with session_scope("s-b"):
+            log.info("b")
+        log.info("host")
+    finally:
+        clear_session_state("s-a")
+        clear_session_state("s-b")
+        set_state(None, None)
+    a, b, host = (json.loads(line) for line in buffer.getvalue().strip().splitlines())
+    assert (a["session_id"], a["state"]) == ("s-a", "streaming")
+    assert (b["session_id"], b["state"]) == ("s-b", "orphaned")
+    assert "session_id" not in host
+    assert host["state"] == "ready"

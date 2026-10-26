@@ -2619,7 +2619,7 @@ class Runner(ServiceComponent, ConnectionSink):
             with self._step_messages_lock:
                 self._step_messages.clear()
         if transition.from_state is not transition.to_state:
-            _stamp_log_state(transition.to_state)
+            self._stamp_log_state(transition.to_state)
         log = logger.debug if transition.event in JOURNAL_EVENTS else logger.info
         # The fixed transport id (SESSION_ID) is deliberately not a field here:
         # one constant value per process carries nothing, and squatting on
@@ -2669,6 +2669,10 @@ class Runner(ServiceComponent, ConnectionSink):
             # exits clean.
             crashed = transition.detail.get("reason") is EndReason.ERROR
             self.request_shutdown(failure=crashed)
+
+    def _stamp_log_state(self, state: SessionState) -> None:
+        """Stamp *state* on the process's log records."""
+        _stamp_log_state(state)
 
     def _bind_log_session(self, session_id: str) -> int:
         """Stamp *session_id* on the process's log records, returning the binding."""

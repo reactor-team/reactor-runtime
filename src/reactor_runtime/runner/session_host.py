@@ -75,13 +75,14 @@ from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.bridge import CommandOutcome, ModelBridge
 from reactor_runtime.interface.internal.reactor_core import MediaOps, RequestId
 from reactor_runtime.interface.model.contract import ContractError, ModelContract
-from reactor_runtime.log import get_logger, session_scope
+from reactor_runtime.log import clear_session_state, get_logger, session_scope, set_session_state
 from reactor_runtime.manifest import import_model_class
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.recording import ClipManifest, Gone, Pending, Recorder
 from reactor_runtime.runner.runner import (
     _RUNNING_STATES,
+    _RUNTIME_STATES,
     Runner,
     ShutdownHook,
     _no_shutdown,
@@ -435,6 +436,7 @@ class _SessionSlot(Runner):
         self._host = host
         self._events = events
         self._step_store = step_store
+        self._stamped_session: str | None = None
 
     async def _open_model(self) -> tuple[ModelBridge, str]:
         """Attach to the model the host loads, instead of loading one."""
@@ -446,6 +448,22 @@ class _SessionSlot(Runner):
     def _bind_log_session(self, session_id: str) -> int:
         """Leave the process-wide log binding alone; the host scopes each session's work."""
         return 0
+
+    def _stamp_log_state(self, state: SessionState) -> None:
+        """Stamp *state* on the records of this slot's session, not on the whole process.
+
+        Before the slot's first session, the move is the model's load, which is
+        the process's own lifecycle, so it stamps the process. The previous
+        session's state is forgotten when the next one starts here.
+        """
+        sid = self._event_session_id
+        if sid is None:
+            super()._stamp_log_state(state)
+            return
+        if self._stamped_session not in (None, sid):
+            clear_session_state(self._stamped_session)
+        self._stamped_session = sid
+        set_session_state(sid, state.name.lower(), _RUNTIME_STATES[state].value)
 
     def _check_generation(self, start: SessionStart) -> None:
         """Refuse a stepped session: a hosted session steps with the batch, not on request.

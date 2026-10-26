@@ -146,6 +146,31 @@ _state: str | None = None
 _runtime_state: str | None = None
 
 
+# The state of each session a runtime hosting several keeps, by session id. A
+# record written in a session's scope (session_scope) reads its session's state
+# here; every other record reads the process-wide stamp above.
+_session_states: dict[str, tuple[str | None, str | None]] = {}
+
+
+def set_session_state(session_id: str, state: str | None, runtime_state: str | None) -> None:
+    """Stamp *state* and *runtime_state* on the records written in *session_id*'s scope.
+
+    For a runtime hosting several sessions in one process, where the process-wide
+    stamp of :func:`set_state` cannot say which session a state belongs to.
+
+    Args:
+        session_id: The session whose records carry the state.
+        state: The session state machine's word.
+        runtime_state: Its coarse lifecycle projection.
+    """
+    _session_states[session_id] = (state, runtime_state)
+
+
+def clear_session_state(session_id: str) -> None:
+    """Forget *session_id*'s state; its records read the process-wide stamp again."""
+    _session_states.pop(session_id, None)
+
+
 def set_state(state: str | None, runtime_state: str | None) -> None:
     """Stamp *state* and *runtime_state* on every record written from now on.
 
@@ -211,10 +236,13 @@ class SessionContextFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         """Merge the ambient context into *record*'s structured fields."""
         scoped = _scoped_session_id.get()
+        state, runtime_state = _state, _runtime_state
+        if scoped is not None and scoped in _session_states:
+            state, runtime_state = _session_states[scoped]
         stamped = {
             "session_id": scoped if scoped is not None else _session_id,
-            "state": _state,
-            "runtime_state": _runtime_state,
+            "state": state,
+            "runtime_state": runtime_state,
         }
         context = {key: value for key, value in stamped.items() if value is not None}
         if not context:
@@ -352,6 +380,7 @@ __all__ = [
     "StructuredLogger",
     "TextFormatter",
     "clear_session_id",
+    "clear_session_state",
     "configure",
     "get_logger",
     "get_runtime_state",
@@ -360,5 +389,6 @@ __all__ = [
     "release_session_id",
     "session_scope",
     "set_session_id",
+    "set_session_state",
     "set_state",
 ]
