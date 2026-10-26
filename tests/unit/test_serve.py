@@ -126,32 +126,23 @@ def test_assemble_serves_webrtc_alone_without_the_livekit_extra(
     assert not any("/transport/livekit/" in path for path in paths)
 
 
-def test_assemble_serves_webrtc_alone_beside_a_session_host(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("reactor_runtime.serve.batched_capacity", lambda ref: 3)
-
-    service = _assemble(RuntimeConfig(model_ref="fake:Model"), peer_factory=_UNUSED)
-
-    host, http = service._components["runner"], service._components["http"]
-    assert isinstance(host, SessionHost)
-    assert isinstance(http, HttpServer)
-    paths = {getattr(route, "path", "") for route in http._app.routes}
-    assert not any("/transport/livekit/" in path for path in paths)
-    assert all(
-        slot.descriptor()["transports"] == [{"protocol": "webrtc", "version": "1.0"}]
-        for slot in host.slots
-    )
-
-
-def test_assemble_refuses_a_livekit_block_for_a_session_host(
+def test_assemble_serves_livekit_beside_a_session_host(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("reactor_runtime.serve.batched_capacity", lambda ref: 3)
     cfg = RuntimeConfig(model_ref="fake:Model", livekit=LiveKitConfig(topics=("avatar",)))
 
-    with pytest.raises(SystemExit, match=r"runtime\.livekit block needs the LiveKit transport"):
-        _assemble(cfg, peer_factory=_UNUSED)
+    service = _assemble(cfg, peer_factory=_UNUSED)
+
+    host, http = service._components["runner"], service._components["http"]
+    assert isinstance(host, SessionHost)
+    assert isinstance(http, HttpServer)
+    paths = {getattr(route, "path", "") for route in http._app.routes}
+    assert any("/transport/livekit/" in path for path in paths)
+    assert all(
+        {t["protocol"] for t in slot.descriptor()["transports"]} == {"webrtc", "livekit"}
+        for slot in host.slots
+    )
 
 
 def test_assemble_answers_health_with_the_process_aggregate() -> None:

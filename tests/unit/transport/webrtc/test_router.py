@@ -64,7 +64,7 @@ class FakeRunner:
     def connection_failed(self, conn_id: ConnId, transport: str, reason: str) -> None:
         pass
 
-    def session_epoch(self) -> int:
+    def session_epoch(self, sid: str | None = None) -> int:
         return self.epoch
 
     def transport_conn_id(self, sid: str, cid: int) -> ConnId:

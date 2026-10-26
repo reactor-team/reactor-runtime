@@ -76,7 +76,7 @@ class FakeRunner:
     def transport_conn_id(self, sid: str, cid: int) -> ConnId:
         return ConnId(cid)
 
-    def session_epoch(self) -> int:
+    def session_epoch(self, sid: str | None = None) -> int:
         return self.epoch
 
     def offer_admitted(self, conn_id: ConnId) -> None:

@@ -1068,8 +1068,14 @@ class SessionHost:
         """Journal, in its session, a connection the transport could not open."""
         self._to_slot(conn_id, lambda slot, cid: slot.connection_failed(cid, transport, reason))
 
-    def session_epoch(self) -> int:
-        """Return a number that changes each time any slot starts a session."""
+    def session_epoch(self, sid: str | None = None) -> int:
+        """Return a number that changes each time any slot starts a session, or *sid*'s slot does.
+
+        Raises:
+            UnknownSessionError: If *sid* is given and no slot runs it.
+        """
+        if sid is not None:
+            return self._require_slot(sid).session_epoch()
         return sum(slot.session_epoch() for slot in self._slots)
 
     def add_transport(self, protocol: str, version: str) -> None:

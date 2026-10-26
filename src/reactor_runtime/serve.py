@@ -447,10 +447,10 @@ def _assemble(
     transports: list[TransportRouter] = [
         WebRtcRouter(webrtc or WebRtcConfig(), peer_factory, metrics)
     ]
-    if slots > 1:
-        _refuse_livekit(cfg, slots)
-    elif livekit_available():
+    if livekit_available():
         transports.append(LiveKitRouter(cfg.livekit))
+    elif slots > 1:
+        _refuse_livekit(cfg, slots)
     service.add(
         HttpServer(
             cfg,
