@@ -12,6 +12,10 @@ run for one session, and these are bound to it:
 * The connected clients are that session's clients, and ``emit()``,
   ``send()``, ``flush()``, and a client handle's ``send()`` reach them only.
 
+That binding lives in context variables, so it reaches the coroutines a
+session's code starts and :func:`asyncio.to_thread`, but not a thread the model
+starts itself: hand such work to a :class:`SessionExecutor`.
+
 Every other attribute of ``self`` is one object all sessions share, and it
 outlives a session into the next one hosted after it. Data that belongs to one
 session is kept in a mapping keyed by ``self.session_id`` and dropped in a
@@ -40,6 +44,7 @@ loop, and with it the process, as a failing step of a :class:`ReactorApp` does.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
 import contextvars
 import time
@@ -560,6 +565,8 @@ class BatchedReactorApp(ReactorApp):
         """Create the loop-bound state, and the event that wakes an idle step loop."""
         super()._on_loop_ready()
         self._roster_changed = asyncio.Event()
+        # Work the model hands to the default executor stays the session's.
+        self._loop.set_default_executor(SessionExecutor(thread_name_prefix="reactor-session"))
 
     def _background_coros(self) -> list[Coroutine[Any, Any, None]]:
         """Run the session-addressed drain loop alongside ``run()``."""
@@ -682,6 +689,30 @@ class BatchedReactorApp(ReactorApp):
         """Send a reply to one connection of the current session."""
         if self._out_addressed is not None:
             self._out_addressed(conn_id, message, request_id)
+
+
+class SessionExecutor(concurrent.futures.ThreadPoolExecutor):
+    """A thread pool whose work runs as the session that submitted it.
+
+    A batched app tells its sessions apart by context variables: ``self.state``,
+    ``self.session_id``, the clients ``emit()`` reaches, and the session id on
+    every log record. A plain thread does not inherit them, so work a session
+    hands to a :class:`~concurrent.futures.ThreadPoolExecutor` or a
+    ``threading.Thread`` of its own runs as no session at all. Work submitted
+    here runs in a copy of the submitter's context, so it stays that session's,
+    while the threads themselves are shared: one pool can serve every session,
+    in the order their work was submitted.
+
+    The model loop's default executor is one of these, so
+    ``loop.run_in_executor(None, ...)`` and :func:`asyncio.to_thread` already
+    keep the session. Use it for any pool the model creates itself.
+    """
+
+    def submit(
+        self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any
+    ) -> concurrent.futures.Future[Any]:
+        """Schedule *fn* to run in a copy of the calling context."""
+        return super().submit(contextvars.copy_context().run, fn, *args, **kwargs)
 
 
 _FAILED = object()

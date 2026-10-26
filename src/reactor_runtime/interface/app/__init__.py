@@ -10,7 +10,7 @@ What an author subclasses. Declaring the subclass assembles its
 batched step.
 """
 
-from reactor_runtime.interface.app.batched_app import BatchedReactorApp, JoinPolicy
+from reactor_runtime.interface.app.batched_app import BatchedReactorApp, JoinPolicy, SessionExecutor
 from reactor_runtime.interface.app.input_state import InputState
 from reactor_runtime.interface.app.outcome import StepOutcome
 from reactor_runtime.interface.app.reactor_app import ReactorApp
@@ -21,6 +21,7 @@ __all__ = [
     "InputState",
     "JoinPolicy",
     "ReactorApp",
+    "SessionExecutor",
     "StepCompleted",
     "StepOutcome",
 ]

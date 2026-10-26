@@ -31,6 +31,7 @@ from reactor_runtime.interface.app import (
     InputState,
     JoinPolicy,
     ReactorApp,
+    SessionExecutor,
     StepCompleted,
     StepOutcome,
 )
@@ -105,6 +106,7 @@ __all__ = [
     "OutputStream",
     "ReactorApp",
     "ReadMode",
+    "SessionExecutor",
     "StepCompleted",
     "StepOutcome",
     "Track",

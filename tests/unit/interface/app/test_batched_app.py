@@ -8,6 +8,8 @@ serving when it did, which is how the runtime routes it.
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -38,8 +40,9 @@ from reactor_runtime.core.model import (
     SessionStarted,
 )
 from reactor_runtime.core.values import CompletedStep, ConnId, InputFrame, MediaChunk
-from reactor_runtime.interface.app.batched_app import _Session, current_session_key
+from reactor_runtime.interface.app.batched_app import SessionExecutor, _Session, current_session_key
 from reactor_runtime.interface.model.contract import ModelContract
+from reactor_runtime.log import get_session_id
 
 
 class Frame(Output):
@@ -483,3 +486,48 @@ def test_a_session_registered_while_the_loop_scans_the_table_keeps_it_running(
 
     _wait(lambda: bool(sinks.frames(2)))
     assert not sinks.crashed
+
+
+class Threaded(Summing):
+    """Reads the session id that work handed to threads sees."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen: list[tuple[str, str | None, str | None]] = []
+        self.session_pool = SessionExecutor(max_workers=1)
+        self.plain_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+    @session_started
+    async def begin(self) -> None:
+        loop = asyncio.get_running_loop()
+        sid = self.session_id
+        self.seen.append(("default", sid, await loop.run_in_executor(None, get_session_id)))
+        self.seen.append(
+            ("session", sid, await loop.run_in_executor(self.session_pool, get_session_id))
+        )
+        self.seen.append(
+            ("plain", sid, await loop.run_in_executor(self.plain_pool, get_session_id))
+        )
+
+
+def test_work_handed_to_a_thread_stays_its_sessions_unless_the_pool_drops_context(
+    register_model: Callable[[type], None],
+) -> None:
+    register_model(Threaded)
+    model = Threaded()
+    try:
+        _serve(model)
+        _open(model, 1, "s-one")
+        _open(model, 2, "s-two")
+        _wait(lambda: len(model.seen) == 6)
+    finally:
+        model.stop()
+        if model._thread is not None:
+            model._thread.join(timeout=5)
+    by_pool: dict[str, list[tuple[str | None, str | None]]] = {}
+    for pool, sid, seen in model.seen:
+        by_pool.setdefault(pool, []).append((sid, seen))
+    assert all(sid == seen for sid, seen in by_pool["default"])
+    assert all(sid == seen for sid, seen in by_pool["session"])
+    # A pool of the model's own drops the context: the work runs as no session.
+    assert all(seen is None for _, seen in by_pool["plain"])
