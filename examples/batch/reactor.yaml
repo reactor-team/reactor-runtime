@@ -23,4 +23,4 @@ runtime:
 
 build:
   # Must match the `reactor-runtime==<version>` pin in requirements.txt.
-  runtime_version: "3.8.2"
+  runtime_version: "3.11.0"
