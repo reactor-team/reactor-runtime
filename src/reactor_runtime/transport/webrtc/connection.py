@@ -54,6 +54,13 @@ def _capabilities_for(tracks: TrackMap) -> ConnectionCapabilities:
     )
 
 
+def _inbound_video_tracks(tracks: TrackMap) -> frozenset[str]:
+    """Return the names of the inbound video tracks a step request may send H.264 frames on."""
+    return frozenset(
+        t.name for t in tracks.by_direction(TrackDirection.IN) if t.kind is TrackKind.VIDEO
+    )
+
+
 def _outbound_video_tracks(tracks: TrackMap) -> dict[str, TrackInfo]:
     """Return the outbound video tracks the pacer synthesises black frames for."""
     return {t.name: t for t in tracks.by_direction(TrackDirection.OUT) if t.kind is TrackKind.VIDEO}
@@ -81,6 +88,7 @@ class WebRTCConnection:
         *,
         ping_timeout: float,
         video_tracks: dict[str, TrackInfo] | None = None,
+        video_inputs: Collection[str] = (),
     ) -> None:
         """Bind the connection to its peer and outbound capabilities.
 
@@ -92,6 +100,9 @@ class WebRTCConnection:
                 declares the connection lost; ``0`` or less disables it.
             video_tracks: The connection's outbound video tracks, so its pacer can
                 synthesise black frames before the first real one arrives.
+            video_inputs: The names of the model's input video tracks, the only
+                tracks a step request's H.264 frames decode for; with none, every
+                step request that carries an H.264 frame is refused.
         """
         self.id = conn_id
         self.capabilities = capabilities
@@ -107,7 +118,9 @@ class WebRTCConnection:
         self._on_decoded_step: Callable[[DecodedStep, ProtocolVersion], None] | None = None
         # Decodes the encoded frames of a step request before it goes up, in
         # arrival order; a request it cannot decode is answered here.
-        self._steps = StepFrameGate(self._forward_message, self._forward_step, self.send_message)
+        self._steps = StepFrameGate(
+            self._forward_message, self._forward_step, self.send_message, video_inputs
+        )
         self._on_media: Callable[[str, InputFrame], None] | None = None
         self._on_ping: Callable[[], None] | None = None
         self._on_client_stats: Callable[[ClientStatsBatch], None] | None = None
@@ -153,6 +166,7 @@ class WebRTCConnection:
             _capabilities_for(tracks),
             ping_timeout=config.ping_timeout,
             video_tracks=_outbound_video_tracks(tracks),
+            video_inputs=_inbound_video_tracks(tracks),
         )
         conn._subscribe()
         return conn, answer

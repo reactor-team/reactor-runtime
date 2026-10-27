@@ -27,6 +27,7 @@ from reactor_wire.v1 import (
 )
 
 WIDTH, HEIGHT = 64, 48
+VIDEO_INPUTS = frozenset({"webcam", "other"})
 
 
 def _pictures(count: int) -> list[np.ndarray]:
@@ -121,13 +122,13 @@ def _unpublish(name: str) -> bytes:
 def _decode(
     message: data_pb2.DataClientMessage, decoders: dict[str, TrackDecoder] | None = None
 ) -> Pictures:
-    outcome = decode_step_frames(message, {} if decoders is None else decoders)
+    outcome = decode_step_frames(message, {} if decoders is None else decoders, VIDEO_INPUTS)
     assert not isinstance(outcome, StepFrameRefusal), outcome
     return outcome
 
 
 def _refused(message: data_pb2.DataClientMessage) -> StepFrameRefusal:
-    outcome = decode_step_frames(message, {})
+    outcome = decode_step_frames(message, {}, VIDEO_INPUTS)
     assert isinstance(outcome, StepFrameRefusal)
     return outcome
 
@@ -194,12 +195,27 @@ def test_a_decoder_decodes_the_next_request_cleanly_after_a_corrupt_one() -> Non
     # Starts at a keyframe and passes the checks, but its second frame is a
     # picture's slices cut short, which the decoder conceals.
     corrupt = _step(_h264(packets[0]), _h264(packets[1][: len(packets[1]) // 3]))
-    decode_step_frames(corrupt, decoders)
+    decode_step_frames(corrupt, decoders, VIDEO_INPUTS)
 
     pictures = _decode(_step(*(_h264(p) for p in packets)), decoders)
 
     expected = _reference(packets)
     assert all(np.array_equal(pictures[0, i], expected[i]) for i in range(4))
+
+
+def test_h264_frames_for_a_track_that_is_not_an_input_video_track_open_no_decoder() -> None:
+    packets = _encode(_pictures(4))
+    decoders: dict[str, TrackDecoder] = {}
+
+    outcome = decode_step_frames(
+        _step(*(_h264(p) for p in packets), track="mic"), decoders, VIDEO_INPUTS
+    )
+
+    assert outcome == StepFrameRefusal(
+        "media_input[0]",
+        "media_input[0] names 'mic', which is not an input video track of the model",
+    )
+    assert decoders == {}
 
 
 def test_an_unknown_encoding_is_refused_naming_its_frame() -> None:
@@ -311,7 +327,10 @@ class _Recorder:
             self.order.append("step")
 
         return StepFrameGate(
-            deliver, deliver_step, lambda payload: self.replies.append(_as_bytes(payload))
+            deliver,
+            deliver_step,
+            lambda payload: self.replies.append(_as_bytes(payload)),
+            VIDEO_INPUTS,
         )
 
 
@@ -414,19 +433,47 @@ def test_only_a_v1_control_publish_or_unpublish_is_a_track_event() -> None:
     assert track_event(b"\xff not protobuf", ProtocolVersion.V1, Channel.CONTROL) is None
 
 
-async def test_publishing_a_track_opens_its_decoder_and_unpublishing_releases_it() -> None:
+async def test_publishing_a_track_opens_no_decoder() -> None:
     rec = _Recorder()
     gate = rec.gate()
 
+    for name in ("webcam", "mic", "screen"):
+        gate.submit(_publish(name), ProtocolVersion.V1, Channel.CONTROL)
+
+    assert gate.decoders == 0
+    # The runner still sees each, to arbitrate the track.
+    assert rec.delivered == [_publish("webcam"), _publish("mic"), _publish("screen")]
+
+
+async def test_unpublishing_a_track_releases_its_decoder() -> None:
+    rec = _Recorder()
+    gate = rec.gate()
+    packets = _encode(_pictures(4))
+
     gate.submit(_publish("webcam"), ProtocolVersion.V1, Channel.CONTROL)
-    assert gate.decoders == 1
-    gate.submit(_publish("webcam"), ProtocolVersion.V1, Channel.CONTROL)
+    gate.submit(_wire(_step(*(_h264(p) for p in packets))), ProtocolVersion.V1, Channel.DATA)
+    await _until(lambda: len(rec.steps) == 1)
     assert gate.decoders == 1
     gate.submit(_unpublish("webcam"), ProtocolVersion.V1, Channel.CONTROL)
 
     assert gate.decoders == 0
-    # The runner still sees both, to arbitrate the track.
-    assert rec.delivered == [_publish("webcam"), _publish("webcam"), _unpublish("webcam")]
+    assert rec.delivered == [_publish("webcam"), _unpublish("webcam")]
+
+
+async def test_h264_frames_for_a_track_that_is_not_an_input_video_track_are_refused() -> None:
+    rec = _Recorder()
+    gate = rec.gate()
+    packets = _encode(_pictures(4))
+
+    gate.submit(
+        _wire(_step(*(_h264(p) for p in packets), track="mic")),
+        ProtocolVersion.V1,
+        Channel.DATA,
+    )
+    await _until(lambda: len(rec.replies) == 1)
+
+    assert rec.steps == []
+    assert gate.decoders == 0
 
 
 async def test_a_track_never_published_gets_its_decoder_with_its_first_frames() -> None:
@@ -451,7 +498,7 @@ async def test_an_unpublish_queued_behind_a_decode_releases_the_decoder_after_it
     gate.submit(_publish("webcam"), ProtocolVersion.V1, Channel.CONTROL)
     gate.submit(_wire(_step(*(_h264(p) for p in packets))), ProtocolVersion.V1, Channel.DATA)
     gate.submit(_unpublish("webcam"), ProtocolVersion.V1, Channel.CONTROL)
-    assert gate.decoders == 1
+    assert rec.order == ["message"]
     await _until(lambda: len(rec.order) == 3)
 
     assert rec.order == ["message", "step", "message"]

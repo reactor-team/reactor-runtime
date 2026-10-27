@@ -779,9 +779,11 @@ class StepClient(BareClient):
     the model's effect through ``state`` and carrying one small webcam frame in
     ``media_input``, raw on even steps and H.264 on odd ones, waits for each
     step's result, and closes. Every other client publishes the webcam first and
-    unpublishes it before closing, so the runtime's H.264 decoder for the track
-    is opened and released both ways: by the publish and the unpublish, and by
-    the first encoded frame and the close. A stepped session streams nothing and
+    unpublishes it before closing, so the runtime's H.264 decoder for the track,
+    which the first encoded frame opens, is released by the unpublish or by the
+    close. The client closes without waiting for the unpublish to land, so the
+    suite checks only that one of them released it; the unit tests of
+    ``StepFrameGate`` check the unpublish alone. A stepped session streams nothing and
     drops live input, so nothing else is sent. :attr:`unanswered` lists the
     requests that got no result or a failed one.
     """

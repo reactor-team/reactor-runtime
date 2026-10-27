@@ -10,10 +10,10 @@ decode, because it does not know the encoding or the bytes do not decode, is
 answered as refused on the connection and never reaches the runner. Every other
 message goes on untouched.
 
-Each track a connection sends H.264 on keeps one decoder for the connection's
-life: it opens when the connection publishes the track, or with the first
-request that carries the track's H.264 frames, and it is released when the
-connection unpublishes the track or closes. Every request's frames start at a
+Each input video track a connection sends H.264 on keeps one decoder for the
+connection's life: it opens with the first request that carries the track's
+H.264 frames, and it is released when the connection unpublishes the track or
+closes. Every request's frames start at a
 keyframe, so a decoder is reset, not rebuilt, between requests.
 
 A connection's messages reach the runner in the order they arrived, which the
@@ -25,7 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 
 import av
@@ -124,8 +124,8 @@ def track_event(
 class TrackDecoder:
     """One track's H.264 decoder, kept across a connection's step requests.
 
-    Opens on construction, with its frame threads started, so the first request
-    that uses it does not pay for that. FFmpeg picks how many: one for each CPU
+    Opens on construction, with its frame threads started, so only the first
+    request that uses it pays for that. FFmpeg picks how many: one for each CPU
     the process may run on, plus one, and at most 16. The decoder holds them
     until it is released. Not thread-safe: a connection decodes one request at
     a time.
@@ -167,13 +167,18 @@ class TrackDecoder:
 
 
 def decode_step_frames(
-    message: data_pb2.DataClientMessage, decoders: dict[str, TrackDecoder]
+    message: data_pb2.DataClientMessage,
+    decoders: dict[str, TrackDecoder],
+    video_inputs: Collection[str],
 ) -> Pictures | StepFrameRefusal:
     """Decode each encoded frame of *message*'s step request to its picture.
 
     Each track's encoded frames are one stream, fed in order to the track's
-    decoder in *decoders*; a track without one gets a new one there. The
-    request is left as it is.
+    decoder in *decoders*; a track without one gets a new one there. Encoded
+    frames decode only for a track named in *video_inputs*, the model's input
+    video tracks, so *decoders* holds at most one decoder for each of them; an
+    entry that sends them to any other track is refused before a decoder opens.
+    The request is left as it is.
 
     Returns:
         The picture of each encoded frame, by ``(entry, position)``, or why the
@@ -191,6 +196,11 @@ def decode_step_frames(
             name = _encoding_name(entry.frames[position].encoding)
             return StepFrameRefusal(
                 f"{where}.frames[{position}]", f"frame encoding {name} is not supported"
+            )
+        if entry.track not in video_inputs:
+            return StepFrameRefusal(
+                where,
+                f"{where} names {entry.track!r}, which is not an input video track of the model",
             )
         decoded = _decode_h264(entry, index, decoders)
         if isinstance(decoded, StepFrameRefusal):
@@ -332,9 +342,12 @@ class StepFrameGate:
     does not decode is answered as refused through *reply*, and is not
     delivered.
 
-    The gate holds a :class:`TrackDecoder` for each track the connection
-    publishes or sends H.264 frames on, until the connection unpublishes the
-    track or the gate closes.
+    The gate holds a :class:`TrackDecoder` for each of the model's input video
+    tracks that the connection sends H.264 frames on, from the first request
+    that carries them until the connection unpublishes the track or the gate
+    closes, so a connection holds at most one decoder per input video track, and
+    one that never sends a step request holds none. H.264 frames sent to any
+    other track are refused.
 
     Runs on the event loop the connection's callbacks run on.
     """
@@ -344,6 +357,7 @@ class StepFrameGate:
         deliver: Callable[[bytes | str, ProtocolVersion, Channel], None],
         deliver_step: Callable[[DecodedStep, ProtocolVersion], None],
         reply: Callable[[bytes | str], None],
+        video_inputs: Collection[str],
     ) -> None:
         """Bind the gate to the connection's upward deliveries and its outbound send.
 
@@ -351,10 +365,13 @@ class StepFrameGate:
             deliver: Hands a message on to the runner.
             deliver_step: Hands a decoded step request on to the runner.
             reply: Sends an encoded frame to the client, on the data channel.
+            video_inputs: The names of the model's input video tracks, the only
+                tracks the gate opens a decoder for.
         """
         self._deliver = deliver
         self._deliver_step = deliver_step
         self._reply = reply
+        self._video_inputs = frozenset(video_inputs)
         self._backlog: deque[tuple[bytes | str, ProtocolVersion, Channel]] = deque()
         self._draining: asyncio.Task[None] | None = None
         self._decoders: dict[str, TrackDecoder] = {}
@@ -382,14 +399,10 @@ class StepFrameGate:
             self._draining = None
 
     def _pass(self, payload: bytes | str, version: ProtocolVersion, channel: Channel) -> None:
-        """Deliver a message that carries no encoded frame, tracking the tracks it publishes."""
+        """Deliver a message that carries no encoded frame, releasing any track it unpublishes."""
         event = track_event(payload, version, channel)
-        if event is not None:
-            published, name = event
-            if published and name not in self._decoders:
-                self._decoders[name] = TrackDecoder()
-            elif not published:
-                self._decoders.pop(name, None)
+        if event is not None and not event[0]:
+            self._decoders.pop(event[1], None)
         self._deliver(payload, version, channel)
 
     async def _drain(self) -> None:
@@ -403,7 +416,9 @@ class StepFrameGate:
                 # Decoded against a copy, so a close while the decode runs
                 # releases every decoder, the ones it opens included.
                 decoders = dict(self._decoders)
-                outcome = await asyncio.to_thread(decode_step_frames, message, decoders)
+                outcome = await asyncio.to_thread(
+                    decode_step_frames, message, decoders, self._video_inputs
+                )
                 self._decoders.update(decoders)
                 if isinstance(outcome, StepFrameRefusal):
                     logger.debug("step request refused at %s: %s", outcome.entry, outcome.reason)
