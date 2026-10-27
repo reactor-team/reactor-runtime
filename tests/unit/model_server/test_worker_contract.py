@@ -80,7 +80,10 @@ def test_a_declaration_of_every_allowed_field_type_validates_and_round_trips() -
     assert type(out) is Everything
     assert type(out.inner) is Inner
     np.testing.assert_array_equal(out.frame, value.frame)
-    assert dataclasses.replace(out, frame=value.frame) == value
+    # Python 3.13 compares dataclass fields one by one, and an array has no
+    # single truth value: compare every field but the array (checked above).
+    blank: Any = None
+    assert dataclasses.replace(out, frame=blank) == dataclasses.replace(value, frame=blank)
 
 
 class NotADataclass:
