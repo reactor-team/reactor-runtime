@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import traceback
 from pathlib import Path
 
 import pytest
@@ -98,3 +99,27 @@ def test_an_unreadable_file_or_mount_blocks_the_start(tmp_path: Path, target: st
             load_expected_secrets('["API_TOKEN"]', tmp_path)
     finally:
         (tmp_path / target).chmod(0o700)
+
+
+@pytest.mark.parametrize(
+    ("data", "failure"),
+    [
+        (b"", "is empty"),
+        (b"x" * 32769, "is larger than 32768 bytes"),
+        (b"synth-nul-\x00-end", "contains a NUL byte"),
+        (b"synth-notutf8-\xff", "is not valid UTF-8"),
+    ],
+)
+def test_a_bad_value_blocks_the_start_with_a_names_only_message(
+    tmp_path: Path, data: bytes, failure: str
+) -> None:
+    (tmp_path / "API_TOKEN").write_bytes(data)
+
+    with pytest.raises(SystemExit, match=f"'API_TOKEN' {failure}") as raised:
+        load_expected_secrets('["API_TOKEN"]', tmp_path)
+
+    # A decode error quotes the bad byte and its position, so it must not show.
+    formatted = "".join(traceback.format_exception(raised.value))
+    assert "position" not in formatted
+    needle = data.decode(errors="ignore")
+    assert not needle or needle not in formatted
