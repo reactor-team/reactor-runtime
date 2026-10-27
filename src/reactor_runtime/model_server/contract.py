@@ -46,11 +46,16 @@ class ServerRequest[T]:
             worker that declares none, plain values and numpy arrays. Its
             arrays are read-only views of shared memory, valid until this
             request is answered: copy whatever is kept past ``step()``.
+        session_id: The platform id of the session this request belongs to,
+            as the session's last reset named it, for a model's own log lines
+            about the request; ``None`` before the first reset or when the
+            session runtime has none.
     """
 
     slot: int
     generation: int
     payload: T
+    session_id: str | None = None
 
 
 class ModelServer:

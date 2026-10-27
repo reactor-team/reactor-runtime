@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from reactor_runtime.distributed.errors import WorkerCrashed, WorkerTimeout
-from reactor_runtime.log import get_logger
+from reactor_runtime.log import get_logger, get_session_id
 from reactor_runtime.model_server import codec, schema, wire
 from reactor_runtime.model_server.contract import check_signal_types
 from reactor_runtime.model_server.transport import (
@@ -434,13 +434,19 @@ class ModelClient:
                 if link.lost is not None:
                     link.release()
 
-    def reset(self, *, timeout: float | None = None) -> int:
+    def reset(self, *, timeout: float | None = None, session_id: str | None = None) -> int:
         """Close this slot's session on the worker and open a new one.
 
         The worker runs ``session_closed()`` then ``session_opened()`` for the
         slot, between steps. Only the application calls it, when its session
         starts, so nothing of the last session reaches it; until it completes
         on a connection, :meth:`step` raises :class:`ResetRequired`.
+
+        Args:
+            timeout: Seconds to wait for the worker; the step timeout when omitted.
+            session_id: The id the worker stamps on its lines about this slot
+                until the next reset. The live session's id (the one this
+                process's log lines carry) when omitted.
 
         Returns:
             The slot's new generation.
@@ -453,8 +459,10 @@ class ModelClient:
         with self._call_lock:
             link = self._usable()
             self._reset_required = True
+            if session_id is None:
+                session_id = get_session_id()
             try:
-                generation = self._reset(link, timeout)
+                generation = self._reset(link, timeout, session_id)
             finally:
                 if link.lost is not None:
                     link.release()
@@ -626,10 +634,10 @@ class ModelClient:
             raise StepExpired("the request expired in the model worker's queue")
         raise self._protocol_break(link, f"answered a step with {kind.name}")
 
-    def _reset(self, link: _Link, timeout: float | None) -> int:
+    def _reset(self, link: _Link, timeout: float | None, session_id: str | None) -> int:
         request_id = next(self._ids)
         wait = self._step_timeout if timeout is None else timeout
-        self._send(link, Kind.RESET, request_id)
+        self._send(link, Kind.RESET, request_id, wire.encode_message(wire.Reset(session_id)))
         kind, reply = self._await(link, request_id, wait)
         if kind is None:
             raise StepTimedOut(f"the model worker did not reset within {wait} s")

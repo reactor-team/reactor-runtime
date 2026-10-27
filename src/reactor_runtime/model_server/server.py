@@ -71,6 +71,8 @@ class _Conn:
     transport: dict[str, str]
     hello_id: int
     generation: int = 0
+    # The platform id of the session the last reset opened, for the log lines.
+    session_id: str | None = None
     send_lock: threading.Lock = field(default_factory=threading.Lock)
     opened: bool = False
     closed: bool = False
@@ -143,7 +145,7 @@ class WorkerServer:
         self._waiting: list[_Request] = []
         self._joining: list[_Conn] = []
         self._leaving: list[_Conn] = []
-        self._resets: list[tuple[_Conn, int]] = []
+        self._resets: list[tuple[_Conn, int, str | None]] = []
         self._by_slot: dict[int, _Conn] = {}
         # Slots whose connection is being set up, outside the lock.
         self._opening: set[int] = set()
@@ -248,8 +250,10 @@ class WorkerServer:
                 elif kind is Kind.SIGNAL:
                     self._signal(conn, payload)
                 elif kind is Kind.RESET:
+                    reset = wire.decode_message(payload, wire.Reset)
+                    session_id = _checked_session_id(reset.session_id)
                     with self._cond:
-                        self._resets.append((conn, request_id))
+                        self._resets.append((conn, request_id, session_id))
                         self._cond.notify_all()
                 elif kind is Kind.CANCEL:
                     with self._cond:
@@ -265,15 +269,13 @@ class WorkerServer:
         except wire.ProtocolError as exc:
             logger.warning(
                 "closing a session that broke the protocol",
-                slot=conn.slot if conn else None,
+                **_where(conn),
                 error=str(exc),
             )
         except OSError as exc:
-            logger.warning(
-                "a session's socket failed", slot=conn.slot if conn else None, error=str(exc)
-            )
+            logger.warning("a session's socket failed", **_where(conn), error=str(exc))
         except Exception:
-            logger.exception("a session's reader failed", slot=conn.slot if conn else None)
+            logger.exception("a session's reader failed", **_where(conn))
         finally:
             if conn is None:
                 with contextlib.suppress(OSError):
@@ -421,7 +423,7 @@ class WorkerServer:
             if self._request_type is not None:
                 value = schema.load(value, self._request_type)
         except (RequestRefused, schema.SchemaError) as exc:
-            logger.warning("rejected a session's request", slot=conn.slot, reason=str(exc))
+            logger.warning("rejected a session's request", **_where(conn), reason=str(exc))
             self._reject(conn, request_id, f"the request does not decode: {exc}")
             return
         now = time.monotonic()
@@ -484,7 +486,7 @@ class WorkerServer:
         try:
             self._worker.signal(conn.slot, signal)
         except Exception:
-            logger.exception("signal() raised", slot=conn.slot, signal=declared.__qualname__)
+            logger.exception("signal() raised", **_where(conn), signal=declared.__qualname__)
 
     def _refuse(self, sock: socket.socket, request_id: int, reason: str) -> None:
         logger.warning("refused a session", reason=reason)
@@ -508,7 +510,7 @@ class WorkerServer:
         except OSError as exc:
             # The reader sees the socket end and closes the connection.
             logger.warning(
-                "a session stopped taking its answers; closing it", slot=conn.slot, error=str(exc)
+                "a session stopped taking its answers; closing it", **_where(conn), error=str(exc)
             )
             with contextlib.suppress(OSError):
                 conn.sock.shutdown(socket.SHUT_RDWR)
@@ -528,8 +530,8 @@ class WorkerServer:
                 self._guarded(self._close, conn)
             for conn in joining:
                 self._guarded(self._open_conn, conn)
-            for conn, request_id in resets:
-                self._guarded(self._reset, conn, request_id)
+            for conn, request_id, session_id in resets:
+                self._guarded(self._reset, conn, request_id, session_id)
             if leaving or joining or resets:
                 continue
             batch = self._take_batch()
@@ -554,7 +556,7 @@ class WorkerServer:
         try:
             call(conn, *args)
         except Exception:
-            logger.exception("a session's open, close, or reset failed; closing it", slot=conn.slot)
+            logger.exception("a session's open, close, or reset failed; closing it", **_where(conn))
             with contextlib.suppress(OSError):
                 conn.sock.shutdown(socket.SHUT_RDWR)
         finally:
@@ -599,7 +601,7 @@ class WorkerServer:
         try:
             self._worker.session_opened(conn.slot, conn.generation)
         except Exception as exc:
-            logger.exception("session_opened() refused a session", slot=conn.slot)
+            logger.exception("session_opened() refused a session", **_where(conn))
             self._reply(
                 conn,
                 Kind.REFUSED,
@@ -612,7 +614,7 @@ class WorkerServer:
         conn.opened = True
         with self._cond:
             self._open.add(conn)
-        logger.info("session opened", slot=conn.slot, generation=conn.generation, pid=conn.peer_pid)
+        logger.info("session opened", **_where(conn), generation=conn.generation, pid=conn.peer_pid)
         welcome = wire.Welcome(
             slot=conn.slot,
             generation=conn.generation,
@@ -637,15 +639,15 @@ class WorkerServer:
             try:
                 self._worker.session_closed(conn.slot, conn.generation)
             except Exception:
-                logger.exception("session_closed() raised", slot=conn.slot)
-            logger.info("session closed", slot=conn.slot, generation=conn.generation)
+                logger.exception("session_closed() raised", **_where(conn))
+            logger.info("session closed", **_where(conn), generation=conn.generation)
         try:
             conn.carrier.close()
         finally:
             with conn.send_lock, contextlib.suppress(OSError):
                 conn.sock.close()
 
-    def _reset(self, conn: _Conn, request_id: int) -> None:
+    def _reset(self, conn: _Conn, request_id: int, session_id: str | None) -> None:
         if conn.closed:
             return
         if conn.opened:
@@ -654,12 +656,13 @@ class WorkerServer:
             try:
                 self._worker.session_closed(conn.slot, conn.generation)
             except Exception:
-                logger.exception("session_closed() raised", slot=conn.slot)
+                logger.exception("session_closed() raised", **_where(conn))
         conn.generation = self._next_generation(conn.slot)
+        conn.session_id = session_id
         try:
             self._worker.session_opened(conn.slot, conn.generation)
         except Exception as exc:
-            logger.exception("session_opened() refused a reset", slot=conn.slot)
+            logger.exception("session_opened() refused a reset", **_where(conn))
             conn.opened = False
             with self._cond:
                 self._open.discard(conn)
@@ -668,12 +671,15 @@ class WorkerServer:
         conn.opened = True
         with self._cond:
             self._open.add(conn)
-        logger.info("session reset", slot=conn.slot, generation=conn.generation)
+        logger.info("session reset", **_where(conn), generation=conn.generation)
         self._reply(conn, Kind.ACK, request_id, wire.encode_message(wire.ResetAck(conn.generation)))
 
     def _run(self, batch: list[_Request]) -> None:
         started = time.monotonic()
-        requests = [ServerRequest(r.conn.slot, r.conn.generation, r.payload) for r in batch]
+        requests = [
+            ServerRequest(r.conn.slot, r.conn.generation, r.payload, r.conn.session_id)
+            for r in batch
+        ]
         failed: bytes | None = None
         outputs: list[Any] = []
         try:
@@ -696,7 +702,7 @@ class WorkerServer:
                 else:
                     self._answer(request, outputs[index])
             except Exception:
-                logger.exception("an answer could not be sent", slot=request.conn.slot)
+                logger.exception("an answer could not be sent", **_where(request.conn))
                 self._reply(request.conn, Kind.FAILED, request.request_id, _UNDESCRIBED)
         logger.debug(
             "step ran",
@@ -719,7 +725,7 @@ class WorkerServer:
                 output = schema.dump(output, self._result_type)
             header = conn.carrier.encode(output)
         except Exception as exc:
-            logger.exception("an output could not be sent", slot=conn.slot)
+            logger.exception("an output could not be sent", **_where(conn))
             self._reply(conn, Kind.FAILED, request.request_id, _failure(exc))
             return
         self._reply(conn, Kind.RESULT, request.request_id, header)
@@ -787,6 +793,30 @@ def _peer_pid(sock: socket.socket) -> int:
     except OSError:
         return 0
     return pid
+
+
+# The longest session id a reset may carry, and what it may hold.
+_SESSION_ID = re.compile(r"[A-Za-z0-9._:-]{1,128}")
+
+
+def _checked_session_id(session_id: str | None) -> str | None:
+    """Return the session id a reset carried, or ``None`` for one not fit for a log line.
+
+    It is a log field only: an unusual one is dropped, never refused, so a
+    session never fails for its id.
+    """
+    if session_id is None or _SESSION_ID.fullmatch(session_id) is None:
+        return None
+    return session_id
+
+
+def _where(conn: _Conn | None) -> dict[str, Any]:
+    """The fields that place a line about *conn*: its slot, and its session's id once reset."""
+    if conn is None:
+        return {"slot": None}
+    if conn.session_id is None:
+        return {"slot": conn.slot}
+    return {"slot": conn.slot, "session_id": conn.session_id}
 
 
 def _gone(conn: _Conn) -> bool:

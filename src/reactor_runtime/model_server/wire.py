@@ -19,7 +19,7 @@ missing field as zero. The field names mirror a proto sketch, so a move is
 mechanical should a cross-host transport ever need one.
 
 The control payloads are typed: :class:`Hello`, :class:`Welcome`,
-:class:`Failure`, :class:`ResetAck`, and :class:`Refusal`, frozen dataclasses
+:class:`Failure`, :class:`Reset`, :class:`ResetAck`, and :class:`Refusal`, frozen dataclasses
 that travel as JSON objects of their fields and are decoded strictly by
 :func:`decode` (a missing, an extra, or a wrongly typed field is a
 :class:`ProtocolError`). :data:`PROTOCOL` is the version of this whole
@@ -33,7 +33,8 @@ Which frame carries which payload:
   header. ``RESULT``: a codec header.
 * ``SIGNAL``: :data:`SIGNAL_TAG` (the index of the signal's type in the
   worker's declared ``signals``) then the codec tree of its fields, as JSON.
-* ``RESET``, ``CANCEL``, ``EXPIRED``: empty. ``ACK``: a :class:`ResetAck`.
+* ``RESET``: a :class:`Reset`. ``ACK``: a :class:`ResetAck`.
+* ``CANCEL``, ``EXPIRED``: empty.
 * ``FAILED``: a :class:`Failure`. ``REJECTED`` and ``REFUSED``: a
   :class:`Refusal`.
 """
@@ -56,7 +57,7 @@ SIGNAL_TAG = struct.Struct("!I")
 
 # The version of the exchange this module defines. A change to a frame kind, a
 # control message, or the codec's header moves it on.
-PROTOCOL = 2
+PROTOCOL = 3
 
 # The ceiling on a frame that carries no step data: a hello, a signal, an error.
 CONTROL_LIMIT = 1 << 20
@@ -189,6 +190,19 @@ class Failure:
     traceback: str
     worker_lost: bool
     batch_failed: bool
+
+
+@dataclass(frozen=True)
+class Reset:
+    """A session asks the worker to reopen its slot for a new session.
+
+    Attributes:
+        session_id: The platform id of the session that starts, which the
+            worker stamps on its lines about the slot until the next reset;
+            ``None`` when the session runtime has none.
+    """
+
+    session_id: str | None
 
 
 @dataclass(frozen=True)
