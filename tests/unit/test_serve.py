@@ -61,6 +61,7 @@ _RUNTIME_ENV = (
     "SIGTERM_GRACE_PERIOD",
     "EXIT_TIMEOUT_SECONDS",
     "REACTOR_LOG_LEVEL",
+    "REACTOR_SECRETS_EXPECTED_KEYS",
 )
 
 
@@ -267,6 +268,16 @@ def test_main_refuses_when_no_manifest_in_the_working_directory(
     monkeypatch.chdir(tmp_path)
 
     with pytest.raises(SystemExit):
+        main()
+
+
+def test_main_refuses_bad_secrets_before_the_manifest_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("REACTOR_SECRETS_EXPECTED_KEYS", "not json")
+
+    with pytest.raises(SystemExit, match="JSON array"):
         main()
 
 

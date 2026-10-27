@@ -144,6 +144,8 @@ logger.info("scene changed", prompt=self.prompt)
 
 Records render as `key=value` text, or as one JSON object per line under `REACTOR_LOG_FORMAT=json`. Every record written during a session carries its id and the runtime's lifecycle state, including the records of `logging.getLogger()` and of the libraries your model imports.
 
+A deployment can give your model secrets. The deployment platform mounts one file per secret under `/run/secrets` and names the files in the reserved variable `REACTOR_SECRETS_EXPECTED_KEYS`. Before your model module imports, the runtime checks the files and puts each value into the process environment, so your model reads a secret with `os.environ["API_TOKEN"]`. A mounted secret replaces a value that your image sets under the same name.
+
 ## Install
 
 Everything runs through the [`reactor` CLI](https://docs.reactor.inc/deploy/platform/installation). There is nothing to install on your host but the CLI and Docker; the runtime ships inside the image the CLI builds for your workspace.

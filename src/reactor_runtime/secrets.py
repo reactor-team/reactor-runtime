@@ -1,9 +1,11 @@
 """Managed secrets, loaded into the environment before the model module imports.
 
-A deployment platform mounts one file per secret in a directory and names the
-files in ``REACTOR_SECRETS_EXPECTED_KEYS``, a JSON array of names that is ``[]``
-when there are none. :func:`load_expected_secrets` checks that the files match
-the names exactly and validates every value.
+A deployment platform mounts one file per secret under :data:`SECRETS_ROOT` and
+names the files in ``REACTOR_SECRETS_EXPECTED_KEYS``, a JSON array of names that
+is ``[]`` when there are none. :func:`export_secrets` checks that the files match
+the names exactly and validates every value before it sets any value in the
+process environment. A mounted value replaces a value that the image set under
+the same name. When the variable is absent, nothing happens.
 
 Every failure raises :class:`SystemExit` with a message that names keys and the
 failure, never a value.
@@ -17,11 +19,16 @@ import re
 import stat
 from pathlib import Path
 
+from reactor_runtime import log
+
 EXPECTED_KEYS_ENV = "REACTOR_SECRETS_EXPECTED_KEYS"
+SECRETS_ROOT = Path("/run/secrets")
 
 _MAX_BYTES = 32768
 _NAME_PATTERN = "[A-Za-z_][A-Za-z0-9_]*"
 _NAME_RE = re.compile(_NAME_PATTERN)
+
+logger = log.get_logger(__name__)
 
 
 def load_expected_secrets(raw: str, root: Path) -> dict[str, str]:
@@ -68,6 +75,25 @@ def load_expected_secrets(raw: str, root: Path) -> dict[str, str]:
         )
     real_root = os.path.realpath(root)
     return {name: _read_secret(real_root, name) for name in sorted(expected)}
+
+
+def export_secrets() -> None:
+    """Load the mounted secrets and set them in the process environment.
+
+    Does nothing when ``REACTOR_SECRETS_EXPECTED_KEYS`` is absent. Each value
+    goes in through ``os.environb`` as the exact file bytes, whatever the locale.
+
+    Raises:
+        SystemExit: If a check in :func:`load_expected_secrets` fails. The
+            environment is then unchanged.
+    """
+    raw = os.environ.get(EXPECTED_KEYS_ENV)
+    if raw is None:
+        return
+    values = load_expected_secrets(raw, SECRETS_ROOT)
+    for name, text in values.items():
+        os.environb[name.encode()] = text.encode()
+    logger.info("loaded secret files", keys=sorted(values), count=len(values))
 
 
 def _read_secret(real_root: str, name: str) -> str:

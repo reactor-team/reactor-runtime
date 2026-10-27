@@ -8,15 +8,30 @@ and one symlink per key.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import subprocess
+import sys
 import traceback
+from collections.abc import Iterator
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
-from reactor_runtime.secrets import load_expected_secrets
+from reactor_runtime import secrets
+from reactor_runtime.secrets import EXPECTED_KEYS_ENV, export_secrets, load_expected_secrets
 
 _GOOD = b"synth-value-3c6d6c03"
+_IMAGE_DEFAULT = "synth-image-default-7712"
+
+
+@pytest.fixture(autouse=True)
+def _clean_environ() -> Iterator[None]:
+    """Restore the environment, because the export writes ``os.environb`` directly."""
+    with mock.patch.dict(os.environ):
+        os.environ.pop(EXPECTED_KEYS_ENV, None)
+        yield
 
 
 def _mount(root: Path, files: dict[str, bytes]) -> None:
@@ -26,6 +41,12 @@ def _mount(root: Path, files: dict[str, bytes]) -> None:
     for name, data in files.items():
         (stamp / name).write_bytes(data)
         (root / name).symlink_to(f"..data/{name}")
+
+
+def _export(root: Path, names: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(secrets, "SECRETS_ROOT", root)
+    monkeypatch.setenv(EXPECTED_KEYS_ENV, json.dumps(names))
+    export_secrets()
 
 
 @pytest.mark.parametrize("raw", ["not json", "{}", "[1]"])
@@ -135,3 +156,60 @@ def test_a_symlink_that_escapes_the_mount_blocks_the_start(tmp_path: Path) -> No
 
     with pytest.raises(SystemExit, match="'API_TOKEN' is a symlink that escapes the mount"):
         load_expected_secrets('["API_TOKEN"]', root)
+
+
+def test_an_absent_variable_touches_no_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(*args: object) -> None:
+        raise AssertionError("the loader touched the file system")
+
+    monkeypatch.setattr(os, "listdir", forbidden)
+    snapshot = dict(os.environ)
+
+    export_secrets()
+
+    assert dict(os.environ) == snapshot
+
+
+def test_export_sets_the_exact_bytes_over_an_image_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    data = "synth-café\n".encode()
+    _mount(tmp_path, {"API_TOKEN": data})
+    os.environ["API_TOKEN"] = _IMAGE_DEFAULT
+    caplog.set_level(logging.INFO)
+
+    _export(tmp_path, ["API_TOKEN"], monkeypatch)
+
+    assert os.environ["API_TOKEN"] == data.decode()
+    # A rank process of the distributed runner inherits the environment the same way.
+    probe = "import os, sys; sys.stdout.buffer.write(os.environb[b'API_TOKEN'])"
+    child = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, check=True, timeout=60
+    )
+    assert child.stdout == data
+    [record] = [record for record in caplog.records if record.name == secrets.__name__]
+    assert getattr(record, "reactor_fields", None) == {"keys": ["API_TOKEN"], "count": 1}
+
+
+def test_an_image_default_never_masks_a_missing_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    os.environ["API_TOKEN"] = _IMAGE_DEFAULT
+
+    with pytest.raises(SystemExit, match=r"missing \['API_TOKEN'\]"):
+        _export(tmp_path / "absent", ["API_TOKEN"], monkeypatch)
+
+    assert os.environ["API_TOKEN"] == _IMAGE_DEFAULT
+
+
+def test_a_bad_later_file_leaves_the_environment_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _mount(tmp_path, {"AAA_FIRST": _GOOD, "ZZZ_LAST": b"synth\x00"})
+    os.environ["AAA_FIRST"] = _IMAGE_DEFAULT
+
+    with pytest.raises(SystemExit, match="'ZZZ_LAST' contains a NUL byte"):
+        _export(tmp_path, ["AAA_FIRST", "ZZZ_LAST"], monkeypatch)
+
+    assert os.environ["AAA_FIRST"] == _IMAGE_DEFAULT
+    assert "ZZZ_LAST" not in os.environ
