@@ -77,7 +77,7 @@ def test_an_empty_list_with_a_payload_file_blocks_the_start(tmp_path: Path) -> N
 
 @pytest.mark.parametrize("data", [b"  synth-spaces\r\n", b"x" * 32768])
 def test_the_exact_bytes_are_kept(tmp_path: Path, data: bytes) -> None:
-    (tmp_path / "API_TOKEN").write_bytes(data)
+    _mount(tmp_path, {"API_TOKEN": data})
 
     assert load_expected_secrets('["API_TOKEN"]', tmp_path) == {"API_TOKEN": data.decode()}
 
@@ -123,3 +123,15 @@ def test_a_bad_value_blocks_the_start_with_a_names_only_message(
     assert "position" not in formatted
     needle = data.decode(errors="ignore")
     assert not needle or needle not in formatted
+
+
+def test_a_symlink_that_escapes_the_mount_blocks_the_start(tmp_path: Path) -> None:
+    root = tmp_path / "secrets"
+    root.mkdir()
+    # A sibling whose name starts with the mount's name is still outside it.
+    (tmp_path / "secrets2").mkdir()
+    (tmp_path / "secrets2" / "payload").write_bytes(_GOOD)
+    (root / "API_TOKEN").symlink_to("../secrets2/payload")
+
+    with pytest.raises(SystemExit, match="'API_TOKEN' is a symlink that escapes the mount"):
+        load_expected_secrets('["API_TOKEN"]', root)
