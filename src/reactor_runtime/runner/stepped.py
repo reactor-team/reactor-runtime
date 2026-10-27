@@ -223,7 +223,7 @@ class StepRequests:
             await self._host.starting_input_done().wait()
             await self.submit(step)
 
-    async def submit(self, step: InboundStep, *, upload_wait: float | None = None) -> None:
+    async def submit(self, step: InboundStep) -> None:
         """Check a step request whole, then hand it to the model as plain calls and its step.
 
         Each ``state`` key becomes the model's ``set_<key>`` command, in
@@ -251,8 +251,6 @@ class StepRequests:
         steps. A request with no entries and no frames runs a step on the
         model's current state.
         """
-        if upload_wait is None:
-            upload_wait = self._upload_wait
         bridge = self._host.bridge()
         if bridge is None:
             return
@@ -297,7 +295,7 @@ class StepRequests:
         calls: list[tuple[str, str, dict[str, Any]]] = []
         for key, name, args, uploads in entries:
             try:
-                resolved = await self._host.resolve_uploads(name, args, uploads, upload_wait)
+                resolved = await self._host.resolve_uploads(name, args, uploads, self._upload_wait)
             except UnknownUploadError:
                 self._host.command_metrics.unresolved_upload(self._host.command_label(name))
                 refuse(key, f"{key} references an unresolved upload")
