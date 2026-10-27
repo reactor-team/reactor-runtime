@@ -80,7 +80,7 @@ class _Status:
             running = server.step_running_for
             if running > self.stuck_after:
                 return 503, {"status": "stuck", "step_seconds": round(running, 1)}
-            if server.failed_steps >= self.failing_after:
+            if server.failing(self.failing_after):
                 return 503, {"status": "failing", "failed_steps": server.failed_steps}
             return 200, {"status": "serving", "shm_slot_bytes": self.slot_bytes}
         return 503, {"status": self.phase}

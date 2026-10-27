@@ -437,10 +437,17 @@ class WorkerClient:
             raise WorkerRejected(
                 f"the request carries {size} bytes, over the worker's {limit} limit"
             )
-        header, _ = link.carrier.encode(payload)
+        header, total = link.carrier.encode(payload)
+        if limit is not None and total > limit:
+            link.carrier.renew()
+            raise WorkerRejected(
+                f"the request carries {total} bytes, over the worker's {limit} limit"
+            )
         self._send(link, Kind.STEP, request_id, wire.TIMEOUT.pack(wait) + header)
         kind, reply = self._await(link, request_id, wait)
-        if kind is not None:
+        if kind in (Kind.RESULT, Kind.FAILED, Kind.EXPIRED):
+            # Answered by the worker's step thread, which is done with every
+            # request before this one; a rejection comes from its reader.
             link.carrier.settled()
         if kind is None:
             self._send(link, Kind.CANCEL, request_id, best_effort=True)
