@@ -37,7 +37,7 @@ def load_expected_secrets(raw: str, root: Path) -> dict[str, str]:
     Raises:
         SystemExit: If *raw* is not a JSON array of unique valid names, if the
             files under *root* do not match it exactly, or if a file is not a
-            readable regular file that holds 1 to 32768 bytes of
+            readable regular file inside *root* that holds 1 to 32768 bytes of
             UTF-8 without a NUL byte.
     """
     try:
@@ -66,13 +66,16 @@ def load_expected_secrets(raw: str, root: Path) -> dict[str, str]:
             f"the secret files in {root} do not match {EXPECTED_KEYS_ENV}: "
             f"missing {missing}, unexpected {unexpected}"
         )
-    return {name: _read_secret(str(root), name) for name in sorted(expected)}
+    real_root = os.path.realpath(root)
+    return {name: _read_secret(real_root, name) for name in sorted(expected)}
 
 
-def _read_secret(root: str, name: str) -> str:
-    path = os.path.join(root, name)
+def _read_secret(real_root: str, name: str) -> str:
+    path = os.path.realpath(os.path.join(real_root, name))
+    if os.path.commonpath((real_root, path)) != real_root:
+        raise SystemExit(f"secret file {name!r} is a symlink that escapes the mount")
     try:
-        info = os.lstat(path)
+        info = os.stat(path)
     except OSError:
         raise SystemExit(f"secret file {name!r} is unreadable") from None
     if not stat.S_ISREG(info.st_mode):
