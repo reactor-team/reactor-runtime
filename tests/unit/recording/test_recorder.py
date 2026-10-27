@@ -33,6 +33,7 @@ from reactor_runtime.recording import (
     RecorderDisabledError,
 )
 from reactor_runtime.recording import recorder as recorder_module
+from reactor_runtime.recording.chunk_encoder import part_init_filename
 from reactor_runtime.recording.recorder import (
     _AUDIO_BACKLOG_FRAMES,
     _DRAIN_SECONDS,
@@ -958,6 +959,40 @@ def test_a_clip_waiting_on_an_idle_segment_is_sealed_and_recording_resumes_after
 
 
 @pytest.mark.usefixtures("quick_idle")
+def test_the_live_recording_checks_its_parts_from_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Serving the live recording runs on every poll, so it must not list the
+    # directory or re-read the inits once a part's init has been checked.
+    fired: list[ClipResult] = []
+    recorder = Recorder(
+        RecordingConfig(enabled=True, chunk_seconds=1, recording_dir=str(tmp_path)),
+        on_clip_ready=fired.append,
+    )
+    recorder.start(_SID)
+    try:
+        session_dir = tmp_path / _SID
+        _emit(recorder, emissions=10, frames=2)
+        clip = recorder.request_clip(30.0)
+        assert _wait_for(lambda: fired == [clip])
+        _emit(recorder, emissions=1, frames=40)
+        assert _wait_for(
+            lambda: recorder._part_verdict(session_dir, 1) is recorder_module._PartInit.OK
+        )
+
+        def read_from_disk(*_: object) -> None:
+            raise AssertionError("the live recording read its parts from disk")
+
+        monkeypatch.setattr(recorder_module, "_part_init", read_from_disk)
+        monkeypatch.setattr(recorder_module, "_check_part", read_from_disk)
+        assert recorder._part_starts == [1]
+        assert recorder._part_verdict(session_dir, 1) is recorder_module._PartInit.OK
+        assert recorder._boundary_ready(session_dir, 0)
+    finally:
+        recorder.stop()
+
+
+@pytest.mark.usefixtures("quick_idle")
 def test_an_idle_segment_with_no_clip_waiting_stays_open(tmp_path: Path) -> None:
     recorder = Recorder(RecordingConfig(enabled=True, chunk_seconds=1, recording_dir=str(tmp_path)))
     recorder.start(_SID)
@@ -987,6 +1022,30 @@ def test_the_gap_between_emissions_is_not_taken_for_a_pause(tmp_path: Path) -> N
         for _ in range(6):
             time.sleep(0.25)
             _emit(recorder, emissions=1, frames=15)
+            assert recorder._encoder is encoder
+        assert not list((tmp_path / _SID).glob("*.sealed"))
+    finally:
+        recorder.stop()
+
+
+@pytest.mark.usefixtures("quick_idle")
+def test_a_regular_cadence_slower_than_the_idle_floor_is_not_taken_for_a_pause(
+    tmp_path: Path,
+) -> None:
+    # A model slower than real time: a tenth of a second of media every 0.4 s,
+    # twice the idle floor. Once a gap has shown that cadence, a clip waiting
+    # through further emissions at it seals nothing.
+    recorder = Recorder(RecordingConfig(enabled=True, chunk_seconds=4, recording_dir=str(tmp_path)))
+    recorder.start(_SID)
+    try:
+        _emit(recorder, emissions=1, frames=3)
+        time.sleep(0.4)
+        _emit(recorder, emissions=1, frames=3)
+        recorder.request_clip(30.0)
+        encoder = recorder._encoder
+        for _ in range(5):
+            time.sleep(0.4)
+            _emit(recorder, emissions=1, frames=3)
             assert recorder._encoder is encoder
         assert not list((tmp_path / _SID).glob("*.sealed"))
     finally:
@@ -1069,6 +1128,8 @@ def test_a_part_whose_init_differs_is_withheld(tmp_path: Path) -> None:
     (session_dir / "init_00001.mp4").write_bytes(b"other")
     recorder._session_dir = session_dir
     recorder._session_id = _SID
+    # What the seal that wrote part_00001.start records for the live recording.
+    recorder._part_starts = [1]
 
     recorder._fire_ready_chunks()
     assert fired == [(_SID, -1), (_SID, 0)]
@@ -1078,16 +1139,18 @@ def test_a_part_whose_init_differs_is_withheld(tmp_path: Path) -> None:
 
 
 def test_a_pause_is_not_learned_as_the_models_cadence(tmp_path: Path) -> None:
-    # A gap past the idle threshold was a pause; the emission after it keeps the
-    # cadence the model showed before it, so the next pause is caught as soon.
+    # A pause is one long gap among the model's regular ones: the emission after
+    # it keeps the cadence the model showed before it, so the next pause is
+    # caught as soon, while a cadence that really changes is followed.
     recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
-    recorder._emission_interval = 0.5
+    recorder._emission_gaps.extend([0.5, 0.5])
     recorder._last_emission_at = time.monotonic() - 600.0
-    recorder._note_emission(0.5)
-    assert recorder._emission_interval == 0.5
+    recorder._note_emission(0.1)
+    assert recorder._emission_interval == pytest.approx(0.5)
 
-    recorder._last_emission_at = time.monotonic() - 0.9
-    recorder._note_emission(0.5)
+    for _ in range(3):
+        recorder._last_emission_at = time.monotonic() - 0.9
+        recorder._note_emission(0.1)
     assert recorder._emission_interval == pytest.approx(0.9, abs=0.05)
 
 
@@ -1102,6 +1165,26 @@ def test_a_clip_requested_while_idle_is_predicted_ready_at_once(tmp_path: Path) 
         clip = recorder.request_clip(30.0)
         # Media-time arithmetic would put it 3.3 s out, at the 4 s boundary.
         assert clip.predicted_ready_at_ms <= before_ms + 100
+    finally:
+        recorder.stop()
+
+
+@pytest.mark.usefixtures("quick_idle")
+def test_a_clip_requested_as_the_model_stops_is_predicted_at_the_seal(tmp_path: Path) -> None:
+    # The boundary is a tenth of a second of media away, but the model has gone
+    # quiet past the media it last emitted: the clip waits for the seal, once
+    # the output has been idle for 1.5x that emission, not for the boundary.
+    recorder = Recorder(RecordingConfig(enabled=True, chunk_seconds=1, recording_dir=str(tmp_path)))
+    recorder.start(_SID)
+    try:
+        _emit(recorder, emissions=1, frames=27)
+        time.sleep(1.0)
+        assert not recorder._idle()
+        before_ms = time.time() * 1000
+        clip = recorder.request_clip(30.0)
+        # Media-time arithmetic alone would put it 0.1 s out.
+        assert clip.predicted_ready_at_ms >= before_ms + 250
+        assert clip.predicted_ready_at_ms <= before_ms + 500
     finally:
         recorder.stop()
 
@@ -1201,6 +1284,31 @@ def test_start_clears_a_stale_completion_marker_from_a_reused_id(
     recorder.start(_SID)
     try:
         assert not (session_dir / marker).exists()
+    finally:
+        recorder.stop()
+        recorder.close()
+
+
+def test_start_under_a_reused_id_drops_everything_the_earlier_run_left(tmp_path: Path) -> None:
+    # An earlier run's seal and part markers would close or misattribute this
+    # run's segments, and its segments would stand in for this run's
+    # successors, so a reused id starts from an empty directory.
+    session_dir = tmp_path / _SID
+    session_dir.mkdir(parents=True)
+    leftovers = [
+        "chunk_00000.sealed",
+        "part_00001.start",
+        part_init_filename(1),
+        "init.mp4",
+        "chunk_00000.m4s",
+        "chunk_00001.m4s",
+    ]
+    for name in leftovers:
+        (session_dir / name).write_bytes(b"old")
+    recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
+    recorder.start(_SID)
+    try:
+        assert [name for name in leftovers if (session_dir / name).exists()] == []
     finally:
         recorder.stop()
         recorder.close()
