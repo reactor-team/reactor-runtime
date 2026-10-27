@@ -9,6 +9,15 @@ A reader refuses a frame whose length passes the limit it was given before it
 reads the payload, so a corrupt or hostile length cannot make it allocate
 without bound. Anything else wrong with a frame is the receiver's to judge.
 
+Why dataclasses and not protobuf: ``reactor_wire`` is the public client
+contract, so a change there is a public release and a pin bump; a private
+proto would need codegen in the build, as generated bindings are not
+committed and the buf hooks depend on remote plugins; both halves always ship
+in one image, so no cross-version compatibility is needed; and strict decoding,
+:data:`PROTOCOL`, and the schema fingerprint fail loudly where proto3 reads a
+missing field as zero. The field names mirror a proto sketch, so a move is
+mechanical should a cross-host transport ever need one.
+
 The control payloads are typed: :class:`Hello`, :class:`Welcome`,
 :class:`Failure`, :class:`ResetAck`, and :class:`Refusal`, frozen dataclasses
 that travel as JSON objects of their fields and are decoded strictly by
@@ -20,7 +29,7 @@ version refuses the session, naming both.
 Which frame carries which payload:
 
 * ``HELLO``: a :class:`Hello`. ``WELCOME``: a :class:`Welcome`.
-* ``STEP``: :data:`TIMEOUT` then a :mod:`~reactor_runtime.model_worker.codec`
+* ``STEP``: :data:`TIMEOUT` then a :mod:`~reactor_runtime.model_server.codec`
   header. ``RESULT``: a codec header.
 * ``SIGNAL``: :data:`SIGNAL_TAG` (the index of the signal's type in the
   worker's declared ``signals``) then the codec tree of its fields, as JSON.
@@ -39,7 +48,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from reactor_runtime.model_worker import schema
+from reactor_runtime.model_server import schema
 
 HEADER = struct.Struct("!IBQ")
 TIMEOUT = struct.Struct("!d")
@@ -125,7 +134,7 @@ class Hello:
         token: A random hex token naming this connection's shared blocks.
         protocol: The :data:`PROTOCOL` the session speaks.
         schema: The fingerprint of the session's request, result, and signal
-            types (:func:`~reactor_runtime.model_worker.schema.fingerprint`).
+            types (:func:`~reactor_runtime.model_server.schema.fingerprint`).
     """
 
     slot: int | None

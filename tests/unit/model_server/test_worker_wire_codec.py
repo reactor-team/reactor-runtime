@@ -18,8 +18,8 @@ import numpy as np
 import pytest
 
 from reactor_runtime.distributed.ipc import SharedSlot
-from reactor_runtime.model_worker import codec, schema, wire
-from reactor_runtime.model_worker.wire import Kind
+from reactor_runtime.model_server import codec, schema, wire
+from reactor_runtime.model_server.wire import Kind
 
 
 def _pair() -> tuple[socket.socket, socket.socket]:

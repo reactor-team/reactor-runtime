@@ -1,11 +1,11 @@
-"""The model worker's process: one :class:`ModelWorker`, many session processes.
+"""The model worker's process: one :class:`ModelServer`, many session processes.
 
 :class:`WorkerServer` listens on its transport's socket (a Unix socket, with
 shared memory for the arrays, by default). Each session process that connects
 gets a reader thread, which decodes its frames, rebuilds its requests (mapping
 their arrays out of shared memory without copying them), and queues them. One
 step thread, the thread that called :meth:`WorkerServer.serve`, forms batches
-from the queue by the policy :class:`ModelWorker` documents, runs ``step()``,
+from the queue by the policy :class:`ModelServer` documents, runs ``step()``,
 and sends each answer back the same way.
 
 A fault stays with the session it belongs to. A request that does not decode,
@@ -36,16 +36,16 @@ from typing import Any
 
 from reactor_runtime.distributed.errors import WorkerCrashed
 from reactor_runtime.log import get_logger
-from reactor_runtime.model_worker import codec, schema, wire
-from reactor_runtime.model_worker.contract import (
-    ModelWorker,
-    WorkerRequest,
-    WorkerSettings,
+from reactor_runtime.model_server import codec, schema, wire
+from reactor_runtime.model_server.contract import (
+    ModelServer,
+    ServerRequest,
+    ServerSettings,
     check_declarations,
 )
-from reactor_runtime.model_worker.shm import RequestRefused
-from reactor_runtime.model_worker.transport import Transport, UnixShmTransport, WorkerCarrier
-from reactor_runtime.model_worker.wire import Kind
+from reactor_runtime.model_server.shm import RequestRefused
+from reactor_runtime.model_server.transport import Transport, UnixShmTransport, WorkerCarrier
+from reactor_runtime.model_server.wire import Kind
 
 logger = get_logger(__name__)
 
@@ -88,7 +88,7 @@ class _Request:
 
 
 class WorkerServer:
-    """Serve one loaded :class:`ModelWorker` to the session processes that connect.
+    """Serve one loaded :class:`ModelServer` to the session processes that connect.
 
     Args:
         worker: The worker, already loaded.
@@ -98,7 +98,7 @@ class WorkerServer:
         transport: How frames and payloads travel; a Unix socket and shared
             memory by default.
         settings: The serving settings, as ``reactor.yaml`` adjusted the
-            class's (:meth:`WorkerSettings.resolve`); the class's own when
+            class's (:meth:`ServerSettings.resolve`); the class's own when
             omitted.
 
     Raises:
@@ -108,16 +108,16 @@ class WorkerServer:
 
     def __init__(
         self,
-        worker: ModelWorker,
+        worker: ModelServer,
         socket_path: str | Path,
         *,
         shm_prefix: str,
         transport: Transport | None = None,
-        settings: WorkerSettings | None = None,
+        settings: ServerSettings | None = None,
     ) -> None:
         cls = type(worker)
         check_declarations(cls)
-        settings = settings or WorkerSettings.resolve(cls, {})
+        settings = settings or ServerSettings.resolve(cls, {})
         settings.check()
         self._settings = settings
         self._worker = worker
@@ -153,7 +153,7 @@ class WorkerServer:
         self._step_started: float | None = None
 
     @property
-    def settings(self) -> WorkerSettings:
+    def settings(self) -> ServerSettings:
         """The serving settings in effect."""
         return self._settings
 
@@ -658,7 +658,7 @@ class WorkerServer:
 
     def _run(self, batch: list[_Request]) -> None:
         started = time.monotonic()
-        requests = [WorkerRequest(r.conn.slot, r.conn.generation, r.payload) for r in batch]
+        requests = [ServerRequest(r.conn.slot, r.conn.generation, r.payload) for r in batch]
         failed: bytes | None = None
         outputs: list[Any] = []
         try:

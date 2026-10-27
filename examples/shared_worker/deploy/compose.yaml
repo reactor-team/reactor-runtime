@@ -22,7 +22,7 @@ x-session: &session
 services:
   model-worker:
     image: shared-worker
-    command: ["python", "-m", "reactor_runtime.model_worker"]
+    command: ["python", "-m", "reactor_runtime.model_server"]
     restart: unless-stopped
     network_mode: host
     environment:

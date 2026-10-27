@@ -588,7 +588,7 @@ class ReactorCore:
         For an application whose model depends on something it does not own,
         such as a model worker in another process, which it has given up on.
         Only the application calls it; nothing in the runtime or a
-        :class:`~reactor_runtime.model_worker.WorkerClient` does.
+        :class:`~reactor_runtime.model_server.ModelClient` does.
 
         The first call journals an ``error`` fact carrying *reason* and stops
         the live session, if any, with end reason ``error`` and *reason* as

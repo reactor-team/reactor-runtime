@@ -40,8 +40,8 @@ spec:
       image: example.com/shared-worker:latest
       restartPolicy: Always
       # Under an init such as tini when the worker starts processes of its own,
-      # so they are reaped: ["/usr/bin/tini", "--", "python", "-m", "reactor_runtime.model_worker"].
-      command: ["python", "-m", "reactor_runtime.model_worker"]
+      # so they are reaped: ["/usr/bin/tini", "--", "python", "-m", "reactor_runtime.model_server"].
+      command: ["python", "-m", "reactor_runtime.model_server"]
       env:
         - name: REACTOR_MODEL_WORKER_SOCKET
           value: /run/reactor-worker/sock

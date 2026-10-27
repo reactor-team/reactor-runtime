@@ -1,5 +1,5 @@
 # examples/echo split in two: the effect runs in one model worker for every
-# session (`python -m reactor_runtime.model_worker`), and each session runtime runs the
+# session (`python -m reactor_runtime.model_server`), and each session runtime runs the
 # echo app with a remote engine.
 runtime:
   import: split_echo:SplitEcho

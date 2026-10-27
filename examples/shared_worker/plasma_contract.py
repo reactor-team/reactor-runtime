@@ -1,7 +1,7 @@
 """What Plasma's two halves exchange: one request and one result type, imported by both.
 
 The worker declares them (``request_type``, ``result_type``) and the session
-half passes the same classes to ``WorkerClient.connect``. Only their fields
+half passes the same classes to ``ModelClient.connect``. Only their fields
 travel, the frame through shared memory; each side builds the type it declares
 from them, and the worker refuses a session whose types differ from its own.
 """

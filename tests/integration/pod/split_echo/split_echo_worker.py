@@ -11,7 +11,7 @@ from pathlib import Path
 
 from echo_model import EchoInput, EchoModel, EchoResult
 
-from reactor_runtime.model_worker import ModelWorker, WorkerRequest
+from reactor_runtime.model_server import ModelServer, ServerRequest
 
 
 def fault_due(stage: str, slot: int) -> bool:
@@ -25,7 +25,7 @@ def fault_due(stage: str, slot: int) -> bool:
     return True
 
 
-class EchoWorker(ModelWorker):
+class EchoWorker(ModelServer):
     """Apply each session's effect to its frame, up to four sessions a step."""
 
     request_type = EchoInput
@@ -38,7 +38,7 @@ class EchoWorker(ModelWorker):
         self.model = EchoModel()
         self.model.load()
 
-    def step(self, requests: list[WorkerRequest[EchoInput]]) -> list[EchoResult | Exception]:
+    def step(self, requests: list[ServerRequest[EchoInput]]) -> list[EchoResult | Exception]:
         """Run the effect for every request."""
         outputs: list[EchoResult | Exception] = []
         for request in requests:

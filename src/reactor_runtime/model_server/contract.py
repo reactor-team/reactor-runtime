@@ -1,10 +1,10 @@
 """The worker half of a model that serves several sessions from one copy of its weights.
 
 This is the application/model split of ``skills/application-model-isolation``
-with the model half in a process of its own: a :class:`ModelWorker` subclass is
+with the model half in a process of its own: a :class:`ModelServer` subclass is
 the model half, constructed once in the worker's process, and each session
 process's :class:`~reactor_runtime.ReactorApp` is the application half, which
-reaches it through a :class:`~reactor_runtime.model_worker.WorkerClient`. The
+reaches it through a :class:`~reactor_runtime.model_server.ModelClient`. The
 skill owns the rules of the split. Two of them shape this contract:
 
 * The model half refuses what it cannot serve and leaves the recovery to the
@@ -12,7 +12,7 @@ skill owns the rules of the split. Two of them shape this contract:
   session it cannot open is refused, and the worker never retries, resets, or
   repairs a session on its own.
 * Only the application calls
-  :meth:`~reactor_runtime.model_worker.WorkerClient.reset`; neither the worker
+  :meth:`~reactor_runtime.model_server.ModelClient.reset`; neither the worker
   nor the client resets a slot by itself.
 """
 
@@ -26,11 +26,11 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from reactor_runtime.core import WORKER_SETTINGS
-from reactor_runtime.model_worker import schema
+from reactor_runtime.model_server import schema
 
 
 @dataclass(frozen=True)
-class WorkerRequest[T]:
+class ServerRequest[T]:
     """One session's request in a batch.
 
     Attributes:
@@ -39,10 +39,10 @@ class WorkerRequest[T]:
             gets the same number.
         generation: Counts the times this slot was opened, starting at ``1``.
             It moves on when a new process connects in the slot and when the
-            application calls :meth:`~reactor_runtime.model_worker.WorkerClient.reset`,
+            application calls :meth:`~reactor_runtime.model_server.ModelClient.reset`,
             so state kept per slot can tell a new session from the one before.
         payload: What the session half passed to ``step()``: an instance of
-            :attr:`ModelWorker.request_type` built from its fields, or, for a
+            :attr:`ModelServer.request_type` built from its fields, or, for a
             worker that declares none, plain values and numpy arrays. Its
             arrays are read-only views of shared memory, valid until this
             request is answered: copy whatever is kept past ``step()``.
@@ -53,11 +53,11 @@ class WorkerRequest[T]:
     payload: T
 
 
-class ModelWorker:
+class ModelServer:
     """Base class for the worker half: weights loaded once, a batch stepped at a time.
 
     Not to be confused with :class:`~reactor_runtime.distributed.DistributedWorker`,
-    one rank of a model split over several GPUs: a ``ModelWorker`` is one model
+    one rank of a model split over several GPUs: a ``ModelServer`` is one model
     half that serves many sessions, and its ``step()`` may drive such ranks.
 
     The worker's process calls :meth:`load` once, then accepts session
@@ -83,7 +83,7 @@ class ModelWorker:
       and never reaches ``step()``.
 
     The types the halves exchange are declared once, in the model's code, and
-    imported by both halves (see :mod:`~reactor_runtime.model_worker.schema`
+    imported by both halves (see :mod:`~reactor_runtime.model_server.schema`
     for what a declaration may hold). Each is checked when the subclass is
     defined, again at load, and the session half's are checked at connect;
     the worker refuses a session whose declared types differ from its own.
@@ -97,7 +97,7 @@ class ModelWorker:
             be; an output that is not one fails that request. ``None`` (the
             default) sends plain values and numpy arrays.
         signals: The frozen dataclasses a session may send with
-            :meth:`~reactor_runtime.model_worker.WorkerClient.signal`. Their
+            :meth:`~reactor_runtime.model_server.ModelClient.signal`. Their
             fields are plain values (no arrays or bytes). A signal of another
             type is refused: the client raises before it sends it, and a
             session that sends one anyway is disconnected. None by default.
@@ -159,23 +159,23 @@ class ModelWorker:
         A raise here fails the worker's start, and the launcher exits with it.
         """
 
-    def step(self, requests: list[WorkerRequest[Any]]) -> list[Any]:
+    def step(self, requests: list[ServerRequest[Any]]) -> list[Any]:
         """Run one step for every request and return one output per request, in order.
 
         An output that is an exception instance fails that request alone: the
         session that sent it sees a
-        :class:`~reactor_runtime.model_worker.WorkerError` naming it. This is
+        :class:`~reactor_runtime.model_server.WorkerError` naming it. This is
         how a model fails one bad request without failing its batch-mates.
 
         A raise from ``step()`` fails every request of the batch: each session
-        sees a :class:`~reactor_runtime.model_worker.BatchFailed` carrying the
+        sees a :class:`~reactor_runtime.model_server.BatchFailed` carrying the
         error, and its application decides what to do. Nothing is stepped
         again. The worker goes on serving, and its ``/health`` reports what
         :meth:`health` and :meth:`mark_unhealthy` say.
 
         An output, like a request, is an instance of :attr:`result_type`, or
         plain values, lists, tuples, dicts, bytes, and numpy arrays when no
-        type is declared (see :mod:`reactor_runtime.model_worker.codec`); the
+        type is declared (see :mod:`reactor_runtime.model_server.codec`); the
         arrays travel through shared memory. Nothing is pickled.
 
         Args:
@@ -190,8 +190,8 @@ class ModelWorker:
     def session_opened(self, slot: int, generation: int) -> None:
         """Set up the state of the session that just opened *slot*.
 
-        A raise refuses the session: its ``WorkerClient.connect()`` or
-        ``reset()`` raises :class:`~reactor_runtime.model_worker.WorkerRejected`.
+        A raise refuses the session: its ``ModelClient.connect()`` or
+        ``reset()`` raises :class:`~reactor_runtime.model_server.WorkerRejected`.
         """
 
     def session_closed(self, slot: int, generation: int) -> None:
@@ -255,7 +255,7 @@ _UNHEALTHY_LOCK = threading.Lock()
 def cuda_health() -> str | None:
     """Return why CUDA cannot run work in this process, or ``None`` when it can.
 
-    For a :meth:`ModelWorker.health` override: ``return cuda_health()``. It
+    For a :meth:`ModelServer.health` override: ``return cuda_health()``. It
     reads torch only when the process already imported it, so it adds no
     dependency, and reports healthy without torch. It runs a one-element
     kernel and synchronizes the device, which waits for the work already
@@ -275,14 +275,14 @@ def cuda_health() -> str | None:
     return None
 
 
-def check_declarations(cls: type[ModelWorker]) -> None:
+def check_declarations(cls: type[ModelServer]) -> None:
     """Check a worker class's serving settings and its declared types.
 
     Raises:
         ValueError: A setting has the wrong type or range.
         TypeError: A declared type
             is not a data-only frozen dataclass (see
-            :mod:`~reactor_runtime.model_worker.schema`).
+            :mod:`~reactor_runtime.model_server.schema`).
     """
     _positive_int(cls.__name__, "max_batch", cls.max_batch)
     _positive_int(cls.__name__, "max_request_bytes", cls.max_request_bytes)
@@ -328,7 +328,7 @@ def check_signal_types(signals: tuple[Any, ...], where: str) -> None:
 
 
 @dataclass(frozen=True)
-class WorkerSettings:
+class ServerSettings:
     """The serving settings a worker runs with: its class's, as ``reactor.yaml`` adjusted them.
 
     Attributes:
@@ -365,7 +365,7 @@ class WorkerSettings:
         return self.shm_input_bytes + self.shm_output_bytes
 
     @classmethod
-    def resolve(cls, worker: type[ModelWorker], overrides: Mapping[str, Any]) -> WorkerSettings:
+    def resolve(cls, worker: type[ModelServer], overrides: Mapping[str, Any]) -> ServerSettings:
         """Return the settings *worker* serves with once *overrides* from ``runtime.worker`` apply.
 
         The class is the authority: an override may lower ``max_batch`` but

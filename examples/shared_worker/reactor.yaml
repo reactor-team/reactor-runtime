@@ -1,6 +1,6 @@
 $schema: reactor/v2
 
-# `runtime.worker` splits the model: `python -m reactor_runtime.model_worker`
+# `runtime.worker` splits the model: `python -m reactor_runtime.model_server`
 # loads the worker half once and steps every session, and `runtime.import`
 # names the application half each session runtime (`python -m
 # reactor_runtime.serve`) runs. The worker block's serving settings may lower

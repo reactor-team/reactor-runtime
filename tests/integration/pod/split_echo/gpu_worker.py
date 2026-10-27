@@ -12,12 +12,12 @@ import numpy as np
 import torch  # ty: ignore[unresolved-import]  # installed where the GPU check runs
 from echo_model import EchoInput, EchoResult
 
-from reactor_runtime.model_worker import ModelWorker, WorkerRequest, cuda_health
+from reactor_runtime.model_server import ModelServer, ServerRequest, cuda_health
 
 WEIGHT_BYTES = 2 << 30
 
 
-class GpuEchoWorker(ModelWorker):
+class GpuEchoWorker(ModelServer):
     """Invert each session's frame on the GPU, batched, after a matmul with the weights."""
 
     request_type = EchoInput
@@ -34,7 +34,7 @@ class GpuEchoWorker(ModelWorker):
         self.probe = torch.randn(1, side, device="cuda", dtype=torch.float16)
         torch.cuda.synchronize()
 
-    def step(self, requests: list[WorkerRequest[EchoInput]]) -> list[EchoResult]:
+    def step(self, requests: list[ServerRequest[EchoInput]]) -> list[EchoResult]:
         """Invert every frame in one batched pass on the GPU."""
         frames = [np.asarray(r.payload.frame) for r in requests]
         if len({f.shape for f in frames}) != 1:

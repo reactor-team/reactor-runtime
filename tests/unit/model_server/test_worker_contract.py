@@ -2,7 +2,7 @@
 
 What a model author writes is checked here without a socket: which declarations
 the schema accepts and how strictly it dumps and loads them, what a
-``ModelWorker`` subclass may declare, how ``reactor.yaml`` may adjust its
+``ModelServer`` subclass may declare, how ``reactor.yaml`` may adjust its
 serving settings, and the health hooks the worker's ``/health`` reads.
 """
 
@@ -19,11 +19,11 @@ import numpy as np
 import pytest
 
 from reactor_runtime import ReactorApp
-from reactor_runtime.model_worker import (
-    ModelWorker,
+from reactor_runtime.model_server import (
+    ModelServer,
     SchemaError,
-    WorkerRequest,
-    WorkerSettings,
+    ServerRequest,
+    ServerSettings,
     cuda_health,
     schema,
 )
@@ -370,23 +370,23 @@ def test_a_worker_class_is_checked_as_it_is_defined(
     attrs: dict[str, Any], error: type[Exception], reason: str
 ) -> None:
     with pytest.raises(error, match=reason):
-        type("Bad", (ModelWorker,), attrs)
+        type("Bad", (ModelServer,), attrs)
 
 
 def test_a_worker_class_with_typed_declarations_defines() -> None:
-    class Good(ModelWorker):
+    class Good(ModelServer):
         request_type = Everything
         result_type = Inner
         signals = (Preempt, Scalars)
 
-        def step(self, requests: list[WorkerRequest[Everything]]) -> list[Inner]:
+        def step(self, requests: list[ServerRequest[Everything]]) -> list[Inner]:
             return [Inner(r.payload.name, 1.0) for r in requests]
 
     assert Good.signals == (Preempt, Scalars)
 
 
 def test_the_default_hooks_report_healthy_and_take_signals_quietly() -> None:
-    worker = ModelWorker()
+    worker = ModelServer()
     assert worker.health() is None
     assert worker.unhealthy is None
     worker.signal(0, Preempt("x"))
@@ -395,7 +395,7 @@ def test_the_default_hooks_report_healthy_and_take_signals_quietly() -> None:
 
 
 def test_mark_unhealthy_latches_its_first_reason_from_any_thread() -> None:
-    worker = ModelWorker()
+    worker = ModelServer()
     threads = [
         threading.Thread(target=worker.mark_unhealthy, args=(f"reason {i}",)) for i in range(8)
     ]
@@ -454,7 +454,7 @@ def test_cuda_health_reads_the_torch_the_process_imported(
 # -- the serving settings -------------------------------------------------------------------
 
 
-class Served(ModelWorker):
+class Served(ModelServer):
     max_batch = 8
     batch_window = 0.01
     max_request_bytes = 1 << 20
@@ -463,13 +463,13 @@ class Served(ModelWorker):
 
 
 def test_the_class_settings_apply_without_overrides() -> None:
-    settings = WorkerSettings.resolve(Served, {})
-    assert settings == WorkerSettings(8, 0.01, 1 << 20, 1 << 16, 1 << 18)
+    settings = ServerSettings.resolve(Served, {})
+    assert settings == ServerSettings(8, 0.01, 1 << 20, 1 << 16, 1 << 18)
     assert settings.shm_slot_bytes == (1 << 16) + (1 << 18)
 
 
 def test_the_manifest_may_lower_max_batch_raise_shm_and_set_the_rest() -> None:
-    settings = WorkerSettings.resolve(
+    settings = ServerSettings.resolve(
         Served,
         {
             "max_batch": 2,
@@ -479,7 +479,7 @@ def test_the_manifest_may_lower_max_batch_raise_shm_and_set_the_rest() -> None:
             "shm_output_bytes": 1 << 22,
         },
     )
-    assert settings == WorkerSettings(2, 0.0, 1 << 30, 1 << 20, 1 << 22)
+    assert settings == ServerSettings(2, 0.0, 1 << 30, 1 << 20, 1 << 22)
     assert type(settings.batch_window) is float
 
 
@@ -502,7 +502,7 @@ def test_the_manifest_may_not_ask_for_what_the_class_cannot_serve(
     overrides: dict[str, Any], reason: str
 ) -> None:
     with pytest.raises(ValueError, match=reason):
-        WorkerSettings.resolve(Served, overrides)
+        ServerSettings.resolve(Served, overrides)
 
 
 # -- the application's availability report --------------------------------------------------

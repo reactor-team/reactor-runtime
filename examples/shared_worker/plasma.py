@@ -6,7 +6,7 @@ session's tick and hue and returns the frame that comes back. The settings,
 the commands, and the media path are the runtime's own, as in any model.
 
 It decides what a lost or a stuck worker means with option 2 of
-:mod:`reactor_runtime.model_worker`: the session ends with the reason, the
+:mod:`reactor_runtime.model_server`: the session ends with the reason, the
 process stays up and refuses sessions until the worker is back, and one watcher
 thread of its own reconnects.
 """
@@ -29,10 +29,10 @@ from reactor_runtime import (
     Video,
     session_started,
 )
-from reactor_runtime.model_worker import (
+from reactor_runtime.model_server import (
     ClientClosed,
+    ModelClient,
     StepUnanswered,
-    WorkerClient,
     WorkerLost,
     WorkerRejected,
     WorkerTimeout,
@@ -67,7 +67,7 @@ class Plasma(ReactorApp):
 
     def load(self, config_path: Path | None) -> None:
         """Connect to the worker, waiting for it, and start watching the connection."""
-        self.worker = WorkerClient.connect(request_type=Tick, result_type=Frame)
+        self.worker = ModelClient.connect(request_type=Tick, result_type=Frame)
         self.tick = 0
         self._give_up = threading.Event()
         threading.Thread(target=self._watch, name="plasma-watch", daemon=True).start()

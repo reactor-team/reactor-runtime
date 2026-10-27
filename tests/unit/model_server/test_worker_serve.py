@@ -1,4 +1,4 @@
-"""``python -m reactor_runtime.model_worker``: what it reads, what it reports, and how it stops."""
+"""``python -m reactor_runtime.model_server``: what it reads, what it reports, and how it stops."""
 
 from __future__ import annotations
 
@@ -18,16 +18,16 @@ from pathlib import Path
 
 import pytest
 
-from reactor_runtime.model_worker import WorkerClient, WorkerError, wire
+from reactor_runtime.model_server import ModelClient, WorkerError, wire
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="process tests on Linux")
 
 _WORKER = """
 import os, time
 from pathlib import Path
-from reactor_runtime.model_worker import ModelWorker
+from reactor_runtime.model_server import ModelServer
 
-class Slow(ModelWorker):
+class Slow(ModelServer):
     max_batch = 4
     shm_input_bytes = 1 << 16
     shm_output_bytes = 1 << 16
@@ -79,7 +79,7 @@ def _manifest(directory: Path, worker: str) -> None:
 
 def _start(directory: Path, port: int, *args: str, **env: str) -> subprocess.Popen[bytes]:
     return subprocess.Popen(
-        [sys.executable, "-m", "reactor_runtime.model_worker", *args],
+        [sys.executable, "-m", "reactor_runtime.model_server", *args],
         cwd=directory,
         env={
             **{k: v for k, v in os.environ.items() if k != "REACTOR_MAX_SESSIONS"},
@@ -94,7 +94,7 @@ def _start(directory: Path, port: int, *args: str, **env: str) -> subprocess.Pop
 
 def _run(directory: Path, **env: str) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(
-        [sys.executable, "-m", "reactor_runtime.model_worker"],
+        [sys.executable, "-m", "reactor_runtime.model_server"],
         cwd=directory,
         capture_output=True,
         env={
@@ -133,8 +133,8 @@ def _stop(process: subprocess.Popen[bytes]) -> int:
         return process.wait()
 
 
-def _connect(directory: Path) -> WorkerClient:
-    client = WorkerClient.connect(socket_path=directory / "run" / "sock", slot=0, connect_timeout=5)
+def _connect(directory: Path) -> ModelClient:
+    client = ModelClient.connect(socket_path=directory / "run" / "sock", slot=0, connect_timeout=5)
     client.reset()
     return client
 

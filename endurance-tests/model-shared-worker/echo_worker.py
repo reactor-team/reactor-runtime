@@ -6,10 +6,10 @@ from pathlib import Path
 
 from echo_model import EchoInput, EchoModel, EchoResult
 
-from reactor_runtime.model_worker import ModelWorker, WorkerRequest
+from reactor_runtime.model_server import ModelServer, ServerRequest
 
 
-class EchoWorker(ModelWorker):
+class EchoWorker(ModelServer):
     """Apply the effect for each request, one at a time."""
 
     request_type = EchoInput
@@ -20,6 +20,6 @@ class EchoWorker(ModelWorker):
         self.model = EchoModel()
         self.model.load()
 
-    def step(self, requests: list[WorkerRequest[EchoInput]]) -> list[EchoResult]:
+    def step(self, requests: list[ServerRequest[EchoInput]]) -> list[EchoResult]:
         """Run the echo model for every request."""
         return [self.model.generate(r.payload) for r in requests]

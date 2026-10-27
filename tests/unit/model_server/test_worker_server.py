@@ -1,7 +1,7 @@
 """The worker's server: accepting sessions, reading their frames, batching, and stepping.
 
 The worker runs on a thread of the test process. Sessions are real
-``WorkerClient`` instances on a real Unix socket, or raw sockets that write the
+``ModelClient`` instances on a real Unix socket, or raw sockets that write the
 frames a broken or hostile session would.
 """
 
@@ -24,29 +24,29 @@ import numpy as np
 import pytest
 
 from reactor_runtime.distributed.ipc import SharedSlot
-from reactor_runtime.model_worker import (
+from reactor_runtime.model_server import (
     BatchFailed,
-    ModelWorker,
-    WorkerClient,
+    ModelClient,
+    ModelServer,
+    ServerRequest,
+    ServerSettings,
     WorkerError,
     WorkerLost,
     WorkerRejected,
-    WorkerRequest,
-    WorkerSettings,
     WorkerUnreachable,
     codec,
     wire,
 )
-from reactor_runtime.model_worker.server import WorkerServer
-from reactor_runtime.model_worker.transport import UnixShmTransport
-from reactor_runtime.model_worker.wire import Kind
+from reactor_runtime.model_server.server import WorkerServer
+from reactor_runtime.model_server.transport import UnixShmTransport
+from reactor_runtime.model_server.wire import Kind
 
 
 class BoomError(RuntimeError):
     """The model's own error, raised for one request."""
 
 
-class Recorder(ModelWorker):
+class Recorder(ModelServer):
     """Double each payload's array and record every call the server makes."""
 
     max_batch = 4
@@ -59,7 +59,7 @@ class Recorder(ModelWorker):
         self.entered = threading.Event()
         self.lock = threading.Lock()
 
-    def step(self, requests: list[WorkerRequest[Any]]) -> list[Any]:
+    def step(self, requests: list[ServerRequest[Any]]) -> list[Any]:
         self.entered.set()
         self.gate.wait(10)
         with self.lock:
@@ -204,8 +204,8 @@ def test_a_step_round_trips_arrays_through_shared_memory(serve: Any) -> None:
 
 
 def test_the_worker_sees_request_arrays_read_only(serve: Any) -> None:
-    class Writes(ModelWorker):
-        def step(self, requests: list[WorkerRequest[Any]]) -> list[Any]:
+    class Writes(ModelServer):
+        def step(self, requests: list[ServerRequest[Any]]) -> list[Any]:
             requests[0].payload[0] = 1
             return [None]
 
@@ -226,12 +226,12 @@ class Out:
     slot: int
 
 
-class Typed(ModelWorker):
+class Typed(ModelServer):
     request_type = In
     result_type = Out
     max_batch = 2
 
-    def step(self, requests: list[WorkerRequest[In]]) -> list[Any]:
+    def step(self, requests: list[ServerRequest[In]]) -> list[Any]:
         out: list[Any] = []
         for r in requests:
             assert type(r.payload) is In
@@ -357,7 +357,7 @@ def test_the_settings_the_server_is_given_are_what_it_batches_by_and_welcomes_wi
     serve: Any,
 ) -> None:
     worker = Recorder()
-    settings = WorkerSettings.resolve(Recorder, {"max_batch": 1, "shm_input_bytes": 2 << 20})
+    settings = ServerSettings.resolve(Recorder, {"max_batch": 1, "shm_input_bytes": 2 << 20})
     served: Any = serve(worker, settings=settings)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.connect(str(served.path))
@@ -394,7 +394,7 @@ def test_a_session_that_joins_mid_step_waits_for_the_next_step(serve: Any) -> No
     running = threading.Thread(target=first.step, args=(np.ones(2),))
     running.start()
     worker.entered.wait(5)
-    joined: list[WorkerClient] = []
+    joined: list[ModelClient] = []
     joiner = threading.Thread(target=lambda: joined.append(served.client(1)))
     joiner.start()
     time.sleep(0.2)
@@ -457,7 +457,7 @@ def test_a_step_that_raises_fails_every_request_of_its_batch_and_runs_once(serve
             super().load(config_path)
             self.calls = 0
 
-        def step(self, requests: list[WorkerRequest[Any]]) -> list[Any]:
+        def step(self, requests: list[ServerRequest[Any]]) -> list[Any]:
             self.calls += 1
             return super().step(requests)
 
@@ -492,8 +492,8 @@ def test_a_step_that_raises_fails_every_request_of_its_batch_and_runs_once(serve
 
 
 def test_a_step_returning_the_wrong_count_fails_every_request(serve: Any) -> None:
-    class Short(ModelWorker):
-        def step(self, requests: list[WorkerRequest[Any]]) -> list[Any]:
+    class Short(ModelServer):
+        def step(self, requests: list[ServerRequest[Any]]) -> list[Any]:
             return []
 
     served: Any = serve(Short())
@@ -502,8 +502,8 @@ def test_a_step_returning_the_wrong_count_fails_every_request(serve: Any) -> Non
 
 
 def test_an_output_that_does_not_travel_fails_that_request(serve: Any) -> None:
-    class Unsendable(ModelWorker):
-        def step(self, requests: list[WorkerRequest[Any]]) -> list[Any]:
+    class Unsendable(ModelServer):
+        def step(self, requests: list[ServerRequest[Any]]) -> list[Any]:
             return [threading.Lock()]
 
     served: Any = serve(Unsendable())
@@ -520,8 +520,8 @@ def test_an_exception_whatever_it_holds_arrives_by_name_and_message(serve: Any) 
             super().__init__("odd")
             self.lock = lock
 
-    class Raises(ModelWorker):
-        def step(self, requests: list[WorkerRequest[Any]]) -> list[Any]:
+    class Raises(ModelServer):
+        def step(self, requests: list[ServerRequest[Any]]) -> list[Any]:
             return [OddError(threading.Lock())]
 
     served: Any = serve(Raises())
@@ -534,8 +534,8 @@ def test_an_exception_that_cannot_be_printed_fails_its_request_alone(serve: Any)
         def __str__(self) -> str:
             raise RuntimeError("no str")
 
-    class Unprintable(ModelWorker):
-        def step(self, requests: list[WorkerRequest[Any]]) -> list[Any]:
+    class Unprintable(ModelServer):
+        def step(self, requests: list[ServerRequest[Any]]) -> list[Any]:
             return [UnprintableError() if r.slot == 0 else 1 for r in requests]
 
     served: Any = serve(Unprintable())
@@ -810,7 +810,7 @@ def test_a_slot_held_by_a_live_process_is_refused(serve: Any) -> None:
 def test_a_held_slot_is_refused_even_when_the_peer_pid_is_unknown(
     serve: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from reactor_runtime.model_worker import server as server_module
+    from reactor_runtime.model_server import server as server_module
 
     # Containers of a pod do not share a PID namespace: the peer reads as pid 0.
     monkeypatch.setattr(server_module, "_peer_pid", lambda sock: 0)
@@ -863,7 +863,7 @@ def test_a_session_the_worker_has_no_memory_for_is_refused(tmp_path: Path) -> No
     thread.start()
     try:
         with pytest.raises(WorkerRejected, match="no shared memory for one more session"):
-            WorkerClient.connect(socket_path=path, slot=0, connect_timeout=5)
+            ModelClient.connect(socket_path=path, slot=0, connect_timeout=5)
     finally:
         server.stop()
         thread.join(5)
@@ -897,8 +897,8 @@ def test_a_stopping_worker_closes_new_connections_without_a_refusal(tmp_path: Pa
     ],
 )
 def test_a_bad_policy_is_refused_at_start(tmp_path: Path, attr: str, value: Any) -> None:
-    good = WorkerSettings.resolve(Recorder, {})
-    bad = WorkerSettings(**{**good.__dict__, attr: value})
+    good = ServerSettings.resolve(Recorder, {})
+    bad = ServerSettings(**{**good.__dict__, attr: value})
     with pytest.raises(ValueError, match=attr):
         WorkerServer(Recorder(), tmp_path / "x.sock", shm_prefix="rrx_", settings=bad)
 
@@ -974,10 +974,10 @@ def test_a_request_that_outgrows_its_block_still_travels(serve: Any) -> None:
 
 @needs_shm_files
 def test_an_output_that_outgrows_its_block_grows_it_in_place(serve: Any) -> None:
-    class Sized(ModelWorker):
+    class Sized(ModelServer):
         shm_output_bytes = 4096
 
-        def step(self, requests: list[WorkerRequest[Any]]) -> list[Any]:
+        def step(self, requests: list[ServerRequest[Any]]) -> list[Any]:
             return [np.zeros(int(r.payload), dtype=np.uint8) for r in requests]
 
     served: Any = serve(Sized())
@@ -995,8 +995,8 @@ def test_an_output_that_outgrows_its_block_grows_it_in_place(serve: Any) -> None
 # -- a session that stops reading -----------------------------------------------------------
 
 
-class Echo(ModelWorker):
-    def step(self, requests: list[WorkerRequest[Any]]) -> list[Any]:
+class Echo(ModelServer):
+    def step(self, requests: list[ServerRequest[Any]]) -> list[Any]:
         return [r.payload for r in requests]
 
 
@@ -1028,8 +1028,8 @@ def test_a_session_that_stops_reading_is_cut_off_and_stalls_nobody(serve: Any) -
 def test_a_session_that_does_not_take_its_answer_holds_the_worker_five_seconds_at_most(
     serve: Any,
 ) -> None:
-    class BigAnswer(ModelWorker):
-        def step(self, requests: list[WorkerRequest[Any]]) -> list[Any]:
+    class BigAnswer(ModelServer):
+        def step(self, requests: list[ServerRequest[Any]]) -> list[Any]:
             return [b"x" * (64 << 20) if r.payload == "big" else r.payload for r in requests]
 
     served: Any = serve(BigAnswer())
