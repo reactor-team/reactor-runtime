@@ -64,6 +64,9 @@ spec:
         httpGet: {path: /health, port: 8079}
         periodSeconds: 10
         failureThreshold: 3
+        # The worker stops on SIGTERM only between steps, so a stuck or frozen
+        # one is killed after this, not after the pod's grace.
+        terminationGracePeriodSeconds: 30
       resources:
         limits:
           nvidia.com/gpu: 1
