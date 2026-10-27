@@ -41,7 +41,9 @@ Every option has an environment variable and a default:
 Every line it logs carries ``runtime_role="model_server"``, and a line about
 one session carries that session's ``slot``, the number its session runtime
 stamps on its own lines (``REACTOR_SESSION_SLOT``) and logs with the slot's
-generation in its ``model server link`` line.
+generation in its ``model server link`` line. Each such generation has a worker
+line with the same slot and generation: ``session opened`` for a session's
+first, ``session reset`` for each reset after it.
 
 Once ready it also writes ``ready`` next to the socket, for an exec probe, and
 removes it when it stops. SIGTERM and SIGINT stop it once the running step

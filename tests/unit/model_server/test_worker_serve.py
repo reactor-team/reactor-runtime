@@ -314,9 +314,13 @@ def test_every_worker_line_names_its_role_and_a_sessions_lines_name_its_slot(
     records = [json.loads(line) for line in process.stderr.read().decode().splitlines()]
     assert records
     assert all(record["runtime_role"] == "model_server" for record in records)
-    sessions = [r for r in records if r["msg"] in ("session opened", "session closed")]
+    # Each generation a session's link reports ("model server link") has a worker line with the
+    # same slot and generation: "session opened" for the first, "session reset" for each reset.
+    named = ("session opened", "session reset", "session closed")
+    sessions = [r for r in records if r["msg"] in named]
     assert [(r["msg"], r["slot"], r["generation"]) for r in sessions] == [
         ("session opened", 0, 1),
+        ("session reset", 0, 2),
         ("session closed", 0, 2),
     ]
 

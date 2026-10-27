@@ -595,8 +595,14 @@ class ReactorCore:
         its close reason (clients get the session-ended notice carrying it).
         From then on ``/health`` answers 503 with *reason* as its detail, and
         ``/start_session`` answers 503 with ``Retry-After`` in every state but
-        terminated. The process stays up and nothing is raised. A repeat while
-        unavailable only updates the reason ``/health`` serves.
+        terminated. The runtime keeps the process up and raises nothing. A
+        repeat while unavailable only updates the reason ``/health`` serves.
+
+        The process stays up only if the deployment lets it: one that restarts
+        a process whose ``/health`` answers 503 (a liveness check on
+        ``/health``) restarts it instead, and the restarted process loads the
+        model again. Keep liveness on the port (or another signal) where the
+        process should wait for its dependency rather than restart.
 
         Non-blocking and safe from any thread, including from :meth:`load`:
         the state is stored under a short lock and handed to the runtime's

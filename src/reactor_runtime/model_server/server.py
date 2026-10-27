@@ -654,6 +654,7 @@ class WorkerServer:
         conn.opened = True
         with self._cond:
             self._open.add(conn)
+        logger.info("session reset", slot=conn.slot, generation=conn.generation)
         self._reply(conn, Kind.ACK, request_id, wire.encode_message(wire.ResetAck(conn.generation)))
 
     def _run(self, batch: list[_Request]) -> None:
