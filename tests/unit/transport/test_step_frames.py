@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Callable
 
 import av
 import numpy as np
@@ -319,6 +320,15 @@ async def _settle() -> None:
         await asyncio.sleep(0.01)
 
 
+async def _until(predicate: Callable[[], bool]) -> None:
+    """Wait for *predicate*, which a decode on a worker thread makes true."""
+    for _ in range(1000):
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition not reached within 10 s")
+
+
 async def test_a_plain_message_is_delivered_at_once() -> None:
     rec = _Recorder()
     rec.gate().submit(b"anything", ProtocolVersion.V1, Channel.DATA)
@@ -338,7 +348,7 @@ async def test_an_encoded_step_goes_up_with_its_pictures_and_nothing_overtakes_i
     gate.submit(request, ProtocolVersion.V1, Channel.DATA)
     gate.submit(command, ProtocolVersion.V1, Channel.DATA)
     assert rec.order == []  # the command waits behind the decode
-    await _settle()
+    await _until(lambda: len(rec.order) == 2)
 
     assert rec.order == ["step", "message"]
     (step,) = rec.steps
@@ -359,7 +369,7 @@ async def test_a_step_that_does_not_decode_is_refused_and_not_delivered() -> Non
 
     gate.submit(_wire(_step(*(_h264(p) for p in packets[1:]))), ProtocolVersion.V1, Channel.DATA)
     gate.submit(command, ProtocolVersion.V1, Channel.DATA)
-    await _settle()
+    await _until(lambda: len(rec.delivered) == 1)
 
     assert rec.delivered == [command]
     assert rec.steps == []
@@ -425,13 +435,12 @@ async def test_a_track_never_published_gets_its_decoder_with_its_first_frames() 
     packets = _encode(_pictures(8))
 
     gate.submit(_wire(_step(*(_h264(p) for p in packets[:4]))), ProtocolVersion.V1, Channel.DATA)
-    await _settle()
+    await _until(lambda: len(rec.steps) == 1)
     assert gate.decoders == 1
     gate.submit(_wire(_step(*(_h264(p) for p in packets[4:]))), ProtocolVersion.V1, Channel.DATA)
-    await _settle()
+    await _until(lambda: len(rec.steps) == 2)
 
     assert gate.decoders == 1
-    assert len(rec.steps) == 2
 
 
 async def test_an_unpublish_queued_behind_a_decode_releases_the_decoder_after_it() -> None:
@@ -443,7 +452,7 @@ async def test_an_unpublish_queued_behind_a_decode_releases_the_decoder_after_it
     gate.submit(_wire(_step(*(_h264(p) for p in packets))), ProtocolVersion.V1, Channel.DATA)
     gate.submit(_unpublish("webcam"), ProtocolVersion.V1, Channel.CONTROL)
     assert gate.decoders == 1
-    await _settle()
+    await _until(lambda: len(rec.order) == 3)
 
     assert rec.order == ["message", "step", "message"]
     assert gate.decoders == 0
