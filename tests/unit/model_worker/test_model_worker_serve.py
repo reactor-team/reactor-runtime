@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from reactor_runtime import cli
-from reactor_runtime.model_worker import WorkerClient
+from reactor_runtime.model_worker import WorkerClient, WorkerError
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="process tests on Linux")
 
@@ -128,16 +128,52 @@ def test_serve_worker_refuses_without_a_worker_half(tmp_path: Path) -> None:
     assert b"no worker half named" in result.stderr
 
 
-def test_serve_worker_unlinks_blocks_a_previous_worker_left(model_dir: Path) -> None:
+def test_serve_worker_unlinks_blocks_its_predecessor_left_and_no_others(model_dir: Path) -> None:
     from multiprocessing import shared_memory
 
     port = _free_port()
-    stale = shared_memory.SharedMemory(name=f"rrs{port}dead_w0c0_0", create=True, size=64)
+    (model_dir / "run").mkdir()
+    (model_dir / "run" / "shm-prefix").write_text(f"rrs{port}dead_")
+    stale = shared_memory.SharedMemory(name=f"rrs{port}dead_w0c0_out", create=True, size=64)
+    other = shared_memory.SharedMemory(name=f"rrs{port}live_w0c0_out", create=True, size=64)
     stale.close()
     process = _start(model_dir, port)
     try:
         _wait(lambda: _health(port)[0] == 200)
-        assert not Path(f"/dev/shm/rrs{port}dead_w0c0_0").exists()
+        assert not Path(f"/dev/shm/rrs{port}dead_w0c0_out").exists()
+        # Another worker's blocks under the same base are left alone.
+        assert Path(f"/dev/shm/rrs{port}live_w0c0_out").exists()
+        assert (model_dir / "run" / "shm-prefix").read_text().startswith(f"rrs{port}")
+    finally:
+        process.send_signal(signal.SIGTERM)
+        process.wait(10)
+        other.close()
+        other.unlink()
+    assert not (model_dir / "run" / "shm-prefix").exists()
+
+
+def test_serve_worker_reports_failing_after_steps_in_a_row_raise(model_dir: Path) -> None:
+    (model_dir / "bad_worker.py").write_text(
+        "from reactor_runtime.model_worker import ModelWorker\n"
+        "class Bad(ModelWorker):\n"
+        "    def step(self, requests):\n"
+        "        raise RuntimeError('CUDA error: an illegal memory access')\n"
+    )
+    port = _free_port()
+    process = _start(
+        model_dir,
+        port,
+        REACTOR_WORKER_IMPORT="bad_worker:Bad",
+        REACTOR_MODEL_WORKER_FAILING_STEPS="3",
+    )
+    try:
+        _wait(lambda: _health(port)[0] == 200)
+        client = WorkerClient.connect(socket_path=model_dir / "run" / "sock", slot=0)
+        for _ in range(3):
+            with pytest.raises(WorkerError, match="illegal memory access"):
+                client.step(1)
+        assert _health(port) == (503, {"status": "failing", "failed_steps": 3})
+        client.close()
     finally:
         process.send_signal(signal.SIGTERM)
         process.wait(10)

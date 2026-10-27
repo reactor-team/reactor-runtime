@@ -123,6 +123,7 @@ class _Link:
     signals: frozenset[str] | None = None
     replies: dict[int, tuple[Kind, bytes]] = field(default_factory=dict)
     lost: WorkerLost | None = None
+    reset_pending: bool = False
     closing: bool = False
     released: bool = False
 
@@ -333,6 +334,8 @@ class WorkerClient:
         with self._call_lock:
             link = self._usable()
             try:
+                if link.reset_pending:
+                    self._reset(link, timeout)
                 return self._step(link, payload, timeout)
             finally:
                 if link.lost is not None:
@@ -343,7 +346,10 @@ class WorkerClient:
 
         The worker runs ``session_closed()`` then ``session_opened()`` for the
         slot, between steps. Call it when the session process starts a new
-        session, so nothing of the last one reaches it.
+        session, so nothing of the last one reaches it. A reset that does not
+        complete (it timed out, or the worker went away) is retried before the
+        next :meth:`step`, which raises rather than run on the last session's
+        state; a reconnect opens a new session anyway.
 
         Returns:
             The slot's new generation.
@@ -355,22 +361,28 @@ class WorkerClient:
         """
         with self._call_lock:
             link = self._usable()
-            try:
-                request_id = next(self._ids)
-                wait = self._step_timeout if timeout is None else timeout
-                self._send(link, Kind.RESET, request_id)
-                kind, reply = self._await(link, request_id, wait)
-                if kind is None:
-                    raise WorkerTimeout(f"the model worker did not reset within {wait} s")
-                if kind is Kind.REJECTED:
-                    raise WorkerRejected(reply.decode(errors="replace"))
-                if kind is not Kind.ACK:
-                    raise WorkerLost(f"worker_died: answered a reset with {kind.name}")
-                link.generation = int(wire.from_json(reply)["generation"])
-                return link.generation
-            finally:
-                if link.lost is not None:
-                    link.release()
+            link.reset_pending = True
+            return self._reset(link, timeout)
+
+    def _reset(self, link: _Link, timeout: float | None) -> int:
+        """Reset *link*'s slot; call with the call lock held."""
+        try:
+            request_id = next(self._ids)
+            wait = self._step_timeout if timeout is None else timeout
+            self._send(link, Kind.RESET, request_id)
+            kind, reply = self._await(link, request_id, wait)
+            if kind is None:
+                raise StepTimedOut(f"the model worker did not reset within {wait} s")
+            if kind is Kind.REJECTED:
+                raise WorkerRejected(reply.decode(errors="replace"))
+            if kind is not Kind.ACK:
+                raise WorkerLost(f"worker_died: answered a reset with {kind.name}")
+            link.generation = int(wire.from_json(reply)["generation"])
+            link.reset_pending = False
+            return link.generation
+        finally:
+            if link.lost is not None:
+                link.release()
 
     def signal(self, name: str, payload: Any = None) -> None:
         """Deliver *name* to the worker's ``signal()`` now, even while a step waits.
@@ -428,6 +440,8 @@ class WorkerClient:
         header, _ = link.carrier.encode(payload)
         self._send(link, Kind.STEP, request_id, wire.TIMEOUT.pack(wait) + header)
         kind, reply = self._await(link, request_id, wait)
+        if kind is not None:
+            link.carrier.settled()
         if kind is None:
             self._send(link, Kind.CANCEL, request_id, best_effort=True)
             # The worker may still read the abandoned request, so the next
@@ -532,6 +546,9 @@ class WorkerClient:
                 self._open()
             except (WorkerRejected, WorkerUnreachable) as exc:
                 logger.warning("could not reopen this session on the worker", error=str(exc))
+                with self._cond:
+                    self._lost_reason = f"worker_unavailable: {exc}"
+                self._report()
             except (NoListener, WorkerLost):
                 pass
             with self._cond:

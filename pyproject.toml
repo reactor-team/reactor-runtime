@@ -160,6 +160,7 @@ extra-paths = [
     "tests/contract",
     "endurance-tests",
     "endurance-tests/model",
+    "endurance-tests/model-shared-worker",
 ]
 
 [tool.ty.src]

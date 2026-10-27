@@ -868,7 +868,8 @@ def test_a_session_whose_reset_was_refused_is_rejected_at_once(serve: Any) -> No
     with pytest.raises(WorkerRejected, match="no room"):
         client.reset()
     started = time.monotonic()
-    with pytest.raises(WorkerRejected, match="not open"):
+    # The step first retries the reset the worker refused, and is refused again.
+    with pytest.raises(WorkerRejected, match="no room"):
         client.step(1)
     assert time.monotonic() - started < 1.0
     # The step thread is idle, not spinning on the request it cannot run.
@@ -908,7 +909,7 @@ def test_an_oversize_request_leaves_no_block_behind(serve: Any) -> None:
     assert set(_shm_sizes(served.prefix)) == before
 
 
-def test_an_output_that_outgrows_its_block_leaves_no_block_behind(serve: Any) -> None:
+def test_an_output_that_outgrows_its_block_grows_it_in_place(serve: Any) -> None:
     class Sized(ModelWorker):
         shm_output_bytes = 4096
 
@@ -917,11 +918,14 @@ def test_an_output_that_outgrows_its_block_leaves_no_block_behind(serve: Any) ->
 
     served: Any = serve(Sized())
     client = served.client(0)
-    before = set(_shm_sizes(served.prefix))
+    before = _shm_sizes(served.prefix)
     assert client.step(1 << 20).nbytes == 1 << 20
-    assert len(set(_shm_sizes(served.prefix)) - before) == 1
+    grown = _shm_sizes(served.prefix)
+    # One block replaced by one its size, not one more block.
+    assert len(grown) == len(before)
+    assert max(grown.values()) >= 1 << 20
     assert client.step(16).nbytes == 16
-    assert set(_shm_sizes(served.prefix)) == before
+    assert _shm_sizes(served.prefix) == grown
 
 
 def test_a_step_that_times_out_is_a_model_unavailable() -> None:
@@ -943,3 +947,174 @@ def test_an_oversize_control_frame_is_refused_before_it_is_read(serve: Any) -> N
     assert sock.recv(1) == b""
     sock.close()
     _until(lambda: ("closed", 0, 1) in worker.events)
+
+
+def test_a_batch_that_raises_is_stepped_again_one_request_at_a_time(serve: Any) -> None:
+    class Poisoned(Recorder):
+        def step(self, requests: list[WorkerRequest]) -> list[Any]:
+            if any(isinstance(r.payload, dict) and r.payload.get("poison") for r in requests):
+                with self.lock:
+                    self.batches.append([r.slot for r in requests])
+                raise BoomError("out of memory")
+            return super().step(requests)
+
+    worker = Poisoned()
+    served: Any = serve(worker)
+    clients = [served.client(slot) for slot in range(3)]
+    holder = served.client(3)
+    worker.gate.clear()
+    hold = threading.Thread(target=holder.step, args=(np.ones(1),))
+    hold.start()
+    worker.entered.wait(5)
+    results: dict[int, Any] = {}
+
+    def run(slot: int, payload: Any) -> None:
+        try:
+            results[slot] = clients[slot].step(payload)
+        except Exception as exc:
+            results[slot] = exc
+
+    threads = [
+        threading.Thread(target=run, args=(0, np.ones(2))),
+        threading.Thread(target=run, args=(1, {"poison": True})),
+        threading.Thread(target=run, args=(2, np.ones(3))),
+    ]
+    for thread in threads:
+        thread.start()
+    time.sleep(0.2)
+    worker.gate.set()
+    for thread in [hold, *threads]:
+        thread.join(10)
+    assert [0, 1, 2] in [sorted(batch) for batch in worker.batches]
+    assert isinstance(results[1], WorkerError)
+    np.testing.assert_array_equal(results[0]["x"], np.ones(2) * 2)
+    np.testing.assert_array_equal(results[2]["x"], np.ones(3) * 2)
+
+
+def test_after_a_timeout_the_input_block_is_used_again(serve: Any) -> None:
+    worker = Recorder()
+    served: Any = serve(worker)
+    client = served.client(0)
+    worker.gate.clear()
+    with pytest.raises(WorkerTimeout):
+        client.step(np.ones(1024), timeout=0.1)
+    worker.gate.set()
+    client.step(np.ones(1024))
+    blocks = set(_shm_sizes(served.prefix))
+    for _ in range(5):
+        client.step(np.ones(1024))
+    assert set(_shm_sizes(served.prefix)) <= blocks
+    assert not [n for n in _shm_sizes(served.prefix) if "_g" in n]
+
+
+def test_an_incomplete_reset_is_retried_before_the_next_step(serve: Any) -> None:
+    worker = Recorder()
+    served: Any = serve(worker)
+    client = served.client(0)
+    worker.gate.clear()
+    hold = threading.Thread(target=_swallow, args=(served.client(1).step, np.ones(1)))
+    hold.start()
+    worker.entered.wait(5)
+    with pytest.raises(WorkerTimeout):
+        client.reset(timeout=0.1)
+    worker.gate.set()
+    hold.join(5)
+    out = client.step(1)
+    assert out["gen"] > 1
+    assert ("closed", 0, 1) in worker.events
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        np.array(7),
+        np.array(3.5, dtype=np.float32),
+        np.zeros((0, 4), dtype=np.int16),
+        np.arange(6, dtype=">i4").reshape(2, 3),
+        np.array(["2026-10-26"], dtype="datetime64[D]"),
+        np.arange(12, dtype=np.float64).reshape(3, 4)[:, ::2],
+        np.array([1 + 2j], dtype=np.complex64),
+        {"t": (1, "a", None, True, b"xy"), 3: [1.5, float("inf"), float("-inf")]},
+    ],
+)
+def test_the_codec_round_trips_what_it_carries(value: Any) -> None:
+    slot = SharedSlot(initial_bytes=4096)
+    try:
+        header, _ = codec.encode(value, slot)
+        _, spans, tree = codec.parse(header)
+        buf = slot._shm.buf
+        assert buf is not None
+        copies = [memoryview(bytearray(buf[o : o + n])) for o, n in spans]
+        del buf
+    finally:
+        slot.close()
+    out = codec.decode(tree, copies.__getitem__)
+    if isinstance(value, np.ndarray):
+        assert out.shape == value.shape
+        assert out.dtype == value.dtype
+        np.testing.assert_array_equal(out, value)
+    else:
+        assert out == value
+
+
+def test_an_array_that_does_not_rebuild_is_rejected_not_a_closed_connection(serve: Any) -> None:
+    served: Any = serve(Recorder())
+    sock, prefix = _raw(served, 0)
+    try:
+        header = _header({"a": ["<u1", [2**62, 2**62, 0], 0]}, spans=[[0, 0]])
+        header = header.replace(b'"OWN"', json.dumps(f"{prefix}in").encode())
+        kind, _ = _step_raw(sock, 1, header)
+        assert kind is Kind.REJECTED
+        bad_name = _header(1, block=f"{prefix}in\\u0000x", spans=[[0, 1]])
+        kind, _ = _step_raw(sock, 2, bad_name)
+        assert kind is Kind.REJECTED
+    finally:
+        sock.close()
+
+
+def test_the_availability_replay_at_bind_comes_before_any_later_report() -> None:
+    from reactor_runtime import ReactorApp
+
+    class App(ReactorApp):
+        def generate(self, input: Any) -> Any:
+            return None
+
+    app = App()
+    app.report_unavailable("worker_unavailable: not up")
+    heard: list[str | None] = []
+    reporter: list[threading.Thread] = []
+
+    def sink(reason: str | None) -> None:
+        if not reporter:
+            reporter.append(threading.Thread(target=app.report_available))
+            reporter[0].start()
+            time.sleep(0.1)
+        heard.append(reason)
+
+    app._bind_availability(sink)
+    reporter[0].join(5)
+    assert heard == ["worker_unavailable: not up", None]
+
+
+def test_a_reconnect_that_cannot_reach_the_worker_reports_why(
+    serve: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from reactor_runtime.model_worker import client as client_module
+
+    monkeypatch.setattr(client_module, "_RECONNECT_FIRST", 0.05)
+    monkeypatch.setattr(client_module, "_RECONNECT_MAX", 0.1)
+    served: Any = serve(Recorder())
+    app = FakeApp()
+    client = WorkerClient.connect(app, socket_path=served.path, slot=0)
+    served.clients.append(client)
+    holder_path = served.path
+    served.server.stop()
+    served.thread.join(5)
+
+    class Blind(UnixShmTransport):
+        def client_carrier(self, welcome: dict[str, Any]) -> Any:
+            raise WorkerUnreachable("the model worker's shared memory is not visible here")
+
+    client._transport = Blind()
+    serve(Recorder(), path=holder_path)
+    _until(lambda: app.reports and "not visible here" in str(app.reports[-1]), within=5)

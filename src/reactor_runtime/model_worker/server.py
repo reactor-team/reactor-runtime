@@ -139,6 +139,8 @@ class WorkerServer:
         self._stopping = False
         self._listener: socket.socket | None = None
         self._step_started: float | None = None
+        # Steps in a row that raised, for the worker's health.
+        self.failed_steps = 0
 
     @property
     def socket_path(self) -> Path:
@@ -538,22 +540,13 @@ class WorkerServer:
 
     def _run(self, batch: list[_Request]) -> None:
         started = time.monotonic()
-        requests = [WorkerRequest(r.conn.slot, r.conn.generation, r.payload) for r in batch]
-        self._step_started = started
-        try:
-            outputs = self._worker.step(requests)
-            if not isinstance(outputs, list | tuple) or len(outputs) != len(batch):
-                count = (
-                    len(outputs) if isinstance(outputs, list | tuple) else type(outputs).__name__
-                )
-                raise RuntimeError(f"step() returned {count} outputs for {len(batch)} requests")
-        except Exception as exc:
-            logger.exception("step() raised", size=len(batch))
-            outputs = [exc] * len(batch)
-        finally:
-            self._step_started = None
+        outputs = self._step(batch)
+        if len(batch) > 1 and all(isinstance(o, BaseException) for o in outputs):
+            # The whole step raised: run each request alone, so the error
+            # lands on the request that causes it and not on its batch-mates.
+            logger.warning("a batched step raised; stepping its requests one at a time")
+            outputs = [self._step([request])[0] for request in batch]
         ran = time.monotonic() - started
-        del requests
         for request, output in zip(batch, outputs, strict=True):
             request.payload = None
             self._answer(request, output)
@@ -564,6 +557,26 @@ class WorkerServer:
             step_ms=round(ran * 1000, 2),
             wait_ms=[round((started - r.arrived) * 1000, 2) for r in batch],
         )
+
+    def _step(self, batch: list[_Request]) -> list[Any]:
+        """Call ``step()`` once; on a raise, every request's output is the exception."""
+        requests = [WorkerRequest(r.conn.slot, r.conn.generation, r.payload) for r in batch]
+        self._step_started = time.monotonic()
+        try:
+            outputs = self._worker.step(requests)
+            if not isinstance(outputs, list | tuple) or len(outputs) != len(batch):
+                count = (
+                    len(outputs) if isinstance(outputs, list | tuple) else type(outputs).__name__
+                )
+                raise RuntimeError(f"step() returned {count} outputs for {len(batch)} requests")
+        except Exception as exc:
+            logger.exception("step() raised", size=len(batch))
+            self.failed_steps += 1
+            return [exc] * len(batch)
+        finally:
+            self._step_started = None
+        self.failed_steps = 0
+        return list(outputs)
 
     def _answer(self, request: _Request, output: Any) -> None:
         conn = request.conn

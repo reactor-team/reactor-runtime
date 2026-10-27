@@ -149,8 +149,9 @@ def _to_tree(value: Any, store: Callable[[Any], int], depth: int, *, measure: bo
             raise TypeError(f"an array of dtype {value.dtype} does not travel; use a numeric one")
         if measure:
             return store(value.nbytes)
-        array = np.ascontiguousarray(value)
-        return {"a": [array.dtype.str, list(array.shape), store(array.reshape(-1).view(np.uint8))]}
+        array = value if value.flags.c_contiguous else value.copy(order="C")
+        flat = array.reshape(-1).view(np.uint8)
+        return {"a": [array.dtype.str, list(value.shape), store(flat)]}
     if isinstance(value, bytes | bytearray | memoryview):
         return {"b": store(memoryview(value).cast("B"))}
     if isinstance(value, list):
@@ -223,12 +224,15 @@ def _array(body: list[Any], buffer: Callable[[int], memoryview]) -> np.ndarray:
     if type(index) is not int:
         raise MalformedPayload("an array's span is not an index")
     raw = _span(buffer, index)
-    if math.prod(shape) * dtype.itemsize != raw.nbytes:
+    if any(n > 1 << 48 for n in shape) or math.prod(shape) * dtype.itemsize != raw.nbytes:
         raise MalformedPayload(
             f"an array of shape {shape} and dtype {dtype_str} needs "
             f"{math.prod(shape) * dtype.itemsize} bytes, its span holds {raw.nbytes}"
         )
-    return np.frombuffer(raw, dtype=dtype).reshape(shape)
+    try:
+        return np.frombuffer(raw, dtype=dtype).reshape(shape)
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise MalformedPayload(f"an array does not rebuild: {exc}") from None
 
 
 def _span(buffer: Callable[[int], memoryview], index: int) -> memoryview:

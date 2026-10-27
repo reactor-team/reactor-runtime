@@ -79,6 +79,10 @@ class ClientCarrier(ABC):
         """Stop writing where an abandoned request may still be read."""
 
     @abstractmethod
+    def settled(self) -> None:
+        """An answer arrived after which nothing written before is read again."""
+
+    @abstractmethod
     def close(self) -> None:
         """Release what this side of the connection holds."""
 
@@ -291,24 +295,28 @@ class UnixShmTransport(Transport):
                     "the shared block the model worker made reads differently here: the worker "
                     "and the sessions do not share one /dev/shm"
                 )
-        return _ClientShm(created_here(str(welcome["request_prefix"])), str(welcome["input_block"]))
+        return _ClientShm(str(welcome["request_prefix"]), str(welcome["input_block"]))
 
 
 class _Blocks:
-    """Where one direction's payloads are written: a fixed block, or one made to fit.
+    """Where one direction's payloads are written: one block, grown to the largest.
 
-    A payload that fits goes into the fixed block. One that does not goes into a
-    block of its own, sized to it, which is unlinked when the next payload is
-    written. :meth:`abandon` stops the fixed block from being written again,
-    for when the reader may still be reading what is in it.
+    A payload that fits goes into the block; one that does not replaces it with
+    a block its size, made by this side, which every later payload uses. The
+    reader is done with the last payload before the next is written: an output
+    is copied out before the session sends again, and a request is answered
+    before the next one is sent. Only an abandoned request (its step timed out)
+    may still be read, so :meth:`abandon` sends the next payload to a block of
+    its own, and :meth:`settled` returns to the main block once an answer shows
+    the reader is done.
     """
 
     def __init__(self, base: shared_memory.SharedMemory, grow_prefix: str, *, owned: bool) -> None:
         self._base = base
         self._owned = owned
-        self._base_usable = True
         self._grow_prefix = created_here(grow_prefix)
         self._grown = 0
+        self._abandoned = False
         self._extra: shared_memory.SharedMemory | None = None
         self._target = base
         self._cursor = 0
@@ -318,12 +326,19 @@ class _Blocks:
         if self._extra is not None:
             _unlink(self._extra)
             self._extra = None
-        if self._base_usable and nbytes <= self._base.size:
-            self._target = self._base
+        if self._abandoned:
+            self._extra = self._make(max(nbytes, 1))
+            self._target = self._extra
             return
-        self._grown += 1
-        self._extra = _allocate(f"{self._grow_prefix}{self._grown}", max(nbytes, 1), fill=False)
-        self._target = self._extra
+        if nbytes > self._base.size:
+            replacement = self._make(nbytes)
+            self._drop_base()
+            self._base, self._owned = replacement, True
+        self._target = self._base
+
+    def settled(self) -> None:
+        """The reader is done with everything written so far."""
+        self._abandoned = False
 
     @property
     def name(self) -> str:
@@ -345,29 +360,29 @@ class _Blocks:
         return span
 
     def abandon(self) -> None:
-        """Write nothing more where the last payload went."""
-        if self._target is self._base:
-            self._base_usable = False
-        elif self._extra is not None:
-            # Unlinked now; the reader's mapping, if any, stays valid.
-            _unlink(self._extra)
-            self._extra = None
-            self._target = self._base
+        """Write nothing more where the last payload went, until :meth:`settled`."""
+        self._abandoned = True
 
     def close(self) -> None:
         if self._extra is not None:
             _unlink(self._extra)
             self._extra = None
+        self._drop_base()
+        forget_created(self._grow_prefix)
+
+    def _make(self, size: int) -> shared_memory.SharedMemory:
+        self._grown += 1
+        return _allocate(f"{self._grow_prefix}{self._grown}", size, fill=False)
+
+    def _drop_base(self) -> None:
         if self._owned:
             _unlink(self._base)
         else:
             release(self._base)
-        forget_created(self._grow_prefix)
 
 
 class _ClientShm(ClientCarrier):
     def __init__(self, prefix: str, input_block: str) -> None:
-        self._prefix = prefix
         self._request = _Blocks(attach(input_block), f"{prefix}g", owned=False)
         self._mapping: dict[str, Any] = {}
 
@@ -384,10 +399,12 @@ class _ClientShm(ClientCarrier):
     def renew(self) -> None:
         self._request.abandon()
 
+    def settled(self) -> None:
+        self._request.settled()
+
     def close(self) -> None:
         close_mapping(self._mapping)
         self._request.close()
-        forget_created(self._prefix)
 
 
 class _WorkerShm(WorkerCarrier):
