@@ -3,7 +3,7 @@
 A deployment platform mounts one file per secret in a directory and names the
 files in ``REACTOR_SECRETS_EXPECTED_KEYS``, a JSON array of names that is ``[]``
 when there are none. :func:`load_expected_secrets` checks that the files match
-the names exactly and reads every value.
+the names exactly and validates every value.
 
 Every failure raises :class:`SystemExit` with a message that names keys and the
 failure, never a value.
@@ -19,6 +19,7 @@ from pathlib import Path
 
 EXPECTED_KEYS_ENV = "REACTOR_SECRETS_EXPECTED_KEYS"
 
+_MAX_BYTES = 32768
 _NAME_PATTERN = "[A-Za-z_][A-Za-z0-9_]*"
 _NAME_RE = re.compile(_NAME_PATTERN)
 
@@ -36,7 +37,8 @@ def load_expected_secrets(raw: str, root: Path) -> dict[str, str]:
     Raises:
         SystemExit: If *raw* is not a JSON array of unique valid names, if the
             files under *root* do not match it exactly, or if a file is not a
-            readable regular file of UTF-8 text.
+            readable regular file that holds 1 to 32768 bytes of
+            UTF-8 without a NUL byte.
     """
     try:
         expected = json.loads(raw)
@@ -78,9 +80,15 @@ def _read_secret(root: str, name: str) -> str:
         raise SystemExit(f"secret file {name!r} is not a regular file")
     try:
         with open(path, "rb") as file:
-            data = file.read()
+            data = file.read(_MAX_BYTES + 1)
     except OSError:
         raise SystemExit(f"secret file {name!r} is unreadable") from None
+    if len(data) > _MAX_BYTES:
+        raise SystemExit(f"secret file {name!r} is larger than {_MAX_BYTES} bytes")
+    if not data:
+        raise SystemExit(f"secret file {name!r} is empty")
+    if b"\x00" in data:
+        raise SystemExit(f"secret file {name!r} contains a NUL byte")
     try:
         return data.decode()
     except UnicodeDecodeError:
