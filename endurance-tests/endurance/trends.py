@@ -46,6 +46,16 @@ MAX_RSS_MB_PER_HOUR = 20.0
 # 75 minutes or more, which a run of about two hours reaches: the release
 # runs are judged, shorter manual runs only report the rate.
 MIN_SLOPE_SPAN_HOURS = 1.25
+# A slope over the limit still passes when the climb is levelling off: the
+# last third rose at most this fraction of what the middle third rose, and a
+# line fitted over the last third alone is under the limit. A leak climbs
+# about as much in each third, a plateau being reached less and less: a
+# healthy two-hour run read +20.7 MB/h with thirds rising +29 MB, then
+# +15 MB, and +8 MB/h over its last third. The margin under 1 keeps the noise
+# in a leak's thirds from passing it. The last third's own slope keeps a
+# one-time step in the middle third from passing a tail that still climbs:
+# the step makes the middle rise large, not the tail's climb small.
+MAX_SETTLING_RATIO = 2 / 3
 
 
 @dataclasses.dataclass
@@ -222,7 +232,12 @@ def assert_slope_under(
     samples, so on a short run a few MB of noise cannot read as a fast rate.
     A fit over less than :data:`MIN_SLOPE_SPAN_HOURS` is reported as not
     judged and never fails: memory that swings up and down by about a batch
-    fits a steep line over anything shorter.
+    fits a steep line over anything shorter. A slope over the limit also
+    passes when the climb is levelling off, the rise from the middle third
+    to the last at most :data:`MAX_SETTLING_RATIO` of the rise from the
+    first third to the middle and a line fitted over the last third alone
+    under the limit: memory reaching a plateau late in the run fits a line
+    as steep as a leak's.
 
     Args:
         hours: When each sample was taken, in hours.
@@ -249,7 +264,23 @@ def assert_slope_under(
     span = xs[-1] - xs[0]
     rise = slope * span
     judged = span >= MIN_SLOPE_SPAN_HOURS
-    is_leak = judged and slope > max_per_hour and rise > min_absolute_delta
+    # The same three windows the ratio check compares.
+    third = n // 3
+    first_avg = _mean(values[:third])
+    middle_avg = _mean(values[third : 2 * third])
+    last_avg = _mean(values[-third:])
+    middle_rise, last_rise = middle_avg - first_avg, last_avg - middle_avg
+    last_xs, last_ys = hours[-third:], values[-third:]
+    last_slope = (
+        statistics.linear_regression(last_xs, last_ys).slope if last_xs[-1] > last_xs[0] else 0.0
+    )
+    settling = (
+        middle_rise > 0
+        and last_rise <= MAX_SETTLING_RATIO * middle_rise
+        and last_slope <= max_per_hour
+    )
+    over_limit = judged and slope > max_per_hour and rise > min_absolute_delta
+    is_leak = over_limit and not settling
     if not judged:
         reason = (
             f"{slope:+,.1f} {unit}/h over {span * 60:.0f} min, not judged: "
@@ -258,7 +289,15 @@ def assert_slope_under(
     elif is_leak:
         reason = (
             f"climbing {slope:+,.1f} {unit}/h over the end of the run, "
-            f"above the {max_per_hour:g} {unit}/h limit"
+            f"above the {max_per_hour:g} {unit}/h limit, and not levelling off: "
+            f"the thirds rose {middle_rise:+,.1f} {unit}, then {last_rise:+,.1f} {unit}, "
+            f"the last third {last_slope:+,.1f} {unit}/h"
+        )
+    elif over_limit:
+        reason = (
+            f"{slope:+,.1f} {unit}/h, above the {max_per_hour:g} {unit}/h limit but levelling "
+            f"off: the thirds rose {middle_rise:+,.1f} {unit}, then {last_rise:+,.1f} {unit}, "
+            f"the last third {last_slope:+,.1f} {unit}/h"
         )
     elif rise <= min_absolute_delta:
         reason = (
@@ -277,7 +316,11 @@ def assert_slope_under(
         unit=unit,
         status=status,
         detail=reason,
-        threshold=f"slope > {max_per_hour:g} {unit}/h (min rise {min_absolute_delta:g} {unit})",
+        threshold=(
+            f"slope > {max_per_hour:g} {unit}/h (min rise {min_absolute_delta:g} {unit}), "
+            f"unless the last third rose at most {MAX_SETTLING_RATIO:.0%} of the middle's rise "
+            f"and climbs at most {max_per_hour:g} {unit}/h on its own"
+        ),
     )
 
 

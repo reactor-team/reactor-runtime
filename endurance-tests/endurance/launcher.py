@@ -10,6 +10,7 @@ the route and the check exist only in a runtime started from here.
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import gc
 import sys
 import threading
@@ -232,6 +233,19 @@ def _live_transport_objects() -> dict[str, int]:
     return counts
 
 
+def _malloc_trim() -> None:
+    """Hand glibc's free heap back to the OS, so RSS reads live memory.
+
+    glibc keeps freed memory cached in its arenas, and how much it keeps swings
+    with the order of allocations: on a two-hour run the RSS of a healthy
+    runtime swung by tens of MB between readings, which a slope fitted over it
+    read as a leak. Trimmed, the same runs read within a few MB. A no-op off
+    Linux, where the runtime is not run for a verdict.
+    """
+    if sys.platform == "linux":
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+
+
 def build_app(
     runner: Runner,
     transports: list[TransportRouter],
@@ -261,6 +275,7 @@ def build_app(
         # Collect, so garbage from this cycle is counted in this cycle's
         # reading rather than whenever the next collection runs.
         gc.collect()
+        _malloc_trim()
         return {
             "registered_connections": runner._connections.count,
             "client_stats_connections": len(runner._client_stats._accepted_at),
