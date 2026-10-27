@@ -127,13 +127,14 @@ async def test_a_request_outside_a_running_session_is_not_ready_and_journals_not
 
 
 async def test_a_request_in_a_streamed_session_is_refused() -> None:
-    steps, connections, _ = _requests(generation=Generation.STREAMED)
+    steps, connections, journal = _requests(generation=Generation.STREAMED)
 
     await steps.submit(_step())
 
     [reply] = connections.replies
     assert reply.step_result.failure_code == step_pb2.STEP_FAILURE_CODE_REFUSED
     assert "not stepped" in reply.step_result.error
+    assert journal == []
 
 
 def test_a_refusal_carries_its_code_and_entry() -> None:
