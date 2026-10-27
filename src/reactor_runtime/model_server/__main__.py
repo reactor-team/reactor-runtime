@@ -38,6 +38,11 @@ Every option has an environment variable and a default:
   worker that starts unlinks the blocks the worker before it on the same
   socket left, which it reads from ``shm-prefix`` next to the socket.
 
+Every line it logs carries ``runtime_role="model_server"``, and a line about
+one session carries that session's ``slot``, the number its session runtime
+stamps on its own lines (``REACTOR_SESSION_SLOT``) and logs with the slot's
+generation in its ``model server link`` line.
+
 Once ready it also writes ``ready`` next to the socket, for an exec probe, and
 removes it when it stops. SIGTERM and SIGINT stop it once the running step
 finishes: it accepts no more sessions, answers every request still queued with
@@ -118,6 +123,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     name = os.getenv("REACTOR_LOG_LEVEL", "INFO").strip().upper()
     log.configure(level=logging.getLevelNamesMapping().get(name, logging.INFO))
+    log.set_process_context(runtime_role="model_server")
     sys.path.insert(0, str(Path.cwd()))
 
     manifest = Path.cwd() / MANIFEST

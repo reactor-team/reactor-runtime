@@ -200,6 +200,26 @@ def _int_env(name: str, default: int) -> int:
         raise SystemExit(f"{name} {raw!r} must be an integer") from None
 
 
+SESSION_SLOT_ENV = "REACTOR_SESSION_SLOT"
+
+
+def _stamp_session_slot() -> None:
+    """Stamp ``slot`` and ``runtime_role="session"`` while ``REACTOR_SESSION_SLOT`` is set.
+
+    A session runtime sharing a model worker with others runs under a slot
+    number (see :class:`~reactor_runtime.model_server.ModelClient`); stamping
+    it lets a reader pick one session process's lines out of the deployment's
+    and join them to the worker's lines for the same slot. With the variable
+    unset or empty this stamps nothing.
+
+    Raises:
+        SystemExit: If the value is set but not an integer.
+    """
+    if not os.getenv(SESSION_SLOT_ENV, "").strip():
+        return
+    log.set_process_context(slot=_int_env(SESSION_SLOT_ENV, 0), runtime_role="session")
+
+
 def _bwe_limits_from_env() -> tuple[int, int, int]:
     """Read the congestion-control bitrate limits, enforcing libwebrtc's own ordering.
 
@@ -407,8 +427,9 @@ def main() -> None:
     Refuses to start when no manifest is present. The manifest's directory is
     put first on the import path so a model referenced as ``"pipeline:Model"``
     resolves to the code sitting beside it. The manifest names the model; the
-    bind address, ICE/transport configuration, lifecycle timeouts, and log level
-    are read from the environment around it.
+    bind address, ICE/transport configuration, lifecycle timeouts, log level,
+    and the session slot stamped on every line (``REACTOR_SESSION_SLOT``) are
+    read from the environment around it.
 
     Raises:
         SystemExit: If no ``reactor.yaml`` is found or an environment variable
@@ -418,6 +439,7 @@ def main() -> None:
     from reactor_runtime.transport.webrtc.peer import libwebrtc_peer_factory
 
     log.configure(level=_log_level_from_env())
+    _stamp_session_slot()
     # The runner re-stamps this at construction and on every move; stamping here
     # too covers the lines written before it exists — the process is up and the
     # model is not loaded, which is exactly what CREATED names and what LOADING

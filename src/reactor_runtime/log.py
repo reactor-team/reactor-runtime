@@ -27,6 +27,22 @@ happens where records are written rather than where they are made, it reaches a
 model's own ``logging.getLogger(__name__)`` and any third-party library that
 propagates to root, so a line can be traced to the session and phase that
 produced it without model code threading any of it through its call sites.
+
+A process can add fields of its own that hold for its whole life, through
+:func:`set_process_context`, and the same filter stamps them. The runtime adds
+them only where a deployment runs more than one process per model:
+
+- A session runtime started with ``REACTOR_SESSION_SLOT`` set (one of several
+  session processes sharing one model worker) stamps ``slot``, that variable
+  as an int, and ``runtime_role="session"``. Without the variable it stamps
+  neither, and its lines are what they are without this feature.
+- The model worker (``python -m reactor_runtime.model_server``) stamps
+  ``runtime_role="model_server"``. Its lines about one session name that
+  session's ``slot`` themselves.
+
+Process fields never use the names a log collector commonly attaches to a line
+from where it was written (:data:`RESERVED_CONTEXT_NAMES`), so a field written
+by the process cannot be mistaken for, or clash with, the collector's own.
 """
 
 from __future__ import annotations
@@ -139,6 +155,55 @@ def get_runtime_state() -> str | None:
     return _runtime_state
 
 
+# Names a log collector commonly attaches to a line from where it was written.
+# The process's own context never claims them, so they always mean what the
+# collector says.
+RESERVED_CONTEXT_NAMES = frozenset(
+    {
+        "pod",
+        "container",
+        "namespace",
+        "instance",
+        "instance_id",
+        "component",
+        "job",
+        "cluster",
+        "service_name",
+    }
+)
+
+# The fields the filter stamps from the session and state setters.
+_AMBIENT_NAMES = frozenset({"session_id", "state", "runtime_state"})
+
+# Fields that hold for the process's whole life, stamped after the session and
+# state fields. Empty unless the process sets them.
+_process_context: dict[str, Any] = {}
+
+
+def set_process_context(**fields: Any) -> None:
+    """Stamp *fields* on every record written from now on, for the process's whole life.
+
+    Replaces whatever was set before; called with nothing, it stamps nothing. A
+    call site that names one of these fields itself keeps its own value, and a
+    field whose value is ``None`` is absent.
+
+    Raises:
+        ValueError: A field is named in :data:`RESERVED_CONTEXT_NAMES`, or
+            repeats a field the filter stamps already (``session_id``,
+            ``state``, ``runtime_state``).
+    """
+    clashing = sorted(set(fields) & (RESERVED_CONTEXT_NAMES | _AMBIENT_NAMES))
+    if clashing:
+        raise ValueError(f"process context cannot claim {clashing}")
+    global _process_context
+    _process_context = {key: value for key, value in fields.items() if value is not None}
+
+
+def get_process_context() -> dict[str, Any]:
+    """Return a copy of the process fields currently being stamped."""
+    return dict(_process_context)
+
+
 def _logfmt_value(value: Any) -> str:
     """Render *value* as a logfmt-safe token.
 
@@ -167,15 +232,15 @@ def _record_fields(record: logging.LogRecord) -> dict[str, Any]:
 
 
 class SessionContextFilter(logging.Filter):
-    """Stamp the live session's id and the runtime's state on every record.
+    """Stamp the live session's id, the runtime's state, and the process fields on every record.
 
     Sits on the handler rather than on one logger, so it sees every record a
     handler writes: the runtime's own, a model's ``logging.getLogger(__name__)``,
     and a third-party library's that propagates to root. A call site that names
-    ``session_id``, ``state``, or ``runtime_state`` itself keeps its own value —
-    a model logging its own ``state`` claims that record's field, deliberately —
-    and a field with nothing bound, the session id between sessions or the
-    states before boot, is absent rather than empty.
+    ``session_id``, ``state``, ``runtime_state``, or a process field itself
+    keeps its own value — a model logging its own ``state`` claims that
+    record's field, deliberately — and a field with nothing bound, the session
+    id between sessions or the states before boot, is absent rather than empty.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -186,6 +251,7 @@ class SessionContextFilter(logging.Filter):
             "runtime_state": _runtime_state,
         }
         context = {key: value for key, value in stamped.items() if value is not None}
+        context.update(_process_context)
         if not context:
             return True
         fields = getattr(record, _REACTOR_FIELDS_ATTR, None)
@@ -316,6 +382,7 @@ def configure(*, level: int = logging.INFO, stream: IO[str] | None = None) -> No
 
 
 __all__ = [
+    "RESERVED_CONTEXT_NAMES",
     "JsonFormatter",
     "SessionContextFilter",
     "StructuredLogger",
@@ -323,10 +390,12 @@ __all__ = [
     "clear_session_id",
     "configure",
     "get_logger",
+    "get_process_context",
     "get_runtime_state",
     "get_session_id",
     "get_state",
     "release_session_id",
+    "set_process_context",
     "set_session_id",
     "set_state",
 ]

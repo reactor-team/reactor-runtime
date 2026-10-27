@@ -218,6 +218,13 @@ class ModelClient:
       slot on this connection.
     * :class:`WorkerLost` once the connection is lost, from every call, until
       :meth:`reconnect` succeeds; :class:`ClientClosed` after :meth:`close`.
+
+    After every successful :meth:`connect`, :meth:`reconnect`, and
+    :meth:`reset` it logs one ``model server link`` line with the ``slot`` and
+    the ``generation`` the worker settled on. The worker's lines about this
+    session carry the same ``slot``, and a reset during a session logs under
+    that session's ``session_id``, so the line joins a session to the worker's
+    lines for it.
     """
 
     def __init__(
@@ -452,6 +459,7 @@ class ModelClient:
                 if link.lost is not None:
                     link.release()
             self._reset_required = False
+            _log_link(link)
             return generation
 
     def signal(self, signal: Any) -> None:
@@ -742,6 +750,7 @@ class ModelClient:
             max_request_bytes=welcome.max_request_bytes,
             shm_slot_bytes=welcome.shm_slot_bytes,
         )
+        _log_link(link)
 
     def _await_welcome(self, sock: socket.socket, wait: float) -> tuple[Kind, bytes]:
         """Read the answer to a hello, waking every so often to see whether the client closed."""
@@ -855,6 +864,16 @@ class ModelClient:
                 link.release()
             finally:
                 self._call_lock.release()
+
+
+def _log_link(link: _Link) -> None:
+    """Log the slot and generation a connection or a reset settled on.
+
+    One ``model server link`` line follows every successful connect, reconnect,
+    and reset: the key that joins this session's lines (and, during a session,
+    its ``session_id``) to the worker's lines for the same slot.
+    """
+    logger.info("model server link", slot=link.slot, generation=link.generation)
 
 
 def _reply_limit(kind: Kind) -> int:

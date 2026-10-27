@@ -1,10 +1,13 @@
+import io
 import logging
+import time
 from pathlib import Path
 from typing import cast
 
 import pytest
 from fastapi.testclient import TestClient
 
+from reactor_runtime import log
 from reactor_runtime.core import ConnId, RuntimeConfig
 from reactor_runtime.http import HttpServer
 from reactor_runtime.protocol import ProtocolVersion
@@ -14,6 +17,7 @@ from reactor_runtime.serve import (
     _assemble,
     _log_level_from_env,
     _port_range_from_env,
+    _stamp_session_slot,
     _version,
     _video_codecs_from_env,
     _webrtc_config_from_env,
@@ -254,6 +258,113 @@ def test_main_returns_normally_after_a_clean_stop(
     _fake_main_environment(tmp_path, monkeypatch, code=0)
 
     main()
+
+
+def test_main_stamps_the_session_slot_when_it_is_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_main_environment(tmp_path, monkeypatch, code=0)
+    monkeypatch.setenv("REACTOR_SESSION_SLOT", "3")
+
+    main()
+    assert log.get_process_context() == {"slot": 3, "runtime_role": "session"}
+
+
+def test_main_stamps_nothing_more_without_a_session_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_main_environment(tmp_path, monkeypatch, code=0)
+    monkeypatch.delenv("REACTOR_SESSION_SLOT", raising=False)
+
+    main()
+    assert log.get_process_context() == {}
+
+
+# 2026-01-01T00:00:00Z, so the golden lines below are the same on every run.
+_GOLDEN_CREATED = 1767225600.0
+
+
+def _boot_line(monkeypatch: pytest.MonkeyPatch, fmt: str, slot: str | None) -> str:
+    """Return the first line a session runtime boots with, as ``main`` configures logging."""
+    monkeypatch.setenv("REACTOR_LOG_FORMAT", fmt)
+    if slot is None:
+        monkeypatch.delenv("REACTOR_SESSION_SLOT", raising=False)
+    else:
+        monkeypatch.setenv("REACTOR_SESSION_SLOT", slot)
+    buffer = io.StringIO()
+    log.configure(level=logging.INFO, stream=buffer)
+    _stamp_session_slot()
+    log.set_state("created", "loading")
+    root = logging.getLogger()
+    formatter = root.handlers[0].formatter
+    assert formatter is not None
+    formatter.converter = time.gmtime
+    record = logging.getLogger("reactor_runtime.serve").makeRecord(
+        "reactor_runtime.serve",
+        logging.INFO,
+        __file__,
+        1,
+        "starting reactor runtime",
+        (),
+        None,
+        extra={"reactor_fields": {"version": "1.2.3", "port": 8080, "note": "two words"}},
+    )
+    record.created = _GOLDEN_CREATED
+    root.handle(record)
+    return buffer.getvalue()
+
+
+_TEXT_UNSET = (
+    "2026-01-01T00:00:00+0000 INFO reactor_runtime.serve: starting reactor runtime "
+    'version=1.2.3 port=8080 note="two words" state=created runtime_state=loading\n'
+)
+_JSON_UNSET = (
+    '{"ts": "2026-01-01T00:00:00+0000", "level": "info", "logger": "reactor_runtime.serve", '
+    '"msg": "starting reactor runtime", "version": "1.2.3", "port": 8080, '
+    '"note": "two words", "state": "created", "runtime_state": "loading"}\n'
+)
+
+
+@pytest.mark.parametrize("slot", [None, ""])
+def test_text_lines_without_a_session_slot_are_unchanged(
+    monkeypatch: pytest.MonkeyPatch, slot: str | None
+) -> None:
+    assert _boot_line(monkeypatch, "text", slot) == _TEXT_UNSET
+
+
+@pytest.mark.parametrize("slot", [None, ""])
+def test_json_lines_without_a_session_slot_are_unchanged(
+    monkeypatch: pytest.MonkeyPatch, slot: str | None
+) -> None:
+    assert _boot_line(monkeypatch, "json", slot) == _JSON_UNSET
+
+
+def test_text_lines_with_a_session_slot_carry_it_and_the_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert _boot_line(monkeypatch, "text", "3") == (
+        "2026-01-01T00:00:00+0000 INFO reactor_runtime.serve: starting reactor runtime "
+        'version=1.2.3 port=8080 note="two words" state=created runtime_state=loading '
+        "slot=3 runtime_role=session\n"
+    )
+
+
+def test_json_lines_with_a_session_slot_carry_it_as_an_int_and_the_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert _boot_line(monkeypatch, "json", " 3 ") == (
+        '{"ts": "2026-01-01T00:00:00+0000", "level": "info", "logger": "reactor_runtime.serve", '
+        '"msg": "starting reactor runtime", "version": "1.2.3", "port": 8080, '
+        '"note": "two words", "state": "created", "runtime_state": "loading", '
+        '"slot": 3, "runtime_role": "session"}\n'
+    )
+
+
+def test_a_malformed_session_slot_stops_the_boot(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("REACTOR_SESSION_SLOT", "first")
+    with pytest.raises(SystemExit, match="REACTOR_SESSION_SLOT 'first' must be an integer"):
+        _stamp_session_slot()
+    assert log.get_process_context() == {}
 
 
 def test_version_is_a_non_empty_string() -> None:

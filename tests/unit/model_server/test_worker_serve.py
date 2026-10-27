@@ -77,10 +77,13 @@ def _manifest(directory: Path, worker: str) -> None:
     )
 
 
-def _start(directory: Path, port: int, *args: str, **env: str) -> subprocess.Popen[bytes]:
+def _start(
+    directory: Path, port: int, *args: str, stderr: int | None = None, **env: str
+) -> subprocess.Popen[bytes]:
     return subprocess.Popen(
         [sys.executable, "-m", "reactor_runtime.model_server", *args],
         cwd=directory,
+        stderr=stderr,
         env={
             **{k: v for k, v in os.environ.items() if k != "REACTOR_MAX_SESSIONS"},
             "REACTOR_MODEL_WORKER_SOCKET": str(directory / "run" / "sock"),
@@ -294,6 +297,28 @@ def test_a_dev_shm_with_room_for_max_sessions_starts(model_dir: Path) -> None:
         _wait(lambda: _health(port)[0] == 200)
     finally:
         assert _stop(process) == 0
+
+
+def test_every_worker_line_names_its_role_and_a_sessions_lines_name_its_slot(
+    model_dir: Path,
+) -> None:
+    port = _free_port()
+    process = _start(model_dir, port, stderr=subprocess.PIPE, REACTOR_LOG_FORMAT="json")
+    try:
+        _wait(lambda: _health(port)[0] == 200)
+        client = _connect(model_dir)
+        client.close()
+    finally:
+        assert _stop(process) == 0
+    assert process.stderr is not None
+    records = [json.loads(line) for line in process.stderr.read().decode().splitlines()]
+    assert records
+    assert all(record["runtime_role"] == "model_server" for record in records)
+    sessions = [r for r in records if r["msg"] in ("session opened", "session closed")]
+    assert [(r["msg"], r["slot"], r["generation"]) for r in sessions] == [
+        ("session opened", 0, 1),
+        ("session closed", 0, 2),
+    ]
 
 
 def test_the_worker_unlinks_blocks_its_predecessor_left_and_no_others(model_dir: Path) -> None:

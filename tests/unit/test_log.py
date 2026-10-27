@@ -5,16 +5,19 @@ import logging
 import pytest
 
 from reactor_runtime.log import (
+    RESERVED_CONTEXT_NAMES,
     JsonFormatter,
     StructuredLogger,
     TextFormatter,
     clear_session_id,
     configure,
     get_logger,
+    get_process_context,
     get_runtime_state,
     get_session_id,
     get_state,
     release_session_id,
+    set_process_context,
     set_session_id,
     set_state,
 )
@@ -300,3 +303,82 @@ def test_get_state_reports_what_is_stamped() -> None:
     set_state(None, None)
     assert get_state() is None
     assert get_runtime_state() is None
+
+
+def test_no_process_fields_unless_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    log, buffer = configured_logger(monkeypatch, "json")
+    log.info("plain")
+    payload = json.loads(buffer.getvalue().strip())
+    assert set(payload) == {"ts", "level", "logger", "msg"}
+
+
+def test_process_fields_are_stamped_after_the_session_and_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log, buffer = configured_logger(monkeypatch, "text")
+    set_process_context(slot=2, runtime_role="session")
+    set_state("streaming", "serving")
+    set_session_id("s-live")
+    log.info("generating", chunk_idx=3)
+    assert (
+        buffer.getvalue()
+        .rstrip("\n")
+        .endswith(
+            "generating chunk_idx=3 session_id=s-live state=streaming runtime_state=serving "
+            "slot=2 runtime_role=session"
+        )
+    )
+
+
+def test_a_call_site_that_names_a_process_field_keeps_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log, buffer = configured_logger(monkeypatch, "json")
+    set_process_context(slot=2, runtime_role="session")
+    log.info("about another slot", slot=5)
+    payload = json.loads(buffer.getvalue().strip())
+    assert payload["slot"] == 5
+    assert payload["runtime_role"] == "session"
+
+
+def test_a_plain_stdlib_logger_gets_the_process_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    _, buffer = configured_logger(monkeypatch, "json")
+    set_process_context(runtime_role="model_server")
+    logging.getLogger("third.party").warning("from a library")
+    assert json.loads(buffer.getvalue().strip())["runtime_role"] == "model_server"
+
+
+def test_setting_the_process_context_replaces_it_and_drops_none() -> None:
+    set_process_context(slot=1, runtime_role="session")
+    set_process_context(runtime_role="model_server", slot=None)
+    assert get_process_context() == {"runtime_role": "model_server"}
+    set_process_context()
+    assert get_process_context() == {}
+
+
+@pytest.mark.parametrize("name", sorted(RESERVED_CONTEXT_NAMES))
+def test_a_collector_name_is_never_a_process_field(name: str) -> None:
+    with pytest.raises(ValueError, match=name):
+        set_process_context(**{name: "x"})
+    assert get_process_context() == {}
+
+
+def test_the_reserved_names_are_the_collectors() -> None:
+    collectors = {
+        "pod",
+        "container",
+        "namespace",
+        "instance",
+        "instance_id",
+        "component",
+        "job",
+        "cluster",
+        "service_name",
+    }
+    assert collectors == RESERVED_CONTEXT_NAMES
+
+
+@pytest.mark.parametrize("name", ["session_id", "state", "runtime_state"])
+def test_a_field_the_filter_stamps_already_is_never_a_process_field(name: str) -> None:
+    with pytest.raises(ValueError, match=name):
+        set_process_context(**{name: "x"})

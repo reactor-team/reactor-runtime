@@ -7,7 +7,9 @@ process and drive the client the way an application does.
 
 from __future__ import annotations
 
+import io
 import json
+import logging
 import os
 import socket
 import tempfile
@@ -20,6 +22,7 @@ from typing import Any
 import numpy as np
 import pytest
 
+from reactor_runtime import log
 from reactor_runtime.model_server import (
     ClientClosed,
     ModelClient,
@@ -689,6 +692,62 @@ def test_connect_reads_the_socket_and_slot_from_the_environment(
     served.clients.append(client)
     client.reset()
     assert client.step(1)["slot"] == 7
+
+
+def _links(caplog: pytest.LogCaptureFixture) -> list[tuple[int, int]]:
+    """Return the (slot, generation) of every ``model server link`` line so far."""
+    links = []
+    for record in caplog.records:
+        if record.getMessage() == "model server link":
+            fields = record.__dict__["reactor_fields"]
+            links.append((fields["slot"], fields["generation"]))
+    return links
+
+
+def test_a_link_line_follows_every_connect_reconnect_and_reset(
+    serve: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="reactor_runtime.model_server.client")
+    served: Any = serve(Gated())
+    client = served.client(5, reset=False)
+    assert _links(caplog) == [(5, 1)]
+    client.reset()
+    assert _links(caplog) == [(5, 1), (5, 2)]
+    client.reconnect(timeout=5)
+    assert _links(caplog) == [(5, 1), (5, 2), (5, 3)]
+    client.reset()
+    assert _links(caplog) == [(5, 1), (5, 2), (5, 3), (5, 4)]
+
+
+def test_no_link_line_after_a_reset_that_failed(
+    serve: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="reactor_runtime.model_server.client")
+    served: Any = serve(Gated())
+    client = served.client(0, reset=False)
+    served.halt()
+    client.wait_lost(timeout=5)
+    with pytest.raises(WorkerLost):
+        client.reset()
+    assert _links(caplog) == [(0, 1)]
+
+
+def test_a_link_line_during_a_session_carries_its_id(
+    serve: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("REACTOR_LOG_FORMAT", "json")
+    buffer = io.StringIO()
+    log.configure(level=logging.INFO, stream=buffer)
+    served: Any = serve(Gated())
+    client = served.client(2, reset=False)
+    log.set_session_id("s-live")
+    client.reset()
+    records = [json.loads(line) for line in buffer.getvalue().splitlines()]
+    links = [record for record in records if record["msg"] == "model server link"]
+    assert [(r["slot"], r["generation"], r.get("session_id")) for r in links] == [
+        (2, 1, None),
+        (2, 2, "s-live"),
+    ]
 
 
 def test_connect_reads_its_deadline_from_the_environment(
