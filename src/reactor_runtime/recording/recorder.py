@@ -31,10 +31,12 @@ import shutil
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections import deque
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from statistics import median
 from typing import Any
 from urllib.parse import urlencode
 
@@ -123,6 +125,10 @@ _IDLE_MIN_SECONDS = 1.0
 # a little late is not taken for a pause; sealing mid-stream would cost the
 # recording a gap of up to a segment.
 _IDLE_CADENCE_FACTOR = 1.5
+# How many of the latest gaps between emissions the cadence is read from. A
+# pause is one long gap among regular ones, so a robust middle of a few recent
+# gaps follows the model's cadence without being stretched by a pause.
+_CADENCE_WINDOW = 5
 # A recording id is a lowercase UUID. Validating a URL path segment against this
 # shape before joining it onto the recordings root closes the path-traversal
 # vector on ``/clips`` and ``/clips/chunks/{id}/{file}``.
@@ -336,7 +342,15 @@ class Recorder:
         # emissions run, which is what tells a pause from the gap between two
         # emissions.
         self._last_emission_at: float | None = None
+        self._emission_gaps: deque[float] = deque(maxlen=_CADENCE_WINDOW)
         self._emission_interval = 0.0
+        self._last_emission_media = 0.0
+        # The segments this recording's later parts start at, and each part's
+        # init checked against the first one's once it was on disk. The live
+        # recording knows both, so serving it does not list or read the
+        # directory on every poll.
+        self._part_starts: list[int] = []
+        self._part_verdicts: dict[int, _PartInit] = {}
         # Whether this session already reported a later part whose init differs
         # from the first one's, so the error is logged once.
         self._part_mismatch_logged = False
@@ -403,16 +417,17 @@ class Recorder:
             self._root.mkdir(parents=True, exist_ok=True)
         self._ensure_reaper()
         self._session_id = session_id
-        # A session recorded under an id used before inherits that run's
-        # completion marker, which reads as finished. Claiming the directory and
-        # clearing the marker under the reaper's lock makes the pair atomic
-        # against a sweep, so neither a sweep in flight nor a later one can
-        # delete a live recording.
+        # A session recorded under an id used before would inherit that run's
+        # files: its completion marker reads as finished, its seal and part
+        # markers would close or misattribute this run's segments, and its
+        # segments would stand in for this run's successors. So the directory
+        # starts empty. Claiming and emptying it under the reaper's lock makes
+        # the pair atomic against a sweep, so neither a sweep in flight nor a
+        # later one can delete a live recording.
         with self._reaper_lock:
             self._session_dir = self._root / self._session_id
+            shutil.rmtree(self._session_dir, ignore_errors=True)
             self._session_dir.mkdir(parents=True, exist_ok=True)
-            for name in _END_MARKERS:
-                (self._session_dir / name).unlink(missing_ok=True)
         self._markers = MarkerBookkeeper()
         self._feed_stop.clear()
         self._watch_stop.clear()
@@ -584,7 +599,11 @@ class Recorder:
         self._next_segment = 0
         self._frame_size = None
         self._last_emission_at = None
+        self._emission_gaps.clear()
         self._emission_interval = 0.0
+        self._last_emission_media = 0.0
+        self._part_starts = []
+        self._part_verdicts = {}
         self._part_mismatch_logged = False
         with self._pending_lock:
             self._pending = []
@@ -666,21 +685,28 @@ class Recorder:
     def _note_emission(self, media_seconds: float) -> None:
         """Record when an emission arrived and how far apart emissions run.
 
-        The interval is the larger of the wall time since the previous emission
-        and the media the emission carries, so a model slower than real time is
-        judged by its actual cadence and one faster than real time by the media
-        it buffers ahead. A gap at least as long as the idle threshold was a
-        pause, sealed or not, so it is not learned as cadence: learning it would
-        stretch the next threshold by the length of the pause.
+        The interval is the larger of the model's wall-time cadence and the
+        media the emission carries, so a model slower than real time is judged
+        by its actual cadence and one faster than real time by the media it
+        buffers ahead. The cadence is the shortest of the first few gaps, then
+        the median of the latest ones: a pause is one long gap among regular
+        ones and moves neither, while a regular cadence slower than the idle
+        floor is learned from its first gap rather than taken for a pause.
         """
         now = time.monotonic()
         last = self._last_emission_at
-        since = now - last if last is not None else 0.0
-        if since >= self._idle_after():
-            self._emission_interval = max(media_seconds, self._emission_interval)
+        if last is not None:
+            self._emission_gaps.append(now - last)
+        gaps = self._emission_gaps
+        if not gaps:
+            cadence = 0.0
+        elif len(gaps) < 3:
+            cadence = min(gaps)
         else:
-            self._emission_interval = max(media_seconds, since)
+            cadence = median(gaps)
+        self._emission_interval = max(media_seconds, cadence)
         self._last_emission_at = now
+        self._last_emission_media = media_seconds
 
     def _claim_slot(self, capacity: int, *, wait: bool, deadline: float) -> _Slot:
         """Ask the feed queue for room for one more grid frame.
@@ -898,6 +924,7 @@ class Recorder:
         sealed = next_segment - 1
         try:
             (session_dir / _PART_MARKER_PATTERN.format(next_segment)).write_text("")
+            self._part_starts.append(next_segment)
             (session_dir / _SEALED_PATTERN.format(sealed)).write_text("")
         except OSError:
             logger.exception(
@@ -905,7 +932,8 @@ class Recorder:
             )
         self._encoder = None
         self._next_segment = next_segment
-        self._frame_size = frame_size
+        # An encoder that never opened knows no size; the one carried stands.
+        self._frame_size = frame_size or self._frame_size
         self._grid_debt = 0.0
         self._audio_jitter_buf = []
         self._audio_buffered_samples = 0
@@ -1032,11 +1060,17 @@ class Recorder:
         now = markers.now_marker()
         cs = float(self._config.chunk_seconds)
         wait_s = max(0.0, (math.floor(now / cs) + 1) * cs - now) if cs > 0 else 0.0
+        last = self._last_emission_at
         if self._idle():
             # The model has already gone quiet, so the open segment is sealed on
             # the feed worker's next pass rather than when media reaches the
             # boundary.
             wait_s = 0.0
+        elif last is not None and time.monotonic() - last > self._last_emission_media:
+            # More wall time has passed since the last emission than the media
+            # it carried, so the media-time boundary is optimistic: a model that
+            # has stopped serves the clip only at the seal, once it goes idle.
+            wait_s = max(wait_s, last + self._idle_after() - time.monotonic())
         predicted_ready_at_ms = round((time.time() + wait_s) * 1000)
         query = urlencode(
             {"session_id": self._session_id, "start": f"{start:.3f}", "end": f"{end:.3f}"}
@@ -1114,7 +1148,7 @@ class Recorder:
             next_idx = self._announced_chunk_idx + 1
             if (
                 not self._part_mismatch_logged
-                and _part_init(session_dir, next_idx) is _PartInit.MISMATCH
+                and self._part_verdict(session_dir, next_idx) is _PartInit.MISMATCH
             ):
                 self._part_mismatch_logged = True
                 self._disabled = True
@@ -1169,7 +1203,7 @@ class Recorder:
             # decoded with the init the manifest names.
             if (session_dir / _INCOMPLETE_MARKER).is_file():
                 return Gone()
-            if _part_init(session_dir, chunk_end_idx) is _PartInit.MISMATCH:
+            if self._part_verdict(session_dir, chunk_end_idx) is _PartInit.MISMATCH:
                 return Gone()
             return Pending()
         lines = [
@@ -1224,7 +1258,24 @@ class Recorder:
             or (session_dir / _SEALED_PATTERN.format(boundary_idx)).is_file()
             or (session_dir / _COMPLETE_MARKER).is_file()
         )
-        return closed and _part_init(session_dir, boundary_idx) is _PartInit.OK
+        return closed and self._part_verdict(session_dir, boundary_idx) is _PartInit.OK
+
+    def _part_verdict(self, session_dir: Path, segment: int) -> _PartInit:
+        """Check *segment*'s part init as :func:`_part_init` does, from memory when live.
+
+        The live recording's parts are the ones its own seals started, and a
+        part's init, once written, does not change, so its verdict is kept; a
+        recording from an earlier session is read from disk.
+        """
+        if session_dir != self._session_dir:
+            return _part_init(session_dir, segment)
+        part = _part_of(tuple(self._part_starts), segment)
+        verdict = self._part_verdicts.get(part)
+        if verdict is None:
+            verdict = _check_part(session_dir, part)
+            if verdict is not _PartInit.PENDING:
+                self._part_verdicts[part] = verdict
+        return verdict
 
     @staticmethod
     def _init_ready(session_dir: Path) -> bool:
@@ -1266,7 +1317,16 @@ def _part_init(session_dir: Path, segment: int) -> _PartInit:
             starts.append(int(marker.name.removeprefix("part_").removesuffix(".start")))
         except ValueError:
             continue
-    part = max((start for start in starts if start <= segment), default=0)
+    return _check_part(session_dir, _part_of(starts, segment))
+
+
+def _part_of(starts: Iterable[int], segment: int) -> int:
+    """Return the first segment of the part *segment* was encoded in, 0 for the first."""
+    return max((start for start in starts if start <= segment), default=0)
+
+
+def _check_part(session_dir: Path, part: int) -> _PartInit:
+    """Check the init of the part starting at segment *part* against ``init.mp4``."""
     if part == 0:
         return _PartInit.OK
     try:
