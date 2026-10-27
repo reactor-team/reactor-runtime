@@ -105,6 +105,7 @@ model thread.
 """
 
 FailureSink = Callable[[BaseException], None]
+AvailabilitySink = Callable[[str | None], None]
 """Receives the exception that ended :meth:`ReactorCore.run`, on the model thread."""
 
 StepRefusalSink = Callable[[StepRefusal], None]
@@ -379,6 +380,9 @@ class ReactorCore:
         self._last_emit_fps: float | None = None
         self._media_ops: MediaOps | None = None
         self._on_failure: FailureSink | None = None
+        self._unavailable: str | None = None
+        self._on_availability: AvailabilitySink | None = None
+        self._availability_lock = threading.Lock()
         self.output = OutputStream(self)
 
         self._input_buffers: dict[str, InputBuffer] = {}
@@ -560,6 +564,59 @@ class ReactorCore:
         loop marshals from within the callback.
         """
         self._on_failure = callback
+
+    def bind_availability(self, callback: AvailabilitySink) -> None:
+        """Bind the sink that hears :meth:`set_unavailable` and :meth:`set_available`.
+
+        The callback receives the reason, or ``None`` once the model is
+        available again, on whichever thread made the call. A model that was
+        already unavailable when bound is reported at once.
+        """
+        with self._availability_lock:
+            self._on_availability = callback
+            current = self._unavailable
+        if current is not None:
+            callback(current)
+
+    @property
+    def unavailable(self) -> str | None:
+        """Why the model cannot serve now, or ``None`` while it can."""
+        return self._unavailable
+
+    def set_unavailable(self, reason: str) -> None:
+        """Report that the model cannot serve until :meth:`set_available`.
+
+        For a model that depends on something it does not own, such as a model
+        worker in another process, which has gone away. The runtime ends the
+        live session, if any, with ``reason`` ``error`` and *reason* as its
+        close reason (clients get the session-ended notice carrying it),
+        journals an ``error`` fact carrying *reason*, answers ``/health`` with
+        503 and *reason* as its detail, and refuses ``/start_session`` with 503
+        until the model is available again. The process stays up. Safe from any
+        thread, including from :meth:`load`; a repeat while unavailable only
+        updates the reason ``/health`` serves.
+
+        Args:
+            reason: Why, for the journal, the clients, and the health detail.
+        """
+        with self._availability_lock:
+            self._unavailable = reason
+            sink = self._on_availability
+        if sink is not None:
+            sink(reason)
+
+    def set_available(self) -> None:
+        """Report that the model can serve again after :meth:`set_unavailable`.
+
+        Safe from any thread. Does nothing while the model is available.
+        """
+        with self._availability_lock:
+            if self._unavailable is None:
+                return
+            self._unavailable = None
+            sink = self._on_availability
+        if sink is not None:
+            sink(None)
 
     # -- thread-safe ingress (called by the bridge from the runtime thread) ---
 

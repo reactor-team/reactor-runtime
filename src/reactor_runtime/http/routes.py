@@ -26,6 +26,7 @@ from reactor_runtime.runner import Runner
 from reactor_runtime.runner.session_start import InvalidSessionStartError
 from reactor_runtime.transport.router import (
     ErrorDetail,
+    ModelUnavailableError,
     SessionNotRunningError,
     SessionTransitionError,
     UnknownSessionError,
@@ -79,8 +80,12 @@ def _transition_rejection(error: SessionTransitionError) -> HTTPException:
     ``Retry-After``; a terminated process is a permanent ``503``. Every other
     wrong-state — a session already running, one still closing, or nothing to
     stop — is a ``409`` conflict. The detail names the action and the state, so
-    the caller sees exactly why the transition was refused.
+    the caller sees exactly why the transition was refused. A model that
+    reported it cannot serve answers ``503`` with a ``Retry-After`` and the
+    model's own reason as the detail.
     """
+    if isinstance(error, ModelUnavailableError):
+        return HTTPException(status_code=503, detail=error.reason, headers={"Retry-After": "1"})
     state = error.state
     detail = f"cannot {error.action} session while {state.name.lower()}"
     if state is SessionState.CREATED:

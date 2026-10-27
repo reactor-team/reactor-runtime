@@ -188,6 +188,22 @@ class SessionTransitionError(RuntimeError):
         super().__init__(f"cannot {action} session from state {state.name.lower()}")
 
 
+class ModelUnavailableError(SessionTransitionError):
+    """Raised when a session start is refused because the model reported it cannot serve.
+
+    The model called :meth:`~reactor_runtime.ReactorApp.set_unavailable`; the
+    refusal lasts until it reports itself available again.
+
+    Attributes:
+        reason: What the model reported.
+    """
+
+    def __init__(self, state: SessionState, reason: str) -> None:
+        """Record the state and the model's reason."""
+        super().__init__("start", state)
+        self.reason = reason
+
+
 @runtime_checkable
 class SessionControl(ConnectionSink, Protocol):
     """The session-facing surface a router drives, beyond the upward sink.
