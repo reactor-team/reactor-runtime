@@ -36,6 +36,8 @@ spec:
     - name: model-worker
       image: example.com/shared-worker:latest
       restartPolicy: Always
+      # Under an init such as tini when the worker starts processes of its own,
+      # so they are reaped: ["/usr/bin/tini", "--", "reactor-runtime", "serve-worker"].
       command: ["reactor-runtime", "serve-worker"]
       env:
         - name: REACTOR_MODEL_WORKER_SOCKET
