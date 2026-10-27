@@ -114,6 +114,7 @@ class WorkerServer:
         shm_prefix: str,
         transport: Transport | None = None,
         settings: ServerSettings | None = None,
+        max_sessions: int | None = None,
     ) -> None:
         cls = type(worker)
         check_declarations(cls)
@@ -121,6 +122,9 @@ class WorkerServer:
         settings.check()
         self._settings = settings
         self._worker = worker
+        # With a deployment's session count, only slots 0 to max_sessions - 1
+        # are served: a session cannot take a slot no session of the pod has.
+        self._max_sessions = max_sessions
         self._path = Path(socket_path)
         self._prefix = shm_prefix
         self._request_type = cls.request_type
@@ -333,6 +337,14 @@ class WorkerServer:
                     for n in itertools.count()
                     if n not in self._by_slot and n not in self._opening
                 )
+            if self._max_sessions is not None and slot >= self._max_sessions:
+                self._refuse(
+                    sock,
+                    request_id,
+                    f"slot {slot} is out of range: this worker serves slots 0 to "
+                    f"{self._max_sessions - 1}",
+                )
+                return None
             if slot in self._opening:
                 self._refuse(sock, request_id, f"slot {slot} is being opened by another connection")
                 return None
@@ -465,7 +477,9 @@ class WorkerServer:
                     _SEND_TIMEOUT,
                 )
             raise
-        if not conn.opened:
+        if not conn.opened or conn.closed:
+            # A signal still buffered from a connection that has left must
+            # not reach the next session of its slot.
             return
         try:
             self._worker.signal(conn.slot, signal)

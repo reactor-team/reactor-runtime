@@ -26,11 +26,14 @@ class Served:
         socket_path: Path,
         prefix: str,
         settings: ServerSettings | None = None,
+        max_sessions: int | None = None,
     ) -> None:
         self.worker = worker
         self.prefix = prefix
         self.path = socket_path
-        self.server = WorkerServer(worker, socket_path, shm_prefix=prefix, settings=settings)
+        self.server = WorkerServer(
+            worker, socket_path, shm_prefix=prefix, settings=settings, max_sessions=max_sessions
+        )
         self.server.bind()
         self.thread = threading.Thread(target=self.server.serve, daemon=True)
         self.thread.start()
@@ -67,12 +70,15 @@ def serve() -> Iterator[Callable[[ModelServer], Served]]:
     prefix = f"rrt{secrets.token_hex(3)}_"
 
     def start(
-        worker: ModelServer, path: Path | None = None, settings: ServerSettings | None = None
+        worker: ModelServer,
+        path: Path | None = None,
+        settings: ServerSettings | None = None,
+        max_sessions: int | None = None,
     ) -> Served:
         if not hasattr(worker, "device"):
             worker.device = "cpu"
         worker.load(None)
-        one = Served(worker, path or short / f"w{len(served)}.sock", prefix, settings)
+        one = Served(worker, path or short / f"w{len(served)}.sock", prefix, settings, max_sessions)
         served.append(one)
         return one
 

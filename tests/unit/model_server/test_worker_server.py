@@ -710,6 +710,25 @@ def test_a_declared_signal_reaches_the_worker_as_its_type(serve: Any) -> None:
         sock.close()
 
 
+def test_a_signal_of_a_connection_that_left_does_not_reach_its_slot(serve: Any) -> None:
+    from reactor_runtime.model_server.server import _Conn
+
+    worker = Signalled()
+    served: Any = serve(worker)
+    gone = _Conn(
+        slot=3, peer_pid=0, sock=None, carrier=None, request_prefix="", transport={}, hello_id=0
+    )  # type: ignore[arg-type]
+    gone.opened, gone.closed = True, True
+    body = json.dumps(codec.to_tree({"reason": "barge"})).encode()
+    served.server._signal(gone, wire.SIGNAL_TAG.pack(0) + body)
+    assert (
+        worker.received == []
+    )  # a buffered signal of a closed connection is not the next session's
+    gone.closed = False
+    served.server._signal(gone, wire.SIGNAL_TAG.pack(0) + body)
+    assert worker.received == [(3, Preempt("barge"))]
+
+
 @pytest.mark.parametrize(
     ("frame", "reason"),
     [
@@ -798,6 +817,24 @@ def test_the_worker_assigns_the_lowest_free_slot(serve: Any) -> None:
     assert first.slot == 0
     assert auto.slot == 1
     assert auto.step(1)["slot"] == 1
+
+
+def test_a_worker_with_a_session_count_serves_only_its_slots(serve: Any) -> None:
+    served: Any = serve(Recorder(), max_sessions=2)
+    served.client(1)
+    # A slot no session of the deployment has, asked for or assigned, is refused.
+    with pytest.raises(
+        WorkerRejected, match="slot 2 is out of range: this worker serves slots 0 to 1"
+    ):
+        served.client(2)
+    served.client(None)  # slot 0, the one left
+    with pytest.raises(WorkerRejected, match="slot 2 is out of range"):
+        served.client(None)
+
+
+def test_a_worker_without_a_session_count_serves_any_slot(serve: Any) -> None:
+    served: Any = serve(Recorder())
+    assert served.client(7).slot == 7
 
 
 def test_a_slot_held_by_a_live_process_is_refused(serve: Any) -> None:

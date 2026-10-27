@@ -21,7 +21,8 @@ Every option has an environment variable and a default:
 * ``--config`` / the manifest's ``runtime.config``: handed to ``load()``.
 * ``--socket`` / ``REACTOR_MODEL_WORKER_SOCKET`` / ``/run/reactor-worker/sock``:
   where session processes connect. Its directory is created when missing.
-* ``REACTOR_MAX_SESSIONS``: when set, the most sessions the deployment runs.
+* ``REACTOR_MAX_SESSIONS``: when set, the most sessions the deployment runs; the
+  worker serves only slots 0 to that number minus one.
   The start fails, before ``load()``, when ``/dev/shm`` has less free space
   than that many sessions' blocks.
 * ``--health-port`` / ``REACTOR_MODEL_WORKER_HEALTH_PORT``: when set, ``GET
@@ -199,7 +200,7 @@ def main(argv: list[str] | None = None) -> int:
             shm_output_bytes=settings.shm_output_bytes,
             from_manifest=sorted(overrides),
         )
-        _check_shm_room(settings)
+        max_sessions = _check_shm_room(settings)
         worker = worker_cls()
         worker.device = _device()
         started = time.monotonic()
@@ -211,7 +212,9 @@ def main(argv: list[str] | None = None) -> int:
             seconds=round(time.monotonic() - started, 2),
             shm_slot_bytes=settings.shm_slot_bytes,
         )
-        server = WorkerServer(worker, socket_path, shm_prefix=prefix, settings=settings)
+        server = WorkerServer(
+            worker, socket_path, shm_prefix=prefix, settings=settings, max_sessions=max_sessions
+        )
         status.worker = worker
         status.serving = {
             "protocol": wire.PROTOCOL,
@@ -281,15 +284,18 @@ def _port_env() -> int | None:
         raise SystemExit(f"{HEALTH_PORT_ENV} {raw!r} must be an integer") from None
 
 
-def _check_shm_room(settings: ServerSettings) -> None:
+def _check_shm_room(settings: ServerSettings) -> int | None:
     """Fail the start when ``/dev/shm`` cannot hold ``REACTOR_MAX_SESSIONS`` sessions' blocks.
+
+    Returns:
+        ``REACTOR_MAX_SESSIONS``, or ``None`` when it is unset.
 
     Raises:
         SystemExit: ``REACTOR_MAX_SESSIONS`` is malformed, or the free space is short.
     """
     raw = os.getenv(MAX_SESSIONS_ENV, "").strip()
     if not raw:
-        return
+        return None
     try:
         sessions = int(raw)
     except ValueError:
@@ -309,6 +315,7 @@ def _check_shm_room(settings: ServerSettings) -> None:
             "Size /dev/shm (in a pod, the emptyDir's sizeLimit) to fit them"
         )
     logger.info("shared memory has room", free_bytes=free, needed_bytes=needed, sessions=sessions)
+    return sessions
 
 
 def _stuck_seconds() -> float:
