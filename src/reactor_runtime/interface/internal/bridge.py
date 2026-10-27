@@ -23,7 +23,7 @@ from reactor_runtime.core.model import Command, ReactorEvent
 from reactor_runtime.core.values import ConnId, InputFrame
 from reactor_runtime.interface.internal.reactor_core import (
     AddressedSink,
-    AvailabilitySink,
+    AvailabilityReportSink,
     BroadcastSink,
     CommandTimingSink,
     FailureSink,
@@ -274,7 +274,7 @@ class ModelBridge:
         command_timing: CommandTimingSink | None = None,
         frame_timing: FrameTimingSink | None = None,
         step_refusal: StepRefusalSink | None = None,
-        availability: AvailabilitySink | None = None,
+        availability: AvailabilityReportSink | None = None,
     ) -> None:
         """Wire the model's outbound paths down into the runner. Call once.
 

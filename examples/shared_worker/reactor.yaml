@@ -1,8 +1,10 @@
 $schema: reactor/v2
 
-# `runtime.worker` splits the model: `reactor-runtime serve-worker` loads the
-# worker half once and steps every session, and `runtime.import` names the
-# session half each session runtime (`reactor-runtime serve`) runs.
+# `runtime.worker` splits the model: `python -m reactor_runtime.model_worker`
+# loads the worker half once and steps every session, and `runtime.import`
+# names the application half each session runtime (`python -m
+# reactor_runtime.serve`) runs. The worker block's serving settings may lower
+# the class's max_batch and raise its shm sizes, never the reverse.
 model:
   name: shared-worker
   version: v0.0.1
@@ -12,7 +14,9 @@ model:
 
 runtime:
   import: plasma:Plasma
-  worker: plasma_worker:PlasmaWorker
+  worker:
+    import: plasma_worker:PlasmaWorker
+    max_batch: 4
 
 build:
   runtime_version: "3.10.0"

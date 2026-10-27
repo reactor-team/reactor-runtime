@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
-from echo_model import EchoInput, EchoModel
+from echo_model import EchoInput, EchoModel, EchoResult
 
 from reactor_runtime.model_worker import ModelWorker, WorkerRequest
 
@@ -13,21 +12,14 @@ from reactor_runtime.model_worker import ModelWorker, WorkerRequest
 class EchoWorker(ModelWorker):
     """Apply the effect for each request, one at a time."""
 
+    request_type = EchoInput
+    result_type = EchoResult
+
     def load(self, config_path: Path | None) -> None:
         """Construct the echo model."""
         self.model = EchoModel()
         self.model.load()
 
-    def step(self, requests: list[WorkerRequest]) -> list[Any]:
+    def step(self, requests: list[WorkerRequest[EchoInput]]) -> list[EchoResult]:
         """Run the echo model for every request."""
-        return [
-            self.model.generate(
-                EchoInput(
-                    frame=r.payload["frame"],
-                    effect=r.payload["effect"],
-                    intensity=r.payload["intensity"],
-                    caption=r.payload["caption"],
-                )
-            ).frame
-            for r in requests
-        ]
+        return [self.model.generate(r.payload) for r in requests]

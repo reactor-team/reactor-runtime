@@ -1328,7 +1328,7 @@ class Runner(ServiceComponent, ConnectionSink):
             SessionTransitionError: If the session is not in a startable state.
             ModelUnavailableError: If the model reported it cannot serve.
         """
-        if self._unavailable is not None and self._sm.current_state is SessionState.READY:
+        if self._unavailable is not None and self._sm.current_state is not SessionState.TERMINATED:
             raise ModelUnavailableError(self._sm.current_state, self._unavailable)
         start = parse_session_start(params)
         self._check_generation(start)

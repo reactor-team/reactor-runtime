@@ -16,6 +16,17 @@ Anything else is refused by :func:`encode` with a ``TypeError`` naming it.
 :func:`decode` checks everything it reads (the shape of the tree, each array's
 dtype, shape, and span) before it builds anything, and raises
 :class:`MalformedPayload` for what it refuses.
+
+A header (the JSON that names the arrays and holds the plain values) is at
+most :data:`MAX_HEADER_BYTES`, 1 MiB: :func:`encode` raises
+:class:`HeaderTooLarge` past it, and :func:`parse` refuses a longer header
+before it parses it. Bulk data belongs in arrays or bytes, which travel in
+shared memory and do not count against it.
+
+A typed payload (a request or result type a model declares) is dumped to its
+fields by :mod:`~reactor_runtime.model_worker.schema` before it is encoded and
+built back from them after it is decoded, so this codec only ever carries
+plain values.
 """
 
 from __future__ import annotations
@@ -31,12 +42,19 @@ import numpy as np
 # reader recurse or allocate without limit.
 MAX_DEPTH = 64
 MAX_NODES = 1 << 20
+# The most bytes a header may take, checked before it is parsed: a header sits
+# in a socket frame and is parsed on a reader thread.
+MAX_HEADER_BYTES = 1 << 20
 _KINDS = frozenset("biufcmM")
 VERSION = 1
 
 
 class MalformedPayload(ValueError):  # noqa: N818 (named for the event a caller catches)
     """A header that does not describe a payload this codec makes."""
+
+
+class HeaderTooLarge(ValueError):  # noqa: N818 (named for the event a caller catches)
+    """A payload whose header passes :data:`MAX_HEADER_BYTES`: too many plain values."""
 
 
 class Writer(Protocol):
@@ -78,6 +96,11 @@ def encode(payload: Any, writer: Writer) -> tuple[bytes, int]:
         separators=(",", ":"),
         allow_nan=False,
     ).encode()
+    if len(header) > MAX_HEADER_BYTES:
+        raise HeaderTooLarge(
+            f"the payload's header takes {len(header)} bytes, over the {MAX_HEADER_BYTES} limit: "
+            "carry bulk data as numpy arrays or bytes"
+        )
     return header, len(header) + sum(length for _, length in spans)
 
 
@@ -101,8 +124,11 @@ def parse(header: bytes) -> tuple[str, list[tuple[int, int]], Any]:
     """Return a header's block name, spans, and tree, checking their shape.
 
     Raises:
-        MalformedPayload: The header is not one :func:`encode` makes.
+        MalformedPayload: The header is not one :func:`encode` makes, or it
+            passes :data:`MAX_HEADER_BYTES`.
     """
+    if len(header) > MAX_HEADER_BYTES:
+        raise MalformedPayload(f"the header passes the {MAX_HEADER_BYTES} byte limit")
     try:
         document = json.loads(header)
     except (UnicodeDecodeError, ValueError, RecursionError) as exc:
@@ -133,6 +159,32 @@ def decode(tree: Any, buffer: Callable[[int], memoryview]) -> Any:
     """
     count = [0]
     return _from_tree(tree, buffer, 0, count)
+
+
+def to_tree(value: Any) -> Any:
+    """Return the tree of a payload that holds no arrays and no bytes, for a control frame.
+
+    Raises:
+        TypeError: The payload holds a value that does not travel, an array, or bytes.
+    """
+
+    def refuse(_buffer: Any) -> int:
+        raise TypeError("arrays and bytes do not travel in a signal; send them with a step")
+
+    return _to_tree(value, refuse, 0)
+
+
+def from_tree(tree: Any) -> Any:
+    """Rebuild a payload :func:`to_tree` made.
+
+    Raises:
+        MalformedPayload: The tree is malformed, too deep, too large, or names a buffer.
+    """
+    return decode(tree, _no_buffer)
+
+
+def _no_buffer(index: int) -> memoryview:
+    raise IndexError(index)
 
 
 def _to_tree(value: Any, store: Callable[[Any], int], depth: int, *, measure: bool = False) -> Any:

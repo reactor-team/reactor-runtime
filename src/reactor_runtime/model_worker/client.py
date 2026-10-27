@@ -1,12 +1,18 @@
-"""The session half's connection to the model worker.
+"""The application half's connection to the model worker.
 
 A session process opens one :class:`WorkerClient` in its model's ``load()`` and
 calls :meth:`WorkerClient.step` from ``generate()``. The client writes the
 payload's arrays into a shared block of its own, sends the worker a small
 header, and blocks until the answer, which it copies out of the block the
-worker keeps for it. A thread of the client reads the socket, so a worker that
-dies is seen at once, even between steps; the client then connects again in
-the background until a worker answers.
+worker keeps for it.
+
+The client reports and never decides. It holds no reference to the
+application and does nothing in the background but read its socket: a worker
+that goes away marks the connection lost, and from then on every call raises
+:class:`WorkerLost` on the application's own call path until the application
+calls :meth:`WorkerClient.reconnect`. What a lost or a stuck worker means for
+the session is the application's to decide, in ``process_output()`` (see
+:mod:`reactor_runtime.model_worker` for the two ways to do it).
 """
 
 from __future__ import annotations
@@ -15,21 +21,24 @@ import atexit
 import contextlib
 import ctypes
 import itertools
+import json
 import os
-import random
 import secrets
+import select
 import socket
 import sys
 import threading
 import time
+import weakref
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from reactor_runtime.distributed.errors import WorkerCrashed, WorkerTimeout
-from reactor_runtime.interface.events.errors import ModelUnavailable
 from reactor_runtime.log import get_logger
-from reactor_runtime.model_worker import wire
+from reactor_runtime.model_worker import codec, schema, wire
+from reactor_runtime.model_worker.contract import check_signal_types
 from reactor_runtime.model_worker.transport import (
     ClientCarrier,
     NoListener,
@@ -39,32 +48,22 @@ from reactor_runtime.model_worker.transport import (
 )
 from reactor_runtime.model_worker.wire import Kind
 
-
-class AvailabilitySink(Protocol):
-    """What the client reports the worker's comings and goings to: a ``ReactorApp``."""
-
-    def report_unavailable(self, reason: str) -> None:
-        """The worker is gone, for *reason*."""
-
-    def report_available(self) -> None:
-        """A worker is connected again."""
-
-
 logger = get_logger(__name__)
 
 SOCKET_ENV = "REACTOR_MODEL_WORKER_SOCKET"
 SLOT_ENV = "REACTOR_SESSION_SLOT"
 STEP_TIMEOUT_ENV = "REACTOR_WORKER_STEP_TIMEOUT"
+CONNECT_TIMEOUT_ENV = "REACTOR_WORKER_CONNECT_TIMEOUT"
 DEFAULT_SOCKET = "/run/reactor-worker/sock"
 
 _DEFAULT_STEP_TIMEOUT = 30.0
-_CONNECT_POLL = 0.2
-# Long enough for a worker opening many sessions at once after a restart.
+# Long enough for a worker loading large weights after a restart.
+_DEFAULT_CONNECT_TIMEOUT = 1800.0
+_CONNECT_POLL_FIRST = 0.2
+_CONNECT_POLL_MAX = 2.0
+# How long one opened connection may take to be welcomed: a worker welcomes
+# between steps, so a long step delays it.
 _HELLO_TIMEOUT = 120.0
-_RECONNECT_FIRST = 0.5
-_RECONNECT_MAX = 5.0
-# Outputs carry their arrays in shared memory; this bounds the header around them.
-_REPLY_LIMIT = 1 << 30
 
 
 class WorkerRejected(ValueError):  # noqa: N818 (named for the event a caller catches)
@@ -76,7 +75,7 @@ class WorkerRejected(ValueError):  # noqa: N818 (named for the event a caller ca
 
 
 class WorkerError(RuntimeError):
-    """The model raised for this request in the worker.
+    """The model failed this request in the worker.
 
     Its message is ``"<type>: <message>"`` of the worker's exception. Nothing
     of the exception object crosses: nothing on the socket is pickled, either
@@ -89,27 +88,69 @@ class WorkerError(RuntimeError):
     """
 
     def __init__(self, type_name: str, message: str, worker_traceback: str) -> None:
+        """Record the worker's exception by name, message, and traceback."""
         super().__init__(f"{type_name}: {message}")
         self.type_name = type_name
         self.message = message
         self.worker_traceback = worker_traceback
 
 
-class StepTimedOut(WorkerTimeout, ModelUnavailable):
-    """No answer to a step in time: the worker is alive but slow, or stuck.
+class BatchFailed(WorkerError):  # noqa: N818 (named for the event a caller catches)
+    """The worker's ``step()`` raised for the whole batch this request was in.
 
-    A :class:`~reactor_runtime.distributed.WorkerTimeout` and a
-    :class:`~reactor_runtime.ModelUnavailable`, so the default step loop
-    drops the step and the session goes on; a worker that stays stuck is the
-    worker's liveness probe's to restart.
+    Every request of the batch gets it, with the same cause: :attr:`type_name`,
+    :attr:`message`, and :attr:`worker_traceback` describe the exception
+    ``step()`` raised. The cause may be another session's input; a model that
+    can tell which request is bad returns an exception for that request alone,
+    which arrives as a plain :class:`WorkerError`.
     """
 
 
-class WorkerLost(WorkerCrashed, ModelUnavailable):
-    """No worker is connected: its message starts with ``worker_died:`` and says why.
+class StepUnanswered(WorkerTimeout):
+    """A step the model did not answer: :class:`StepTimedOut` or :class:`StepExpired`.
 
-    A :class:`~reactor_runtime.ModelUnavailable`, so the default step loop
-    drops the step it ends instead of crashing the session's process.
+    A :class:`~reactor_runtime.distributed.WorkerTimeout`. The connection is
+    still up and the client stays usable.
+    """
+
+
+class StepTimedOut(StepUnanswered):
+    """No answer came within the step's timeout: the worker is slow, or stuck.
+
+    The request was cancelled. A worker that stays stuck is the worker's
+    liveness probe's to restart.
+    """
+
+
+class StepExpired(StepUnanswered):
+    """The worker dropped the request before stepping it.
+
+    Its timeout passed while it waited in the worker's queue, or the same
+    session sent another request that replaced it.
+    """
+
+
+class WorkerLost(WorkerCrashed):
+    """The connection to the worker is gone: its message says why.
+
+    Raised by every call once the connection is lost, until
+    :meth:`WorkerClient.reconnect` succeeds. A
+    :class:`~reactor_runtime.distributed.WorkerCrashed`.
+    """
+
+
+class ClientClosed(WorkerLost):
+    """The client was closed: every call raises it, :meth:`WorkerClient.wait_lost` included."""
+
+
+class ResetRequired(RuntimeError):  # noqa: N818 (named for the state a caller catches)
+    """A step on a connection whose slot the application has not reset yet.
+
+    Raised by :meth:`WorkerClient.step` after :meth:`WorkerClient.connect` and
+    after :meth:`WorkerClient.reconnect`, and after a :meth:`WorkerClient.reset`
+    that did not complete, until a reset succeeds. The application calls
+    ``reset()`` when its session starts, so a session never runs on state the
+    worker kept for another one.
     """
 
 
@@ -120,12 +161,10 @@ class _Link:
     sock: socket.socket
     slot: int
     generation: int
-    max_request_bytes: int | None
+    max_request_bytes: int
     carrier: ClientCarrier
-    signals: frozenset[str] | None = None
     replies: dict[int, tuple[Kind, bytes]] = field(default_factory=dict)
     lost: WorkerLost | None = None
-    reset_pending: bool = False
     closing: bool = False
     released: bool = False
 
@@ -138,36 +177,47 @@ class _Link:
         self.carrier.close()
 
 
+# Every client that is open, closed by the interpreter's exit before it joins
+# the threads still running: a client blocked in connect() or reconnect() on a
+# pool thread (asyncio.to_thread) then returns instead of holding the exit.
+_OPEN: weakref.WeakSet[WorkerClient] = weakref.WeakSet()
+
+
+def _close_all() -> None:
+    for client in list(_OPEN):
+        with contextlib.suppress(Exception):
+            client.close()
+
+
+_register_exit: Callable[[Callable[[], None]], None] | None = getattr(
+    threading, "_register_atexit", None
+)
+if _register_exit is not None:
+    _register_exit(_close_all)
+atexit.register(_close_all)
+
+
 class WorkerClient:
     """One session process's connection to the model worker.
 
-    Build it with :meth:`connect`. One :meth:`step` runs at a time; a second
-    caller waits for the first. :meth:`signal` may be called from any thread at
-    any time.
-
-    The client keeps itself connected. When the worker goes away it notices at
-    once, and connects again in the background, every half second at first and
-    every five seconds at most, until a worker answers. A client built with the
-    session's app reports both moves to it, with
-    :meth:`~reactor_runtime.ReactorApp.report_unavailable` (reason
-    ``worker_died: <why>``) and :meth:`~reactor_runtime.ReactorApp.report_available`:
-    the runtime then ends the live session with that reason, answers
-    ``/health`` with 503 and refuses new sessions until the worker is back,
-    and the process stays up. A reconnected session is a new one on the worker:
-    its ``session_opened()`` runs again.
+    Build it with :meth:`connect`. One :meth:`step` or :meth:`reset` runs at a
+    time; a second caller waits for the first. :meth:`signal`,
+    :meth:`wait_lost`, and :meth:`close` may be called from any thread.
 
     Every failure is a raise from the call that sees it:
 
-    * :class:`WorkerError` when the model raised for this request; it names
-      the worker's exception type and carries its message and traceback.
+    * :class:`WorkerError` when the model failed this request, and its
+      subclass :class:`BatchFailed` when ``step()`` raised for the whole batch.
     * :class:`WorkerRejected` when the worker refused the request (it did not
-      decode, was larger than the worker's ``max_request_bytes``) or the
-      model's ``session_opened()`` refused the session.
-    * :class:`StepTimedOut` (a :class:`~reactor_runtime.distributed.WorkerTimeout`)
-      when no answer came within the timeout. The request is cancelled; the
-      client stays usable.
-    * :class:`WorkerLost`, whose message starts ``worker_died:``, while no
-      worker is connected.
+      decode, did not match the worker's ``request_type``, or was larger than
+      ``max_request_bytes``) or ``session_opened()`` refused a reset.
+    * :class:`StepTimedOut` when no answer came within the timeout (the request
+      is cancelled), and :class:`StepExpired` when the worker dropped it from
+      its queue; both are :class:`StepUnanswered`, and the client stays usable.
+    * :class:`ResetRequired` from a step before the application has reset the
+      slot on this connection.
+    * :class:`WorkerLost` once the connection is lost, from every call, until
+      :meth:`reconnect` succeeds; :class:`ClientClosed` after :meth:`close`.
     """
 
     def __init__(
@@ -176,111 +226,137 @@ class WorkerClient:
         socket_path: str,
         slot: int | None,
         step_timeout: float,
-        app: AvailabilitySink | None,
         transport: Transport,
+        request_type: type | None,
+        result_type: type | None,
+        signals: tuple[type, ...],
     ) -> None:
+        """Hold the settings; :meth:`connect` builds and connects one."""
         self._path = socket_path
         self._transport = transport
         self._wanted_slot = slot
         self._step_timeout = step_timeout
-        self._app = app
+        self._request_type = request_type
+        self._result_type = result_type
+        self._signal_types = signals
+        self._signal_tags = {cls: tag for tag, cls in enumerate(signals)}
+        self._schema = schema.fingerprint(
+            request_type=request_type, result_type=result_type, signals=signals
+        )
+        self._contract = schema.contract_text(request_type, result_type, signals)
         self._ids = itertools.count(1)
         self._call_lock = threading.Lock()
         self._send_lock = threading.Lock()
         self._cond = threading.Condition()
+        self._stop = threading.Event()
         self._link: _Link | None = None
-        self._lost_reason = "worker_unavailable: not connected yet"
+        self._lost_reason: str | None = None
+        self._reset_required = True
         self._closed = False
-        self._reconnecting = False
         self._last_slot = slot
-        self._report_lock = threading.Lock()
-        self._reported: str | None = None
-        atexit.register(self.close)
+        _OPEN.add(self)
 
     @classmethod
     def connect(
         cls,
-        app: AvailabilitySink | None = None,
         *,
         socket_path: str | Path | None = None,
         slot: int | None = None,
-        connect_timeout: float = 60.0,
+        request_type: type | None = None,
+        result_type: type | None = None,
+        signals: tuple[type, ...] = (),
+        connect_timeout: float | None = None,
         step_timeout: float | None = None,
         transport: Transport | None = None,
     ) -> WorkerClient:
-        """Connect to the worker and wait until it has opened this session.
+        """Connect to the worker and block until it has opened this session.
+
+        Called from the session half's ``load()``: while it waits, the session
+        runtime is in its loading state, so a cold start and a worker restart
+        both look like a slow model load. It waits through a worker that is
+        not listening yet, or that goes away before it welcomes the session,
+        and returns once one does.
+
+        The types are the session half's view of the contract and must be
+        the worker's own (``ModelWorker.request_type``, ``result_type``, and
+        ``signals``), imported from the model's code; the worker refuses a
+        session whose types differ.
 
         Args:
-            app: The session's app, passed from its ``load()`` as
-                ``WorkerClient.connect(self)``. With it, a worker that is not
-                there yet is no error: the client returns at once with the app
-                marked unavailable, and connects in the background.
             socket_path: The worker's socket; ``REACTOR_MODEL_WORKER_SOCKET``
                 when omitted, which must then be set.
             slot: This session's slot, the number the worker keeps its state
                 under; ``REACTOR_SESSION_SLOT``, else the lowest free slot the
                 worker assigns (read it back from :attr:`slot`).
-            connect_timeout: Without an app, seconds to keep trying while no
-                worker listens.
-            step_timeout: Seconds a :meth:`step` waits for its answer by
-                default; ``REACTOR_WORKER_STEP_TIMEOUT``, else 30. ``0`` waits
+            request_type: The frozen dataclass :meth:`step` sends, or ``None``
+                for plain values.
+            result_type: The frozen dataclass :meth:`step` returns, built from
+                the fields the worker sent, or ``None`` for plain values.
+            signals: The frozen dataclasses :meth:`signal` sends, in the
+                worker's order.
+            connect_timeout: Seconds to wait for a welcome in all;
+                ``REACTOR_WORKER_CONNECT_TIMEOUT``, else 1800. ``0`` waits
                 without bound.
+            step_timeout: Seconds a :meth:`step` or :meth:`reset` waits for
+                its answer by default; ``REACTOR_WORKER_STEP_TIMEOUT``, else
+                30. ``0`` waits without bound.
             transport: How frames and payloads travel; a Unix socket and
                 shared memory by default, which needs the session and the
                 worker on one host sharing the socket's directory and
                 ``/dev/shm``.
 
         Raises:
-            WorkerUnreachable: The deployment cannot reach a worker at all: no
-                socket is named, the socket's directory is missing, or the worker's shared memory is
-                not visible from here. Raised with or without an app, since
-                waiting does not fix it.
-            WorkerRejected: The worker refused this session.
-            WorkerTimeout: Without an app, no worker accepted within
-                *connect_timeout*.
-            WorkerLost: Without an app, the worker closed the connection
-                before opening it.
+            WorkerUnreachable: At once, for a deployment that cannot reach a
+                worker however long it waits: no socket is named, the socket's
+                directory is missing, the socket is not open to this user, or
+                the worker's shared memory is not visible from here.
+            WorkerRejected: The worker refused this session: another protocol
+                version, other types, a slot held by a live process, no shared
+                memory for one more session, or ``session_opened()`` refused it.
+            TypeError: A declared type is not a data-only frozen dataclass.
+            WorkerTimeout: No worker welcomed the session within *connect_timeout*.
+            ClientClosed: :meth:`close` was called while it waited, as the
+                interpreter's exit does on SIGTERM.
         """
         path = str(socket_path or os.getenv(SOCKET_ENV, "").strip())
         if not path:
             raise WorkerUnreachable(
                 f"{SOCKET_ENV} is not set: this model's session half needs a model worker "
-                "(reactor-runtime serve-worker) and the path of its socket"
+                "(python -m reactor_runtime.model_worker) and the path of its socket"
             )
         if slot is None:
             raw = os.getenv(SLOT_ENV, "").strip()
             slot = int(raw) if raw else None
         if step_timeout is None:
-            step_timeout = float(os.getenv(STEP_TIMEOUT_ENV, "") or _DEFAULT_STEP_TIMEOUT)
+            step_timeout = _float_env(STEP_TIMEOUT_ENV, _DEFAULT_STEP_TIMEOUT)
+        if connect_timeout is None:
+            connect_timeout = _float_env(CONNECT_TIMEOUT_ENV, _DEFAULT_CONNECT_TIMEOUT)
+        for name, declared in (("request_type", request_type), ("result_type", result_type)):
+            if declared is not None:
+                try:
+                    schema.validate(declared)
+                except schema.SchemaError as exc:
+                    raise TypeError(f"{name}: {exc}") from None
+        if not isinstance(signals, tuple):
+            raise TypeError(f"signals must be a tuple of frozen dataclasses, got {signals!r}")
+        check_signal_types(signals, "signals")
         _cap_malloc_arenas()
         transport = transport or UnixShmTransport()
         transport.check(path)
         client = cls(
-            socket_path=path, slot=slot, step_timeout=step_timeout, app=app, transport=transport
+            socket_path=path,
+            slot=slot,
+            step_timeout=step_timeout,
+            transport=transport,
+            request_type=request_type,
+            result_type=result_type,
+            signals=signals,
         )
-        if app is None:
-            deadline = time.monotonic() + connect_timeout
-            while True:
-                try:
-                    client._open()
-                    return client
-                except NoListener as exc:
-                    if time.monotonic() >= deadline:
-                        client.close()
-                        raise WorkerTimeout(f"no model worker accepted at {path}: {exc}") from None
-                    time.sleep(_CONNECT_POLL)
-                except BaseException:
-                    client.close()
-                    raise
         try:
-            client._open()
-        except (WorkerRejected, WorkerUnreachable):
+            client._connect_within(connect_timeout)
+        except BaseException:
             client.close()
             raise
-        except NoListener as exc:
-            client._went_down(f"worker_unavailable: no model worker at {path}: {exc}")
-        except WorkerLost as exc:
-            client._went_down(str(exc))
         return client
 
     @property
@@ -290,54 +366,62 @@ class WorkerClient:
 
     @property
     def generation(self) -> int:
-        """The worker's count of openings of this slot, moved on by :meth:`reset`."""
+        """The worker's count of openings of this slot, moved on by :meth:`reset`.
+
+        ``0`` while the connection is lost.
+        """
         link = self._link
         return link.generation if link is not None else 0
 
     @property
     def available(self) -> bool:
-        """Whether a worker is connected now."""
+        """Whether the connection is up. A stuck worker's connection is up."""
         return self._link is not None
 
-    def wait_available(self, timeout: float | None = None) -> bool:
-        """Block until a worker is connected; return whether one is.
-
-        Args:
-            timeout: Seconds to wait; ``None`` waits without bound.
-        """
-        deadline = None if timeout is None else time.monotonic() + timeout
-        with self._cond:
-            while self._link is None and not self._closed:
-                remaining = None if deadline is None else deadline - time.monotonic()
-                if remaining is not None and remaining <= 0:
-                    return False
-                self._cond.wait(remaining)
-            return self._link is not None
+    @property
+    def lost_reason(self) -> str | None:
+        """Why the connection was lost, or ``None`` while it is up."""
+        return self._lost_reason
 
     def step(self, payload: Any, *, timeout: float | None = None) -> Any:
         """Send *payload* to the worker's next step and return this session's output.
 
         Pass contiguous numpy arrays for the bulk of the payload: they travel
-        through shared memory. The output's arrays are copies this session owns.
+        through shared memory. The output's arrays are copies this session
+        owns. The header that carries the rest (plain values, the arrays'
+        shapes) is at most 1 MiB.
 
         Args:
-            payload: Plain values, lists, tuples, dicts, bytes, and numpy
-                arrays (see :mod:`reactor_runtime.model_worker.codec`).
+            payload: An instance of the ``request_type`` passed to
+                :meth:`connect`, or plain values, lists, tuples, dicts, bytes,
+                and numpy arrays without one (see
+                :mod:`reactor_runtime.model_worker.codec`).
             timeout: Seconds to wait for the answer; the client's step timeout
                 when omitted, and ``0`` waits without bound.
 
+        Returns:
+            An instance of ``result_type``, or plain values without one.
+
         Raises:
-            WorkerError: The model raised for this request.
-            TypeError: The payload holds a value that does not travel.
-            WorkerRejected: The worker refused the request.
+            WorkerError: The model failed this request.
+            BatchFailed: ``step()`` raised for the batch this request was in.
+            TypeError: The payload does not match ``request_type``, or holds a
+                value that does not travel.
+            WorkerRejected: The request is too large, or the worker refused it.
             StepTimedOut: No answer in time; the request was cancelled.
-            WorkerLost: No worker is connected.
+            StepExpired: The worker dropped the request from its queue.
+            ResetRequired: The application has not reset the slot on this
+                connection yet.
+            WorkerLost: The connection is lost.
         """
         with self._call_lock:
             link = self._usable()
+            if self._reset_required:
+                raise ResetRequired(
+                    "reset() has not completed on this connection to the model worker: the "
+                    "application resets its slot when its session starts"
+                )
             try:
-                if link.reset_pending:
-                    self._reset(link, timeout)
                 return self._step(link, payload, timeout)
             finally:
                 if link.lost is not None:
@@ -347,80 +431,132 @@ class WorkerClient:
         """Close this slot's session on the worker and open a new one.
 
         The worker runs ``session_closed()`` then ``session_opened()`` for the
-        slot, between steps. Call it when the session process starts a new
-        session, so nothing of the last one reaches it. A reset that does not
-        complete (it timed out, or the worker went away) is retried before the
-        next :meth:`step`, which raises rather than run on the last session's
-        state; a reconnect opens a new session anyway.
+        slot, between steps. Only the application calls it, when its session
+        starts, so nothing of the last session reaches it; until it completes
+        on a connection, :meth:`step` raises :class:`ResetRequired`.
 
         Returns:
             The slot's new generation.
 
         Raises:
             WorkerRejected: ``session_opened()`` refused the new session.
-            WorkerTimeout: No answer in time.
-            WorkerLost: No worker is connected.
+            StepTimedOut: No answer in time.
+            WorkerLost: The connection is lost.
         """
         with self._call_lock:
             link = self._usable()
-            link.reset_pending = True
-            return self._reset(link, timeout)
+            self._reset_required = True
+            try:
+                generation = self._reset(link, timeout)
+            finally:
+                if link.lost is not None:
+                    link.release()
+            self._reset_required = False
+            return generation
 
-    def _reset(self, link: _Link, timeout: float | None) -> int:
-        """Reset *link*'s slot; call with the call lock held."""
-        try:
-            request_id = next(self._ids)
-            wait = self._step_timeout if timeout is None else timeout
-            self._send(link, Kind.RESET, request_id)
-            kind, reply = self._await(link, request_id, wait)
-            if kind is None:
-                raise StepTimedOut(f"the model worker did not reset within {wait} s")
-            if kind is Kind.REJECTED:
-                raise WorkerRejected(reply.decode(errors="replace"))
-            if kind is not Kind.ACK:
-                raise WorkerLost(f"worker_died: answered a reset with {kind.name}")
-            link.generation = int(wire.from_json(reply)["generation"])
-            link.reset_pending = False
-            return link.generation
-        finally:
-            if link.lost is not None:
-                link.release()
+    def signal(self, signal: Any) -> None:
+        """Deliver *signal* to the worker's ``signal()`` now, even while a step waits.
 
-    def signal(self, name: str, payload: Any = None) -> None:
-        """Deliver *name* to the worker's ``signal()`` now, even while a step waits.
-
-        Never blocks on the worker and never raises for a worker that is gone:
-        the signal is dropped then. Safe from any thread.
+        Never waits for the worker. Safe from any thread.
 
         Args:
-            name: One of the names the worker's ``ModelWorker.signals`` declares.
-            payload: A JSON value.
+            signal: An instance of one of the ``signals`` types passed to
+                :meth:`connect`.
 
         Raises:
-            ValueError: The worker declares no signal of that name.
-            TypeError: The payload is not a JSON value.
+            ValueError: Its type is not one of the declared signals.
+            TypeError: Its fields do not match its declaration.
+            WorkerLost: The connection is lost.
         """
-        link = self._link
-        if link is None:
-            return
-        if link.signals is not None and name not in link.signals:
+        tag = self._signal_tags.get(type(signal))
+        if tag is None:
+            names = [cls.__qualname__ for cls in self._signal_types]
             raise ValueError(
-                f"the model worker declares no signal {name!r}; it takes {sorted(link.signals)}"
+                f"{type(signal).__qualname__} is not a declared signal; this client "
+                f"declares {names}"
             )
-        data = wire.to_json({"name": name, "payload": payload})
-        self._send(link, Kind.SIGNAL, 0, data, best_effort=True)
+        try:
+            fields = schema.dump(signal, type(signal))
+        except schema.SchemaError as exc:
+            raise TypeError(str(exc)) from None
+        body = wire.SIGNAL_TAG.pack(tag) + _json(codec.to_tree(fields))
+        link = self._usable()
+        self._send(link, Kind.SIGNAL, 0, body)
+
+    def wait_lost(self, timeout: float | None = None) -> str:
+        """Block until the connection is lost, and return why.
+
+        Returns at once while it is lost. Meant for one task of the
+        application that watches the worker between steps and while idle (see
+        :mod:`reactor_runtime.model_worker`); call it with a timeout, in a
+        loop, so the task can be cancelled.
+
+        Args:
+            timeout: Seconds to wait; ``None`` waits without bound.
+
+        Raises:
+            TimeoutError: The connection is still up after *timeout*.
+            ClientClosed: :meth:`close` was called, before or while it waited.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self._cond:
+            while True:
+                if self._closed:
+                    raise ClientClosed("the worker client is closed")
+                if self._link is None and self._lost_reason is not None:
+                    return self._lost_reason
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    raise TimeoutError(
+                        f"the connection to the model worker is up after {timeout} s"
+                    )
+                self._cond.wait(remaining)
+
+    def reconnect(self, timeout: float) -> None:
+        """Drop the connection, if any, and connect again, blocking until the worker welcomes it.
+
+        The new connection is a new session on the worker, with a new
+        generation; :meth:`step` raises :class:`ResetRequired` until the
+        application calls :meth:`reset`. For a stuck worker this waits until
+        the worker is restarted, since a worker opens a session only between
+        steps.
+
+        Args:
+            timeout: Seconds to wait in all; call it in a loop to wait longer,
+                so shutdown is never held by it.
+
+        Raises:
+            WorkerTimeout: No worker welcomed the session within *timeout*.
+            WorkerUnreachable: The deployment cannot reach a worker at all.
+            WorkerRejected: The worker refused the session.
+            ClientClosed: :meth:`close` was called, before or while it waited.
+        """
+        with self._call_lock:
+            link = self._link
+            if link is not None:
+                self._lose(link, "the application reconnects")
+                link.release()
+        self._connect_within(timeout)
 
     def close(self) -> None:
-        """Leave the worker and release this client's shared memory. Idempotent."""
+        """Leave the worker and release this client's shared memory. Idempotent.
+
+        A :meth:`connect`, :meth:`reconnect`, or :meth:`wait_lost` blocked in
+        another thread raises :class:`ClientClosed`, and so does every call
+        after it.
+        """
         with self._cond:
             if self._closed:
                 return
             self._closed = True
+            self._stop.set()
             link, self._link = self._link, None
+            if self._lost_reason is None:
+                self._lost_reason = "the worker client is closed"
             if link is not None and link.lost is None:
-                link.lost = WorkerLost("worker_unavailable: the worker client is closed")
+                link.lost = ClientClosed("the worker client is closed")
             self._cond.notify_all()
-        atexit.unregister(self.close)
+        _OPEN.discard(self)
         if link is not None:
             link.closing = True
             with contextlib.suppress(OSError):
@@ -434,13 +570,22 @@ class WorkerClient:
         request_id = next(self._ids)
         wait = self._step_timeout if timeout is None else timeout
         limit = link.max_request_bytes
+        if self._request_type is not None:
+            try:
+                payload = schema.dump(payload, self._request_type)
+            except schema.SchemaError as exc:
+                raise TypeError(str(exc)) from None
         size = link.carrier.size(payload)
-        if limit is not None and size > limit:
+        if size > limit:
             raise WorkerRejected(
                 f"the request carries {size} bytes, over the worker's {limit} limit"
             )
-        header, total = link.carrier.encode(payload)
-        if limit is not None and total > limit:
+        try:
+            header, total = link.carrier.encode(payload)
+        except codec.HeaderTooLarge as exc:
+            link.carrier.renew()
+            raise WorkerRejected(str(exc)) from None
+        if total > limit:
             link.carrier.renew()
             raise WorkerRejected(
                 f"the request carries {total} bytes, over the worker's {limit} limit"
@@ -459,149 +604,175 @@ class WorkerClient:
             raise StepTimedOut(f"the model worker gave no answer within {wait} s")
         if kind is Kind.RESULT:
             try:
-                return link.carrier.decode(reply)
-            except ValueError as exc:
+                value = link.carrier.decode(reply)
+                if self._result_type is not None:
+                    value = schema.load(value, self._result_type)
+            except (ValueError, schema.SchemaError) as exc:
                 raise RuntimeError(f"the model worker's output did not decode: {exc}") from None
+            return value
         if kind is Kind.FAILED:
             raise _failure(reply)
         if kind is Kind.REJECTED:
-            raise WorkerRejected(reply.decode(errors="replace"))
+            raise WorkerRejected(_reason(reply))
         if kind is Kind.EXPIRED:
-            raise StepTimedOut("the request expired in the model worker's queue")
-        raise WorkerLost(f"worker_died: answered a step with {kind.name}")
+            raise StepExpired("the request expired in the model worker's queue")
+        raise self._protocol_break(link, f"answered a step with {kind.name}")
+
+    def _reset(self, link: _Link, timeout: float | None) -> int:
+        request_id = next(self._ids)
+        wait = self._step_timeout if timeout is None else timeout
+        self._send(link, Kind.RESET, request_id)
+        kind, reply = self._await(link, request_id, wait)
+        if kind is None:
+            raise StepTimedOut(f"the model worker did not reset within {wait} s")
+        if kind is Kind.REJECTED:
+            raise WorkerRejected(_reason(reply))
+        if kind is not Kind.ACK:
+            raise self._protocol_break(link, f"answered a reset with {kind.name}")
+        try:
+            ack = wire.decode_message(reply, wire.ResetAck)
+        except wire.ProtocolError as exc:
+            raise self._protocol_break(link, str(exc)) from None
+        link.generation = ack.generation
+        return ack.generation
+
+    def _protocol_break(self, link: _Link, reason: str) -> WorkerLost:
+        """Drop a connection whose worker broke the protocol; return what the caller raises."""
+        self._lose(link, f"the model worker broke the protocol: {reason}")
+        assert link.lost is not None
+        return link.lost
 
     # -- connecting --------------------------------------------------------------------------
 
-    def _open(self) -> None:
+    def _connect_within(self, timeout: float) -> None:
+        """Open a connection, waiting through a worker that is not there yet, until *timeout*."""
+        deadline = None if timeout <= 0 else time.monotonic() + timeout
+        poll = _CONNECT_POLL_FIRST
+        last = "no model worker listens yet"
+        while True:
+            if self._closed:
+                raise ClientClosed("the worker client is closed")
+            try:
+                self._open(deadline)
+                return
+            except NoListener as exc:
+                last = f"no model worker listens at {self._path}: {exc}"
+            except WorkerLost as exc:
+                if isinstance(exc, ClientClosed):
+                    raise
+                last = str(exc)
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                raise WorkerTimeout(
+                    f"no model worker welcomed this session within {timeout} s: {last}"
+                )
+            if self._stop.wait(poll if remaining is None else min(poll, remaining)):
+                raise ClientClosed("the worker client is closed")
+            poll = min(poll * 2, _CONNECT_POLL_MAX)
+
+    def _open(self, deadline: float | None) -> None:
         """Connect once and install the link, or raise why not."""
         sock = self._transport.connect(self._path)
-        hello: dict[str, Any] = {"pid": os.getpid(), "token": secrets.token_hex(4)}
         # A slot the worker assigned is not asked for again: another session
         # may hold it by now. Its state is a new session's either way.
-        if self._wanted_slot is not None:
-            hello["slot"] = self._wanted_slot
+        hello = wire.Hello(
+            slot=self._wanted_slot,
+            pid=os.getpid(),
+            token=secrets.token_hex(4),
+            protocol=wire.PROTOCOL,
+            schema=self._schema,
+        )
+        wait = _HELLO_TIMEOUT if deadline is None else max(0.1, deadline - time.monotonic())
         try:
-            wire.send(sock, Kind.HELLO, 0, wire.to_json(hello))
-            sock.settimeout(_HELLO_TIMEOUT)
-            kind, _, payload = wire.recv(sock, wire.CONTROL_LIMIT)
-            sock.settimeout(None)
-            welcome = wire.from_json(payload) if kind is Kind.WELCOME else {}
+            wire.send(sock, Kind.HELLO, 0, wire.encode_message(hello))
+            kind, payload = self._await_welcome(sock, min(wait, _HELLO_TIMEOUT))
         except (wire.Closed, OSError, wire.ProtocolError) as exc:
             sock.close()
+            if self._closed:
+                raise ClientClosed("the worker client is closed") from None
             raise WorkerLost(f"worker_died: lost while opening the session: {exc}") from None
         if kind is Kind.REFUSED:
             sock.close()
-            raise WorkerRejected(f"the model worker refused the session: {payload.decode()}")
+            reason = _reason(payload)
+            raise WorkerRejected(
+                f"the model worker refused the session: {reason}"
+                + (f" (this session declares: {self._contract})" if "fingerprint" in reason else "")
+            )
         if kind is not Kind.WELCOME:
             sock.close()
             raise WorkerLost(f"worker_died: answered a hello with {kind.name}")
         try:
-            carrier = self._transport.client_carrier(welcome)
+            welcome = wire.decode_message(payload, wire.Welcome)
+        except wire.ProtocolError as exc:
+            sock.close()
+            raise WorkerRejected(f"the model worker's welcome does not decode: {exc}") from None
+        try:
+            carrier = self._transport.client_carrier(
+                {**welcome.transport, "request_prefix": welcome.request_prefix}
+            )
         except BaseException:
             sock.close()
             raise
         link = _Link(
             sock=sock,
-            slot=int(welcome["slot"]),
-            generation=int(welcome.get("generation", 1)),
-            max_request_bytes=int(welcome.get("max_request_bytes", 0)) or None,
+            slot=welcome.slot,
+            generation=welcome.generation,
+            max_request_bytes=welcome.max_request_bytes,
             carrier=carrier,
-            signals=frozenset(welcome["signals"]) if "signals" in welcome else None,
         )
         with self._cond:
             if self._closed:
                 link.release()
-                return
+                raise ClientClosed("the worker client is closed")
             self._link = link
+            self._lost_reason = None
+            self._reset_required = True
             self._last_slot = link.slot
+            self._cond.notify_all()
         reader = threading.Thread(
             target=self._read_loop, args=(link,), name="worker-client", daemon=True
         )
         reader.start()
-        logger.info("connected to the model worker", slot=link.slot, socket=self._path)
-        self._report()
-        with self._cond:
-            self._cond.notify_all()
+        logger.info(
+            "connected to the model worker",
+            slot=link.slot,
+            generation=link.generation,
+            socket=self._path,
+            max_batch=welcome.max_batch,
+            max_request_bytes=welcome.max_request_bytes,
+            shm_slot_bytes=welcome.shm_slot_bytes,
+        )
 
-    def _went_down(self, reason: str) -> None:
-        """Report the worker gone and make sure a reconnect is under way."""
-        with self._cond:
-            if self._closed:
-                return
-            self._lost_reason = reason
-            start = not self._reconnecting
-            self._reconnecting = True
-        self._report()
-        if start:
-            threading.Thread(
-                target=self._reconnect_loop, name="worker-reconnect", daemon=True
-            ).start()
-
-    def _reconnect_loop(self) -> None:
-        """Connect until a link is up; it ends only with a link installed, or the client closed.
-
-        Whether to go on is decided under the same lock :meth:`_went_down`
-        reads, so a link lost the moment it was made is either seen here (and
-        the loop goes on) or finds the loop gone (and starts another).
-        """
-        backoff = _RECONNECT_FIRST
+    def _await_welcome(self, sock: socket.socket, wait: float) -> tuple[Kind, bytes]:
+        """Read the answer to a hello, waking every so often to see whether the client closed."""
+        deadline = time.monotonic() + wait
         while True:
-            time.sleep(backoff)
-            with self._cond:
-                if self._closed or self._link is not None:
-                    self._reconnecting = False
-                    return
-            try:
-                self._open()
-            except (WorkerRejected, WorkerUnreachable) as exc:
-                logger.warning("could not reopen this session on the worker", error=str(exc))
-                with self._cond:
-                    self._lost_reason = f"worker_unavailable: {exc}"
-                self._report()
-            except (NoListener, WorkerLost):
-                pass
-            with self._cond:
-                if self._closed or self._link is not None:
-                    self._reconnecting = False
-                    return
-            # Spread out, so the sessions of a restarted worker do not all
-            # come back in the same instant.
-            backoff = min(backoff * 2, _RECONNECT_MAX) * random.uniform(0.75, 1.25)
-
-    def _report(self) -> None:
-        """Tell the app whether a worker is connected, as it is now, once per change.
-
-        Reports from the reader, the reconnect thread, and connect race; each
-        reads the state under one lock as it reports, so the last report the
-        app hears is the state that holds.
-        """
-        if self._app is None:
-            return
-        with self._report_lock:
-            with self._cond:
-                up = self._link is not None and not self._closed
-                reason = self._lost_reason
-            if up:
-                if self._reported != "up":
-                    self._reported = "up"
-                    self._app.report_available()
-            elif self._reported != reason:
-                self._reported = reason
-                self._app.report_unavailable(reason)
+            readable, _, _ = select.select([sock], [], [], 0.5)
+            if self._closed:
+                raise wire.Closed("the worker client is closed")
+            if readable:
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"no welcome within {wait:.0f} s")
+        # The frame has started: read it whole, bounded so a stalled worker cannot hold it.
+        sock.settimeout(max(1.0, deadline - time.monotonic()))
+        kind, _, payload = wire.recv(sock, wire.CONTROL_LIMIT)
+        sock.settimeout(None)
+        return kind, payload
 
     # -- one connection ----------------------------------------------------------------------
 
     def _usable(self) -> _Link:
-        if self._closed:
-            raise RuntimeError("the worker client is closed")
-        link = self._link
-        if link is None:
-            raise WorkerLost(
-                self._lost_reason
-                if self._lost_reason.startswith("worker_")
-                else f"worker_died: {self._lost_reason}"
-            )
-        return link
+        with self._cond:
+            if self._closed:
+                raise ClientClosed("the worker client is closed")
+            link = self._link
+            if link is None:
+                reason = self._lost_reason or "not connected"
+                raise WorkerLost(
+                    reason if reason.startswith("worker_") else f"worker_died: {reason}"
+                )
+            return link
 
     def _send(
         self,
@@ -641,7 +812,10 @@ class WorkerClient:
         reason = "the model worker closed the connection"
         try:
             while True:
-                kind, request_id, payload = wire.recv(link.sock, _REPLY_LIMIT)
+                kind, request_id, payload = wire.recv(link.sock, _reply_limit)
+                if kind is Kind.REFUSED:
+                    reason = f"the model worker refused this session: {_reason(payload)}"
+                    break
                 with self._cond:
                     link.replies[request_id] = (kind, payload)
                     self._cond.notify_all()
@@ -658,7 +832,7 @@ class WorkerClient:
                 self._call_lock.release()
 
     def _lose(self, link: _Link, reason: str) -> None:
-        """Retire *link*: fail what waits on it, and start connecting again.
+        """Retire *link*: fail what waits on it and record why; nothing reconnects.
 
         The link's shared memory is released by whichever comes last: this,
         when no call is using it, or the call that is, as it returns.
@@ -667,9 +841,10 @@ class WorkerClient:
             if link.lost is not None:
                 return
             link.lost = WorkerLost(f"worker_died: {reason}")
-            current = self._link is link
-            if current:
+            if self._link is link:
                 self._link = None
+                if not self._closed:
+                    self._lost_reason = f"worker_died: {reason}"
             self._cond.notify_all()
         logger.error("lost the model worker", slot=link.slot, reason=reason)
         link.closing = True
@@ -680,22 +855,49 @@ class WorkerClient:
                 link.release()
             finally:
                 self._call_lock.release()
-        if current:
-            self._went_down(f"worker_died: {reason}")
+
+
+def _reply_limit(kind: Kind) -> int:
+    return codec.MAX_HEADER_BYTES if kind is Kind.RESULT else wire.CONTROL_LIMIT
+
+
+def _json(tree: Any) -> bytes:
+    return json.dumps(tree, separators=(",", ":"), allow_nan=False).encode()
+
+
+def _reason(payload: bytes) -> str:
+    """The reason a REFUSED or REJECTED frame carries."""
+    try:
+        return wire.decode_message(payload, wire.Refusal).reason
+    except wire.ProtocolError as exc:
+        return f"(the refusal does not decode: {exc})"
 
 
 def _failure(payload: bytes) -> Exception:
     """The exception a FAILED answer stands for."""
     try:
-        failure = wire.from_json(payload)
-    except wire.ProtocolError:
-        return RuntimeError("the model worker failed this request and its answer did not decode")
-    message = str(failure.get("message", ""))
-    if failure.get("worker_lost"):
-        return WorkerLost(message)
-    return WorkerError(
-        str(failure.get("type", "Exception")), message, str(failure.get("traceback", ""))
-    )
+        failure = wire.decode_message(payload, wire.Failure)
+    except wire.ProtocolError as exc:
+        return RuntimeError(
+            f"the model worker failed this request; its answer did not decode: {exc}"
+        )
+    if failure.worker_lost:
+        return WorkerLost(failure.message)
+    cls = BatchFailed if failure.batch_failed else WorkerError
+    return cls(failure.type, failure.message, failure.traceback)
+
+
+def _float_env(name: str, default: float) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(f"{name} {raw!r} must be a number of seconds") from None
+    if not value >= 0:
+        raise ValueError(f"{name} must be at least 0")
+    return value
 
 
 # glibc's mallopt option for the arena count.

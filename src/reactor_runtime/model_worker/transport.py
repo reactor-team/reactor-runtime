@@ -24,6 +24,7 @@ import os
 import secrets
 import socket
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from multiprocessing import shared_memory
 from pathlib import Path
 from typing import Any
@@ -133,7 +134,7 @@ class Transport(ABC):
         """
 
     @abstractmethod
-    def worker_started(self, prefix: str) -> dict[str, Any]:
+    def worker_started(self, prefix: str) -> dict[str, str]:
         """Prepare the worker's side; return what every welcome tells a session."""
 
     @abstractmethod
@@ -150,8 +151,12 @@ class Transport(ABC):
         limit: int,
         input_bytes: int,
         output_bytes: int,
-    ) -> tuple[WorkerCarrier, dict[str, Any]]:
+    ) -> tuple[WorkerCarrier, dict[str, str]]:
         """Return the worker's carrier for a new connection and what its welcome adds.
+
+        The map holds ``request_prefix``, which the welcome carries as its own
+        field, and whatever else the session's side needs, which the welcome
+        carries in its ``transport`` map.
 
         Whatever the carrier holds for the session (a transport over shared
         memory: its input and output blocks, of the sizes given) is made here,
@@ -159,8 +164,10 @@ class Transport(ABC):
         """
 
     @abstractmethod
-    def client_carrier(self, welcome: dict[str, Any]) -> ClientCarrier:
+    def client_carrier(self, welcome: Mapping[str, str]) -> ClientCarrier:
         """Return the session's carrier for the connection *welcome* opened.
+
+        *welcome* is the welcome's ``transport`` map with its ``request_prefix``.
 
         Raises:
             WorkerUnreachable: The worker's side cannot be reached from here.
@@ -224,7 +231,7 @@ class UnixShmTransport(Transport):
             raise NoListener(str(exc)) from None
         return sock
 
-    def worker_started(self, prefix: str) -> dict[str, Any]:
+    def worker_started(self, prefix: str) -> dict[str, str]:
         """Make the block every session reads at connect to prove it shares ``/dev/shm``."""
         nonce = secrets.token_bytes(8)
         name = created_here(f"{prefix}probe")
@@ -251,7 +258,7 @@ class UnixShmTransport(Transport):
         limit: int,
         input_bytes: int,
         output_bytes: int,
-    ) -> tuple[WorkerCarrier, dict[str, Any]]:
+    ) -> tuple[WorkerCarrier, dict[str, str]]:
         """Make and zero-fill this session's input and output blocks, before it is welcomed.
 
         Filling them here charges their memory to the worker, which made them,
@@ -279,7 +286,7 @@ class UnixShmTransport(Transport):
         )
         return carrier, {"request_prefix": request_prefix, "input_block": input_block.name}
 
-    def client_carrier(self, welcome: dict[str, Any]) -> ClientCarrier:
+    def client_carrier(self, welcome: Mapping[str, str]) -> ClientCarrier:
         """Check the worker's probe block is visible here, then carry under the welcome's prefix."""
         probe, nonce = welcome.get("probe"), welcome.get("probe_nonce")
         if isinstance(probe, str) and isinstance(nonce, str):

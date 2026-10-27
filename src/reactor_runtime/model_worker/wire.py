@@ -8,6 +8,25 @@ step's arrays sit in shared memory, and the payload of a step or a result is the
 A reader refuses a frame whose length passes the limit it was given before it
 reads the payload, so a corrupt or hostile length cannot make it allocate
 without bound. Anything else wrong with a frame is the receiver's to judge.
+
+The control payloads are typed: :class:`Hello`, :class:`Welcome`,
+:class:`Failure`, :class:`ResetAck`, and :class:`Refusal`, frozen dataclasses
+that travel as JSON objects of their fields and are decoded strictly by
+:func:`decode` (a missing, an extra, or a wrongly typed field is a
+:class:`ProtocolError`). :data:`PROTOCOL` is the version of this whole
+exchange; a session sends it in its :class:`Hello` and a worker of another
+version refuses the session, naming both.
+
+Which frame carries which payload:
+
+* ``HELLO``: a :class:`Hello`. ``WELCOME``: a :class:`Welcome`.
+* ``STEP``: :data:`TIMEOUT` then a :mod:`~reactor_runtime.model_worker.codec`
+  header. ``RESULT``: a codec header.
+* ``SIGNAL``: :data:`SIGNAL_TAG` (the index of the signal's type in the
+  worker's declared ``signals``) then the codec tree of its fields, as JSON.
+* ``RESET``, ``CANCEL``, ``EXPIRED``: empty. ``ACK``: a :class:`ResetAck`.
+* ``FAILED``: a :class:`Failure`. ``REJECTED`` and ``REFUSED``: a
+  :class:`Refusal`.
 """
 
 from __future__ import annotations
@@ -17,10 +36,18 @@ import json
 import socket
 import struct
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
+
+from reactor_runtime.model_worker import schema
 
 HEADER = struct.Struct("!IBQ")
 TIMEOUT = struct.Struct("!d")
+SIGNAL_TAG = struct.Struct("!I")
+
+# The version of the exchange this module defines. A change to a frame kind, a
+# control message, or the codec's header moves it on.
+PROTOCOL = 2
 
 # The ceiling on a frame that carries no step data: a hello, a signal, an error.
 CONTROL_LIMIT = 1 << 20
@@ -88,21 +115,132 @@ def recv(sock: socket.socket, limit: int | Callable[[Kind], int]) -> tuple[Kind,
     return frame_kind, request_id, _exactly(sock, length) if length else b""
 
 
-def to_json(value: dict[str, Any]) -> bytes:
-    """Encode a control payload."""
-    return json.dumps(value, separators=(",", ":")).encode()
+@dataclass(frozen=True)
+class Hello:
+    """A session's first frame: who it is and which contract it speaks.
+
+    Attributes:
+        slot: The slot asked for, or ``None`` for the lowest free one.
+        pid: The session process's pid, for the worker's logs.
+        token: A random hex token naming this connection's shared blocks.
+        protocol: The :data:`PROTOCOL` the session speaks.
+        schema: The fingerprint of the session's request, result, and signal
+            types (:func:`~reactor_runtime.model_worker.schema.fingerprint`).
+    """
+
+    slot: int | None
+    pid: int
+    token: str
+    protocol: int
+    schema: str
 
 
-def from_json(payload: bytes) -> dict[str, Any]:
-    """Decode a control payload, refusing anything but a JSON object.
+@dataclass(frozen=True)
+class Welcome:
+    """The worker's answer once it has opened the session.
+
+    Attributes:
+        slot: The slot the session holds.
+        generation: The slot's count of openings.
+        max_batch: The effective ``max_batch``.
+        max_request_bytes: The effective ``max_request_bytes``.
+        shm_slot_bytes: The ``/dev/shm`` this session holds.
+        signals: The names of the worker's declared signal types, in the
+            order their tags index.
+        request_prefix: The prefix the session names its request blocks under.
+        transport: What the transport adds for the session's side, such as
+            the block that proves the two share ``/dev/shm``.
+    """
+
+    slot: int
+    generation: int
+    max_batch: int
+    max_request_bytes: int
+    shm_slot_bytes: int
+    signals: tuple[str, ...]
+    request_prefix: str
+    transport: dict[str, str]
+
+
+@dataclass(frozen=True)
+class Failure:
+    """Why a request failed in the worker.
+
+    Attributes:
+        type: The qualified type of the worker's exception.
+        message: Its message.
+        traceback: Its traceback in the worker, as text.
+        worker_lost: The worker is going away (it is stopping).
+        batch_failed: ``step()`` raised for the whole batch this request was
+            in; the cause is the batch's, not necessarily this request's.
+    """
+
+    type: str
+    message: str
+    traceback: str
+    worker_lost: bool
+    batch_failed: bool
+
+
+@dataclass(frozen=True)
+class ResetAck:
+    """The worker reopened the slot.
+
+    Attributes:
+        generation: The slot's new generation.
+    """
+
+    generation: int
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """Why the worker refused a session (``REFUSED``) or a request (``REJECTED``).
+
+    Attributes:
+        reason: What was refused and why, for the session's error.
+    """
+
+    reason: str
+
+
+def encode_message(message: object) -> bytes:
+    """Encode a control message as the JSON object of its fields.
+
+    Raises:
+        ProtocolError: The message does not match its declaration.
+    """
+    try:
+        fields = schema.dump(message, type(message))
+    except schema.SchemaError as exc:
+        raise ProtocolError(f"a {type(message).__name__} does not encode: {exc}") from None
+    return json.dumps(fields, separators=(",", ":")).encode()
+
+
+def decode_message[M](payload: bytes, cls: type[M]) -> M:
+    """Decode a control message of type *cls*, strictly.
+
+    Raises:
+        ProtocolError: The payload is not a JSON object of exactly *cls*'s
+            fields, each of its declared type.
+    """
+    value = json_object(payload)
+    try:
+        return schema.load(value, cls)
+    except schema.SchemaError as exc:
+        raise ProtocolError(f"a malformed {cls.__name__}: {exc}") from None
+
+
+def json_object(payload: bytes) -> dict[str, Any]:
+    """Decode a JSON object, refusing anything else.
 
     Raises:
         ProtocolError: The payload is not a JSON object.
     """
     try:
         value = json.loads(payload)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ProtocolError(f"control payload is not JSON: {exc}") from None
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+        raise ProtocolError(f"control payload is not JSON: {type(exc).__name__}") from None
     if not isinstance(value, dict):
         raise ProtocolError("control payload is not a JSON object")
     return value

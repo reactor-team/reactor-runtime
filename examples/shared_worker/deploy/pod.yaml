@@ -30,22 +30,25 @@ spec:
     - name: dshm
       emptyDir:
         medium: Memory
-        # ModelWorker.shm_slot_size() per session (the worker logs it as
-        # shm_slot_bytes), times the sessions, plus headroom for a request or
-        # an output that outgrows its block.
+        # shm_slot_bytes per session (the worker logs it and serves it on
+        # /health), times the sessions, plus headroom for a request or an
+        # output that outgrows its block. The worker refuses to start when
+        # REACTOR_MAX_SESSIONS sessions do not fit.
         sizeLimit: 2Gi
   initContainers:
     - name: model-worker
       image: example.com/shared-worker:latest
       restartPolicy: Always
       # Under an init such as tini when the worker starts processes of its own,
-      # so they are reaped: ["/usr/bin/tini", "--", "reactor-runtime", "serve-worker"].
-      command: ["reactor-runtime", "serve-worker"]
+      # so they are reaped: ["/usr/bin/tini", "--", "python", "-m", "reactor_runtime.model_worker"].
+      command: ["python", "-m", "reactor_runtime.model_worker"]
       env:
         - name: REACTOR_MODEL_WORKER_SOCKET
           value: /run/reactor-worker/sock
         - name: REACTOR_MODEL_WORKER_HEALTH_PORT
           value: "8079"
+        - name: REACTOR_MAX_SESSIONS
+          value: "2"
       ports:
         - name: worker-health
           containerPort: 8079
@@ -55,7 +58,9 @@ spec:
         # Up to 30 minutes to load the weights.
         failureThreshold: 360
       livenessProbe:
-        # 503 "stuck" once one step has run past REACTOR_MODEL_WORKER_STUCK_SECONDS.
+        # 503 "unhealthy" once the model marked itself so or its health()
+        # reports a reason, and "stuck" once one step has run past
+        # REACTOR_MODEL_WORKER_STUCK_SECONDS.
         httpGet: {path: /health, port: 8079}
         periodSeconds: 10
         failureThreshold: 3

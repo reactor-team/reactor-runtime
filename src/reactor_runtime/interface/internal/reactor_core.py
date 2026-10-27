@@ -107,7 +107,7 @@ model thread.
 FailureSink = Callable[[BaseException], None]
 """Receives the exception that ended :meth:`ReactorCore.run`, on the model thread."""
 
-AvailabilitySink = Callable[[str | None], None]
+AvailabilityReportSink = Callable[[str | None], None]
 """Receives why the model cannot serve, or ``None`` once it can, on the reporting thread.
 
 Called with the model's availability lock held, so reports arrive in the order
@@ -386,7 +386,7 @@ class ReactorCore:
         self._media_ops: MediaOps | None = None
         self._on_failure: FailureSink | None = None
         self._reactor_unavailable: str | None = None
-        self._reactor_on_availability: AvailabilitySink | None = None
+        self._reactor_on_availability: AvailabilityReportSink | None = None
         self._reactor_availability_lock = threading.Lock()
         self.output = OutputStream(self)
 
@@ -570,7 +570,7 @@ class ReactorCore:
         """
         self._on_failure = callback
 
-    def _bind_availability(self, callback: AvailabilitySink) -> None:
+    def _bind_availability(self, callback: AvailabilityReportSink) -> None:
         """Bind the sink that hears :meth:`report_unavailable` and :meth:`report_available`.
 
         The callback receives the reason, or ``None`` once the model is
@@ -585,15 +585,22 @@ class ReactorCore:
     def report_unavailable(self, reason: str) -> None:
         """Report that the model cannot serve until :meth:`report_available`.
 
-        For a model that depends on something it does not own, such as a model
-        worker in another process, which has gone away. The runtime ends the
-        live session, if any, with ``reason`` ``error`` and *reason* as its
-        close reason (clients get the session-ended notice carrying it),
-        journals an ``error`` fact carrying *reason*, answers ``/health`` with
-        503 and *reason* as its detail, and refuses ``/start_session`` with 503
-        until the model is available again. The process stays up. Safe from any
-        thread, including from :meth:`load`; a repeat while unavailable only
-        updates the reason ``/health`` serves.
+        For an application whose model depends on something it does not own,
+        such as a model worker in another process, which it has given up on.
+        Only the application calls it; nothing in the runtime or a
+        :class:`~reactor_runtime.model_worker.WorkerClient` does.
+
+        The first call journals an ``error`` fact carrying *reason* and stops
+        the live session, if any, with end reason ``error`` and *reason* as
+        its close reason (clients get the session-ended notice carrying it).
+        From then on ``/health`` answers 503 with *reason* as its detail, and
+        ``/start_session`` answers 503 with ``Retry-After`` in every state but
+        terminated. The process stays up and nothing is raised. A repeat while
+        unavailable only updates the reason ``/health`` serves.
+
+        Non-blocking and safe from any thread, including from :meth:`load`:
+        the state is stored under a short lock and handed to the runtime's
+        loop, which applies it.
 
         Args:
             reason: Why, for the journal, the clients, and the health detail.
@@ -606,7 +613,8 @@ class ReactorCore:
     def report_available(self) -> None:
         """Report that the model can serve again after :meth:`report_unavailable`.
 
-        Safe from any thread. Does nothing while the model is available.
+        ``/health`` answers 200 and sessions are accepted again. Non-blocking
+        and safe from any thread. Does nothing while the model is available.
         """
         with self._reactor_availability_lock:
             if self._reactor_unavailable is None:
@@ -614,6 +622,11 @@ class ReactorCore:
             self._reactor_unavailable = None
             if self._reactor_on_availability is not None:
                 self._reactor_on_availability(None)
+
+    @property
+    def unavailable(self) -> str | None:
+        """The reason last passed to :meth:`report_unavailable`, or ``None`` while available."""
+        return self._reactor_unavailable
 
     # -- thread-safe ingress (called by the bridge from the runtime thread) ---
 

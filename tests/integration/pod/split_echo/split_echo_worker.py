@@ -8,9 +8,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
 
-from echo_model import EchoInput, EchoModel
+from echo_model import EchoInput, EchoModel, EchoResult
 
 from reactor_runtime.model_worker import ModelWorker, WorkerRequest
 
@@ -29,6 +28,8 @@ def fault_due(stage: str, slot: int) -> bool:
 class EchoWorker(ModelWorker):
     """Apply each session's effect to its frame, up to four sessions a step."""
 
+    request_type = EchoInput
+    result_type = EchoResult
     max_batch = 4
     batch_window = 0.002
 
@@ -37,21 +38,12 @@ class EchoWorker(ModelWorker):
         self.model = EchoModel()
         self.model.load()
 
-    def step(self, requests: list[WorkerRequest]) -> list[Any]:
+    def step(self, requests: list[WorkerRequest[EchoInput]]) -> list[EchoResult | Exception]:
         """Run the effect for every request."""
-        outputs: list[Any] = []
+        outputs: list[EchoResult | Exception] = []
         for request in requests:
             if fault_due("worker", request.slot):
                 outputs.append(RuntimeError(f"injected worker fault in slot {request.slot}"))
             else:
-                sent = request.payload
-                result = self.model.generate(
-                    EchoInput(
-                        frame=sent["frame"],
-                        effect=sent["effect"],
-                        intensity=sent["intensity"],
-                        caption=sent["caption"],
-                    )
-                )
-                outputs.append(result.frame)
+                outputs.append(self.model.generate(request.payload))
         return outputs

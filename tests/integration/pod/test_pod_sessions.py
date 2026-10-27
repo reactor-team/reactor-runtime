@@ -1,10 +1,10 @@
 """A pod of one model worker and several session runtimes, as separate processes.
 
 Each process stands in for one container of the pod the docs describe: the
-worker is ``python -m reactor_runtime.model_worker`` (``reactor-runtime
-serve-worker``), and every session is an unchanged ``python -m
-reactor_runtime.serve`` on its own port, all sharing one socket directory and
-``/dev/shm``. The model is ``examples/echo`` split in two. The test plays the
+worker is ``python -m reactor_runtime.model_worker``, and every session is an
+unchanged ``python -m reactor_runtime.serve`` on its own port, all sharing one
+socket directory and ``/dev/shm``. The model is ``examples/echo`` split in two,
+its application half taking option 2 for a lost worker. The test plays the
 kubelet: it starts the processes, kills them, and starts them again. A bare
 ``reactor_webrtc`` client (the endurance suite's) streams a webcam to a session
 over real HTTP and WebRTC and counts the frames that come back.
@@ -254,15 +254,19 @@ async def test_every_session_streams_through_the_one_worker(pod: Any) -> None:
     assert "model worker loaded" not in one.log("session0")
 
 
-async def test_sessions_that_start_before_the_worker_wait_without_exiting(pod: Any) -> None:
+async def test_sessions_that_start_before_the_worker_wait_in_load_without_exiting(
+    pod: Any,
+) -> None:
     one: Pod = pod()
     for slot in range(_SESSIONS):
         one.start_session(slot)
-    await _until(lambda: one.health(0)[0] == 503, what="slot 0 answering unavailable")
+    await _until(lambda: one.health(0)[0] is not None, what="slot 0 answering")
+    # connect() blocks in load(): the runtime is in its ordinary loading state.
     _, body = one.health(0)
-    assert body["detail"].startswith("worker_unavailable: ")
+    assert body.get("state") == "loading", body
     await asyncio.sleep(2)
     assert all(p is not None and p.poll() is None for p in one.sessions)
+    assert one.health(0)[1].get("state") == "loading"
     one.start_worker()
     one.wait_worker()
     for slot in range(_SESSIONS):
@@ -296,6 +300,10 @@ async def test_a_killed_worker_ends_live_sessions_and_they_recover(pod: Any) -> 
     client.close()
     # No session process exits for it.
     assert [pid for pid in pids if _alive(pid)] == pids
+
+    # The idle sessions saw the worker go too, through their own watcher.
+    for slot in (1, 2):
+        assert one.health(slot)[0] == 503
 
     one.start_worker()
     one.wait_worker()

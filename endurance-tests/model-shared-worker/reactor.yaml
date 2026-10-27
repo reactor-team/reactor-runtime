@@ -1,8 +1,8 @@
 $schema: reactor/v2
 
 # The endurance suite's model split in two: the tracked echo is the session
-# half, and its EchoModel runs in a model worker (`reactor-runtime
-# serve-worker`) that the scenario starts beside the runtime, so every step
+# half, and its EchoModel runs in a model worker (`python -m
+# reactor_runtime.model_worker`) that the scenario starts beside the runtime, so every step
 # crosses to the worker and back through its socket and shared memory.
 model:
   name: echo-endurance-shared-worker
@@ -11,4 +11,5 @@ model:
 
 runtime:
   import: shared_worker_echo:SharedWorkerEcho
-  worker: echo_worker:EchoWorker
+  worker:
+    import: echo_worker:EchoWorker

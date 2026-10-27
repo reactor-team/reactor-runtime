@@ -1,10 +1,12 @@
-"""Lock what a model reporting itself unavailable does to the session surface.
+"""Lock what an application reporting its model unavailable does to the session surface.
 
-A model whose work runs somewhere it does not own (a model worker in another
-process) calls ``report_unavailable(reason)`` when that goes away: the live
-session stops with ``error`` and the reason, ``/health`` answers 503 with the
-reason, ``/start_session`` answers 503, and the process stays up. Once the
-model calls ``report_available()`` everything serves as before.
+An application whose model runs somewhere it does not own (a model worker in
+another process) decides what a failure of it means in ``process_output()``.
+Re-raising ends the session and the process (option 1). Calling
+``report_unavailable(reason)`` (option 2) stops the live session with
+``error`` and the reason, makes ``/health`` and ``/start_session`` answer 503,
+and keeps the process up; once the application calls ``report_available()``
+everything serves as before. Nothing in the runtime calls either on its own.
 """
 
 from __future__ import annotations
@@ -18,24 +20,45 @@ import numpy as np
 import pytest
 from contract_helpers import Harness, JournalReader, SteppingOutput, running_runtime, wait_for_state
 
-from reactor_runtime import ModelUnavailable, ReactorApp
+from reactor_runtime import ReactorApp, StepOutcome
 
 _LOADED: list[ReactorApp] = []
 
 
 class DependentModel(ReactorApp):
-    """A model on the default step loop whose steps fail while its dependency is gone."""
+    """A model on the default step loop whose steps fail while its dependency is gone.
+
+    Its ``process_output()`` takes option 2: it reports the model unavailable
+    and emits nothing.
+    """
 
     def load(self, config_path: Path | None) -> None:
         self.gone = threading.Event()
         self.steps = 0
+        self.outcomes: list[StepOutcome] = []
         _LOADED.append(self)
 
     def generate(self, input: object) -> SteppingOutput:
         if self.gone.is_set():
-            raise ModelUnavailable("worker_died: gone")
+            raise RuntimeError("worker_died: gone")
         self.steps += 1
         return SteppingOutput(frames=np.zeros((2, 2, 3), dtype=np.uint8))
+
+    async def process_output(self, outcome: StepOutcome) -> SteppingOutput | None:
+        self.outcomes.append(outcome)
+        if outcome.error is not None:
+            self.report_unavailable(str(outcome.error))
+            return None
+        return outcome.result
+
+
+class ReraisingModel(DependentModel):
+    """The same model taking option 1: a failed step is re-raised."""
+
+    async def process_output(self, outcome: StepOutcome) -> SteppingOutput | None:
+        if outcome.error is not None:
+            raise outcome.error
+        return outcome.result
 
 
 @pytest.fixture
@@ -129,16 +152,60 @@ async def test_a_model_unavailable_from_load_is_reported_once_it_loads() -> None
         assert (await harness.client.post("/start_session", json={})).status_code == 503
 
 
-async def test_a_step_that_raises_model_unavailable_is_dropped_not_a_crash(
+async def test_option_2_a_failed_step_reaches_process_output_and_ends_the_session(
     harness: Harness,
 ) -> None:
     model = _model()
     model.gone.set()
-    assert (await harness.client.post("/start_session", json={})).status_code == 200
-    # No client connects, so give the loop a moment either way; the session
-    # must still be running, with no crash and no step.
-    await asyncio.sleep(0.2)
-    assert harness.runner.health().status.value == "healthy"
+    journal = JournalReader(harness.runner)
+    try:
+        started = await harness.client.post("/start_session", json={"steps": 50})
+        assert started.status_code == 200
+        error = await journal.expect("error")
+        assert error["detail"] == {"message": "worker_died: gone"}
+        stopped = await journal.expect("stop_session")
+        assert stopped["detail"] == {"reason": "error", "close_reason": "worker_died: gone"}
+        await wait_for_state(harness.runner, "ready")
+    finally:
+        await journal.aclose()
+    assert model.outcomes
+    assert isinstance(model.outcomes[0].error, RuntimeError)
+    health = await harness.client.get("/health")
+    assert (health.status_code, health.json()["detail"]) == (503, "worker_died: gone")
+    refused = await harness.client.post("/start_session", json={})
+    assert refused.status_code == 503
+    assert refused.headers["retry-after"] == "1"
+    assert model.unavailable == "worker_died: gone"
+
     model.gone.clear()
-    assert (await harness.client.post("/stop_session", json={})).status_code == 200
+    await _from_thread(model.report_available)
+    await asyncio.sleep(0.05)
+    assert model.unavailable is None
+    assert (await harness.client.get("/health")).status_code == 200
+
+
+async def test_option_1_a_reraised_step_error_evicts_the_session() -> None:
+    _LOADED.clear()
+    async with running_runtime(ReraisingModel) as harness:
+        model = _model()
+        model.gone.set()
+        journal = JournalReader(harness.runner)
+        try:
+            started = await harness.client.post("/start_session", json={"steps": 50})
+            assert started.status_code == 200
+            evicted = await journal.expect("eviction")
+            assert evicted["to"] == "terminated"
+            assert evicted["detail"]["reason"] == "error"
+            assert "worker_died: gone" in evicted["detail"]["error"]
+        finally:
+            await journal.aclose()
+        assert model.unavailable is None
+
+
+async def test_the_runtime_never_reports_unavailable_on_its_own(harness: Harness) -> None:
+    model = _model()
+    assert (await harness.client.post("/start_session", json={"steps": 3})).status_code == 200
     await wait_for_state(harness.runner, "ready")
+    assert model.steps >= 1
+    assert model.unavailable is None
+    assert (await harness.client.get("/health")).status_code == 200

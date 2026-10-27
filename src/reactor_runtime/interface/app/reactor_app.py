@@ -84,11 +84,7 @@ from reactor_runtime.interface.events.decorators import (
     EventHandler,
     make_command,
 )
-from reactor_runtime.interface.events.errors import (
-    ApplicationError,
-    CommandError,
-    ModelUnavailable,
-)
+from reactor_runtime.interface.events.errors import ApplicationError, CommandError
 from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.reactor_core import (
     STEP_SESSION,
@@ -363,10 +359,6 @@ class ReactorApp(ReactorCore):
                         input_started = time.perf_counter()
                         try:
                             input = await self.process_input()
-                        except ModelUnavailable:
-                            self._report_input_waits(session, report=False)
-                            returned = None
-                            outcome = None
                         except ApplicationError as refused:
                             # Frames a refused turn read belong to no step.
                             self._report_input_waits(session, report=False)
@@ -390,19 +382,14 @@ class ReactorApp(ReactorCore):
 
                             # 4. The application collects the outcome into media,
                             #    sends its messages, or recovers. A raise ends the
-                            #    loop. A model that could not run is not an
-                            #    outcome: the step is dropped like a refused one.
-                            if isinstance(outcome.error, ModelUnavailable):
-                                outcome = None
-                                returned = None
-                            else:
-                                output_started = time.perf_counter()
-                                returned = await self.process_output(outcome)
-                                stages = self._step_stages(
-                                    input_ms,
-                                    outcome.elapsed,
-                                    (time.perf_counter() - output_started) * 1000.0,
-                                )
+                            #    loop.
+                            output_started = time.perf_counter()
+                            returned = await self.process_output(outcome)
+                            stages = self._step_stages(
+                                input_ms,
+                                outcome.elapsed,
+                                (time.perf_counter() - output_started) * 1000.0,
+                            )
 
                     # 5. Emit outside the lock, so a handler can run while the
                     #    wire is full, then report the step that ran.
@@ -496,8 +483,7 @@ class ReactorApp(ReactorCore):
 
         The frames go to their input tracks, then ``process_input()`` decides.
         An :class:`ApplicationError` from it refuses the step and the client is
-        told why; the frames stay buffered. A :class:`ModelUnavailable` from it
-        or from ``generate()`` refuses the step the same way. An accepted step takes the next
+        told why; the frames stay buffered. An accepted step takes the next
         number in the session, and is reported with it once
         ``process_output()`` returns, with the request it answers.
         """
@@ -510,12 +496,8 @@ class ReactorApp(ReactorCore):
                         buffer.push(decode(), request.conn_id, session)
             try:
                 input = await self.process_input()
-            except (ApplicationError, ModelUnavailable) as refused:
+            except ApplicationError as refused:
                 self._refuse_step(request, session, str(refused) or type(refused).__name__)
-                return
-            outcome = self._generate(input)
-            if isinstance(outcome.error, ModelUnavailable):
-                self._refuse_step(request, session, str(outcome.error) or "model unavailable")
                 return
             self._steps_accepted += 1
             accepted = RequestedStep(
@@ -524,6 +506,7 @@ class ReactorApp(ReactorCore):
                 self._steps_accepted,
                 max_message_size=request.max_message_size,
             )
+            outcome = self._generate(input)
             returned = await self.process_output(outcome)
         self._report_step(_step_report(returned, outcome), session, request=accepted)
 

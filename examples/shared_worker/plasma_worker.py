@@ -10,21 +10,20 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
 
 import numpy as np
+from plasma_contract import HEIGHT, WIDTH, Frame, Tick
 
 from reactor_runtime.model_worker import ModelWorker, WorkerRequest
 
 logger = logging.getLogger(__name__)
 
-WIDTH = 320
-HEIGHT = 192
-
 
 class PlasmaWorker(ModelWorker):
     """Render one frame per waiting session, up to four at a time."""
 
+    request_type = Tick
+    result_type = Frame
     max_batch = 4
     batch_window = 0.002
 
@@ -44,15 +43,15 @@ class PlasmaWorker(ModelWorker):
         ).astype(np.uint8)
         self.frames_served: dict[int, int] = {}
 
-    def step(self, requests: list[WorkerRequest]) -> list[Any]:
+    def step(self, requests: list[WorkerRequest[Tick]]) -> list[Frame]:
         """Render every request's frame at its tick and hue, in one call."""
-        ticks = np.array([int(r.payload["tick"]) for r in requests], dtype=np.int32)
-        hues = np.array([int(r.payload["hue"]) for r in requests], dtype=np.int32)
+        ticks = np.array([r.payload.tick for r in requests], dtype=np.int32)
+        hues = np.array([r.payload.hue for r in requests], dtype=np.int32)
         index = (self.phase[None] + ticks[:, None, None] + hues[:, None, None]) % 256
         frames = self.palette[index]
         for request in requests:
             self.frames_served[request.slot] = self.frames_served.get(request.slot, 0) + 1
-        return [np.ascontiguousarray(frame) for frame in frames]
+        return [Frame(pixels=np.ascontiguousarray(frame)) for frame in frames]
 
     def session_opened(self, slot: int, generation: int) -> None:
         """Start counting this slot's frames."""
