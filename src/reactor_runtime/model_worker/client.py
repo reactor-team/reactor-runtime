@@ -16,6 +16,7 @@ import contextlib
 import ctypes
 import itertools
 import os
+import random
 import secrets
 import socket
 import sys
@@ -58,7 +59,8 @@ DEFAULT_SOCKET = "/run/reactor-worker/sock"
 
 _DEFAULT_STEP_TIMEOUT = 30.0
 _CONNECT_POLL = 0.2
-_HELLO_TIMEOUT = 30.0
+# Long enough for a worker opening many sessions at once after a restart.
+_HELLO_TIMEOUT = 120.0
 _RECONNECT_FIRST = 0.5
 _RECONNECT_MAX = 5.0
 # Outputs carry their arrays in shared memory; this bounds the header around them.
@@ -562,7 +564,9 @@ class WorkerClient:
                 if self._closed or self._link is not None:
                     self._reconnecting = False
                     return
-            backoff = min(backoff * 2, _RECONNECT_MAX)
+            # Spread out, so the sessions of a restarted worker do not all
+            # come back in the same instant.
+            backoff = min(backoff * 2, _RECONNECT_MAX) * random.uniform(0.75, 1.25)
 
     def _report(self) -> None:
         """Tell the app whether a worker is connected, as it is now, once per change.

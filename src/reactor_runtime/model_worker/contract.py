@@ -129,9 +129,11 @@ class ModelWorker:
         that raise on their own; ``step()`` therefore sees those requests a
         second time, and must leave a session's state as it was when it
         raises. A raise for one request fails that request. The worker goes on
-        either way; its ``/health`` reports ``failing`` once
+        either way. A slot whose requests raise on their own is then stepped
+        alone until one succeeds, so its batch-mates do not pay for it. The
+        worker's ``/health`` reports ``failing`` once
         ``REACTOR_MODEL_WORKER_FAILING_STEPS`` steps in a row (5 by default)
-        have raised. An output, like a
+        have raised for every session that stepped in the last minute. An output, like a
         request, is plain values, lists, tuples, dicts, bytes, and numpy
         arrays (see :mod:`reactor_runtime.model_worker.codec`); the arrays
         travel through shared memory. Nothing is pickled.
