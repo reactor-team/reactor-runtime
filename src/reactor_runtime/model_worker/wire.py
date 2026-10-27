@@ -16,6 +16,7 @@ import enum
 import json
 import socket
 import struct
+from collections.abc import Callable
 from typing import Any
 
 HEADER = struct.Struct("!IBQ")
@@ -60,12 +61,13 @@ def send(sock: socket.socket, kind: Kind, request_id: int, payload: bytes = b"")
     sock.sendall(encode(kind, request_id, payload))
 
 
-def recv(sock: socket.socket, limit: int) -> tuple[Kind, int, bytes]:
+def recv(sock: socket.socket, limit: int | Callable[[Kind], int]) -> tuple[Kind, int, bytes]:
     """Read one frame.
 
     Args:
         sock: The socket to read.
-        limit: The largest payload accepted, in bytes.
+        limit: The largest payload accepted, in bytes, or a function of the
+            frame's kind returning it; checked before the payload is read.
 
     Returns:
         The frame's kind, request id, and payload.
@@ -80,8 +82,9 @@ def recv(sock: socket.socket, limit: int) -> tuple[Kind, int, bytes]:
         frame_kind = Kind(kind)
     except ValueError:
         raise ProtocolError(f"unknown frame kind {kind}") from None
-    if length > limit:
-        raise ProtocolError(f"a {frame_kind.name} frame of {length} bytes passes the {limit} limit")
+    most = limit if isinstance(limit, int) else limit(frame_kind)
+    if length > most:
+        raise ProtocolError(f"a {frame_kind.name} frame of {length} bytes passes the {most} limit")
     return frame_kind, request_id, _exactly(sock, length) if length else b""
 
 

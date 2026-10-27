@@ -469,6 +469,8 @@ def test_a_request_that_expired_while_queued_never_reaches_step(serve: Any) -> N
     worker.entered.wait(5)
     with pytest.raises(WorkerTimeout):
         late.step(np.ones(1), timeout=0.2)
+    # Past its deadline on the worker too, whether or not its cancel landed.
+    time.sleep(0.1)
     worker.gate.set()
     hold.join(5)
     time.sleep(0.2)
@@ -545,8 +547,8 @@ def test_a_slot_is_closed_before_it_is_opened_again(serve: Any) -> None:
     first = served.client(0)
     first.close()
     second = served.client(0)
-    assert second.step(1)["gen"] == 1
-    assert worker.events == [("opened", 0, 1), ("closed", 0, 1), ("opened", 0, 1)]
+    assert second.step(1)["gen"] == 2
+    assert worker.events == [("opened", 0, 1), ("closed", 0, 1), ("opened", 0, 2)]
 
 
 def test_a_dead_worker_ends_every_session_with_its_reason(serve: Any) -> None:
@@ -585,10 +587,10 @@ class FakeApp:
     def __init__(self) -> None:
         self.reports: list[str | None] = []
 
-    def set_unavailable(self, reason: str) -> None:
+    def report_unavailable(self, reason: str) -> None:
         self.reports.append(reason)
 
-    def set_available(self) -> None:
+    def report_available(self) -> None:
         self.reports.append(None)
 
 
@@ -823,3 +825,121 @@ def test_the_session_process_caps_malloc_arenas(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(client_module, "_arenas_capped", False)
     client_module._cap_malloc_arenas()
     assert calls == [(-8, 2)]
+
+
+def test_a_worker_that_drops_a_session_right_after_welcome_is_reconnected_to(
+    serve: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from reactor_runtime.model_worker import client as client_module
+    from reactor_runtime.model_worker.server import WorkerServer
+
+    monkeypatch.setattr(client_module, "_RECONNECT_FIRST", 0.05)
+    monkeypatch.setattr(client_module, "_RECONNECT_MAX", 0.1)
+    drops = {"left": 3}
+    original = WorkerServer._open_conn
+
+    def flaky(self: WorkerServer, conn: Any) -> None:
+        original(self, conn)
+        if drops["left"] > 0:
+            drops["left"] -= 1
+            conn.sock.shutdown(socket.SHUT_RDWR)
+
+    monkeypatch.setattr(WorkerServer, "_open_conn", flaky)
+    served: Any = serve(Recorder())
+    app = FakeApp()
+    client = WorkerClient.connect(app, socket_path=served.path, slot=0)
+    served.clients.append(client)
+    _until(lambda: drops["left"] == 0 and client.available, within=10)
+    time.sleep(0.3)
+    assert client.available
+    assert app.reports[-1] is None
+    assert client.step(1)["slot"] == 0
+
+
+def test_a_session_whose_reset_was_refused_is_rejected_at_once(serve: Any) -> None:
+    class RefusesReopen(Recorder):
+        def session_opened(self, slot: int, generation: int) -> None:
+            super().session_opened(slot, generation)
+            if generation > 1:
+                raise ValueError("no room")
+
+    served: Any = serve(RefusesReopen())
+    client = served.client(0)
+    with pytest.raises(WorkerRejected, match="no room"):
+        client.reset()
+    started = time.monotonic()
+    with pytest.raises(WorkerRejected, match="not open"):
+        client.step(1)
+    assert time.monotonic() - started < 1.0
+    # The step thread is idle, not spinning on the request it cannot run.
+    other = served.client(1)
+    assert other.step(1)["slot"] == 1
+
+
+def test_a_held_slot_is_refused_even_when_the_peer_pid_is_unknown(
+    serve: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from reactor_runtime.model_worker import server as server_module
+
+    # Containers of a pod do not share a PID namespace: the peer reads as pid 0.
+    monkeypatch.setattr(server_module, "_peer_pid", lambda sock: 0)
+    worker = Recorder()
+    served: Any = serve(worker)
+    first = served.client(0)
+    with pytest.raises(WorkerRejected, match="slot 0 is held"):
+        served.client(0)
+    assert first.step(1)["slot"] == 0
+    # A holder whose socket is gone is closed, and the slot opens again.
+    sock, _ = _raw(served, 3)
+    sock.close()
+    again = served.client(3)
+    assert again.step(1)["slot"] == 3
+
+
+def test_an_oversize_request_leaves_no_block_behind(serve: Any) -> None:
+    class Small(Recorder):
+        max_request_bytes = 1 << 20
+
+    served: Any = serve(Small())
+    client = served.client(0)
+    before = set(_shm_sizes(served.prefix))
+    with pytest.raises(WorkerRejected, match="over the worker's"):
+        client.step(np.zeros(8 << 20, dtype=np.uint8))
+    assert set(_shm_sizes(served.prefix)) == before
+
+
+def test_an_output_that_outgrows_its_block_leaves_no_block_behind(serve: Any) -> None:
+    class Sized(ModelWorker):
+        shm_output_bytes = 4096
+
+        def step(self, requests: list[WorkerRequest]) -> list[Any]:
+            return [np.zeros(int(r.payload), dtype=np.uint8) for r in requests]
+
+    served: Any = serve(Sized())
+    client = served.client(0)
+    before = set(_shm_sizes(served.prefix))
+    assert client.step(1 << 20).nbytes == 1 << 20
+    assert len(set(_shm_sizes(served.prefix)) - before) == 1
+    assert client.step(16).nbytes == 16
+    assert set(_shm_sizes(served.prefix)) == before
+
+
+def test_a_step_that_times_out_is_a_model_unavailable() -> None:
+    from reactor_runtime import ModelUnavailable
+    from reactor_runtime.model_worker import StepTimedOut, WorkerLost
+
+    assert issubclass(StepTimedOut, WorkerTimeout)
+    assert issubclass(StepTimedOut, ModelUnavailable)
+    assert issubclass(WorkerLost, ModelUnavailable)
+
+
+def test_an_oversize_control_frame_is_refused_before_it_is_read(serve: Any) -> None:
+    worker = Recorder()
+    served: Any = serve(worker)
+    sock, _ = _raw(served, 0)
+    # Announce a 100 MB signal and send none of it: the worker must not wait for it.
+    sock.sendall(wire.HEADER.pack(100 << 20, Kind.SIGNAL, 0))
+    sock.settimeout(5)
+    assert sock.recv(1) == b""
+    sock.close()
+    _until(lambda: ("closed", 0, 1) in worker.events)

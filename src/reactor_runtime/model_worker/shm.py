@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import os
 import sys
+import threading
 from multiprocessing import resource_tracker, shared_memory
 from pathlib import Path
 from typing import Any
@@ -34,17 +35,20 @@ class RequestRefused(ValueError):  # noqa: N818 (named for the event a caller ca
 # Prefixes of the blocks this process creates. Its tracker holds those for the
 # creator, so attaching to one of them must leave the registration alone.
 _created_here: set[str] = set()
+_created_lock = threading.Lock()
 
 
 def created_here(prefix: str) -> str:
     """Record that this process creates the blocks named under *prefix*, and return it."""
-    _created_here.add(prefix)
+    with _created_lock:
+        _created_here.add(prefix)
     return prefix
 
 
 def forget_created(prefix: str) -> None:
     """Drop a prefix :func:`created_here` recorded, once nothing more is made under it."""
-    _created_here.discard(prefix)
+    with _created_lock:
+        _created_here.discard(prefix)
 
 
 def attach(name: str) -> shared_memory.SharedMemory:
@@ -52,7 +56,9 @@ def attach(name: str) -> shared_memory.SharedMemory:
     if sys.version_info >= (3, 13):
         return shared_memory.SharedMemory(name=name, track=False)
     shm = shared_memory.SharedMemory(name=name)
-    if not any(name.startswith(prefix) for prefix in _created_here):
+    with _created_lock:
+        mine = any(name.startswith(prefix) for prefix in _created_here)
+    if not mine:
         with contextlib.suppress(Exception):
             resource_tracker.unregister(shm._name, "shared_memory")  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
     return shm
@@ -90,6 +96,8 @@ class ViewReader:
         self._prefix = prefix
         self._limit = limit
         self._shm: shared_memory.SharedMemory | None = None
+        self._closed = False
+        self._lock = threading.Lock()
 
     def unpack(self, header: bytes) -> Any:
         """Return the payload *header* describes, its arrays as read-only views.
@@ -137,16 +145,23 @@ class ViewReader:
             raise RequestRefused(f"the request does not decode: {exc}") from None
 
     def close(self) -> None:
-        """Drop the mapping. A view still held keeps it alive until it is released."""
-        if self._shm is not None:
-            release(self._shm)
-            self._shm = None
+        """Drop the mapping, and map nothing more. A view still held keeps it alive."""
+        with self._lock:
+            self._closed = True
+            if self._shm is not None:
+                release(self._shm)
+                self._shm = None
 
     def _attach(self, name: str) -> None:
-        if self._shm is not None and self._shm.name == name:
-            return
-        self.close()
-        self._shm = attach(name)
+        with self._lock:
+            if self._closed:
+                raise OSError("the session is closed")
+            if self._shm is not None and self._shm.name == name:
+                return
+            if self._shm is not None:
+                release(self._shm)
+                self._shm = None
+            self._shm = attach(name)
 
 
 def copy_unpack(header: bytes, mapping: dict[str, shared_memory.SharedMemory]) -> Any:

@@ -371,3 +371,68 @@ async def test_sigterm_drains_each_session_then_the_worker_stops(pod: Any) -> No
     for slot in range(_SESSIONS):
         assert "worker_died" not in one.log(f"session{slot}")
     assert not _blocks(one.env["REACTOR_SHM_PREFIX"])
+
+
+def _gpu_apps(index: str) -> dict[int, int]:
+    """The pids using the GPU at *index*, with the MiB each holds."""
+    uuid = subprocess.run(
+        ["nvidia-smi", "-i", index, "--query-gpu=uuid", "--format=csv,noheader"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    rows = subprocess.run(
+        [
+            "nvidia-smi",
+            "--query-compute-apps=gpu_uuid,pid,used_memory",
+            "--format=csv,noheader,nounits",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    apps = {}
+    for row in rows:
+        gpu, pid, used = (part.strip() for part in row.split(","))
+        if gpu == uuid:
+            apps[int(pid)] = int(used)
+    return apps
+
+
+@pytest.mark.skipif(
+    not os.getenv("REACTOR_TEST_GPU"), reason="set REACTOR_TEST_GPU to a GPU index to run"
+)
+async def test_one_gpu_worker_serves_every_session_with_one_copy_of_the_weights(
+    pod: Any,
+) -> None:
+    gpu = os.environ["REACTOR_TEST_GPU"]
+    one: Pod = pod(REACTOR_WORKER_IMPORT="gpu_worker:GpuEchoWorker")
+    one.env["CUDA_VISIBLE_DEVICES"] = gpu
+    one.start_worker()
+    one.wait_worker(within=300)
+    # The session runtimes see no GPU, as session containers request none.
+    one.env["CUDA_VISIBLE_DEVICES"] = ""
+    for slot in range(_SESSIONS):
+        one.start_session(slot)
+    for slot in range(_SESSIONS):
+        one.wait_healthy(slot)
+    received = await asyncio.gather(*(_stream(one, slot) for slot in range(_SESSIONS)))
+    assert all(count >= 60 for count in received), received
+    assert one.worker is not None
+    apps = _gpu_apps(gpu)
+    assert list(apps) == [one.worker.pid], apps
+    assert apps[one.worker.pid] >= 2048
+    # A worker restart reloads the one copy; the sessions recover in place.
+    pids = [p.pid for p in one.sessions if p is not None]
+    one.worker.send_signal(signal.SIGKILL)
+    one.worker.wait(30)
+    await _until(lambda: one.health(0)[0] == 503, what="slot 0 not ready")
+    one.env["CUDA_VISIBLE_DEVICES"] = gpu
+    one.start_worker()
+    one.wait_worker(within=300)
+    for slot in range(_SESSIONS):
+        one.wait_healthy(slot, within=60)
+    received = await asyncio.gather(*(_stream(one, slot) for slot in range(_SESSIONS)))
+    assert all(count >= 60 for count in received), received
+    assert list(_gpu_apps(gpu)) == [one.worker.pid]
+    assert [p.pid for p in one.sessions if p is not None] == pids

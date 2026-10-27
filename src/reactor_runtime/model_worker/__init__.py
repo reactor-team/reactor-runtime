@@ -43,6 +43,7 @@ is served exactly as before.
 
 from reactor_runtime.distributed.errors import WorkerCrashed, WorkerTimeout
 from reactor_runtime.model_worker.client import (
+    StepTimedOut,
     WorkerClient,
     WorkerError,
     WorkerLost,
@@ -53,6 +54,7 @@ from reactor_runtime.model_worker.transport import Transport, UnixShmTransport, 
 
 __all__ = [
     "ModelWorker",
+    "StepTimedOut",
     "Transport",
     "UnixShmTransport",
     "WorkerClient",

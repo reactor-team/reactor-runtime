@@ -42,10 +42,10 @@ from reactor_runtime.model_worker.wire import Kind
 class AvailabilitySink(Protocol):
     """What the client reports the worker's comings and goings to: a ``ReactorApp``."""
 
-    def set_unavailable(self, reason: str) -> None:
+    def report_unavailable(self, reason: str) -> None:
         """The worker is gone, for *reason*."""
 
-    def set_available(self) -> None:
+    def report_available(self) -> None:
         """A worker is connected again."""
 
 
@@ -93,6 +93,16 @@ class WorkerError(RuntimeError):
         self.worker_traceback = worker_traceback
 
 
+class StepTimedOut(WorkerTimeout, ModelUnavailable):
+    """No answer to a step in time: the worker is alive but slow, or stuck.
+
+    A :class:`~reactor_runtime.distributed.WorkerTimeout` and a
+    :class:`~reactor_runtime.ModelUnavailable`, so the default step loop
+    drops the step and the session goes on; a worker that stays stuck is the
+    worker's liveness probe's to restart.
+    """
+
+
 class WorkerLost(WorkerCrashed, ModelUnavailable):
     """No worker is connected: its message starts with ``worker_died:`` and says why.
 
@@ -136,8 +146,8 @@ class WorkerClient:
     once, and connects again in the background, every half second at first and
     every five seconds at most, until a worker answers. A client built with the
     session's app reports both moves to it, with
-    :meth:`~reactor_runtime.ReactorApp.set_unavailable` (reason
-    ``worker_died: <why>``) and :meth:`~reactor_runtime.ReactorApp.set_available`:
+    :meth:`~reactor_runtime.ReactorApp.report_unavailable` (reason
+    ``worker_died: <why>``) and :meth:`~reactor_runtime.ReactorApp.report_available`:
     the runtime then ends the live session with that reason, answers
     ``/health`` with 503 and refuses new sessions until the worker is back,
     and the process stays up. A reconnected session is a new one on the worker:
@@ -150,8 +160,9 @@ class WorkerClient:
     * :class:`WorkerRejected` when the worker refused the request (it did not
       decode, was larger than the worker's ``max_request_bytes``) or the
       model's ``session_opened()`` refused the session.
-    * :class:`~reactor_runtime.distributed.WorkerTimeout` when no answer came
-      within the timeout. The request is cancelled; the client stays usable.
+    * :class:`StepTimedOut` (a :class:`~reactor_runtime.distributed.WorkerTimeout`)
+      when no answer came within the timeout. The request is cancelled; the
+      client stays usable.
     * :class:`WorkerLost`, whose message starts ``worker_died:``, while no
       worker is connected.
     """
@@ -179,6 +190,8 @@ class WorkerClient:
         self._closed = False
         self._reconnecting = False
         self._last_slot = slot
+        self._report_lock = threading.Lock()
+        self._reported: str | None = None
         atexit.register(self.close)
 
     @classmethod
@@ -199,8 +212,8 @@ class WorkerClient:
                 ``WorkerClient.connect(self)``. With it, a worker that is not
                 there yet is no error: the client returns at once with the app
                 marked unavailable, and connects in the background.
-            socket_path: The worker's socket; ``REACTOR_MODEL_WORKER_SOCKET``,
-                else ``/run/reactor-worker/sock``.
+            socket_path: The worker's socket; ``REACTOR_MODEL_WORKER_SOCKET``
+                when omitted, which must then be set.
             slot: This session's slot, the number the worker keeps its state
                 under; ``REACTOR_SESSION_SLOT``, else the lowest free slot the
                 worker assigns (read it back from :attr:`slot`).
@@ -215,8 +228,8 @@ class WorkerClient:
                 ``/dev/shm``.
 
         Raises:
-            WorkerUnreachable: The deployment cannot reach a worker at all: the
-                socket's directory is missing, or the worker's shared memory is
+            WorkerUnreachable: The deployment cannot reach a worker at all: no
+                socket is named, the socket's directory is missing, or the worker's shared memory is
                 not visible from here. Raised with or without an app, since
                 waiting does not fix it.
             WorkerRejected: The worker refused this session.
@@ -225,7 +238,12 @@ class WorkerClient:
             WorkerLost: Without an app, the worker closed the connection
                 before opening it.
         """
-        path = str(socket_path or os.getenv(SOCKET_ENV, "").strip() or DEFAULT_SOCKET)
+        path = str(socket_path or os.getenv(SOCKET_ENV, "").strip())
+        if not path:
+            raise WorkerUnreachable(
+                f"{SOCKET_ENV} is not set: this model's session half needs a model worker "
+                "(reactor-runtime serve-worker) and the path of its socket"
+            )
         if slot is None:
             raw = os.getenv(SLOT_ENV, "").strip()
             slot = int(raw) if raw else None
@@ -309,7 +327,7 @@ class WorkerClient:
             WorkerError: The model raised for this request.
             TypeError: The payload holds a value that does not travel.
             WorkerRejected: The worker refused the request.
-            WorkerTimeout: No answer in time; the request was cancelled.
+            StepTimedOut: No answer in time; the request was cancelled.
             WorkerLost: No worker is connected.
         """
         with self._call_lock:
@@ -401,12 +419,13 @@ class WorkerClient:
     def _step(self, link: _Link, payload: Any, timeout: float | None) -> Any:
         request_id = next(self._ids)
         wait = self._step_timeout if timeout is None else timeout
-        header, size = link.carrier.encode(payload)
         limit = link.max_request_bytes
+        size = link.carrier.size(payload)
         if limit is not None and size > limit:
             raise WorkerRejected(
                 f"the request carries {size} bytes, over the worker's {limit} limit"
             )
+        header, _ = link.carrier.encode(payload)
         self._send(link, Kind.STEP, request_id, wire.TIMEOUT.pack(wait) + header)
         kind, reply = self._await(link, request_id, wait)
         if kind is None:
@@ -414,7 +433,7 @@ class WorkerClient:
             # The worker may still read the abandoned request, so the next
             # one is written elsewhere.
             link.carrier.renew()
-            raise WorkerTimeout(f"the model worker gave no answer within {wait} s")
+            raise StepTimedOut(f"the model worker gave no answer within {wait} s")
         if kind is Kind.RESULT:
             try:
                 return link.carrier.decode(reply)
@@ -425,7 +444,7 @@ class WorkerClient:
         if kind is Kind.REJECTED:
             raise WorkerRejected(reply.decode(errors="replace"))
         if kind is Kind.EXPIRED:
-            raise WorkerTimeout("the request expired in the model worker's queue")
+            raise StepTimedOut("the request expired in the model worker's queue")
         raise WorkerLost(f"worker_died: answered a step with {kind.name}")
 
     # -- connecting --------------------------------------------------------------------------
@@ -434,9 +453,10 @@ class WorkerClient:
         """Connect once and install the link, or raise why not."""
         sock = self._transport.connect(self._path)
         hello: dict[str, Any] = {"pid": os.getpid(), "token": secrets.token_hex(4)}
-        wanted = self._wanted_slot if self._wanted_slot is not None else self._last_slot
-        if wanted is not None:
-            hello["slot"] = wanted
+        # A slot the worker assigned is not asked for again: another session
+        # may hold it by now. Its state is a new session's either way.
+        if self._wanted_slot is not None:
+            hello["slot"] = self._wanted_slot
         try:
             wire.send(sock, Kind.HELLO, 0, wire.to_json(hello))
             sock.settimeout(_HELLO_TIMEOUT)
@@ -476,44 +496,70 @@ class WorkerClient:
         )
         reader.start()
         logger.info("connected to the model worker", slot=link.slot, socket=self._path)
-        if self._app is not None:
-            self._app.set_available()
+        self._report()
         with self._cond:
             self._cond.notify_all()
 
     def _went_down(self, reason: str) -> None:
-        """Report the worker gone and keep connecting in the background."""
+        """Report the worker gone and make sure a reconnect is under way."""
         with self._cond:
             if self._closed:
                 return
             self._lost_reason = reason
             start = not self._reconnecting
             self._reconnecting = True
-        if self._app is not None:
-            self._app.set_unavailable(reason)
+        self._report()
         if start:
             threading.Thread(
                 target=self._reconnect_loop, name="worker-reconnect", daemon=True
             ).start()
 
     def _reconnect_loop(self) -> None:
+        """Connect until a link is up; it ends only with a link installed, or the client closed.
+
+        Whether to go on is decided under the same lock :meth:`_went_down`
+        reads, so a link lost the moment it was made is either seen here (and
+        the loop goes on) or finds the loop gone (and starts another).
+        """
         backoff = _RECONNECT_FIRST
-        try:
-            while not self._closed:
-                time.sleep(backoff)
-                if self._closed:
-                    return
-                try:
-                    self._open()
-                    return
-                except (WorkerRejected, WorkerUnreachable) as exc:
-                    logger.warning("could not reopen this session on the worker", error=str(exc))
-                except (NoListener, WorkerLost):
-                    pass
-                backoff = min(backoff * 2, _RECONNECT_MAX)
-        finally:
+        while True:
+            time.sleep(backoff)
             with self._cond:
-                self._reconnecting = False
+                if self._closed or self._link is not None:
+                    self._reconnecting = False
+                    return
+            try:
+                self._open()
+            except (WorkerRejected, WorkerUnreachable) as exc:
+                logger.warning("could not reopen this session on the worker", error=str(exc))
+            except (NoListener, WorkerLost):
+                pass
+            with self._cond:
+                if self._closed or self._link is not None:
+                    self._reconnecting = False
+                    return
+            backoff = min(backoff * 2, _RECONNECT_MAX)
+
+    def _report(self) -> None:
+        """Tell the app whether a worker is connected, as it is now, once per change.
+
+        Reports from the reader, the reconnect thread, and connect race; each
+        reads the state under one lock as it reports, so the last report the
+        app hears is the state that holds.
+        """
+        if self._app is None:
+            return
+        with self._report_lock:
+            with self._cond:
+                up = self._link is not None and not self._closed
+                reason = self._lost_reason
+            if up:
+                if self._reported != "up":
+                    self._reported = "up"
+                    self._app.report_available()
+            elif self._reported != reason:
+                self._reported = reason
+                self._app.report_unavailable(reason)
 
     # -- one connection ----------------------------------------------------------------------
 

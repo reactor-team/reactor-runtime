@@ -69,7 +69,7 @@ class ModelUnavailable(Exception):  # noqa: N818 (named for the state a caller c
     worker in another process, that has gone away. The default step loop drops
     the step: ``process_output()`` is not called, nothing is emitted or
     reported, and the loop asks again a moment later. Raising it does not end
-    the session; :meth:`~reactor_runtime.ReactorApp.set_unavailable` does, and
+    the session; :meth:`~reactor_runtime.ReactorApp.report_unavailable` does, and
     a model that raises this calls that too (a
     :class:`~reactor_runtime.model_worker.WorkerClient` connected with the app
     does both). A hand-written ``run()`` catches it itself.

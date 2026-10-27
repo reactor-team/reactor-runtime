@@ -380,9 +380,9 @@ class ReactorCore:
         self._last_emit_fps: float | None = None
         self._media_ops: MediaOps | None = None
         self._on_failure: FailureSink | None = None
-        self._unavailable: str | None = None
-        self._on_availability: AvailabilitySink | None = None
-        self._availability_lock = threading.Lock()
+        self._reactor_unavailable: str | None = None
+        self._reactor_on_availability: AvailabilitySink | None = None
+        self._reactor_availability_lock = threading.Lock()
         self.output = OutputStream(self)
 
         self._input_buffers: dict[str, InputBuffer] = {}
@@ -565,26 +565,21 @@ class ReactorCore:
         """
         self._on_failure = callback
 
-    def bind_availability(self, callback: AvailabilitySink) -> None:
-        """Bind the sink that hears :meth:`set_unavailable` and :meth:`set_available`.
+    def _bind_availability(self, callback: AvailabilitySink) -> None:
+        """Bind the sink that hears :meth:`report_unavailable` and :meth:`report_available`.
 
         The callback receives the reason, or ``None`` once the model is
         available again, on whichever thread made the call. A model that was
         already unavailable when bound is reported at once.
         """
-        with self._availability_lock:
-            self._on_availability = callback
-            current = self._unavailable
+        with self._reactor_availability_lock:
+            self._reactor_on_availability = callback
+            current = self._reactor_unavailable
         if current is not None:
             callback(current)
 
-    @property
-    def unavailable(self) -> str | None:
-        """Why the model cannot serve now, or ``None`` while it can."""
-        return self._unavailable
-
-    def set_unavailable(self, reason: str) -> None:
-        """Report that the model cannot serve until :meth:`set_available`.
+    def report_unavailable(self, reason: str) -> None:
+        """Report that the model cannot serve until :meth:`report_available`.
 
         For a model that depends on something it does not own, such as a model
         worker in another process, which has gone away. The runtime ends the
@@ -599,22 +594,22 @@ class ReactorCore:
         Args:
             reason: Why, for the journal, the clients, and the health detail.
         """
-        with self._availability_lock:
-            self._unavailable = reason
-            sink = self._on_availability
+        with self._reactor_availability_lock:
+            self._reactor_unavailable = reason
+            sink = self._reactor_on_availability
         if sink is not None:
             sink(reason)
 
-    def set_available(self) -> None:
-        """Report that the model can serve again after :meth:`set_unavailable`.
+    def report_available(self) -> None:
+        """Report that the model can serve again after :meth:`report_unavailable`.
 
         Safe from any thread. Does nothing while the model is available.
         """
-        with self._availability_lock:
-            if self._unavailable is None:
+        with self._reactor_availability_lock:
+            if self._reactor_unavailable is None:
                 return
-            self._unavailable = None
-            sink = self._on_availability
+            self._reactor_unavailable = None
+            sink = self._reactor_on_availability
         if sink is not None:
             sink(None)
 

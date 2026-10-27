@@ -1,10 +1,10 @@
 """Lock what a model reporting itself unavailable does to the session surface.
 
 A model whose work runs somewhere it does not own (a model worker in another
-process) calls ``set_unavailable(reason)`` when that goes away: the live
+process) calls ``report_unavailable(reason)`` when that goes away: the live
 session stops with ``error`` and the reason, ``/health`` answers 503 with the
 reason, ``/start_session`` answers 503, and the process stays up. Once the
-model calls ``set_available()`` everything serves as before.
+model calls ``report_available()`` everything serves as before.
 """
 
 from __future__ import annotations
@@ -65,7 +65,7 @@ async def test_an_unavailable_model_stops_the_live_session_with_its_reason(
         assert (await harness.client.post("/start_session", json={})).status_code == 200
         model = _model()
         model.gone.set()
-        await _from_thread(lambda: model.set_unavailable("worker_died: socket closed"))
+        await _from_thread(lambda: model.report_unavailable("worker_died: socket closed"))
         error = await journal.expect("error")
         assert error["detail"] == {"message": "worker_died: socket closed"}
         stopped = await journal.expect("stop_session")
@@ -82,7 +82,7 @@ async def test_health_and_start_answer_503_until_the_model_is_available(
     harness: Harness,
 ) -> None:
     model = _model()
-    await _from_thread(lambda: model.set_unavailable("worker_died: socket closed"))
+    await _from_thread(lambda: model.report_unavailable("worker_died: socket closed"))
     await asyncio.sleep(0.05)
     health = await harness.client.get("/health")
     assert health.status_code == 503
@@ -93,7 +93,7 @@ async def test_health_and_start_answer_503_until_the_model_is_available(
     assert started.json()["detail"] == "worker_died: socket closed"
     assert started.headers["retry-after"] == "1"
 
-    await _from_thread(model.set_available)
+    await _from_thread(model.report_available)
     await asyncio.sleep(0.05)
     assert (await harness.client.get("/health")).status_code == 200
     assert (await harness.client.post("/start_session", json={})).status_code == 200
@@ -105,9 +105,9 @@ async def test_a_repeat_report_updates_the_reason_and_stops_nothing_more(
     model = _model()
     journal = JournalReader(harness.runner)
     try:
-        await _from_thread(lambda: model.set_unavailable("worker_unavailable: connecting"))
+        await _from_thread(lambda: model.report_unavailable("worker_unavailable: connecting"))
         await journal.expect("error")
-        await _from_thread(lambda: model.set_unavailable("worker_died: refused"))
+        await _from_thread(lambda: model.report_unavailable("worker_died: refused"))
         await asyncio.sleep(0.05)
         assert (await harness.client.get("/health")).json()["detail"] == "worker_died: refused"
     finally:
@@ -118,7 +118,7 @@ async def test_a_model_unavailable_from_load_is_reported_once_it_loads() -> None
     class UnavailableAtLoad(DependentModel):
         def load(self, config_path: Path | None) -> None:
             super().load(config_path)
-            self.set_unavailable("worker_unavailable: no worker yet")
+            self.report_unavailable("worker_unavailable: no worker yet")
 
     _LOADED.clear()
     async with running_runtime(UnavailableAtLoad) as harness:

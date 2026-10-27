@@ -149,6 +149,7 @@ def main(argv: list[str] | None = None) -> int:
         server = WorkerServer(worker, socket_path, shm_prefix=prefix)
         server.bind()
         if stop_requested.is_set():
+            server.close()
             return 0
         status.server = server
         status.phase = "serving"

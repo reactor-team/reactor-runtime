@@ -20,6 +20,7 @@ import contextlib
 import itertools
 import os
 import re
+import select
 import socket
 import struct
 import threading
@@ -130,6 +131,8 @@ class WorkerServer:
         self._by_slot: dict[int, _Conn] = {}
         # Slots whose connection is being set up, outside the lock.
         self._opening: set[int] = set()
+        # How many sessions each slot has opened, across connections.
+        self._generations: dict[int, int] = {}
         self._open: set[_Conn] = set()
         self._arrivals = itertools.count()
         self._conn_ids = itertools.count()
@@ -171,6 +174,10 @@ class WorkerServer:
         started = self._step_started
         return 0.0 if started is None else time.monotonic() - started
 
+    def close(self) -> None:
+        """Release what :meth:`bind` set up, for a server that never served."""
+        self._shutdown()
+
     def stop(self) -> None:
         """Ask :meth:`serve` to return once the step running, if any, finishes.
 
@@ -198,11 +205,13 @@ class WorkerServer:
             conn = self._hello(sock)
             if conn is None:
                 return
-            frame_limit = self._limit + _FRAME_SLACK
+            step_limit = self._limit + _FRAME_SLACK
+
+            def limit(kind: Kind) -> int:
+                return step_limit if kind is Kind.STEP else wire.CONTROL_LIMIT
+
             while True:
-                kind, request_id, payload = wire.recv(sock, frame_limit)
-                if kind is not Kind.STEP and len(payload) > wire.CONTROL_LIMIT:
-                    raise wire.ProtocolError(f"a {kind.name} frame of {len(payload)} bytes")
+                kind, request_id, payload = wire.recv(sock, limit)
                 if kind is Kind.STEP:
                     self._take_request(conn, request_id, payload)
                 elif kind is Kind.SIGNAL:
@@ -274,7 +283,7 @@ class WorkerServer:
                 return None
             held = self._by_slot.get(slot)
             if held is not None and not held.closed:
-                if _alive(held.peer_pid):
+                if not _gone(held):
                     self._refuse(
                         sock, request_id, f"slot {slot} is held by process {held.peer_pid}"
                     )
@@ -337,6 +346,9 @@ class WorkerServer:
             self._reply(conn, Kind.REJECTED, request_id, b"the request has no timeout field")
             return
         (timeout,) = wire.TIMEOUT.unpack_from(payload)
+        if not conn.opened:
+            self._reply(conn, Kind.REJECTED, request_id, b"the session is not open on the worker")
+            return
         try:
             value = conn.carrier.decode(payload[wire.TIMEOUT.size :])
         except RequestRefused as exc:
@@ -418,6 +430,10 @@ class WorkerServer:
             batch = self._take_batch()
             if batch:
                 self._run(batch)
+                continue
+            with self._cond:
+                if not (self._joining or self._leaving or self._resets or self._ready()):
+                    self._cond.wait(_STOP_POLL)
 
     def _take_batch(self) -> list[_Request]:
         """Take the next batch off the queue, waiting out the batch window first."""
@@ -437,7 +453,7 @@ class WorkerServer:
                     self._cond.wait(remaining)
                     ready = self._ready()
             now = time.monotonic()
-            expired = [r for r in ready if r.deadline is not None and r.deadline <= now]
+            expired = [r for r in self._waiting if r.deadline is not None and r.deadline <= now]
             batch = [r for r in ready if r not in expired][: self._max_batch]
             taken = set(map(id, batch + expired))
             self._waiting = [r for r in self._waiting if id(r) not in taken]
@@ -454,7 +470,7 @@ class WorkerServer:
     def _open_conn(self, conn: _Conn) -> None:
         if conn.closed:
             return
-        conn.generation += 1
+        conn.generation = self._next_generation(conn.slot)
         try:
             self._worker.session_opened(conn.slot, conn.generation)
         except Exception as exc:
@@ -479,6 +495,10 @@ class WorkerServer:
         }
         self._reply(conn, Kind.WELCOME, conn.hello_id, wire.to_json(welcome))
 
+    def _next_generation(self, slot: int) -> int:
+        self._generations[slot] = self._generations.get(slot, 0) + 1
+        return self._generations[slot]
+
     def _close(self, conn: _Conn) -> None:
         with self._cond:
             self._open.discard(conn)
@@ -501,7 +521,7 @@ class WorkerServer:
                 self._worker.session_closed(conn.slot, conn.generation)
             except Exception:
                 logger.exception("session_closed() raised", slot=conn.slot)
-        conn.generation += 1
+        conn.generation = self._next_generation(conn.slot)
         try:
             self._worker.session_opened(conn.slot, conn.generation)
         except Exception as exc:
@@ -598,6 +618,33 @@ def _peer_pid(sock: socket.socket) -> int:
     except OSError:
         return 0
     return pid
+
+
+def _gone(conn: _Conn) -> bool:
+    """Whether the process on *conn*'s other end has gone, closing its socket.
+
+    Read from the socket itself, which works across PID namespaces (separate
+    containers of one pod), where the peer's pid reads as 0.
+    """
+    if conn.peer_pid > 0 and not _alive(conn.peer_pid):
+        return True
+    poller = select.poll()
+    poller.register(conn.sock, select.POLLIN | select.POLLHUP | select.POLLERR)
+    try:
+        events = poller.poll(0)
+    except (OSError, ValueError):
+        return True
+    for _, mask in events:
+        if mask & (select.POLLHUP | select.POLLERR | select.POLLNVAL):
+            return True
+        if mask & select.POLLIN:
+            try:
+                return conn.sock.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) == b""
+            except BlockingIOError:
+                return False
+            except OSError:
+                return True
+    return False
 
 
 def _alive(pid: int) -> bool:
