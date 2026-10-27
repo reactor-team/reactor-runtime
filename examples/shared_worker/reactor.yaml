@@ -1,0 +1,18 @@
+$schema: reactor/v2
+
+# `runtime.worker` splits the model: `reactor-runtime serve-worker` loads the
+# worker half once and steps every session, and `runtime.import` names the
+# session half each session runtime (`reactor-runtime serve`) runs.
+model:
+  name: shared-worker
+  version: v0.0.1
+  description: |
+    A color field that drifts at the speed each client sets, rendered for
+    every session by one worker process that holds the palette.
+
+runtime:
+  import: plasma:Plasma
+  worker: plasma_worker:PlasmaWorker
+
+build:
+  runtime_version: "3.10.0"

@@ -1,0 +1,104 @@
+# One pod serving N sessions from one copy of the weights (here N = 2).
+#
+# - The model worker is a native sidecar (an init container with
+#   restartPolicy: Always, Kubernetes 1.29+): it starts, and passes its
+#   startupProbe, before any session container starts, and it stops after
+#   them. It is the only container that requests a GPU.
+# - Each session container is the model image's ordinary runtime, one session
+#   each, on its own port. It reaches the worker through the socket in the
+#   shared `worker-socket` volume, with the arrays in the shared `/dev/shm`.
+# - If the worker dies, the kubelet restarts only the worker. Each session
+#   container ends its live session with `worker_died: <reason>`, answers
+#   /health with 503 (not ready) and refuses /start_session until the worker
+#   is back, then serves again without restarting. Liveness probes the port
+#   alone, so a worker outage never restarts a session container.
+# - A session container whose model crashes exits, and the kubelet restarts
+#   that container alone.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: shared-worker
+spec:
+  # A session drains within SIGTERM_GRACE_PERIOD plus EXIT_TIMEOUT_SECONDS
+  # (30 s + 10 s by default), then the sidecar worker stops after its step.
+  terminationGracePeriodSeconds: 60
+  volumes:
+    - name: worker-socket
+      emptyDir: {}
+    - name: dshm
+      emptyDir:
+        medium: Memory
+        # ModelWorker.shm_slot_size() per session (the worker logs it as
+        # shm_slot_bytes), times the sessions, plus headroom for a request or
+        # an output that outgrows its block.
+        sizeLimit: 2Gi
+  initContainers:
+    - name: model-worker
+      image: example.com/shared-worker:latest
+      restartPolicy: Always
+      command: ["reactor-runtime", "serve-worker"]
+      env:
+        - name: REACTOR_MODEL_WORKER_SOCKET
+          value: /run/reactor-worker/sock
+        - name: REACTOR_MODEL_WORKER_HEALTH_PORT
+          value: "8079"
+      ports:
+        - name: worker-health
+          containerPort: 8079
+      startupProbe:
+        httpGet: {path: /health, port: 8079}
+        periodSeconds: 5
+        # Up to 30 minutes to load the weights.
+        failureThreshold: 360
+      livenessProbe:
+        # 503 "stuck" once one step has run past REACTOR_MODEL_WORKER_STUCK_SECONDS.
+        httpGet: {path: /health, port: 8079}
+        periodSeconds: 10
+        failureThreshold: 3
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+      volumeMounts:
+        - {name: worker-socket, mountPath: /run/reactor-worker}
+        - {name: dshm, mountPath: /dev/shm}
+  containers:
+    - name: session-0
+      image: example.com/shared-worker:latest
+      env:
+        - {name: PORT, value: "8080"}
+        - {name: REACTOR_SESSION_SLOT, value: "0"}
+        - {name: REACTOR_MODEL_WORKER_SOCKET, value: /run/reactor-worker/sock}
+        # Containers of a pod share its network: give each its own ICE range.
+        - {name: WEBRTC_PORT_RANGE, value: "40000:40999"}
+        # glibc's arenas grow with churn; a session process needs two.
+        - {name: MALLOC_ARENA_MAX, value: "2"}
+      ports:
+        - {name: http-0, containerPort: 8080}
+      readinessProbe:
+        httpGet: {path: /health, port: 8080}
+        periodSeconds: 2
+      livenessProbe:
+        tcpSocket: {port: 8080}
+        periodSeconds: 10
+      volumeMounts:
+        - {name: worker-socket, mountPath: /run/reactor-worker}
+        - {name: dshm, mountPath: /dev/shm}
+    - name: session-1
+      image: example.com/shared-worker:latest
+      env:
+        - {name: PORT, value: "8081"}
+        - {name: REACTOR_SESSION_SLOT, value: "1"}
+        - {name: REACTOR_MODEL_WORKER_SOCKET, value: /run/reactor-worker/sock}
+        - {name: WEBRTC_PORT_RANGE, value: "41000:41999"}
+        - {name: MALLOC_ARENA_MAX, value: "2"}
+      ports:
+        - {name: http-1, containerPort: 8081}
+      readinessProbe:
+        httpGet: {path: /health, port: 8081}
+        periodSeconds: 2
+      livenessProbe:
+        tcpSocket: {port: 8081}
+        periodSeconds: 10
+      volumeMounts:
+        - {name: worker-socket, mountPath: /run/reactor-worker}
+        - {name: dshm, mountPath: /dev/shm}
