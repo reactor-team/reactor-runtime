@@ -10,15 +10,15 @@ describes with the model half in its own process:
 
 - `plasma_contract.py` declares what the halves exchange, `Tick` and `Frame`,
   frozen dataclasses both halves import.
-- `plasma_worker.py` is the model half, a `ModelWorker`. The worker process
+- `plasma_worker.py` is the model half, a `ModelServer`. The worker process
   loads it once; it renders the frames of every waiting session in one
   `step()` call, up to `max_batch` at a time.
 - `plasma.py` is the application half, an ordinary `ReactorApp`. Each session
   runs it in its own runtime process; it resets its slot on the worker when a
   session starts, and its `generate()` sends the session's `Tick` through a
-  `WorkerClient` and returns the frame. When the worker is lost or stuck it
+  `ModelClient` and returns the frame. When the worker is lost or stuck it
   ends the session with the reason and stays up, refusing sessions until its
-  watcher thread has reconnected (option 2 of `reactor_runtime.model_worker`).
+  watcher thread has reconnected (option 2 of `reactor_runtime.model_server`).
 
 `reactor.yaml` names both halves:
 
@@ -38,7 +38,7 @@ directory for the worker's socket and `/dev/shm` for the frames:
 ```sh
 cd examples/shared_worker
 export REACTOR_MODEL_WORKER_SOCKET=/tmp/plasma/sock
-python -m reactor_runtime.model_worker &
+python -m reactor_runtime.model_server &
 PORT=8080 REACTOR_SESSION_SLOT=0 python -m reactor_runtime.serve &
 PORT=8081 REACTOR_SESSION_SLOT=1 python -m reactor_runtime.serve &
 ```

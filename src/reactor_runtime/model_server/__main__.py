@@ -1,16 +1,16 @@
-"""Serve a model's worker half: ``python -m reactor_runtime.model_worker``.
+"""Serve a model's worker half: ``python -m reactor_runtime.model_server``.
 
 The one process of a deployment that owns the weights and the GPU. Run it in
 the model's directory, beside the session runtimes' ``python -m
 reactor_runtime.serve``; it reads ``reactor.yaml`` there::
 
     cd my-model/                          # the directory with reactor.yaml
-    python -m reactor_runtime.model_worker
+    python -m reactor_runtime.model_server
 
 Every option has an environment variable and a default:
 
 * ``--worker`` / ``REACTOR_WORKER_IMPORT`` / the manifest's
-  ``runtime.worker.import``: the :class:`~reactor_runtime.model_worker.ModelWorker`
+  ``runtime.worker.import``: the :class:`~reactor_runtime.model_server.ModelServer`
   to serve, as ``module:Class``. The flag and the variable override the manifest.
 * The manifest's ``runtime.worker`` block: the serving settings
   (``max_batch``, ``batch_window``, ``max_request_bytes``,
@@ -28,8 +28,8 @@ Every option has an environment variable and a default:
   /health`` on that port answers 503 ``loading`` while ``load()`` runs, then
   200 ``serving`` with the effective settings, the protocol version, and the
   schema fingerprint. It answers 503 ``unhealthy`` with a reason once the
-  model called :meth:`~reactor_runtime.model_worker.ModelWorker.mark_unhealthy`
-  or while its :meth:`~reactor_runtime.model_worker.ModelWorker.health`
+  model called :meth:`~reactor_runtime.model_server.ModelServer.mark_unhealthy`
+  or while its :meth:`~reactor_runtime.model_server.ModelServer.health`
   returns one (called on every probe, on the health server's thread), and 503
   ``stuck`` while one step has run longer than
   ``REACTOR_MODEL_WORKER_STUCK_SECONDS`` (120 by default).
@@ -63,13 +63,13 @@ from typing import Any
 
 from reactor_runtime import log
 from reactor_runtime.manifest import MANIFEST, import_ref, load_config
-from reactor_runtime.model_worker import wire
-from reactor_runtime.model_worker.client import DEFAULT_SOCKET, SOCKET_ENV
-from reactor_runtime.model_worker.contract import ModelWorker, WorkerSettings, check_declarations
-from reactor_runtime.model_worker.server import WorkerServer
-from reactor_runtime.model_worker.shm import unlink_prefix
+from reactor_runtime.model_server import wire
+from reactor_runtime.model_server.client import DEFAULT_SOCKET, SOCKET_ENV
+from reactor_runtime.model_server.contract import ModelServer, ServerSettings, check_declarations
+from reactor_runtime.model_server.server import WorkerServer
+from reactor_runtime.model_server.shm import unlink_prefix
 
-logger = log.get_logger("reactor_runtime.model_worker")
+logger = log.get_logger("reactor_runtime.model_server")
 
 WORKER_ENV = "REACTOR_WORKER_IMPORT"
 HEALTH_PORT_ENV = "REACTOR_MODEL_WORKER_HEALTH_PORT"
@@ -85,7 +85,7 @@ class _Status:
     def __init__(self, stuck_after: float) -> None:
         self.phase = "loading"
         self.server: WorkerServer | None = None
-        self.worker: ModelWorker | None = None
+        self.worker: ModelServer | None = None
         self.stuck_after = stuck_after
         self.serving: dict[str, Any] = {}
 
@@ -110,8 +110,8 @@ class _Status:
 
 def main(argv: list[str] | None = None) -> int:
     """Load the worker half and serve it until signalled; return the exit status."""
-    parser = argparse.ArgumentParser(prog="python -m reactor_runtime.model_worker")
-    parser.add_argument("--worker", default=None, help="module:Class of the ModelWorker")
+    parser = argparse.ArgumentParser(prog="python -m reactor_runtime.model_server")
+    parser.add_argument("--worker", default=None, help="module:Class of the ModelServer")
     parser.add_argument("--socket", default=None, help="the Unix socket sessions connect to")
     parser.add_argument("--config", default=None, help="the model's config file")
     parser.add_argument("--health-port", type=int, default=None, help="serve GET /health here")
@@ -174,11 +174,11 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         worker_cls = import_ref(worker_ref)
-        if not (isinstance(worker_cls, type) and issubclass(worker_cls, ModelWorker)):
-            raise SystemExit(f"{worker_ref} does not name a ModelWorker subclass")
+        if not (isinstance(worker_cls, type) and issubclass(worker_cls, ModelServer)):
+            raise SystemExit(f"{worker_ref} does not name a ModelServer subclass")
         try:
             check_declarations(worker_cls)
-            settings = WorkerSettings.resolve(worker_cls, overrides)
+            settings = ServerSettings.resolve(worker_cls, overrides)
         except (TypeError, ValueError) as exc:
             raise SystemExit(f"{worker_ref}: {exc}") from None
         logger.info(
@@ -273,7 +273,7 @@ def _port_env() -> int | None:
         raise SystemExit(f"{HEALTH_PORT_ENV} {raw!r} must be an integer") from None
 
 
-def _check_shm_room(settings: WorkerSettings) -> None:
+def _check_shm_room(settings: ServerSettings) -> None:
     """Fail the start when ``/dev/shm`` cannot hold ``REACTOR_MAX_SESSIONS`` sessions' blocks.
 
     Raises:

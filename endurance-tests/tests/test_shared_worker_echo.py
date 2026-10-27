@@ -16,8 +16,8 @@ import pytest
 
 # A runtime from before the model worker (runtime_ref) has nothing for this
 # scenario to test. Only a missing package skips.
-if importlib.util.find_spec("reactor_runtime.model_worker") is None:
-    pytest.skip("this runtime has no model_worker package", allow_module_level=True)
+if importlib.util.find_spec("reactor_runtime.model_server") is None:
+    pytest.skip("this runtime has no model_server package", allow_module_level=True)
 from endurance.churn import run_churn
 from endurance.harness import SUITE_DIR, RuntimeProcess, V1Client
 from endurance.report import DEFAULT_OUTPUT_DIR
@@ -27,7 +27,7 @@ MODEL_DIR = SUITE_DIR / "model-shared-worker"
 DESCRIPTION = (
     "One long-lived session on a model split in two: the tracked echo runs in the "
     "runtime, and its EchoModel in a model worker process (python -m "
-    "reactor_runtime.model_worker) beside it, so every frame goes to the worker and "
+    "reactor_runtime.model_server) beside it, so every frame goes to the worker and "
     "back through its socket and shared memory. Each cycle a v1 client joins, "
     "streams until 60 frames come back, and closes. The session's one connection to "
     "the worker lasts the whole run, so what the churn checks must not grow with it."
@@ -52,7 +52,7 @@ def runtime(
     )
     log = (DEFAULT_OUTPUT_DIR / f"{request.node.name}-worker.log").open("w")
     worker = subprocess.Popen(
-        [sys.executable, "-m", "reactor_runtime.model_worker", "--socket", str(socket_path)],
+        [sys.executable, "-m", "reactor_runtime.model_server", "--socket", str(socket_path)],
         cwd=MODEL_DIR,
         env={
             **os.environ,

@@ -32,8 +32,8 @@ from typing import Any
 import numpy as np
 
 from reactor_runtime.distributed.errors import SharedSlotAllocationFailed
-from reactor_runtime.model_worker import codec
-from reactor_runtime.model_worker.shm import (
+from reactor_runtime.model_server import codec
+from reactor_runtime.model_server.shm import (
     ViewReader,
     attach,
     close_mapping,
@@ -96,7 +96,7 @@ class WorkerCarrier(ABC):
         """Rebuild a request from its frame body.
 
         Raises:
-            reactor_runtime.model_worker.shm.RequestRefused: The body is
+            reactor_runtime.model_server.shm.RequestRefused: The body is
                 malformed, names memory not this session's, or is too large.
         """
 

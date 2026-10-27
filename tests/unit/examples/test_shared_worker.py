@@ -1,7 +1,7 @@
 """The shared-worker example: each session's frames are its own, batched or alone.
 
 The worker half is served on a thread of the test process and every session is
-a real ``WorkerClient``, so the frames cross the socket and shared memory as
+a real ``ModelClient``, so the frames cross the socket and shared memory as
 they do between processes. The application half's option 2 is checked against
 a worker that stops and comes back.
 """
@@ -25,9 +25,9 @@ from plasma_worker import PlasmaWorker
 
 from reactor_runtime import ApplicationError
 from reactor_runtime.manifest import load_config
-from reactor_runtime.model_worker import WorkerClient, WorkerRequest
-from reactor_runtime.model_worker.server import WorkerServer
-from reactor_runtime.model_worker.shm import unlink_prefix
+from reactor_runtime.model_server import ModelClient, ServerRequest
+from reactor_runtime.model_server.server import WorkerServer
+from reactor_runtime.model_server.shm import unlink_prefix
 
 _EXAMPLE_DIR = Path(__file__).parents[3] / "examples" / "shared_worker"
 
@@ -37,7 +37,7 @@ class CountingPlasma(PlasmaWorker):
 
     batch_window = 0.05
 
-    def step(self, requests: list[WorkerRequest[Tick]]) -> list[Frame]:
+    def step(self, requests: list[ServerRequest[Tick]]) -> list[Frame]:
         self.sizes.append(len(requests))
         return super().step(requests)
 
@@ -86,8 +86,8 @@ def _payloads(slot: int) -> list[Tick]:
     return [Tick(tick=tick * (slot + 1), hue=40 * slot) for tick in range(6)]
 
 
-def _connect(path: Path, slot: int) -> WorkerClient:
-    client = WorkerClient.connect(
+def _connect(path: Path, slot: int) -> ModelClient:
+    client = ModelClient.connect(
         socket_path=path, slot=slot, request_type=Tick, result_type=Frame, connect_timeout=5
     )
     client.reset()

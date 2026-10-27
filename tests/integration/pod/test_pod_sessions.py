@@ -1,7 +1,7 @@
 """A pod of one model worker and several session runtimes, as separate processes.
 
 Each process stands in for one container of the pod the docs describe: the
-worker is ``python -m reactor_runtime.model_worker``, and every session is an
+worker is ``python -m reactor_runtime.model_server``, and every session is an
 unchanged ``python -m reactor_runtime.serve`` on its own port, all sharing one
 socket directory and ``/dev/shm``. The model is ``examples/echo`` split in two,
 its application half taking option 2 for a lost worker. The test plays the
@@ -112,7 +112,7 @@ class Pod:
     def start_worker(self) -> None:
         env = {**self.env, "REACTOR_MODEL_WORKER_HEALTH_PORT": str(self.worker_port)}
         self.worker = self._spawn(
-            "worker", [sys.executable, "-m", "reactor_runtime.model_worker"], env
+            "worker", [sys.executable, "-m", "reactor_runtime.model_server"], env
         )
 
     def wait_worker(self, within: float = 60.0) -> None:

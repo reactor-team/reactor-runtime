@@ -20,7 +20,7 @@ Reactor Runtime turns an inference pipeline into a real-time, interactive media 
 - 🏠 **LiveKit rooms.** A session can join a LiveKit room: the model's tracks are published there, and every other participant in the room is a client.
 - ✅ **Typed, validated commands.** Declare the commands your model accepts with standard Python types and constraints. The runtime validates every payload before your handler runs and compiles the surface into an OpenAPI schema that drives typed client SDKs.
 - 🗂️ **Step results.** Start a session with its input and a number of steps, and keep each step's output as a folder of files.
-- 🧩 **Many sessions, one copy of the weights.** Split a model into a model half that one worker process (`python -m reactor_runtime.model_worker`) loads once and an application half each session runtime runs, and every session shares the worker's weights and GPU. See `examples/shared_worker`.
+- 🧩 **Many sessions, one copy of the weights.** Split a model into a model half that one worker process (`python -m reactor_runtime.model_server`) loads once and an application half each session runtime runs, and every session shares the worker's weights and GPU. See `examples/shared_worker`.
 - 🔎 **Traceable logs.** `get_logger()` writes structured records, and every record a session writes carries its id, so one filter recovers a whole run.
 - 📦 **One container, anywhere.** The `reactor` CLI scaffolds a workspace, builds a small image, and runs it locally. The same image deploys to [Reactor](https://reactor.inc)'s GPU cloud unchanged.
 

@@ -19,17 +19,17 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from reactor_runtime.model_worker import WorkerClient, WorkerCrashed, WorkerLost
-from reactor_runtime.model_worker.shm import unlink_prefix
+from reactor_runtime.model_server import ModelClient, WorkerCrashed, WorkerLost
+from reactor_runtime.model_server.shm import unlink_prefix
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="process tests on Linux")
 
 _WORKER = textwrap.dedent(
     """
     import os, time
-    from reactor_runtime.model_worker import ModelWorker
+    from reactor_runtime.model_server import ModelServer
 
-    class Echo(ModelWorker):
+    class Echo(ModelServer):
         max_batch = 2
 
         def step(self, requests):
@@ -59,7 +59,7 @@ class Worker:
             [
                 sys.executable,
                 "-m",
-                "reactor_runtime.model_worker",
+                "reactor_runtime.model_server",
                 "--worker",
                 "echo_worker:Echo",
                 "--socket",
@@ -75,8 +75,8 @@ class Worker:
             assert time.monotonic() < deadline, "the worker never became ready"
             time.sleep(0.05)
 
-    def client(self, slot: int) -> WorkerClient:
-        client = WorkerClient.connect(socket_path=self.socket, slot=slot, connect_timeout=10)
+    def client(self, slot: int) -> ModelClient:
+        client = ModelClient.connect(socket_path=self.socket, slot=slot, connect_timeout=10)
         client.reset()
         return client
 
@@ -132,7 +132,7 @@ def test_a_worker_killed_mid_step_ends_the_waiting_session_at_once(worker: Worke
 
 
 def _session_main(socket: str, prefix: str, slot: int, started: object) -> None:
-    client = WorkerClient.connect(socket_path=socket, slot=slot, connect_timeout=10)
+    client = ModelClient.connect(socket_path=socket, slot=slot, connect_timeout=10)
     client.reset()
     started.set()  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
     client.step({"sleep": 1.0})
@@ -166,7 +166,7 @@ def test_sigterm_fails_queued_requests_and_frees_every_block(worker: Worker) -> 
     running, queued, third = worker.client(0), worker.client(1), worker.client(2)
     results: dict[str, object] = {}
 
-    def call(name: str, client: WorkerClient, payload: object) -> None:
+    def call(name: str, client: ModelClient, payload: object) -> None:
         try:
             results[name] = client.step(payload)
         except Exception as exc:

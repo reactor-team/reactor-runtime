@@ -1,7 +1,7 @@
 """A model without a worker half never loads, starts, or reaches any model-worker code.
 
 The single-session runtime is the default, and nothing of the worker path may
-run for it: no import of ``reactor_runtime.model_worker``, no thread, no shared
+run for it: no import of ``reactor_runtime.model_server``, no thread, no shared
 memory, no change to its health or its session routes.
 """
 
@@ -55,7 +55,7 @@ def test_importing_the_runtime_imports_no_worker_code() -> None:
     )
     imported = _imported(result.stderr)
     assert "reactor_runtime.serve" in imported
-    assert not {m for m in imported if m.startswith("reactor_runtime.model_worker")}
+    assert not {m for m in imported if m.startswith("reactor_runtime.model_server")}
 
 
 def test_a_single_session_model_serves_without_any_worker_code(tmp_path: Path) -> None:
@@ -108,17 +108,17 @@ def test_a_single_session_model_serves_without_any_worker_code(tmp_path: Path) -
     imported = _imported((tmp_path / "stderr").read_text())
     # The model's own imports are recorded too (the starter draws with PIL).
     assert "PIL.ImageDraw" in imported
-    assert not {m for m in imported if m.startswith("reactor_runtime.model_worker")}
+    assert not {m for m in imported if m.startswith("reactor_runtime.model_server")}
 
 
 def test_a_session_half_without_a_worker_socket_fails_its_start_clearly(tmp_path: Path) -> None:
     (tmp_path / "reactor.yaml").write_text("runtime:\n  import: half:Half\n")
     (tmp_path / "half.py").write_text(
         "from reactor_runtime import ReactorApp\n"
-        "from reactor_runtime.model_worker import WorkerClient\n"
+        "from reactor_runtime.model_server import ModelClient\n"
         "class Half(ReactorApp):\n"
         "    def load(self, config_path):\n"
-        "        self.worker = WorkerClient.connect()\n"
+        "        self.worker = ModelClient.connect()\n"
         "    def generate(self, input):\n"
         "        return None\n"
     )

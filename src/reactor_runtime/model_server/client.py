@@ -1,7 +1,7 @@
 """The application half's connection to the model worker.
 
-A session process opens one :class:`WorkerClient` in its model's ``load()`` and
-calls :meth:`WorkerClient.step` from ``generate()``. The client writes the
+A session process opens one :class:`ModelClient` in its model's ``load()`` and
+calls :meth:`ModelClient.step` from ``generate()``. The client writes the
 payload's arrays into a shared block of its own, sends the worker a small
 header, and blocks until the answer, which it copies out of the block the
 worker keeps for it.
@@ -10,9 +10,9 @@ The client reports and never decides. It holds no reference to the
 application and does nothing in the background but read its socket: a worker
 that goes away marks the connection lost, and from then on every call raises
 :class:`WorkerLost` on the application's own call path until the application
-calls :meth:`WorkerClient.reconnect`. What a lost or a stuck worker means for
+calls :meth:`ModelClient.reconnect`. What a lost or a stuck worker means for
 the session is the application's to decide, in ``process_output()`` (see
-:mod:`reactor_runtime.model_worker` for the two ways to do it).
+:mod:`reactor_runtime.model_server` for the two ways to do it).
 """
 
 from __future__ import annotations
@@ -37,16 +37,16 @@ from typing import Any
 
 from reactor_runtime.distributed.errors import WorkerCrashed, WorkerTimeout
 from reactor_runtime.log import get_logger
-from reactor_runtime.model_worker import codec, schema, wire
-from reactor_runtime.model_worker.contract import check_signal_types
-from reactor_runtime.model_worker.transport import (
+from reactor_runtime.model_server import codec, schema, wire
+from reactor_runtime.model_server.contract import check_signal_types
+from reactor_runtime.model_server.transport import (
     ClientCarrier,
     NoListener,
     Transport,
     UnixShmTransport,
     WorkerUnreachable,
 )
-from reactor_runtime.model_worker.wire import Kind
+from reactor_runtime.model_server.wire import Kind
 
 logger = get_logger(__name__)
 
@@ -134,20 +134,20 @@ class WorkerLost(WorkerCrashed):
     """The connection to the worker is gone: its message says why.
 
     Raised by every call once the connection is lost, until
-    :meth:`WorkerClient.reconnect` succeeds. A
+    :meth:`ModelClient.reconnect` succeeds. A
     :class:`~reactor_runtime.distributed.WorkerCrashed`.
     """
 
 
 class ClientClosed(WorkerLost):
-    """The client was closed: every call raises it, :meth:`WorkerClient.wait_lost` included."""
+    """The client was closed: every call raises it, :meth:`ModelClient.wait_lost` included."""
 
 
 class ResetRequired(RuntimeError):  # noqa: N818 (named for the state a caller catches)
     """A step on a connection whose slot the application has not reset yet.
 
-    Raised by :meth:`WorkerClient.step` after :meth:`WorkerClient.connect` and
-    after :meth:`WorkerClient.reconnect`, and after a :meth:`WorkerClient.reset`
+    Raised by :meth:`ModelClient.step` after :meth:`ModelClient.connect` and
+    after :meth:`ModelClient.reconnect`, and after a :meth:`ModelClient.reset`
     that did not complete, until a reset succeeds. The application calls
     ``reset()`` when its session starts, so a session never runs on state the
     worker kept for another one.
@@ -180,7 +180,7 @@ class _Link:
 # Every client that is open, closed by the interpreter's exit before it joins
 # the threads still running: a client blocked in connect() or reconnect() on a
 # pool thread (asyncio.to_thread) then returns instead of holding the exit.
-_OPEN: weakref.WeakSet[WorkerClient] = weakref.WeakSet()
+_OPEN: weakref.WeakSet[ModelClient] = weakref.WeakSet()
 
 
 def _close_all() -> None:
@@ -197,7 +197,7 @@ if _register_exit is not None:
 atexit.register(_close_all)
 
 
-class WorkerClient:
+class ModelClient:
     """One session process's connection to the model worker.
 
     Build it with :meth:`connect`. One :meth:`step` or :meth:`reset` runs at a
@@ -268,7 +268,7 @@ class WorkerClient:
         connect_timeout: float | None = None,
         step_timeout: float | None = None,
         transport: Transport | None = None,
-    ) -> WorkerClient:
+    ) -> ModelClient:
         """Connect to the worker and block until it has opened this session.
 
         Called from the session half's ``load()``: while it waits, the session
@@ -278,7 +278,7 @@ class WorkerClient:
         and returns once one does.
 
         The types are the session half's view of the contract and must be
-        the worker's own (``ModelWorker.request_type``, ``result_type``, and
+        the worker's own (``ModelServer.request_type``, ``result_type``, and
         ``signals``), imported from the model's code; the worker refuses a
         session whose types differ.
 
@@ -322,7 +322,7 @@ class WorkerClient:
         if not path:
             raise WorkerUnreachable(
                 f"{SOCKET_ENV} is not set: this model's session half needs a model worker "
-                "(python -m reactor_runtime.model_worker) and the path of its socket"
+                "(python -m reactor_runtime.model_server) and the path of its socket"
             )
         if slot is None:
             raw = os.getenv(SLOT_ENV, "").strip()
@@ -395,7 +395,7 @@ class WorkerClient:
             payload: An instance of the ``request_type`` passed to
                 :meth:`connect`, or plain values, lists, tuples, dicts, bytes,
                 and numpy arrays without one (see
-                :mod:`reactor_runtime.model_worker.codec`).
+                :mod:`reactor_runtime.model_server.codec`).
             timeout: Seconds to wait for the answer; the client's step timeout
                 when omitted, and ``0`` waits without bound.
 
@@ -488,7 +488,7 @@ class WorkerClient:
 
         Returns at once while it is lost. Meant for one task of the
         application that watches the worker between steps and while idle (see
-        :mod:`reactor_runtime.model_worker`); call it with a timeout, in a
+        :mod:`reactor_runtime.model_server`); call it with a timeout, in a
         loop, so the task can be cancelled.
 
         Args:

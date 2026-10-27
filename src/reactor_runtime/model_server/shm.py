@@ -23,7 +23,7 @@ from multiprocessing import resource_tracker, shared_memory
 from pathlib import Path
 from typing import Any
 
-from reactor_runtime.model_worker import codec
+from reactor_runtime.model_server import codec
 
 _SHM_DIR = Path("/dev/shm")
 

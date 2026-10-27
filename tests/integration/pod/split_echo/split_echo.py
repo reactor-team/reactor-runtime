@@ -1,6 +1,6 @@
 """The application half of the split echo: examples/echo with its engine in the worker.
 
-It takes option 2 of :mod:`reactor_runtime.model_worker` for a lost or stuck
+It takes option 2 of :mod:`reactor_runtime.model_server` for a lost or stuck
 worker: the session ends with the reason, the process stays up and refuses
 sessions, and one watcher thread reconnects. Any other model error is re-raised,
 as in examples/echo.
@@ -21,10 +21,10 @@ from split_echo_worker import fault_due
 
 from echo import Echo, EchoOutput
 from reactor_runtime import ApplicationError, StepOutcome, session_started
-from reactor_runtime.model_worker import (
+from reactor_runtime.model_server import (
     ClientClosed,
+    ModelClient,
     StepUnanswered,
-    WorkerClient,
     WorkerLost,
     WorkerRejected,
     WorkerTimeout,
@@ -38,7 +38,7 @@ class RemoteEngine:
     """The echo model's surface, answered by the worker."""
 
     def __init__(self) -> None:
-        self.client = WorkerClient.connect(request_type=EchoInput, result_type=EchoResult)
+        self.client = ModelClient.connect(request_type=EchoInput, result_type=EchoResult)
 
     def generate(self, input: EchoInput) -> EchoResult:
         return self.client.step(input)

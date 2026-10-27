@@ -12,9 +12,9 @@ from typing import Any
 
 import pytest
 
-from reactor_runtime.model_worker import ModelWorker, WorkerClient, WorkerSettings
-from reactor_runtime.model_worker.server import WorkerServer
-from reactor_runtime.model_worker.shm import unlink_prefix
+from reactor_runtime.model_server import ModelClient, ModelServer, ServerSettings
+from reactor_runtime.model_server.server import WorkerServer
+from reactor_runtime.model_server.shm import unlink_prefix
 
 
 class Served:
@@ -22,10 +22,10 @@ class Served:
 
     def __init__(
         self,
-        worker: ModelWorker,
+        worker: ModelServer,
         socket_path: Path,
         prefix: str,
-        settings: WorkerSettings | None = None,
+        settings: ServerSettings | None = None,
     ) -> None:
         self.worker = worker
         self.prefix = prefix
@@ -34,12 +34,12 @@ class Served:
         self.server.bind()
         self.thread = threading.Thread(target=self.server.serve, daemon=True)
         self.thread.start()
-        self.clients: list[WorkerClient] = []
+        self.clients: list[ModelClient] = []
 
-    def client(self, slot: int | None, *, reset: bool = True, **kwargs: Any) -> WorkerClient:
+    def client(self, slot: int | None, *, reset: bool = True, **kwargs: Any) -> ModelClient:
         """Connect a client in *slot*, and reset it as the application does, unless told not to."""
         kwargs.setdefault("connect_timeout", 5.0)
-        client = WorkerClient.connect(socket_path=self.path, slot=slot, **kwargs)
+        client = ModelClient.connect(socket_path=self.path, slot=slot, **kwargs)
         self.clients.append(client)
         if reset:
             client.reset()
@@ -59,7 +59,7 @@ class Served:
 
 
 @pytest.fixture
-def serve() -> Iterator[Callable[[ModelWorker], Served]]:
+def serve() -> Iterator[Callable[[ModelServer], Served]]:
     """Return a function that serves a worker; everything it served stops after the test."""
     # A Unix socket path is limited to about 100 bytes, which pytest's tmp_path can pass.
     short = Path(tempfile.mkdtemp(prefix="rrw"))
@@ -67,7 +67,7 @@ def serve() -> Iterator[Callable[[ModelWorker], Served]]:
     prefix = f"rrt{secrets.token_hex(3)}_"
 
     def start(
-        worker: ModelWorker, path: Path | None = None, settings: WorkerSettings | None = None
+        worker: ModelServer, path: Path | None = None, settings: ServerSettings | None = None
     ) -> Served:
         if not hasattr(worker, "device"):
             worker.device = "cpu"

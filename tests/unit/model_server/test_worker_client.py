@@ -1,4 +1,4 @@
-"""The application half's ``WorkerClient``: what each call raises, and what it never does alone.
+"""The application half's ``ModelClient``: what each call raises, and what it never does alone.
 
 The client reports and never decides: it does not reset a slot, retry a reset,
 or reconnect on its own. These tests run a real worker on a thread of the test
@@ -20,27 +20,27 @@ from typing import Any
 import numpy as np
 import pytest
 
-from reactor_runtime.model_worker import (
+from reactor_runtime.model_server import (
     ClientClosed,
-    ModelWorker,
+    ModelClient,
+    ModelServer,
     ResetRequired,
+    ServerRequest,
     StepExpired,
     StepTimedOut,
     StepUnanswered,
-    WorkerClient,
     WorkerCrashed,
     WorkerLost,
     WorkerRejected,
-    WorkerRequest,
     WorkerTimeout,
     WorkerUnreachable,
     codec,
     wire,
 )
-from reactor_runtime.model_worker import client as client_module
-from reactor_runtime.model_worker import server as server_module
-from reactor_runtime.model_worker.transport import UnixShmTransport
-from reactor_runtime.model_worker.wire import Kind
+from reactor_runtime.model_server import client as client_module
+from reactor_runtime.model_server import server as server_module
+from reactor_runtime.model_server.transport import UnixShmTransport
+from reactor_runtime.model_server.wire import Kind
 
 
 @dataclass(frozen=True)
@@ -60,7 +60,7 @@ class Out:
     chunk: int
 
 
-class Gated(ModelWorker):
+class Gated(ModelServer):
     """Echo plain payloads, holding each step until the test opens the gate."""
 
     max_batch = 4
@@ -72,7 +72,7 @@ class Gated(ModelWorker):
         self.steps: list[list[Any]] = []
         self.events: list[tuple[str, int, int]] = []
 
-    def step(self, requests: list[WorkerRequest[Any]]) -> list[Any]:
+    def step(self, requests: list[ServerRequest[Any]]) -> list[Any]:
         self.entered.set()
         self.gate.wait(10)
         self.steps.append([r.payload for r in requests])
@@ -85,7 +85,7 @@ class Gated(ModelWorker):
         self.events.append(("closed", slot, generation))
 
 
-class TypedWorker(ModelWorker):
+class TypedWorker(ModelServer):
     request_type = In
     result_type = Out
     signals = (Preempt,)
@@ -96,7 +96,7 @@ class TypedWorker(ModelWorker):
         self.gate.set()
         self.entered = threading.Event()
 
-    def step(self, requests: list[WorkerRequest[In]]) -> list[Out]:
+    def step(self, requests: list[ServerRequest[In]]) -> list[Out]:
         self.entered.set()
         self.gate.wait(10)
         return [Out(frame=r.payload.frame * 2, chunk=r.payload.chunk) for r in requests]
@@ -105,7 +105,7 @@ class TypedWorker(ModelWorker):
         self.received.append((slot, signal))
 
 
-def _typed(served: Any, slot: int, **kwargs: Any) -> WorkerClient:
+def _typed(served: Any, slot: int, **kwargs: Any) -> ModelClient:
     return served.client(slot, request_type=In, result_type=Out, signals=(Preempt,), **kwargs)
 
 
@@ -325,10 +325,10 @@ def test_a_reconnect_blocked_on_a_missing_worker_returns_when_the_client_closes(
 
 def test_connect_waits_for_a_worker_that_starts_late(serve: Any) -> None:
     path = _short_dir() / "late.sock"
-    connected: list[WorkerClient] = []
+    connected: list[ModelClient] = []
     thread = threading.Thread(
         target=lambda: connected.append(
-            WorkerClient.connect(socket_path=path, slot=2, connect_timeout=10)
+            ModelClient.connect(socket_path=path, slot=2, connect_timeout=10)
         )
     )
     thread.start()
@@ -345,7 +345,7 @@ def test_connect_waits_for_a_worker_that_starts_late(serve: Any) -> None:
 def test_connect_gives_up_after_its_deadline(tmp_path: Path) -> None:
     started = time.monotonic()
     with pytest.raises(WorkerTimeout, match=r"no model worker welcomed this session within 0.3"):
-        WorkerClient.connect(socket_path=tmp_path / "none.sock", slot=0, connect_timeout=0.3)
+        ModelClient.connect(socket_path=tmp_path / "none.sock", slot=0, connect_timeout=0.3)
     assert time.monotonic() - started < 2
 
 
@@ -355,7 +355,7 @@ def test_a_connect_waiting_for_a_worker_returns_when_the_client_closes() -> None
 
     def connect() -> None:
         try:
-            WorkerClient.connect(socket_path=path, slot=0, connect_timeout=30)
+            ModelClient.connect(socket_path=path, slot=0, connect_timeout=30)
         except BaseException as exc:
             raised.append(exc)
 
@@ -376,14 +376,14 @@ def test_a_missing_socket_directory_fails_at_once(tmp_path: Path) -> None:
     missing = tmp_path / "not-mounted" / "sock"
     started = time.monotonic()
     with pytest.raises(WorkerUnreachable, match=r"socket directory .* does not exist"):
-        WorkerClient.connect(socket_path=missing, slot=0, connect_timeout=30)
+        ModelClient.connect(socket_path=missing, slot=0, connect_timeout=30)
     assert time.monotonic() - started < 2
 
 
 def test_no_socket_named_fails_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("REACTOR_MODEL_WORKER_SOCKET", raising=False)
     with pytest.raises(WorkerUnreachable, match="REACTOR_MODEL_WORKER_SOCKET is not set"):
-        WorkerClient.connect()
+        ModelClient.connect()
 
 
 def test_shared_memory_the_session_cannot_see_fails_the_connect(serve: Any) -> None:
@@ -402,7 +402,7 @@ def test_shared_memory_the_session_cannot_see_fails_the_connect(serve: Any) -> N
 
     started = time.monotonic()
     with pytest.raises(WorkerUnreachable, match="not visible here"):
-        WorkerClient.connect(socket_path=served.path, slot=0, transport=Blind(), connect_timeout=30)
+        ModelClient.connect(socket_path=served.path, slot=0, transport=Blind(), connect_timeout=30)
     assert time.monotonic() - started < 3
 
 
@@ -553,13 +553,13 @@ def test_after_a_timeout_the_input_block_is_used_again(serve: Any) -> None:
 
 
 def test_a_rejected_request_does_not_free_an_abandoned_ones_block(serve: Any) -> None:
-    class Slow(ModelWorker):
+    class Slow(ModelServer):
         max_request_bytes = 1 << 16
 
         def load(self, config_path: Any) -> None:
             self.seen: list[int] = []
 
-        def step(self, requests: list[WorkerRequest[Any]]) -> list[Any]:
+        def step(self, requests: list[ServerRequest[Any]]) -> list[Any]:
             request = requests[0]
             if request.payload.get("slow"):
                 time.sleep(1.0)
@@ -685,7 +685,7 @@ def test_connect_reads_the_socket_and_slot_from_the_environment(
     served: Any = serve(Gated())
     monkeypatch.setenv("REACTOR_MODEL_WORKER_SOCKET", str(served.path))
     monkeypatch.setenv("REACTOR_SESSION_SLOT", "7")
-    client = WorkerClient.connect()
+    client = ModelClient.connect()
     served.clients.append(client)
     client.reset()
     assert client.step(1)["slot"] == 7
@@ -697,11 +697,11 @@ def test_connect_reads_its_deadline_from_the_environment(
     monkeypatch.setenv("REACTOR_WORKER_CONNECT_TIMEOUT", "0.3")
     started = time.monotonic()
     with pytest.raises(WorkerTimeout, match=r"within 0.3 s"):
-        WorkerClient.connect(socket_path=tmp_path / "none.sock", slot=0)
+        ModelClient.connect(socket_path=tmp_path / "none.sock", slot=0)
     assert time.monotonic() - started < 2
     monkeypatch.setenv("REACTOR_WORKER_CONNECT_TIMEOUT", "soon")
     with pytest.raises(ValueError, match="REACTOR_WORKER_CONNECT_TIMEOUT 'soon'"):
-        WorkerClient.connect(socket_path=tmp_path / "none.sock", slot=0)
+        ModelClient.connect(socket_path=tmp_path / "none.sock", slot=0)
 
 
 def test_a_step_reads_its_timeout_from_the_environment(

@@ -1,16 +1,25 @@
 """Serve several sessions from one copy of a model's weights.
 
 A model split in two runs its model half in one process, ``python -m
-reactor_runtime.model_worker``, which owns the weights and the GPU, and its
+reactor_runtime.model_server``, which owns the weights and the GPU, and its
 application half in ordinary one-session runtimes, ``python -m
 reactor_runtime.serve``, one per session. The split is the one
 ``skills/application-model-isolation`` describes, with the model half in its
 own process: the skill owns its rules. The model half refuses what it cannot
 serve and never recovers on its own, and only the application calls
-:meth:`WorkerClient.reset`. The sessions reach the worker through a Unix
+:meth:`ModelClient.reset`. The sessions reach the worker through a Unix
 socket, with the arrays in shared memory, so they run on one host: in
 Kubernetes, one pod with the worker as a native sidecar and the session
 runtimes as its containers.
+
+:class:`ModelServer` is the model half that serves many sessions from one
+process; it is not :class:`~reactor_runtime.distributed.DistributedWorker`,
+which is one rank of a model split over several GPUs. The two compose: a
+``ModelServer`` whose ``step()`` drives distributed ranks serves every session
+from weights spread over those GPUs. The client is a :class:`ModelClient`.
+"Worker" names the process that runs a ``ModelServer``: its environment
+variables, its socket, and the errors that describe it (:class:`WorkerLost`,
+:class:`WorkerError`).
 
 The manifest names both halves; the worker block also holds the serving
 settings, within the bounds the worker class sets::
@@ -18,7 +27,7 @@ settings, within the bounds the worker class sets::
     runtime:
       import: plasma:Plasma                 # the application half, a ReactorApp
       worker:
-        import: plasma_worker:PlasmaWorker  # the model half, a ModelWorker
+        import: plasma_worker:PlasmaWorker  # the model half, a ModelServer
         max_batch: 4
 
 The types the halves exchange are frozen dataclasses, declared once in the
@@ -28,7 +37,7 @@ model's code and imported by both::
     class Tick:
         tick: int
 
-    class PlasmaWorker(ModelWorker):
+    class PlasmaWorker(ModelServer):
         request_type = Tick
         max_batch = 4
 
@@ -41,7 +50,7 @@ welcomes it), resets its slot when a session starts, and calls the worker from
 
     class Plasma(ReactorApp):
         def load(self, config_path):
-            self.worker = WorkerClient.connect(request_type=Tick)
+            self.worker = ModelClient.connect(request_type=Tick)
 
         @session_started
         def begin(self):
@@ -71,7 +80,7 @@ while idle. Every wait in it is bounded, so shutdown is never held::
 
     class Plasma(ReactorApp):
         def load(self, config_path):
-            self.worker = WorkerClient.connect(request_type=Tick)
+            self.worker = ModelClient.connect(request_type=Tick)
             self._give_up = threading.Event()
             threading.Thread(target=self._watch, daemon=True).start()
 
@@ -131,45 +140,45 @@ import this package.
 """
 
 from reactor_runtime.distributed.errors import WorkerCrashed, WorkerTimeout
-from reactor_runtime.model_worker.client import (
+from reactor_runtime.model_server.client import (
     BatchFailed,
     ClientClosed,
+    ModelClient,
     ResetRequired,
     StepExpired,
     StepTimedOut,
     StepUnanswered,
-    WorkerClient,
     WorkerError,
     WorkerLost,
     WorkerRejected,
 )
-from reactor_runtime.model_worker.contract import (
-    ModelWorker,
-    WorkerRequest,
-    WorkerSettings,
+from reactor_runtime.model_server.contract import (
+    ModelServer,
+    ServerRequest,
+    ServerSettings,
     cuda_health,
 )
-from reactor_runtime.model_worker.schema import SchemaError
-from reactor_runtime.model_worker.transport import Transport, UnixShmTransport, WorkerUnreachable
+from reactor_runtime.model_server.schema import SchemaError
+from reactor_runtime.model_server.transport import Transport, UnixShmTransport, WorkerUnreachable
 
 __all__ = [
     "BatchFailed",
     "ClientClosed",
-    "ModelWorker",
+    "ModelClient",
+    "ModelServer",
     "ResetRequired",
     "SchemaError",
+    "ServerRequest",
+    "ServerSettings",
     "StepExpired",
     "StepTimedOut",
     "StepUnanswered",
     "Transport",
     "UnixShmTransport",
-    "WorkerClient",
     "WorkerCrashed",
     "WorkerError",
     "WorkerLost",
     "WorkerRejected",
-    "WorkerRequest",
-    "WorkerSettings",
     "WorkerTimeout",
     "WorkerUnreachable",
     "cuda_health",

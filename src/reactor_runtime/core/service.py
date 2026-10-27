@@ -229,10 +229,10 @@ class WorkerConfig:
     """The worker half of a model split in two, drawn from the manifest's ``runtime.worker`` block.
 
     Read by the model worker's entry point, ``python -m
-    reactor_runtime.model_worker``; the session runtime reads nothing from it.
+    reactor_runtime.model_server``; the session runtime reads nothing from it.
 
     Attributes:
-        import_ref: The worker half, a ``ModelWorker`` subclass, as ``"module:Class"``.
+        import_ref: The worker half, a ``ModelServer`` subclass, as ``"module:Class"``.
         settings: The serving settings the block sets, by name (a subset of
             :data:`WORKER_SETTINGS`). The worker checks them against its class
             when it loads: the class is the authority on what it can serve.

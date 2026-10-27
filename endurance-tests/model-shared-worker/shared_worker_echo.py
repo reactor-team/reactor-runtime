@@ -8,13 +8,13 @@ from echo_model import EchoInput, EchoResult
 from tracked_echo import TrackedEcho
 
 from reactor_runtime import session_started
-from reactor_runtime.model_worker import WorkerClient
+from reactor_runtime.model_server import ModelClient
 
 
 class _RemoteEngine:
     """The echo model's three calls, answered by the worker."""
 
-    def __init__(self, client: WorkerClient) -> None:
+    def __init__(self, client: ModelClient) -> None:
         self._client = client
 
     def load(self) -> None:
@@ -36,7 +36,7 @@ class SharedWorkerEcho(TrackedEcho):
         """Load as echo does, then answer its engine's calls from the worker."""
         super().load(config_path)
         self.engine = _RemoteEngine(
-            WorkerClient.connect(request_type=EchoInput, result_type=EchoResult)
+            ModelClient.connect(request_type=EchoInput, result_type=EchoResult)
         )
 
     @session_started

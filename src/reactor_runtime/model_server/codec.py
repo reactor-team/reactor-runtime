@@ -24,7 +24,7 @@ before it parses it. Bulk data belongs in arrays or bytes, which travel in
 shared memory and do not count against it.
 
 A typed payload (a request or result type a model declares) is dumped to its
-fields by :mod:`~reactor_runtime.model_worker.schema` before it is encoded and
+fields by :mod:`~reactor_runtime.model_server.schema` before it is encoded and
 built back from them after it is decoded, so this codec only ever carries
 plain values.
 """

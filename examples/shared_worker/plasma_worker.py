@@ -14,12 +14,12 @@ from pathlib import Path
 import numpy as np
 from plasma_contract import HEIGHT, WIDTH, Frame, Tick
 
-from reactor_runtime.model_worker import ModelWorker, WorkerRequest
+from reactor_runtime.model_server import ModelServer, ServerRequest
 
 logger = logging.getLogger(__name__)
 
 
-class PlasmaWorker(ModelWorker):
+class PlasmaWorker(ModelServer):
     """Render one frame per waiting session, up to four at a time."""
 
     request_type = Tick
@@ -43,7 +43,7 @@ class PlasmaWorker(ModelWorker):
         ).astype(np.uint8)
         self.frames_served: dict[int, int] = {}
 
-    def step(self, requests: list[WorkerRequest[Tick]]) -> list[Frame]:
+    def step(self, requests: list[ServerRequest[Tick]]) -> list[Frame]:
         """Render every request's frame at its tick and hue, in one call."""
         ticks = np.array([r.payload.tick for r in requests], dtype=np.int32)
         hues = np.array([r.payload.hue for r in requests], dtype=np.int32)
