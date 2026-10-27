@@ -107,6 +107,7 @@ from reactor_runtime.runner.system_client import SYSTEM_CONN_ID, SystemConnectio
 from reactor_runtime.runner.upload_resolution import declares_upload, resolve_uploads
 from reactor_runtime.step_results import SavedStep, StepStore, content_type_of
 from reactor_runtime.transport.router import (
+    ModelUnavailableError,
     SessionNotRunningError,
     SessionTransitionError,
     UnknownSessionError,
@@ -427,6 +428,9 @@ class Runner(ServiceComponent, ConnectionSink):
         # first session binds one.
         self._log_binding = 0
         self._accepting = True
+        # Why the model reported it cannot serve, or None while it can (see
+        # ReactorCore.set_unavailable). Written on the runtime loop only.
+        self._unavailable: str | None = None
         # The transports mounted on the HTTP surface, as the descriptor lists them.
         self._transports: list[dict[str, str]] = []
         # The process-shutdown hook, wired by the assembly so the runner can ask
@@ -510,6 +514,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 command_timing=self._on_command_timing,
                 frame_timing=self._on_frame_timing,
                 step_refusal=self._on_step_refusal,
+                availability=self._on_model_availability,
             )
             bridge.start()
         except Exception:
@@ -593,13 +598,17 @@ class Runner(ServiceComponent, ConnectionSink):
             await asyncio.sleep(0.01)
 
     def health(self) -> Health:
-        """Report unhealthy only for a terminated session.
+        """Report unhealthy for a terminated session or a model that cannot serve.
 
         Every other state is healthy: a model still loading is working as
-        intended, just not yet available — :meth:`state` carries that word.
+        intended, just not yet available — :meth:`state` carries that word. A
+        model that reported itself unavailable is unhealthy, with its reason as
+        the detail, until it reports itself available again.
         """
         if self._sm.current_state is SessionState.TERMINATED:
             return Health(HealthStatus.UNHEALTHY, "session terminated")
+        if self._unavailable is not None:
+            return Health(HealthStatus.UNHEALTHY, self._unavailable)
         return Health.healthy()
 
     def state(self) -> RuntimeState:
@@ -1226,6 +1235,38 @@ class Runner(ServiceComponent, ConnectionSink):
         if loop is not None:
             loop.call_soon_threadsafe(self._evict_on_failure, str(error) or repr(error))
 
+    def _on_model_availability(self, reason: str | None) -> None:
+        """Hear the model report it cannot serve (a reason) or can again (``None``).
+
+        The report comes from whichever thread the model made it on, so it is
+        applied on the runtime loop, where the state machine is single-writer.
+        """
+        loop = self._loop
+        if loop is not None:
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(self._apply_availability, reason)
+
+    def _apply_availability(self, reason: str | None) -> None:
+        """End the live session and refuse new ones while the model cannot serve.
+
+        The session stops like any other, with ``error`` as its end reason and
+        the model's reason as its close reason, and unwinds to ready; the
+        process stays up for the model to recover.
+        """
+        if reason is None:
+            if self._unavailable is not None:
+                logger.info("the model can serve again", was=self._unavailable)
+            self._unavailable = None
+            return
+        newly = self._unavailable is None
+        self._unavailable = reason
+        if not newly:
+            return
+        logger.warning("the model cannot serve", reason=reason)
+        self._sm.send(SessionEvent.ERROR, message=reason)
+        if self._sm.current_state in _RUNNING_STATES:
+            self._sm.send(SessionEvent.STOP_SESSION, reason=EndReason.ERROR, close_reason=reason)
+
     def _evict_on_failure(self, error: str) -> None:
         """Evict the session to terminated, carrying the crash as its reason."""
         self._sm.send(SessionEvent.EVICTION, reason=EndReason.ERROR, error=error)
@@ -1285,7 +1326,10 @@ class Runner(ServiceComponent, ConnectionSink):
             InvalidSessionStartError: If a session-shaping key has the wrong
                 shape, or a starting command fails the model's contract.
             SessionTransitionError: If the session is not in a startable state.
+            ModelUnavailableError: If the model reported it cannot serve.
         """
+        if self._unavailable is not None and self._sm.current_state is SessionState.READY:
+            raise ModelUnavailableError(self._sm.current_state, self._unavailable)
         start = parse_session_start(params)
         self._check_generation(start)
         self._check_starting_input(start)

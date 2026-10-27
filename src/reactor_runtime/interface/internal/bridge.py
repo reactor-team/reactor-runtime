@@ -23,6 +23,7 @@ from reactor_runtime.core.model import Command, ReactorEvent
 from reactor_runtime.core.values import ConnId, InputFrame
 from reactor_runtime.interface.internal.reactor_core import (
     AddressedSink,
+    AvailabilitySink,
     BroadcastSink,
     CommandTimingSink,
     FailureSink,
@@ -273,6 +274,7 @@ class ModelBridge:
         command_timing: CommandTimingSink | None = None,
         frame_timing: FrameTimingSink | None = None,
         step_refusal: StepRefusalSink | None = None,
+        availability: AvailabilitySink | None = None,
     ) -> None:
         """Wire the model's outbound paths down into the runner. Call once.
 
@@ -303,6 +305,8 @@ class ModelBridge:
             frame_timing: Sink for a frame's time in a stage only the model
                 sees, for the connection that sent the frame.
             step_refusal: Sink for each requested step the model refused.
+            availability: Sink for the model's reports that it cannot serve
+                (a reason) and can again (``None``), on the reporting thread.
 
         Raises:
             RuntimeError: If outbound has already been bound.
@@ -320,6 +324,8 @@ class ModelBridge:
         self._model._bind_step_refusal(step_refusal)
         if failure is not None:
             self._model.bind_failure(failure)
+        if availability is not None:
+            self._model.bind_availability(availability)
         self._outbound_bound = True
 
     # -- lifecycle --------------------------------------------------------

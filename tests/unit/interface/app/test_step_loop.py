@@ -22,6 +22,7 @@ from reactor_runtime import (
     MediaInput,
     MessageField,
     ModelMessage,
+    ModelUnavailable,
     Output,
     ReactorApp,
     StepCompleted,
@@ -1087,3 +1088,50 @@ async def test_frames_pushed_for_the_next_session_survive_the_last_sessions_rese
     assert kept is not None
     assert [frame.pts for frame in kept] == [2.0]
     await _stop(task)
+
+
+async def test_a_step_whose_model_is_unavailable_is_dropped_and_the_loop_goes_on() -> None:
+    class Dependent(Recording):
+        def __init__(self) -> None:
+            super().__init__()
+            self.outputs = 0
+            self.down = True
+
+        def generate(self, input: State) -> Frame:
+            self.generated += 1
+            if self.down:
+                raise ModelUnavailable("worker_died: gone")
+            return _frame()
+
+        async def process_output(self, outcome: StepOutcome) -> Output | StepCompleted | None:
+            self.outputs += 1
+            return await super().process_output(outcome)
+
+    app = Dependent()
+    steps = _ready_reporting(app)
+    await _go_live(app)
+    task = await _run_for(app, 0.05)
+    assert not task.done()
+    assert app.generated >= 2
+    assert app.outputs == 0
+    assert steps == []
+    app.down = False
+    await asyncio.sleep(0.05)
+    await _stop(task)
+    assert app.outputs >= 1
+    assert steps
+
+
+async def test_process_input_raising_model_unavailable_drops_the_step() -> None:
+    class Waiting(OnlyGenerate):
+        async def process_input(self) -> Any:
+            raise ModelUnavailable("worker_unavailable: connecting")
+
+    app = Waiting()
+    steps = _ready_reporting(app)
+    await _go_live(app)
+    task = await _run_for(app, 0.05)
+    assert not task.done()
+    await _stop(task)
+    assert app.generated == 0
+    assert steps == []
