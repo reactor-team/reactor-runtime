@@ -24,6 +24,7 @@ from __future__ import annotations
 import contextlib
 import mmap
 import os
+import stat
 import sys
 import threading
 from multiprocessing import resource_tracker, shared_memory
@@ -67,8 +68,9 @@ class FileBlock:
     tracker sees it: its owner unlinks it.
 
     Raises:
-        ValueError: *name* is not a plain file name.
-        OSError: The file cannot be made or opened.
+        ValueError: *name* is not a plain file name, or names something other
+            than a regular file.
+        OSError: The file cannot be made or opened, or *name* is a symlink.
     """
 
     def __init__(self, directory: Path, name: str, *, create: bool = False, size: int = 0) -> None:
@@ -76,11 +78,19 @@ class FileBlock:
             raise ValueError(f"{name!r} is not a block name")
         self._path = directory / name
         self._name = name
-        flags = os.O_RDWR | (os.O_CREAT | os.O_EXCL if create else 0)
+        # The directory is the session's own volume, so the session can put
+        # anything under a name it owns. O_NOFOLLOW refuses a symlink (to
+        # another session's block, say), and the S_ISREG check refuses a FIFO,
+        # socket or directory: only a plain file is mapped. glibc's shm_open
+        # does the same for blocks in /dev/shm. This runs once per open, not
+        # per request.
+        flags = os.O_RDWR | os.O_NOFOLLOW | (os.O_CREAT | os.O_EXCL if create else 0)
         self._fd = os.open(self._path, flags, 0o600)
         self._mmap: mmap.mmap | None = None
         self._buf: memoryview | None = None
         try:
+            if not stat.S_ISREG(os.fstat(self._fd).st_mode):
+                raise ValueError(f"{name!r} is not a regular file")
             if create:
                 if size <= 0:
                     raise ValueError("a new block needs a positive size")

@@ -108,6 +108,37 @@ def test_a_file_block_reads_back_what_was_written(tmp_path: Path) -> None:
     assert not (tmp_path / "blk").exists()
 
 
+def test_a_symlink_to_another_slots_block_is_refused(tmp_path: Path) -> None:
+    import json
+    import os
+
+    (tmp_path / "s1").mkdir()
+    (tmp_path / "s2").mkdir()
+    victim = FileBlock(tmp_path / "s2", "rrd_s2_abcd_out", create=True, size=64)
+    assert victim.buf is not None
+    victim.buf[:6] = b"secret"
+    prefix = "rrd_s1_abcd_"
+    os.symlink(tmp_path / "s2" / "rrd_s2_abcd_out", tmp_path / "s1" / f"{prefix}g1")
+    header = json.dumps(
+        {"v": 1, "block": f"{prefix}g1", "spans": [[0, 6]], "tree": {"a": 0}}
+    ).encode()
+    reader = ViewReader(prefix, 1 << 20, tmp_path / "s1")
+    with pytest.raises(RequestRefused, match="cannot be mapped"):
+        reader.unpack(header)
+    with pytest.raises(OSError, match="Too many levels of symbolic links"):
+        FileBlock(tmp_path / "s1", f"{prefix}g1")
+    reader.close()
+    victim.close()
+
+
+def test_a_block_that_is_not_a_regular_file_is_refused(tmp_path: Path) -> None:
+    import os
+
+    os.mkfifo(tmp_path / "rrd_s0_abcd_g1")
+    with pytest.raises(ValueError, match="not a regular file"):
+        FileBlock(tmp_path, "rrd_s0_abcd_g1")
+
+
 @pytest.fixture
 def shm_as_slot_dir(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     """Point every slot's directory at /dev/shm, where the client finds blocks by name.
