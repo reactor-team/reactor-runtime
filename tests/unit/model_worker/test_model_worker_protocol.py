@@ -741,7 +741,12 @@ def test_a_worker_refuses_to_start_without_its_socket_directory(tmp_path: Path) 
 
 
 def _shm_sizes(prefix: str) -> dict[str, int]:
-    return {p.name: p.stat().st_size for p in Path("/dev/shm").glob(f"{prefix}*")}
+    sizes = {}
+    for path in Path("/dev/shm").glob(f"{prefix}*"):
+        # A block can be unlinked between the listing and the stat.
+        with contextlib.suppress(FileNotFoundError):
+            sizes[path.name] = path.stat().st_size
+    return sizes
 
 
 def test_a_sessions_blocks_are_made_at_join_and_gone_after_it_leaves(serve: Any) -> None:

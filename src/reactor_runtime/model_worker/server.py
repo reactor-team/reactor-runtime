@@ -51,7 +51,8 @@ _PEERCRED = struct.Struct("3i")
 _TOKEN = re.compile(r"[0-9a-f]{4,16}")
 # How long an answer may wait for a session to read it before the session is cut off.
 _SEND_TIMEOUT = 5.0
-_TIMEVAL = struct.Struct("ll")
+# Sessions that stepped this recently count as active for the failing check.
+_ACTIVE_WINDOW = 60.0
 
 
 @dataclass(eq=False)
@@ -145,6 +146,10 @@ class WorkerServer:
         # Steps in a row that raised, for the worker's health.
         self.failed_steps = 0
         self._failing_slots: set[int] = set()
+        # Slots whose requests raised alone after their batch raised.
+        self._solo: set[int] = set()
+        # When each slot last had a step run, for the failing check.
+        self._last_stepped: dict[int, float] = {}
 
     @property
     def socket_path(self) -> Path:
@@ -250,9 +255,14 @@ class WorkerServer:
         except Exception:
             logger.exception("a session's reader failed", slot=conn.slot if conn else None)
         finally:
-            with contextlib.suppress(OSError):
-                sock.close()
-            if conn is not None:
+            if conn is None:
+                with contextlib.suppress(OSError):
+                    sock.close()
+            else:
+                # Closed on the step thread once the connection is: a send
+                # still under way must not find the descriptor reused.
+                with contextlib.suppress(OSError):
+                    sock.shutdown(socket.SHUT_RDWR)
                 with self._cond:
                     self._leave(conn)
                     self._cond.notify_all()
@@ -273,7 +283,6 @@ class WorkerServer:
             self._refuse(sock, request_id, "the hello carries no valid token")
             return None
         sock.settimeout(None)
-        _bound_sends(sock, _SEND_TIMEOUT)
         peer_pid = _peer_pid(sock)
         with self._cond:
             if self._stopping:
@@ -416,7 +425,7 @@ class WorkerServer:
             return
         try:
             with conn.send_lock:
-                wire.send(conn.sock, kind, request_id, payload)
+                _send_within(conn.sock, wire.encode(kind, request_id, payload), _SEND_TIMEOUT)
         except OSError as exc:
             # The reader sees the socket end and closes the connection.
             logger.warning(
@@ -436,16 +445,12 @@ class WorkerServer:
                 leaving, self._leaving = self._leaving, []
                 joining, self._joining = self._joining, []
                 resets, self._resets = self._resets, []
-            self._step_started = time.monotonic()
-            try:
-                for conn in leaving:
-                    self._guarded(self._close, conn)
-                for conn in joining:
-                    self._guarded(self._open_conn, conn)
-                for conn, request_id in resets:
-                    self._guarded(self._reset, conn, request_id)
-            finally:
-                self._step_started = None
+            for conn in leaving:
+                self._guarded(self._close, conn)
+            for conn in joining:
+                self._guarded(self._open_conn, conn)
+            for conn, request_id in resets:
+                self._guarded(self._reset, conn, request_id)
             if leaving or joining or resets:
                 continue
             batch = self._take_batch()
@@ -461,13 +466,20 @@ class WorkerServer:
                     self._cond.wait(_STOP_POLL)
 
     def _guarded(self, call: Any, conn: _Conn, *args: Any) -> None:
-        """Run one connection's open, close, or reset; a failure closes that connection alone."""
+        """Run one connection's open, close, or reset; a failure closes that connection alone.
+
+        Each call is timed on its own for the stuck check, so many sessions
+        opening at once do not add up to one long step.
+        """
+        self._step_started = time.monotonic()
         try:
             call(conn, *args)
         except Exception:
             logger.exception("a session's open, close, or reset failed; closing it", slot=conn.slot)
             with contextlib.suppress(OSError):
                 conn.sock.shutdown(socket.SHUT_RDWR)
+        finally:
+            self._step_started = None
 
     def _take_batch(self) -> list[_Request]:
         """Take the next batch off the queue, waiting out the batch window first."""
@@ -488,7 +500,13 @@ class WorkerServer:
                     ready = self._ready()
             now = time.monotonic()
             expired = [r for r in self._waiting if r.deadline is not None and r.deadline <= now]
-            batch = [r for r in ready if r not in expired][: self._max_batch]
+            candidates = [r for r in ready if r not in expired]
+            if candidates and candidates[0].conn.slot in self._solo:
+                # A slot whose requests raise on their own is stepped alone
+                # until one succeeds, so its batch-mates do not pay for it.
+                batch = candidates[:1]
+            else:
+                batch = [r for r in candidates if r.conn.slot not in self._solo][: self._max_batch]
             taken = set(map(id, batch + expired))
             self._waiting = [r for r in self._waiting if id(r) not in taken]
         for request in expired:
@@ -536,6 +554,8 @@ class WorkerServer:
     def _close(self, conn: _Conn) -> None:
         with self._cond:
             self._open.discard(conn)
+        self._solo.discard(conn.slot)
+        self._last_stepped.pop(conn.slot, None)
         if conn.opened:
             conn.opened = False
             try:
@@ -543,7 +563,11 @@ class WorkerServer:
             except Exception:
                 logger.exception("session_closed() raised", slot=conn.slot)
             logger.info("session closed", slot=conn.slot, generation=conn.generation)
-        conn.carrier.close()
+        try:
+            conn.carrier.close()
+        finally:
+            with conn.send_lock, contextlib.suppress(OSError):
+                conn.sock.close()
 
     def _reset(self, conn: _Conn, request_id: int) -> None:
         if conn.closed:
@@ -577,7 +601,14 @@ class WorkerServer:
             # The whole step raised: run each request alone, so the error
             # lands on the request that causes it and not on its batch-mates.
             logger.warning("a batched step raised; stepping its requests one at a time")
-            outputs = [self._step([request])[0][0] for request in batch]
+            outputs = []
+            for request in batch:
+                (output,), alone_raised = self._step([request])
+                if alone_raised:
+                    self._solo.add(request.conn.slot)
+                outputs.append(output)
+        elif not raised and len(batch) == 1:
+            self._solo.discard(batch[0].conn.slot)
         ran = time.monotonic() - started
         for request, output in zip(batch, outputs, strict=True):
             request.payload = None
@@ -600,6 +631,9 @@ class WorkerServer:
         On a raise every request's output is the exception.
         """
         requests = [WorkerRequest(r.conn.slot, r.conn.generation, r.payload) for r in batch]
+        now = time.monotonic()
+        for request in batch:
+            self._last_stepped[request.conn.slot] = now
         try:
             outputs = self._worker.step(requests)
             if not isinstance(outputs, list | tuple) or len(outputs) != len(batch):
@@ -617,15 +651,19 @@ class WorkerServer:
         return list(outputs), False
 
     def failing(self, threshold: int) -> bool:
-        """Whether steps keep raising for more than one session, as on a broken GPU.
+        """Whether every session stepping keeps raising, as on a broken GPU.
 
-        *threshold* steps in a row must have raised, for at least two sessions
-        between them, or for the one session open: one session whose own input
-        keeps raising does not make the worker failing for the others.
+        *threshold* steps in a row must have raised, and they must have raised
+        for every session that stepped in the last minute: a session whose own
+        input keeps raising while another steps fine does not make the worker
+        failing. With one session stepping, its raises alone cannot be told
+        from a broken GPU, and count.
         """
         if self.failed_steps < threshold:
             return False
-        return len(self._failing_slots) >= 2 or len(self._open) <= 1
+        recent = time.monotonic() - _ACTIVE_WINDOW
+        active = {slot for slot, when in self._last_stepped.items() if when >= recent}
+        return active <= self._failing_slots
 
     def _answer(self, request: _Request, output: Any) -> None:
         conn = request.conn
@@ -670,15 +708,29 @@ class WorkerStopping(WorkerCrashed, ModelUnavailable):
     """The answer to a request still queued when the worker was stopped."""
 
 
-def _bound_sends(sock: socket.socket, seconds: float) -> None:
-    """Make a send on *sock* fail after *seconds*, leaving its reads blocking."""
-    whole = int(seconds)
-    with contextlib.suppress(OSError):
-        sock.setsockopt(
-            socket.SOL_SOCKET,
-            socket.SO_SNDTIMEO,
-            _TIMEVAL.pack(whole, int((seconds - whole) * 1_000_000)),
-        )
+def _send_within(sock: socket.socket, data: bytes, seconds: float) -> None:
+    """Send all of *data* within *seconds* in all, or raise ``TimeoutError``.
+
+    Non-blocking sends against one deadline, so a session that reads a little
+    now and then cannot stretch one frame past it; the socket's own reads stay
+    blocking for its reader.
+    """
+    view = memoryview(data)
+    deadline = time.monotonic() + seconds
+    poller = select.poll()
+    poller.register(sock, select.POLLOUT)
+    while view:
+        try:
+            sent = sock.send(view, socket.MSG_DONTWAIT)
+        except BlockingIOError:
+            sent = 0
+        view = view[sent:]
+        if not view:
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"the session took no answer for {seconds} s")
+        poller.poll(remaining * 1000)
 
 
 def _peer_pid(sock: socket.socket) -> int:
