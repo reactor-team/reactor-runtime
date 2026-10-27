@@ -7,7 +7,14 @@ from conftest import FakePeer
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from reactor_runtime.core import ClientStatsBatch, Connection, ConnId, InputFrame, ReplyRoute
+from reactor_runtime.core import (
+    ClientStatsBatch,
+    Connection,
+    ConnId,
+    DecodedStep,
+    InputFrame,
+    ReplyRoute,
+)
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.transport import (
@@ -85,6 +92,11 @@ class FakeRunner:
 
     def message_received(
         self, conn_id: ConnId, payload: bytes | str, version: ProtocolVersion, channel: Channel
+    ) -> None:
+        pass
+
+    def decoded_step_received(
+        self, conn_id: ConnId, step: DecodedStep, version: ProtocolVersion
     ) -> None:
         pass
 

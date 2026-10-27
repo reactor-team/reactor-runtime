@@ -2,6 +2,7 @@ import asyncio
 from collections.abc import Callable, Mapping
 from typing import Any
 
+import av
 import numpy as np
 import pytest
 from conftest import FakePeer
@@ -10,6 +11,7 @@ from reactor_runtime.core import (
     ClientStatsBatch,
     Connection,
     ConnId,
+    DecodedStep,
     InputFrame,
     ReplyRoute,
     TrackDirection,
@@ -37,7 +39,7 @@ from reactor_runtime.transport.webrtc.connection import WebRTCConnection
 from reactor_runtime.transport.webrtc.metrics import WebRtcMetrics
 from reactor_runtime.transport.webrtc.signaling import IceCandidate
 from reactor_runtime.transport.webrtc.stats import OutboundMediaHealth, PeerStats, TrackStat
-from reactor_wire.v1 import control_pb2, platform_pb2
+from reactor_wire.v1 import control_pb2, data_pb2, platform_pb2, step_pb2
 
 
 class FakeSink:
@@ -47,6 +49,7 @@ class FakeSink:
         self.opened: list[ConnId] = []
         self.closed: list[ConnId] = []
         self.messages: list[tuple[ConnId, bytes | str]] = []
+        self.steps: list[tuple[ConnId, DecodedStep]] = []
         self.media: list[tuple[ConnId, str]] = []
         self.keepalives: list[ConnId] = []
         self.client_stats: list[tuple[ConnId, ClientStatsBatch]] = []
@@ -63,6 +66,11 @@ class FakeSink:
         self, conn_id: ConnId, payload: bytes | str, version: ProtocolVersion, channel: Channel
     ) -> None:
         self.messages.append((conn_id, payload))
+
+    def decoded_step_received(
+        self, conn_id: ConnId, step: DecodedStep, version: ProtocolVersion
+    ) -> None:
+        self.steps.append((conn_id, step))
 
     def command_received(
         self,
@@ -343,6 +351,42 @@ async def test_sink_callbacks_are_wired(
     assert sink.media == [(ConnId(7), "webcam")]
     assert sink.keepalives == [ConnId(7)]
     fake_peer.fire_disconnect()
+
+
+async def test_a_decoded_step_reaches_the_sink_with_the_connection_id(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    sink = FakeSink()
+    acceptor = _acceptor(sink, fake_peer, factory_for)
+    await _negotiate(acceptor, ConnId(7), SdpOffer("offer"), out_av_tracks)
+    fake_peer.protocol_version = ProtocolVersion.V1
+    encoder = av.CodecContext.create("libx264", "w")
+    encoder.width, encoder.height, encoder.pix_fmt = 32, 32, "yuv420p"
+    picture = av.VideoFrame.from_ndarray(np.zeros((32, 32, 3), np.uint8), format="rgb24")
+    packets = [bytes(p) for p in [*encoder.encode(picture), *encoder.encode(None)]]
+    frame = step_pb2.Frame(
+        encoding=step_pb2.FRAME_ENCODING_H264, dtype="uint8", shape=[32, 32, 3], data=packets[0]
+    )
+    _, request = V1Codec().encode(
+        data_pb2.DataClientMessage(
+            request_id="r1",
+            request_step=step_pb2.RequestStep(
+                media_input=[step_pb2.TrackFrames(track="webcam", frames=[frame])]
+            ),
+        )
+    )
+
+    fake_peer.fire_message(request)
+    for _ in range(200):
+        if sink.steps:
+            break
+        await asyncio.sleep(0.01)
+
+    ((conn_id, step),) = sink.steps
+    assert (conn_id, step.payload, list(step.pictures)) == (ConnId(7), request, [(0, 0)])
+    assert sink.messages == []
 
 
 async def test_client_stats_reach_the_sink_with_the_connection_id(

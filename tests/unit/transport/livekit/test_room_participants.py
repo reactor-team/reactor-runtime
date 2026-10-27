@@ -9,7 +9,7 @@ from livekit import rtc
 from tests.unit.transport.livekit.test_participant_connection import FakeReader
 from tests.unit.transport.livekit.test_room_join import FakeControl, FakeRoom
 
-from reactor_runtime.core import ConnId, LiveKitConfig, LiveKitRpcMethod, ReplyRoute
+from reactor_runtime.core import ConnId, DecodedStep, LiveKitConfig, LiveKitRpcMethod, ReplyRoute
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.transport import ConnectionsExhaustedError
 from reactor_runtime.transport.livekit import room as room_module
@@ -66,6 +66,11 @@ class ParticipantControl(FakeControl):
     ) -> None:
         assert version is ProtocolVersion.V1
         self.received.append((conn_id, payload, channel))
+
+    def decoded_step_received(
+        self, conn_id: ConnId, step: DecodedStep, version: ProtocolVersion
+    ) -> None:
+        pass
 
     def command_received(
         self,

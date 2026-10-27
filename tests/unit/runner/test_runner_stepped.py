@@ -33,6 +33,7 @@ from reactor_runtime.core import (
     CompletedStep,
     ConnectionCapabilities,
     ConnId,
+    DecodedStep,
     InputFrame,
     MediaBundle,
     MediaChunk,
@@ -80,6 +81,7 @@ class StepModel(ReactorApp):
         super().__init__()
         self.notes: list[str] = []
         self.inputs: list[tuple[str, list[str], list[int]]] = []
+        self.frames: list[InputFrame] = []
         models.append(self)
 
     @event(name="note")
@@ -99,6 +101,7 @@ class StepModel(ReactorApp):
             raise ApplicationError("not now")
         webcam = cast(InputBuffer, self.camera.webcam)
         frames = webcam.try_read(webcam.available, mode=ReadMode.FIFO)
+        self.frames += frames or []
         return self.state.prompt, list(self.notes), [int(f.data[0, 0, 0]) for f in frames or []]
 
     def generate(self, input: tuple[str, list[str], list[int]]) -> Out:
@@ -684,6 +687,90 @@ async def test_a_steps_frames_are_decoded_on_the_models_thread(
     assert models[-1].inputs == [("a forest", [], [7])]
     assert threads
     assert threading.get_ident() not in threads
+
+
+def _h264_frame(**fields: Any) -> step_pb2.Frame:
+    return step_pb2.Frame(
+        encoding=step_pb2.FRAME_ENCODING_H264,
+        dtype="uint8",
+        shape=[2, 2, 3],
+        data=b"an access unit",
+        **fields,
+    )
+
+
+async def test_a_decoded_step_reads_each_encoded_frame_as_its_picture(runner: Runner) -> None:
+    conn = await _stepped(runner)
+    frames = step_pb2.TrackFrames(
+        track="webcam", frames=[_h264_frame(metadata=b"tag", capture_time_us=42), _frame(5)]
+    )
+    picture = np.full((2, 2, 3), 77, dtype=np.uint8)
+    runner.decoded_step_received(
+        conn.id,
+        DecodedStep(payload=_request_step("r1", media_input=[frames]), pictures={(0, 0): picture}),
+        V1,
+    )
+    await _until(lambda: len(conn.sent) == 1)
+
+    assert conn.replies()[0].step_result.step == 1
+    assert models[-1].inputs == [("a forest", [], [77, 5])]
+    decoded, raw = models[-1].frames
+    # The picture itself, not a copy, with what its encoded frame carried.
+    assert decoded.data is picture
+    assert (decoded.metadata, decoded.capture_time_us) == (b"tag", 42)
+    assert (raw.metadata, raw.capture_time_us) == (None, None)
+
+
+async def test_an_encoded_frame_for_an_audio_track_is_refused(
+    monkeypatch: pytest.MonkeyPatch, register_model: Callable[[type], None]
+) -> None:
+    class Microphone(MediaInput):
+        mic: Audio
+
+    class ListeningStepModel(StepModel):
+        microphone: Microphone
+
+    register_model(ListeningStepModel)
+    runner = await _runner(monkeypatch, ListeningStepModel)
+    try:
+        conn = await _stepped(runner)
+        frames = step_pb2.TrackFrames(track="mic", frames=[_h264_frame()])
+        runner.decoded_step_received(
+            conn.id,
+            DecodedStep(
+                payload=_request_step("r1", media_input=[frames]),
+                pictures={(0, 0): np.zeros((2, 2, 3), dtype=np.uint8)},
+            ),
+            V1,
+        )
+        await _until(lambda: len(conn.sent) == 1)
+
+        assert _refusal(conn.replies()[0]) == (
+            "media_input[0].frames[0]: an encoded video frame cannot go to audio track 'mic'"
+        )
+        assert conn.replies()[0].step_result.entry == "media_input[0]"
+        assert models[-1].inputs == []
+    finally:
+        await runner.stop()
+
+
+async def test_a_decoded_step_keeps_its_place_behind_a_command_sent_before_it(
+    runner: Runner,
+) -> None:
+    conn = await _stepped(runner)
+    _send(runner, conn, _command("c1", "note", text="first"))
+    frames = step_pb2.TrackFrames(track="webcam", frames=[_h264_frame()])
+    runner.decoded_step_received(
+        conn.id,
+        DecodedStep(
+            payload=_request_step("r1", media_input=[frames]),
+            pictures={(0, 0): np.full((2, 2, 3), 3, dtype=np.uint8)},
+        ),
+        V1,
+    )
+    await _until(lambda: any(r.WhichOneof("payload") == "step_result" for r in conn.replies()))
+
+    assert models[-1].inputs == [("a forest", ["first"], [3])]
 
 
 async def test_a_stepped_session_drops_live_track_frames(runner: Runner) -> None:

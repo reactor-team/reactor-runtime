@@ -401,6 +401,9 @@ class WebRTCAcceptor(ConnectionAcceptor):
             conn.on_message(
                 lambda payload, ver, ch: self._sink.message_received(conn_id, payload, ver, ch)
             )
+            conn.on_decoded_step(
+                lambda step, ver: self._sink.decoded_step_received(conn_id, step, ver)
+            )
             conn.on_media(lambda track, frame: self._sink.media_received(conn_id, track, frame))
             conn.on_ping(lambda: self._sink.keepalive(conn_id))
             conn.on_client_stats(lambda batch: self._sink.client_stats_received(conn_id, batch))

@@ -9,6 +9,7 @@ from reactor_runtime.core import (
     ConnectionCapabilities,
     ConnectionSink,
     ConnId,
+    DecodedStep,
     InputFrame,
     MediaChunk,
     ReplyRoute,
@@ -65,6 +66,7 @@ class FakeSink:
     def __init__(self) -> None:
         self.opened: list[ConnId] = []
         self.messages: list[tuple[ConnId, bytes | str, Channel]] = []
+        self.steps: list[tuple[ConnId, DecodedStep]] = []
         self.answers: list[tuple[ConnId, dict[str, str]]] = []
 
     def connection_opened(self, conn: Connection) -> bool:
@@ -78,6 +80,11 @@ class FakeSink:
         self, conn_id: ConnId, payload: bytes | str, version: ProtocolVersion, channel: Channel
     ) -> None:
         self.messages.append((conn_id, payload, channel))
+
+    def decoded_step_received(
+        self, conn_id: ConnId, step: DecodedStep, version: ProtocolVersion
+    ) -> None:
+        self.steps.append((conn_id, step))
 
     def command_received(
         self,

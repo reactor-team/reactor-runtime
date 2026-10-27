@@ -38,6 +38,7 @@ Exact counts, which must be 0 on every cycle:
 | `live_client_stats` | Connections the runtime still keeps client-stats state for, with no client connected. |
 | `live_participants` | Room participant connections still alive after a collection, with no participant in the room. |
 | `live_step_requests` | Step requests whose order the runtime still keeps for a connection, or whose failure the model still keeps, with no client connected. |
+| `live_step_decoders` | H.264 decoders a connection opened for its step frames, still alive after a collection, with no client connected. |
 | `tasks` | asyncio tasks on the runtime's loop; must never rise above the reading taken before the first client. |
 | `child_processes` | Processes the runtime started, at any depth, an exited one nobody reaped included; must never rise above the reading taken before the first client. |
 | `shm_blocks`, `shm_bytes` | The distributed package's shared-memory blocks in `/dev/shm` (`rr*`); must never rise above the first reading. Judged only for a runtime with worker processes, and Linux only: elsewhere they are not files, and the run says they were not measured. The count covers the whole machine, which a CI runner gives to one scenario; run locally, it assumes nothing else on the machine uses the distributed package meanwhile. |

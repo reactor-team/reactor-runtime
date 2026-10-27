@@ -2,9 +2,17 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
+import numpy as np
 import pytest
 
-from reactor_runtime.core import ClientStatsBatch, Connection, ConnId, InputFrame, ReplyRoute
+from reactor_runtime.core import (
+    ClientStatsBatch,
+    Connection,
+    ConnId,
+    DecodedStep,
+    InputFrame,
+    ReplyRoute,
+)
 from reactor_runtime.message_gateway import (
     InboundCommand,
     InboundStep,
@@ -46,6 +54,11 @@ class FakeSink:
 
     def message_received(
         self, conn_id: ConnId, payload: bytes | str, version: ProtocolVersion, channel: Channel
+    ) -> None:
+        pass
+
+    def decoded_step_received(
+        self, conn_id: ConnId, step: DecodedStep, version: ProtocolVersion
     ) -> None:
         pass
 
@@ -390,6 +403,34 @@ async def test_a_step_request_is_decoded_and_handed_to_the_step_handler() -> Non
             received_at=_ARRIVED,
         )
     ]
+
+
+async def test_a_step_request_carries_the_pictures_its_transport_decoded() -> None:
+    steps: list[InboundStep] = []
+
+    async def on_step(step: InboundStep) -> None:
+        steps.append(step)
+
+    async def on_command(command: InboundCommand) -> None:
+        raise AssertionError("a step request is not a command")
+
+    gateway = MessageGateway(sink=FakeSink(), on_command=on_command, on_step=on_step)
+    pictures = {(0, 0): np.zeros((2, 2, 3), dtype=np.uint8)}
+    _, frame = V1Codec().encode(
+        data_pb2.DataClientMessage(request_id="s-2", request_step=step_pb2.RequestStep())
+    )
+    await gateway.handle(
+        ConnId(4),
+        frame,
+        Channel.DATA,
+        ProtocolVersion.V1,
+        received_at=_ARRIVED,
+        pictures=pictures,
+    )
+
+    (step,) = steps
+    assert step.request_id == "s-2"
+    assert step.pictures is pictures
 
 
 async def test_a_step_request_without_a_step_handler_is_dropped() -> None:

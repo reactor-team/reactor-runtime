@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import contextlib
+import itertools
 import json
 import os
 import socket
@@ -27,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import av
 import numpy as np
 import psutil
 import reactor_webrtc as rw
@@ -775,10 +777,16 @@ class StepClient(BareClient):
 
     It requests :data:`STEPS_PER_CYCLE` steps one after another, each setting
     the model's effect through ``state`` and carrying one small webcam frame in
-    ``media_input``, waits for each step's result, and closes. A stepped
-    session streams nothing and drops live input, so nothing else is sent.
-    :attr:`unanswered` lists the requests that got no result or a failed one.
+    ``media_input``, raw on even steps and H.264 on odd ones, waits for each
+    step's result, and closes. Every other client publishes the webcam first and
+    unpublishes it before closing, so the runtime's H.264 decoder for the track
+    is opened and released both ways: by the publish and the unpublish, and by
+    the first encoded frame and the close. A stepped session streams nothing and
+    drops live input, so nothing else is sent. :attr:`unanswered` lists the
+    requests that got no result or a failed one.
     """
+
+    _clients = itertools.count()
 
     def __init__(self, runtime: RuntimeProcess, session_id: str) -> None:
         """Create a client for *session_id*; nothing connects until :meth:`run`."""
@@ -795,8 +803,12 @@ class StepClient(BareClient):
         await self._connect()
         ran = 0
         unanswered: list[str] = []
+        publishes = next(self._clients) % 2 == 0
         try:
-            webcam = _raw_frame(np.full((48, 64, 3), 128, dtype=np.uint8))
+            if publishes:
+                self._send_track(publish_track=track_pb2.PublishTrack(name="webcam"))
+            webcam = np.full((48, 64, 3), 128, dtype=np.uint8)
+            frames = (_raw_frame(webcam), _h264_frame(webcam))
             for n in range(STEPS_PER_CYCLE):
                 request_id = f"step-{n}"
                 state = struct_pb2.Struct()
@@ -807,7 +819,9 @@ class StepClient(BareClient):
                         kind=_REQUEST,
                         request_step=step_pb2.RequestStep(
                             state=state,
-                            media_input=[step_pb2.TrackFrames(track="webcam", frames=[webcam])],
+                            media_input=[
+                                step_pb2.TrackFrames(track="webcam", frames=[frames[n % 2]])
+                            ],
                         ),
                     ).SerializeToString(),
                     binary=True,
@@ -819,11 +833,20 @@ class StepClient(BareClient):
                     unanswered.append(f"request_step ({request_id}): {result.error}")
                 else:
                     ran += 1
+            if publishes:
+                self._send_track(unpublish_track=track_pb2.UnpublishTrack(name="webcam"))
             with self._lock:
                 self.unanswered = [*unanswered, *self._failed]
             return ran
         finally:
             self.close()
+
+    def _send_track(self, **track: Any) -> None:
+        """Send a track verb on the control channel; its answer is not awaited."""
+        self._control.send(
+            control_pb2.ControlClientMessage(kind=_REQUEST, **track).SerializeToString(),
+            binary=True,
+        )
 
     async def _result(self, request_id: str) -> step_pb2.StepResult | None:
         deadline = time.monotonic() + _STEP_WAIT_S
@@ -854,6 +877,21 @@ class StepClient(BareClient):
         if message.WhichOneof("payload") == "step_result":
             with self._lock:
                 self._results[message.request_id] = message.step_result
+
+
+def _h264_frame(rgb: np.ndarray) -> step_pb2.Frame:
+    """Return *rgb* as one H.264 wire frame: a keyframe, so it starts a step's stream alone."""
+    encoder = av.CodecContext.create("libx264", "w")
+    encoder.height, encoder.width = rgb.shape[:2]
+    encoder.pix_fmt = "yuv420p"
+    picture = av.VideoFrame.from_ndarray(rgb, format="rgb24")
+    (packet,) = [*encoder.encode(picture), *encoder.encode(None)]
+    return step_pb2.Frame(
+        encoding=step_pb2.FRAME_ENCODING_H264,
+        dtype="uint8",
+        shape=list(rgb.shape),
+        data=bytes(packet),
+    )
 
 
 def _raw_frame(rgb: np.ndarray) -> step_pb2.Frame:
@@ -1180,6 +1218,7 @@ class ResourceSampler:
                 shm_bytes=shm[1] if shm else None,
                 executor_threads=reading.get("executor_threads", 0),
                 live_step_requests=reading.get("step_requests", 0),
+                live_step_decoders=reading["live"].get("step_decoders", 0),
             )
         self._baseline.freed_by_gc = freed
         self._baseline.holding_after_stop = holding

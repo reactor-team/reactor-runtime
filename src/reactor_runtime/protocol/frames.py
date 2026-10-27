@@ -189,8 +189,17 @@ def decode_frame(frame: step_pb2.Frame, kind: TrackKind) -> InputFrame:
         FrameEncodingError: The encoding is unspecified or unknown, or the
             frame does not fit it.
     """
+    return decoded_frame(frame, _codec(frame).decode(frame, kind))
+
+
+def decoded_frame(frame: step_pb2.Frame, data: npt.NDArray[Any]) -> InputFrame:
+    """Return *data*, the samples a transport decoded *frame* to, as the frame a model reads.
+
+    The frame's metadata and capture time ride along unchanged, as they do
+    through :func:`decode_frame`.
+    """
     return InputFrame(
-        data=_codec(frame).decode(frame, kind),
+        data=data,
         metadata=frame.metadata if frame.HasField("metadata") else None,
         capture_time_us=frame.capture_time_us if frame.HasField("capture_time_us") else None,
     )

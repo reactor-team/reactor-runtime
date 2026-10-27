@@ -13,6 +13,7 @@ from reactor_runtime.core import (
     ConnectionOrigin,
     ConnectionOriginSource,
     ConnId,
+    DecodedStep,
     InputFrame,
     MediaBundle,
     MediaChunk,
@@ -259,7 +260,7 @@ async def test_a_client_stats_frame_goes_to_on_client_stats_not_on_message(
     assert messages == [ping]
 
 
-async def test_an_encoded_step_reaches_on_message_decoded_or_is_refused_to_the_client(
+async def test_an_encoded_step_reaches_on_decoded_step_or_is_refused_to_the_client(
     fake_peer: FakePeer,
     factory_for: Callable[..., WebRtcPeerFactory],
     out_av_tracks: TrackMap,
@@ -267,7 +268,9 @@ async def test_an_encoded_step_reaches_on_message_decoded_or_is_refused_to_the_c
     conn = await _connect(fake_peer, factory_for(fake_peer), out_av_tracks)
     fake_peer.protocol_version = ProtocolVersion.V1
     messages: list[bytes | str] = []
+    steps: list[DecodedStep] = []
     conn.on_message(lambda payload, version, channel: messages.append(payload))
+    conn.on_decoded_step(lambda step, version: steps.append(step))
 
     codec = av.CodecContext.create("libx264", "w")
     codec.width, codec.height, codec.pix_fmt = 32, 32, "yuv420p"
@@ -290,21 +293,19 @@ async def test_an_encoded_step_reaches_on_message_decoded_or_is_refused_to_the_c
         )
         return payload
 
-    fake_peer.fire_message(step("data_1", packets[0]))
+    sent = step("data_1", packets[0])
+    fake_peer.fire_message(sent)
     fake_peer.fire_message(step("data_2", b"\x00\x00\x01\x41 not an idr"))
     for _ in range(100):
-        if len(messages) == 1 and len(fake_peer.messages) == 1:
+        if len(steps) == 1 and len(fake_peer.messages) == 1:
             break
         await asyncio.sleep(0.01)
 
-    (delivered,) = messages
-    assert isinstance(delivered, bytes)
-    decoded = data_pb2.DataClientMessage.FromString(delivered)
-    (frame,) = decoded.request_step.media_input[0].frames
-    assert decoded.request_id == "data_1"
-    assert frame.encoding == step_pb2.FRAME_ENCODING_RAW
-    assert list(frame.shape) == [32, 32, 3]
-    assert len(frame.data) == 32 * 32 * 3
+    assert messages == []
+    (delivered,) = steps
+    assert delivered.payload == sent
+    assert list(delivered.pictures) == [(0, 0)]
+    assert delivered.pictures[0, 0].shape == (32, 32, 3)
     (refused,) = fake_peer.messages
     assert isinstance(refused, bytes)
     answer = data_pb2.DataServerMessage.FromString(refused)

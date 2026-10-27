@@ -210,6 +210,7 @@ def _step_requests(runner: Runner) -> int:
 
 
 def _live_transport_objects() -> dict[str, int]:
+    from reactor_runtime.transport.step_frames import TrackDecoder
     from reactor_runtime.transport.webrtc.connection import WebRTCConnection
     from reactor_runtime.transport.webrtc.pacer import MediaPacer
     from reactor_runtime.transport.webrtc.peer import WebRTCPeer
@@ -220,7 +221,7 @@ def _live_transport_objects() -> dict[str, int]:
 
         participant = ParticipantConnection
 
-    counts = {"connections": 0, "peers": 0, "pacers": 0, "participants": 0}
+    counts = {"connections": 0, "peers": 0, "pacers": 0, "participants": 0, "step_decoders": 0}
     for obj in gc.get_objects():
         if isinstance(obj, WebRTCConnection):
             counts["connections"] += 1
@@ -228,6 +229,8 @@ def _live_transport_objects() -> dict[str, int]:
             counts["peers"] += 1
         elif isinstance(obj, MediaPacer):
             counts["pacers"] += 1
+        elif isinstance(obj, TrackDecoder):
+            counts["step_decoders"] += 1
         elif participant is not None and isinstance(obj, participant):
             counts["participants"] += 1
     return counts

@@ -21,6 +21,7 @@ from reactor_runtime.core import (
     ConnectionCapabilities,
     ConnectionOrigin,
     ConnId,
+    DecodedStep,
     FrameStage,
     InputFrame,
     MediaChunk,
@@ -103,9 +104,10 @@ class WebRTCConnection:
         )
 
         self._on_message: Callable[[bytes | str, ProtocolVersion, Channel], None] | None = None
+        self._on_decoded_step: Callable[[DecodedStep, ProtocolVersion], None] | None = None
         # Decodes the encoded frames of a step request before it goes up, in
         # arrival order; a request it cannot decode is answered here.
-        self._steps = StepFrameGate(self._forward_message, self.send_message)
+        self._steps = StepFrameGate(self._forward_message, self._forward_step, self.send_message)
         self._on_media: Callable[[str, InputFrame], None] | None = None
         self._on_ping: Callable[[], None] | None = None
         self._on_client_stats: Callable[[ClientStatsBatch], None] | None = None
@@ -193,11 +195,18 @@ class WebRTCConnection:
     def on_message(self, callback: Callable[[bytes | str, ProtocolVersion, Channel], None]) -> None:
         """Register the sink for inbound frames, with the codec version and channel.
 
-        A step request whose media carries encoded frames reaches it with
-        those frames decoded to raw ones; one that does not decode is refused
-        to the client and does not reach it.
+        A step request whose media carries encoded frames goes to
+        :meth:`on_decoded_step` instead, once decoded; one that does not decode
+        is refused to the client and reaches neither.
         """
         self._on_message = callback
+
+    def on_decoded_step(self, callback: Callable[[DecodedStep, ProtocolVersion], None]) -> None:
+        """Register the sink for step requests whose encoded frames were decoded.
+
+        Each arrives in its place among the frames :meth:`on_message` gets.
+        """
+        self._on_decoded_step = callback
 
     def on_media(self, callback: Callable[[str, InputFrame], None]) -> None:
         """Register the sink for inbound media frames, by track name."""
@@ -351,6 +360,10 @@ class WebRTCConnection:
     ) -> None:
         if self._on_message is not None:
             self._on_message(payload, version, channel)
+
+    def _forward_step(self, step: DecodedStep, version: ProtocolVersion) -> None:
+        if self._on_decoded_step is not None:
+            self._on_decoded_step(step, version)
 
     def _handle_media(self, track: str, frame: InputFrame) -> None:
         if self._on_media is not None:
