@@ -8,8 +8,10 @@ shared memory as it does between processes.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import pickle
+import shutil
 import socket
 import threading
 import time
@@ -19,14 +21,16 @@ from typing import Any
 import numpy as np
 import pytest
 
-from reactor_runtime.distributed.ipc import SharedSlot, pack
+from reactor_runtime.distributed.ipc import SharedSlot
 from reactor_runtime.model_worker import (
     ModelWorker,
     WorkerClient,
+    WorkerError,
     WorkerLost,
     WorkerRejected,
     WorkerRequest,
     WorkerTimeout,
+    codec,
     wire,
 )
 from reactor_runtime.model_worker.transport import UnixShmTransport, WorkerUnreachable
@@ -41,11 +45,12 @@ class Recorder(ModelWorker):
     """Double each payload's array and record every call the server makes."""
 
     max_batch = 4
+    signals = frozenset({"preempt"})
 
     def load(self, config_path: Path | None) -> None:
         self.batches: list[list[int]] = []
         self.events: list[tuple[str, int, int]] = []
-        self.signals: list[tuple[int, str, Any]] = []
+        self.received: list[tuple[int, str, Any]] = []
         self.gate = threading.Event()
         self.gate.set()
         self.entered = threading.Event()
@@ -75,7 +80,7 @@ class Recorder(ModelWorker):
 
     def signal(self, slot: int, name: str, payload: Any) -> None:
         with self.lock:
-            self.signals.append((slot, name, payload))
+            self.received.append((slot, name, payload))
 
 
 def _until(check: Any, within: float = 5.0) -> None:
@@ -107,7 +112,7 @@ def test_the_worker_sees_request_arrays_read_only(serve: Any) -> None:
             return [None]
 
     served: Any = serve(Writes())
-    with pytest.raises(ValueError, match="read-only"):
+    with pytest.raises(WorkerError, match="read-only"):
         served.client(0).step(np.zeros(1 << 16, dtype=np.uint8))
 
 
@@ -250,9 +255,11 @@ def test_an_output_that_is_an_exception_fails_that_request_alone(serve: Any) -> 
     for thread in [hold, *threads]:
         thread.join(5)
     assert [0, 1] in worker.batches
-    assert isinstance(results["failing"], BoomError)
-    assert "slot 0 failed" in str(results["failing"])
-    assert any("Raised in the model worker" in note for note in results["failing"].__notes__)
+    failure = results["failing"]
+    assert isinstance(failure, WorkerError)
+    assert failure.type_name == "test_model_worker_protocol.BoomError"
+    assert failure.message == "slot 0 failed"
+    assert "BoomError" in failure.worker_traceback
     np.testing.assert_array_equal(results["fine"]["x"], np.ones(3) * 2)
     # The failure ended nothing: the same client steps again.
     np.testing.assert_array_equal(failing.step(np.ones(2))["x"], np.ones(2) * 2)
@@ -261,7 +268,7 @@ def test_an_output_that_is_an_exception_fails_that_request_alone(serve: Any) -> 
 def test_a_step_that_raises_fails_its_batch_and_the_worker_goes_on(serve: Any) -> None:
     served: Any = serve(Recorder())
     client = served.client(0)
-    with pytest.raises(BoomError, match="whole step failed"):
+    with pytest.raises(WorkerError, match="BoomError: the whole step failed"):
         client.step({"raise": True})
     np.testing.assert_array_equal(client.step(np.ones(2))["x"], np.ones(2) * 2)
 
@@ -276,19 +283,29 @@ def test_a_step_returning_the_wrong_count_fails_every_request(serve: Any) -> Non
         served.client(0).step(1)
 
 
-def test_an_output_that_does_not_pickle_fails_that_request(serve: Any) -> None:
+def test_an_output_that_does_not_travel_fails_that_request(serve: Any) -> None:
     class Unpicklable(ModelWorker):
         def step(self, requests: list[WorkerRequest]) -> list[Any]:
             return [threading.Lock()]
 
     served: Any = serve(Unpicklable())
-    with pytest.raises(TypeError):
+    with pytest.raises(WorkerError, match="TypeError: a lock does not travel"):
         served.client(0).step(1)
-    with pytest.raises(TypeError):
-        served.client(0 + 1).step(1)
+    with pytest.raises(WorkerError, match="TypeError"):
+        served.client(1).step(1)
 
 
-def test_an_exception_that_does_not_pickle_arrives_as_a_runtime_error(serve: Any) -> None:
+def test_a_payload_that_does_not_travel_is_refused_before_it_is_sent(serve: Any) -> None:
+    served: Any = serve(Recorder())
+    client = served.client(0)
+    with pytest.raises(TypeError, match="does not travel"):
+        client.step(object())
+    with pytest.raises(TypeError, match="dtype object"):
+        client.step(np.array([object()], dtype=object))
+    assert client.step(np.ones(2))["slot"] == 0
+
+
+def test_an_exception_whatever_it_holds_arrives_by_name_and_message(serve: Any) -> None:
     class OddError(Exception):
         def __init__(self, lock: Any) -> None:
             super().__init__("odd")
@@ -299,7 +316,7 @@ def test_an_exception_that_does_not_pickle_arrives_as_a_runtime_error(serve: Any
             return [OddError(threading.Lock())]
 
     served: Any = serve(Raises())
-    with pytest.raises(RuntimeError, match="OddError: odd"):
+    with pytest.raises(WorkerError, match="OddError: odd"):
         served.client(0).step(1)
 
 
@@ -326,6 +343,21 @@ def _raw(served: Any, slot: int) -> tuple[socket.socket, str]:
     return sock, wire.from_json(payload)["request_prefix"]
 
 
+def _header(tree: Any, *, block: str = "OWN", spans: list[list[int]] | None = None) -> bytes:
+    """A request header written by hand, as a hostile or broken session might.
+
+    ``OWN`` stands for the session's own input block, filled in once connected.
+    """
+    return json.dumps({"v": 1, "block": block, "spans": spans or [], "tree": tree}).encode()
+
+
+def _deep(depth: int) -> Any:
+    tree: Any = 1
+    for _ in range(depth):
+        tree = {"l": [tree]}
+    return tree
+
+
 def _step_raw(sock: socket.socket, request_id: int, header: bytes) -> tuple[Kind, bytes]:
     wire.send(sock, Kind.STEP, request_id, wire.TIMEOUT.pack(5.0) + header)
     kind, got, payload = wire.recv(sock, 1 << 20)
@@ -341,7 +373,8 @@ def test_the_worker_refuses_an_oversize_request_the_client_did_not_check(serve: 
     sock, prefix = _raw(served, 0)
     slot = SharedSlot(prefix=f"{prefix}raw_")
     try:
-        kind, reason = _step_raw(sock, 1, pack(np.zeros(1 << 13, dtype=np.uint8), slot))
+        header, _ = codec.encode(np.zeros(1 << 13, dtype=np.uint8), slot)
+        kind, reason = _step_raw(sock, 1, header)
         assert kind is Kind.REJECTED
         assert b"over the 4096 limit" in reason
     finally:
@@ -352,10 +385,18 @@ def test_the_worker_refuses_an_oversize_request_the_client_did_not_check(serve: 
 @pytest.mark.parametrize(
     ("header", "reason"),
     [
-        (b"not a pickle", b"does not decode"),
-        (pickle.dumps(("blob", 1, [])), b"wrong shape"),
-        (pickle.dumps((b"\x80\x05junk", "x", [])), b"does not unpickle"),
-        (pickle.dumps((pickle.dumps(1), "rrother_0", [(0, 4)])), b"not one of this client's"),
+        (b"not json", b"not JSON"),
+        # A pickle that would run code if anything unpickled it.
+        (pickle.dumps(shutil.rmtree), b"not JSON"),
+        (json.dumps({"v": 2, "block": "x", "spans": [], "tree": 1}).encode(), b"version 1"),
+        (_header({"o": 1}), b"unknown or malformed tag"),
+        (_header({"a": ["|O", [1], 0]}, spans=[[0, 8]]), b"does not travel"),
+        (_header({"a": ["<f8", [3], 0]}, spans=[[0, 8]]), b"needs 24 bytes"),
+        (_header({"a": ["V8", [1], 0]}, spans=[[0, 8]]), b"does not travel"),
+        (_header({"b": 5}, spans=[[0, 1]]), b"span 5"),
+        (_header(_deep(80)), b"deeper than"),
+        (_header(1, block="rrother_0", spans=[[0, 4]]), b"not one of this client's"),
+        (_header(1, spans=[[-1, 4]]), b"two non-negative integers"),
     ],
 )
 def test_a_malformed_request_is_rejected_and_the_session_goes_on(
@@ -365,11 +406,12 @@ def test_a_malformed_request_is_rejected_and_the_session_goes_on(
     other = served.client(1)
     sock, prefix = _raw(served, 0)
     ok = SharedSlot(prefix=f"{prefix}ok_")
+    header = header.replace(b'"OWN"', json.dumps(f"{prefix}in").encode())
     try:
         kind, payload = _step_raw(sock, 1, header)
         assert kind is Kind.REJECTED
         assert reason in payload
-        kind, payload = _step_raw(sock, 2, pack(3, ok))
+        kind, payload = _step_raw(sock, 2, codec.encode(3, ok)[0])
         assert kind is Kind.RESULT
     finally:
         ok.close()
@@ -382,8 +424,9 @@ def test_a_span_past_the_block_is_rejected(serve: Any) -> None:
     sock, prefix = _raw(served, 0)
     slot = SharedSlot(prefix=f"{prefix}span_", initial_bytes=4096)
     try:
-        blob, name, _ = pickle.loads(pack(np.ones(8), slot))
-        kind, payload = _step_raw(sock, 1, pickle.dumps((blob, name, [(0, 1 << 20)])))
+        header = json.loads(codec.encode(np.ones(8), slot)[0])
+        header["spans"] = [[0, 1 << 20]]
+        kind, payload = _step_raw(sock, 1, json.dumps(header).encode())
         assert kind is Kind.REJECTED
         assert b"past the block" in payload
     finally:
@@ -441,9 +484,30 @@ def test_signals_reach_the_worker_while_a_step_runs(serve: Any) -> None:
     running.start()
     worker.entered.wait(5)
     client.signal("preempt", {"why": "barge"})
-    _until(lambda: worker.signals == [(3, "preempt", {"why": "barge"})])
+    _until(lambda: worker.received == [(3, "preempt", {"why": "barge"})])
     worker.gate.set()
     running.join(5)
+
+
+def test_an_unknown_signal_is_refused_by_the_client_and_dropped_by_the_worker(
+    serve: Any,
+) -> None:
+    worker = Recorder()
+    served: Any = serve(worker)
+    client = served.client(0)
+    with pytest.raises(ValueError, match="declares no signal 'shutdown'"):
+        client.signal("shutdown")
+    sock, _ = _raw(served, 1)
+    try:
+        # Unknown names, a pickle, and garbage reach no signal() and close nothing.
+        wire.send(sock, Kind.SIGNAL, 0, wire.to_json({"name": "shutdown", "payload": 1}))
+        wire.send(sock, Kind.SIGNAL, 0, pickle.dumps(("preempt", shutil.rmtree)))
+        wire.send(sock, Kind.SIGNAL, 0, b"\xff\xfe")
+        wire.send(sock, Kind.SIGNAL, 0, wire.to_json({"name": "preempt", "payload": [1, 2]}))
+        _until(lambda: worker.received == [(1, "preempt", [1, 2])])
+        assert client.step(1)["slot"] == 0
+    finally:
+        sock.close()
 
 
 def test_reset_closes_and_reopens_the_slot_with_a_new_generation(serve: Any) -> None:
@@ -595,7 +659,7 @@ def test_a_session_that_vanishes_has_its_blocks_unlinked_by_the_worker(serve: An
     served: Any = serve(worker)
     sock, prefix = _raw(served, 0)
     slot = SharedSlot(prefix=f"{prefix}gone_")
-    kind, _ = _step_raw(sock, 1, pack(np.ones(1 << 12), slot))
+    kind, _ = _step_raw(sock, 1, codec.encode(np.ones(1 << 12), slot)[0])
     assert kind is Kind.RESULT
     # The session dies without closing what it made.
     sock.close()

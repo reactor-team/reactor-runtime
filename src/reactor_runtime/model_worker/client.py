@@ -16,7 +16,6 @@ import contextlib
 import ctypes
 import itertools
 import os
-import pickle
 import secrets
 import socket
 import sys
@@ -62,7 +61,7 @@ _CONNECT_POLL = 0.2
 _HELLO_TIMEOUT = 30.0
 _RECONNECT_FIRST = 0.5
 _RECONNECT_MAX = 5.0
-# Results carry their arrays in shared memory; this bounds the pickle around them.
+# Outputs carry their arrays in shared memory; this bounds the header around them.
 _REPLY_LIMIT = 1 << 30
 
 
@@ -72,6 +71,26 @@ class WorkerRejected(ValueError):  # noqa: N818 (named for the event a caller ca
     Only the session it names is affected; the worker and every other session
     go on.
     """
+
+
+class WorkerError(RuntimeError):
+    """The model raised for this request in the worker.
+
+    Its message is ``"<type>: <message>"`` of the worker's exception. Nothing
+    of the exception object crosses: nothing on the socket is pickled, either
+    way.
+
+    Attributes:
+        type_name: The exception's qualified type, such as ``"mymodel.NoFace"``.
+        message: The exception's message.
+        worker_traceback: Its traceback in the worker, as text.
+    """
+
+    def __init__(self, type_name: str, message: str, worker_traceback: str) -> None:
+        super().__init__(f"{type_name}: {message}")
+        self.type_name = type_name
+        self.message = message
+        self.worker_traceback = worker_traceback
 
 
 class WorkerLost(WorkerCrashed, ModelUnavailable):
@@ -91,6 +110,7 @@ class _Link:
     generation: int
     max_request_bytes: int | None
     carrier: ClientCarrier
+    signals: frozenset[str] | None = None
     replies: dict[int, tuple[Kind, bytes]] = field(default_factory=dict)
     lost: WorkerLost | None = None
     closing: bool = False
@@ -125,8 +145,8 @@ class WorkerClient:
 
     Every failure is a raise from the call that sees it:
 
-    * The model's own exception for this request, re-raised from ``step()``
-      with the worker's traceback attached as a note.
+    * :class:`WorkerError` when the model raised for this request; it names
+      the worker's exception type and carries its message and traceback.
     * :class:`WorkerRejected` when the worker refused the request (it did not
       decode, was larger than the worker's ``max_request_bytes``) or the
       model's ``session_opened()`` refused the session.
@@ -280,12 +300,14 @@ class WorkerClient:
         through shared memory. The output's arrays are copies this session owns.
 
         Args:
-            payload: Anything that pickles.
+            payload: Plain values, lists, tuples, dicts, bytes, and numpy
+                arrays (see :mod:`reactor_runtime.model_worker.codec`).
             timeout: Seconds to wait for the answer; the client's step timeout
                 when omitted, and ``0`` waits without bound.
 
         Raises:
-            Exception: The model's exception for this request.
+            WorkerError: The model raised for this request.
+            TypeError: The payload holds a value that does not travel.
             WorkerRejected: The worker refused the request.
             WorkerTimeout: No answer in time; the request was cancelled.
             WorkerLost: No worker is connected.
@@ -337,11 +359,23 @@ class WorkerClient:
 
         Never blocks on the worker and never raises for a worker that is gone:
         the signal is dropped then. Safe from any thread.
+
+        Args:
+            name: One of the names the worker's ``ModelWorker.signals`` declares.
+            payload: A JSON value.
+
+        Raises:
+            ValueError: The worker declares no signal of that name.
+            TypeError: The payload is not a JSON value.
         """
         link = self._link
         if link is None:
             return
-        data = pickle.dumps((name, payload), protocol=5)
+        if link.signals is not None and name not in link.signals:
+            raise ValueError(
+                f"the model worker declares no signal {name!r}; it takes {sorted(link.signals)}"
+            )
+        data = wire.to_json({"name": name, "payload": payload})
         self._send(link, Kind.SIGNAL, 0, data, best_effort=True)
 
     def close(self) -> None:
@@ -382,9 +416,12 @@ class WorkerClient:
             link.carrier.renew()
             raise WorkerTimeout(f"the model worker gave no answer within {wait} s")
         if kind is Kind.RESULT:
-            return link.carrier.decode(reply)
+            try:
+                return link.carrier.decode(reply)
+            except ValueError as exc:
+                raise RuntimeError(f"the model worker's output did not decode: {exc}") from None
         if kind is Kind.FAILED:
-            raise _reraise(reply)
+            raise _failure(reply)
         if kind is Kind.REJECTED:
             raise WorkerRejected(reply.decode(errors="replace"))
         if kind is Kind.EXPIRED:
@@ -426,6 +463,7 @@ class WorkerClient:
             generation=int(welcome.get("generation", 1)),
             max_request_bytes=int(welcome.get("max_request_bytes", 0)) or None,
             carrier=carrier,
+            signals=frozenset(welcome["signals"]) if "signals" in welcome else None,
         )
         with self._cond:
             if self._closed:
@@ -572,18 +610,18 @@ class WorkerClient:
             self._went_down(f"worker_died: {reason}")
 
 
-def _reraise(payload: bytes) -> BaseException:
+def _failure(payload: bytes) -> Exception:
+    """The exception a FAILED answer stands for."""
     try:
-        error, text = pickle.loads(payload)
-    except Exception as exc:
-        return RuntimeError(
-            f"the model worker failed this request, and its error did not load: {exc}"
-        )
-    if not isinstance(error, BaseException):
-        return RuntimeError(f"the model worker failed this request: {error!r}")
-    with contextlib.suppress(Exception):
-        error.add_note(f"Raised in the model worker:\n{text}")
-    return error
+        failure = wire.from_json(payload)
+    except wire.ProtocolError:
+        return RuntimeError("the model worker failed this request and its answer did not decode")
+    message = str(failure.get("message", ""))
+    if failure.get("worker_lost"):
+        return WorkerLost(message)
+    return WorkerError(
+        str(failure.get("type", "Exception")), message, str(failure.get("traceback", ""))
+    )
 
 
 # glibc's mallopt option for the arena count.

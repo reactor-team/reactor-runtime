@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from echo_model import EchoModel
+from echo_model import EchoInput, EchoModel
 
 from reactor_runtime.model_worker import ModelWorker, WorkerRequest
 
@@ -44,5 +44,14 @@ class EchoWorker(ModelWorker):
             if fault_due("worker", request.slot):
                 outputs.append(RuntimeError(f"injected worker fault in slot {request.slot}"))
             else:
-                outputs.append(self.model.generate(request.payload))
+                sent = request.payload
+                result = self.model.generate(
+                    EchoInput(
+                        frame=sent["frame"],
+                        effect=sent["effect"],
+                        intensity=sent["intensity"],
+                        caption=sent["caption"],
+                    )
+                )
+                outputs.append(result.frame)
         return outputs
