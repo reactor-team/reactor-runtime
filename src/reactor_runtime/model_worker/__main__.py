@@ -17,11 +17,13 @@ Every option has an environment variable and a default:
   /health`` on that port answers 503 ``loading`` while ``load()`` runs, 200
   ``serving`` once sessions can connect, with ``shm_slot_bytes``, the
   ``/dev/shm`` each session holds, and 503 ``stuck`` while one step has run
-  longer than ``REACTOR_MODEL_WORKER_STUCK_SECONDS`` (120 by default).
+  longer than ``REACTOR_MODEL_WORKER_STUCK_SECONDS`` (120 by default), or
+  ``failing`` once ``REACTOR_MODEL_WORKER_FAILING_STEPS`` steps in a row (5 by
+  default) have raised, as a worker whose GPU state is broken does.
 * ``REACTOR_SHM_PREFIX`` (``rrmw`` by default): the shared blocks of this
-  worker and its sessions are named under it. A worker that starts unlinks
-  every block left under it by one before it, so give each worker sharing one
-  ``/dev/shm`` its own prefix.
+  worker and its sessions are named under it and a token of each start. A
+  worker that starts unlinks the blocks the worker before it on the same
+  socket left, which it reads from ``shm-prefix`` next to the socket.
 
 Once ready it also writes ``ready`` next to the socket, for an exec probe, and
 removes it when it stops. SIGTERM and SIGINT stop it once the running step
@@ -59,6 +61,7 @@ WORKER_ENV = "REACTOR_WORKER_IMPORT"
 HEALTH_PORT_ENV = "REACTOR_MODEL_WORKER_HEALTH_PORT"
 STUCK_ENV = "REACTOR_MODEL_WORKER_STUCK_SECONDS"
 SHM_PREFIX_ENV = "REACTOR_SHM_PREFIX"
+FAILING_ENV = "REACTOR_MODEL_WORKER_FAILING_STEPS"
 
 
 class _Status:
@@ -68,6 +71,7 @@ class _Status:
         self.phase = "loading"
         self.server: WorkerServer | None = None
         self.stuck_after = stuck_after
+        self.failing_after = _int_env(FAILING_ENV, 5)
         self.slot_bytes: int | None = None
 
     def report(self) -> tuple[int, dict[str, Any]]:
@@ -76,6 +80,8 @@ class _Status:
             running = server.step_running_for
             if running > self.stuck_after:
                 return 503, {"status": "stuck", "step_seconds": round(running, 1)}
+            if server.failed_steps >= self.failing_after:
+                return 503, {"status": "failing", "failed_steps": server.failed_steps}
             return 200, {"status": "serving", "shm_slot_bytes": self.slot_bytes}
         return 503, {"status": self.phase}
 
@@ -110,10 +116,17 @@ def main(argv: list[str] | None = None) -> int:
     with contextlib.suppress(FileNotFoundError):
         ready_file.unlink()
     base = os.getenv(SHM_PREFIX_ENV, "").strip() or "rrmw"
-    stale = unlink_prefix(base)
-    if stale:
-        logger.info("unlinked shared blocks a previous worker left", count=stale, prefix=base)
-    prefix = f"{base}{secrets.token_hex(2)}_"
+    # The prefix of the worker that served this socket before, if one did and
+    # died without cleaning up: its blocks are reclaimed, nobody else's.
+    record = socket_path.parent / "shm-prefix"
+    with contextlib.suppress(OSError):
+        previous = record.read_text().strip()
+        if previous.startswith(base) and previous.endswith("_"):
+            stale = unlink_prefix(previous)
+            if stale:
+                logger.info("unlinked blocks a previous worker left", count=stale, prefix=previous)
+    prefix = f"{base}{secrets.token_hex(4)}_"
+    record.write_text(prefix)
 
     status = _Status(_stuck_seconds())
     port = args.health_port if args.health_port is not None else _port_env()
@@ -164,6 +177,8 @@ def main(argv: list[str] | None = None) -> int:
         if probe is not None:
             probe.shutdown()
         unlink_prefix(prefix)
+        with contextlib.suppress(OSError):
+            record.unlink()
 
 
 def _serve_health(port: int, status: _Status) -> ThreadingHTTPServer:
@@ -199,6 +214,17 @@ def _port_env() -> int | None:
         return int(raw)
     except ValueError:
         raise SystemExit(f"{HEALTH_PORT_ENV} {raw!r} must be an integer") from None
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    try:
+        value = int(raw) if raw else default
+    except ValueError:
+        raise SystemExit(f"{name} {raw!r} must be an integer") from None
+    if value < 1:
+        raise SystemExit(f"{name} must be at least 1")
+    return value
 
 
 def _stuck_seconds() -> float:

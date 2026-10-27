@@ -125,7 +125,7 @@ class ViewReader:
                 raise RequestRefused(f"the request names block {name!r}, not one of this client's")
             try:
                 self._attach(name)
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 raise RequestRefused(
                     f"the request's block {name!r} cannot be mapped: {exc}"
                 ) from None

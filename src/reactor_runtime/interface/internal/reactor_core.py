@@ -105,8 +105,13 @@ model thread.
 """
 
 FailureSink = Callable[[BaseException], None]
-AvailabilitySink = Callable[[str | None], None]
 """Receives the exception that ended :meth:`ReactorCore.run`, on the model thread."""
+
+AvailabilitySink = Callable[[str | None], None]
+"""Receives why the model cannot serve, or ``None`` once it can, on the reporting thread.
+
+Called with the model's availability lock held, so reports arrive in the order
+they were made; the sink hands them on and returns without blocking."""
 
 StepRefusalSink = Callable[[StepRefusal], None]
 """Receives each step a client requested that the model refused, on the model thread."""
@@ -574,9 +579,8 @@ class ReactorCore:
         """
         with self._reactor_availability_lock:
             self._reactor_on_availability = callback
-            current = self._reactor_unavailable
-        if current is not None:
-            callback(current)
+            if self._reactor_unavailable is not None:
+                callback(self._reactor_unavailable)
 
     def report_unavailable(self, reason: str) -> None:
         """Report that the model cannot serve until :meth:`report_available`.
@@ -596,9 +600,8 @@ class ReactorCore:
         """
         with self._reactor_availability_lock:
             self._reactor_unavailable = reason
-            sink = self._reactor_on_availability
-        if sink is not None:
-            sink(reason)
+            if self._reactor_on_availability is not None:
+                self._reactor_on_availability(reason)
 
     def report_available(self) -> None:
         """Report that the model can serve again after :meth:`report_unavailable`.
@@ -609,9 +612,8 @@ class ReactorCore:
             if self._reactor_unavailable is None:
                 return
             self._reactor_unavailable = None
-            sink = self._reactor_on_availability
-        if sink is not None:
-            sink(None)
+            if self._reactor_on_availability is not None:
+                self._reactor_on_availability(None)
 
     # -- thread-safe ingress (called by the bridge from the runtime thread) ---
 

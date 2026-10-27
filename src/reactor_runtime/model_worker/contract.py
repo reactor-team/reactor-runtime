@@ -124,8 +124,14 @@ class ModelWorker:
         An output that is an exception instance fails that request alone: the
         session that sent it sees a
         :class:`~reactor_runtime.model_worker.WorkerError` naming it.
-        A raise out of this method fails every request of the batch the same
-        way; the worker goes on with the next batch. An output, like a
+        When a step of several requests raises, the worker calls ``step()``
+        again for each of them alone, so the error reaches only the requests
+        that raise on their own; ``step()`` therefore sees those requests a
+        second time, and must leave a session's state as it was when it
+        raises. A raise for one request fails that request. The worker goes on
+        either way; its ``/health`` reports ``failing`` once
+        ``REACTOR_MODEL_WORKER_FAILING_STEPS`` steps in a row (5 by default)
+        have raised. An output, like a
         request, is plain values, lists, tuples, dicts, bytes, and numpy
         arrays (see :mod:`reactor_runtime.model_worker.codec`); the arrays
         travel through shared memory. Nothing is pickled.
