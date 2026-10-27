@@ -216,6 +216,11 @@ class UnixShmTransport(Transport):
             sock.close()
             if exc.errno == errno.ENOENT and not Path(address).parent.is_dir():
                 self.check(address)
+            if exc.errno in (errno.EACCES, errno.EPERM):
+                raise WorkerUnreachable(
+                    f"the model worker's socket {address} is not open to this user: run the "
+                    "sessions as the worker's user"
+                ) from None
             raise NoListener(str(exc)) from None
         return sock
 
@@ -281,6 +286,11 @@ class UnixShmTransport(Transport):
             expected = bytes.fromhex(nonce)
             try:
                 shm = attach(probe)
+            except PermissionError:
+                raise WorkerUnreachable(
+                    "the model worker's shared memory is not open to this user: run the "
+                    "sessions as the worker's user"
+                ) from None
             except OSError:
                 raise WorkerUnreachable(
                     "the model worker's shared memory is not visible here: the worker and the "

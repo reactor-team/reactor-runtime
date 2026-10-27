@@ -14,6 +14,8 @@
 #   alone, so a worker outage never restarts a session container.
 # - A session container whose model crashes exits, and the kubelet restarts
 #   that container alone.
+# - Every container runs as the same user: the worker's socket and shared
+#   blocks are open to its own user alone.
 apiVersion: v1
 kind: Pod
 metadata:

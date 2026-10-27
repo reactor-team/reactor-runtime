@@ -49,6 +49,9 @@ _HELLO_TIMEOUT = 10.0
 _FRAME_SLACK = 64 << 10
 _PEERCRED = struct.Struct("3i")
 _TOKEN = re.compile(r"[0-9a-f]{4,16}")
+# How long an answer may wait for a session to read it before the session is cut off.
+_SEND_TIMEOUT = 5.0
+_TIMEVAL = struct.Struct("ll")
 
 
 @dataclass(eq=False)
@@ -141,6 +144,7 @@ class WorkerServer:
         self._step_started: float | None = None
         # Steps in a row that raised, for the worker's health.
         self.failed_steps = 0
+        self._failing_slots: set[int] = set()
 
     @property
     def socket_path(self) -> Path:
@@ -269,6 +273,7 @@ class WorkerServer:
             self._refuse(sock, request_id, "the hello carries no valid token")
             return None
         sock.settimeout(None)
+        _bound_sends(sock, _SEND_TIMEOUT)
         peer_pid = _peer_pid(sock)
         with self._cond:
             if self._stopping:
@@ -402,13 +407,23 @@ class WorkerServer:
             wire.send(sock, Kind.REFUSED, request_id, reason.encode())
 
     def _reply(self, conn: _Conn, kind: Kind, request_id: int, payload: bytes = b"") -> None:
+        """Send one frame to *conn*; a session that does not read it in time is cut off.
+
+        The socket's send timeout bounds the wait, so a session that stops
+        reading cannot hold the step thread, and with it every other session.
+        """
         if conn.closed:
             return
         try:
             with conn.send_lock:
                 wire.send(conn.sock, kind, request_id, payload)
-        except OSError:
-            pass  # The reader sees the socket end and closes the connection.
+        except OSError as exc:
+            # The reader sees the socket end and closes the connection.
+            logger.warning(
+                "a session stopped taking its answers; closing it", slot=conn.slot, error=str(exc)
+            )
+            with contextlib.suppress(OSError):
+                conn.sock.shutdown(socket.SHUT_RDWR)
 
     # -- the step thread ---------------------------------------------------------------------
 
@@ -421,21 +436,38 @@ class WorkerServer:
                 leaving, self._leaving = self._leaving, []
                 joining, self._joining = self._joining, []
                 resets, self._resets = self._resets, []
-            for conn in leaving:
-                self._close(conn)
-            for conn in joining:
-                self._open_conn(conn)
-            for conn, request_id in resets:
-                self._reset(conn, request_id)
+            self._step_started = time.monotonic()
+            try:
+                for conn in leaving:
+                    self._guarded(self._close, conn)
+                for conn in joining:
+                    self._guarded(self._open_conn, conn)
+                for conn, request_id in resets:
+                    self._guarded(self._reset, conn, request_id)
+            finally:
+                self._step_started = None
             if leaving or joining or resets:
                 continue
             batch = self._take_batch()
             if batch:
-                self._run(batch)
+                self._step_started = time.monotonic()
+                try:
+                    self._run(batch)
+                finally:
+                    self._step_started = None
                 continue
             with self._cond:
                 if not (self._joining or self._leaving or self._resets or self._ready()):
                     self._cond.wait(_STOP_POLL)
+
+    def _guarded(self, call: Any, conn: _Conn, *args: Any) -> None:
+        """Run one connection's open, close, or reset; a failure closes that connection alone."""
+        try:
+            call(conn, *args)
+        except Exception:
+            logger.exception("a session's open, close, or reset failed; closing it", slot=conn.slot)
+            with contextlib.suppress(OSError):
+                conn.sock.shutdown(socket.SHUT_RDWR)
 
     def _take_batch(self) -> list[_Request]:
         """Take the next batch off the queue, waiting out the batch window first."""
@@ -540,16 +572,20 @@ class WorkerServer:
 
     def _run(self, batch: list[_Request]) -> None:
         started = time.monotonic()
-        outputs = self._step(batch)
-        if len(batch) > 1 and all(isinstance(o, BaseException) for o in outputs):
+        outputs, raised = self._step(batch)
+        if raised and len(batch) > 1:
             # The whole step raised: run each request alone, so the error
             # lands on the request that causes it and not on its batch-mates.
             logger.warning("a batched step raised; stepping its requests one at a time")
-            outputs = [self._step([request])[0] for request in batch]
+            outputs = [self._step([request])[0][0] for request in batch]
         ran = time.monotonic() - started
         for request, output in zip(batch, outputs, strict=True):
             request.payload = None
-            self._answer(request, output)
+            try:
+                self._answer(request, output)
+            except Exception:
+                logger.exception("an answer could not be sent", slot=request.conn.slot)
+                self._reply(request.conn, Kind.FAILED, request.request_id, _UNDESCRIBED)
         logger.debug(
             "step ran",
             size=len(batch),
@@ -558,10 +594,12 @@ class WorkerServer:
             wait_ms=[round((started - r.arrived) * 1000, 2) for r in batch],
         )
 
-    def _step(self, batch: list[_Request]) -> list[Any]:
-        """Call ``step()`` once; on a raise, every request's output is the exception."""
+    def _step(self, batch: list[_Request]) -> tuple[list[Any], bool]:
+        """Call ``step()`` once; return its outputs and whether it raised.
+
+        On a raise every request's output is the exception.
+        """
         requests = [WorkerRequest(r.conn.slot, r.conn.generation, r.payload) for r in batch]
-        self._step_started = time.monotonic()
         try:
             outputs = self._worker.step(requests)
             if not isinstance(outputs, list | tuple) or len(outputs) != len(batch):
@@ -572,11 +610,22 @@ class WorkerServer:
         except Exception as exc:
             logger.exception("step() raised", size=len(batch))
             self.failed_steps += 1
-            return [exc] * len(batch)
-        finally:
-            self._step_started = None
+            self._failing_slots.update(r.conn.slot for r in batch)
+            return [exc] * len(batch), True
         self.failed_steps = 0
-        return list(outputs)
+        self._failing_slots.clear()
+        return list(outputs), False
+
+    def failing(self, threshold: int) -> bool:
+        """Whether steps keep raising for more than one session, as on a broken GPU.
+
+        *threshold* steps in a row must have raised, for at least two sessions
+        between them, or for the one session open: one session whose own input
+        keeps raising does not make the worker failing for the others.
+        """
+        if self.failed_steps < threshold:
+            return False
+        return len(self._failing_slots) >= 2 or len(self._open) <= 1
 
     def _answer(self, request: _Request, output: Any) -> None:
         conn = request.conn
@@ -619,6 +668,17 @@ class WorkerServer:
 
 class WorkerStopping(WorkerCrashed, ModelUnavailable):
     """The answer to a request still queued when the worker was stopped."""
+
+
+def _bound_sends(sock: socket.socket, seconds: float) -> None:
+    """Make a send on *sock* fail after *seconds*, leaving its reads blocking."""
+    whole = int(seconds)
+    with contextlib.suppress(OSError):
+        sock.setsockopt(
+            socket.SOL_SOCKET,
+            socket.SO_SNDTIMEO,
+            _TIMEVAL.pack(whole, int((seconds - whole) * 1_000_000)),
+        )
 
 
 def _peer_pid(sock: socket.socket) -> int:
@@ -672,18 +732,33 @@ def _alive(pid: int) -> bool:
     return True
 
 
+def _text(call: Any, fallback: str) -> str:
+    try:
+        return str(call())
+    except Exception:
+        return fallback
+
+
 def _describe(exc: BaseException) -> str:
-    return f"{type(exc).__name__}: {exc}"
+    return f"{type(exc).__name__}: {_text(lambda: str(exc), '<unprintable>')}"
 
 
 def _failure(exc: BaseException) -> bytes:
-    """Describe *exc* for the session as JSON: its type's name, its message, its traceback."""
+    """Describe *exc* for the session as JSON: its type's name, its message, its traceback.
+
+    An exception that cannot be printed is still described, by its type.
+    """
     kind = type(exc)
     return wire.to_json(
         {
             "type": f"{kind.__module__}.{kind.__qualname__}",
-            "message": str(exc),
-            "traceback": "".join(traceback.format_exception(exc)),
+            "message": _text(lambda: str(exc), "<unprintable>"),
+            "traceback": _text(lambda: "".join(traceback.format_exception(exc)), ""),
             "worker_lost": isinstance(exc, WorkerStopping),
         }
     )
+
+
+_UNDESCRIBED = wire.to_json(
+    {"type": "builtins.RuntimeError", "message": "the answer could not be sent", "traceback": ""}
+)
