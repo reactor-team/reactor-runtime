@@ -322,6 +322,18 @@ def test_a_step_in_the_middle_third_does_not_hide_a_tail_still_climbing() -> Non
     assert "not levelling off" in result.detail
 
 
+def test_an_early_step_does_not_hide_a_steady_leak_after_it() -> None:
+    # Flat at 300 MB for 20 minutes, a one-time 60 MB step, then a steady
+    # 40 MB/h leak: the thirds rise +53.2 MB, then +26.7 MB, as a plateau
+    # being reached would, but the last third climbs at twice the limit.
+    values = [300.0] * 20 + [360.0 + i * 40 / 60 for i in range(100)]
+    result = assert_slope_under(
+        _hours(120), values, name="rss_slope", max_per_hour=20.0, min_absolute_delta=5.0
+    )
+    assert result.status == "fail"
+    assert "not levelling off" in result.detail
+
+
 def test_a_leak_slowing_only_slightly_still_fails_the_slope_check() -> None:
     # Thirds rising +30 MB, then +25 MB: the noise in a steady leak, not a
     # plateau being reached.

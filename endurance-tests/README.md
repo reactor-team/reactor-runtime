@@ -56,6 +56,8 @@ trend ends in ERROR rather than in a verdict; a failed count still fails it.
 The runtime runs with `MALLOC_ARENA_MAX=2` unless the environment sets it:
 with glibc's default of up to 8 arenas per core, each keeping the most memory
 it ever held, RSS climbs to a plateau set by the core count, not by a leak.
+The probe also calls `malloc_trim(0)` after its collection, so each reading
+counts live memory rather than the free memory glibc keeps cached.
 
 ## Scenarios
 
