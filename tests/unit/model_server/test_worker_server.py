@@ -715,9 +715,10 @@ def test_a_signal_of_a_connection_that_left_does_not_reach_its_slot(serve: Any) 
 
     worker = Signalled()
     served: Any = serve(worker)
+    unused: Any = None  # the signal path reads neither the socket nor the blocks
     gone = _Conn(
-        slot=3, peer_pid=0, sock=None, carrier=None, request_prefix="", transport={}, hello_id=0
-    )  # type: ignore[arg-type]
+        slot=3, peer_pid=0, sock=unused, carrier=unused, request_prefix="", transport={}, hello_id=0
+    )
     gone.opened, gone.closed = True, True
     body = json.dumps(codec.to_tree({"reason": "barge"})).encode()
     served.server._signal(gone, wire.SIGNAL_TAG.pack(0) + body)
