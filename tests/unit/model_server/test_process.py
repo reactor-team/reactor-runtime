@@ -37,6 +37,7 @@ from reactor_runtime.model_server import (
     ModelServer,
     ServerRequest,
 )
+from reactor_runtime.model_server.__main__ import main as model_server_main
 from reactor_runtime.model_server.config import ServerProcessConfig, server_process_config
 from reactor_runtime.model_server.process import ModelServerProcess
 
@@ -435,3 +436,13 @@ def test_python_m_model_server_finishes_the_load_then_exits_on_a_sigterm_during_
         if server.poll() is None:
             server.kill()
             server.wait()
+
+
+def test_model_server_main_refuses_bad_secrets_before_the_manifest_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("REACTOR_SECRETS_EXPECTED_KEYS", "not json")
+
+    with pytest.raises(SystemExit, match="JSON array"):
+        model_server_main()
