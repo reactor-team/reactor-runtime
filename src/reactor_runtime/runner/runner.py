@@ -429,7 +429,7 @@ class Runner(ServiceComponent, ConnectionSink):
         self._log_binding = 0
         self._accepting = True
         # Why the model reported it cannot serve, or None while it can (see
-        # ReactorCore.set_unavailable). Written on the runtime loop only.
+        # ReactorCore.report_unavailable). Written on the runtime loop only.
         self._unavailable: str | None = None
         # The transports mounted on the HTTP surface, as the descriptor lists them.
         self._transports: list[dict[str, str]] = []

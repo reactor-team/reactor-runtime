@@ -191,7 +191,7 @@ class SessionTransitionError(RuntimeError):
 class ModelUnavailableError(SessionTransitionError):
     """Raised when a session start is refused because the model reported it cannot serve.
 
-    The model called :meth:`~reactor_runtime.ReactorApp.set_unavailable`; the
+    The model called :meth:`~reactor_runtime.ReactorApp.report_unavailable`; the
     refusal lasts until it reports itself available again.
 
     Attributes:

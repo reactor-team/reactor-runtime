@@ -81,6 +81,22 @@ def encode(payload: Any, writer: Writer) -> tuple[bytes, int]:
     return header, len(header) + sum(length for _, length in spans)
 
 
+def size(payload: Any) -> int:
+    """Return the bytes *payload*'s arrays and bytes take in a block, without writing them.
+
+    Raises:
+        TypeError: The payload holds a value this codec does not carry.
+    """
+    total = [0]
+
+    def count(buffer: Any) -> int:
+        total[0] += buffer if isinstance(buffer, int) else memoryview(buffer).nbytes
+        return 0
+
+    _to_tree(payload, count, 0, measure=True)
+    return total[0]
+
+
 def parse(header: bytes) -> tuple[str, list[tuple[int, int]], Any]:
     """Return a header's block name, spans, and tree, checking their shape.
 
@@ -119,7 +135,7 @@ def decode(tree: Any, buffer: Callable[[int], memoryview]) -> Any:
     return _from_tree(tree, buffer, 0, count)
 
 
-def _to_tree(value: Any, store: Callable[[Any], int], depth: int) -> Any:
+def _to_tree(value: Any, store: Callable[[Any], int], depth: int, *, measure: bool = False) -> Any:
     if depth > MAX_DEPTH:
         raise TypeError(f"the payload nests deeper than {MAX_DEPTH}")
     if value is None or isinstance(value, bool | int | str):
@@ -127,24 +143,26 @@ def _to_tree(value: Any, store: Callable[[Any], int], depth: int) -> Any:
     if isinstance(value, float):
         return value if math.isfinite(value) else {"f": repr(value)}
     if isinstance(value, np.generic) and not isinstance(value, np.void | np.object_):
-        return _to_tree(value.item(), store, depth)
+        return _to_tree(value.item(), store, depth, measure=measure)
     if isinstance(value, np.ndarray):
         if value.dtype.kind not in _KINDS:
             raise TypeError(f"an array of dtype {value.dtype} does not travel; use a numeric one")
+        if measure:
+            return store(value.nbytes)
         array = np.ascontiguousarray(value)
         return {"a": [array.dtype.str, list(array.shape), store(array.reshape(-1).view(np.uint8))]}
     if isinstance(value, bytes | bytearray | memoryview):
         return {"b": store(memoryview(value).cast("B"))}
     if isinstance(value, list):
-        return {"l": [_to_tree(item, store, depth + 1) for item in value]}
+        return {"l": [_to_tree(item, store, depth + 1, measure=measure) for item in value]}
     if isinstance(value, tuple):
-        return {"t": [_to_tree(item, store, depth + 1) for item in value]}
+        return {"t": [_to_tree(item, store, depth + 1, measure=measure) for item in value]}
     if isinstance(value, dict):
         items = []
         for key, item in value.items():
             if not isinstance(key, str | int) or isinstance(key, bool):
                 raise TypeError(f"a dict key of type {type(key).__name__} does not travel")
-            items.append([key, _to_tree(item, store, depth + 1)])
+            items.append([key, _to_tree(item, store, depth + 1, measure=measure)])
         return {"d": items}
     raise TypeError(
         f"a {type(value).__name__} does not travel to or from the model worker: use plain "

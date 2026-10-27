@@ -5,7 +5,9 @@
 #
 # The worker starts first and the sessions wait for its health check; they
 # share the socket volume and one memory-backed /dev/shm, as the pod's
-# containers do. `restart: unless-stopped` stands in for the kubelet.
+# containers do. `restart: unless-stopped` stands in for the kubelet. The host
+# ports default to the pod's (8079, 8080, 8081); WORKER_HEALTH_PORT,
+# SESSION0_PORT, and SESSION1_PORT move them.
 x-session: &session
   image: shared-worker
   restart: unless-stopped
@@ -26,7 +28,7 @@ services:
     ipc: shareable
     shm_size: 2g
     environment:
-      REACTOR_MODEL_WORKER_HEALTH_PORT: "8079"
+      REACTOR_MODEL_WORKER_HEALTH_PORT: "${WORKER_HEALTH_PORT:-8079}"
     volumes:
       - worker-socket:/run/reactor-worker
     healthcheck:
@@ -36,14 +38,14 @@ services:
   session-0:
     <<: *session
     environment:
-      PORT: "8080"
+      PORT: "${SESSION0_PORT:-8080}"
       REACTOR_SESSION_SLOT: "0"
       WEBRTC_PORT_RANGE: "40000:40999"
       MALLOC_ARENA_MAX: "2"
   session-1:
     <<: *session
     environment:
-      PORT: "8081"
+      PORT: "${SESSION1_PORT:-8081}"
       REACTOR_SESSION_SLOT: "1"
       WEBRTC_PORT_RANGE: "41000:41999"
       MALLOC_ARENA_MAX: "2"

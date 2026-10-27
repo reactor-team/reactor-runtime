@@ -325,7 +325,7 @@ class ModelBridge:
         if failure is not None:
             self._model.bind_failure(failure)
         if availability is not None:
-            self._model.bind_availability(availability)
+            self._model._bind_availability(availability)
         self._outbound_bound = True
 
     # -- lifecycle --------------------------------------------------------

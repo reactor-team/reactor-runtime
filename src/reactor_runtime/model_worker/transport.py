@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import os
 import secrets
 import socket
 from abc import ABC, abstractmethod
@@ -30,7 +31,6 @@ from typing import Any
 import numpy as np
 
 from reactor_runtime.distributed.errors import SharedSlotAllocationFailed
-from reactor_runtime.distributed.ipc import SharedSlot
 from reactor_runtime.model_worker import codec
 from reactor_runtime.model_worker.shm import (
     ViewReader,
@@ -61,6 +61,10 @@ class NoListener(Exception):  # noqa: N818 (named for the state a caller catches
 
 class ClientCarrier(ABC):
     """The session side of one connection: requests out, outputs back."""
+
+    @abstractmethod
+    def size(self, payload: Any) -> int:
+        """Return the bytes *payload* would carry, without writing anything."""
 
     @abstractmethod
     def encode(self, payload: Any) -> tuple[bytes, int]:
@@ -253,15 +257,16 @@ class UnixShmTransport(Transport):
         result_prefix = created_here(f"{prefix}w{slot}c{conn_id}_")
         input_block = _allocate(created_here(f"{request_prefix}in"), input_bytes)
         try:
-            output = SharedSlot(prefix=result_prefix, initial_bytes=output_bytes)
+            output_block = _allocate(f"{result_prefix}out", output_bytes)
         except BaseException:
-            release(input_block)
-            with contextlib.suppress(OSError):
-                input_block.unlink()
+            _unlink(input_block)
             raise
-        _zero_fill(output._shm)
         carrier = _WorkerShm(
-            ViewReader(request_prefix, limit), request_prefix, result_prefix, input_block, output
+            ViewReader(request_prefix, limit),
+            request_prefix,
+            result_prefix,
+            input_block,
+            _Blocks(output_block, f"{result_prefix}g", owned=True),
         )
         return carrier, {"request_prefix": request_prefix, "input_block": input_block.name}
 
@@ -289,74 +294,95 @@ class UnixShmTransport(Transport):
         return _ClientShm(created_here(str(welcome["request_prefix"])), str(welcome["input_block"]))
 
 
-class _InputSlot:
-    """Writes requests into the input block the worker made, or into its own once outgrown."""
+class _Blocks:
+    """Where one direction's payloads are written: a fixed block, or one made to fit.
 
-    def __init__(self, block: str, grow_prefix: str) -> None:
-        self._block = attach(block)
-        self._grow_prefix = grow_prefix
+    A payload that fits goes into the fixed block. One that does not goes into a
+    block of its own, sized to it, which is unlinked when the next payload is
+    written. :meth:`abandon` stops the fixed block from being written again,
+    for when the reader may still be reading what is in it.
+    """
+
+    def __init__(self, base: shared_memory.SharedMemory, grow_prefix: str, *, owned: bool) -> None:
+        self._base = base
+        self._owned = owned
+        self._base_usable = True
+        self._grow_prefix = created_here(grow_prefix)
         self._grown = 0
-        self._own: SharedSlot | None = None
+        self._extra: shared_memory.SharedMemory | None = None
+        self._target = base
         self._cursor = 0
+
+    def prepare(self, nbytes: int) -> None:
+        """Choose where the next payload, of *nbytes* in its buffers, is written."""
+        if self._extra is not None:
+            _unlink(self._extra)
+            self._extra = None
+        if self._base_usable and nbytes <= self._base.size:
+            self._target = self._base
+            return
+        self._grown += 1
+        self._extra = _allocate(f"{self._grow_prefix}{self._grown}", max(nbytes, 1), fill=False)
+        self._target = self._extra
 
     @property
     def name(self) -> str:
-        return self._own.name if self._own is not None else self._block.name
+        return self._target.name
 
     def begin(self) -> None:
         self._cursor = 0
-        if self._own is not None:
-            self._own.begin()
 
     def write(self, buffer: Any) -> tuple[int, int]:
-        if self._own is not None:
-            return self._own.write(buffer)
         raw = memoryview(buffer).cast("B")
         end = self._cursor + raw.nbytes
-        buf = self._block.buf
+        buf = self._target.buf
         assert buf is not None
-        if end > self._block.size:
-            # Outgrown: carry on in a block of this session's own, bytes so far included.
-            own = self._move(max(end, 2 * self._block.size))
-            own.write(buf[: self._cursor])
-            return own.write(raw)
+        if end > self._target.size:
+            raise RuntimeError("a payload outgrew the block prepared for it")
         buf[self._cursor : end] = raw
         span = (self._cursor, raw.nbytes)
         self._cursor = end
         return span
 
-    def renew(self) -> None:
-        """Write the next request elsewhere: the worker may still read the abandoned one."""
-        self._move(self._block.size)
+    def abandon(self) -> None:
+        """Write nothing more where the last payload went."""
+        if self._target is self._base:
+            self._base_usable = False
+        elif self._extra is not None:
+            # Unlinked now; the reader's mapping, if any, stays valid.
+            _unlink(self._extra)
+            self._extra = None
+            self._target = self._base
 
     def close(self) -> None:
-        release(self._block)
-        if self._own is not None:
-            self._own.close()
-
-    def _move(self, size: int) -> SharedSlot:
-        if self._own is not None:
-            self._own.close()
-        self._grown += 1
-        self._own = SharedSlot(prefix=f"{self._grow_prefix}{self._grown}_", initial_bytes=size)
-        self._own.begin()
-        return self._own
+        if self._extra is not None:
+            _unlink(self._extra)
+            self._extra = None
+        if self._owned:
+            _unlink(self._base)
+        else:
+            release(self._base)
+        forget_created(self._grow_prefix)
 
 
 class _ClientShm(ClientCarrier):
     def __init__(self, prefix: str, input_block: str) -> None:
         self._prefix = prefix
-        self._request = _InputSlot(input_block, prefix)
+        self._request = _Blocks(attach(input_block), f"{prefix}g", owned=False)
         self._mapping: dict[str, Any] = {}
 
+    def size(self, payload: Any) -> int:
+        return codec.size(payload)
+
     def encode(self, payload: Any) -> tuple[bytes, int]:
+        self._request.prepare(codec.size(payload))
         return codec.encode(payload, self._request)
 
     def decode(self, body: bytes) -> Any:
         return copy_unpack(body, self._mapping)
 
     def renew(self) -> None:
-        self._request.renew()
+        self._request.abandon()
 
     def close(self) -> None:
         close_mapping(self._mapping)
@@ -371,31 +397,26 @@ class _WorkerShm(WorkerCarrier):
         request_prefix: str,
         result_prefix: str,
         input_block: shared_memory.SharedMemory,
-        output: SharedSlot,
+        output: _Blocks,
     ) -> None:
         self._reader = reader
         self._request_prefix = request_prefix
         self._result_prefix = result_prefix
         self._input = input_block
-        self._result: SharedSlot | None = output
+        self._output = output
 
     def decode(self, body: bytes) -> Any:
         return self._reader.unpack(body)
 
     def encode(self, output: Any) -> bytes:
-        if self._result is None:
-            self._result = SharedSlot(prefix=self._result_prefix)
-        header, _ = codec.encode(output, self._result)
+        self._output.prepare(codec.size(output))
+        header, _ = codec.encode(output, self._output)
         return header
 
     def close(self) -> None:
         self._reader.close()
-        if self._result is not None:
-            self._result.close()
-            self._result = None
-        release(self._input)
-        with contextlib.suppress(OSError):
-            self._input.unlink()
+        self._output.close()
+        _unlink(self._input)
         # Blocks the session made once a request outgrew its input block, which
         # a session process that was killed never unlinked.
         unlink_prefix(self._request_prefix)
@@ -403,32 +424,40 @@ class _WorkerShm(WorkerCarrier):
         forget_created(f"{self._request_prefix}in")
 
 
-def _allocate(name: str, size: int) -> shared_memory.SharedMemory:
-    block = shared_memory.SharedMemory(name=name, create=True, size=size)
+def _allocate(name: str, size: int, *, fill: bool = True) -> shared_memory.SharedMemory:
+    """Create block *name* and reserve its pages, so a full ``/dev/shm`` is an error here.
+
+    ``posix_fallocate`` reserves the pages (charging them to this process) and
+    answers ENOSPC when they do not fit, where a write to a page tmpfs cannot
+    back would kill the process with SIGBUS. *fill* also touches every page.
+
+    Raises:
+        SharedSlotAllocationFailed: ``/dev/shm`` cannot hold the block.
+    """
     try:
-        _zero_fill(block)
+        block = shared_memory.SharedMemory(name=name, create=True, size=size)
+    except OSError as exc:
+        raise SharedSlotAllocationFailed(f"cannot make a {size} byte shared block: {exc}") from None
+    try:
+        fd = getattr(block, "_fd", -1)
+        if fd >= 0 and hasattr(os, "posix_fallocate"):
+            os.posix_fallocate(fd, 0, size)
+        if fill:
+            buf = block.buf
+            assert buf is not None
+            np.frombuffer(buf, dtype=np.uint8)[:] = 0
+    except OSError as exc:
+        _unlink(block)
+        raise SharedSlotAllocationFailed(
+            f"/dev/shm cannot hold a {size} byte block: {exc}"
+        ) from None
     except BaseException:
-        release(block)
-        with contextlib.suppress(OSError):
-            block.unlink()
+        _unlink(block)
         raise
     return block
 
 
-def _zero_fill(block: shared_memory.SharedMemory) -> None:
-    """Touch every page of *block*, so tmpfs charges it to this process now.
-
-    A page of a full ``/dev/shm`` raises SIGBUS when first touched; checking the
-    free space first turns that into an error instead.
-    """
-    buf = block.buf
-    assert buf is not None
-    if _SHM_DIR.is_dir():
-        import shutil
-
-        free = shutil.disk_usage(_SHM_DIR).free
-        if free < block.size:
-            raise SharedSlotAllocationFailed(
-                f"/dev/shm has {free} bytes free, not the {block.size} one session's block needs"
-            )
-    np.frombuffer(buf, dtype=np.uint8)[:] = 0
+def _unlink(block: shared_memory.SharedMemory) -> None:
+    release(block)
+    with contextlib.suppress(OSError):
+        block.unlink()
