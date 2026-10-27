@@ -42,13 +42,6 @@ logger = logging.getLogger(__name__)
 _PASSTHROUGH = frozenset({step_pb2.FRAME_ENCODING_UNSPECIFIED, step_pb2.FRAME_ENCODING_RAW})
 """Encodings the runner reads itself: raw, and unspecified, which it refuses."""
 
-_DECODER_THREADS = 8
-"""Threads one track's decoder decodes a request's frames on, several frames at once.
-
-Past eight, a 1080p request decodes barely faster, and each decoder holds its
-threads for as long as its track is published.
-"""
-
 Pictures = dict[tuple[int, int], npt.NDArray[np.uint8]]
 """The RGB picture of each encoded frame of a request, by ``(entry, position)``."""
 
@@ -132,18 +125,19 @@ class TrackDecoder:
     """One track's H.264 decoder, kept across a connection's step requests.
 
     Opens on construction, with its frame threads started, so the first request
-    that uses it does not pay for that. Not thread-safe: a connection decodes
-    one request at a time.
+    that uses it does not pay for that. FFmpeg picks how many: one for each CPU
+    the process may run on, plus one, and at most 16. The decoder holds them
+    until it is released. Not thread-safe: a connection decodes one request at
+    a time.
     """
 
     def __init__(self) -> None:
-        """Open an H.264 decoder that decodes on :data:`_DECODER_THREADS` threads."""
+        """Open an H.264 decoder that decodes several frames at once."""
         self._codec = av.CodecContext.create("h264", "r")
         # Frame threads decode several frames at once, holding back up to one
         # frame per thread. That costs a request nothing: its frames are
         # flushed out together.
         self._codec.thread_type = "AUTO"
-        self._codec.thread_count = _DECODER_THREADS
         self._codec.open()
 
     def decode(self, packets: list[bytes]) -> dict[int, av.VideoFrame]:
