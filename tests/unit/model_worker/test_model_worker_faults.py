@@ -221,3 +221,53 @@ def test_a_session_that_does_not_take_a_large_answer_holds_the_worker_five_secon
         assert time.monotonic() - started < 8
     finally:
         sock.close()
+
+
+def test_one_bad_session_among_idle_ones_does_not_make_the_worker_failing(serve: Any) -> None:
+    served: Any = serve(Raises())
+    bad = served.client(0)
+    idle = [served.client(slot) for slot in (1, 2, 3)]
+    for _ in range(6):
+        with pytest.raises(WorkerError):
+            bad.step(1)
+    assert all(client.available for client in idle)
+    assert not served.server.failing(5)
+    bad.close()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and len(served.server._open) > 3:
+        time.sleep(0.05)
+    assert not served.server.failing(5)
+
+
+class ShapeSensitive(ModelWorker):
+    max_batch = 4
+    batch_window = 0.05
+
+    def load(self, config_path: Any) -> None:
+        self.batches: list[list[int]] = []
+
+    def step(self, requests: list[WorkerRequest]) -> list[Any]:
+        self.batches.append([r.slot for r in requests])
+        np.stack([np.asarray(r.payload) for r in requests])
+        return [1 for _ in requests]
+
+
+def test_a_batch_that_raises_only_together_stops_being_batched_for_a_while(serve: Any) -> None:
+    worker = ShapeSensitive()
+    served: Any = serve(worker)
+    clients = [served.client(slot) for slot in range(3)]
+    shapes = {0: np.zeros(3), 1: np.zeros(3), 2: np.zeros(5)}
+
+    def run(slot: int) -> None:
+        for _ in range(10):
+            assert clients[slot].step(shapes[slot]) == 1
+
+    threads = [threading.Thread(target=run, args=(slot,)) for slot in range(3)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    mixed = [b for b in worker.batches if len(b) > 1 and 2 in b]
+    # Each failed mixed batch buys several steps alone: far fewer mixed batches
+    # than rounds.
+    assert len(mixed) <= 3, worker.batches

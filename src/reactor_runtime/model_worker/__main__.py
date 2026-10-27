@@ -19,7 +19,7 @@ Every option has an environment variable and a default:
   ``/dev/shm`` each session holds, and 503 ``stuck`` while one step has run
   longer than ``REACTOR_MODEL_WORKER_STUCK_SECONDS`` (120 by default), or
   ``failing`` once ``REACTOR_MODEL_WORKER_FAILING_STEPS`` steps in a row (5 by
-  default) have raised for every session that stepped in the last minute, as
+  default) have raised for at least two sessions, or for the only one open, as
   they do when the GPU's state is broken.
 * ``REACTOR_SHM_PREFIX`` (``rrmw`` by default): the shared blocks of this
   worker and its sessions are named under it and a token of each start. A

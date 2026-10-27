@@ -51,8 +51,8 @@ _PEERCRED = struct.Struct("3i")
 _TOKEN = re.compile(r"[0-9a-f]{4,16}")
 # How long an answer may wait for a session to read it before the session is cut off.
 _SEND_TIMEOUT = 5.0
-# Sessions that stepped this recently count as active for the failing check.
-_ACTIVE_WINDOW = 60.0
+# Successful steps alone owed by the slots of a batch that raised only together.
+_PROBATION = 8
 
 
 @dataclass(eq=False)
@@ -145,11 +145,14 @@ class WorkerServer:
         self._step_started: float | None = None
         # Steps in a row that raised, for the worker's health.
         self.failed_steps = 0
-        self._failing_slots: set[int] = set()
-        # Slots whose requests raised alone after their batch raised.
-        self._solo: set[int] = set()
-        # When each slot last had a step run, for the failing check.
-        self._last_stepped: dict[int, float] = {}
+        # The sessions, by (slot, generation), whose steps raised in the
+        # current run of raising steps; read by the health thread.
+        self._failing_sessions: set[tuple[int, int]] = set()
+        self._health_lock = threading.Lock()
+        # Slots stepped alone, with how many successful steps they still owe:
+        # one whose request raised alone owes one; the members of a batch
+        # that raised only together owe _PROBATION each.
+        self._solo: dict[int, int] = {}
 
     @property
     def socket_path(self) -> Path:
@@ -485,7 +488,7 @@ class WorkerServer:
         """Take the next batch off the queue, waiting out the batch window first."""
         with self._cond:
             ready = self._ready()
-            if ready and self._window > 0:
+            if ready and self._window > 0 and ready[0].conn.slot not in self._solo:
                 until = ready[0].arrived + self._window
                 while (
                     not self._stopping
@@ -554,8 +557,7 @@ class WorkerServer:
     def _close(self, conn: _Conn) -> None:
         with self._cond:
             self._open.discard(conn)
-        self._solo.discard(conn.slot)
-        self._last_stepped.pop(conn.slot, None)
+        self._solo.pop(conn.slot, None)
         if conn.opened:
             conn.opened = False
             try:
@@ -580,6 +582,7 @@ class WorkerServer:
             except Exception:
                 logger.exception("session_closed() raised", slot=conn.slot)
         conn.generation = self._next_generation(conn.slot)
+        self._solo.pop(conn.slot, None)
         try:
             self._worker.session_opened(conn.slot, conn.generation)
         except Exception as exc:
@@ -602,13 +605,26 @@ class WorkerServer:
             # lands on the request that causes it and not on its batch-mates.
             logger.warning("a batched step raised; stepping its requests one at a time")
             outputs = []
+            culprits = []
             for request in batch:
                 (output,), alone_raised = self._step([request])
                 if alone_raised:
-                    self._solo.add(request.conn.slot)
+                    culprits.append(request.conn.slot)
                 outputs.append(output)
+            if culprits:
+                for slot in culprits:
+                    self._solo[slot] = max(self._solo.get(slot, 0), 1)
+            else:
+                # They raise only together; nobody to blame, so all of them
+                # step alone for a while before they are batched again.
+                for request in batch:
+                    self._solo[request.conn.slot] = _PROBATION
         elif not raised and len(batch) == 1:
-            self._solo.discard(batch[0].conn.slot)
+            slot = batch[0].conn.slot
+            if slot in self._solo:
+                self._solo[slot] -= 1
+                if self._solo[slot] <= 0:
+                    del self._solo[slot]
         ran = time.monotonic() - started
         for request, output in zip(batch, outputs, strict=True):
             request.payload = None
@@ -631,9 +647,6 @@ class WorkerServer:
         On a raise every request's output is the exception.
         """
         requests = [WorkerRequest(r.conn.slot, r.conn.generation, r.payload) for r in batch]
-        now = time.monotonic()
-        for request in batch:
-            self._last_stepped[request.conn.slot] = now
         try:
             outputs = self._worker.step(requests)
             if not isinstance(outputs, list | tuple) or len(outputs) != len(batch):
@@ -643,27 +656,31 @@ class WorkerServer:
                 raise RuntimeError(f"step() returned {count} outputs for {len(batch)} requests")
         except Exception as exc:
             logger.exception("step() raised", size=len(batch))
-            self.failed_steps += 1
-            self._failing_slots.update(r.conn.slot for r in batch)
+            with self._health_lock:
+                self.failed_steps += 1
+                self._failing_sessions.update((r.conn.slot, r.conn.generation) for r in batch)
             return [exc] * len(batch), True
-        self.failed_steps = 0
-        self._failing_slots.clear()
+        with self._health_lock:
+            self.failed_steps = 0
+            self._failing_sessions.clear()
         return list(outputs), False
 
     def failing(self, threshold: int) -> bool:
-        """Whether every session stepping keeps raising, as on a broken GPU.
+        """Whether steps keep raising whoever sends them, as on a broken GPU.
 
-        *threshold* steps in a row must have raised, and they must have raised
-        for every session that stepped in the last minute: a session whose own
-        input keeps raising while another steps fine does not make the worker
-        failing. With one session stepping, its raises alone cannot be told
-        from a broken GPU, and count.
+        *threshold* steps in a row must have raised, for at least two
+        sessions between them (a session is a slot's generation, so one
+        restarted counts anew), or for the only session open. One session
+        whose own input keeps raising, among others connected but idle, does
+        not make the worker failing. Safe from any thread.
         """
-        if self.failed_steps < threshold:
-            return False
-        recent = time.monotonic() - _ACTIVE_WINDOW
-        active = {slot for slot, when in self._last_stepped.items() if when >= recent}
-        return active <= self._failing_slots
+        with self._health_lock:
+            if self.failed_steps < threshold or not self._failing_sessions:
+                return False
+            sessions = len(self._failing_sessions)
+        with self._cond:
+            open_now = len(self._open)
+        return sessions >= 2 or open_now <= 1
 
     def _answer(self, request: _Request, output: Any) -> None:
         conn = request.conn
