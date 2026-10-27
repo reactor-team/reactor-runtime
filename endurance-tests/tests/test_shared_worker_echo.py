@@ -26,11 +26,11 @@ MODEL_DIR = SUITE_DIR / "model-shared-worker"
 
 DESCRIPTION = (
     "One long-lived session on a model split in two: the tracked echo runs in the "
-    "runtime, and its EchoModel in a model worker process (reactor-runtime "
-    "serve-worker) beside it, so every frame goes to the worker and back through its "
-    "socket and shared memory. Each cycle a v1 client joins, streams until 60 frames "
-    "come back, and closes. The session's one connection to the worker lasts the whole "
-    "run, so what the churn checks must not grow with it."
+    "runtime, and its EchoModel in a model worker process (python -m "
+    "reactor_runtime.model_worker) beside it, so every frame goes to the worker and "
+    "back through its socket and shared memory. Each cycle a v1 client joins, "
+    "streams until 60 frames come back, and closes. The session's one connection to "
+    "the worker lasts the whole run, so what the churn checks must not grow with it."
 )
 
 

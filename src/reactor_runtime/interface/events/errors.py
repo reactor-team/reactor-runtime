@@ -1,9 +1,7 @@
-"""The errors an author raises to answer a command, refuse a step, or drop one.
+"""The errors an author raises: :class:`CommandError` and :class:`ApplicationError`.
 
 A :class:`CommandError` answers one client's command with a failure. An
-:class:`ApplicationError` refuses one step of the loop. A
-:class:`ModelUnavailable` drops a step the model could not run because
-something it depends on is gone.
+:class:`ApplicationError` refuses one step of the loop.
 """
 
 from __future__ import annotations
@@ -59,18 +57,4 @@ class ApplicationError(Exception):
                 super().__init__("waiting for 4 webcam frames")
 
     The loop catches the base class, so every subclass refuses the same way.
-    """
-
-
-class ModelUnavailable(Exception):  # noqa: N818 (named for the state a caller catches)
-    """Raise from ``process_input()`` or ``generate()`` when the model cannot run the step now.
-
-    For a model whose work happens somewhere it does not own, such as a model
-    worker in another process, that has gone away. The default step loop drops
-    the step: ``process_output()`` is not called, nothing is emitted or
-    reported, and the loop asks again a moment later. Raising it does not end
-    the session; :meth:`~reactor_runtime.ReactorApp.report_unavailable` does, and
-    a model that raises this calls that too (a
-    :class:`~reactor_runtime.model_worker.WorkerClient` connected with the app
-    does both). A hand-written ``run()`` catches it itself.
     """

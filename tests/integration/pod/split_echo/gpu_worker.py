@@ -7,12 +7,12 @@ the GPU's memory shows whether one copy of them is loaded.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import torch  # ty: ignore[unresolved-import]  # installed where the GPU check runs
+from echo_model import EchoInput, EchoResult
 
-from reactor_runtime.model_worker import ModelWorker, WorkerRequest
+from reactor_runtime.model_worker import ModelWorker, WorkerRequest, cuda_health
 
 WEIGHT_BYTES = 2 << 30
 
@@ -20,6 +20,8 @@ WEIGHT_BYTES = 2 << 30
 class GpuEchoWorker(ModelWorker):
     """Invert each session's frame on the GPU, batched, after a matmul with the weights."""
 
+    request_type = EchoInput
+    result_type = EchoResult
     max_batch = 4
     batch_window = 0.002
     shm_output_bytes = 1 << 20
@@ -32,15 +34,19 @@ class GpuEchoWorker(ModelWorker):
         self.probe = torch.randn(1, side, device="cuda", dtype=torch.float16)
         torch.cuda.synchronize()
 
-    def step(self, requests: list[WorkerRequest]) -> list[Any]:
+    def step(self, requests: list[WorkerRequest[EchoInput]]) -> list[EchoResult]:
         """Invert every frame in one batched pass on the GPU."""
-        frames = [np.asarray(r.payload["frame"]) for r in requests]
+        frames = [np.asarray(r.payload.frame) for r in requests]
         if len({f.shape for f in frames}) != 1:
-            return [self._one(f) for f in frames]
+            return [EchoResult(frame=self._one(f)) for f in frames]
         batch = torch.from_numpy(np.stack(frames)).to("cuda", non_blocking=True)
         (self.probe @ self.weights).sum().item()
         out = (255 - batch).cpu().numpy()
-        return [np.ascontiguousarray(frame) for frame in out]
+        return [EchoResult(frame=np.ascontiguousarray(frame)) for frame in out]
+
+    def health(self) -> str | None:
+        """Report a broken CUDA context, which no step recovers from."""
+        return cuda_health()
 
     def _one(self, frame: np.ndarray) -> np.ndarray:
         return (255 - torch.from_numpy(frame.copy()).to("cuda")).cpu().numpy()

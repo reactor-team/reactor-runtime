@@ -1,26 +1,38 @@
-"""Serve a model's worker half: ``reactor-runtime serve-worker``.
+"""Serve a model's worker half: ``python -m reactor_runtime.model_worker``.
 
 The one process of a deployment that owns the weights and the GPU. Run it in
-the model's directory; it reads ``reactor.yaml`` there when there is one::
+the model's directory, beside the session runtimes' ``python -m
+reactor_runtime.serve``; it reads ``reactor.yaml`` there::
 
-    reactor-runtime serve-worker
-    python -m reactor_runtime.model_worker --worker pkg.module:Worker --socket /tmp/w.sock
+    cd my-model/                          # the directory with reactor.yaml
+    python -m reactor_runtime.model_worker
 
 Every option has an environment variable and a default:
 
-* ``--worker`` / ``REACTOR_WORKER_IMPORT`` / the manifest's ``runtime.worker``:
-  the :class:`~reactor_runtime.model_worker.ModelWorker` to serve.
+* ``--worker`` / ``REACTOR_WORKER_IMPORT`` / the manifest's
+  ``runtime.worker.import``: the :class:`~reactor_runtime.model_worker.ModelWorker`
+  to serve, as ``module:Class``. The flag and the variable override the manifest.
+* The manifest's ``runtime.worker`` block: the serving settings
+  (``max_batch``, ``batch_window``, ``max_request_bytes``,
+  ``shm_input_bytes``, ``shm_output_bytes``) on top of the class's. The class
+  is the authority: the block may lower ``max_batch`` and raise the shm sizes,
+  never the reverse, and a value outside that stops the start before
+  ``load()`` runs. The effective values are logged and served on ``/health``.
 * ``--config`` / the manifest's ``runtime.config``: handed to ``load()``.
 * ``--socket`` / ``REACTOR_MODEL_WORKER_SOCKET`` / ``/run/reactor-worker/sock``:
   where session processes connect. Its directory is created when missing.
+* ``REACTOR_MAX_SESSIONS``: when set, the most sessions the deployment runs.
+  The start fails, before ``load()``, when ``/dev/shm`` has less free space
+  than that many sessions' blocks.
 * ``--health-port`` / ``REACTOR_MODEL_WORKER_HEALTH_PORT``: when set, ``GET
-  /health`` on that port answers 503 ``loading`` while ``load()`` runs, 200
-  ``serving`` once sessions can connect, with ``shm_slot_bytes``, the
-  ``/dev/shm`` each session holds, and 503 ``stuck`` while one step has run
-  longer than ``REACTOR_MODEL_WORKER_STUCK_SECONDS`` (120 by default), or
-  ``failing`` once ``REACTOR_MODEL_WORKER_FAILING_STEPS`` steps in a row (5 by
-  default) have raised for at least two sessions, or for the only one open, as
-  they do when the GPU's state is broken.
+  /health`` on that port answers 503 ``loading`` while ``load()`` runs, then
+  200 ``serving`` with the effective settings, the protocol version, and the
+  schema fingerprint. It answers 503 ``unhealthy`` with a reason once the
+  model called :meth:`~reactor_runtime.model_worker.ModelWorker.mark_unhealthy`
+  or while its :meth:`~reactor_runtime.model_worker.ModelWorker.health`
+  returns one (called on every probe, on the health server's thread), and 503
+  ``stuck`` while one step has run longer than
+  ``REACTOR_MODEL_WORKER_STUCK_SECONDS`` (120 by default).
 * ``REACTOR_SHM_PREFIX`` (``rrmw`` by default): the shared blocks of this
   worker and its sessions are named under it and a token of each start. A
   worker that starts unlinks the blocks the worker before it on the same
@@ -50,9 +62,10 @@ from pathlib import Path
 from typing import Any
 
 from reactor_runtime import log
-from reactor_runtime.manifest import MANIFEST, import_ref, load_config, load_worker_ref
+from reactor_runtime.manifest import MANIFEST, import_ref, load_config
+from reactor_runtime.model_worker import wire
 from reactor_runtime.model_worker.client import DEFAULT_SOCKET, SOCKET_ENV
-from reactor_runtime.model_worker.contract import ModelWorker
+from reactor_runtime.model_worker.contract import ModelWorker, WorkerSettings, check_declarations
 from reactor_runtime.model_worker.server import WorkerServer
 from reactor_runtime.model_worker.shm import unlink_prefix
 
@@ -62,7 +75,8 @@ WORKER_ENV = "REACTOR_WORKER_IMPORT"
 HEALTH_PORT_ENV = "REACTOR_MODEL_WORKER_HEALTH_PORT"
 STUCK_ENV = "REACTOR_MODEL_WORKER_STUCK_SECONDS"
 SHM_PREFIX_ENV = "REACTOR_SHM_PREFIX"
-FAILING_ENV = "REACTOR_MODEL_WORKER_FAILING_STEPS"
+MAX_SESSIONS_ENV = "REACTOR_MAX_SESSIONS"
+SHM_DIR = Path("/dev/shm")
 
 
 class _Status:
@@ -71,25 +85,32 @@ class _Status:
     def __init__(self, stuck_after: float) -> None:
         self.phase = "loading"
         self.server: WorkerServer | None = None
+        self.worker: ModelWorker | None = None
         self.stuck_after = stuck_after
-        self.failing_after = _int_env(FAILING_ENV, 5)
-        self.slot_bytes: int | None = None
+        self.serving: dict[str, Any] = {}
 
     def report(self) -> tuple[int, dict[str, Any]]:
-        server = self.server
-        if self.phase == "serving" and server is not None:
-            running = server.step_running_for
-            if running > self.stuck_after:
-                return 503, {"status": "stuck", "step_seconds": round(running, 1)}
-            if server.failing(self.failing_after):
-                return 503, {"status": "failing", "failed_steps": server.failed_steps}
-            return 200, {"status": "serving", "shm_slot_bytes": self.slot_bytes}
-        return 503, {"status": self.phase}
+        server, worker = self.server, self.worker
+        if self.phase != "serving" or server is None or worker is None:
+            return 503, {"status": self.phase}
+        latched = worker.unhealthy
+        if latched is not None:
+            return 503, {"status": "unhealthy", "reason": latched}
+        running = server.step_running_for
+        if running > self.stuck_after:
+            return 503, {"status": "stuck", "step_seconds": round(running, 1)}
+        try:
+            reason = worker.health()
+        except Exception as exc:
+            reason = f"health() raised {type(exc).__name__}: {exc}"
+        if reason is not None:
+            return 503, {"status": "unhealthy", "reason": str(reason)}
+        return 200, {"status": "serving", **self.serving}
 
 
 def main(argv: list[str] | None = None) -> int:
     """Load the worker half and serve it until signalled; return the exit status."""
-    parser = argparse.ArgumentParser(prog="reactor-runtime serve-worker")
+    parser = argparse.ArgumentParser(prog="python -m reactor_runtime.model_worker")
     parser.add_argument("--worker", default=None, help="module:Class of the ModelWorker")
     parser.add_argument("--socket", default=None, help="the Unix socket sessions connect to")
     parser.add_argument("--config", default=None, help="the model's config file")
@@ -102,14 +123,21 @@ def main(argv: list[str] | None = None) -> int:
     manifest = Path.cwd() / MANIFEST
     worker_ref = args.worker or os.getenv(WORKER_ENV, "").strip() or None
     config_path = Path(args.config).resolve() if args.config else None
+    overrides: dict[str, Any] = {}
     if manifest.is_file():
-        worker_ref = worker_ref or load_worker_ref(manifest)
+        try:
+            cfg = load_config(manifest)
+        except ValueError as exc:
+            raise SystemExit(f"{manifest}: {exc}") from None
+        if cfg.worker is not None:
+            worker_ref = worker_ref or cfg.worker.import_ref
+            overrides = dict(cfg.worker.settings)
         if config_path is None:
-            config_path = load_config(manifest).config_path
+            config_path = cfg.config_path
     if not worker_ref:
         raise SystemExit(
-            f"no worker half named: pass --worker, set {WORKER_ENV}, or name runtime.worker "
-            f"in {MANIFEST}"
+            f"no worker half named: name runtime.worker.import in {MANIFEST}, pass --worker, "
+            f"or set {WORKER_ENV}"
         )
     socket_path = Path(args.socket or os.getenv(SOCKET_ENV, "").strip() or DEFAULT_SOCKET)
     socket_path.parent.mkdir(parents=True, exist_ok=True)
@@ -148,6 +176,22 @@ def main(argv: list[str] | None = None) -> int:
         worker_cls = import_ref(worker_ref)
         if not (isinstance(worker_cls, type) and issubclass(worker_cls, ModelWorker)):
             raise SystemExit(f"{worker_ref} does not name a ModelWorker subclass")
+        try:
+            check_declarations(worker_cls)
+            settings = WorkerSettings.resolve(worker_cls, overrides)
+        except (TypeError, ValueError) as exc:
+            raise SystemExit(f"{worker_ref}: {exc}") from None
+        logger.info(
+            "model worker settings",
+            worker=worker_ref,
+            max_batch=settings.max_batch,
+            batch_window=settings.batch_window,
+            max_request_bytes=settings.max_request_bytes,
+            shm_input_bytes=settings.shm_input_bytes,
+            shm_output_bytes=settings.shm_output_bytes,
+            from_manifest=sorted(overrides),
+        )
+        _check_shm_room(settings)
         worker = worker_cls()
         worker.device = _device()
         started = time.monotonic()
@@ -157,10 +201,22 @@ def main(argv: list[str] | None = None) -> int:
             worker=worker_ref,
             device=worker.device,
             seconds=round(time.monotonic() - started, 2),
-            shm_slot_bytes=worker_cls.shm_slot_size(),
+            shm_slot_bytes=settings.shm_slot_bytes,
         )
-        status.slot_bytes = worker_cls.shm_slot_size()
-        server = WorkerServer(worker, socket_path, shm_prefix=prefix)
+        server = WorkerServer(worker, socket_path, shm_prefix=prefix, settings=settings)
+        status.worker = worker
+        status.serving = {
+            "protocol": wire.PROTOCOL,
+            "schema": server.schema,
+            "shm_slot_bytes": settings.shm_slot_bytes,
+            "settings": {
+                "max_batch": settings.max_batch,
+                "batch_window": settings.batch_window,
+                "max_request_bytes": settings.max_request_bytes,
+                "shm_input_bytes": settings.shm_input_bytes,
+                "shm_output_bytes": settings.shm_output_bytes,
+            },
+        }
         server.bind()
         if stop_requested.is_set():
             server.close()
@@ -217,15 +273,34 @@ def _port_env() -> int | None:
         raise SystemExit(f"{HEALTH_PORT_ENV} {raw!r} must be an integer") from None
 
 
-def _int_env(name: str, default: int) -> int:
-    raw = os.getenv(name, "").strip()
+def _check_shm_room(settings: WorkerSettings) -> None:
+    """Fail the start when ``/dev/shm`` cannot hold ``REACTOR_MAX_SESSIONS`` sessions' blocks.
+
+    Raises:
+        SystemExit: ``REACTOR_MAX_SESSIONS`` is malformed, or the free space is short.
+    """
+    raw = os.getenv(MAX_SESSIONS_ENV, "").strip()
+    if not raw:
+        return
     try:
-        value = int(raw) if raw else default
+        sessions = int(raw)
     except ValueError:
-        raise SystemExit(f"{name} {raw!r} must be an integer") from None
-    if value < 1:
-        raise SystemExit(f"{name} must be at least 1")
-    return value
+        raise SystemExit(f"{MAX_SESSIONS_ENV} {raw!r} must be an integer") from None
+    if sessions < 1:
+        raise SystemExit(f"{MAX_SESSIONS_ENV} must be at least 1")
+    try:
+        stats = os.statvfs(SHM_DIR)
+    except OSError as exc:
+        raise SystemExit(f"cannot read the free space of {SHM_DIR}: {exc}") from None
+    free = stats.f_bavail * stats.f_frsize
+    needed = sessions * settings.shm_slot_bytes
+    if free < needed:
+        raise SystemExit(
+            f"{SHM_DIR} has {free} bytes free, and {sessions} sessions ({MAX_SESSIONS_ENV}) need "
+            f"{needed}: {settings.shm_slot_bytes} each (shm_input_bytes + shm_output_bytes). "
+            "Size /dev/shm (in a pod, the emptyDir's sizeLimit) to fit them"
+        )
+    logger.info("shared memory has room", free_bytes=free, needed_bytes=needed, sessions=sessions)
 
 
 def _stuck_seconds() -> float:

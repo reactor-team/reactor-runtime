@@ -97,7 +97,7 @@ def test_a_single_session_model_serves_without_any_worker_code(tmp_path: Path) -
         threads = {
             path.read_text().strip() for path in Path(f"/proc/{process.pid}/task").glob("*/comm")
         }
-        assert not threads & {"worker-client", "worker-reconnect"}
+        assert "worker-client" not in threads
         process.send_signal(signal.SIGTERM)
         assert process.wait(30) == 0
     finally:
@@ -118,7 +118,7 @@ def test_a_session_half_without_a_worker_socket_fails_its_start_clearly(tmp_path
         "from reactor_runtime.model_worker import WorkerClient\n"
         "class Half(ReactorApp):\n"
         "    def load(self, config_path):\n"
-        "        self.worker = WorkerClient.connect(self)\n"
+        "        self.worker = WorkerClient.connect()\n"
         "    def generate(self, input):\n"
         "        return None\n"
     )

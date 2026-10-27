@@ -4,8 +4,9 @@ The ``reactor.yaml`` manifest is the runtime's one configuration file:
 ``runtime.import`` names the model as a ``"module:Class"`` reference,
 ``runtime.config`` points at the model's own config file, the
 ``runtime.recording`` block configures the recorder, the
-``runtime.step_results`` block says how each finished step is saved, and the
-``runtime.livekit`` block says how a LiveKit room reaches the model. This
+``runtime.step_results`` block says how each finished step is saved, the
+``runtime.livekit`` block says how a LiveKit room reaches the model, and the
+``runtime.worker`` block names the worker half of a model split in two. This
 module turns that file into
 a :class:`~reactor_runtime.core.RuntimeConfig` and the reference into the model
 class — and it is the only code that does either, so every entry point resolves
@@ -25,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from reactor_runtime.core import (
+    WORKER_SETTINGS,
     LiveKitBlockError,
     LiveKitConfig,
     LiveKitRpcMethod,
@@ -32,6 +34,7 @@ from reactor_runtime.core import (
     RuntimeConfig,
     StepResultsConfig,
     TrackDirection,
+    WorkerConfig,
 )
 from reactor_runtime.interface.internal.reactor_core import ReactorCore
 
@@ -66,8 +69,8 @@ def load_config(manifest: Path) -> RuntimeConfig:
         SystemExit: If the manifest is not valid YAML, is not a mapping, or
             carries no ``runtime.import``.
         ValueError: If a block the runtime refuses to guess about has the
-            wrong shape: a ``step_results.queue`` below 1, or a malformed
-            ``livekit`` block.
+            wrong shape: a ``step_results.queue`` below 1, a malformed
+            ``livekit`` block, or a malformed ``worker`` block.
     """
     try:
         document = yaml.safe_load(manifest.read_text())
@@ -87,6 +90,7 @@ def load_config(manifest: Path) -> RuntimeConfig:
         recording=_recording_from_manifest(runtime, document),
         step_results=_step_results_from_manifest(runtime),
         livekit=_livekit_from_manifest(runtime),
+        worker=_worker_from_manifest(runtime),
     )
 
 
@@ -109,26 +113,44 @@ def _model_name(block: Any) -> str | None:
     return name if isinstance(name, str) and name else None
 
 
-def load_worker_ref(manifest: Path) -> str | None:
-    """Read ``runtime.worker``, the worker half of a model split in two, if the manifest names one.
+def _worker_from_manifest(runtime: dict[str, Any]) -> WorkerConfig | None:
+    """Read the ``runtime.worker`` block: the worker half and its serving settings.
 
-    The worker half is a :class:`~reactor_runtime.model_worker.ModelWorker` named
-    as ``"module:Class"``; ``reactor-runtime serve-worker`` serves it. The
-    session runtime reads nothing from this key.
+    The block is a mapping with ``import``, the worker half as
+    ``"module:Class"``, and any of :data:`~reactor_runtime.core.WORKER_SETTINGS`::
+
+        runtime:
+          import: plasma:Plasma
+          worker:
+            import: plasma_worker:PlasmaWorker
+            max_batch: 2
+            batch_window: 0.005
+
+    Only the shape is checked here; the values are checked against the worker
+    class when the worker loads, since the class sets their bounds.
 
     Raises:
-        SystemExit: If the manifest does not parse, or ``runtime.worker`` is not
-            a non-empty string.
+        ValueError: The block is not a mapping, has no ``import`` string, or
+            names a key it does not take.
     """
-    try:
-        document = yaml.safe_load(manifest.read_text())
-    except yaml.YAMLError as error:
-        raise SystemExit(f"{manifest}: invalid YAML: {error}") from None
-    runtime = document.get("runtime") if isinstance(document, dict) else None
-    worker = runtime.get("worker") if isinstance(runtime, dict) else None
-    if worker is not None and (not isinstance(worker, str) or not worker):
-        raise SystemExit(f"{manifest}: runtime.worker must be a 'module:Class' string")
-    return worker
+    block = runtime.get("worker")
+    if block is None:
+        return None
+    if not isinstance(block, dict):
+        raise ValueError(
+            "runtime.worker must be a block with `import: module:Class` and the worker's "
+            f"serving settings, got {block!r}"
+        )
+    ref = block.get("import")
+    if not isinstance(ref, str) or not ref:
+        raise ValueError("runtime.worker.import must name the worker half as 'module:Class'")
+    unknown = sorted(set(block) - {"import", *WORKER_SETTINGS})
+    if unknown:
+        raise ValueError(
+            f"runtime.worker has unknown keys {unknown}; it takes import and "
+            f"{', '.join(WORKER_SETTINGS)}"
+        )
+    return WorkerConfig(import_ref=ref, settings={k: v for k, v in block.items() if k != "import"})
 
 
 def import_ref(ref: str) -> Any:

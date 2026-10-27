@@ -21,7 +21,6 @@ from reactor_runtime import (
     InputField,
     InputState,
     MediaInput,
-    ModelUnavailable,
     Output,
     ReactorApp,
     ReadMode,
@@ -372,25 +371,3 @@ def test_only_the_default_step_loop_supports_stepped_sessions() -> None:
     assert not OwnLoop.supports_stepped()
     assert not Pipeline.supports_stepped()
     assert not OwnCommands.supports_stepped()
-
-
-class Unavailable(Stepper):
-    def generate(self, input: Any) -> Frame:
-        if self.state.prompt == "gone":
-            raise ModelUnavailable("worker_died: gone")
-        return super().generate(input)
-
-
-async def test_a_step_the_model_cannot_run_is_refused_and_takes_no_number() -> None:
-    harness = Harness(Unavailable())
-    try:
-        await harness.start()
-        harness.step("r1", ("set_prompt", {"prompt": "gone"}))
-        harness.step("r2", ("set_prompt", {"prompt": "a lake"}))
-        await harness.settle()
-        assert harness.refusals == [StepRefusal(CLIENT, "r1", 1, "worker_died: gone")]
-        assert [(r.request.request_id, r.request.index) for r in harness.reports if r.request] == [
-            ("r2", 1)
-        ]
-    finally:
-        await harness.stop()

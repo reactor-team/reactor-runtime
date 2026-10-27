@@ -57,10 +57,12 @@ live in `skills/application-model-isolation`, which says the split is
 optional and when to make it. `stepped_echo` is the reference for a stepped
 session: it writes the three step hooks, never `run()`, and reports back
 everything a step carried, so its report is a contract clients and tests rely
-on. `shared_worker` is the reference for a model split into a worker half and
-a session half (`reactor_runtime.model_worker`): the worker half owns the
-weights, every session runtime asks it for its frames, and its `deploy/` files
-show the pod the two run in.
+on. `shared_worker` is the reference for the same split with the model half
+in a process of its own (`reactor_runtime.model_worker`): the worker owns the
+weights, every session runtime's application half asks it for its frames
+through typed requests and results, decides itself what a lost worker means
+(option 2: end the session, stay up, reconnect), and its `deploy/` files show
+the pod the two run in.
 
 ## Toolchain
 

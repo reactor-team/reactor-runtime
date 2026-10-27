@@ -9,15 +9,19 @@ from the queue by the policy :class:`ModelWorker` documents, runs ``step()``,
 and sends each answer back the same way.
 
 A fault stays with the session it belongs to. A request that does not decode,
-names another session's memory, or is too large is answered as rejected; a
-frame that breaks the protocol closes that session's connection alone; an
-output that fails, or holds a value that does not travel, fails that request alone.
+does not match the worker's ``request_type``, names another session's memory,
+or is too large is answered as rejected; a frame that breaks the protocol (an
+undeclared signal included) closes that session's connection alone; an output
+that fails, or holds a value that does not travel, fails that request alone. A
+``step()`` that raises fails every request of its batch with the same error,
+and the worker goes on: it never steps a request twice.
 """
 
 from __future__ import annotations
 
 import contextlib
 import itertools
+import json
 import os
 import re
 import select
@@ -31,10 +35,14 @@ from pathlib import Path
 from typing import Any
 
 from reactor_runtime.distributed.errors import WorkerCrashed
-from reactor_runtime.interface.events.errors import ModelUnavailable
 from reactor_runtime.log import get_logger
-from reactor_runtime.model_worker import wire
-from reactor_runtime.model_worker.contract import ModelWorker, WorkerRequest
+from reactor_runtime.model_worker import codec, schema, wire
+from reactor_runtime.model_worker.contract import (
+    ModelWorker,
+    WorkerRequest,
+    WorkerSettings,
+    check_declarations,
+)
 from reactor_runtime.model_worker.shm import RequestRefused
 from reactor_runtime.model_worker.transport import Transport, UnixShmTransport, WorkerCarrier
 from reactor_runtime.model_worker.wire import Kind
@@ -45,14 +53,12 @@ logger = get_logger(__name__)
 _STOP_POLL = 0.2
 # How long a new connection may take to say hello.
 _HELLO_TIMEOUT = 10.0
-# Room for the header around a request's arrays, past the request limit.
-_FRAME_SLACK = 64 << 10
+# A STEP frame is its timeout and a codec header; its arrays are in shared memory.
+_STEP_FRAME_LIMIT = wire.TIMEOUT.size + codec.MAX_HEADER_BYTES
 _PEERCRED = struct.Struct("3i")
 _TOKEN = re.compile(r"[0-9a-f]{4,16}")
 # How long an answer may wait for a session to read it before the session is cut off.
 _SEND_TIMEOUT = 5.0
-# Successful steps alone owed by the slots of a batch that raised only together.
-_PROBATION = 8
 
 
 @dataclass(eq=False)
@@ -61,7 +67,8 @@ class _Conn:
     peer_pid: int
     sock: socket.socket
     carrier: WorkerCarrier
-    welcome: dict[str, Any]
+    request_prefix: str
+    transport: dict[str, str]
     hello_id: int
     generation: int = 0
     send_lock: threading.Lock = field(default_factory=threading.Lock)
@@ -90,6 +97,13 @@ class WorkerServer:
             server writes, is named under this prefix.
         transport: How frames and payloads travel; a Unix socket and shared
             memory by default.
+        settings: The serving settings, as ``reactor.yaml`` adjusted the
+            class's (:meth:`WorkerSettings.resolve`); the class's own when
+            omitted.
+
+    Raises:
+        TypeError: The worker class's declared types are not valid declarations.
+        ValueError: A serving setting is out of range.
     """
 
     def __init__(
@@ -99,34 +113,28 @@ class WorkerServer:
         *,
         shm_prefix: str,
         transport: Transport | None = None,
+        settings: WorkerSettings | None = None,
     ) -> None:
-        max_batch = type(worker).max_batch
-        if type(max_batch) is not int or max_batch < 1:
-            raise ValueError(f"max_batch must be a positive integer, got {max_batch!r}")
-        window = float(type(worker).batch_window)
-        if not window >= 0:
-            raise ValueError(f"batch_window must be at least 0, got {window!r}")
-        limit = type(worker).max_request_bytes
-        if type(limit) is not int or limit < 1:
-            raise ValueError(f"max_request_bytes must be a positive integer, got {limit!r}")
-        for name in ("shm_input_bytes", "shm_output_bytes"):
-            size = getattr(type(worker), name)
-            if type(size) is not int or size < 1:
-                raise ValueError(f"{name} must be a positive integer, got {size!r}")
+        cls = type(worker)
+        check_declarations(cls)
+        settings = settings or WorkerSettings.resolve(cls, {})
+        settings.check()
+        self._settings = settings
         self._worker = worker
         self._path = Path(socket_path)
         self._prefix = shm_prefix
-        signals = type(worker).signals
-        if not isinstance(signals, frozenset | set | tuple | list) or not all(
-            isinstance(name, str) for name in signals
-        ):
-            raise ValueError(f"signals must be a set of names, got {signals!r}")
-        self._signals = frozenset(signals)
+        self._request_type = cls.request_type
+        self._result_type = cls.result_type
+        self._signal_types = cls.signals
+        self._schema = schema.fingerprint(
+            request_type=cls.request_type, result_type=cls.result_type, signals=cls.signals
+        )
+        self._contract = schema.contract_text(cls.request_type, cls.result_type, cls.signals)
         self._transport = transport or UnixShmTransport()
-        self._shared: dict[str, Any] = {}
-        self._max_batch = max_batch
-        self._window = window
-        self._limit = limit
+        self._shared: dict[str, str] = {}
+        self._max_batch = settings.max_batch
+        self._window = settings.batch_window
+        self._limit = settings.max_request_bytes
         self._cond = threading.Condition()
         self._waiting: list[_Request] = []
         self._joining: list[_Conn] = []
@@ -143,16 +151,16 @@ class WorkerServer:
         self._stopping = False
         self._listener: socket.socket | None = None
         self._step_started: float | None = None
-        # Steps in a row that raised, for the worker's health.
-        self.failed_steps = 0
-        # The sessions, by (slot, generation), whose steps raised in the
-        # current run of raising steps; read by the health thread.
-        self._failing_sessions: set[tuple[int, int]] = set()
-        self._health_lock = threading.Lock()
-        # Slots stepped alone, with how many successful steps they still owe:
-        # one whose request raised alone owes one; the members of a batch
-        # that raised only together owe _PROBATION each.
-        self._solo: dict[int, int] = {}
+
+    @property
+    def settings(self) -> WorkerSettings:
+        """The serving settings in effect."""
+        return self._settings
+
+    @property
+    def schema(self) -> str:
+        """The fingerprint of the worker's request, result, and signal types."""
+        return self._schema
 
     @property
     def socket_path(self) -> Path:
@@ -174,8 +182,14 @@ class WorkerServer:
         logger.info(
             "model worker serving",
             socket=str(self._path),
+            protocol=wire.PROTOCOL,
+            schema=self._schema,
+            contract=self._contract,
             max_batch=self._max_batch,
             batch_window=self._window,
+            max_request_bytes=self._limit,
+            shm_input_bytes=self._settings.shm_input_bytes,
+            shm_output_bytes=self._settings.shm_output_bytes,
         )
         try:
             self._step_loop()
@@ -219,10 +233,9 @@ class WorkerServer:
             conn = self._hello(sock)
             if conn is None:
                 return
-            step_limit = self._limit + _FRAME_SLACK
 
             def limit(kind: Kind) -> int:
-                return step_limit if kind is Kind.STEP else wire.CONTROL_LIMIT
+                return _STEP_FRAME_LIMIT if kind is Kind.STEP else wire.CONTROL_LIMIT
 
             while True:
                 kind, request_id, payload = wire.recv(sock, limit)
@@ -276,20 +289,43 @@ class WorkerServer:
         kind, request_id, payload = wire.recv(sock, wire.CONTROL_LIMIT)
         if kind is not Kind.HELLO:
             raise wire.ProtocolError(f"expected a HELLO, got {kind.name}")
-        hello = wire.from_json(payload)
-        slot = hello.get("slot")
-        token = hello.get("token")
-        if slot is not None and (type(slot) is not int or slot < 0):
+        raw = wire.json_object(payload)
+        protocol = raw.get("protocol")
+        if protocol != wire.PROTOCOL:
+            self._refuse(
+                sock,
+                request_id,
+                f"the session speaks model worker protocol {protocol!r} and this worker speaks "
+                f"protocol {wire.PROTOCOL}: run both halves on the same reactor-runtime",
+            )
+            return None
+        try:
+            hello = wire.decode_message(payload, wire.Hello)
+        except wire.ProtocolError as exc:
+            self._refuse(sock, request_id, str(exc))
+            return None
+        if hello.schema != self._schema:
+            self._refuse(
+                sock,
+                request_id,
+                f"the session's request, result, and signal types (fingerprint {hello.schema}) "
+                f"differ from the worker's (fingerprint {self._schema}: {self._contract})",
+            )
+            return None
+        slot = hello.slot
+        token = hello.token
+        if slot is not None and slot < 0:
             self._refuse(sock, request_id, f"slot must be a non-negative integer, got {slot!r}")
             return None
-        if not isinstance(token, str) or not _TOKEN.fullmatch(token):
+        if not _TOKEN.fullmatch(token):
             self._refuse(sock, request_id, "the hello carries no valid token")
             return None
         sock.settimeout(None)
         peer_pid = _peer_pid(sock)
         with self._cond:
             if self._stopping:
-                self._refuse(sock, request_id, "the model worker is stopping")
+                # Closed without a refusal: a session waiting in connect()
+                # goes on waiting for the worker that replaces this one.
                 return None
             if slot is None:
                 slot = next(
@@ -317,14 +353,14 @@ class WorkerServer:
             conn_id = next(self._conn_ids)
         # Made and zero-filled outside the lock: the step thread goes on meanwhile.
         try:
-            carrier, welcome = self._transport.worker_carrier(
+            carrier, extra = self._transport.worker_carrier(
                 self._prefix,
                 slot,
                 token,
                 conn_id,
                 self._limit,
-                type(self._worker).shm_input_bytes,
-                type(self._worker).shm_output_bytes,
+                self._settings.shm_input_bytes,
+                self._settings.shm_output_bytes,
             )
         except Exception as exc:
             with self._cond:
@@ -336,14 +372,14 @@ class WorkerServer:
             peer_pid=peer_pid,
             sock=sock,
             carrier=carrier,
-            welcome=welcome,
+            request_prefix=extra.pop("request_prefix"),
+            transport=extra,
             hello_id=request_id,
         )
         with self._cond:
             self._opening.discard(slot)
             if self._stopping:
                 carrier.close()
-                self._refuse(sock, request_id, "the model worker is stopping")
                 return None
             self._by_slot[slot] = conn
             self._joining.append(conn)
@@ -362,17 +398,19 @@ class WorkerServer:
 
     def _take_request(self, conn: _Conn, request_id: int, payload: bytes) -> None:
         if len(payload) < wire.TIMEOUT.size:
-            self._reply(conn, Kind.REJECTED, request_id, b"the request has no timeout field")
+            self._reject(conn, request_id, "the request has no timeout field")
             return
         (timeout,) = wire.TIMEOUT.unpack_from(payload)
         if not conn.opened:
-            self._reply(conn, Kind.REJECTED, request_id, b"the session is not open on the worker")
+            self._reject(conn, request_id, "the session is not open on the worker")
             return
         try:
             value = conn.carrier.decode(payload[wire.TIMEOUT.size :])
-        except RequestRefused as exc:
+            if self._request_type is not None:
+                value = schema.load(value, self._request_type)
+        except (RequestRefused, schema.SchemaError) as exc:
             logger.warning("rejected a session's request", slot=conn.slot, reason=str(exc))
-            self._reply(conn, Kind.REJECTED, request_id, str(exc).encode())
+            self._reject(conn, request_id, f"the request does not decode: {exc}")
             return
         now = time.monotonic()
         request = _Request(
@@ -395,28 +433,52 @@ class WorkerServer:
             self._reply(conn, Kind.EXPIRED, old.request_id)
 
     def _signal(self, conn: _Conn, payload: bytes) -> None:
+        """Deliver one signal; one that is not a declared type refuses the session.
+
+        Raises:
+            wire.ProtocolError: The signal's tag is not in the worker's table,
+                or its fields do not match the type the tag names. The
+                session is sent the reason, then its connection is closed.
+        """
         try:
-            signal = wire.from_json(payload)
+            if len(payload) < wire.SIGNAL_TAG.size:
+                raise wire.ProtocolError("a signal has no tag")
+            (tag,) = wire.SIGNAL_TAG.unpack_from(payload)
+            if tag >= len(self._signal_types):
+                raise wire.ProtocolError(
+                    f"a signal names tag {tag}, which the worker does not declare "
+                    f"(it declares {len(self._signal_types)} signal types)"
+                )
+            declared = self._signal_types[tag]
+            try:
+                tree = json.loads(payload[wire.SIGNAL_TAG.size :])
+                signal = schema.load(codec.from_tree(tree), declared)
+            except (UnicodeDecodeError, ValueError, RecursionError, schema.SchemaError) as exc:
+                raise wire.ProtocolError(
+                    f"a {declared.__qualname__} signal does not decode: {exc}"
+                ) from None
         except wire.ProtocolError as exc:
-            logger.warning("dropped a signal that does not decode", slot=conn.slot, error=str(exc))
-            return
-        name, value = signal.get("name"), signal.get("payload")
-        if not isinstance(name, str) or name not in self._signals:
-            logger.warning(
-                "dropped a signal the worker does not declare", slot=conn.slot, signal=name
-            )
-            return
+            with conn.send_lock, contextlib.suppress(OSError):
+                _send_within(
+                    conn.sock,
+                    wire.encode(Kind.REFUSED, 0, wire.encode_message(wire.Refusal(str(exc)))),
+                    _SEND_TIMEOUT,
+                )
+            raise
         if not conn.opened:
             return
         try:
-            self._worker.signal(conn.slot, name, value)
+            self._worker.signal(conn.slot, signal)
         except Exception:
-            logger.exception("signal() raised", slot=conn.slot, signal=name)
+            logger.exception("signal() raised", slot=conn.slot, signal=declared.__qualname__)
 
     def _refuse(self, sock: socket.socket, request_id: int, reason: str) -> None:
         logger.warning("refused a session", reason=reason)
         with contextlib.suppress(OSError):
-            wire.send(sock, Kind.REFUSED, request_id, reason.encode())
+            wire.send(sock, Kind.REFUSED, request_id, wire.encode_message(wire.Refusal(reason)))
+
+    def _reject(self, conn: _Conn, request_id: int, reason: str) -> None:
+        self._reply(conn, Kind.REJECTED, request_id, wire.encode_message(wire.Refusal(reason)))
 
     def _reply(self, conn: _Conn, kind: Kind, request_id: int, payload: bytes = b"") -> None:
         """Send one frame to *conn*; a session that does not read it in time is cut off.
@@ -488,7 +550,7 @@ class WorkerServer:
         """Take the next batch off the queue, waiting out the batch window first."""
         with self._cond:
             ready = self._ready()
-            if ready and self._window > 0 and ready[0].conn.slot not in self._solo:
+            if ready and self._window > 0:
                 until = ready[0].arrived + self._window
                 while (
                     not self._stopping
@@ -503,13 +565,7 @@ class WorkerServer:
                     ready = self._ready()
             now = time.monotonic()
             expired = [r for r in self._waiting if r.deadline is not None and r.deadline <= now]
-            candidates = [r for r in ready if r not in expired]
-            if candidates and candidates[0].conn.slot in self._solo:
-                # A slot whose requests raise on their own is stepped alone
-                # until one succeeds, so its batch-mates do not pay for it.
-                batch = candidates[:1]
-            else:
-                batch = [r for r in candidates if r.conn.slot not in self._solo][: self._max_batch]
+            batch = [r for r in ready if r not in expired][: self._max_batch]
             taken = set(map(id, batch + expired))
             self._waiting = [r for r in self._waiting if id(r) not in taken]
         for request in expired:
@@ -530,7 +586,12 @@ class WorkerServer:
             self._worker.session_opened(conn.slot, conn.generation)
         except Exception as exc:
             logger.exception("session_opened() refused a session", slot=conn.slot)
-            self._reply(conn, Kind.REFUSED, conn.hello_id, _describe(exc).encode())
+            self._reply(
+                conn,
+                Kind.REFUSED,
+                conn.hello_id,
+                wire.encode_message(wire.Refusal(f"session_opened() refused it: {_describe(exc)}")),
+            )
             with contextlib.suppress(OSError):
                 conn.sock.shutdown(socket.SHUT_RDWR)
             return
@@ -538,17 +599,17 @@ class WorkerServer:
         with self._cond:
             self._open.add(conn)
         logger.info("session opened", slot=conn.slot, generation=conn.generation, pid=conn.peer_pid)
-        welcome = {
-            **self._shared,
-            **conn.welcome,
-            "slot": conn.slot,
-            "generation": conn.generation,
-            "max_batch": self._max_batch,
-            "max_request_bytes": self._limit,
-            "shm_slot_bytes": type(self._worker).shm_slot_size(),
-            "signals": sorted(self._signals),
-        }
-        self._reply(conn, Kind.WELCOME, conn.hello_id, wire.to_json(welcome))
+        welcome = wire.Welcome(
+            slot=conn.slot,
+            generation=conn.generation,
+            max_batch=self._max_batch,
+            max_request_bytes=self._limit,
+            shm_slot_bytes=self._settings.shm_slot_bytes,
+            signals=tuple(s.__qualname__ for s in self._signal_types),
+            request_prefix=conn.request_prefix,
+            transport={**self._shared, **conn.transport},
+        )
+        self._reply(conn, Kind.WELCOME, conn.hello_id, wire.encode_message(welcome))
 
     def _next_generation(self, slot: int) -> int:
         self._generations[slot] = self._generations.get(slot, 0) + 1
@@ -557,7 +618,6 @@ class WorkerServer:
     def _close(self, conn: _Conn) -> None:
         with self._cond:
             self._open.discard(conn)
-        self._solo.pop(conn.slot, None)
         if conn.opened:
             conn.opened = False
             try:
@@ -582,7 +642,6 @@ class WorkerServer:
             except Exception:
                 logger.exception("session_closed() raised", slot=conn.slot)
         conn.generation = self._next_generation(conn.slot)
-        self._solo.pop(conn.slot, None)
         try:
             self._worker.session_opened(conn.slot, conn.generation)
         except Exception as exc:
@@ -590,46 +649,37 @@ class WorkerServer:
             conn.opened = False
             with self._cond:
                 self._open.discard(conn)
-            self._reply(conn, Kind.REJECTED, request_id, _describe(exc).encode())
+            self._reject(conn, request_id, f"session_opened() refused the reset: {_describe(exc)}")
             return
         conn.opened = True
         with self._cond:
             self._open.add(conn)
-        self._reply(conn, Kind.ACK, request_id, wire.to_json({"generation": conn.generation}))
+        self._reply(conn, Kind.ACK, request_id, wire.encode_message(wire.ResetAck(conn.generation)))
 
     def _run(self, batch: list[_Request]) -> None:
         started = time.monotonic()
-        outputs, raised = self._step(batch)
-        if raised and len(batch) > 1:
-            # The whole step raised: run each request alone, so the error
-            # lands on the request that causes it and not on its batch-mates.
-            logger.warning("a batched step raised; stepping its requests one at a time")
-            outputs = []
-            culprits = []
-            for request in batch:
-                (output,), alone_raised = self._step([request])
-                if alone_raised:
-                    culprits.append(request.conn.slot)
-                outputs.append(output)
-            if culprits:
-                for slot in culprits:
-                    self._solo[slot] = max(self._solo.get(slot, 0), 1)
-            else:
-                # They raise only together; nobody to blame, so all of them
-                # step alone for a while before they are batched again.
-                for request in batch:
-                    self._solo[request.conn.slot] = _PROBATION
-        elif not raised and len(batch) == 1:
-            slot = batch[0].conn.slot
-            if slot in self._solo:
-                self._solo[slot] -= 1
-                if self._solo[slot] <= 0:
-                    del self._solo[slot]
+        requests = [WorkerRequest(r.conn.slot, r.conn.generation, r.payload) for r in batch]
+        failed: bytes | None = None
+        outputs: list[Any] = []
+        try:
+            returned = self._worker.step(requests)
+            if not isinstance(returned, list | tuple) or len(returned) != len(batch):
+                count = (
+                    len(returned) if isinstance(returned, list | tuple) else type(returned).__name__
+                )
+                raise RuntimeError(f"step() returned {count} outputs for {len(batch)} requests")
+            outputs = list(returned)
+        except Exception as exc:
+            logger.exception("step() raised; failing its batch", size=len(batch))
+            failed = _failure(exc, batch_failed=True)
         ran = time.monotonic() - started
-        for request, output in zip(batch, outputs, strict=True):
+        for index, request in enumerate(batch):
             request.payload = None
             try:
-                self._answer(request, output)
+                if failed is not None:
+                    self._reply(request.conn, Kind.FAILED, request.request_id, failed)
+                else:
+                    self._answer(request, outputs[index])
             except Exception:
                 logger.exception("an answer could not be sent", slot=request.conn.slot)
                 self._reply(request.conn, Kind.FAILED, request.request_id, _UNDESCRIBED)
@@ -637,50 +687,10 @@ class WorkerServer:
             "step ran",
             size=len(batch),
             slots=[r.conn.slot for r in batch],
+            raised=failed is not None,
             step_ms=round(ran * 1000, 2),
             wait_ms=[round((started - r.arrived) * 1000, 2) for r in batch],
         )
-
-    def _step(self, batch: list[_Request]) -> tuple[list[Any], bool]:
-        """Call ``step()`` once; return its outputs and whether it raised.
-
-        On a raise every request's output is the exception.
-        """
-        requests = [WorkerRequest(r.conn.slot, r.conn.generation, r.payload) for r in batch]
-        try:
-            outputs = self._worker.step(requests)
-            if not isinstance(outputs, list | tuple) or len(outputs) != len(batch):
-                count = (
-                    len(outputs) if isinstance(outputs, list | tuple) else type(outputs).__name__
-                )
-                raise RuntimeError(f"step() returned {count} outputs for {len(batch)} requests")
-        except Exception as exc:
-            logger.exception("step() raised", size=len(batch))
-            with self._health_lock:
-                self.failed_steps += 1
-                self._failing_sessions.update((r.conn.slot, r.conn.generation) for r in batch)
-            return [exc] * len(batch), True
-        with self._health_lock:
-            self.failed_steps = 0
-            self._failing_sessions.clear()
-        return list(outputs), False
-
-    def failing(self, threshold: int) -> bool:
-        """Whether steps keep raising whoever sends them, as on a broken GPU.
-
-        *threshold* steps in a row must have raised, for at least two
-        sessions between them (a session is a slot's generation, so one
-        restarted counts anew), or for the only session open. One session
-        whose own input keeps raising, among others connected but idle, does
-        not make the worker failing. Safe from any thread.
-        """
-        with self._health_lock:
-            if self.failed_steps < threshold or not self._failing_sessions:
-                return False
-            sessions = len(self._failing_sessions)
-        with self._cond:
-            open_now = len(self._open)
-        return sessions >= 2 or open_now <= 1
 
     def _answer(self, request: _Request, output: Any) -> None:
         conn = request.conn
@@ -690,6 +700,8 @@ class WorkerServer:
             self._reply(conn, Kind.FAILED, request.request_id, _failure(output))
             return
         try:
+            if self._result_type is not None:
+                output = schema.dump(output, self._result_type)
             header = conn.carrier.encode(output)
         except Exception as exc:
             logger.exception("an output could not be sent", slot=conn.slot)
@@ -721,7 +733,7 @@ class WorkerServer:
         self._transport.worker_stopped()
 
 
-class WorkerStopping(WorkerCrashed, ModelUnavailable):
+class WorkerStopping(WorkerCrashed):
     """The answer to a request still queued when the worker was stopped."""
 
 
@@ -812,22 +824,29 @@ def _describe(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {_text(lambda: str(exc), '<unprintable>')}"
 
 
-def _failure(exc: BaseException) -> bytes:
-    """Describe *exc* for the session as JSON: its type's name, its message, its traceback.
+def _failure(exc: BaseException, *, batch_failed: bool = False) -> bytes:
+    """Describe *exc* for the session: its type's name, its message, its traceback.
 
     An exception that cannot be printed is still described, by its type.
     """
     kind = type(exc)
-    return wire.to_json(
-        {
-            "type": f"{kind.__module__}.{kind.__qualname__}",
-            "message": _text(lambda: str(exc), "<unprintable>"),
-            "traceback": _text(lambda: "".join(traceback.format_exception(exc)), ""),
-            "worker_lost": isinstance(exc, WorkerStopping),
-        }
+    return wire.encode_message(
+        wire.Failure(
+            type=f"{kind.__module__}.{kind.__qualname__}",
+            message=_text(lambda: str(exc), "<unprintable>"),
+            traceback=_text(lambda: "".join(traceback.format_exception(exc)), ""),
+            worker_lost=isinstance(exc, WorkerStopping),
+            batch_failed=batch_failed,
+        )
     )
 
 
-_UNDESCRIBED = wire.to_json(
-    {"type": "builtins.RuntimeError", "message": "the answer could not be sent", "traceback": ""}
+_UNDESCRIBED = wire.encode_message(
+    wire.Failure(
+        type="builtins.RuntimeError",
+        message="the answer could not be sent",
+        traceback="",
+        worker_lost=False,
+        batch_failed=False,
+    )
 )

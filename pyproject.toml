@@ -46,9 +46,6 @@ dependencies = [
     "uvicorn>=0.49.0",
 ]
 
-[project.scripts]
-reactor-runtime = "reactor_runtime.cli:main"
-
 [project.optional-dependencies]
 # The LiveKit transport. A model that joins LiveKit rooms lists
 # `reactor-runtime[livekit]` in its requirements; the runtime pin stays the

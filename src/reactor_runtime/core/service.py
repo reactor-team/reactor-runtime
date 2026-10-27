@@ -13,7 +13,7 @@ from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from reactor_runtime.core.values import Health
 
@@ -214,6 +214,39 @@ class LiveKitConfig:
                 )
 
 
+WORKER_SETTINGS = (
+    "max_batch",
+    "batch_window",
+    "max_request_bytes",
+    "shm_input_bytes",
+    "shm_output_bytes",
+)
+"""The serving settings a ``runtime.worker`` block may set beside ``import``."""
+
+
+@dataclass(frozen=True)
+class WorkerConfig:
+    """The worker half of a model split in two, drawn from the manifest's ``runtime.worker`` block.
+
+    Read by the model worker's entry point, ``python -m
+    reactor_runtime.model_worker``; the session runtime reads nothing from it.
+
+    Attributes:
+        import_ref: The worker half, a ``ModelWorker`` subclass, as ``"module:Class"``.
+        settings: The serving settings the block sets, by name (a subset of
+            :data:`WORKER_SETTINGS`). The worker checks them against its class
+            when it loads: the class is the authority on what it can serve.
+            Held read-only, and left out of the hash.
+    """
+
+    import_ref: str
+    settings: Mapping[str, Any] = field(default_factory=dict, hash=False)
+
+    def __post_init__(self) -> None:
+        """Hold ``settings`` as a read-only copy of what was passed."""
+        object.__setattr__(self, "settings", MappingProxyType(dict(self.settings)))
+
+
 @dataclass(frozen=True)
 class RuntimeConfig:
     """The single configuration object threaded through ``serve``.
@@ -240,6 +273,8 @@ class RuntimeConfig:
         recording: The recorder's configuration; disabled by default.
         step_results: How each finished step is saved; disabled by default.
         livekit: How a LiveKit room reaches the model; empty by default.
+        worker: The worker half of a model split in two, from
+            ``runtime.worker``; ``None`` for a model that does not split.
     """
 
     model_ref: str
@@ -253,3 +288,4 @@ class RuntimeConfig:
     recording: RecordingConfig = field(default_factory=RecordingConfig)
     step_results: StepResultsConfig = field(default_factory=StepResultsConfig)
     livekit: LiveKitConfig = field(default_factory=LiveKitConfig)
+    worker: WorkerConfig | None = None

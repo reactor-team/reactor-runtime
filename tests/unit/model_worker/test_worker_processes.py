@@ -19,8 +19,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from reactor_runtime import ModelUnavailable
-from reactor_runtime.model_worker import WorkerClient, WorkerCrashed
+from reactor_runtime.model_worker import WorkerClient, WorkerCrashed, WorkerLost
 from reactor_runtime.model_worker.shm import unlink_prefix
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="process tests on Linux")
@@ -45,7 +44,7 @@ _WORKER = textwrap.dedent(
 
         def session_closed(self, slot, generation):
             with open(os.environ["CLOSED_LOG"], "a") as f:
-                f.write(f"{slot}\\n")
+                f.write(f"{slot}:{generation}\\n")
     """
 )
 
@@ -77,12 +76,20 @@ class Worker:
             time.sleep(0.05)
 
     def client(self, slot: int) -> WorkerClient:
-        return WorkerClient.connect(socket_path=self.socket, slot=slot)
+        client = WorkerClient.connect(socket_path=self.socket, slot=slot, connect_timeout=10)
+        client.reset()
+        return client
 
-    def closed(self) -> list[int]:
+    def closed(self) -> list[tuple[int, int]]:
+        """The (slot, generation) of every session the worker closed, a reset's included."""
         if not self.closed_log.exists():
             return []
-        return [int(line) for line in self.closed_log.read_text().split()]
+        return [
+            (int(slot), int(generation))
+            for slot, generation in (
+                line.split(":") for line in self.closed_log.read_text().split()
+            )
+        ]
 
 
 @pytest.fixture
@@ -115,6 +122,7 @@ def test_a_worker_killed_mid_step_ends_the_waiting_session_at_once(worker: Worke
     worker.process.send_signal(signal.SIGKILL)
     thread.join(10)
     assert time.monotonic() - started < 5
+    assert isinstance(errors[0], WorkerLost)
     assert isinstance(errors[0], WorkerCrashed)
     assert str(errors[0]).startswith("worker_died: ")
     with pytest.raises(WorkerCrashed, match=r"^worker_died: "):
@@ -124,7 +132,8 @@ def test_a_worker_killed_mid_step_ends_the_waiting_session_at_once(worker: Worke
 
 
 def _session_main(socket: str, prefix: str, slot: int, started: object) -> None:
-    client = WorkerClient.connect(socket_path=socket, slot=slot)
+    client = WorkerClient.connect(socket_path=socket, slot=slot, connect_timeout=10)
+    client.reset()
     started.set()  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
     client.step({"sleep": 1.0})
 
@@ -142,9 +151,10 @@ def test_a_session_killed_mid_step_is_closed_and_the_others_go_on(worker: Worker
     other = worker.client(1)
     assert other.step(41) == 42
     deadline = time.monotonic() + 10
-    while 0 not in worker.closed() and time.monotonic() < deadline:
+    # The victim's reset closed (0, 1); its death closes (0, 2).
+    while (0, 2) not in worker.closed() and time.monotonic() < deadline:
         time.sleep(0.05)
-    assert worker.closed() == [0]
+    assert sorted(worker.closed()) == [(0, 1), (0, 2), (1, 1)]
     # The slot opens again for a restarted session process.
     again = worker.client(0)
     assert again.step(np.int64(5)) == 5
@@ -178,7 +188,7 @@ def test_sigterm_fails_queued_requests_and_frees_every_block(worker: Worker) -> 
     assert results["running"] == 0
     for name in ("queued", "queued2"):
         error = results[name]
-        assert isinstance(error, ModelUnavailable), error
+        assert isinstance(error, WorkerLost), error
         assert str(error) == "worker_died: the model worker is stopping"
     assert not list(Path("/dev/shm").glob(f"{worker.prefix}*"))
     for client in (running, queued, third):

@@ -22,12 +22,13 @@ x-session: &session
 services:
   model-worker:
     image: shared-worker
-    command: ["reactor-runtime", "serve-worker"]
+    command: ["python", "-m", "reactor_runtime.model_worker"]
     restart: unless-stopped
     network_mode: host
     environment:
       REACTOR_MODEL_WORKER_HEALTH_PORT: "${WORKER_HEALTH_PORT:-8079}"
       REACTOR_MODEL_WORKER_SOCKET: /run/reactor-worker/sock
+      REACTOR_MAX_SESSIONS: "2"
     volumes:
       - worker-socket:/run/reactor-worker
       - dshm:/dev/shm

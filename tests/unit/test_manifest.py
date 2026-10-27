@@ -432,3 +432,53 @@ def test_livekit_check_refuses_a_name_the_model_does_not_declare(
 ) -> None:
     with pytest.raises(LiveKitBlockError, match=reason):
         config.check(commands={"c"}, messages={"d"}, input_tracks={"t"})
+
+
+def test_load_config_leaves_the_worker_unset_for_a_model_that_does_not_split(
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_MANIFEST)
+
+    assert load_config(manifest).worker is None
+
+
+def test_load_config_reads_the_worker_block_with_its_serving_settings(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(
+        _MANIFEST
+        + "  worker:\n"
+        + "    import: pipeline_worker:DemoWorker\n"
+        + "    max_batch: 2\n"
+        + "    batch_window: 0.005\n"
+        + "    shm_output_bytes: 16777216\n"
+    )
+
+    worker = load_config(manifest).worker
+
+    assert worker is not None
+    assert worker.import_ref == "pipeline_worker:DemoWorker"
+    assert dict(worker.settings) == {
+        "max_batch": 2,
+        "batch_window": 0.005,
+        "shm_output_bytes": 16777216,
+    }
+
+
+@pytest.mark.parametrize(
+    ("block", "message"),
+    [
+        ("  worker: pipeline_worker:DemoWorker\n", "must be a block"),
+        ("  worker:\n    max_batch: 2\n", "runtime.worker.import"),
+        ("  worker:\n    import: ''\n", "runtime.worker.import"),
+        ("  worker:\n    import: w:W\n    batch_size: 2\n", "unknown keys ['batch_size']"),
+    ],
+)
+def test_load_config_refuses_a_malformed_worker_block(
+    tmp_path: Path, block: str, message: str
+) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_MANIFEST + block)
+
+    with pytest.raises(ValueError, match=message.replace("[", r"\[").replace("]", r"\]")):
+        load_config(manifest)
