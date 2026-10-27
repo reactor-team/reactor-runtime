@@ -1,0 +1,52 @@
+# The pod in pod.yaml as a Docker Compose project, for a local run. From the
+# repository's root, after building the image (see Dockerfile):
+#
+#   docker compose -f examples/shared_worker/deploy/compose.yaml up
+#
+# The worker starts first and the sessions wait for its health check; they
+# share the socket volume and one memory-backed /dev/shm, as the pod's
+# containers do. `restart: unless-stopped` stands in for the kubelet.
+x-session: &session
+  image: shared-worker
+  restart: unless-stopped
+  network_mode: host
+  ipc: "service:model-worker"
+  depends_on:
+    model-worker:
+      condition: service_healthy
+  volumes:
+    - worker-socket:/run/reactor-worker
+
+services:
+  model-worker:
+    image: shared-worker
+    command: ["reactor-runtime", "serve-worker"]
+    restart: unless-stopped
+    network_mode: host
+    ipc: shareable
+    shm_size: 2g
+    environment:
+      REACTOR_MODEL_WORKER_HEALTH_PORT: "8079"
+    volumes:
+      - worker-socket:/run/reactor-worker
+    healthcheck:
+      test: ["CMD", "test", "-e", "/run/reactor-worker/ready"]
+      interval: 2s
+      retries: 900
+  session-0:
+    <<: *session
+    environment:
+      PORT: "8080"
+      REACTOR_SESSION_SLOT: "0"
+      WEBRTC_PORT_RANGE: "40000:40999"
+      MALLOC_ARENA_MAX: "2"
+  session-1:
+    <<: *session
+    environment:
+      PORT: "8081"
+      REACTOR_SESSION_SLOT: "1"
+      WEBRTC_PORT_RANGE: "41000:41999"
+      MALLOC_ARENA_MAX: "2"
+
+volumes:
+  worker-socket: {}

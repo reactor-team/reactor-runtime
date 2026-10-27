@@ -1,0 +1,6 @@
+# examples/echo split in two: the effect runs in one model worker for every
+# session (`reactor-runtime serve-worker`), and each session runtime runs the
+# echo app with a remote engine.
+runtime:
+  import: split_echo:SplitEcho
+  worker: split_echo_worker:EchoWorker
