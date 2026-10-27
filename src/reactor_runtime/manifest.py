@@ -109,6 +109,40 @@ def _model_name(block: Any) -> str | None:
     return name if isinstance(name, str) and name else None
 
 
+def load_worker_ref(manifest: Path) -> str | None:
+    """Read ``runtime.worker``, the worker half of a model split in two, if the manifest names one.
+
+    The worker half is a :class:`~reactor_runtime.model_worker.ModelWorker` named
+    as ``"module:Class"``; ``reactor-runtime serve-worker`` serves it. The
+    session runtime reads nothing from this key.
+
+    Raises:
+        SystemExit: If the manifest does not parse, or ``runtime.worker`` is not
+            a non-empty string.
+    """
+    try:
+        document = yaml.safe_load(manifest.read_text())
+    except yaml.YAMLError as error:
+        raise SystemExit(f"{manifest}: invalid YAML: {error}") from None
+    runtime = document.get("runtime") if isinstance(document, dict) else None
+    worker = runtime.get("worker") if isinstance(runtime, dict) else None
+    if worker is not None and (not isinstance(worker, str) or not worker):
+        raise SystemExit(f"{manifest}: runtime.worker must be a 'module:Class' string")
+    return worker
+
+
+def import_ref(ref: str) -> Any:
+    """Resolve a ``"module:Name"`` reference into the object it names.
+
+    Raises:
+        ValueError: If the reference is not of the form ``"module:Name"``.
+    """
+    module_name, separator, name = ref.partition(":")
+    if not separator or not module_name or not name:
+        raise ValueError(f"reference must be 'module:Name', got {ref!r}")
+    return getattr(importlib.import_module(module_name), name)
+
+
 def import_model_class(model_ref: str) -> type[ReactorCore]:
     """Resolve a ``"module:Class"`` reference into the model class it names.
 
