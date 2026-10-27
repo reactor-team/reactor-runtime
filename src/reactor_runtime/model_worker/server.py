@@ -11,7 +11,7 @@ and sends each answer back the same way.
 A fault stays with the session it belongs to. A request that does not decode,
 names another session's memory, or is too large is answered as rejected; a
 frame that breaks the protocol closes that session's connection alone; an
-output that fails, or does not pickle, fails that request alone.
+output that fails, or holds a value that does not travel, fails that request alone.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from __future__ import annotations
 import contextlib
 import itertools
 import os
-import pickle
 import re
 import socket
 import struct
@@ -31,7 +30,6 @@ from pathlib import Path
 from typing import Any
 
 from reactor_runtime.distributed.errors import WorkerCrashed
-from reactor_runtime.distributed.rank import portable
 from reactor_runtime.interface.events.errors import ModelUnavailable
 from reactor_runtime.log import get_logger
 from reactor_runtime.model_worker import wire
@@ -46,7 +44,7 @@ logger = get_logger(__name__)
 _STOP_POLL = 0.2
 # How long a new connection may take to say hello.
 _HELLO_TIMEOUT = 10.0
-# Room for the pickle around a request's arrays, past the request limit.
+# Room for the header around a request's arrays, past the request limit.
 _FRAME_SLACK = 64 << 10
 _PEERCRED = struct.Struct("3i")
 _TOKEN = re.compile(r"[0-9a-f]{4,16}")
@@ -113,6 +111,12 @@ class WorkerServer:
         self._worker = worker
         self._path = Path(socket_path)
         self._prefix = shm_prefix
+        signals = type(worker).signals
+        if not isinstance(signals, frozenset | set | tuple | list) or not all(
+            isinstance(name, str) for name in signals
+        ):
+            raise ValueError(f"signals must be a set of names, got {signals!r}")
+        self._signals = frozenset(signals)
         self._transport = transport or UnixShmTransport()
         self._shared: dict[str, Any] = {}
         self._max_batch = max_batch
@@ -361,11 +365,17 @@ class WorkerServer:
 
     def _signal(self, conn: _Conn, payload: bytes) -> None:
         try:
-            name, value = pickle.loads(payload)
-        except Exception as exc:
+            signal = wire.from_json(payload)
+        except wire.ProtocolError as exc:
             logger.warning("dropped a signal that does not decode", slot=conn.slot, error=str(exc))
             return
-        if not conn.opened or not isinstance(name, str):
+        name, value = signal.get("name"), signal.get("payload")
+        if not isinstance(name, str) or name not in self._signals:
+            logger.warning(
+                "dropped a signal the worker does not declare", slot=conn.slot, signal=name
+            )
+            return
+        if not conn.opened:
             return
         try:
             self._worker.signal(conn.slot, name, value)
@@ -465,6 +475,7 @@ class WorkerServer:
             "max_batch": self._max_batch,
             "max_request_bytes": self._limit,
             "shm_slot_bytes": type(self._worker).shm_slot_size(),
+            "signals": sorted(self._signals),
         }
         self._reply(conn, Kind.WELCOME, conn.hello_id, wire.to_json(welcome))
 
@@ -606,10 +617,13 @@ def _describe(exc: BaseException) -> str:
 
 
 def _failure(exc: BaseException) -> bytes:
-    """Pickle what a session needs to re-raise *exc*: the exception and its traceback text."""
-    text = "".join(traceback.format_exception(exc))
-    error = portable(exc) if isinstance(exc, Exception) else RuntimeError(_describe(exc))
-    try:
-        return pickle.dumps((error, text), protocol=5)
-    except Exception:
-        return pickle.dumps((RuntimeError(_describe(exc)), text), protocol=5)
+    """Describe *exc* for the session as JSON: its type's name, its message, its traceback."""
+    kind = type(exc)
+    return wire.to_json(
+        {
+            "type": f"{kind.__module__}.{kind.__qualname__}",
+            "message": str(exc),
+            "traceback": "".join(traceback.format_exception(exc)),
+            "worker_lost": isinstance(exc, WorkerStopping),
+        }
+    )

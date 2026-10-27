@@ -42,7 +42,12 @@ is served exactly as before.
 """
 
 from reactor_runtime.distributed.errors import WorkerCrashed, WorkerTimeout
-from reactor_runtime.model_worker.client import WorkerClient, WorkerLost, WorkerRejected
+from reactor_runtime.model_worker.client import (
+    WorkerClient,
+    WorkerError,
+    WorkerLost,
+    WorkerRejected,
+)
 from reactor_runtime.model_worker.contract import ModelWorker, WorkerRequest
 from reactor_runtime.model_worker.transport import Transport, UnixShmTransport, WorkerUnreachable
 
@@ -52,6 +57,7 @@ __all__ = [
     "UnixShmTransport",
     "WorkerClient",
     "WorkerCrashed",
+    "WorkerError",
     "WorkerLost",
     "WorkerRejected",
     "WorkerRequest",

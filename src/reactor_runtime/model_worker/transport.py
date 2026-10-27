@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import contextlib
 import errno
-import pickle
 import secrets
 import socket
 from abc import ABC, abstractmethod
@@ -31,7 +30,8 @@ from typing import Any
 import numpy as np
 
 from reactor_runtime.distributed.errors import SharedSlotAllocationFailed
-from reactor_runtime.distributed.ipc import SharedSlot, pack
+from reactor_runtime.distributed.ipc import SharedSlot
+from reactor_runtime.model_worker import codec
 from reactor_runtime.model_worker.shm import (
     ViewReader,
     attach,
@@ -290,10 +290,7 @@ class UnixShmTransport(Transport):
 
 
 class _InputSlot:
-    """Writes requests into the input block the worker made, or into its own once outgrown.
-
-    The duck type :func:`~reactor_runtime.distributed.ipc.pack` writes through.
-    """
+    """Writes requests into the input block the worker made, or into its own once outgrown."""
 
     def __init__(self, block: str, grow_prefix: str) -> None:
         self._block = attach(block)
@@ -314,8 +311,7 @@ class _InputSlot:
     def write(self, buffer: Any) -> tuple[int, int]:
         if self._own is not None:
             return self._own.write(buffer)
-        raw = buffer.raw() if isinstance(buffer, pickle.PickleBuffer) else memoryview(buffer)
-        raw = raw.cast("B")
+        raw = memoryview(buffer).cast("B")
         end = self._cursor + raw.nbytes
         buf = self._block.buf
         assert buf is not None
@@ -354,9 +350,7 @@ class _ClientShm(ClientCarrier):
         self._mapping: dict[str, Any] = {}
 
     def encode(self, payload: Any) -> tuple[bytes, int]:
-        header = pack(payload, self._request)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
-        blob, _, spans = _header_parts(header)
-        return header, len(blob) + sum(length for _, length in spans)
+        return codec.encode(payload, self._request)
 
     def decode(self, body: bytes) -> Any:
         return copy_unpack(body, self._mapping)
@@ -391,7 +385,8 @@ class _WorkerShm(WorkerCarrier):
     def encode(self, output: Any) -> bytes:
         if self._result is None:
             self._result = SharedSlot(prefix=self._result_prefix)
-        return pack(output, self._result)
+        header, _ = codec.encode(output, self._result)
+        return header
 
     def close(self) -> None:
         self._reader.close()
@@ -437,7 +432,3 @@ def _zero_fill(block: shared_memory.SharedMemory) -> None:
                 f"/dev/shm has {free} bytes free, not the {block.size} one session's block needs"
             )
     np.frombuffer(buf, dtype=np.uint8)[:] = 0
-
-
-def _header_parts(header: bytes) -> tuple[bytes, str, list[tuple[int, int]]]:
-    return pickle.loads(header)

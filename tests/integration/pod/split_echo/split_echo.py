@@ -28,7 +28,13 @@ class RemoteEngine:
         self.client = WorkerClient.connect(app)
 
     def generate(self, input: EchoInput) -> EchoResult:
-        return self.client.step(input)
+        sent = {
+            "frame": input.frame,
+            "effect": input.effect,
+            "intensity": input.intensity,
+            "caption": input.caption,
+        }
+        return EchoResult(frame=self.client.step(sent))
 
     def reset(self) -> None:
         with contextlib.suppress(ModelUnavailable):

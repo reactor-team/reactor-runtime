@@ -27,9 +27,10 @@ class WorkerRequest:
             It moves on when a new process connects in the slot and when the
             session half calls :meth:`~reactor_runtime.model_worker.WorkerClient.reset`,
             so state kept per slot can tell a new session from the one before.
-        payload: What the session half passed to ``step()``. Its contiguous
-            numpy arrays are read-only views of shared memory, valid until this
-            request is answered: copy whatever is kept past ``step()``.
+        payload: What the session half passed to ``step()``, rebuilt from plain
+            values and numpy arrays. Its arrays are read-only views of shared
+            memory, valid until this request is answered: copy whatever is
+            kept past ``step()``.
     """
 
     slot: int
@@ -68,9 +69,12 @@ class ModelWorker:
         batch_window: Seconds the worker waits after the first request for
             others to batch with it. ``0`` (the default) steps whatever is
             waiting at once.
-        max_request_bytes: The most bytes one request may carry, its pickle and
+        max_request_bytes: The most bytes one request may carry, its header and
             its arrays together. A larger request is refused for that session
             alone. 256 MiB by default.
+        signals: The names a session may pass to
+            :meth:`~reactor_runtime.model_worker.WorkerClient.signal`. A signal
+            of another name is dropped, for that session alone. None by default.
         shm_input_bytes: The size of the block a session's requests are
             written into, 1 MiB by default.
         shm_output_bytes: The size of the block its outputs are written into,
@@ -89,6 +93,7 @@ class ModelWorker:
     max_batch: ClassVar[int] = 1
     batch_window: ClassVar[float] = 0.0
     max_request_bytes: ClassVar[int] = 256 << 20
+    signals: ClassVar[frozenset[str]] = frozenset()
     shm_input_bytes: ClassVar[int] = 1 << 20
     shm_output_bytes: ClassVar[int] = 8 << 20
 
@@ -117,11 +122,13 @@ class ModelWorker:
         """Run one step for every request and return one output per request, in order.
 
         An output that is an exception instance fails that request alone: the
-        session that sent it sees the exception raised by its ``step()`` call.
+        session that sent it sees a
+        :class:`~reactor_runtime.model_worker.WorkerError` naming it.
         A raise out of this method fails every request of the batch the same
-        way; the worker goes on with the next batch. Return contiguous numpy
-        arrays for the bulk of an output: they travel through shared memory,
-        anything else is pickled.
+        way; the worker goes on with the next batch. An output, like a
+        request, is plain values, lists, tuples, dicts, bytes, and numpy
+        arrays (see :mod:`reactor_runtime.model_worker.codec`); the arrays
+        travel through shared memory. Nothing is pickled.
 
         Args:
             requests: Between one and :attr:`max_batch` requests, at most one
@@ -149,6 +156,8 @@ class ModelWorker:
 
     def signal(self, slot: int, name: str, payload: Any) -> None:
         """Take an out-of-band signal a session sent, such as a request to stop early.
+
+        Only the names :attr:`signals` declares reach it, with a JSON payload.
 
         Runs on that session's reader thread, possibly while :meth:`step` runs
         on the step thread, so it should only record the signal (set a flag
