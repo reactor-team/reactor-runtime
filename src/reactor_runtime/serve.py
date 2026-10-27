@@ -27,7 +27,7 @@ import os
 import sys
 from pathlib import Path
 
-from reactor_runtime import log
+from reactor_runtime import log, pod_control
 from reactor_runtime.core import RuntimeConfig, RuntimeState, SessionState
 from reactor_runtime.http import HttpServer
 from reactor_runtime.manifest import MANIFEST, load_config
@@ -440,6 +440,7 @@ def main() -> None:
 
     log.configure(level=_log_level_from_env())
     _stamp_session_slot()
+    pod_control.watch_restart()
     # The runner re-stamps this at construction and on every move; stamping here
     # too covers the lines written before it exists — the process is up and the
     # model is not loaded, which is exactly what CREATED names and what LOADING

@@ -12,8 +12,11 @@ contract.
 frames, and shared memory for the arrays, so a frame carries only a small
 header. It needs the worker and its sessions on one host, sharing the socket's
 directory and ``/dev/shm``; in Kubernetes, containers of one pod with the same
-two volumes mounted. :meth:`Transport.check` refuses a deployment where that
-does not hold, before anything is served.
+two volumes mounted. Or, safer, each session has a memory-backed volume of its
+own, at its ``/dev/shm`` and at a per-slot directory in the worker
+(``UnixShmTransport(slot_dir=...)``), so a session reaches and fills only its
+own blocks. :meth:`Transport.check` and the session's probe of the worker's
+block refuse a deployment where that does not hold, before anything is served.
 """
 
 from __future__ import annotations
@@ -34,10 +37,12 @@ import numpy as np
 from reactor_runtime.distributed.errors import SharedSlotAllocationFailed
 from reactor_runtime.model_server import codec
 from reactor_runtime.model_server.shm import (
+    Block,
     ViewReader,
     attach,
     close_mapping,
     copy_unpack,
+    create,
     created_here,
     forget_created,
     release,
@@ -175,10 +180,28 @@ class Transport(ABC):
 
 
 class UnixShmTransport(Transport):
-    """Frames on a Unix socket, arrays in ``/dev/shm``: worker and sessions on one host."""
+    """Frames on a Unix socket, arrays in ``/dev/shm``: worker and sessions on one host.
 
-    def __init__(self) -> None:
+    Args:
+        slot_dir: Where the worker keeps each session's blocks, a path with
+            ``{slot}`` in it, such as ``/run/reactor-shm/s{slot}``: the
+            session's own memory-backed volume, which the session mounts at
+            its ``/dev/shm``. A session then reaches only its own blocks, and
+            fills only its own volume. ``None`` keeps every block in the
+            worker's ``/dev/shm``, which the sessions share.
+    """
+
+    def __init__(self, slot_dir: str | None = None) -> None:
+        if slot_dir is not None and "{slot}" not in slot_dir:
+            raise ValueError(f"the per-slot shared memory path {slot_dir!r} has no {{slot}} in it")
+        self._slot_dir = slot_dir
         self._probe: shared_memory.SharedMemory | None = None
+
+    def slot_directory(self, slot: int) -> Path | None:
+        """The directory slot *slot*'s blocks live in, or ``None`` for ``/dev/shm``."""
+        if self._slot_dir is None:
+            return None
+        return Path(self._slot_dir.replace("{slot}", str(slot)))
 
     def check(self, address: str) -> None:
         """Refuse a missing socket directory or an unusable ``/dev/shm``."""
@@ -232,7 +255,13 @@ class UnixShmTransport(Transport):
         return sock
 
     def worker_started(self, prefix: str) -> dict[str, str]:
-        """Make the block every session reads at connect to prove it shares ``/dev/shm``."""
+        """Make the block every session reads at connect to prove it shares ``/dev/shm``.
+
+        With per-slot directories each session gets a probe of its own, in its
+        directory, at :meth:`worker_carrier`.
+        """
+        if self._slot_dir is not None:
+            return {}
         nonce = secrets.token_bytes(8)
         name = created_here(f"{prefix}probe")
         self._probe = shared_memory.SharedMemory(name=name, create=True, size=len(nonce))
@@ -269,22 +298,50 @@ class UnixShmTransport(Transport):
             reactor_runtime.distributed.SharedSlotAllocationFailed: ``/dev/shm``
                 cannot hold the two blocks.
         """
+        directory = self.slot_directory(slot)
+        if directory is not None and not directory.is_dir():
+            raise SharedSlotAllocationFailed(
+                f"slot {slot} has no shared memory volume at {directory}: mount the session's "
+                "volume there in the worker, and at /dev/shm in the session"
+            )
         request_prefix = f"{prefix}s{slot}_{token}_"
         result_prefix = created_here(f"{prefix}w{slot}c{conn_id}_")
-        input_block = _allocate(created_here(f"{request_prefix}in"), input_bytes)
+        extra: dict[str, str] = {}
+        probe: Block | None = None
+        if directory is not None:
+            nonce = secrets.token_bytes(8)
+            probe = _allocate(f"{result_prefix}probe", len(nonce), directory=directory)
+            buf = probe.buf
+            assert buf is not None
+            buf[: len(nonce)] = nonce
+            extra = {"probe": probe.name, "probe_nonce": nonce.hex()}
         try:
-            output_block = _allocate(f"{result_prefix}out", output_bytes)
+            input_block = _allocate(
+                created_here(f"{request_prefix}in"), input_bytes, directory=directory
+            )
+            try:
+                output_block = _allocate(f"{result_prefix}out", output_bytes, directory=directory)
+            except BaseException:
+                _unlink(input_block)
+                raise
         except BaseException:
-            _unlink(input_block)
+            if probe is not None:
+                _unlink(probe)
             raise
         carrier = _WorkerShm(
-            ViewReader(request_prefix, limit),
+            ViewReader(request_prefix, limit, directory),
             request_prefix,
             result_prefix,
             input_block,
-            _Blocks(output_block, f"{result_prefix}g", owned=True),
+            _Blocks(output_block, f"{result_prefix}g", owned=True, directory=directory),
+            directory,
+            probe,
         )
-        return carrier, {"request_prefix": request_prefix, "input_block": input_block.name}
+        return carrier, {
+            "request_prefix": request_prefix,
+            "input_block": input_block.name,
+            **extra,
+        }
 
     def client_carrier(self, welcome: Mapping[str, str]) -> ClientCarrier:
         """Check the worker's probe block is visible here, then carry under the welcome's prefix."""
@@ -302,7 +359,8 @@ class UnixShmTransport(Transport):
                 raise WorkerUnreachable(
                     "the model worker's shared memory is not visible here: the worker and the "
                     "sessions must share /dev/shm (one host; in a pod, the same emptyDir with "
-                    "medium: Memory mounted at /dev/shm in every container)"
+                    "medium: Memory mounted at /dev/shm in every container), or this session's "
+                    "own volume must be at its /dev/shm and at its slot's directory in the worker"
                 ) from None
             buf = shm.buf
             seen = bytes(buf[: len(expected)]) if buf is not None else b""
@@ -328,13 +386,21 @@ class _Blocks:
     the reader is done.
     """
 
-    def __init__(self, base: shared_memory.SharedMemory, grow_prefix: str, *, owned: bool) -> None:
+    def __init__(
+        self,
+        base: Block,
+        grow_prefix: str,
+        *,
+        owned: bool,
+        directory: Path | None = None,
+    ) -> None:
         self._base = base
         self._owned = owned
+        self._directory = directory
         self._grow_prefix = created_here(grow_prefix)
         self._grown = 0
         self._abandoned = False
-        self._extra: shared_memory.SharedMemory | None = None
+        self._extra: Block | None = None
         self._target = base
         self._cursor = 0
 
@@ -387,9 +453,11 @@ class _Blocks:
         self._drop_base()
         forget_created(self._grow_prefix)
 
-    def _make(self, size: int) -> shared_memory.SharedMemory:
+    def _make(self, size: int) -> Block:
         self._grown += 1
-        return _allocate(f"{self._grow_prefix}{self._grown}", size, fill=False)
+        return _allocate(
+            f"{self._grow_prefix}{self._grown}", size, fill=False, directory=self._directory
+        )
 
     def _drop_base(self) -> None:
         if self._owned:
@@ -430,14 +498,18 @@ class _WorkerShm(WorkerCarrier):
         reader: ViewReader,
         request_prefix: str,
         result_prefix: str,
-        input_block: shared_memory.SharedMemory,
+        input_block: Block,
         output: _Blocks,
+        directory: Path | None = None,
+        probe: Block | None = None,
     ) -> None:
         self._reader = reader
         self._request_prefix = request_prefix
         self._result_prefix = result_prefix
         self._input = input_block
         self._output = output
+        self._directory = directory
+        self._probe = probe
 
     def decode(self, body: bytes) -> Any:
         return self._reader.unpack(body)
@@ -451,15 +523,20 @@ class _WorkerShm(WorkerCarrier):
         self._reader.close()
         self._output.close()
         _unlink(self._input)
+        if self._probe is not None:
+            _unlink(self._probe)
+            self._probe = None
         # Blocks the session made once a request outgrew its input block, which
         # a session process that was killed never unlinked.
-        unlink_prefix(self._request_prefix)
+        unlink_prefix(self._request_prefix, self._directory)
         forget_created(self._result_prefix)
         forget_created(f"{self._request_prefix}in")
 
 
-def _allocate(name: str, size: int, *, fill: bool = True) -> shared_memory.SharedMemory:
+def _allocate(name: str, size: int, *, fill: bool = True, directory: Path | None = None) -> Block:
     """Create block *name* and reserve its pages, so a full ``/dev/shm`` is an error here.
+
+    In *directory* when one is given (a session's own volume), else in ``/dev/shm``.
 
     ``posix_fallocate`` reserves the pages (charging them to this process) and
     answers ENOSPC when they do not fit, where a write to a page tmpfs cannot
@@ -469,8 +546,8 @@ def _allocate(name: str, size: int, *, fill: bool = True) -> shared_memory.Share
         SharedSlotAllocationFailed: ``/dev/shm`` cannot hold the block.
     """
     try:
-        block = shared_memory.SharedMemory(name=name, create=True, size=size)
-    except OSError as exc:
+        block = create(name, size, directory)
+    except (OSError, ValueError) as exc:
         raise SharedSlotAllocationFailed(f"cannot make a {size} byte shared block: {exc}") from None
     try:
         fd = getattr(block, "_fd", -1)
@@ -491,7 +568,7 @@ def _allocate(name: str, size: int, *, fill: bool = True) -> shared_memory.Share
     return block
 
 
-def _unlink(block: shared_memory.SharedMemory) -> None:
+def _unlink(block: Block) -> None:
     release(block)
     with contextlib.suppress(OSError):
         block.unlink()

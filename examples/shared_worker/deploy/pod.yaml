@@ -6,7 +6,10 @@
 #   them. It is the only container that requests a GPU.
 # - Each session container is the model image's ordinary runtime, one session
 #   each, on its own port. It reaches the worker through the socket in the
-#   shared `worker-socket` volume, with the arrays in the shared `/dev/shm`.
+#   shared `worker-socket` volume. Its arrays travel in a memory-backed
+#   volume of its own, mounted at its `/dev/shm` and, in the worker, at
+#   `/run/reactor-shm/s<slot>` (REACTOR_SHM_SLOT_DIR): a session sees and
+#   fills only its own blocks.
 # - If the worker dies, the kubelet restarts only the worker. Each session
 #   container ends its live session with `worker_died: <reason>`, answers
 #   /health with 503 (not ready) and refuses /start_session until the worker
@@ -27,14 +30,15 @@ spec:
   volumes:
     - name: worker-socket
       emptyDir: {}
-    - name: dshm
-      emptyDir:
-        medium: Memory
-        # shm_slot_bytes per session (the worker logs it and serves it on
-        # /health), times the sessions, plus headroom for a request or an
-        # output that outgrows its block. The worker refuses to start when
-        # REACTOR_MAX_SESSIONS sessions do not fit.
-        sizeLimit: 2Gi
+    # One memory-backed volume per session: shm_slot_bytes (the worker logs
+    # it and serves it on /health) plus headroom for a request or an output
+    # that outgrows its block. The worker refuses to start when one does not
+    # fit, and a session that writes past it gets an error, not the node's
+    # memory.
+    - name: shm-s0
+      emptyDir: {medium: Memory, sizeLimit: 1Gi}
+    - name: shm-s1
+      emptyDir: {medium: Memory, sizeLimit: 1Gi}
   initContainers:
     - name: model-worker
       image: example.com/shared-worker:latest
@@ -49,6 +53,8 @@ spec:
           value: "8079"
         - name: REACTOR_MAX_SESSIONS
           value: "2"
+        - name: REACTOR_SHM_SLOT_DIR
+          value: /run/reactor-shm/s{slot}
       ports:
         - name: worker-health
           containerPort: 8079
@@ -72,7 +78,8 @@ spec:
           nvidia.com/gpu: 1
       volumeMounts:
         - {name: worker-socket, mountPath: /run/reactor-worker}
-        - {name: dshm, mountPath: /dev/shm}
+        - {name: shm-s0, mountPath: /run/reactor-shm/s0}
+        - {name: shm-s1, mountPath: /run/reactor-shm/s1}
   containers:
     - name: session-0
       image: example.com/shared-worker:latest
@@ -94,7 +101,7 @@ spec:
         periodSeconds: 10
       volumeMounts:
         - {name: worker-socket, mountPath: /run/reactor-worker}
-        - {name: dshm, mountPath: /dev/shm}
+        - {name: shm-s0, mountPath: /dev/shm}
     - name: session-1
       image: example.com/shared-worker:latest
       env:
@@ -113,4 +120,4 @@ spec:
         periodSeconds: 10
       volumeMounts:
         - {name: worker-socket, mountPath: /run/reactor-worker}
-        - {name: dshm, mountPath: /dev/shm}
+        - {name: shm-s1, mountPath: /dev/shm}

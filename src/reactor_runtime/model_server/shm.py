@@ -11,11 +11,18 @@ gone, and for a worker that starts after one that died.
 On Python 3.12 attaching to a block registers it with the attaching process's
 resource tracker, which unlinks it when that process exits, under the writer's
 feet. Attaching here unregisters it again (3.13 and later take ``track=False``).
+
+A worker can also keep a session's blocks in a directory of its own, the
+session's memory-backed volume mounted in the worker, where the session sees
+the same files as its ``/dev/shm`` (:class:`FileBlock`). Every function that
+maps or unlinks a block then takes that *directory*; ``None`` is ``/dev/shm``
+by name, as POSIX shared memory.
 """
 
 from __future__ import annotations
 
 import contextlib
+import mmap
 import os
 import sys
 import threading
@@ -51,8 +58,99 @@ def forget_created(prefix: str) -> None:
         _created_here.discard(prefix)
 
 
-def attach(name: str) -> shared_memory.SharedMemory:
+class FileBlock:
+    """A shared block kept as a file in a directory other than ``/dev/shm``.
+
+    It answers what this package uses of :class:`multiprocessing.shared_memory.SharedMemory`
+    (``name``, ``size``, ``buf``, :meth:`close`, :meth:`unlink`), so a block in
+    a session's own volume is handled like one in ``/dev/shm``. No resource
+    tracker sees it: its owner unlinks it.
+
+    Raises:
+        ValueError: *name* is not a plain file name.
+        OSError: The file cannot be made or opened.
+    """
+
+    def __init__(self, directory: Path, name: str, *, create: bool = False, size: int = 0) -> None:
+        if not name or "/" in name or "\0" in name or name in (".", ".."):
+            raise ValueError(f"{name!r} is not a block name")
+        self._path = directory / name
+        self._name = name
+        flags = os.O_RDWR | (os.O_CREAT | os.O_EXCL if create else 0)
+        self._fd = os.open(self._path, flags, 0o600)
+        self._mmap: mmap.mmap | None = None
+        self._buf: memoryview | None = None
+        try:
+            if create:
+                if size <= 0:
+                    raise ValueError("a new block needs a positive size")
+                os.ftruncate(self._fd, size)
+            self._size = os.fstat(self._fd).st_size
+            self._mmap = mmap.mmap(self._fd, self._size)
+        except BaseException:
+            os.close(self._fd)
+            if create:
+                with contextlib.suppress(OSError):
+                    self._path.unlink()
+            raise
+        self._buf = memoryview(self._mmap)
+
+    @property
+    def name(self) -> str:
+        """The block's file name in its directory."""
+        return self._name
+
+    @property
+    def size(self) -> int:
+        """The block's size in bytes."""
+        return self._size
+
+    @property
+    def buf(self) -> memoryview | None:
+        """The block's bytes, writable; ``None`` once closed."""
+        return self._buf
+
+    def close(self) -> None:
+        """Unmap the block, as ``SharedMemory.close`` does: a view still held raises BufferError."""
+        if self._buf is not None:
+            self._buf.release()
+            self._buf = None
+        if self._mmap is not None:
+            self._mmap.close()
+            self._mmap = None
+        if self._fd >= 0:
+            os.close(self._fd)
+            self._fd = -1
+
+    def unlink(self) -> None:
+        """Remove the block's file; mappings still open keep its pages until they go."""
+        self._path.unlink()
+
+    def abandon(self) -> None:
+        """Let go of the block while views of it are still held; the last view unmaps it."""
+        self._buf = None
+        self._mmap = None
+        if self._fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(self._fd)
+            self._fd = -1
+
+
+# A shared block: POSIX shared memory by name, or a file in a session's own directory.
+type Block = shared_memory.SharedMemory | FileBlock
+
+
+def create(name: str, size: int, directory: Path | None = None) -> Block:
+    """Make block *name* of *size* bytes, in *directory* or ``/dev/shm``."""
+    if directory is not None:
+        return FileBlock(directory, name, create=True, size=size)
+    return shared_memory.SharedMemory(name=name, create=True, size=size)
+
+
+def attach(name: str, directory: Path | None = None) -> shared_memory.SharedMemory | FileBlock:
     """Map the existing block *name* without handing it to this process's tracker."""
+    if directory is not None:
+        return FileBlock(directory, name)
     if sys.version_info >= (3, 13):
         return shared_memory.SharedMemory(name=name, track=False)
     shm = shared_memory.SharedMemory(name=name)
@@ -64,7 +162,7 @@ def attach(name: str) -> shared_memory.SharedMemory:
     return shm
 
 
-def release(shm: shared_memory.SharedMemory) -> None:
+def release(shm: Block) -> None:
     """Close *shm*, leaving its mapping to the views still exported from it.
 
     A view of the block keeps the mapping alive by itself; it is unmapped
@@ -74,12 +172,15 @@ def release(shm: shared_memory.SharedMemory) -> None:
     try:
         shm.close()
     except BufferError:
-        shm._mmap = None  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
+        if isinstance(shm, FileBlock):
+            shm.abandon()
+            return
+        shm._mmap = None  # type: ignore[attr-defined]  # ty: ignore[invalid-assignment]
         fd = getattr(shm, "_fd", -1)
         if fd >= 0:
             with contextlib.suppress(OSError):
                 os.close(fd)
-            shm._fd = -1  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
+            shm._fd = -1  # type: ignore[attr-defined]  # ty: ignore[invalid-assignment]
     except OSError:
         pass
 
@@ -92,10 +193,11 @@ class ViewReader:
         limit: The most bytes one request may carry, header and buffers together.
     """
 
-    def __init__(self, prefix: str, limit: int) -> None:
+    def __init__(self, prefix: str, limit: int, directory: Path | None = None) -> None:
         self._prefix = prefix
         self._limit = limit
-        self._shm: shared_memory.SharedMemory | None = None
+        self._directory = directory
+        self._shm: Block | None = None
         self._closed = False
         self._lock = threading.Lock()
 
@@ -161,10 +263,10 @@ class ViewReader:
             if self._shm is not None:
                 release(self._shm)
                 self._shm = None
-            self._shm = attach(name)
+            self._shm = attach(name, self._directory)
 
 
-def copy_unpack(header: bytes, mapping: dict[str, shared_memory.SharedMemory]) -> Any:
+def copy_unpack(header: bytes, mapping: dict[str, Block]) -> Any:
     """Rebuild an output *header* describes, copying its arrays out of the block.
 
     A copy, because the worker writes the next output into the same block while
@@ -192,23 +294,24 @@ def copy_unpack(header: bytes, mapping: dict[str, shared_memory.SharedMemory]) -
     return codec.decode(tree, copies.__getitem__)
 
 
-def close_mapping(mapping: dict[str, shared_memory.SharedMemory]) -> None:
+def close_mapping(mapping: dict[str, Block]) -> None:
     """Close the block :func:`copy_unpack` cached in *mapping*."""
     shm = mapping.pop("block", None)
     if shm is not None:
         release(shm)
 
 
-def unlink_prefix(prefix: str) -> int:
+def unlink_prefix(prefix: str, directory: Path | None = None) -> int:
     """Unlink every shared block whose name starts with *prefix*; return how many.
 
-    Only where ``/dev/shm`` lists the blocks (Linux). Call it once the
-    processes that write under *prefix* are dead.
+    In *directory*, or where ``/dev/shm`` lists the blocks (Linux). Call it
+    once the processes that write under *prefix* are dead.
     """
-    if not prefix or not _SHM_DIR.is_dir():
+    where = _SHM_DIR if directory is None else directory
+    if not prefix or not where.is_dir():
         return 0
     count = 0
-    for path in _SHM_DIR.glob(f"{prefix}*"):
+    for path in where.glob(f"{prefix}*"):
         with contextlib.suppress(OSError):
             path.unlink()
             count += 1

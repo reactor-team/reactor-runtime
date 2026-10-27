@@ -346,3 +346,62 @@ def test_the_worker_unlinks_blocks_its_predecessor_left_and_no_others(model_dir:
         other.close()
         other.unlink()
     assert not (model_dir / "run" / "shm-prefix").exists()
+
+
+def test_per_slot_directories_need_max_sessions_and_every_directory(
+    model_dir: Path, tmp_path: Path
+) -> None:
+    template = str(tmp_path / "s{slot}")
+    alone = _run(model_dir, REACTOR_SHM_SLOT_DIR=template)
+    assert alone.returncode == 1
+    assert b"REACTOR_SHM_SLOT_DIR needs REACTOR_MAX_SESSIONS" in alone.stderr
+    (tmp_path / "s0").mkdir()
+    missing = _run(model_dir, REACTOR_SHM_SLOT_DIR=template, REACTOR_MAX_SESSIONS="2")
+    assert missing.returncode == 1
+    assert b"cannot read the free space of" in missing.stderr
+    assert b"s1" in missing.stderr
+    no_placeholder = _run(model_dir, REACTOR_SHM_SLOT_DIR=str(tmp_path), REACTOR_MAX_SESSIONS="1")
+    assert no_placeholder.returncode == 1
+    assert b"has no {slot} in it" in no_placeholder.stderr
+    assert not (model_dir / "loaded").exists()
+
+
+def test_a_worker_with_per_slot_directories_reclaims_its_predecessors_files(
+    model_dir: Path, tmp_path: Path
+) -> None:
+    for slot in (0, 1):
+        (tmp_path / f"s{slot}").mkdir()
+    port = _free_port()
+    run = model_dir / "run"
+    run.mkdir()
+    (run / "shm-prefix").write_text(f"rrs{port}dead_")
+    left = tmp_path / "s1" / f"rrs{port}dead_w1c1_out"
+    left.write_bytes(b"x")
+    other = tmp_path / "s1" / "someone_else"
+    other.write_bytes(b"y")
+    process = _start(
+        model_dir,
+        port,
+        REACTOR_MAX_SESSIONS="2",
+        REACTOR_SHM_SLOT_DIR=str(tmp_path / "s{slot}"),
+    )
+    try:
+        _wait(lambda: _health(port)[0] == 200)
+        assert not left.exists()
+        assert other.exists()
+    finally:
+        assert _stop(process) == 0
+
+
+def test_a_new_pod_restart_token_stops_the_worker(model_dir: Path, tmp_path: Path) -> None:
+    (tmp_path / "restart").write_text("first")
+    port = _free_port()
+    process = _start(model_dir, port, REACTOR_POD_CONTROL_DIR=str(tmp_path))
+    try:
+        _wait(lambda: _health(port)[0] == 200)
+        time.sleep(2.5)
+        assert process.poll() is None
+        (tmp_path / "restart").write_text("second")
+        assert process.wait(timeout=30) == 0
+    finally:
+        _stop(process)

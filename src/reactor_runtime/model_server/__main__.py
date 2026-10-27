@@ -38,13 +38,24 @@ Every option has an environment variable and a default:
   worker and its sessions are named under it and a token of each start. A
   worker that starts unlinks the blocks the worker before it on the same
   socket left, which it reads from ``shm-prefix`` next to the socket.
+* ``REACTOR_SHM_SLOT_DIR``: when set, a path with ``{slot}`` in it, such as
+  ``/run/reactor-shm/s{slot}``. Each session's blocks live there, in that
+  session's own memory-backed volume, which the session mounts at its
+  ``/dev/shm``; a session then sees and fills only its own. It needs
+  ``REACTOR_MAX_SESSIONS``, and the start fails when a slot's directory is
+  missing or holds less than one session's blocks.
+* ``REACTOR_POD_CONTROL_DIR``: when set, the worker stops, as on SIGTERM, once
+  a new restart token is written there (:mod:`reactor_runtime.pod_control`),
+  so the kubelet restarts it with the rest of the pod.
 
 Every line it logs carries ``runtime_role="model_server"``, and a line about
 one session carries that session's ``slot``, the number its session runtime
 stamps on its own lines (``REACTOR_SESSION_SLOT``) and logs with the slot's
 generation in its ``model server link`` line. Each such generation has a worker
 line with the same slot and generation: ``session opened`` for a session's
-first, ``session reset`` for each reset after it.
+first, ``session reset`` for each reset after it. From a reset on, the lines
+about that slot also carry the ``session_id`` the reset named (by default the
+session runtime's live session), until the next reset.
 
 Once ready it also writes ``ready`` next to the socket, for an exec probe, and
 removes it when it stops. SIGTERM and SIGINT stop it once the running step
@@ -69,13 +80,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from reactor_runtime import log
+from reactor_runtime import log, pod_control
 from reactor_runtime.manifest import MANIFEST, import_ref, load_config
 from reactor_runtime.model_server import wire
 from reactor_runtime.model_server.client import DEFAULT_SOCKET, SOCKET_ENV
 from reactor_runtime.model_server.contract import ModelServer, ServerSettings, check_declarations
 from reactor_runtime.model_server.server import WorkerServer
 from reactor_runtime.model_server.shm import unlink_prefix
+from reactor_runtime.model_server.transport import UnixShmTransport
 
 logger = log.get_logger("reactor_runtime.model_server")
 
@@ -84,6 +96,7 @@ HEALTH_PORT_ENV = "REACTOR_MODEL_WORKER_HEALTH_PORT"
 STUCK_ENV = "REACTOR_MODEL_WORKER_STUCK_SECONDS"
 SHM_PREFIX_ENV = "REACTOR_SHM_PREFIX"
 MAX_SESSIONS_ENV = "REACTOR_MAX_SESSIONS"
+SHM_SLOT_DIR_ENV = "REACTOR_SHM_SLOT_DIR"
 SHM_DIR = Path("/dev/shm")
 
 
@@ -154,13 +167,21 @@ def main(argv: list[str] | None = None) -> int:
     with contextlib.suppress(FileNotFoundError):
         ready_file.unlink()
     base = os.getenv(SHM_PREFIX_ENV, "").strip() or "rrmw"
+    max_sessions = _max_sessions()
+    try:
+        transport = UnixShmTransport(os.getenv(SHM_SLOT_DIR_ENV, "").strip() or None)
+    except ValueError as exc:
+        raise SystemExit(f"{SHM_SLOT_DIR_ENV}: {exc}") from None
+    slot_dirs = _slot_dirs(transport, max_sessions)
     # The prefix of the worker that served this socket before, if one did and
     # died without cleaning up: its blocks are reclaimed, nobody else's.
     record = socket_path.parent / "shm-prefix"
     with contextlib.suppress(OSError):
         previous = record.read_text().strip()
         if previous.startswith(base) and previous.endswith("_"):
-            stale = unlink_prefix(previous)
+            stale = unlink_prefix(previous) + sum(
+                unlink_prefix(previous, directory) for directory in slot_dirs
+            )
             if stale:
                 logger.info("unlinked blocks a previous worker left", count=stale, prefix=previous)
     prefix = f"{base}{secrets.token_hex(4)}_"
@@ -180,6 +201,7 @@ def main(argv: list[str] | None = None) -> int:
 
     for signum in (signal.SIGTERM, signal.SIGINT):
         signal.signal(signum, on_signal)
+    pod_control.watch_restart()
 
     try:
         worker_cls = import_ref(worker_ref)
@@ -200,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
             shm_output_bytes=settings.shm_output_bytes,
             from_manifest=sorted(overrides),
         )
-        max_sessions = _check_shm_room(settings)
+        _check_shm_room(settings, max_sessions, slot_dirs)
         worker = worker_cls()
         worker.device = _device()
         started = time.monotonic()
@@ -213,7 +235,12 @@ def main(argv: list[str] | None = None) -> int:
             shm_slot_bytes=settings.shm_slot_bytes,
         )
         server = WorkerServer(
-            worker, socket_path, shm_prefix=prefix, settings=settings, max_sessions=max_sessions
+            worker,
+            socket_path,
+            shm_prefix=prefix,
+            transport=transport,
+            settings=settings,
+            max_sessions=max_sessions,
         )
         status.worker = worker
         status.serving = {
@@ -245,6 +272,8 @@ def main(argv: list[str] | None = None) -> int:
         if probe is not None:
             probe.shutdown()
         unlink_prefix(prefix)
+        for directory in slot_dirs:
+            unlink_prefix(prefix, directory)
         with contextlib.suppress(OSError):
             record.unlink()
 
@@ -284,14 +313,11 @@ def _port_env() -> int | None:
         raise SystemExit(f"{HEALTH_PORT_ENV} {raw!r} must be an integer") from None
 
 
-def _check_shm_room(settings: ServerSettings) -> int | None:
-    """Fail the start when ``/dev/shm`` cannot hold ``REACTOR_MAX_SESSIONS`` sessions' blocks.
-
-    Returns:
-        ``REACTOR_MAX_SESSIONS``, or ``None`` when it is unset.
+def _max_sessions() -> int | None:
+    """``REACTOR_MAX_SESSIONS``, or ``None`` when it is unset.
 
     Raises:
-        SystemExit: ``REACTOR_MAX_SESSIONS`` is malformed, or the free space is short.
+        SystemExit: It is malformed.
     """
     raw = os.getenv(MAX_SESSIONS_ENV, "").strip()
     if not raw:
@@ -302,20 +328,56 @@ def _check_shm_room(settings: ServerSettings) -> int | None:
         raise SystemExit(f"{MAX_SESSIONS_ENV} {raw!r} must be an integer") from None
     if sessions < 1:
         raise SystemExit(f"{MAX_SESSIONS_ENV} must be at least 1")
-    try:
-        stats = os.statvfs(SHM_DIR)
-    except OSError as exc:
-        raise SystemExit(f"cannot read the free space of {SHM_DIR}: {exc}") from None
-    free = stats.f_bavail * stats.f_frsize
-    needed = sessions * settings.shm_slot_bytes
-    if free < needed:
-        raise SystemExit(
-            f"{SHM_DIR} has {free} bytes free, and {sessions} sessions ({MAX_SESSIONS_ENV}) need "
-            f"{needed}: {settings.shm_slot_bytes} each (shm_input_bytes + shm_output_bytes). "
-            "Size /dev/shm (in a pod, the emptyDir's sizeLimit) to fit them"
-        )
-    logger.info("shared memory has room", free_bytes=free, needed_bytes=needed, sessions=sessions)
     return sessions
+
+
+def _slot_dirs(transport: UnixShmTransport, max_sessions: int | None) -> list[Path]:
+    """Each slot's own shared memory directory, or none when the slots share ``/dev/shm``.
+
+    Raises:
+        SystemExit: Per-slot directories are asked for without ``REACTOR_MAX_SESSIONS``.
+    """
+    if transport.slot_directory(0) is None:
+        return []
+    if max_sessions is None:
+        raise SystemExit(f"{SHM_SLOT_DIR_ENV} needs {MAX_SESSIONS_ENV}")
+    return [d for slot in range(max_sessions) if (d := transport.slot_directory(slot)) is not None]
+
+
+def _check_shm_room(settings: ServerSettings, sessions: int | None, slot_dirs: list[Path]) -> None:
+    """Fail the start when shared memory cannot hold ``REACTOR_MAX_SESSIONS`` sessions' blocks.
+
+    With per-slot directories each must hold one session's blocks; otherwise
+    ``/dev/shm`` must hold them all.
+
+    Raises:
+        SystemExit: A directory is missing, or the free space is short.
+    """
+    if sessions is None:
+        return
+    checks = [(d, settings.shm_slot_bytes) for d in slot_dirs] or [
+        (SHM_DIR, sessions * settings.shm_slot_bytes)
+    ]
+    for directory, needed in checks:
+        try:
+            stats = os.statvfs(directory)
+        except OSError as exc:
+            raise SystemExit(f"cannot read the free space of {directory}: {exc}") from None
+        free = stats.f_bavail * stats.f_frsize
+        if free < needed:
+            raise SystemExit(
+                f"{directory} has {free} bytes free, and its {sessions if not slot_dirs else 1} "
+                f"session(s) ({MAX_SESSIONS_ENV}) need {needed}: {settings.shm_slot_bytes} each "
+                "(shm_input_bytes + shm_output_bytes). Size the memory-backed volume (in a pod, "
+                "the emptyDir's sizeLimit) to fit them"
+            )
+        logger.info(
+            "shared memory has room",
+            directory=str(directory),
+            free_bytes=free,
+            needed_bytes=needed,
+            sessions=sessions,
+        )
 
 
 def _stuck_seconds() -> float:
