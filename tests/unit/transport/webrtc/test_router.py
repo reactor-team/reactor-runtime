@@ -24,6 +24,8 @@ from reactor_runtime.transport import (
     UnknownSessionError,
 )
 from reactor_runtime.transport.webrtc import WebRtcConfig, WebRtcPeerFactory, WebRtcRouter
+from reactor_runtime.transport.webrtc import router as router_module
+from reactor_runtime.transport.webrtc.acceptor import WebRTCAcceptor
 from reactor_runtime.transport.webrtc.config import IceCredentials, IceServer
 
 _SID = "s1"
@@ -173,6 +175,33 @@ def _poll_answer(client: TestClient, cid: int, attempts: int = 50) -> Any:
         time.sleep(0.01)
         response = client.get(f"{_PREFIX}/connections/{cid}/sdp_params")
     return response
+
+
+def test_the_acceptor_decodes_step_frames_for_the_video_inputs_the_model_declares(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    built: list[WebRTCAcceptor] = []
+
+    class Recorded(WebRTCAcceptor):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            built.append(self)
+
+    class WithWebcam(FakeRunner):
+        def track_map(self) -> dict[str, Any]:
+            return {
+                **super().track_map(),
+                "webcam": {"kind": "video", "direction": "in", "rate": 30.0},
+            }
+
+    monkeypatch.setattr(router_module, "WebRTCAcceptor", Recorded)
+    _client(WithWebcam(), fake_peer, factory_for)
+
+    (acceptor,) = built
+    assert acceptor._video_inputs is not None
+    assert list(acceptor._video_inputs()) == ["webcam"]
 
 
 def test_register_mints_id_and_returns_track_map(

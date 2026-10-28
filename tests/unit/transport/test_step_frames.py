@@ -1,8 +1,11 @@
 import asyncio
+import threading
+import weakref
 from collections.abc import Callable
 
 import av
 import numpy as np
+import pytest
 
 from reactor_runtime.core import DecodedStep
 from reactor_runtime.protocol import Channel, ProtocolVersion
@@ -14,7 +17,7 @@ from reactor_runtime.transport.step_frames import (
     TrackDecoder,
     decode_step_frames,
     encoded_step,
-    track_event,
+    unpublished_track,
 )
 from reactor_wire.v1 import (
     common_pb2,
@@ -417,20 +420,14 @@ async def test_close_drops_what_is_still_queued() -> None:
 # ── decoder lifecycle ──────────────────────────────────────────────────────────
 
 
-def test_only_a_v1_control_publish_or_unpublish_is_a_track_event() -> None:
-    assert track_event(_publish("webcam"), ProtocolVersion.V1, Channel.CONTROL) == (
-        True,
-        "webcam",
-    )
-    assert track_event(_unpublish("webcam"), ProtocolVersion.V1, Channel.CONTROL) == (
-        False,
-        "webcam",
-    )
-    assert track_event(_publish("webcam"), ProtocolVersion.V1, Channel.DATA) is None
-    assert track_event(_publish("webcam"), ProtocolVersion.V0, Channel.CONTROL) is None
+def test_only_a_v1_control_unpublish_names_an_unpublished_track() -> None:
+    assert unpublished_track(_unpublish("webcam"), ProtocolVersion.V1, Channel.CONTROL) == "webcam"
+    assert unpublished_track(_publish("webcam"), ProtocolVersion.V1, Channel.CONTROL) is None
+    assert unpublished_track(_unpublish("webcam"), ProtocolVersion.V1, Channel.DATA) is None
+    assert unpublished_track(_unpublish("webcam"), ProtocolVersion.V0, Channel.CONTROL) is None
     ping = _wire(control_pb2.ControlClientMessage(ping=platform_pb2.Ping()))
-    assert track_event(ping, ProtocolVersion.V1, Channel.CONTROL) is None
-    assert track_event(b"\xff not protobuf", ProtocolVersion.V1, Channel.CONTROL) is None
+    assert unpublished_track(ping, ProtocolVersion.V1, Channel.CONTROL) is None
+    assert unpublished_track(b"\xff not protobuf", ProtocolVersion.V1, Channel.CONTROL) is None
 
 
 async def test_publishing_a_track_opens_no_decoder() -> None:
@@ -490,6 +487,27 @@ async def test_a_track_never_published_gets_its_decoder_with_its_first_frames() 
     assert gate.decoders == 1
 
 
+@pytest.mark.parametrize("release", ["unpublish", "close"])
+async def test_a_released_decoder_is_freed_off_the_event_loop(release: str) -> None:
+    rec = _Recorder()
+    gate = rec.gate()
+    packets = _encode(_pictures(4))
+    gate.submit(_wire(_step(*(_h264(p) for p in packets))), ProtocolVersion.V1, Channel.DATA)
+    await _until(lambda: len(rec.steps) == 1)
+    freed: list[threading.Thread] = []
+    weakref.finalize(
+        next(iter(gate._decoders.values())), lambda: freed.append(threading.current_thread())
+    )
+
+    if release == "unpublish":
+        gate.submit(_unpublish("webcam"), ProtocolVersion.V1, Channel.CONTROL)
+    else:
+        gate.close()
+    await _until(lambda: len(freed) == 1)
+
+    assert freed[0] is not threading.current_thread()
+
+
 async def test_an_unpublish_queued_behind_a_decode_releases_the_decoder_after_it() -> None:
     rec = _Recorder()
     gate = rec.gate()
@@ -509,7 +527,6 @@ async def test_close_releases_every_decoder_even_one_a_running_decode_opens() ->
     rec = _Recorder()
     gate = rec.gate()
     packets = _encode(_pictures(4))
-    gate.submit(_publish("other"), ProtocolVersion.V1, Channel.CONTROL)
     gate.submit(_wire(_step(*(_h264(p) for p in packets))), ProtocolVersion.V1, Channel.DATA)
 
     gate.close()

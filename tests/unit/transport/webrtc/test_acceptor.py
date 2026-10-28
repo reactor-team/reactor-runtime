@@ -138,6 +138,7 @@ def _acceptor(
         peer_factory=factory_for(peer),
         metrics=WebRtcMetrics(metrics or _metrics()),
         track_names=lambda: ("main_video", "main_audio", "webcam"),
+        video_inputs=lambda: ("webcam",),
     )
 
 

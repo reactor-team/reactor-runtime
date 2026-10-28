@@ -54,13 +54,6 @@ def _capabilities_for(tracks: TrackMap) -> ConnectionCapabilities:
     )
 
 
-def _inbound_video_tracks(tracks: TrackMap) -> frozenset[str]:
-    """Return the names of the inbound video tracks a step request may send H.264 frames on."""
-    return frozenset(
-        t.name for t in tracks.by_direction(TrackDirection.IN) if t.kind is TrackKind.VIDEO
-    )
-
-
 def _outbound_video_tracks(tracks: TrackMap) -> dict[str, TrackInfo]:
     """Return the outbound video tracks the pacer synthesises black frames for."""
     return {t.name: t for t in tracks.by_direction(TrackDirection.OUT) if t.kind is TrackKind.VIDEO}
@@ -150,6 +143,7 @@ class WebRTCConnection:
         version: ProtocolVersion,
         *,
         peer_factory: WebRtcPeerFactory,
+        video_inputs: Collection[str] = (),
     ) -> tuple[WebRTCConnection, SdpAnswer]:
         """Negotiate a peer for *offer* and wrap it as a connection.
 
@@ -158,6 +152,11 @@ class WebRTCConnection:
         connection, which it holds for its life. The connection subscribes to
         its peer's inbound events here, so it is ready to forward facts the
         moment the acceptor has registered its callbacks.
+
+        *video_inputs* names the model's input video tracks, from its declared
+        contract rather than the client's *tracks*: they are the only tracks a
+        step request's H.264 frames decode for, whether or not the client
+        negotiated them.
         """
         peer, answer = await peer_factory(conn_id, offer, tracks, config, version)
         conn = cls(
@@ -166,7 +165,7 @@ class WebRTCConnection:
             _capabilities_for(tracks),
             ping_timeout=config.ping_timeout,
             video_tracks=_outbound_video_tracks(tracks),
-            video_inputs=_inbound_video_tracks(tracks),
+            video_inputs=video_inputs,
         )
         conn._subscribe()
         return conn, answer

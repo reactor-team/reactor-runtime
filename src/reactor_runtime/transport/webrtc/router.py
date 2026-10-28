@@ -21,7 +21,7 @@ from fastapi import FastAPI, Header, HTTPException, Path, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
-from reactor_runtime.core import ConnId
+from reactor_runtime.core import ConnId, TrackDirection, TrackKind
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.transport.router import (
     CONN_ID_MAX,
@@ -280,6 +280,11 @@ class WebRtcRouter(TransportRouter):
             peer_factory=self._peer_factory,
             metrics=self._metrics,
             track_names=lambda: runner.track_map().keys(),
+            video_inputs=lambda: [
+                name
+                for name, track in runner.track_map().items()
+                if track["kind"] == TrackKind.VIDEO and track["direction"] == TrackDirection.IN
+            ],
         )
 
         add_session_error_handlers(app)

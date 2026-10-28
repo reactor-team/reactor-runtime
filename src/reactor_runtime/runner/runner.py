@@ -681,14 +681,11 @@ class Runner(ServiceComponent, ConnectionSink):
         loop is busy waits before the gateway reads it, and the wait belongs to
         the command's ingress rather than being invisible.
         """
-        if self._loop is None:
-            return
-        received_at = time.monotonic()
-        task = self._loop.create_task(
-            self._gateway.handle(conn_id, payload, channel, version, received_at=received_at)
+        self._dispatch_inbound(
+            lambda received_at: self._gateway.handle(
+                conn_id, payload, channel, version, received_at=received_at
+            )
         )
-        self._inbound.add(task)
-        task.add_done_callback(self._inbound.discard)
 
     def decoded_step_received(
         self, conn_id: ConnId, step: DecodedStep, version: ProtocolVersion
@@ -698,11 +695,8 @@ class Runner(ServiceComponent, ConnectionSink):
         Scheduled and stamped as :meth:`message_received` does a frame, so the
         request keeps its place among the connection's messages.
         """
-        if self._loop is None:
-            return
-        received_at = time.monotonic()
-        task = self._loop.create_task(
-            self._gateway.handle(
+        self._dispatch_inbound(
+            lambda received_at: self._gateway.handle(
                 conn_id,
                 step.payload,
                 Channel.DATA,
@@ -711,6 +705,16 @@ class Runner(ServiceComponent, ConnectionSink):
                 pictures=step.pictures,
             )
         )
+
+    def _dispatch_inbound(self, handle: Callable[[float], Coroutine[Any, Any, None]]) -> None:
+        """Stamp an inbound frame's arrival and schedule *handle* with it on the runtime loop.
+
+        Both kinds of inbound frame go through here, so they keep the order
+        they arrived in. The task is tracked until it completes.
+        """
+        if self._loop is None:
+            return
+        task = self._loop.create_task(handle(time.monotonic()))
         self._inbound.add(task)
         task.add_done_callback(self._inbound.discard)
 

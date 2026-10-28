@@ -106,6 +106,7 @@ class WebRTCAcceptor(ConnectionAcceptor):
         peer_factory: WebRtcPeerFactory,
         metrics: WebRtcMetrics,
         track_names: Callable[[], Iterable[str]] | None = None,
+        video_inputs: Callable[[], Iterable[str]] | None = None,
     ) -> None:
         """Bind the acceptor to its sink, config, peer factory, and instruments.
 
@@ -116,12 +117,18 @@ class WebRTCAcceptor(ConnectionAcceptor):
             metrics: Where the handshake timings are recorded.
             track_names: Read the trusted model manifest names for metric labels.
                 Without a manifest, tracks use the fixed ``unknown`` label.
+            video_inputs: Read the names of the model's input video tracks from
+                its declared contract, when a connection negotiates. They are
+                the only tracks a step request's H.264 frames decode for;
+                without them, every step request that carries an H.264 frame
+                is refused.
         """
         self._sink = sink
         self._config = config
         self._peer_factory = peer_factory
         self._metrics = metrics
         self._track_names = track_names
+        self._video_inputs = video_inputs
         self._conns: dict[ConnId, WebRTCConnection] = {}
         self._live: set[ConnId] = set()
         # Candidates that arrived before their connection's offer was negotiated,
@@ -396,7 +403,13 @@ class WebRTCAcceptor(ConnectionAcceptor):
                 await previous.close(drain=False)
 
             conn, answer = await WebRTCConnection.create(
-                conn_id, sdp_offer, tracks, config, version, peer_factory=self._peer_factory
+                conn_id,
+                sdp_offer,
+                tracks,
+                config,
+                version,
+                peer_factory=self._peer_factory,
+                video_inputs=frozenset(self._video_inputs()) if self._video_inputs else (),
             )
             conn.on_message(
                 lambda payload, ver, ch: self._sink.message_received(conn_id, payload, ver, ch)

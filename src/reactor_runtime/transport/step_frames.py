@@ -23,9 +23,10 @@ wire promises: while a request decodes, the messages behind it wait.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections import deque
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass
 
 import av
@@ -95,13 +96,13 @@ def encoded_step(
     return None
 
 
-def track_event(
+def unpublished_track(
     payload: bytes | str, version: ProtocolVersion, channel: Channel
-) -> tuple[bool, str] | None:
-    """Return whether *payload* publishes (``True``) or unpublishes a track, and its name.
+) -> str | None:
+    """Return the name of the track *payload* unpublishes, or ``None`` if it unpublishes none.
 
     Only a v1 control frame is read: a v0 client cannot send a step request,
-    so its tracks never need a decoder. Any other frame returns ``None``.
+    so its tracks never hold a decoder.
     """
     if version is not ProtocolVersion.V1 or channel is not Channel.CONTROL:
         return None
@@ -113,12 +114,9 @@ def track_event(
         return None
     if not isinstance(message, control_pb2.ControlClientMessage):
         return None
-    which = message.WhichOneof("payload")
-    if which == "publish_track":
-        return True, message.publish_track.name
-    if which == "unpublish_track":
-        return False, message.unpublish_track.name
-    return None
+    if message.WhichOneof("payload") != "unpublish_track":
+        return None
+    return message.unpublish_track.name
 
 
 class TrackDecoder:
@@ -393,17 +391,30 @@ class StepFrameGate:
     def close(self) -> None:
         """Drop what is still queued and release every decoder; the connection is going away."""
         self._backlog.clear()
-        self._decoders.clear()
+        self._release(self._decoders)
         if self._draining is not None:
             self._draining.cancel()
             self._draining = None
 
     def _pass(self, payload: bytes | str, version: ProtocolVersion, channel: Channel) -> None:
         """Deliver a message that carries no encoded frame, releasing any track it unpublishes."""
-        event = track_event(payload, version, channel)
-        if event is not None and not event[0]:
-            self._decoders.pop(event[1], None)
+        name = unpublished_track(payload, version, channel)
+        if name is not None:
+            self._release([name])
         self._deliver(payload, version, channel)
+
+    def _release(self, names: Iterable[str]) -> None:
+        """Drop the decoders of *names*, freeing them on a worker thread.
+
+        Freeing a decoder joins its frame threads, which stays off the event
+        loop as opening one does.
+        """
+        released = [self._decoders.pop(name) for name in list(names) if name in self._decoders]
+        if not released:
+            return
+        # With no running loop, or its executor shut down, they are freed here.
+        with contextlib.suppress(RuntimeError):
+            asyncio.get_running_loop().run_in_executor(None, released.clear)
 
     async def _drain(self) -> None:
         try:
