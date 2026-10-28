@@ -194,7 +194,7 @@ def test_a_track_without_a_decoder_gets_one_and_keeps_it_for_the_next_request() 
 
 def test_a_decoder_decodes_the_next_request_cleanly_after_a_corrupt_one() -> None:
     packets = _encode(_pictures(4))
-    decoders = {"webcam": TrackDecoder()}
+    decoders = {"webcam": TrackDecoder(sliced=False)}
     # Starts at a keyframe and passes the checks, but its second frame is a
     # picture's slices cut short, which the decoder conceals.
     corrupt = _step(_h264(packets[0]), _h264(packets[1][: len(packets[1]) // 3]))
@@ -204,6 +204,94 @@ def test_a_decoder_decodes_the_next_request_cleanly_after_a_corrupt_one() -> Non
 
     expected = _reference(packets)
     assert all(np.array_equal(pictures[0, i], expected[i]) for i in range(4))
+
+
+def _sliced(slices: int) -> list[bytes]:
+    """Eight frames, each picture cut into *slices* slices."""
+    return _encode(_pictures(8), **{"x264-params": f"scenecut=0:slices={slices}"})
+
+
+def _entries(*entries: tuple[str, list[bytes]]) -> data_pb2.DataClientMessage:
+    """A step request with one entry per ``(track, packets)``, in order."""
+    message = _step()
+    del message.request_step.media_input[:]
+    for track, packets in entries:
+        message.request_step.media_input.append(
+            step_pb2.TrackFrames(
+                track=track,
+                kind=platform_pb2.TrackKind.TRACK_KIND_VIDEO,
+                frames=[_h264(p) for p in packets],
+            )
+        )
+    return message
+
+
+def test_a_stream_of_sliced_pictures_decodes_on_a_slice_threaded_decoder() -> None:
+    packets = _sliced(3)
+    decoders: dict[str, TrackDecoder] = {}
+
+    pictures = _decode(_step(*(_h264(p) for p in packets[:4])), decoders)
+
+    assert decoders["webcam"].sliced
+    expected = _reference(packets[:4])
+    assert all(np.array_equal(pictures[0, i], expected[i]) for i in range(4))
+
+
+def test_a_stream_of_one_slice_per_picture_decodes_on_a_frame_threaded_decoder() -> None:
+    packets = _sliced(1)
+    decoders: dict[str, TrackDecoder] = {}
+
+    _decode(_step(*(_h264(p) for p in packets[:4])), decoders)
+
+    assert not decoders["webcam"].sliced
+
+
+def test_a_track_whose_stream_changes_its_slicing_gets_a_new_decoder() -> None:
+    decoders: dict[str, TrackDecoder] = {}
+    _decode(_step(*(_h264(p) for p in _sliced(1)[:4])), decoders)
+    first = decoders["webcam"]
+
+    packets = _sliced(3)
+    pictures = _decode(_step(*(_h264(p) for p in packets[:4])), decoders)
+
+    assert decoders["webcam"] is not first
+    assert decoders["webcam"].sliced
+    expected = _reference(packets[:4])
+    assert all(np.array_equal(pictures[0, i], expected[i]) for i in range(4))
+
+
+def test_each_track_of_a_request_decodes_to_its_own_pictures() -> None:
+    webcam, other = _sliced(3)[:4], _encode(_pictures(8)[4:])
+    decoders: dict[str, TrackDecoder] = {}
+
+    pictures = _decode(_entries(("webcam", webcam), ("other", other)), decoders)
+
+    assert set(decoders) == {"webcam", "other"}
+    for index, packets in enumerate((webcam, other)):
+        expected = _reference(packets)
+        assert all(np.array_equal(pictures[index, i], expected[i]) for i in range(len(packets)))
+
+
+def test_entries_naming_the_same_track_each_decode_to_their_own_pictures() -> None:
+    packets = _encode(_pictures(8))
+    decoders: dict[str, TrackDecoder] = {}
+
+    pictures = _decode(_entries(("webcam", packets[:4]), ("webcam", packets[4:])), decoders)
+
+    assert len(decoders) == 1
+    for index, window in enumerate((packets[:4], packets[4:])):
+        expected = _reference(window)
+        assert all(np.array_equal(pictures[index, i], expected[i]) for i in range(4))
+
+
+def test_the_first_entry_at_fault_is_the_one_refused() -> None:
+    packets = _encode(_pictures(4))
+    message = _entries(("webcam", packets), ("other", packets[1:]))
+    message.request_step.media_input[0].frames[0].shape[:] = [HEIGHT * 2, WIDTH, 3]
+
+    refusal = _refused(message)
+
+    assert refusal.entry == "media_input[0].frames[0]"
 
 
 def test_h264_frames_for_a_track_that_is_not_an_input_video_track_open_no_decoder() -> None:
