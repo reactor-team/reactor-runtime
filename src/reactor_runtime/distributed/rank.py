@@ -21,7 +21,6 @@ import queue
 import sys
 from typing import Any
 
-from reactor_runtime.distributed.ipc import SharedSlot, SlotReader, pack, unpack
 from reactor_runtime.distributed.protocol import (
     Answer,
     Generate,
@@ -31,6 +30,7 @@ from reactor_runtime.distributed.protocol import (
     Reset,
     Shutdown,
 )
+from reactor_runtime.ipc import SharedSlot, SlotReader, pack, unpack
 from reactor_runtime.log import configure as configure_logging
 from reactor_runtime.log import get_logger
 
