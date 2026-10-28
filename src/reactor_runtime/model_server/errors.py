@@ -53,6 +53,15 @@ class WorkerRejected(ValueError):  # noqa: N818 (named for the event a caller ca
     """
 
 
+class PayloadTooLarge(ValueError):  # noqa: N818 (named for the event a caller catches)
+    """A request or a result is larger than the shared memory ``reactor.yaml`` gives it.
+
+    The message names the payload's size, the block's, and the
+    ``runtime.worker`` key that sets it. Nothing was sent: the request fails
+    alone, and the link and every other request go on.
+    """
+
+
 class StepUnanswered(WorkerTimeout):
     """A step the model did not answer. The connection is still up."""
 

@@ -15,6 +15,7 @@ this package.
 
 from reactor_runtime.model_server.errors import (
     BatchFailed,
+    PayloadTooLarge,
     StepExpired,
     StepUnanswered,
     WorkerError,
@@ -31,6 +32,7 @@ from reactor_runtime.model_server.server import (
 __all__ = [
     "BatchFailed",
     "ModelServer",
+    "PayloadTooLarge",
     "ServerRequest",
     "ServerSettings",
     "StepExpired",
