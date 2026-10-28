@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from reactor_runtime.core import CompletedStep, StepResultsConfig
+from reactor_runtime.core.external_file import EXTERNAL_RESULTS_FILE
 from reactor_runtime.log import get_logger
 from reactor_runtime.step_results.mp4 import write_mp4
 from reactor_runtime.step_results.usage import VideoUsage
@@ -67,7 +68,8 @@ class SavedStep:
     Attributes:
         session_id: The session the step belongs to.
         step: The step's number within the session.
-        files: The names of the files in the folder beside ``result.json``.
+        files: The names of the files to persist beside ``result.json``,
+            including the private external-source descriptor when present.
         usage: The measured facts of each video track the folder holds, as
             ``result.json`` lists them. Empty when it holds no video.
         generate_s: The time the step took to generate, as ``result.json``
@@ -327,9 +329,13 @@ class StepStore:
         if result is None:
             return None
         try:
-            entries = json.loads(result.read_text()).get("files", [])
+            manifest = json.loads(result.read_text())
+            entries = manifest.get("files", [])
         except (OSError, ValueError):
             return None
+        if name == EXTERNAL_RESULTS_FILE and manifest.get("external_files"):
+            path = result.parent / EXTERNAL_RESULTS_FILE
+            return (path, "application/json") if path.is_file() else None
         for entry in entries:
             if entry.get("name") == name:
                 path = result.parent / name
@@ -456,6 +462,7 @@ class StepStore:
         completed = pending.completed
         started = time.perf_counter()
         files: list[dict[str, Any]] = []
+        external_files: list[dict[str, str | None]] = []
         usage: tuple[VideoUsage, ...] = ()
         save_error: str | None = None
         try:
@@ -467,6 +474,15 @@ class StepStore:
                 path = step_dir / name
                 path.write_bytes(data)
                 files.append(_file_entry(path))
+            if completed.error is None and completed.external_files:
+                descriptors = {
+                    "version": 1,
+                    "files": [entry.source_entry() for entry in completed.external_files],
+                }
+                _write_atomically(
+                    step_dir / EXTERNAL_RESULTS_FILE, json.dumps(descriptors).encode()
+                )
+                external_files = [entry.public_entry() for entry in completed.external_files]
         except Exception as error:
             logger.exception(
                 "failed to save a step result",
@@ -474,10 +490,11 @@ class StepStore:
                 step=pending.step,
             )
             save_error = f"{type(error).__name__}: {error}"
-            for name in (OUTPUT_FILE, *completed.files):
+            for name in (OUTPUT_FILE, EXTERNAL_RESULTS_FILE, *completed.files):
                 (step_dir / name).unlink(missing_ok=True)
             files = []
             usage = ()
+            external_files = []
         result = {
             "step": pending.step,
             "session_id": pending.session_id,
@@ -491,12 +508,15 @@ class StepStore:
                 "encode_s": time.perf_counter() - started,
             },
         }
+        if external_files:
+            result["external_files"] = external_files
         _write_atomically(step_dir / RESULT_FILE, json.dumps(result, default=str).encode())
         self._publish(step_dir, session_dir / str(pending.step))
         return SavedStep(
             session_id=pending.session_id,
             step=pending.step,
-            files=tuple(entry["name"] for entry in files),
+            files=tuple(entry["name"] for entry in files)
+            + ((EXTERNAL_RESULTS_FILE,) if external_files else ()),
             usage=usage,
             generate_s=completed.elapsed,
         )

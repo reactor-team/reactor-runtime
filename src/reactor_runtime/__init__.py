@@ -19,6 +19,7 @@ All four are removed in the next major.
 from importlib.metadata import version
 from typing import Any
 
+from reactor_runtime.core.external_file import ExternalFile
 from reactor_runtime.interface import (
     EVENT_REGISTRY,
     INPUT_REGISTRY,
@@ -84,6 +85,7 @@ __all__ = [
     "ClientInfo",
     "Command",
     "CommandError",
+    "ExternalFile",
     "FieldInfo",
     "InputBuffer",
     "InputField",

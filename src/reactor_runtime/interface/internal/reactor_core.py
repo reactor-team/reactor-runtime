@@ -479,6 +479,7 @@ class ReactorCore:
             CompletedStep(
                 bundle=bundle,
                 files=dict(step.files),
+                external_files=step.external_files,
                 error=step.error,
                 elapsed=step.elapsed,
                 session=session,

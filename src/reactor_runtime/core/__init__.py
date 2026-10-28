@@ -6,6 +6,7 @@ vocabulary, and the service-lifecycle contract. Types only, no behaviour beyond
 small pure helpers, so it sits at the root of the dependency graph.
 """
 
+from reactor_runtime.core.external_file import ExternalFile
 from reactor_runtime.core.fields import FieldInfo, InputField
 from reactor_runtime.core.model import (
     ClientConnected,
@@ -99,6 +100,7 @@ __all__ = [
     "ConnectionSink",
     "DecodedStep",
     "EndReason",
+    "ExternalFile",
     "FieldInfo",
     "FileUploaded",
     "FrameStage",

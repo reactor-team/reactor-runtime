@@ -21,6 +21,7 @@ from typing import Any
 
 from reactor_runtime.core import (
     Command,
+    ExternalFile,
     FieldInfo,
     InputField,
     InputFrame,
@@ -83,6 +84,7 @@ __all__ = [
     "ClientInfo",
     "Command",
     "CommandError",
+    "ExternalFile",
     "FieldInfo",
     "InputBuffer",
     "InputField",
