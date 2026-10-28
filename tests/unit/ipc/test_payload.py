@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from reactor_runtime.ipc import SharedSlot, SlotReader, pack, unpack
+from reactor_runtime.ipc import SharedSlot, SharedSlotLimitExceeded, SlotReader, pack, unpack
 from reactor_runtime.ipc import payload as payload_module
 
 
@@ -111,6 +111,22 @@ def test_the_header_names_the_grown_block(slot: SharedSlot, reader: SlotReader) 
     assert name != small
     assert spans == [(0, big.nbytes)]
     np.testing.assert_array_equal(unpack(header, reader), big)
+
+
+def test_a_call_above_the_limit_is_refused_and_the_slot_goes_on(
+    tmp_path: Path, reader: SlotReader
+) -> None:
+    slot = SharedSlot(initial_bytes=4096, max_bytes=4096, directory=tmp_path)
+    try:
+        arrays = (np.ones(3000, dtype=np.uint8), np.ones(3000, dtype=np.uint8))
+        with pytest.raises(SharedSlotLimitExceeded) as refused:
+            pack(arrays, slot)
+        assert (refused.value.needed, refused.value.limit) == (6000, 4096)
+
+        small = np.arange(16, dtype=np.uint8)
+        np.testing.assert_array_equal(unpack(pack(small, slot), reader), small)
+    finally:
+        slot.close()
 
 
 def test_an_object_without_buffers_needs_no_block(slot: SharedSlot, tmp_path: Path) -> None:

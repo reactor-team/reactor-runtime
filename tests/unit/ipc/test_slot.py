@@ -1,14 +1,21 @@
-"""A slot grows to its writer's high-water mark, and a reader copies out what it is told."""
+"""A slot grows to its writer's high-water mark or stops at its limit, and a reader copies out."""
 
 from __future__ import annotations
 
+import pickle
 from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from reactor_runtime.ipc import SharedSlot, SlotReader, new_prefix, unlink_blocks
+from reactor_runtime.ipc import (
+    SharedSlot,
+    SharedSlotLimitExceeded,
+    SlotReader,
+    new_prefix,
+    unlink_blocks,
+)
 
 
 @pytest.fixture
@@ -52,6 +59,48 @@ def test_the_block_grows_keeping_what_was_written_and_the_old_block_goes(
     reader.attach(slot.name)
     assert reader.copy(*head) == bytearray(b"\x07" * 3000)
     assert reader.copy(*tail) == bytearray(b"\x09" * 3000)
+
+
+def test_a_bounded_slot_grows_only_to_its_limit(tmp_path: Path) -> None:
+    slot = SharedSlot(initial_bytes=4096, max_bytes=6000, directory=tmp_path)
+    try:
+        slot.begin()
+        slot.write(b"x" * 5000)
+        assert slot.capacity == 6000
+    finally:
+        slot.close()
+
+
+def test_a_slot_at_its_limit_never_grows_and_refuses_a_larger_call_before_writing(
+    tmp_path: Path, reader: SlotReader
+) -> None:
+    slot = SharedSlot(initial_bytes=4096, max_bytes=4096, directory=tmp_path)
+    try:
+        block = slot.name
+        slot.begin()
+        slot.write(b"x" * 4000)
+        with pytest.raises(SharedSlotLimitExceeded) as refused:
+            slot.write(b"y" * 100)
+        assert (refused.value.needed, refused.value.limit) == (4100, 4096)
+
+        assert (slot.name, slot.capacity) == (block, 4096)
+        assert sorted(path.name for path in tmp_path.iterdir()) == [block]
+    finally:
+        slot.close()
+
+
+def test_the_limit_error_crosses_a_process_boundary_intact() -> None:
+    error = pickle.loads(pickle.dumps(SharedSlotLimitExceeded(10, 4)))
+    assert (error.needed, error.limit, str(error)) == (
+        10,
+        4,
+        "a call holds 10 bytes, above the slot's limit of 4",
+    )
+
+
+def test_a_first_block_above_the_limit_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="above max_bytes"):
+        SharedSlot(initial_bytes=8192, max_bytes=4096, directory=tmp_path)
 
 
 def test_a_reader_refuses_a_span_past_the_block(slot: SharedSlot, reader: SlotReader) -> None:
