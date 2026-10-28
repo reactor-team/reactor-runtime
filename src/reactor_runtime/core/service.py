@@ -220,9 +220,6 @@ DEFAULT_SHM_INPUT_BYTES = 1 << 20
 DEFAULT_SHM_OUTPUT_BYTES = 8 << 20
 """Each session's output block when the ``runtime.worker`` block names none: 8 MiB."""
 
-DEFAULT_MAX_REQUEST_BYTES = 256 << 20
-"""The most one request may carry when the ``runtime.worker`` block names none: 256 MiB."""
-
 
 @dataclass(frozen=True)
 class WorkerConfig:
@@ -239,8 +236,6 @@ class WorkerConfig:
             class's ``max_batch``, which this may only lower.
         batch_window: Seconds the worker waits for a batch to fill; ``None``
             keeps the class's ``batch_window``.
-        max_request_bytes: The most bytes one request may carry;
-            :data:`DEFAULT_MAX_REQUEST_BYTES` when ``None``.
         shm_input_bytes: Each session's request block;
             :data:`DEFAULT_SHM_INPUT_BYTES` when ``None``.
         shm_output_bytes: Each session's output block;
@@ -254,7 +249,6 @@ class WorkerConfig:
     import_ref: str
     max_batch: int | None = None
     batch_window: float | None = None
-    max_request_bytes: int | None = None
     shm_input_bytes: int | None = None
     shm_output_bytes: int | None = None
 
@@ -265,7 +259,7 @@ class WorkerConfig:
                 f"runtime.worker.import must name the model half as 'module:Class', "
                 f"got {self.import_ref!r}"
             )
-        for key in ("max_batch", "max_request_bytes", "shm_input_bytes", "shm_output_bytes"):
+        for key in ("max_batch", "shm_input_bytes", "shm_output_bytes"):
             value = getattr(self, key)
             if value is not None and (type(value) is not int or value < 1):
                 raise ValueError(f"runtime.worker.{key} must be a positive integer, got {value!r}")

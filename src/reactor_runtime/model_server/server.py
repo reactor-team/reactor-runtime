@@ -26,7 +26,6 @@ from typing import Any, ClassVar, Literal, get_args, get_origin
 import numpy as np
 
 from reactor_runtime.core import (
-    DEFAULT_MAX_REQUEST_BYTES,
     DEFAULT_SHM_INPUT_BYTES,
     DEFAULT_SHM_OUTPUT_BYTES,
     Health,
@@ -34,7 +33,7 @@ from reactor_runtime.core import (
 )
 
 _SCALARS: tuple[Any, ...] = (bool, int, float, str, bytes, type(None))
-_MANIFEST_ONLY = ("max_request_bytes", "shm_input_bytes", "shm_output_bytes")
+_MANIFEST_ONLY = ("shm_input_bytes", "shm_output_bytes")
 
 
 @dataclass(frozen=True)
@@ -213,10 +212,10 @@ class ModelServer:
         batch_window: Seconds to wait for a batch to fill, 0 by default;
             ``runtime.worker.batch_window`` overrides it.
 
-    The sizes of the shared memory each session holds, and the most one
-    request may carry, are set in ``reactor.yaml`` (``runtime.worker``) and
-    nowhere else: a deployment sizes each session's memory from the manifest,
-    so a class that declares them is refused.
+    The sizes of the shared memory each session holds are set in
+    ``reactor.yaml`` (``runtime.worker``) and nowhere else: a deployment sizes
+    each session's memory from the manifest, so a class that declares them is
+    refused.
 
     Attributes:
         device: ``"cuda"`` when torch sees a GPU in the model server's process,
@@ -346,14 +345,12 @@ class ServerSettings:
     Attributes:
         max_batch: The most requests one step receives.
         batch_window: Seconds to wait for a batch to fill.
-        max_request_bytes: The most bytes one request may carry.
         shm_input_bytes: Each session's request block.
         shm_output_bytes: Each session's output block.
     """
 
     max_batch: int
     batch_window: float
-    max_request_bytes: int
     shm_input_bytes: int
     shm_output_bytes: int
 
@@ -388,7 +385,6 @@ class ServerSettings:
             batch_window=float(
                 server.batch_window if manifest.batch_window is None else manifest.batch_window
             ),
-            max_request_bytes=manifest.max_request_bytes or DEFAULT_MAX_REQUEST_BYTES,
             shm_input_bytes=manifest.shm_input_bytes or DEFAULT_SHM_INPUT_BYTES,
             shm_output_bytes=manifest.shm_output_bytes or DEFAULT_SHM_OUTPUT_BYTES,
         )

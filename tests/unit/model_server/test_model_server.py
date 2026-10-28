@@ -11,7 +11,6 @@ import numpy as np
 import pytest
 
 from reactor_runtime.core import (
-    DEFAULT_MAX_REQUEST_BYTES,
     DEFAULT_SHM_INPUT_BYTES,
     DEFAULT_SHM_OUTPUT_BYTES,
     HealthStatus,
@@ -126,7 +125,7 @@ def test_a_subclass_without_types_is_refused() -> None:
             pass
 
 
-@pytest.mark.parametrize("key", ["shm_input_bytes", "shm_output_bytes", "max_request_bytes"])
+@pytest.mark.parametrize("key", ["shm_input_bytes", "shm_output_bytes"])
 def test_a_subclass_that_sets_what_the_manifest_owns_is_refused(key: str) -> None:
     with pytest.raises(TypeError, match=f"runtime.worker.{key}"):
         type("Sized", (ModelServer,), {"types": TYPES, key: 1 << 20})
@@ -170,7 +169,6 @@ def test_without_a_manifest_block_the_class_and_the_runtime_defaults_apply() -> 
     assert settings == ServerSettings(
         max_batch=4,
         batch_window=0.002,
-        max_request_bytes=DEFAULT_MAX_REQUEST_BYTES,
         shm_input_bytes=DEFAULT_SHM_INPUT_BYTES,
         shm_output_bytes=DEFAULT_SHM_OUTPUT_BYTES,
     )
@@ -182,14 +180,12 @@ def test_the_manifest_lowers_max_batch_and_sets_the_rest() -> None:
         import_ref="plasma_worker:PlasmaModel",
         max_batch=2,
         batch_window=0,
-        max_request_bytes=1 << 20,
         shm_input_bytes=2 << 20,
         shm_output_bytes=32 << 20,
     )
     assert ServerSettings.resolve(PlasmaModel, config) == ServerSettings(
         max_batch=2,
         batch_window=0.0,
-        max_request_bytes=1 << 20,
         shm_input_bytes=2 << 20,
         shm_output_bytes=32 << 20,
     )
