@@ -11,18 +11,15 @@ shared-memory, or NCCL code::
     runner.reset()
     runner.shutdown()
 
-This package is standalone. Nothing else in the runtime depends on it, and it
-reads no manifest and no environment variable of its own.
+Nothing else in the runtime depends on this package, and it reads no manifest
+and no environment variable of its own. Its shared memory comes from
+:mod:`reactor_runtime.ipc`.
 """
 
-from reactor_runtime.distributed.errors import (
-    RankDesync,
-    SharedSlotAllocationFailed,
-    WorkerCrashed,
-    WorkerTimeout,
-)
+from reactor_runtime.distributed.errors import RankDesync, WorkerCrashed, WorkerTimeout
 from reactor_runtime.distributed.runner import DistributedRunner
 from reactor_runtime.distributed.worker import DistributedWorker
+from reactor_runtime.ipc import SharedSlotAllocationFailed
 
 __all__ = [
     "DistributedRunner",

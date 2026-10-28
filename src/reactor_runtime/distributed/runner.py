@@ -26,14 +26,6 @@ import time
 from typing import Any
 
 from reactor_runtime.distributed.errors import RankDesync, WorkerCrashed, WorkerTimeout
-from reactor_runtime.distributed.ipc import (
-    SharedSlot,
-    SlotReader,
-    new_prefix,
-    pack,
-    unlink_blocks,
-    unpack,
-)
 from reactor_runtime.distributed.protocol import (
     Answer,
     Generate,
@@ -45,6 +37,7 @@ from reactor_runtime.distributed.protocol import (
 )
 from reactor_runtime.distributed.rank import rank_main
 from reactor_runtime.distributed.worker import check_shape
+from reactor_runtime.ipc import SharedSlot, SlotReader, new_prefix, pack, unlink_blocks, unpack
 from reactor_runtime.log import get_logger
 
 logger = get_logger(__name__)
