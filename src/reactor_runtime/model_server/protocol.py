@@ -33,6 +33,12 @@ PROTOCOL = 1
 FRAME_HEADER = struct.Struct("!Q")
 """A frame's header: the length of the pickled message that follows."""
 
+FAILURE_LIMIT = 64 << 10
+"""The most bytes a failure's pickled exception takes; a larger one travels as its description."""
+
+DESCRIPTION_LIMIT = 4096
+"""The most characters of a failure's description."""
+
 
 class ProtocolError(Exception):
     """A frame that cannot be read: its length passes the limit, or it holds no message."""
@@ -186,12 +192,19 @@ def failure(request_id: int, exc: BaseException) -> Failed:
     """Return the :class:`Failed` that carries *exc* as the answer to *request_id*.
 
     An exception that does not pickle travels as a ``RuntimeError`` naming its
-    type and message, as a distributed rank's does.
+    type and message, as a distributed rank's does, and so does one larger than
+    :data:`FAILURE_LIMIT` once pickled, so a failure always fits in a frame. The
+    description is cut at :data:`DESCRIPTION_LIMIT` characters.
     """
     kind = type(exc)
     description = f"{kind.__module__}.{kind.__qualname__}: {_text(exc)}"
+    if len(description) > DESCRIPTION_LIMIT:
+        description = description[: DESCRIPTION_LIMIT - 3] + "..."
     carried = portable(exc) if isinstance(exc, Exception) else RuntimeError(description)
-    return Failed(request_id, pickle.dumps(carried, protocol=5), description)
+    error = pickle.dumps(carried, protocol=5)
+    if len(error) > FAILURE_LIMIT:
+        error = pickle.dumps(RuntimeError(f"{description} (too large to send whole)"), protocol=5)
+    return Failed(request_id, error, description)
 
 
 def error_of(failed: Failed) -> BaseException:
