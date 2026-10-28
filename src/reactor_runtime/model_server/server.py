@@ -15,6 +15,7 @@ drives such ranks serves every session from weights spread over those GPUs.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
@@ -143,7 +144,7 @@ class ModelServer[RequestT, ResultT]:
         A raise here fails the model server's start, and its process exits.
         """
 
-    def step(self, requests: list[ServerRequest[RequestT]]) -> list[ResultT | Exception]:
+    def step(self, requests: list[ServerRequest[RequestT]]) -> Sequence[ResultT | Exception]:
         """Run one step for every request and return one output per request, in order.
 
         An output that is an exception instance fails that request alone, and
