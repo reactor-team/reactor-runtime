@@ -161,3 +161,16 @@ def test_an_exception_this_process_cannot_import_arrives_as_a_worker_error(
 
     assert type(error) is WorkerError
     assert str(error) == "only_in_the_worker.Missing: gone"
+
+
+def test_a_huge_exception_travels_bounded_as_its_description() -> None:
+    failed = failure(3, ValueError("x" * (2 << 20)))
+
+    assert (
+        len(pickle.dumps(failed, protocol=5))
+        < protocol.FAILURE_LIMIT + protocol.DESCRIPTION_LIMIT * 2
+    )
+    error = error_of(failed)
+    assert type(error) is RuntimeError
+    assert "ValueError" in str(error)
+    assert "too large to send whole" in str(error)
