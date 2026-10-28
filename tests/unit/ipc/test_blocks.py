@@ -98,6 +98,16 @@ def test_unlink_blocks_removes_only_the_prefix(tmp_path: Path) -> None:
     assert sorted(p.name for p in tmp_path.iterdir()) == ["rrxyz_0"]
 
 
+def test_a_prefix_is_matched_as_plain_text(tmp_path: Path) -> None:
+    for name in ("rr[ab]_0", "rra_0", "rrb_0", "rr*_0"):
+        create_block(name, 8, tmp_path).close()
+
+    assert unlink_blocks("rr[ab]_", tmp_path) == 1
+    assert unlink_blocks("rr*", tmp_path) == 1
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["rra_0", "rrb_0"]
+
+
 def test_a_process_that_attaches_and_exits_leaves_the_block(tmp_path: Path) -> None:
     block = create_block("b0", 8, tmp_path)
     child = (

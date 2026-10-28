@@ -177,6 +177,9 @@ def attach_block(name: str, directory: Path | None = None) -> Block:
 def unlink_blocks(prefix: str, directory: Path | None = None) -> int:
     """Unlink every block in *directory* whose name starts with *prefix*; return how many.
 
+    The prefix is compared as plain text, so a ``*`` or ``[`` in it matches
+    only itself.
+
     For blocks a creator left behind when it was terminated before it could
     unlink them. Call it only once the processes that create blocks under
     *prefix* are gone: a live creator's blocks would go with the rest.
@@ -187,7 +190,9 @@ def unlink_blocks(prefix: str, directory: Path | None = None) -> int:
     _check_name(prefix)
     where = directory or default_directory()
     count = 0
-    for path in where.glob(f"{prefix}*"):
+    for path in where.iterdir():
+        if not path.name.startswith(prefix):
+            continue
         with contextlib.suppress(OSError):
             path.unlink()
             count += 1
