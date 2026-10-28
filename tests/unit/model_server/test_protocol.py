@@ -86,7 +86,7 @@ _MESSAGES: list[Any] = [
     Cancel(request_id=7),
     Signal(signal=("preempt", "barge-in")),
     Reset(request_id=9, session_id="abc"),
-    Welcome(slot=2, generation=3, max_batch=4, max_request_bytes=1 << 20),
+    Welcome(slot=2, generation=3, max_batch=4),
     Refused(reason="slot 2 is held"),
     Result(request_id=7, output={"frames": np.zeros((2, 2), dtype=np.uint8)}),
     failure(7, ValueError("no face")),
