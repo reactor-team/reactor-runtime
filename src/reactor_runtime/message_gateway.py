@@ -18,9 +18,11 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
+import numpy.typing as npt
 from google.protobuf.message import DecodeError
 
 from reactor_runtime.core import ConnectionSink, ConnId
@@ -91,6 +93,8 @@ class InboundStep:
             and minted here when absent.
         received_at: When the frame carrying the request reached the runtime,
             on a monotonic clock.
+        pictures: The picture the transport decoded each encoded frame to, by
+            ``(entry, position)`` in *media_input*; empty when it decoded none.
     """
 
     state: Mapping[str, Any]
@@ -99,6 +103,7 @@ class InboundStep:
     conn_id: ConnId
     request_id: str
     received_at: float
+    pictures: Mapping[tuple[int, int], npt.NDArray[np.uint8]] = field(default_factory=dict)
 
 
 StepHandler = Callable[[InboundStep], Awaitable[None]]
@@ -154,6 +159,7 @@ class MessageGateway:
         version: ProtocolVersion,
         *,
         received_at: float,
+        pictures: Mapping[tuple[int, int], npt.NDArray[np.uint8]] | None = None,
     ) -> None:
         """Decode one inbound frame and route it.
 
@@ -169,6 +175,9 @@ class MessageGateway:
         The caller stamps it at the transport edge and it rides the decoded
         command, because the gateway runs as a task and cannot see how long the
         frame waited for the event loop.
+
+        *pictures* are what the transport decoded a step request's encoded
+        frames to, and ride the :class:`InboundStep` the frame carries.
         """
         try:
             message = self._codec_for(version).decode_inbound(payload, channel)
@@ -219,6 +228,7 @@ class MessageGateway:
                     conn_id=conn_id,
                     request_id=message.request_id or _new_request_id(),
                     received_at=received_at,
+                    pictures=pictures or {},
                 )
             )
             return

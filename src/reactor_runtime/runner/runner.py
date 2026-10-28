@@ -28,6 +28,9 @@ from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+import numpy as np
+import numpy.typing as npt
+
 from reactor_runtime.codes import INVALID_COMMAND, UNRESOLVED_UPLOAD
 from reactor_runtime.core import (
     JOURNAL_EVENTS,
@@ -39,6 +42,7 @@ from reactor_runtime.core import (
     Connection,
     ConnectionSink,
     ConnId,
+    DecodedStep,
     EndReason,
     FileUploaded,
     Health,
@@ -85,6 +89,7 @@ from reactor_runtime.protocol.frames import (
     FrameEncodingError,
     check_frame,
     decode_frame,
+    decoded_frame,
     media_size,
     track_frames,
 )
@@ -676,12 +681,40 @@ class Runner(ServiceComponent, ConnectionSink):
         loop is busy waits before the gateway reads it, and the wait belongs to
         the command's ingress rather than being invisible.
         """
+        self._dispatch_inbound(
+            lambda received_at: self._gateway.handle(
+                conn_id, payload, channel, version, received_at=received_at
+            )
+        )
+
+    def decoded_step_received(
+        self, conn_id: ConnId, step: DecodedStep, version: ProtocolVersion
+    ) -> None:
+        """Hand a step request whose encoded frames the transport decoded to the gateway.
+
+        Scheduled and stamped as :meth:`message_received` does a frame, so the
+        request keeps its place among the connection's messages.
+        """
+        self._dispatch_inbound(
+            lambda received_at: self._gateway.handle(
+                conn_id,
+                step.payload,
+                Channel.DATA,
+                version,
+                received_at=received_at,
+                pictures=step.pictures,
+            )
+        )
+
+    def _dispatch_inbound(self, handle: Callable[[float], Coroutine[Any, Any, None]]) -> None:
+        """Stamp an inbound frame's arrival and schedule *handle* with it on the runtime loop.
+
+        Both kinds of inbound frame go through here, so they keep the order
+        they arrived in. The task is tracked until it completes.
+        """
         if self._loop is None:
             return
-        received_at = time.monotonic()
-        task = self._loop.create_task(
-            self._gateway.handle(conn_id, payload, channel, version, received_at=received_at)
-        )
+        task = self._loop.create_task(handle(time.monotonic()))
         self._inbound.add(task)
         task.add_done_callback(self._inbound.discard)
 
@@ -1870,7 +1903,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 return
             calls.append((key, name, resolved))
         try:
-            media_input = self._check_media_input(step.media_input)
+            media_input = self._check_media_input(step.media_input, step.pictures)
         except _StepInputError as error:
             refuse(error.entry, str(error))
             return
@@ -1896,12 +1929,16 @@ class Runner(ServiceComponent, ConnectionSink):
             self._sm.send(SessionEvent.COMMAND, name=name, args=args, conn_id=step.conn_id)
 
     def _check_media_input(
-        self, media_input: tuple[step_pb2.TrackFrames, ...]
+        self,
+        media_input: tuple[step_pb2.TrackFrames, ...],
+        pictures: Mapping[tuple[int, int], npt.NDArray[np.uint8]],
     ) -> dict[str, list[FrameSource]]:
         """Check a step request's media input, by the input track each entry belongs to.
 
         Every frame is checked without copying its samples; the copy happens
-        when the model's thread calls the source this returns for it.
+        when the model's thread calls the source this returns for it. A frame
+        the transport already decoded is read as its picture in *pictures*,
+        keyed by ``(entry, position)``, which only a video track takes.
 
         Raises:
             _StepInputError: An entry names a track the model does not take, a
@@ -1933,6 +1970,16 @@ class Runner(ServiceComponent, ConnectionSink):
             frames: list[FrameSource] = []
             samples = 0
             for position, frame in enumerate(entry.frames):
+                picture = pictures.get((index, position))
+                if picture is not None:
+                    if info.kind is not TrackKind.VIDEO:
+                        raise _StepInputError(
+                            where,
+                            f"{where}.frames[{position}]: an encoded video frame cannot go "
+                            f"to {info.kind} track {entry.track!r}",
+                        )
+                    frames.append(functools.partial(decoded_frame, frame, picture))
+                    continue
                 try:
                     shape = check_frame(frame, info.kind)
                 except FrameEncodingError as error:

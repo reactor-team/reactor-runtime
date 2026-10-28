@@ -23,6 +23,7 @@ from reactor_runtime.core.values import (
     ConnectionCapabilities,
     ConnectionOrigin,
     ConnId,
+    DecodedStep,
     FrameStage,
     InputFrame,
     MediaChunk,
@@ -326,6 +327,18 @@ class ConnectionSink(Protocol):
         not a single runtime-wide codec. *channel* is the physical channel it
         arrived on (data or control), so the gateway decodes it as the right
         message family rather than guessing.
+        """
+
+    def decoded_step_received(
+        self, conn_id: ConnId, step: DecodedStep, version: ProtocolVersion
+    ) -> None:
+        """Hand up a step request whose encoded frames the transport decoded.
+
+        Takes the place of :meth:`message_received` for that request: it is
+        decoded and dispatched as the same request arriving on the data
+        channel, with each encoded frame read as its picture in
+        ``step.pictures``. A transport delivers it in the order the request
+        arrived among the connection's other messages.
         """
 
     def command_received(

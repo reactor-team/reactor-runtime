@@ -12,6 +12,7 @@ from reactor_runtime.core import (
     ClientStatsBatch,
     Connection,
     ConnId,
+    DecodedStep,
     InputFrame,
     LiveKitConfig,
     LiveKitRpcMethod,
@@ -90,6 +91,11 @@ class FakeRunner:
 
     def message_received(
         self, conn_id: ConnId, payload: bytes | str, version: ProtocolVersion, channel: Channel
+    ) -> None:
+        pass
+
+    def decoded_step_received(
+        self, conn_id: ConnId, step: DecodedStep, version: ProtocolVersion
     ) -> None:
         pass
 

@@ -8,8 +8,9 @@ from endurance.harness import STEPS_PER_CYCLE, RuntimeProcess, StepClient
 DESCRIPTION = (
     "One long-lived stepped session. Each cycle a client joins over the v1 protobuf "
     f"protocol, requests {STEPS_PER_CYCLE} steps one after another, each setting the "
-    "effect and carrying one webcam frame, waits for every result, and closes; the "
-    "runtime is then read once teardown has finished."
+    "effect and carrying one webcam frame, raw or H.264 in turn, waits for every result, "
+    "and closes; every other client publishes the webcam first and unpublishes it before "
+    "closing. The runtime is then read once teardown has finished."
 )
 
 

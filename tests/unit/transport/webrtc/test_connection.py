@@ -13,6 +13,7 @@ from reactor_runtime.core import (
     ConnectionOrigin,
     ConnectionOriginSource,
     ConnId,
+    DecodedStep,
     InputFrame,
     MediaBundle,
     MediaChunk,
@@ -41,6 +42,7 @@ async def _connect(
     tracks: TrackMap,
     *,
     ping_timeout: float = 0.0,
+    video_inputs: tuple[str, ...] = (),
 ) -> WebRTCConnection:
     conn, _ = await WebRTCConnection.create(
         ConnId(1),
@@ -49,8 +51,35 @@ async def _connect(
         WebRtcConfig(ping_timeout=ping_timeout),
         ProtocolVersion.V0,
         peer_factory=factory,
+        video_inputs=video_inputs,
     )
     return conn
+
+
+def _idr() -> bytes:
+    """One 32x32 H.264 keyframe."""
+    codec = av.CodecContext.create("libx264", "w")
+    codec.width, codec.height, codec.pix_fmt = 32, 32, "yuv420p"
+    codec.options = {"g": "4", "bf": "0", "tune": "zerolatency", "x264-params": "scenecut=0"}
+    picture = np.full((32, 32, 3), 90, dtype=np.uint8)
+    packets = [bytes(p) for p in codec.encode(av.VideoFrame.from_ndarray(picture, format="rgb24"))]
+    packets += [bytes(p) for p in codec.encode(None)]
+    return packets[0]
+
+
+def _h264_step(request_id: str, track: str, data: bytes) -> bytes | str:
+    frame = step_pb2.Frame(
+        encoding=step_pb2.FRAME_ENCODING_H264, dtype="uint8", shape=[32, 32, 3], data=data
+    )
+    _, payload = V1Codec().encode(
+        data_pb2.DataClientMessage(
+            request_id=request_id,
+            request_step=step_pb2.RequestStep(
+                media_input=[step_pb2.TrackFrames(track=track, frames=[frame])]
+            ),
+        )
+    )
+    return payload
 
 
 async def test_create_returns_answer_and_capabilities(
@@ -259,57 +288,73 @@ async def test_a_client_stats_frame_goes_to_on_client_stats_not_on_message(
     assert messages == [ping]
 
 
-async def test_an_encoded_step_reaches_on_message_decoded_or_is_refused_to_the_client(
+async def test_an_encoded_step_reaches_on_decoded_step_or_is_refused_to_the_client(
     fake_peer: FakePeer,
     factory_for: Callable[..., WebRtcPeerFactory],
     out_av_tracks: TrackMap,
 ) -> None:
-    conn = await _connect(fake_peer, factory_for(fake_peer), out_av_tracks)
+    conn = await _connect(
+        fake_peer, factory_for(fake_peer), out_av_tracks, video_inputs=("webcam",)
+    )
     fake_peer.protocol_version = ProtocolVersion.V1
     messages: list[bytes | str] = []
+    steps: list[DecodedStep] = []
     conn.on_message(lambda payload, version, channel: messages.append(payload))
+    conn.on_decoded_step(lambda step, version: steps.append(step))
 
-    codec = av.CodecContext.create("libx264", "w")
-    codec.width, codec.height, codec.pix_fmt = 32, 32, "yuv420p"
-    codec.options = {"g": "4", "bf": "0", "tune": "zerolatency", "x264-params": "scenecut=0"}
-    picture = np.full((32, 32, 3), 90, dtype=np.uint8)
-    packets = [bytes(p) for p in codec.encode(av.VideoFrame.from_ndarray(picture, format="rgb24"))]
-    packets += [bytes(p) for p in codec.encode(None)]
-
-    def step(request_id: str, data: bytes) -> bytes | str:
-        frame = step_pb2.Frame(
-            encoding=step_pb2.FRAME_ENCODING_H264, dtype="uint8", shape=[32, 32, 3], data=data
-        )
-        _, payload = V1Codec().encode(
-            data_pb2.DataClientMessage(
-                request_id=request_id,
-                request_step=step_pb2.RequestStep(
-                    media_input=[step_pb2.TrackFrames(track="webcam", frames=[frame])]
-                ),
-            )
-        )
-        return payload
-
-    fake_peer.fire_message(step("data_1", packets[0]))
-    fake_peer.fire_message(step("data_2", b"\x00\x00\x01\x41 not an idr"))
+    sent = _h264_step("data_1", "webcam", _idr())
+    fake_peer.fire_message(sent)
+    fake_peer.fire_message(_h264_step("data_2", "webcam", b"\x00\x00\x01\x41 not an idr"))
     for _ in range(100):
-        if len(messages) == 1 and len(fake_peer.messages) == 1:
+        if len(steps) == 1 and len(fake_peer.messages) == 1:
             break
         await asyncio.sleep(0.01)
 
-    (delivered,) = messages
-    assert isinstance(delivered, bytes)
-    decoded = data_pb2.DataClientMessage.FromString(delivered)
-    (frame,) = decoded.request_step.media_input[0].frames
-    assert decoded.request_id == "data_1"
-    assert frame.encoding == step_pb2.FRAME_ENCODING_RAW
-    assert list(frame.shape) == [32, 32, 3]
-    assert len(frame.data) == 32 * 32 * 3
+    assert messages == []
+    (delivered,) = steps
+    assert delivered.payload == sent
+    assert list(delivered.pictures) == [(0, 0)]
+    assert delivered.pictures[0, 0].shape == (32, 32, 3)
     (refused,) = fake_peer.messages
     assert isinstance(refused, bytes)
     answer = data_pb2.DataServerMessage.FromString(refused)
     assert answer.request_id == "data_2"
     assert answer.step_result.failure_code == step_pb2.STEP_FAILURE_CODE_REFUSED
+
+
+async def test_step_frames_decode_for_the_model_inputs_not_for_the_tracks_the_client_offers(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+) -> None:
+    # The client offers a "screen" input the model lacks, and not the model's
+    # "webcam" input, which it sends only inside step requests.
+    offered = TrackMap.from_client(
+        [
+            {"mid": "0", "name": "main_video", "kind": "video", "direction": "recvonly"},
+            {"mid": "1", "name": "screen", "kind": "video", "direction": "sendonly"},
+        ]
+    )
+    conn = await _connect(fake_peer, factory_for(fake_peer), offered, video_inputs=("webcam",))
+    fake_peer.protocol_version = ProtocolVersion.V1
+    steps: list[DecodedStep] = []
+    conn.on_decoded_step(lambda step, version: steps.append(step))
+    idr = _idr()
+
+    fake_peer.fire_message(_h264_step("data_1", "webcam", idr))
+    fake_peer.fire_message(_h264_step("data_2", "screen", idr))
+    for _ in range(100):
+        if len(steps) == 1 and len(fake_peer.messages) == 1:
+            break
+        await asyncio.sleep(0.01)
+
+    (delivered,) = steps
+    assert list(delivered.pictures) == [(0, 0)]
+    (refused,) = fake_peer.messages
+    assert isinstance(refused, bytes)
+    answer = data_pb2.DataServerMessage.FromString(refused)
+    assert answer.request_id == "data_2"
+    assert answer.step_result.failure_code == step_pb2.STEP_FAILURE_CODE_REFUSED
+    assert conn._steps.decoders == 1
 
 
 async def test_send_control_delegates_to_peer(

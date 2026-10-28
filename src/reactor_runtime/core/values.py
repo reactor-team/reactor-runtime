@@ -533,6 +533,25 @@ class MediaChunk:
         return split_batch(self.bundle)
 
 
+@dataclass(frozen=True, eq=False)
+class DecodedStep:
+    """A client's step request whose encoded frames its transport already decoded.
+
+    The request goes up as it arrived, its encoded frames still in it, with the
+    picture each one decodes to beside it, so the runner reads the pictures
+    without the request being rewritten and serialized again.
+
+    Attributes:
+        payload: The request's wire frame, as the client sent it.
+        pictures: The ``(H, W, 3)`` ``uint8`` RGB picture each encoded frame
+            decodes to, keyed by ``(entry, position)``: the index of its
+            ``media_input`` entry, and its position among that entry's frames.
+    """
+
+    payload: bytes
+    pictures: Mapping[tuple[int, int], npt.NDArray[np.uint8]]
+
+
 @dataclass(frozen=True)
 class RequestedStep:
     """A client's request for one step of a stepped session, once accepted.

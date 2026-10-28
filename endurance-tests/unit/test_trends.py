@@ -131,6 +131,7 @@ def test_exact_metrics_cover_every_count() -> None:
         "live_client_stats",
         "live_participants",
         "live_step_requests",
+        "live_step_decoders",
         "tasks",
         "child_processes",
     ]
@@ -143,6 +144,16 @@ def test_a_step_request_left_behind_fails_its_cycle() -> None:
     [requests] = [m for m in exact_metrics(samples) if m.name == "live_step_requests"]
 
     assert requests.status == "fail"
+
+
+def test_a_step_decoder_left_alive_fails_its_cycle() -> None:
+    samples = _samples(4)
+    samples[2] = dataclasses.replace(samples[2], live_step_decoders=1)
+
+    [decoders] = [m for m in exact_metrics(samples) if m.name == "live_step_decoders"]
+
+    assert decoders.status == "fail"
+    assert retained_cycles(samples) == 1
 
 
 def test_a_participant_left_alive_fails_its_cycle() -> None:

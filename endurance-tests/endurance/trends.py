@@ -117,6 +117,9 @@ class Sample:
     # Step requests the runtime or the model still keeps state for, with no
     # client connected: a connection's request order, or a request's failure.
     live_step_requests: int = 0
+    # H.264 decoders a connection opened for its step frames, alive after the
+    # probe's collection, with no client connected. Each holds its threads.
+    live_step_decoders: int = 0
 
 
 def cpu_deltas(samples: list[Sample]) -> list[float]:
@@ -417,6 +420,7 @@ ZERO_FIELDS = (
     "live_client_stats",
     "live_participants",
     "live_step_requests",
+    "live_step_decoders",
 )
 
 

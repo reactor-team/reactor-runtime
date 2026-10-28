@@ -21,6 +21,7 @@ from reactor_runtime.core import (
     ConnectionCapabilities,
     ConnectionOrigin,
     ConnId,
+    DecodedStep,
     FrameStage,
     InputFrame,
     MediaChunk,
@@ -80,6 +81,7 @@ class WebRTCConnection:
         *,
         ping_timeout: float,
         video_tracks: dict[str, TrackInfo] | None = None,
+        video_inputs: Collection[str] = (),
     ) -> None:
         """Bind the connection to its peer and outbound capabilities.
 
@@ -91,6 +93,9 @@ class WebRTCConnection:
                 declares the connection lost; ``0`` or less disables it.
             video_tracks: The connection's outbound video tracks, so its pacer can
                 synthesise black frames before the first real one arrives.
+            video_inputs: The names of the model's input video tracks, the only
+                tracks a step request's H.264 frames decode for; with none, every
+                step request that carries an H.264 frame is refused.
         """
         self.id = conn_id
         self.capabilities = capabilities
@@ -103,9 +108,12 @@ class WebRTCConnection:
         )
 
         self._on_message: Callable[[bytes | str, ProtocolVersion, Channel], None] | None = None
+        self._on_decoded_step: Callable[[DecodedStep, ProtocolVersion], None] | None = None
         # Decodes the encoded frames of a step request before it goes up, in
         # arrival order; a request it cannot decode is answered here.
-        self._steps = StepFrameGate(self._forward_message, self.send_message)
+        self._steps = StepFrameGate(
+            self._forward_message, self._forward_step, self.send_message, video_inputs
+        )
         self._on_media: Callable[[str, InputFrame], None] | None = None
         self._on_ping: Callable[[], None] | None = None
         self._on_client_stats: Callable[[ClientStatsBatch], None] | None = None
@@ -135,6 +143,7 @@ class WebRTCConnection:
         version: ProtocolVersion,
         *,
         peer_factory: WebRtcPeerFactory,
+        video_inputs: Collection[str] = (),
     ) -> tuple[WebRTCConnection, SdpAnswer]:
         """Negotiate a peer for *offer* and wrap it as a connection.
 
@@ -143,6 +152,11 @@ class WebRTCConnection:
         connection, which it holds for its life. The connection subscribes to
         its peer's inbound events here, so it is ready to forward facts the
         moment the acceptor has registered its callbacks.
+
+        *video_inputs* names the model's input video tracks, from its declared
+        contract rather than the client's *tracks*: they are the only tracks a
+        step request's H.264 frames decode for, whether or not the client
+        negotiated them.
         """
         peer, answer = await peer_factory(conn_id, offer, tracks, config, version)
         conn = cls(
@@ -151,6 +165,7 @@ class WebRTCConnection:
             _capabilities_for(tracks),
             ping_timeout=config.ping_timeout,
             video_tracks=_outbound_video_tracks(tracks),
+            video_inputs=video_inputs,
         )
         conn._subscribe()
         return conn, answer
@@ -193,11 +208,18 @@ class WebRTCConnection:
     def on_message(self, callback: Callable[[bytes | str, ProtocolVersion, Channel], None]) -> None:
         """Register the sink for inbound frames, with the codec version and channel.
 
-        A step request whose media carries encoded frames reaches it with
-        those frames decoded to raw ones; one that does not decode is refused
-        to the client and does not reach it.
+        A step request whose media carries encoded frames goes to
+        :meth:`on_decoded_step` instead, once decoded; one that does not decode
+        is refused to the client and reaches neither.
         """
         self._on_message = callback
+
+    def on_decoded_step(self, callback: Callable[[DecodedStep, ProtocolVersion], None]) -> None:
+        """Register the sink for step requests whose encoded frames were decoded.
+
+        Each arrives in its place among the frames :meth:`on_message` gets.
+        """
+        self._on_decoded_step = callback
 
     def on_media(self, callback: Callable[[str, InputFrame], None]) -> None:
         """Register the sink for inbound media frames, by track name."""
@@ -351,6 +373,10 @@ class WebRTCConnection:
     ) -> None:
         if self._on_message is not None:
             self._on_message(payload, version, channel)
+
+    def _forward_step(self, step: DecodedStep, version: ProtocolVersion) -> None:
+        if self._on_decoded_step is not None:
+            self._on_decoded_step(step, version)
 
     def _handle_media(self, track: str, frame: InputFrame) -> None:
         if self._on_media is not None:
