@@ -93,7 +93,7 @@ class Signal:
     """An out-of-band signal for the model, such as a request to stop early.
 
     Attributes:
-        signal: An instance of one of the model's declared signal types.
+        signal: What the application passed to ``ModelClient.signal()``.
     """
 
     signal: Any
