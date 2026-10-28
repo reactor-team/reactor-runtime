@@ -3,9 +3,10 @@
 The participant joins the session's LiveKit room, as every client of a room
 session does, and runs one command through each path a room offers: the
 Reactor protocol on its data topics, an RPC method, and a data topic. It
-feeds both kinds of media input too: a webcam track, by name, and a
-microphone byte stream on the topic the model maps to its ``mic`` input. It
-closes once each command is answered, or has had the time to be.
+feeds both kinds of media input too: a webcam track, by name, and two
+microphone byte streams, open at once, on the topic the model maps to its
+``mic`` input. It closes once each command is answered, or has had the time
+to be.
 """
 
 from __future__ import annotations
@@ -183,7 +184,7 @@ class RoomParticipant:
         await asyncio.sleep(_QUIET_S)
 
     async def _feed_media(self) -> None:
-        """Publish a webcam track and send a microphone stream, then take the track down.
+        """Publish a webcam track, send two overlapping mic streams, then unpublish the track.
 
         The webcam sends until the runtime has counted one of its frames, or
         for ``_REPLY_WAIT_S``; the cycle's own check reports a track that got none.
@@ -207,12 +208,23 @@ class RoomParticipant:
                     break
                 next_check = time.monotonic() + _WEBCAM_CHECK_S
         tone = np.sin(2 * np.pi * 440 * np.arange(_MIC_SAMPLES) / _MIC_RATE)
-        await local.send_bytes(
-            (8_000 * tone).astype(np.int16).tobytes(),
-            topic=MIC_TOPIC,
-            attributes={"sample_rate": str(_MIC_RATE), "num_channels": "1"},
-            destination_identities=[self._model],
-        )
+        speech = (8_000 * tone).astype(np.int16).tobytes()
+        half = len(speech) // 2
+        # Two streams on the topic at once: the second opens before the first closes.
+        first, second = [
+            await local.stream_bytes(
+                name,
+                topic=MIC_TOPIC,
+                attributes={"sample_rate": str(_MIC_RATE), "num_channels": "1"},
+                destination_identities=[self._model],
+            )
+            for name in ("mic-1", "mic-2")
+        ]
+        await first.write(speech[:half])
+        await second.write(speech)
+        await first.write(speech[half:])
+        await first.aclose()
+        await second.aclose()
         await local.unpublish_track(publication.sid)
 
     async def _send(self, topic: str, payload: bytes) -> None:
