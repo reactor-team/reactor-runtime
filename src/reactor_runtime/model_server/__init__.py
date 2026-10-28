@@ -9,6 +9,7 @@ exactly as before: the runtime does not import this package.
 
 from reactor_runtime.model_server.errors import (
     BatchFailed,
+    PayloadTooLarge,
     StepExpired,
     StepUnanswered,
     WorkerError,
@@ -19,6 +20,7 @@ from reactor_runtime.model_server.errors import (
 
 __all__ = [
     "BatchFailed",
+    "PayloadTooLarge",
     "StepExpired",
     "StepUnanswered",
     "WorkerError",
