@@ -1,7 +1,6 @@
 """Unit tests for the libwebrtc frame conversions.
 
-Pure NumPy conversions with no native dependency: they exercise the module
-directly, without the ``reactor_webrtc`` wheel.
+They exercise the module directly, without the ``reactor_webrtc`` wheel.
 """
 
 import numpy as np
@@ -42,6 +41,43 @@ def test_bgra_to_rgb_round_trips() -> None:
     restored = bgra_to_rgb(data, width, height)
     assert restored.shape == (2, 3, 3)
     assert np.array_equal(restored, rgb)
+
+
+def _shuffled_bgra(rgb: np.ndarray) -> bytes:
+    """BGRA built channel by channel, the layout libwebrtc reads and writes."""
+    bgra = np.empty((*rgb.shape[:2], 4), dtype=np.uint8)
+    bgra[:, :, 0], bgra[:, :, 1], bgra[:, :, 2] = rgb[:, :, 2], rgb[:, :, 1], rgb[:, :, 0]
+    bgra[:, :, 3] = 255
+    return bgra.tobytes()
+
+
+@pytest.mark.parametrize(("height", "width"), [(1, 1), (3, 5), (17, 31), (480, 640), (1080, 1920)])
+def test_video_conversions_are_exact_channel_swaps_at_any_size(height: int, width: int) -> None:
+    rgb = np.random.default_rng(height * width).integers(0, 256, (height, width, 3), np.uint8)
+
+    data, w, h = rgb_to_bgra(rgb)
+
+    assert (w, h) == (width, height)
+    assert data == _shuffled_bgra(rgb)
+    assert np.array_equal(bgra_to_rgb(_shuffled_bgra(rgb), width, height), rgb)
+
+
+def test_rgb_to_bgra_takes_a_strided_view_as_it_is() -> None:
+    rgb = np.random.default_rng(0).integers(0, 256, (8, 12, 3), np.uint8)
+    view = rgb[::2, 1::2]
+
+    data, width, height = rgb_to_bgra(view)
+
+    assert (width, height) == (6, 4)
+    assert data == _shuffled_bgra(np.ascontiguousarray(view))
+
+
+def test_rgb_to_bgra_casts_other_dtypes_to_uint8() -> None:
+    frame = np.array([[[10.9, 20.2, 30.5]]], dtype=np.float32)
+
+    data, _, _ = rgb_to_bgra(frame)
+
+    assert list(data) == [30, 20, 10, 255]
 
 
 def test_bgra_to_rgb_returns_a_contiguous_copy_not_aliasing_the_source() -> None:

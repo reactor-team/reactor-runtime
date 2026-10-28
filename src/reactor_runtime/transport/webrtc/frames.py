@@ -3,7 +3,8 @@
 libwebrtc exchanges video as tightly packed BGRA and audio as interleaved signed
 16-bit PCM. These helpers translate the runtime's ``(H, W, 3)`` uint8 RGB frames
 and ``(1, M)`` int16 mono audio to that wire form on the way out, and back to the
-same NumPy shapes on the way in.
+same NumPy shapes on the way in. Video converts with FFmpeg's swscale, through
+PyAV, in one native pass per frame.
 """
 
 from __future__ import annotations
@@ -15,7 +16,6 @@ import numpy as np
 import numpy.typing as npt
 
 _INT16_MAX = 32767.0
-_ALPHA_OPAQUE = 255
 
 
 def rgb_to_bgra(frame: npt.NDArray[Any]) -> tuple[bytes, int, int]:
@@ -36,12 +36,9 @@ def rgb_to_bgra(frame: npt.NDArray[Any]) -> tuple[bytes, int, int]:
     if frame.ndim != 3 or frame.shape[2] != 3:
         raise ValueError(f"expected an (H, W, 3) RGB frame, got shape {frame.shape}")
     height, width = int(frame.shape[0]), int(frame.shape[1])
-    bgra = np.empty((height, width, 4), dtype=np.uint8)
-    bgra[:, :, 0] = frame[:, :, 2]
-    bgra[:, :, 1] = frame[:, :, 1]
-    bgra[:, :, 2] = frame[:, :, 0]
-    bgra[:, :, 3] = _ALPHA_OPAQUE
-    return bgra.tobytes(), width, height
+    rgb = np.ascontiguousarray(frame.astype(np.uint8, copy=False))
+    picture = av.VideoFrame.from_ndarray(rgb, format="rgb24").reformat(format="bgra")
+    return picture.to_ndarray().tobytes(), width, height
 
 
 def bgra_to_rgb(bgra: bytes, width: int, height: int) -> npt.NDArray[np.uint8]:
@@ -52,7 +49,10 @@ def bgra_to_rgb(bgra: bytes, width: int, height: int) -> npt.NDArray[np.uint8]:
     alias it.
     """
     arr = np.frombuffer(bgra, dtype=np.uint8).reshape(height, width, 4)
-    return np.ascontiguousarray(arr[:, :, [2, 1, 0]])
+    # from_ndarray copies the pixels into a frame of its own, so the result
+    # never aliases the engine's buffer.
+    picture = av.VideoFrame.from_ndarray(arr, format="bgra")
+    return np.ascontiguousarray(picture.to_ndarray(format="rgb24"))
 
 
 def to_int16_mono(data: npt.NDArray[Any]) -> npt.NDArray[np.int16]:
