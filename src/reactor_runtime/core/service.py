@@ -214,6 +214,78 @@ class LiveKitConfig:
                 )
 
 
+DEFAULT_SHM_INPUT_BYTES = 1 << 20
+"""Each session's request block when the ``runtime.worker`` block names none: 1 MiB."""
+
+DEFAULT_SHM_OUTPUT_BYTES = 8 << 20
+"""Each session's output block when the ``runtime.worker`` block names none: 8 MiB."""
+
+DEFAULT_MAX_REQUEST_BYTES = 256 << 20
+"""The most one request may carry when the ``runtime.worker`` block names none: 256 MiB."""
+
+
+@dataclass(frozen=True)
+class WorkerConfig:
+    """The model half of a model split in two, drawn from the manifest's ``runtime.worker`` block.
+
+    Read by the model server's entry point; a session runtime reads only that
+    the block exists. The shared-memory sizes are set here and nowhere else,
+    because a deployment sizes each session's memory from the manifest: what
+    the block declares is what a deployment gives the model.
+
+    Attributes:
+        import_ref: The model half, a ``ModelServer`` subclass, as ``"module:Class"``.
+        max_batch: The most requests one step receives; ``None`` keeps the
+            class's ``max_batch``, which this may only lower.
+        batch_window: Seconds the worker waits for a batch to fill; ``None``
+            keeps the class's ``batch_window``.
+        max_request_bytes: The most bytes one request may carry;
+            :data:`DEFAULT_MAX_REQUEST_BYTES` when ``None``.
+        shm_input_bytes: Each session's request block;
+            :data:`DEFAULT_SHM_INPUT_BYTES` when ``None``.
+        shm_output_bytes: Each session's output block;
+            :data:`DEFAULT_SHM_OUTPUT_BYTES` when ``None``.
+
+    Raises:
+        ValueError: A size or ``max_batch`` is not a positive integer, or
+            ``batch_window`` is not a finite number of seconds, at least 0.
+    """
+
+    import_ref: str
+    max_batch: int | None = None
+    batch_window: float | None = None
+    max_request_bytes: int | None = None
+    shm_input_bytes: int | None = None
+    shm_output_bytes: int | None = None
+
+    def __post_init__(self) -> None:
+        """Refuse a value of the wrong type or range, naming its key."""
+        if not self.import_ref or ":" not in self.import_ref:
+            raise ValueError(
+                f"runtime.worker.import must name the model half as 'module:Class', "
+                f"got {self.import_ref!r}"
+            )
+        for key in ("max_batch", "max_request_bytes", "shm_input_bytes", "shm_output_bytes"):
+            value = getattr(self, key)
+            if value is not None and (type(value) is not int or value < 1):
+                raise ValueError(f"runtime.worker.{key} must be a positive integer, got {value!r}")
+        window = self.batch_window
+        if window is not None and (
+            type(window) not in (int, float) or not 0 <= window < float("inf")
+        ):
+            raise ValueError(
+                f"runtime.worker.batch_window must be a number of seconds, at least 0, "
+                f"got {window!r}"
+            )
+
+    @property
+    def shm_slot_bytes(self) -> int:
+        """The shared memory one session holds: its request and output blocks together."""
+        return (self.shm_input_bytes or DEFAULT_SHM_INPUT_BYTES) + (
+            self.shm_output_bytes or DEFAULT_SHM_OUTPUT_BYTES
+        )
+
+
 @dataclass(frozen=True)
 class RuntimeConfig:
     """The single configuration object threaded through ``serve``.
@@ -240,6 +312,8 @@ class RuntimeConfig:
         recording: The recorder's configuration; disabled by default.
         step_results: How each finished step is saved; disabled by default.
         livekit: How a LiveKit room reaches the model; empty by default.
+        worker: The model half of a model split in two, from ``runtime.worker``;
+            ``None`` for a model that does not split.
     """
 
     model_ref: str
@@ -253,3 +327,4 @@ class RuntimeConfig:
     recording: RecordingConfig = field(default_factory=RecordingConfig)
     step_results: StepResultsConfig = field(default_factory=StepResultsConfig)
     livekit: LiveKitConfig = field(default_factory=LiveKitConfig)
+    worker: WorkerConfig | None = None
