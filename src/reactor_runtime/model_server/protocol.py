@@ -119,13 +119,11 @@ class Welcome:
         slot: The slot the session holds.
         generation: How many times the slot has been opened, from ``1``.
         max_batch: The most requests one step receives.
-        max_request_bytes: The most bytes one request may carry.
     """
 
     slot: int
     generation: int
     max_batch: int
-    max_request_bytes: int
 
 
 @dataclass(frozen=True)

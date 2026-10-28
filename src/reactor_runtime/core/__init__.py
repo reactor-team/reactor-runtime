@@ -22,7 +22,6 @@ from reactor_runtime.core.model import (
     UploadedFile,
 )
 from reactor_runtime.core.service import (
-    DEFAULT_MAX_REQUEST_BYTES,
     DEFAULT_SHM_INPUT_BYTES,
     DEFAULT_SHM_OUTPUT_BYTES,
     LiveKitBlockError,
@@ -83,7 +82,6 @@ from reactor_runtime.core.values import (
 )
 
 __all__ = [
-    "DEFAULT_MAX_REQUEST_BYTES",
     "DEFAULT_SHM_INPUT_BYTES",
     "DEFAULT_SHM_OUTPUT_BYTES",
     "JOURNAL_EVENTS",

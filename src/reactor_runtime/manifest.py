@@ -116,7 +116,6 @@ _WORKER_KEYS = {
     "import": "import_ref",
     "max_batch": "max_batch",
     "batch_window": "batch_window",
-    "max_request_bytes": "max_request_bytes",
     "shm_input_bytes": "shm_input_bytes",
     "shm_output_bytes": "shm_output_bytes",
 }
