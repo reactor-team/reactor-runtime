@@ -1,4 +1,4 @@
-"""A writer's growing shared block, and the reader that copies out of it.
+"""A writer's shared block, and the reader that copies out of it.
 
 A :class:`SharedSlot` is one block a writer fills, one call at a time; a
 :class:`SlotReader` maps the block a header names and copies spans out of it.
@@ -22,6 +22,25 @@ logger = get_logger(__name__)
 _INITIAL_BYTES = 1 << 20
 
 
+class SharedSlotLimitExceeded(ValueError):  # noqa: N818 (named for the event a caller catches)
+    """A call holds more bytes than its slot's ``max_bytes``; nothing of it was written.
+
+    Attributes:
+        needed: The bytes the call's buffers hold.
+        limit: The slot's ``max_bytes``.
+    """
+
+    def __init__(self, needed: int, limit: int) -> None:
+        """Record the call's size and the slot's limit."""
+        super().__init__(f"a call holds {needed} bytes, above the slot's limit of {limit}")
+        self.needed = needed
+        self.limit = limit
+
+    def __reduce__(self) -> tuple[type[SharedSlotLimitExceeded], tuple[int, int]]:
+        """Pickle by its two sizes, so it crosses a process boundary intact."""
+        return (type(self), (self.needed, self.limit))
+
+
 def new_prefix() -> str:
     """Return a fresh block-name prefix for one slot."""
     return f"rr{secrets.token_hex(4)}_"
@@ -32,19 +51,25 @@ class SharedSlot:
 
     A call starts with :meth:`begin`, appends buffers with :meth:`write`, and
     hands the returned spans to the reader inside the header. When a call's
-    buffers do not fit, the block is replaced by one at least twice its size
-    and the bytes already written move with it. Steady state is one block at
-    the writer's high-water mark.
+    buffers do not fit, the block is replaced by one at least twice its size,
+    up to *max_bytes*, and the bytes already written move with it; the old
+    block is freed once the new one is filled, so a growth briefly holds both.
+    Steady state is one block at the writer's high-water mark.
+
+    With *max_bytes* equal to *initial_bytes* the block never grows: the slot
+    holds exactly one block of that size, and a call larger than it is refused.
 
     Args:
         prefix: Names every block this slot creates, as ``<prefix><generation>``.
             A fresh one from :func:`new_prefix` when omitted.
         initial_bytes: The size of the first block.
+        max_bytes: The most one call may hold; unbounded when omitted.
         directory: Where the blocks live; the reader names the same one.
             :func:`~reactor_runtime.ipc.default_directory` when omitted.
 
     Raises:
         SharedSlotAllocationFailed: The directory cannot hold the first block.
+        ValueError: *initial_bytes* is above *max_bytes*.
     """
 
     def __init__(
@@ -52,9 +77,13 @@ class SharedSlot:
         *,
         prefix: str | None = None,
         initial_bytes: int = _INITIAL_BYTES,
+        max_bytes: int | None = None,
         directory: Path | None = None,
     ) -> None:
+        if max_bytes is not None and initial_bytes > max_bytes:
+            raise ValueError(f"initial_bytes {initial_bytes} is above max_bytes {max_bytes}")
         self._prefix = prefix or new_prefix()
+        self._max_bytes = max_bytes
         self._directory = directory
         self._generation = 0
         self._block = create_block(f"{self._prefix}0", initial_bytes, directory)
@@ -75,6 +104,11 @@ class SharedSlot:
         """Bytes the current block holds."""
         return self._block.size
 
+    @property
+    def max_bytes(self) -> int | None:
+        """The most one call may hold, or ``None`` when the block grows without bound."""
+        return self._max_bytes
+
     def begin(self) -> None:
         """Start a new call; the next write lands at offset zero."""
         self._cursor = 0
@@ -83,6 +117,8 @@ class SharedSlot:
         """Append one flat buffer and return its ``(offset, length)`` span.
 
         Raises:
+            SharedSlotLimitExceeded: The call would hold more than
+                :attr:`max_bytes`; this buffer is not written.
             SharedSlotAllocationFailed: The block had to grow and its
                 directory cannot hold the larger one.
         """
@@ -103,12 +139,13 @@ class SharedSlot:
         self._block.unlink()
 
     def _grow(self, needed: int) -> None:
+        size = max(needed, 2 * self.capacity)
+        if self._max_bytes is not None:
+            if needed > self._max_bytes:
+                raise SharedSlotLimitExceeded(needed, self._max_bytes)
+            size = min(size, self._max_bytes)
         self._generation += 1
-        replacement = create_block(
-            f"{self._prefix}{self._generation}",
-            max(needed, 2 * self.capacity),
-            self._directory,
-        )
+        replacement = create_block(f"{self._prefix}{self._generation}", size, self._directory)
         replacement.buf[: self._cursor] = self._block.buf[: self._cursor]
         logger.info("shared block grown", from_bytes=self.capacity, to_bytes=replacement.size)
         self.close()

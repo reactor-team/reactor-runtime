@@ -5,7 +5,7 @@ holds, a contiguous numpy array above all, is written into the writer's
 :class:`~reactor_runtime.ipc.SharedSlot` instead of into the pickle. The header
 stays small and travels on a queue or a socket; the bytes sit in shared memory.
 The header names the block, so the reader attaches to whatever it is told and
-the block can grow without a protocol of its own.
+the block can be replaced without a protocol of its own.
 
 A torch tensor and a non-contiguous array do not expose a flat buffer and
 pickle inline. That still works, only slower, and is reported once per process
@@ -17,7 +17,7 @@ from __future__ import annotations
 import pickle
 from typing import Any
 
-from reactor_runtime.ipc.slot import SharedSlot, SlotReader
+from reactor_runtime.ipc.slot import SharedSlot, SharedSlotLimitExceeded, SlotReader
 from reactor_runtime.log import get_logger
 
 logger = get_logger(__name__)
@@ -35,15 +35,28 @@ def pack(obj: Any, slot: SharedSlot) -> bytes:
         out-of-band buffer, pickled together.
 
     Raises:
+        SharedSlotLimitExceeded: The flat buffers hold more than the slot's
+            ``max_bytes``. It names their total size; no header is returned,
+            so the bytes written before the limit are never read.
         SharedSlotAllocationFailed: The slot had to grow and could not.
     """
     slot.begin()
     spans: list[tuple[int, int]] = []
+    needed = 0
+    refused: SharedSlotLimitExceeded | None = None
 
     def out_of_band(buffer: pickle.PickleBuffer) -> None:
-        spans.append(slot.write(buffer))
+        nonlocal needed, refused
+        needed += buffer.raw().nbytes
+        if refused is None:
+            try:
+                spans.append(slot.write(buffer))
+            except SharedSlotLimitExceeded as exc:
+                refused = exc
 
     blob = pickle.dumps(obj, protocol=5, buffer_callback=out_of_band)
+    if refused is not None:
+        raise SharedSlotLimitExceeded(needed, refused.limit)
     if len(blob) > _INLINE_WARN_BYTES:
         _report_inline(len(blob))
     return pickle.dumps((blob, slot.name, spans), protocol=5)

@@ -11,7 +11,13 @@ from typing import Any
 import numpy as np
 import pytest
 
-from reactor_runtime.model_server import BatchFailed, WorkerError, WorkerRejected, protocol
+from reactor_runtime.model_server import (
+    BatchFailed,
+    PayloadTooLarge,
+    WorkerError,
+    WorkerRejected,
+    protocol,
+)
 from reactor_runtime.model_server.protocol import (
     PROTOCOL,
     Cancel,
@@ -132,9 +138,10 @@ def test_batch_failed_carries_its_cause() -> None:
     assert "NoFaceError: bad input" in str(error)
 
 
-def test_the_runtimes_own_exceptions_arrive_as_themselves() -> None:
-    error = error_of(failure(3, WorkerRejected("too large")))
-    assert type(error) is WorkerRejected
+@pytest.mark.parametrize("kind", [WorkerRejected, PayloadTooLarge])
+def test_the_runtimes_own_exceptions_arrive_as_themselves(kind: type[Exception]) -> None:
+    error = error_of(failure(3, kind("too large")))
+    assert type(error) is kind
     assert str(error) == "too large"
 
 
