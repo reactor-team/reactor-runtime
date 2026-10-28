@@ -32,12 +32,3 @@ class RankDesync(RuntimeError):  # noqa: N818 (named for the state a caller catc
     rank was meant to contribute to, so it is not returned. The group refuses
     further calls.
     """
-
-
-class SharedSlotAllocationFailed(MemoryError):  # noqa: N818 (named for the event a caller catches)
-    """A shared-memory block could not be created or grown.
-
-    The message states the size that was asked for and, where the host exposes
-    it, the size of ``/dev/shm``. Docker's default is 64 MB; ``--shm-size`` on
-    ``docker run`` and a ``medium: Memory`` ``emptyDir`` on a pod raise it.
-    """

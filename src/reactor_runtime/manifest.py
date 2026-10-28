@@ -4,8 +4,9 @@ The ``reactor.yaml`` manifest is the runtime's one configuration file:
 ``runtime.import`` names the model as a ``"module:Class"`` reference,
 ``runtime.config`` points at the model's own config file, the
 ``runtime.recording`` block configures the recorder, the
-``runtime.step_results`` block says how each finished step is saved, and the
-``runtime.livekit`` block says how a LiveKit room reaches the model. This
+``runtime.step_results`` block says how each finished step is saved, the
+``runtime.livekit`` block says how a LiveKit room reaches the model, and the
+``runtime.worker`` block names the model half of a model split in two. This
 module turns that file into
 a :class:`~reactor_runtime.core.RuntimeConfig` and the reference into the model
 class — and it is the only code that does either, so every entry point resolves
@@ -32,6 +33,7 @@ from reactor_runtime.core import (
     RuntimeConfig,
     StepResultsConfig,
     TrackDirection,
+    WorkerConfig,
 )
 from reactor_runtime.interface.internal.reactor_core import ReactorCore
 
@@ -66,8 +68,8 @@ def load_config(manifest: Path) -> RuntimeConfig:
         SystemExit: If the manifest is not valid YAML, is not a mapping, or
             carries no ``runtime.import``.
         ValueError: If a block the runtime refuses to guess about has the
-            wrong shape: a ``step_results.queue`` below 1, or a malformed
-            ``livekit`` block.
+            wrong shape: a ``step_results.queue`` below 1, a malformed
+            ``livekit`` block, or a malformed ``worker`` block.
     """
     try:
         document = yaml.safe_load(manifest.read_text())
@@ -87,6 +89,7 @@ def load_config(manifest: Path) -> RuntimeConfig:
         recording=_recording_from_manifest(runtime, document),
         step_results=_step_results_from_manifest(runtime),
         livekit=_livekit_from_manifest(runtime),
+        worker=_worker_from_manifest(runtime),
     )
 
 
@@ -107,6 +110,58 @@ def _model_name(block: Any) -> str | None:
         return None
     name = block.get("name")
     return name if isinstance(name, str) and name else None
+
+
+_WORKER_KEYS = {
+    "import": "import_ref",
+    "max_batch": "max_batch",
+    "batch_window": "batch_window",
+    "max_request_bytes": "max_request_bytes",
+    "shm_input_bytes": "shm_input_bytes",
+    "shm_output_bytes": "shm_output_bytes",
+}
+
+
+def _worker_from_manifest(runtime: dict[str, Any]) -> WorkerConfig | None:
+    """Parse the manifest's ``runtime.worker`` block into a :class:`WorkerConfig`.
+
+    The block names the model half and its serving settings::
+
+        runtime:
+          import: plasma:Plasma
+          worker:
+            import: plasma_worker:PlasmaWorker
+            max_batch: 2
+            shm_output_bytes: 33554432
+
+    An unknown key is refused rather than ignored: a misspelt size would
+    otherwise leave a session's memory at its default without a word.
+
+    Args:
+        runtime: The manifest's ``runtime`` section.
+
+    Returns:
+        The parsed block, or ``None`` when the manifest has none.
+
+    Raises:
+        ValueError: The block is not a mapping, names a key it does not take, or
+            holds a value of the wrong type or range.
+    """
+    block = runtime.get("worker")
+    if block is None:
+        return None
+    if not isinstance(block, dict):
+        raise ValueError(
+            f"runtime.worker must be a block with `import: module:Class`, got {block!r}"
+        )
+    if not isinstance(block.get("import"), str):
+        raise ValueError("runtime.worker.import must name the model half as 'module:Class'")
+    unknown = sorted(set(block) - set(_WORKER_KEYS))
+    if unknown:
+        raise ValueError(
+            f"runtime.worker has unknown keys {unknown}; it takes {', '.join(_WORKER_KEYS)}"
+        )
+    return WorkerConfig(**{_WORKER_KEYS[key]: value for key, value in block.items()})
 
 
 def import_model_class(model_ref: str) -> type[ReactorCore]:
