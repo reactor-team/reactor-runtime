@@ -22,6 +22,7 @@ from reactor_runtime.core.model import (
     UploadedFile,
 )
 from reactor_runtime.core.service import (
+    WORKER_SETTINGS,
     LiveKitBlockError,
     LiveKitConfig,
     LiveKitRpcMethod,
@@ -29,6 +30,7 @@ from reactor_runtime.core.service import (
     RuntimeConfig,
     ServiceComponent,
     StepResultsConfig,
+    WorkerConfig,
 )
 from reactor_runtime.core.session import (
     JOURNAL_EVENTS,
@@ -80,6 +82,7 @@ from reactor_runtime.core.values import (
 
 __all__ = [
     "JOURNAL_EVENTS",
+    "WORKER_SETTINGS",
     "ClientConnected",
     "ClientConnectionStat",
     "ClientDisconnected",
@@ -142,4 +145,5 @@ __all__ = [
     "TransportTrackReading",
     "TypeSpec",
     "UploadedFile",
+    "WorkerConfig",
 ]

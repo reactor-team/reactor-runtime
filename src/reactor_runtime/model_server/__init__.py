@@ -139,8 +139,18 @@ A model that does not split is served exactly as before: the runtime does not
 import this package.
 """
 
+from reactor_runtime.model_server.contract import (
+    ModelServer,
+    ServerRequest,
+    ServerSettings,
+    cuda_health,
+)
 from reactor_runtime.model_server.schema import SchemaError
 
 __all__ = [
+    "ModelServer",
     "SchemaError",
+    "ServerRequest",
+    "ServerSettings",
+    "cuda_health",
 ]
