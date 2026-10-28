@@ -226,8 +226,9 @@ class FakeConnection:
 
     def send_media(self, chunk: MediaChunk) -> None: ...
 
-    def flush_media(self, *, hold: bool = False) -> None:
+    def flush_media(self, *, hold: bool = False) -> float | None:
         self.flushed = True
+        return None
 
     def set_media_rate(self, fps: float) -> None:
         self.media_rate = fps
@@ -461,6 +462,23 @@ def test_flush_media_cuts_every_connection() -> None:
 
     assert a.flushed
     assert b.flushed
+
+
+def test_flush_media_returns_the_most_audio_a_connection_dropped() -> None:
+    class Reporting(FakeConnection):
+        def __init__(self, cid: int, unsent: float) -> None:
+            super().__init__(cid)
+            self.unsent = unsent
+
+        def flush_media(self, *, hold: bool = False) -> float:
+            super().flush_media(hold=hold)
+            return self.unsent
+
+    runner = _runner()
+    runner.connection_opened(Reporting(1, 0.05))
+    runner.connection_opened(Reporting(2, 0.2))
+
+    assert runner._flush_media(True) == 0.2
 
 
 def test_a_hold_flush_reaches_every_connection_as_a_hold() -> None:

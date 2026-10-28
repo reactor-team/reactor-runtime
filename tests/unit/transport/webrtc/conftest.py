@@ -29,6 +29,7 @@ class FakePeer:
         self.resumed: list[str] = []
         self.paused: list[str] = []
         self.flushes = 0
+        self.unsent_audio = 0.0
         self.closed = False
         self.protocol_version = ProtocolVersion.V0
         self.last_config: WebRtcConfig | None = None
@@ -65,8 +66,9 @@ class FakePeer:
     def send_media(self, bundle: MediaBundle) -> None:
         self.sent_media.append(bundle)
 
-    def flush_media(self) -> None:
+    def flush_media(self) -> float:
         self.flushes += 1
+        return self.unsent_audio
 
     def resume_track(self, name: str) -> None:
         self.resumed.append(name)

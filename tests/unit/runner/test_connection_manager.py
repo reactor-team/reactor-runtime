@@ -85,9 +85,10 @@ class FakeConnection:
         self._outbound()
         self.media.append(chunk)
 
-    def flush_media(self, *, hold: bool = False) -> None:
+    def flush_media(self, *, hold: bool = False) -> float | None:
         self._outbound()
         self.flushed = True
+        return None
 
     def set_media_rate(self, fps: float) -> None:
         self._outbound()
@@ -667,6 +668,31 @@ def test_a_hold_flush_reaches_every_connection_as_a_hold() -> None:
     cm.flush_media(hold=True)
 
     assert held == [ConnId(1), ConnId(2)]
+
+
+@pytest.mark.parametrize("hold", [False, True])
+def test_a_flush_reports_the_most_audio_any_connection_dropped(hold: bool) -> None:
+    class Reporting(FakeConnection):
+        def __init__(self, cid: int, unsent: object) -> None:
+            super().__init__(cid)
+            self.unsent = unsent
+
+        def flush_media(self, *, hold: bool = False) -> float | None:
+            super().flush_media(hold=hold)
+            return cast(float | None, self.unsent)
+
+    cm, _ = waiting_manager()
+    for cid, unsent in enumerate([0.12, None, 0.31, float("nan"), -1.0], start=1):
+        cm.register(Reporting(cid, unsent))
+
+    assert cm.flush_media(hold=hold) == 0.31
+
+
+def test_a_flush_with_no_connection_reporting_audio_reports_none() -> None:
+    cm, _ = waiting_manager()
+    cm.register(FakeConnection(1))
+
+    assert cm.flush_media() == 0.0
 
 
 @pytest.mark.parametrize("hold", [False, True])

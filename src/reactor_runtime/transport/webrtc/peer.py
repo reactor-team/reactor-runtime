@@ -1275,7 +1275,7 @@ class WebRTCPeer:
         if self._stop_event.is_set():
             self._empty_frame_queue()
 
-    def flush_media(self) -> None:
+    def flush_media(self) -> float:
         """Drop the media this peer still holds for the wire.
 
         The bundles waiting for the drain thread are dropped, along with any
@@ -1287,11 +1287,35 @@ class WebRTCPeer:
 
         Once this returns, no frame queued before it reaches the wire: the
         last checks before a video push and an audio push share its locks.
+
+        Returns:
+            The seconds of audio dropped on the track that lost the most:
+            its buffer and its audio in the waiting bundles. A bundle the
+            drain thread is converting as the flush lands is not counted.
         """
         with self._video_lock, self._audio_lock:
+            dropped = self._unsent_audio_seconds()
             self._flushes += 1
             self._empty_frame_queue()
             self._audio_bufs.clear()
+        return dropped
+
+    def _unsent_audio_seconds(self) -> float:
+        """The most audio one track holds for the wire: its buffer and the waiting bundles'."""
+        samples = {name: buf.size for name, buf in self._audio_bufs.items()}
+        with self._frame_queue.mutex:
+            waiting = [bundle for bundle, _, _ in self._frame_queue.queue]
+        for bundle in waiting:
+            for track_name, data in bundle.tracks.items():
+                info = data.info
+                if info.kind is not TrackKind.AUDIO:
+                    continue
+                if track_name in self._paused_tracks or info.name in self._paused_tracks:
+                    continue
+                name = self._attached_name(track_name, info)
+                if name is not None:
+                    samples[name] = samples.get(name, 0) + to_int16_mono(data.data).size
+        return max(samples.values(), default=0) / _AUDIO_SAMPLE_RATE
 
     def _drop_outbound_media(self) -> None:
         """Drop what the pumps had not taken yet, once the peer is done.

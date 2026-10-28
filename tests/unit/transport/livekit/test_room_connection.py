@@ -176,6 +176,46 @@ async def test_a_flush_clears_the_audio_waiting_for_the_room() -> None:
     await conn.close()
 
 
+async def test_a_flush_reports_the_audio_still_waiting_for_the_room() -> None:
+    conn, _, _ = make_connection()
+    # No pump running: three 40 ms frames wait, handed over and unheard.
+    for value in range(3):
+        conn._send_frame(bundle(value))
+    await _settle()
+
+    assert conn.flush_media(hold=True) == pytest.approx(0.12)
+    await conn.close()
+
+
+async def test_a_flush_reports_the_audio_the_source_has_not_played_out() -> None:
+    conn, _, audio = make_connection()
+    conn.start()
+    for value in range(10):
+        conn._send_frame(bundle(value))
+    await _settle()
+    assert len(audio.frames) == 10
+
+    # 400 ms handed to the source at once plays out in real time from now.
+    assert conn.flush_media(hold=True) == pytest.approx(0.4, abs=0.02)
+    # The flush emptied the queue, so a second one finds nothing to drop.
+    assert conn.flush_media(hold=True) == 0.0
+    await conn.close()
+
+
+async def test_a_flush_from_another_thread_waits_for_the_drop() -> None:
+    conn, _, audio = make_connection()
+    for value in range(5):
+        conn._send_frame(bundle(value))
+    await _settle()
+
+    dropped = await asyncio.to_thread(conn.flush_media, hold=True)
+
+    assert dropped == pytest.approx(0.2)
+    assert conn._audio["main_audio"].pending.empty()
+    assert audio.cleared == 1
+    await conn.close()
+
+
 async def test_messages_to_the_system_client_are_dropped() -> None:
     conn, video, audio = make_connection()
 

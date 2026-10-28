@@ -207,6 +207,18 @@ async def test_playout_operations_reach_the_pacer(
     await conn.close()
 
 
+async def test_a_flush_reports_the_audio_the_peer_dropped(
+    fake_peer: FakePeer,
+    factory_for: Callable[..., WebRtcPeerFactory],
+    out_av_tracks: TrackMap,
+) -> None:
+    conn = await _connect(fake_peer, factory_for(fake_peer), out_av_tracks)
+    fake_peer.unsent_audio = 0.03
+
+    assert conn.flush_media(hold=True) == 0.03
+    await conn.close()
+
+
 async def test_a_hold_flush_keeps_the_last_frame_and_still_flushes_the_peer(
     fake_peer: FakePeer,
     factory_for: Callable[..., WebRtcPeerFactory],

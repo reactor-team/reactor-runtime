@@ -15,7 +15,9 @@ receive messages on their own connections.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 
@@ -48,18 +50,35 @@ AUDIO_QUEUE_MS = 1000
 # per track. Bounded so a room that stops draining cannot grow it.
 _AUDIO_PUMP_MAX = 64
 
+# How long a flush waits for the room's loop to drop the queued audio, so it
+# can report what was dropped. Past it, the flush reports what was queued when
+# it started, and the drop still happens once the loop gets to it.
+_FLUSH_WAIT_S = 0.25
+
 # The size a VideoSource starts at, until the first frame sets its own.
 _INITIAL_VIDEO_SIZE = (1280, 720)
 
 
 @dataclass
 class _AudioOut:
-    """One output audio track: its source, its rate, and the pump that feeds it."""
+    """One output audio track: its source, its rate, and the pump that feeds it.
+
+    Touched only on the room's loop. ``pending_samples`` counts the frames in
+    ``pending``; ``playing_until`` is when the audio handed to the source will
+    have played out, at real time from each capture. The SDK keeps an
+    estimate of its own, but a cleared queue does not reset it.
+    """
 
     source: rtc.AudioSource
     sample_rate: int
     pending: asyncio.Queue[rtc.AudioFrame]
     pump: asyncio.Task[None] | None = None
+    pending_samples: int = 0
+    playing_until: float = 0.0
+
+    def unsent_seconds(self, now: float) -> float:
+        """The audio handed over for the room that has not played out yet."""
+        return self.pending_samples / self.sample_rate + max(self.playing_until - now, 0.0)
 
 
 class RoomConnection:
@@ -161,14 +180,46 @@ class RoomConnection:
         if self._on_input_freed is not None and not self._closed:
             self._on_input_freed(name)
 
-    def flush_media(self, *, hold: bool = False) -> None:
+    def flush_media(self, *, hold: bool = False) -> float:
         """Drop the queued media, the audio waiting for the room included.
 
         Each audio source's own queue is cleared, so the sound stops at the
-        cut rather than up to :data:`AUDIO_QUEUE_MS` later.
+        cut rather than up to :data:`AUDIO_QUEUE_MS` later. The audio is
+        dropped on the room's loop, and the flush waits up to
+        ``_FLUSH_WAIT_S`` for it.
+
+        Returns:
+            The seconds of audio the drop removed after the pacer had handed
+            it over, on the track that lost the most. When the loop does not
+            get to the drop in time, what was queued when the flush started.
         """
         self._pacer.flush(hold=hold)
-        self._loop.call_soon_threadsafe(self._clear_audio)
+        try:
+            on_loop = asyncio.get_running_loop() is self._loop
+        except RuntimeError:
+            on_loop = False
+        if on_loop:
+            return self._clear_audio()
+        estimate = self._unsent_seconds()
+        dropped: concurrent.futures.Future[float] = concurrent.futures.Future()
+
+        def clear() -> None:
+            try:
+                dropped.set_result(self._clear_audio())
+            except Exception as error:
+                dropped.set_exception(error)
+
+        try:
+            self._loop.call_soon_threadsafe(clear)
+        except RuntimeError:
+            return 0.0
+        if self._closed:
+            return 0.0
+        try:
+            return dropped.result(timeout=_FLUSH_WAIT_S)
+        except concurrent.futures.TimeoutError:
+            logger.warning("the room's loop did not drop the audio in time; reporting an estimate")
+            return estimate
 
     def set_media_rate(self, fps: float) -> None:
         """Re-pace the queued media at *fps* immediately."""
@@ -221,16 +272,34 @@ class RoomConnection:
     def _queue_audio(self, out: _AudioOut, frame: rtc.AudioFrame) -> None:
         """Queue one frame for its track's pump, dropping the oldest when full."""
         if out.pending.full():
-            out.pending.get_nowait()
+            oldest = out.pending.get_nowait()
+            out.pending_samples -= oldest.samples_per_channel
             self._dropped_audio += 1
         out.pending.put_nowait(frame)
+        out.pending_samples += frame.samples_per_channel
 
-    def _clear_audio(self) -> None:
-        """Drop the audio waiting for each source and the audio each source queues."""
+    def _unsent_seconds(self) -> float:
+        """The most audio any track has handed over for the room and not played out yet.
+
+        Read on the room's loop; elsewhere, an estimate that can be a frame off.
+        """
+        now = time.monotonic()
+        return max((out.unsent_seconds(now) for out in self._audio.values()), default=0.0)
+
+    def _clear_audio(self) -> float:
+        """Drop the audio waiting for each source and the audio each source queues.
+
+        Returns the most audio one track lost, in seconds.
+        """
+        dropped = self._unsent_seconds()
+        now = time.monotonic()
         for out in self._audio.values():
             while not out.pending.empty():
                 out.pending.get_nowait()
+            out.pending_samples = 0
+            out.playing_until = now
             out.source.clear_queue()
+        return dropped
 
     async def _pump_audio(self, out: _AudioOut) -> None:
         """Feed one audio source in order, waiting for its queue to have room.
@@ -245,6 +314,11 @@ class RoomConnection:
                 frame = await out.pending.get()
             except asyncio.CancelledError:
                 return
+            out.pending_samples -= frame.samples_per_channel
+            out.playing_until = (
+                max(out.playing_until, time.monotonic())
+                + frame.samples_per_channel / out.sample_rate
+            )
             try:
                 await out.source.capture_frame(frame)
             except asyncio.CancelledError:

@@ -226,8 +226,9 @@ class ParticipantConnection:
     def send_media(self, chunk: MediaChunk) -> None:
         """Do nothing: the session's media reaches the room through the room connection."""
 
-    def flush_media(self, *, hold: bool = False) -> None:
-        """Do nothing: no media is queued here."""
+    def flush_media(self, *, hold: bool = False) -> float:
+        """Do nothing, and report no audio dropped: no media is queued here."""
+        return 0.0
 
     def set_media_rate(self, fps: float) -> None:
         """Do nothing: no media is paced here."""

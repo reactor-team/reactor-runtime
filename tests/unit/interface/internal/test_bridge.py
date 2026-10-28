@@ -273,15 +273,16 @@ def test_bound_media_ops_reach_the_model_output_handle() -> None:
         addressed=lambda conn, msg, req: None,
         media=lambda chunk: None,
         media_ops=MediaOps(
-            flush=lambda hold: calls.append(f"flush:{hold}"),
+            flush=lambda hold: calls.append(f"flush:{hold}") or 0.1,
             set_rate=lambda fps: calls.append(f"rate:{fps}"),
             set_depth=lambda depth: calls.append(f"depth:{depth}"),
         ),
     )
     model.output.flush()
-    model.output.flush(hold=True)
+    unheard = model.output.flush(hold=True)
     model.output.fps = 24
     assert calls == ["flush:False", "flush:True", "rate:24.0"]
+    assert unheard == 0.1
 
 
 # --- lifecycle + surface -------------------------------------------------

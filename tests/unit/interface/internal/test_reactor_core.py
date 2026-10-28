@@ -176,6 +176,10 @@ def test_emit_tags_a_batch_with_its_frame_count() -> None:
     assert chunks[0].fps == 20
 
 
+_UNSENT_S = 0.25
+"""What the bound ops report a flush dropped."""
+
+
 def _capture_ops(core: ReactorCore) -> tuple[list[MediaChunk], list[tuple[str, float | int]]]:
     """Bind a media sink and ops that record every emitted chunk and call."""
     chunks: list[MediaChunk] = []
@@ -185,7 +189,7 @@ def _capture_ops(core: ReactorCore) -> tuple[list[MediaChunk], list[tuple[str, f
         addressed=lambda conn, msg, req: None,
         media=chunks.append,
         media_ops=MediaOps(
-            flush=lambda hold: calls.append(("flush", int(hold))),
+            flush=lambda hold: calls.append(("flush", int(hold))) or _UNSENT_S,
             set_rate=lambda fps: calls.append(("rate", fps)),
             set_depth=lambda depth: calls.append(("depth", depth)),
         ),
@@ -282,8 +286,14 @@ def test_a_hold_flush_reaches_the_bound_ops_as_a_hold() -> None:
     assert ("flush", 1) in calls
 
 
-def test_flush_before_bind_is_a_noop() -> None:
-    OutputOnlyCore().output.flush()  # must not raise
+def test_flush_returns_the_audio_the_bound_ops_report_dropped() -> None:
+    core = OutputOnlyCore()
+    _capture_ops(core)
+    assert core.output.flush(hold=True) == _UNSENT_S
+
+
+def test_flush_before_bind_is_a_noop_that_reports_no_audio_dropped() -> None:
+    assert OutputOnlyCore().output.flush() == 0.0
 
 
 def test_push_media_routes_to_the_track_buffer() -> None:

@@ -109,7 +109,7 @@ class Connection(Protocol):
         room for it.
         """
 
-    def flush_media(self, *, hold: bool = False) -> None:
+    def flush_media(self, *, hold: bool = False) -> float | None:
         """Drop this connection's queued media, then cut playout to black or hold it.
 
         Drops what the connection holds for its wire as well as what its pacer
@@ -117,6 +117,14 @@ class Connection(Protocol):
         it. With *hold*, no black frame is sent and the last frame stays on
         screen until new media arrives. A plain flush is called with no
         argument.
+
+        Returns:
+            The seconds of audio dropped that the pacer had already handed
+            over for the wire, on the output track that dropped the most:
+            audio whose play time had come but that no receiver got. The
+            pacer's own queue is not counted, since none of it was due yet.
+            ``None`` from a connection that does not measure it, which the
+            runtime takes as none dropped.
         """
 
     def set_media_rate(self, fps: float) -> None:

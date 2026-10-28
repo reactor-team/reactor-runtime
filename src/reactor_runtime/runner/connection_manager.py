@@ -41,6 +41,7 @@ replaced rather than edited.
 from __future__ import annotations
 
 import inspect
+import math
 import random
 from collections.abc import Callable, Mapping
 from dataclasses import replace
@@ -140,15 +141,21 @@ def _deliver(conn: Connection, operation: str, act: Callable[[Connection], None]
     return True
 
 
-def _flush_holding(conn: Connection) -> None:
+def _flush_holding(conn: Connection) -> float | None:
     """Flush *conn* keeping its picture, or plainly when its transport cannot hold."""
     if _takes_hold(conn.flush_media):
-        conn.flush_media(hold=True)
-    else:
-        conn.flush_media()
+        return conn.flush_media(hold=True)
+    return conn.flush_media()
 
 
-def _takes_hold(flush_media: Callable[..., None]) -> bool:
+def _unsent_seconds(value: object) -> float:
+    """Read a connection's flush report: anything but a finite, non-negative number is none."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return 0.0
+    return float(value) if math.isfinite(value) and value > 0 else 0.0
+
+
+def _takes_hold(flush_media: Callable[..., object]) -> bool:
     """Whether a connection's ``flush_media`` accepts the ``hold`` keyword."""
     try:
         params = inspect.signature(flush_media).parameters
@@ -685,19 +692,26 @@ class ConnectionManager:
                     video.append(cid)
         return video
 
-    def flush_media(self, *, hold: bool = False) -> None:
+    def flush_media(self, *, hold: bool = False) -> float:
         """Drop every connection's queued media, then cut playout to black or hold it.
 
         A plain flush calls ``flush_media()`` with no argument, so a connection
         written before the hold flush existed still takes it. A hold flush
         gives such a connection a plain flush instead: it loses the picture,
         but still drops what it queued.
+
+        Returns:
+            The most audio any connection reports it dropped after the pacer
+            had handed it over, in seconds; ``0.0`` when none reports any.
         """
+        reports: list[float] = []
+
+        def flush(conn: Connection) -> None:
+            reports.append(_unsent_seconds(_flush_holding(conn) if hold else conn.flush_media()))
+
         for conn in self._by_id.values():
-            if hold:
-                _deliver(conn, "flush_media", _flush_holding)
-            else:
-                _deliver(conn, "flush_media", lambda c: c.flush_media())
+            _deliver(conn, "flush_media", flush)
+        return max(reports, default=0.0)
 
     def set_media_rate(self, fps: float) -> None:
         """Re-pace every connection's queued media at *fps* immediately."""

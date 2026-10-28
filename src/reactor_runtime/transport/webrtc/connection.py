@@ -305,16 +305,20 @@ class WebRTCConnection:
         """
         self._pacer.submit(chunk)
 
-    def flush_media(self, *, hold: bool = False) -> None:
+    def flush_media(self, *, hold: bool = False) -> float:
         """Drop this connection's queued media, then cut playout to black or hold it.
 
         The pacer's queue goes first, so nothing more is handed to the peer,
         then what the peer still holds for the wire, both between two pacer
         ticks: once this returns, no frame queued before it reaches the wire.
+
+        Returns:
+            The seconds of audio the peer dropped, on the track that lost the
+            most. The pacer's queue is not counted: none of it was due yet.
         """
         with self._pacer.between_ticks():
             self._pacer.flush(hold=hold)
-            self._peer.flush_media()
+            return self._peer.flush_media()
 
     def set_media_rate(self, fps: float) -> None:
         """Re-pace this connection's queued media at *fps* immediately."""

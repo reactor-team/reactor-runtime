@@ -49,6 +49,7 @@ from reactor_runtime.protocol.common import dict_to_struct, struct_to_dict
 from reactor_runtime.runner import Runner
 from reactor_runtime.runner.runner import SESSION_ID
 from reactor_runtime.transport.livekit import LiveKitRouter
+from reactor_runtime.transport.livekit.connection import AUDIO_QUEUE_MS
 from reactor_runtime.transport.livekit.participant import (
     CONTROL_TOPIC,
     DATA_TOPIC,
@@ -105,6 +106,10 @@ class Heard(ModelMessage):
     camera_mean: float = MessageField(description="The last camera frame's mean value.")
 
 
+class Cut(ModelMessage):
+    unheard: float = MessageField(description="Seconds of paced-out audio the flush dropped.")
+
+
 class Echoed(ModelMessage):
     text: str = MessageField(description="The text the command carried.")
 
@@ -158,6 +163,10 @@ class ToneModel(ReactorApp):
     async def announce(self, text: str) -> None:
         await self.send(Announcement(text=text))
 
+    @event(name="cut", description="Flush the output, holding the picture, and reply with `cut`.")
+    async def cut(self) -> Cut:
+        return Cut(unheard=self.output.flush(hold=True))
+
     @event(name="quiet", description="Do nothing and reply with no message.")
     async def quiet(self) -> None:
         return None
@@ -189,6 +198,7 @@ SIGNALS = LiveKitConfig(
     rpc=(
         LiveKitRpcMethod(method="lk.echo", command="echo"),
         LiveKitRpcMethod(method="lk.quiet", command="quiet"),
+        LiveKitRpcMethod(method="lk.cut", command="cut"),
         LiveKitRpcMethod(method="lk.fail", command="fail"),
         LiveKitRpcMethod(method="lk.announced", message="announcement"),
     ),
@@ -745,6 +755,23 @@ async def test_an_rpc_call_runs_its_command_and_returns_the_reply(
 
         (command,) = [t for t in _moves(runner, SessionEvent.COMMAND) if t.detail["name"] == "echo"]
         assert command.detail["conn_id"] == _conn_id_of(runner, "caller")
+    finally:
+        await client.leave()
+
+
+async def test_a_flush_reports_the_audio_the_room_had_not_played_out(
+    runner: Runner, http: httpx.AsyncClient, room_name: str
+) -> None:
+    await _joined(runner, http, room_name)
+    client = await _client_in_session(runner, room_name, "caller")
+    try:
+        # The tone has been playing into the room for a while.
+        await asyncio.sleep(0.5)
+
+        unheard = json.loads(await _call(client, "lk.cut"))["unheard"]
+
+        # The source holds about one paced frame ahead of the room, never more than its queue.
+        assert 0.0 <= unheard <= AUDIO_QUEUE_MS / 1000
     finally:
         await client.leave()
 

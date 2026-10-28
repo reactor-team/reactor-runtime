@@ -116,20 +116,22 @@ class MediaOps:
     """Operations the runtime exposes over its downstream media consumers.
 
     Bound alongside the sinks; the model reaches them through its
-    :attr:`ReactorCore.output` handle. Like the sinks, each operation is a
-    one-way call carrying only plain values, so the boundary between the
-    model and the runtime stays a set of serialisable messages. Each fans
-    out to every live connection and is remembered for connections that
-    open later.
+    :attr:`ReactorCore.output` handle. Like the sinks, each operation carries
+    only plain values, so the boundary between the model and the runtime
+    stays a set of serialisable messages: ``flush`` answers with a number,
+    the others answer nothing. Each fans out to every live connection and
+    is remembered for connections that open later.
 
     Attributes:
         flush: Drop queued media, then cut playout to black, or with ``True``
-            keep the last frame on screen.
+            keep the last frame on screen. Returns the seconds of audio
+            dropped after the pacer had handed it over, on the connection
+            that dropped the most.
         set_rate: Re-pace queued media at a new frames-per-second immediately.
         set_depth: Bound how many frames may queue between model and wire.
     """
 
-    flush: Callable[[bool], None]
+    flush: Callable[[bool], float]
     set_rate: Callable[[float], None]
     set_depth: Callable[[int], None]
 
@@ -220,7 +222,7 @@ class OutputStream:
             await asyncio.to_thread(core._out_media, chunk)
         await asyncio.sleep(0)
 
-    def flush(self, *, hold: bool = False) -> None:
+    def flush(self, *, hold: bool = False) -> float:
         """Drop queued media on every connection, then cut playout to black or hold it.
 
         Call it when generation resets or restarts, so nothing of the old
@@ -230,15 +232,37 @@ class OutputStream:
         the cut. The session recording is not flushed — a playout cut is not
         an archive boundary.
 
+        A frame counts as played on the pacing clock once its play time has
+        come, but a transport still holds its audio for a moment before any
+        receiver gets it. The return value is that audio: what the flush
+        dropped after the pacer had handed it over. A model that reports how
+        far its speech played subtracts it::
+
+            unheard = self.output.flush(hold=True)
+            played = max(position - unheard, 0.0)
+
         Args:
             hold: Keep the last frame on screen instead of cutting to black,
                 until the next emitted frame replaces it. For a model that
                 cuts what it was saying and carries on rendering, such as an
                 avatar returning to idle.
+
+        Returns:
+            The seconds of that audio, on the connection and output track
+            that dropped the most. ``0.0`` when no connection carries audio,
+            before the model is bound, or when a connection does not measure
+            it. The pacer's own queue is not counted: none of it had reached
+            its play time. Network delay and a receiver's jitter buffer come
+            after the transport and are not counted either. A WebRTC
+            connection can report one paced frame low: it does not count a
+            frame its peer is converting as the flush lands. A room
+            connection whose loop does not get to the drop within a quarter
+            of a second reports what it held when the flush started instead.
         """
         ops = self._core._media_ops
-        if ops is not None:
-            ops.flush(hold)
+        if ops is None:
+            return 0.0
+        return ops.flush(hold)
 
 
 @dataclass(frozen=True)

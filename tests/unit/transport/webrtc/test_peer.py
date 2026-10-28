@@ -898,6 +898,25 @@ def test_audio_of_a_bundle_flushed_mid_push_is_dropped() -> None:
     assert peer._audio_bufs.get("a") is None
 
 
+def test_a_flush_reports_the_buffered_and_waiting_audio_it_dropped() -> None:
+    peer, _, _ = _wired_peer()
+    for _ in range(2):
+        peer._push_bundle(_av_bundle())  # 20 ms in the track's buffer
+    for _ in range(3):
+        peer.send_media(_av_bundle())  # 30 ms more in bundles for the drain thread
+
+    assert peer.flush_media() == pytest.approx(5 * _AUDIO_FRAME_SAMPLES / 48_000)
+    assert peer.flush_media() == 0.0
+
+
+def test_a_flush_reports_the_track_that_lost_the_most() -> None:
+    peer, _, _ = _two_audio_peer()
+    peer._push_bundle(_two_audio_bundle())  # 10 ms on each track
+    peer._enqueue_audio("voice", np.ones(3 * _AUDIO_FRAME_SAMPLES, dtype=np.int16))
+
+    assert peer.flush_media() == pytest.approx(4 * _AUDIO_FRAME_SAMPLES / 48_000)
+
+
 def test_a_flush_clears_every_audio_track() -> None:
     peer, _, _ = _two_audio_peer()
     peer._push_bundle(_two_audio_bundle())

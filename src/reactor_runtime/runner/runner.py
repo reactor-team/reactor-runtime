@@ -2254,15 +2254,16 @@ class Runner(ServiceComponent, ConnectionSink):
         # short: a playout cut is not an archive boundary.
         self._recorder.on_chunk(chunk)
 
-    def _flush_media(self, hold: bool = False) -> None:
+    def _flush_media(self, hold: bool = False) -> float:
         """Drop queued media in every connection, then cut playout to black or hold it.
 
-        The model's ``output.flush()`` lands here. The recorder is not
-        flushed: its stream is the session's archive, and a playout cut is
-        not an archive boundary.
+        The model's ``output.flush()`` lands here and gets back what the
+        connections report: the most paced-out audio any of them dropped, in
+        seconds. The recorder is not flushed: its stream is the session's
+        archive, and a playout cut is not an archive boundary.
         """
         self._media_generation += 1
-        self._connections.flush_media(hold=hold)
+        return self._connections.flush_media(hold=hold)
 
     def _set_media_rate(self, fps: float) -> None:
         """Re-pace every connection now and remember the rate for new ones."""

@@ -57,8 +57,9 @@ class SystemConnection:
     def send_media(self, chunk: MediaChunk) -> None:
         """Drop a media chunk; the fan-out never sends one to a connection without media."""
 
-    def flush_media(self, *, hold: bool = False) -> None:
-        """Do nothing; no media is queued."""
+    def flush_media(self, *, hold: bool = False) -> float:
+        """Do nothing, and report no audio dropped; no media is queued."""
+        return 0.0
 
     def set_media_rate(self, fps: float) -> None:
         """Do nothing; no media is paced."""
