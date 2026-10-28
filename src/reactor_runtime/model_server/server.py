@@ -332,7 +332,9 @@ class ModelServer:
                     raise
 
             def health(self) -> Health:
-                return Health.unhealthy(self.broken) if self.broken else Health.healthy()
+                if self.broken:
+                    return Health(HealthStatus.UNHEALTHY, self.broken)
+                return Health.healthy()
         """
         return Health.healthy()
 
