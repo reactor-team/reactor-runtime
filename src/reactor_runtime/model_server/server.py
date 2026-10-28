@@ -1,4 +1,4 @@
-"""The model half that serves several sessions from one process, and what it is declared with.
+"""The model half that serves several sessions from one process, and its serving settings.
 
 A :class:`ModelServer` subclass is the model half of the split
 ``skills/application-model-isolation`` describes, constructed once in the model
@@ -14,16 +14,11 @@ drives such ranks serves every session from weights spread over those GPUs.
 
 from __future__ import annotations
 
-import dataclasses
-import enum
 import math
-import types
-import typing
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, Literal, get_args, get_origin
-
-import numpy as np
+from typing import Any, ClassVar
 
 from reactor_runtime.core import (
     DEFAULT_SHM_INPUT_BYTES,
@@ -32,116 +27,7 @@ from reactor_runtime.core import (
     WorkerConfig,
 )
 
-_SCALARS: tuple[Any, ...] = (bool, int, float, str, bytes, type(None))
 _MANIFEST_ONLY = ("shm_input_bytes", "shm_output_bytes")
-
-
-@dataclass(frozen=True)
-class ModelServerTypes:
-    """The types a model's two halves exchange, declared once and imported by both.
-
-    Each is a frozen dataclass whose fields are data: ``bool``, ``int``,
-    ``float``, ``str``, ``bytes``, ``None``, ``numpy.ndarray``, an enum, a
-    ``Literal``, another such dataclass, and ``list``, ``tuple``, ``dict`` (with
-    ``str`` or ``int`` keys) and ``T | None`` of those. Only data crosses
-    between the halves: a field that holds a function, a lock, or a tensor on a
-    GPU is refused when the declaration is made, so the session processes,
-    which hold no GPU, only ever receive arrays::
-
-        @dataclass(frozen=True)
-        class Tick:
-            tick: int
-            audio: np.ndarray
-
-        @dataclass(frozen=True)
-        class Frame:
-            pixels: np.ndarray
-
-        PLASMA = ModelServerTypes(request=Tick, result=Frame)
-
-    If the other half must react to something, it is a declared signal it
-    handles itself, never code that travels.
-
-    Attributes:
-        request: What a session sends to the model's ``step()``.
-        result: What ``step()`` returns for one request.
-        signals: What a session may send outside a step, such as a request to
-            stop early.
-
-    Raises:
-        TypeError: A type is not a frozen dataclass of data fields, or a signal
-            type is listed twice.
-    """
-
-    request: type
-    result: type
-    signals: tuple[type, ...] = ()
-
-    def __post_init__(self) -> None:
-        """Check every declared type once, when the declaration is made."""
-        check_data_type(self.request, "request")
-        check_data_type(self.result, "result")
-        if not isinstance(self.signals, tuple):
-            raise TypeError(f"signals must be a tuple of frozen dataclasses, got {self.signals!r}")
-        if len(set(self.signals)) != len(self.signals):
-            raise TypeError("signals names a type twice")
-        for declared in self.signals:
-            check_data_type(declared, "signals")
-
-
-def check_data_type(cls: Any, where: str) -> None:
-    """Refuse *cls* unless it is a frozen dataclass whose fields are data.
-
-    Raises:
-        TypeError: Naming the first field that is not data, or why *cls* is not
-            such a dataclass.
-    """
-    _check_dataclass(cls, where, set())
-
-
-def _check_dataclass(cls: Any, where: str, seen: set[type]) -> None:
-    if not isinstance(cls, type) or "__dataclass_fields__" not in cls.__dict__:
-        raise TypeError(f"{where}: {cls!r} is not a dataclass declared with @dataclass")
-    params = cls.__dict__.get("__dataclass_params__")
-    if params is None or not params.frozen:
-        raise TypeError(f"{where}: {cls.__qualname__} is not frozen; declare it frozen=True")
-    if cls in seen:
-        return
-    seen.add(cls)
-    hints = typing.get_type_hints(cls)
-    for field in dataclasses.fields(cls):
-        _check_annotation(hints[field.name], f"{where}: {cls.__qualname__}.{field.name}", seen)
-
-
-def _check_annotation(hint: Any, where: str, seen: set[type]) -> None:
-    origin, args = get_origin(hint), get_args(hint)
-    if hint in _SCALARS or hint is np.ndarray or origin is np.ndarray:
-        return
-    if isinstance(hint, type) and issubclass(hint, enum.Enum):
-        return
-    if origin is Literal:
-        return
-    if origin in (typing.Union, types.UnionType):
-        for arg in args:
-            _check_annotation(arg, where, seen)
-        return
-    if origin in (list, tuple):
-        for arg in args:
-            if arg is not Ellipsis:
-                _check_annotation(arg, where, seen)
-        return
-    if origin is dict and len(args) == 2:
-        if args[0] not in (str, int):
-            raise TypeError(f"{where}: a dict's keys must be str or int, got {args[0]!r}")
-        _check_annotation(args[1], where, seen)
-        return
-    if isinstance(hint, type) and dataclasses.is_dataclass(hint):
-        _check_dataclass(hint, where, seen)
-        return
-    raise TypeError(
-        f"{where} is typed {hint!r}, which is not data: use plain values, numpy arrays, "
-        "enums, frozen dataclasses, and list, tuple, dict or optional of those"
-    )
 
 
 @dataclass(frozen=True)
@@ -155,8 +41,8 @@ class ServerRequest[T]:
             moves on when a session runtime connects in the slot and at every
             reset, so state kept per slot can tell a new session from the one
             before.
-        payload: The request, an instance of the declared request type. Its
-            arrays are its own: keep them past ``step()`` as they are.
+        payload: The request the session's application sent. Its arrays are
+            its own: keep them past ``step()`` as they are.
         session_id: The id of the session this request belongs to, as the
             session's last reset named it, for the model's own log lines;
             ``None`` before the first reset.
@@ -168,14 +54,12 @@ class ServerRequest[T]:
     session_id: str | None = None
 
 
-class ModelServer:
+class ModelServer[RequestT, ResultT]:
     """Base class for the model half: weights loaded once, one batch stepped at a time.
 
-    A subclass declares the types it exchanges and what it can serve, and
-    writes :meth:`step`::
+    A subclass declares what it can serve and writes :meth:`step`::
 
-        class PlasmaModel(ModelServer):
-            types = PLASMA            # a ModelServerTypes both halves import
+        class PlasmaModel(ModelServer[Tick, Frame]):
             max_batch = 4             # the most requests one step can take
 
             def load(self, config_path):
@@ -204,8 +88,14 @@ class ModelServer:
     * A request whose timeout passed while it waited is answered as expired and
       never reaches ``step()``.
 
+    What crosses between the halves is pickled, so a request, a result and a
+    signal can be any value pickle takes. Plain data, such as frozen
+    dataclasses of numbers, strings and numpy arrays, is the convention: the
+    session processes hold no GPU, so a CUDA tensor cannot be rebuilt there,
+    and a callable runs in whichever process calls it. The type parameters
+    are for type checkers alone; nothing checks them at run time.
+
     Class attributes:
-        types: The :class:`ModelServerTypes` both halves import. Required.
         max_batch: The most requests one step can take, 1 by default.
             ``runtime.worker.max_batch`` in ``reactor.yaml`` may lower it, never
             raise it.
@@ -222,13 +112,11 @@ class ModelServer:
             else ``"cpu"``. Set before :meth:`load` runs.
 
     Raises:
-        TypeError: When a subclass is defined without ``types``, or with a
-            setting the manifest owns.
+        TypeError: When a subclass is defined with a setting the manifest owns.
         ValueError: When a subclass is defined with ``max_batch`` or
             ``batch_window`` out of range.
     """
 
-    types: ClassVar[ModelServerTypes]
     max_batch: ClassVar[int] = 1
     batch_window: ClassVar[float] = 0.0
 
@@ -237,12 +125,6 @@ class ModelServer:
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Check the subclass's declarations as it is defined."""
         super().__init_subclass__(**kwargs)
-        declared = cls.__dict__.get("types", getattr(cls, "types", None))
-        if not isinstance(declared, ModelServerTypes):
-            raise TypeError(
-                f"{cls.__name__}.types must be a ModelServerTypes naming the request, result "
-                f"and signal types, got {declared!r}"
-            )
         for key in _MANIFEST_ONLY:
             if hasattr(cls, key):
                 raise TypeError(
@@ -262,7 +144,7 @@ class ModelServer:
         A raise here fails the model server's start, and its process exits.
         """
 
-    def step(self, requests: list[ServerRequest[Any]]) -> list[Any]:
+    def step(self, requests: list[ServerRequest[RequestT]]) -> Sequence[ResultT | Exception]:
         """Run one step for every request and return one output per request, in order.
 
         An output that is an exception instance fails that request alone, and
@@ -280,8 +162,8 @@ class ModelServer:
                 most one per session, in arrival order.
 
         Returns:
-            One output per request, in the order of *requests*: an instance of
-            the declared result type, or an exception.
+            One output per request, in the order of *requests*: its result,
+            or an exception.
         """
         raise NotImplementedError(f"{type(self).__name__} must define step()")
 
@@ -303,7 +185,7 @@ class ModelServer:
     def signal(self, slot: int, signal: Any) -> None:
         """Take a signal a session sent outside a step, such as a request to stop early.
 
-        *signal* is an instance of one of the declared signal types. It runs
+        *signal* is what the application passed to ``signal()``. It runs
         on that session's reader thread, possibly while :meth:`step` runs, so
         it should only record the signal for ``step()`` to read. Signals from
         one session arrive in the order sent, and one sent before a request is

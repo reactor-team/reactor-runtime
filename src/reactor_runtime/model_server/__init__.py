@@ -2,13 +2,10 @@
 
 A model split in two runs its model half in one process, the model server, and
 its application half in ordinary one-session runtimes, one per session, that
-all call it. The two halves exchange the types they declare once, in a module
-both import::
+all call it. The two halves are written together, in one workspace, and what
+they exchange is pickled::
 
-    PLASMA = ModelServerTypes(request=Tick, result=Frame)
-
-    class PlasmaModel(ModelServer):       # the model half, in the model server
-        types = PLASMA
+    class PlasmaModel(ModelServer[Tick, Frame]):   # the model half, in the model server
         def step(self, requests): ...
 
 The rules of the split are in ``skills/application-model-isolation``. A model
@@ -27,7 +24,6 @@ from reactor_runtime.model_server.errors import (
 )
 from reactor_runtime.model_server.server import (
     ModelServer,
-    ModelServerTypes,
     ServerRequest,
     ServerSettings,
 )
@@ -35,7 +31,6 @@ from reactor_runtime.model_server.server import (
 __all__ = [
     "BatchFailed",
     "ModelServer",
-    "ModelServerTypes",
     "ServerRequest",
     "ServerSettings",
     "StepExpired",
