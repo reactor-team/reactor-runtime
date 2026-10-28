@@ -1,11 +1,9 @@
-"""The model half's declarations: data-only types, its limits, and settings from the manifest."""
+"""The model half's declarations: its limits, and its settings from the manifest."""
 
 from __future__ import annotations
 
-import enum
-import threading
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 import numpy as np
 import pytest
@@ -16,30 +14,12 @@ from reactor_runtime.core import (
     HealthStatus,
     WorkerConfig,
 )
-from reactor_runtime.model_server import ModelServer, ModelServerTypes, ServerSettings
-
-
-class Mode(enum.Enum):
-    FAST = "fast"
-
-
-@dataclass(frozen=True)
-class Inner:
-    label: str
-    weights: list[float]
+from reactor_runtime.model_server import ModelServer, ServerSettings
 
 
 @dataclass(frozen=True)
 class Tick:
     tick: int
-    audio: np.ndarray
-    mode: Mode
-    speed: Literal["slow", "fast"]
-    inner: Inner
-    tags: tuple[str, ...]
-    meta: dict[str, int]
-    note: str | None
-    raw: bytes
 
 
 @dataclass(frozen=True)
@@ -52,83 +32,23 @@ class Preempt:
     reason: str
 
 
-TYPES = ModelServerTypes(request=Tick, result=Frame, signals=(Preempt,))
-
-
-# -- declared types -------------------------------------------------------------------------
-
-
-def test_data_types_are_accepted() -> None:
-    assert TYPES.request is Tick
-    assert TYPES.signals == (Preempt,)
-
-
-@dataclass
-class Mutable:
-    value: int
-
-
-@dataclass(frozen=True)
-class HoldsAFunction:
-    on_done: Any
-
-
-@dataclass(frozen=True)
-class HoldsALock:
-    lock: threading.Lock
-
-
-@dataclass(frozen=True)
-class FloatKeys:
-    table: dict[float, int]
-
-
-@dataclass(frozen=True)
-class Base:
-    value: int
-
-
-class Undecorated(Base):
-    extra: int
-
-
-@pytest.mark.parametrize(
-    ("request_type", "match"),
-    [
-        (dict, "not a dataclass"),
-        (Undecorated, "not a dataclass declared with @dataclass"),
-        (Mutable, "not frozen"),
-        (HoldsAFunction, r"HoldsAFunction\.on_done is typed"),
-        (HoldsALock, r"HoldsALock\.lock is typed"),
-        (FloatKeys, "keys must be str or int"),
-    ],
-)
-def test_a_type_that_is_not_data_is_refused_naming_it(request_type: Any, match: str) -> None:
-    with pytest.raises(TypeError, match=match):
-        ModelServerTypes(request=request_type, result=Frame)
-
-
-def test_signals_are_a_tuple_of_distinct_types() -> None:
-    with pytest.raises(TypeError, match="tuple"):
-        ModelServerTypes(request=Tick, result=Frame, signals=[Preempt])  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]  # a list is the mistake under test
-    with pytest.raises(TypeError, match="twice"):
-        ModelServerTypes(request=Tick, result=Frame, signals=(Preempt, Preempt))
-
-
 # -- the class ------------------------------------------------------------------------------
 
 
-def test_a_subclass_without_types_is_refused() -> None:
-    with pytest.raises(TypeError, match="types must be a ModelServerTypes"):
+def test_a_subclass_declares_nothing_and_its_type_parameters_are_for_type_checkers() -> None:
+    class Bare(ModelServer):
+        pass
 
-        class Untyped(ModelServer):
-            pass
+    class Typed(ModelServer[Tick, Frame]):
+        pass
+
+    assert Bare().max_batch == Typed().max_batch == 1
 
 
 @pytest.mark.parametrize("key", ["shm_input_bytes", "shm_output_bytes"])
 def test_a_subclass_that_sets_what_the_manifest_owns_is_refused(key: str) -> None:
     with pytest.raises(TypeError, match=f"runtime.worker.{key}"):
-        type("Sized", (ModelServer,), {"types": TYPES, key: 1 << 20})
+        type("Sized", (ModelServer,), {key: 1 << 20})
 
 
 @pytest.mark.parametrize(
@@ -142,11 +62,10 @@ def test_a_subclass_that_sets_what_the_manifest_owns_is_refused(key: str) -> Non
 )
 def test_a_subclass_with_limits_out_of_range_is_refused(attrs: dict[str, Any], match: str) -> None:
     with pytest.raises(ValueError, match=match):
-        type("OutOfRange", (ModelServer,), {"types": TYPES, **attrs})
+        type("OutOfRange", (ModelServer,), attrs)
 
 
-class PlasmaModel(ModelServer):
-    types = TYPES
+class PlasmaModel(ModelServer[Tick, Frame]):
     max_batch = 4
     batch_window = 0.002
 
