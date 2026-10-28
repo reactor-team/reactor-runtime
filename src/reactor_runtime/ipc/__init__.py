@@ -4,7 +4,7 @@ An object is pickled with its flat buffers (contiguous numpy arrays) written
 into a shared block instead of into the pickle; the small header that names the
 block travels on whatever carries messages, a queue or a socket::
 
-    slot = SharedSlot(directory=shm_dir)           # the writer's growing block
+    slot = SharedSlot(directory=shm_dir)           # the writer's block
     header = pack(result, slot)                    # bytes for the queue or socket
 
     reader = SlotReader(directory=shm_dir)         # the other process
@@ -25,13 +25,14 @@ from reactor_runtime.ipc.blocks import (
     unlink_blocks,
 )
 from reactor_runtime.ipc.payload import pack, unpack
-from reactor_runtime.ipc.slot import SharedSlot, SlotReader, new_prefix
+from reactor_runtime.ipc.slot import SharedSlot, SharedSlotLimitExceeded, SlotReader, new_prefix
 
 __all__ = [
     "SHM_DIR",
     "Block",
     "SharedSlot",
     "SharedSlotAllocationFailed",
+    "SharedSlotLimitExceeded",
     "SlotReader",
     "attach_block",
     "create_block",
