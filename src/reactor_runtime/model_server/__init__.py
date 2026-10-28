@@ -2,8 +2,8 @@
 
 A model split in two runs its model half in one process, the model server, and
 its application half in ordinary one-session runtimes, one per session, that
-all call it. What the halves exchange is pickled, written together in one
-workspace::
+all call it. The two halves are written together, in one workspace, and what
+they exchange is pickled::
 
     class PlasmaModel(ModelServer[Tick, Frame]):   # the model half, in the model server
         def step(self, requests): ...
