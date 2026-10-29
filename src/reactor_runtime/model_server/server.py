@@ -261,14 +261,20 @@ class ServerSettings:
                     "lower it"
                 )
             max_batch = config.max_batch
-        manifest = config or WorkerConfig(import_ref=f"{server.__module__}:{server.__name__}")
+        if config is None:
+            return cls(
+                max_batch=max_batch,
+                batch_window=float(server.batch_window),
+                shm_input_bytes=DEFAULT_SHM_INPUT_BYTES,
+                shm_output_bytes=DEFAULT_SHM_OUTPUT_BYTES,
+            )
         return cls(
             max_batch=max_batch,
             batch_window=float(
-                server.batch_window if manifest.batch_window is None else manifest.batch_window
+                server.batch_window if config.batch_window is None else config.batch_window
             ),
-            shm_input_bytes=manifest.shm_input_bytes or DEFAULT_SHM_INPUT_BYTES,
-            shm_output_bytes=manifest.shm_output_bytes or DEFAULT_SHM_OUTPUT_BYTES,
+            shm_input_bytes=config.input_bytes,
+            shm_output_bytes=config.output_bytes,
         )
 
 

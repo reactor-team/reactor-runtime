@@ -474,12 +474,18 @@ def test_load_config_reads_the_worker_block_into_typed_settings(tmp_path: Path) 
     ("block", "match"),
     [
         ("worker: plasma_worker:PlasmaModel", "must be a block"),
+        ("worker:", "must be a block"),
+        ("worker:\n  import: plasma_worker:PlasmaModel", "must be a block"),
         ("worker:\n    max_batch: 2", "import must name the model half"),
         ("worker:\n    import: plasma_worker:PlasmaModel\n    shm_size: 1", "unknown keys"),
         ("worker:\n    import: plasma_worker:PlasmaModel\n    max_batch: '2'", "positive integer"),
         ("worker:\n    import: plasma_worker:PlasmaModel\n    shm_input_bytes: 0", "positive"),
         ("worker:\n    import: plasma_worker:PlasmaModel\n    batch_window: -1", "at least 0"),
         ("worker:\n    import: plasma_worker", "module:Class"),
+        ("worker:\n    import: 'plasma_model:'", "module:Class"),
+        ("worker:\n    import: ':PlasmaModel'", "module:Class"),
+        ("worker:\n    import: ':'", "module:Class"),
+        ("worker:\n    import: 3", "module:Class"),
     ],
 )
 def test_load_config_refuses_a_worker_block_of_the_wrong_shape(

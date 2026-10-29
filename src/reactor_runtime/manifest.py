@@ -140,15 +140,16 @@ def _worker_from_manifest(runtime: dict[str, Any]) -> WorkerConfig | None:
         runtime: The manifest's ``runtime`` section.
 
     Returns:
-        The parsed block, or ``None`` when the manifest has none.
+        The parsed block, or ``None`` when the manifest has no ``worker`` key.
 
     Raises:
-        ValueError: The block is not a mapping, names a key it does not take, or
-            holds a value of the wrong type or range.
+        ValueError: The block is not a mapping (an empty ``worker:`` included),
+            names a key it does not take, or holds a value of the wrong type or
+            range.
     """
-    block = runtime.get("worker")
-    if block is None:
+    if "worker" not in runtime:
         return None
+    block = runtime["worker"]
     if not isinstance(block, dict):
         raise ValueError(
             f"runtime.worker must be a block with `import: module:Class`, got {block!r}"
