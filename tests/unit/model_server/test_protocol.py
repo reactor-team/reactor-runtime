@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 import pytest
 
+from reactor_runtime.distributed.rank import portable_pickle
 from reactor_runtime.model_server import (
     BatchFailed,
     PayloadTooLarge,
@@ -107,6 +108,14 @@ def test_every_message_pickles_whole_and_is_recognised(message: Any) -> None:
     assert repr(back) == repr(message)
 
 
+def test_a_subclass_of_a_message_is_not_that_message() -> None:
+    class Extended(Step):
+        pass
+
+    with pytest.raises(ProtocolError, match="not a protocol message"):
+        check_message(Extended(request_id=1, timeout=None, payload=None))
+
+
 def test_a_frame_that_holds_no_message_is_refused() -> None:
     with pytest.raises(ProtocolError, match="not a protocol message"):
         check_message({"kind": "step"})
@@ -132,10 +141,42 @@ def test_a_models_exception_arrives_as_itself() -> None:
 
 
 def test_batch_failed_carries_its_cause() -> None:
-    error = error_of(failure(3, BatchFailed(NoFaceError("bad input"))))
+    failed = failure(3, BatchFailed(NoFaceError("bad input")))
+    error = error_of(failed)
+    assert failed.batch
     assert isinstance(error, BatchFailed)
     assert type(error.cause) is NoFaceError
     assert "NoFaceError: bad input" in str(error)
+
+
+def test_a_batch_failure_whose_cause_does_not_pickle_is_still_a_batch_failure() -> None:
+    error = error_of(failure(3, BatchFailed(HolderError(lambda: None))))
+    assert isinstance(error, BatchFailed)
+    assert type(error.cause) is RuntimeError
+    assert "HolderError" in str(error.cause)
+
+
+def test_a_batch_failure_whose_cause_is_too_large_is_still_a_batch_failure() -> None:
+    error = error_of(failure(3, BatchFailed(ValueError("x" * (2 << 20)))))
+    assert isinstance(error, BatchFailed)
+    assert type(error.cause) is RuntimeError
+    assert "too large to send whole" in str(error.cause)
+
+
+def test_a_batch_failure_whose_cause_only_the_worker_imports_is_still_a_batch_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = types.ModuleType("only_in_the_worker")
+    exec("class Missing(Exception):\n    pass\n", module.__dict__)
+    monkeypatch.setitem(sys.modules, "only_in_the_worker", module)
+    failed = failure(3, BatchFailed(module.Missing("gone")))
+    monkeypatch.delitem(sys.modules, "only_in_the_worker")
+
+    error = error_of(failed)
+
+    assert isinstance(error, BatchFailed)
+    assert type(error.cause) is WorkerError
+    assert str(error.cause) == "only_in_the_worker.Missing: gone"
 
 
 @pytest.mark.parametrize("kind", [WorkerRejected, PayloadTooLarge])
@@ -145,14 +186,59 @@ def test_the_runtimes_own_exceptions_arrive_as_themselves(kind: type[Exception])
     assert str(error) == "too large"
 
 
-def test_an_exception_that_does_not_pickle_arrives_as_a_runtime_error_naming_it() -> None:
-    class HolderError(Exception):
-        def __init__(self, handle: Any) -> None:
-            super().__init__(handle)
+class HolderError(Exception):
+    def __init__(self, handle: Any) -> None:
+        super().__init__(handle)
 
+
+class UnprintableError(Exception):
+    def __str__(self) -> str:
+        raise RuntimeError("cannot print")
+
+
+class ProtocolPickyError(Exception):
+    """Pickles in protocol 4 and not in protocol 5."""
+
+    def __reduce_ex__(self, protocol: Any) -> Any:
+        if protocol >= 5:
+            raise TypeError("not in protocol 5")
+        return (ProtocolPickyError, self.args)
+
+
+def test_an_exception_that_does_not_pickle_arrives_as_a_runtime_error_naming_it() -> None:
     error = error_of(failure(3, HolderError(lambda: None)))
     assert type(error) is RuntimeError
     assert "HolderError" in str(error)
+
+
+def test_an_exception_that_neither_pickles_nor_prints_still_answers_its_request() -> None:
+    unprintable = UnprintableError()
+    unprintable.handle = lambda: None  # ty: ignore[unresolved-attribute]  # an attribute that does not pickle
+
+    failed = failure(3, unprintable)
+
+    assert failed.request_id == 3
+    assert failed.description.endswith("UnprintableError: <unprintable>")
+    error = error_of(failed)
+    assert type(error) is RuntimeError
+    assert str(error) == failed.description
+
+
+def test_the_pickle_checked_is_the_pickle_sent() -> None:
+    error = error_of(failure(3, ProtocolPickyError("picky")))
+    assert type(error) is RuntimeError
+    assert "ProtocolPickyError: picky" in str(error)
+
+
+def test_portable_pickle_checks_the_protocol_it_is_given() -> None:
+    picky = ProtocolPickyError("picky")
+
+    kept, blob = portable_pickle(picky, protocol=4)
+    replaced, _ = portable_pickle(picky, protocol=5)
+
+    assert kept is picky
+    assert type(pickle.loads(blob)) is ProtocolPickyError
+    assert type(replaced) is RuntimeError
 
 
 def test_an_exception_this_process_cannot_import_arrives_as_a_worker_error(
