@@ -111,6 +111,28 @@ def test_the_manifest_lowers_max_batch_and_sets_the_rest() -> None:
     assert config.shm_slot_bytes == 34 << 20
 
 
+def test_the_effective_sizes_are_the_declared_ones_or_the_defaults() -> None:
+    unset = WorkerConfig(import_ref="m:C")
+    declared = WorkerConfig(import_ref="m:C", shm_input_bytes=2 << 20, shm_output_bytes=64 << 20)
+
+    assert (unset.input_bytes, unset.output_bytes) == (
+        DEFAULT_SHM_INPUT_BYTES,
+        DEFAULT_SHM_OUTPUT_BYTES,
+    )
+    assert (declared.input_bytes, declared.output_bytes) == (2 << 20, 64 << 20)
+    for config in (unset, declared):
+        settings = ServerSettings.resolve(PlasmaModel, config)
+        assert (settings.shm_input_bytes, settings.shm_output_bytes) == (
+            config.input_bytes,
+            config.output_bytes,
+        )
+        assert settings.shm_slot_bytes == config.shm_slot_bytes
+
+
+def test_the_default_output_block_fits_a_video_step() -> None:
+    assert DEFAULT_SHM_OUTPUT_BYTES == 32 << 20
+
+
 def test_the_manifest_cannot_raise_max_batch_above_the_class() -> None:
     config = WorkerConfig(import_ref="plasma_worker:PlasmaModel", max_batch=8)
     with pytest.raises(ValueError, match=r"above PlasmaModel\.max_batch = 4"):

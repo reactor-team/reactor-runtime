@@ -10,12 +10,15 @@ import numpy as np
 import pytest
 
 from reactor_runtime.ipc import (
+    Block,
     SharedSlot,
+    SharedSlotAllocationFailed,
     SharedSlotLimitExceeded,
     SlotReader,
     new_prefix,
     unlink_blocks,
 )
+from reactor_runtime.ipc import slot as slot_module
 
 
 @pytest.fixture
@@ -59,6 +62,41 @@ def test_the_block_grows_keeping_what_was_written_and_the_old_block_goes(
     reader.attach(slot.name)
     assert reader.copy(*head) == bytearray(b"\x07" * 3000)
     assert reader.copy(*tail) == bytearray(b"\x09" * 3000)
+
+
+def test_a_growth_that_cannot_double_takes_exactly_what_the_call_needs(
+    slot: SharedSlot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = slot_module.create_block
+
+    def tight(name: str, size: int, directory: Path | None = None) -> Block:
+        if size > 6000:
+            raise SharedSlotAllocationFailed(f"no room for {size} bytes")
+        return real(name, size, directory)
+
+    monkeypatch.setattr(slot_module, "create_block", tight)
+    slot.begin()
+    slot.write(b"x" * 3000)
+    slot.write(b"y" * 3000)  # 6000 fits; 8192, the doubled block, does not
+
+    assert slot.capacity == 6000
+
+
+def test_a_growth_that_does_not_fit_at_all_leaves_the_block_usable(
+    slot: SharedSlot, reader: SlotReader, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def full(name: str, size: int, directory: Path | None = None) -> Block:
+        raise SharedSlotAllocationFailed(f"no room for {size} bytes")
+
+    monkeypatch.setattr(slot_module, "create_block", full)
+    slot.begin()
+    with pytest.raises(SharedSlotAllocationFailed):
+        slot.write(b"x" * 5000)
+
+    slot.begin()
+    span = slot.write(b"small")
+    reader.attach(slot.name)
+    assert reader.copy(*span) == bytearray(b"small")
 
 
 def test_a_bounded_slot_grows_only_to_its_limit(tmp_path: Path) -> None:
