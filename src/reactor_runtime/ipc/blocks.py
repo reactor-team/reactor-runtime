@@ -11,6 +11,18 @@ Blocks are opened as plain files, never through
 registers them: a process that maps a block it did not create never unlinks it
 when it exits, on any Python version. The creator unlinks what it created, and
 :func:`unlink_blocks` reclaims what a creator that died left behind.
+
+No tracker also means nothing reclaims the blocks of a creator killed with
+``SIGKILL``. A writer that can be killed and started again finds its previous
+run's blocks only if it names them under a prefix it knows on its next start,
+and reclaims them then with :func:`unlink_blocks`. Blocks named under a random
+prefix (:func:`~reactor_runtime.ipc.new_prefix`) stay until their directory
+goes away: for a container's own ``/dev/shm``, the container's lifetime; for a
+host's long-lived ``/dev/shm``, until something removes them.
+
+A block is created ``0600``: every process that maps it runs as its creator's
+user, containers sharing a volume included. A process that attaches to a block
+maps it read-only, since it only copies out of it.
 """
 
 from __future__ import annotations
@@ -77,7 +89,7 @@ class Block:
 
     @property
     def buf(self) -> memoryview:
-        """The block's bytes, writable.
+        """The block's bytes: writable for the block's creator, read-only for an attached block.
 
         Raises:
             RuntimeError: The block is closed.
@@ -108,7 +120,8 @@ def create_block(name: str, size: int, directory: Path | None = None) -> Block:
     The pages are reserved with ``posix_fallocate`` where the platform has it,
     so a directory that cannot hold the block is an error here, not a
     ``SIGBUS`` on a later write. On a memory-backed directory the pages are
-    charged to the creating process.
+    charged to the creating process. The file is created ``0600``: a process
+    that attaches to it must run as the same user.
 
     Args:
         name: A plain file name; the block must not exist.
@@ -118,13 +131,19 @@ def create_block(name: str, size: int, directory: Path | None = None) -> Block:
     Raises:
         ValueError: *name* is not a plain file name, or *size* is below 1.
         FileExistsError: A file of that name is already there.
-        SharedSlotAllocationFailed: The directory cannot hold the block.
+        SharedSlotAllocationFailed: The directory cannot hold the block: no
+            space or quota for its pages, or for the file itself.
     """
     _check_name(name)
     if size < 1:
         raise ValueError(f"a shared block needs at least 1 byte, got {size}")
     path = (directory or default_directory()) / name
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        if exc.errno in _NO_ROOM:
+            raise SharedSlotAllocationFailed(_no_room(path.parent, size, exc)) from exc
+        raise
     try:
         try:
             if hasattr(os, "posix_fallocate"):
@@ -144,10 +163,12 @@ def create_block(name: str, size: int, directory: Path | None = None) -> Block:
 
 
 def attach_block(name: str, directory: Path | None = None) -> Block:
-    """Map the existing block *name* in *directory*.
+    """Map the existing block *name* in *directory*, read-only.
 
     Only a regular file is mapped: a symlink, a FIFO, or a directory under a
-    block's name fails here instead of mapping something else.
+    block's name fails here instead of mapping something else. The mapping is
+    read-only: a reader copies out of a block, and never writes into the
+    creator's bytes.
 
     Args:
         name: The block's file name, as a header carries it.
@@ -161,14 +182,16 @@ def attach_block(name: str, directory: Path | None = None) -> Block:
     """
     _check_name(name)
     path = (directory or default_directory()) / name
-    fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+    # O_NONBLOCK: a read-only open of a FIFO would wait for a writer; with it the
+    # open returns, and the type check below refuses the FIFO.
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise ValueError(f"shared block {name!r} is not a regular file")
         if info.st_size < 1:
             raise ValueError(f"shared block {name!r} is empty")
-        mapping = mmap.mmap(fd, info.st_size)
+        mapping = mmap.mmap(fd, info.st_size, access=mmap.ACCESS_READ)
     finally:
         os.close(fd)
     return Block(path, mapping)
@@ -197,6 +220,11 @@ def unlink_blocks(prefix: str, directory: Path | None = None) -> int:
             path.unlink()
             count += 1
     return count
+
+
+_NO_ROOM = frozenset(
+    code for code in (errno.ENOSPC, getattr(errno, "EDQUOT", None)) if code is not None
+)
 
 
 def _check_name(name: str) -> None:
