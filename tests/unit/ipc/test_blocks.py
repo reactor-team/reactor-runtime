@@ -87,6 +87,45 @@ def test_a_full_directory_fails_at_creation_and_names_the_fix(
     assert not (tmp_path / "b0").exists()
 
 
+@pytest.mark.parametrize("code", sorted(blocks_module._NO_ROOM))
+def test_no_room_for_the_file_itself_is_an_allocation_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    real_open = os.open
+    target = tmp_path / "b0"
+
+    def no_inodes(
+        path: str | os.PathLike[str], flags: int, mode: int = 0o777, *, dir_fd: int | None = None
+    ) -> int:
+        if Path(path) == target:
+            raise OSError(code, os.strerror(code))
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(blocks_module.os, "open", no_inodes)
+    with pytest.raises(SharedSlotAllocationFailed, match="--shm-size"):
+        create_block("b0", 4096, tmp_path)
+    assert not (tmp_path / "b0").exists()
+
+
+def test_another_open_error_is_raised_as_it_is(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        create_block("b0", 8, tmp_path / "missing")
+
+
+def test_an_attached_block_is_read_only(tmp_path: Path) -> None:
+    created = create_block("b0", 64, tmp_path)
+    attached = attach_block("b0", tmp_path)
+    try:
+        created.buf[:3] = b"abc"
+        with pytest.raises(TypeError):
+            attached.buf[:1] = b"x"
+        assert bytes(attached.buf[:3]) == b"abc"
+    finally:
+        attached.close()
+        created.close()
+        created.unlink()
+
+
 def test_unlink_blocks_removes_only_the_prefix(tmp_path: Path) -> None:
     mine = [create_block(f"rrabc_{n}", 8, tmp_path) for n in range(3)]
     other = create_block("rrxyz_0", 8, tmp_path)
@@ -110,10 +149,11 @@ def test_a_prefix_is_matched_as_plain_text(tmp_path: Path) -> None:
 
 def test_a_process_that_attaches_and_exits_leaves_the_block(tmp_path: Path) -> None:
     block = create_block("b0", 8, tmp_path)
+    block.buf[0] = 7
     child = (
         "import sys; from pathlib import Path\n"
         "from reactor_runtime.ipc import attach_block\n"
-        "b = attach_block('b0', Path(sys.argv[1])); b.buf[0] = 7; b.close()\n"
+        "b = attach_block('b0', Path(sys.argv[1])); assert b.buf[0] == 7; b.close()\n"
     )
     try:
         subprocess.run([sys.executable, "-c", child, str(tmp_path)], check=True, timeout=60)
