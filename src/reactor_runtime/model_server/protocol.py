@@ -24,8 +24,8 @@ import struct
 from dataclasses import dataclass
 from typing import Any
 
-from reactor_runtime.distributed.rank import portable
-from reactor_runtime.model_server.errors import WorkerError
+from reactor_runtime.distributed.rank import portable_pickle
+from reactor_runtime.model_server.errors import BatchFailed, WorkerError
 
 PROTOCOL = 1
 """The version of this exchange; it moves with any change to a message."""
@@ -157,13 +157,16 @@ class Failed:
         request_id: The request it answers.
         error: The exception, pickled on its own so that a class this process
             cannot import does not fail the whole message.
-        description: ``"module.Type: message"`` of the exception, for when it
-            cannot be rebuilt.
+        description: ``"module.Type: message"`` of the exception, or of its
+            cause for a batch failure, for when it cannot be rebuilt.
+        batch: Whether the exception is a :class:`BatchFailed`, so that it is
+            rebuilt as one even when its cause cannot be.
     """
 
     request_id: int
     error: bytes
     description: str
+    batch: bool = False
 
 
 @dataclass(frozen=True)
@@ -189,33 +192,48 @@ _MESSAGES = (Hello, Step, Cancel, Signal, Reset, Welcome, Refused, Result, Faile
 
 
 def failure(request_id: int, exc: BaseException) -> Failed:
-    """Return the :class:`Failed` that carries *exc* as the answer to *request_id*.
+    """Return the :class:`Failed` that carries *exc* as the answer to *request_id*. Never raises.
 
-    An exception that does not pickle travels as a ``RuntimeError`` naming its
-    type and message, as a distributed rank's does, and so does one larger than
-    :data:`FAILURE_LIMIT` once pickled, so a failure always fits in a frame. The
-    description is cut at :data:`DESCRIPTION_LIMIT` characters.
+    The exception travels as itself when it pickles and its pickle fits
+    :data:`FAILURE_LIMIT`. Otherwise a ``RuntimeError`` carrying its
+    description stands in for it, so a failure always fits in a frame. A
+    :class:`BatchFailed` always travels as one: when its cause cannot travel,
+    only the cause is replaced. The description is ``"module.Type: message"``,
+    cut at :data:`DESCRIPTION_LIMIT` characters, and an exception that cannot
+    print is described by its type alone.
+
+    The model server answers with it on the thread that runs every step, so a
+    raise here would stop every session's answers: anything unexpected while
+    building it falls back to a fixed ``RuntimeError`` naming the type.
     """
-    kind = type(exc)
-    description = f"{kind.__module__}.{kind.__qualname__}: {_text(exc)}"
-    if len(description) > DESCRIPTION_LIMIT:
-        description = description[: DESCRIPTION_LIMIT - 3] + "..."
-    carried = portable(exc) if isinstance(exc, Exception) else RuntimeError(description)
-    error = pickle.dumps(carried, protocol=5)
-    if len(error) > FAILURE_LIMIT:
-        error = pickle.dumps(RuntimeError(f"{description} (too large to send whole)"), protocol=5)
-    return Failed(request_id, error, description)
+    try:
+        if isinstance(exc, BatchFailed):
+            return _batch_failure(request_id, exc)
+        description = _describe(exc)
+        _, error = portable_pickle(exc, limit=FAILURE_LIMIT, description=description)
+        return Failed(request_id, error, description)
+    except Exception:
+        kind = type(exc)
+        description = f"{kind.__module__}.{kind.__qualname__}: <unprintable>"
+        error = pickle.dumps(RuntimeError(description), protocol=5)
+        return Failed(request_id, error, description, batch=isinstance(exc, BatchFailed))
 
 
 def error_of(failed: Failed) -> BaseException:
-    """Return the exception *failed* carries, or a :class:`WorkerError` if it cannot be rebuilt."""
+    """Return the exception *failed* carries, or a :class:`WorkerError` if it cannot be rebuilt.
+
+    A batch failure whose exception cannot be rebuilt (its cause's class is
+    not in this process) is still a :class:`BatchFailed`, with the
+    :class:`WorkerError` as its cause.
+    """
     try:
         error = pickle.loads(failed.error)
     except Exception:
-        return WorkerError(failed.description)
-    if not isinstance(error, BaseException):
-        return WorkerError(failed.description)
-    return error
+        error = None
+    if isinstance(error, BaseException):
+        return error
+    stand_in = WorkerError(failed.description)
+    return BatchFailed(stand_in) if failed.batch else stand_in
 
 
 def check_hello(hello: Hello) -> None:
@@ -232,19 +250,27 @@ def check_hello(hello: Hello) -> None:
 
 
 def check_message(message: object) -> Any:
-    """Return *message* if it is one of this protocol's messages.
+    """Return *message* if it is one of this protocol's messages, by exact type.
+
+    A subclass of a message is not that message: the dataclass is the message's
+    meaning, and a protocol change moves :data:`PROTOCOL`.
 
     Raises:
         ProtocolError: It is not.
     """
-    if not isinstance(message, _MESSAGES):
+    if type(message) not in _MESSAGES:
         raise ProtocolError(f"a frame held a {type(message).__name__}, not a protocol message")
     return message
 
 
 def send_frame(sock: socket.socket, data: bytes) -> None:
-    """Write *data* as one frame. The caller serializes the writers of one socket."""
-    sock.sendall(FRAME_HEADER.pack(len(data)) + data)
+    """Write *data* as one frame. The caller serializes the writers of one socket.
+
+    The header and the body are written by two calls, so a large body is never
+    copied to prepend its header.
+    """
+    sock.sendall(FRAME_HEADER.pack(len(data)))
+    sock.sendall(data)
 
 
 def recv_frame(sock: socket.socket, limit: int) -> bytes:
@@ -271,6 +297,27 @@ def _exactly(sock: socket.socket, n: int) -> bytes:
             raise Closed("the peer closed the connection")
         got += read
     return bytes(buf)
+
+
+def _batch_failure(request_id: int, exc: BatchFailed) -> Failed:
+    cause = exc.cause
+    description = _describe(cause)
+    carried, error = portable_pickle(exc, limit=FAILURE_LIMIT, description=description)
+    if carried is not exc:
+        # The cause cannot travel as itself: keep the wrapper, replace the cause.
+        stand_in, _ = portable_pickle(cause, limit=FAILURE_LIMIT, description=description)
+        if stand_in is cause:
+            stand_in = RuntimeError(description)
+        _, error = portable_pickle(BatchFailed(stand_in), description=description)
+    return Failed(request_id, error, description, batch=True)
+
+
+def _describe(exc: BaseException) -> str:
+    kind = type(exc)
+    description = f"{kind.__module__}.{kind.__qualname__}: {_text(exc)}"
+    if len(description) > DESCRIPTION_LIMIT:
+        description = description[: DESCRIPTION_LIMIT - 3] + "..."
+    return description
 
 
 def _text(exc: BaseException) -> str:

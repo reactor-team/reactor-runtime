@@ -14,7 +14,12 @@ import secrets
 from pathlib import Path
 from typing import Any
 
-from reactor_runtime.ipc.blocks import Block, attach_block, create_block
+from reactor_runtime.ipc.blocks import (
+    Block,
+    SharedSlotAllocationFailed,
+    attach_block,
+    create_block,
+)
 from reactor_runtime.log import get_logger
 
 logger = get_logger(__name__)
@@ -23,7 +28,7 @@ _INITIAL_BYTES = 1 << 20
 
 
 class SharedSlotLimitExceeded(ValueError):  # noqa: N818 (named for the event a caller catches)
-    """A call holds more bytes than its slot's ``max_bytes``; nothing of it was written.
+    """A call holds more bytes than its slot's ``max_bytes``; no header describes it.
 
     Attributes:
         needed: The bytes the call's buffers hold.
@@ -51,10 +56,14 @@ class SharedSlot:
 
     A call starts with :meth:`begin`, appends buffers with :meth:`write`, and
     hands the returned spans to the reader inside the header. When a call's
-    buffers do not fit, the block is replaced by one at least twice its size,
-    up to *max_bytes*, and the bytes already written move with it; the old
-    block is freed once the new one is filled, so a growth briefly holds both.
+    buffers do not fit, the block is replaced by one twice its size, up to
+    *max_bytes*, or by one of exactly the size the call needs when the doubled
+    one cannot be allocated, and the bytes already written move with it.
     Steady state is one block at the writer's high-water mark.
+
+    Every block reserves its whole capacity when it is created, not only the
+    bytes written into it, and the old block is freed only once the new one
+    is filled: a growth briefly holds both.
 
     With *max_bytes* equal to *initial_bytes* the block never grows: the slot
     holds exactly one block of that size, and a call larger than it is refused.
@@ -145,7 +154,13 @@ class SharedSlot:
                 raise SharedSlotLimitExceeded(needed, self._max_bytes)
             size = min(size, self._max_bytes)
         self._generation += 1
-        replacement = create_block(f"{self._prefix}{self._generation}", size, self._directory)
+        name = f"{self._prefix}{self._generation}"
+        try:
+            replacement = create_block(name, size, self._directory)
+        except SharedSlotAllocationFailed:
+            if size == needed:
+                raise
+            replacement = create_block(name, needed, self._directory)
         replacement.buf[: self._cursor] = self._block.buf[: self._cursor]
         logger.info("shared block grown", from_bytes=self.capacity, to_bytes=replacement.size)
         self.close()
