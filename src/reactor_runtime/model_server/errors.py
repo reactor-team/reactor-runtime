@@ -27,9 +27,18 @@ class WorkerError(RuntimeError):
 class BatchFailed(RuntimeError):  # noqa: N818 (named for the event a caller catches)
     """The worker's ``step()`` raised for the whole batch this request was in.
 
-    Every request of the batch gets it, with the same cause. The cause may be
-    another session's input; a model that can tell which request is bad returns
-    an exception for that request alone, which arrives as itself.
+    Every request of the batch gets it, with the same cause, and the cause
+    may come from another session's input: its message, its arguments and its
+    attributes may carry that session's data. The application, written
+    together with the model, decides what of it reaches its own client, for
+    example a generic message for the client and the cause in its own log. A
+    model that can tell which request is bad returns an exception for that
+    request alone, which arrives as itself.
+
+    A ``BatchFailed`` always arrives as one. When its cause cannot travel (it
+    does not pickle, it is too large, or its class is not in the receiving
+    process), the cause arrives as a ``RuntimeError`` or a
+    :class:`WorkerError` naming the original type and message.
 
     Attributes:
         cause: The exception ``step()`` raised.

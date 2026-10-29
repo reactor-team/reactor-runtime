@@ -148,13 +148,53 @@ def portable(exc: Exception) -> Exception:
     """Return *exc* if it pickles, else a ``RuntimeError`` carrying its type and message.
 
     The parent re-raises what a worker raised. An exception whose arguments do
-    not pickle would fail on the queue, so it is replaced by one that does.
+    not pickle would fail on the queue, so it is replaced by one that does. The
+    check uses the protocol the queue pickles with.
     """
+    return portable_pickle(exc, protocol=pickle.DEFAULT_PROTOCOL)[0]
+
+
+def portable_pickle[E: BaseException](
+    exc: E,
+    *,
+    protocol: int = 5,
+    limit: int | None = None,
+    description: str | None = None,
+) -> tuple[E | RuntimeError, bytes]:
+    """Return the exception to send in place of *exc*, and the exact bytes to send.
+
+    *exc* is kept when its pickle in *protocol* is rebuilt by a round trip and,
+    with *limit*, fits it; the bytes returned are that pickle, so what was
+    checked is what is sent. Otherwise a ``RuntimeError`` carrying
+    *description* stands in for it, with ``"(too large to send whole)"`` when
+    only the size failed. Never raises: an exception whose ``__str__`` raises
+    is described by its type alone.
+
+    Args:
+        exc: The exception to carry.
+        protocol: The pickle protocol the bytes will travel in.
+        limit: The most bytes the pickle may take, or ``None`` for no bound.
+        description: The stand-in's message; ``"Type: message"`` of *exc*
+            when omitted.
+    """
+    text = description if description is not None else f"{type(exc).__name__}: {_text(exc)}"
     try:
-        pickle.loads(pickle.dumps(exc))
+        blob = pickle.dumps(exc, protocol=protocol)
+        pickle.loads(blob)
     except Exception:
-        return RuntimeError(f"{type(exc).__name__}: {exc}")
-    return exc
+        stand_in = RuntimeError(text)
+    else:
+        if limit is None or len(blob) <= limit:
+            return exc, blob
+        stand_in = RuntimeError(f"{text} (too large to send whole)")
+    return stand_in, pickle.dumps(stand_in, protocol=protocol)
+
+
+def _text(exc: BaseException) -> str:
+    try:
+        return str(exc)
+    except Exception:
+        return "<unprintable>"
 
 
 def _generate(
