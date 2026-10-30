@@ -2594,7 +2594,6 @@ class Runner(ServiceComponent, ConnectionSink):
             self._uploads.clear()
             self._starting_input_done.set()
             self._client_stats.clear()
-            self._spawn_teardown(asyncio.to_thread(self._recorder.stop))
             self._spawn_teardown(self._close_session(reason))
         if entered and transition.to_state is SessionState.TERMINATED:
             if transition.event is SessionEvent.EVICTION and self._loop is not None:
@@ -2866,20 +2865,45 @@ class Runner(ServiceComponent, ConnectionSink):
         )
 
     async def _close_session(self, reason: EndReason) -> None:
-        """Close the session's connections, then mark cleanup complete.
+        """Close the session's connections and finish its recording, then mark cleanup complete.
 
-        Closing the wires and signalling ``CLEANUP_COMPLETE`` are sequenced, not
-        raced: the session only unwinds to ready once its connections have
-        actually closed, so the model thread :meth:`stop` releases last cannot go
-        while connection-close coroutines are still in flight. A wire that fails
-        to close is logged rather than left to abort the teardown, so one bad
-        connection cannot strand the session in ``CLOSING``.
+        Both run side by side, and ``CLEANUP_COMPLETE`` waits for both. Waiting
+        on the wires means the model thread :meth:`stop` releases last cannot go
+        while connection-close coroutines are still in flight. Waiting on the
+        recorder means every ``chunk_ready`` for the session, its final segment
+        included, is journalled before the session unwinds to ready, so a
+        consumer that stops following the session there has seen all of its
+        recording; it also keeps the next session's start from finding the
+        recorder still busy with this one. A wire or a recorder that fails to
+        close is logged rather than left to abort the teardown, so neither can
+        strand the session in ``CLOSING``. A session that was never recorded
+        waits on its wires alone, so its cleanup still completes within the
+        turn of the loop a zero grace period allows.
         """
+        if self._recorder.recording:
+            await asyncio.gather(self._close_connections(), self._finish_recording())
+        else:
+            await self._close_connections()
+        self._sm.send(SessionEvent.CLEANUP_COMPLETE, reason=reason)
+
+    async def _close_connections(self) -> None:
+        """Close every connection, logging a failure instead of raising it."""
         try:
             await self._connections.close_all()
         except Exception:
             logger.exception("error closing session connections during teardown")
-        self._sm.send(SessionEvent.CLEANUP_COMPLETE, reason=reason)
+
+    async def _finish_recording(self) -> None:
+        """Stop the recorder off the loop, logging a failure instead of raising it.
+
+        The recorder announces its last segments from inside ``stop``, onto the
+        loop, before ``stop`` returns, so they are journalled before this
+        coroutine resumes.
+        """
+        try:
+            await asyncio.to_thread(self._recorder.stop)
+        except Exception:
+            logger.exception("error stopping the recorder during teardown")
 
     def _spawn_teardown(self, coro: Coroutine[Any, Any, None]) -> None:
         """Run a session-teardown coroutine in the background, tracked to completion."""

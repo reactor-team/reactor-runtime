@@ -4006,6 +4006,48 @@ async def test_chunk_ready_is_journalled_on_the_egress(
         await runner.stop()
 
 
+async def test_cleanup_completes_only_after_the_recording_is_finished(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The recorder announces its final segment from inside stop(). The session
+    # must not unwind to ready before that announcement is journalled: a
+    # consumer that stops following the session at cleanup would otherwise
+    # never learn the last segment exists.
+    runner = await _recording_runner(monkeypatch, tmp_path)
+    release = threading.Event()
+    stop = runner.recorder.stop
+
+    def stop_announcing_the_final_segment() -> None:
+        release.wait(timeout=10.0)
+        runner._on_chunk_ready("rec-1", 0)
+        stop()
+
+    monkeypatch.setattr(runner.recorder, "stop", stop_announcing_the_final_segment)
+    try:
+        runner.start_session({})
+        runner.stop_session()
+        await asyncio.sleep(0.05)
+        _expect_state(runner, SessionState.CLOSING)
+
+        release.set()
+        for _ in range(100):
+            if runner._sm.current_state is SessionState.READY:
+                break
+            await asyncio.sleep(0.01)
+        _expect_state(runner, SessionState.READY)
+
+        events = [
+            e.transition.event
+            for e in _egress(runner)
+            if isinstance(e, TransitionEvent)
+            and e.transition.event in (SessionEvent.CHUNK_READY, SessionEvent.CLEANUP_COMPLETE)
+        ]
+        assert events == [SessionEvent.CHUNK_READY, SessionEvent.CLEANUP_COMPLETE]
+    finally:
+        release.set()
+        await runner.stop()
+
+
 async def test_closing_self_loop_does_not_rerun_teardown(started_runner: Runner) -> None:
     started_runner.start_session({})
     conn = SlowCloseConnection(1)
