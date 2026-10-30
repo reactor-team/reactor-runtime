@@ -67,6 +67,7 @@ counts live memory rather than the free memory glibc keeps cached.
 | `connection_churn` | One session. Each cycle a client joins, streams a webcam both ways until 60 frames come back, and leaves. The client speaks the v0 JSON control protocol. |
 | `connection_churn_v1` | The same churn with a client that speaks v1 protobuf, as current SDKs do: it also requests the schema and, once a second, pings, sends client stats and a `set_effect` or `set_intensity` command. Every request must be answered without an error (`unanswered_requests`). |
 | `room_participant_churn` | One session connected to a LiveKit room, the room connection open throughout. Each cycle a participant joins the room, requests the schema and runs a command over the Reactor protocol, calls an RPC method that runs a command, sends a data packet on a topic that runs one, publishes a `webcam` track the session reads by name, sends a microphone byte stream on the topic mapped to `mic`, and leaves. Every request that has an answer must get it, and the topic command must get none; the runtime's own counts must also show that the model's handler ran the topic command, which the runtime did not reject, and that frames arrived on both inputs, since LiveKit accepts a packet, a track, or a stream whether or not the runtime uses it (`unanswered_requests`). Needs a LiveKit server (`LIVEKIT_URL`), and skips without one or against a runtime that serves no LiveKit transport. |
+| `room_leave_unanswered` | Each cycle starts a session, connects it to a LiveKit room through a relay (`endurance/relay.py`), and stops it while the relay has stopped answering, holding the connection open and forwarding nothing, as a server that no longer responds does. The session must be ready again within 6 s while the room is silent (`failed_stops`). The relay answers again after 12 s, and the room's leave, which ran on past the runtime's bound, must finish: the loop must be back to the tasks it ran before any session (`tasks`). Needs a LiveKit server (`LIVEKIT_URL`), and skips without one or against a runtime that serves no LiveKit transport. |
 | `session_churn` | Each cycle starts a session under a fresh id, a v1 client streams until its 60 frames come back, and the session is stopped: in turn a plain stop, the client leaving first and the orphaned session stopped after, a stop with a close reason, and a moderated stop. The last two owe the client its `session_ended` or `moderation` notice before the connection closes. The runtime is read once the session is ready again. |
 | `multi_connection` | One session shared by several clients. Each cycle a v1 client publishes the webcam, and three v1 viewers that publish nothing, receive-only with no webcam track negotiated, join and each get 60 frames of the same output. They leave in two steps, in turn the viewers first or the publisher first; when the publisher leaves first, a new publisher takes over the webcam while the viewers stay, and must be granted it. |
 | `steady_stream` | One v1 client stays connected for the whole run, streaming while it pings, sends client stats and a command once a second. The runtime is read every 15 s as it streams: what the live connection holds (`live_*`, `tasks`) must never rise above the first reading, `pacers_holding_output` and `pinned_batches` stay 0, and every interval gets 60 frames back. Once the client leaves, the reading after teardown must be 0 on every count (`*_after_close`), with the tasks back to the reading before it joined. The trends judge the streaming readings. |
@@ -83,8 +84,9 @@ mise run test-endurance endurance-tests/tests/test_connection_churn.py
 # A smoke run, as PR CI does: two cycles, or one per stop for session_churn,
 # judged only on what each cycle shows on its own.
 ENDURANCE_SMOKE_CYCLES=2 mise run test-endurance
-# The room churn, against a local dev LiveKit server.
+# The room scenarios, against a local dev LiveKit server.
 LIVEKIT_URL=ws://127.0.0.1:7880 mise run test-endurance endurance-tests/tests/test_room_participant_churn.py
+LIVEKIT_URL=ws://127.0.0.1:7880 mise run test-endurance endurance-tests/tests/test_room_leave_unanswered.py
 ```
 
 Each run writes `endurance-results/<scenario>.json`, `-report.md` and
@@ -130,9 +132,9 @@ every PR that touches the runtime:
   that dies without closing, sessions started and stopped, with and without a
   close reason or a moderation verdict, several clients on one session, one
   connection streaming for hours, a model run in worker processes, stepped
-  sessions and their step requests, and room participants with their RPC and
-  data-topic commands and media inputs; uploads, clips and recordings have
-  none yet.
+  sessions and their step requests, room participants with their RPC and
+  data-topic commands and media inputs, and room connections closed while
+  their server does not answer; uploads, clips and recordings have none yet.
 - **A change to what the launcher hooks** (`MediaPacer.stop`,
   `http_server.build_app`, `Runner._connections`, the transport classes the
   probe counts): update `endurance/launcher.py` in the same PR.

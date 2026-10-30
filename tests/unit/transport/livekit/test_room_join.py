@@ -496,3 +496,95 @@ async def test_the_session_reopens_a_timed_out_room_only_once_the_first_join_has
     assert while_leaving.status_code == 409
     assert first.disconnects == 1
     assert after.status_code == 202
+
+
+@pytest.fixture
+def short_leave(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(room_module, "LEAVE_TIMEOUT_SECONDS", 0.05)
+
+
+def _slow_leave(monkeypatch: pytest.MonkeyPatch, room: FakeRoom) -> Gate:
+    """Make *room*'s leave wait on a gate the test opens."""
+    leave = Gate(open_=False)
+
+    async def disconnect() -> None:
+        await leave.pass_through()
+        room.disconnects += 1
+
+    monkeypatch.setattr(room, "disconnect", disconnect)
+    return leave
+
+
+@pytest.mark.usefixtures("short_leave")
+async def test_a_slow_leave_ends_the_close_at_the_bound_and_runs_on_uncancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    room, control = FakeRoom(), FakeControl(_VIDEO_OUT)
+    leave = _slow_leave(monkeypatch, room)
+    session = _session(room, control)
+    session.start()
+    await _settle()
+    assert session.state is RoomState.OPEN
+
+    await asyncio.wait_for(session.leave(), timeout=1.0)
+
+    assert session.state is RoomState.CLOSED
+    assert control.closed == [ConnId(4711)]
+    assert leave.entered
+    assert not leave.cancelled
+    assert not session.settled
+
+    leave.release()
+    await _settle()
+
+    assert not leave.cancelled
+    assert room.disconnects == 1
+    assert session.settled
+
+
+@pytest.mark.usefixtures("short_leave")
+async def test_a_leave_that_fails_settles_the_room_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    room, control = FakeRoom(), FakeControl(_VIDEO_OUT)
+    leave = _slow_leave(monkeypatch, room)
+    session = _session(room, control)
+    session.start()
+    await _settle()
+
+    await asyncio.wait_for(session.leave(), timeout=1.0)
+    leave.release(RuntimeError("the room is gone"))
+    await _settle()
+
+    assert session.settled
+
+
+@pytest.mark.usefixtures("short_deadline", "short_leave")
+async def test_the_session_reopens_a_room_only_once_a_slow_leave_has_finished(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect = Gate(open_=False)
+    first = FakeRoom(connect=connect)
+    leave = _slow_leave(monkeypatch, first)
+    rooms = iter([first, FakeRoom()])
+    monkeypatch.setattr(room_module.rtc, "Room", lambda: next(rooms))
+    app = FastAPI()
+    LiveKitRouter().mount(app, cast(Any, RouterRunner()))
+    path = "/sessions/s1/transport/livekit/connections"
+    body = {"url": "wss://rooms.example", "token": "a-token"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://runtime") as client:
+        assert (await client.post(path, json=body)).status_code == 202
+        await asyncio.sleep(0.1)  # past the deadline: the join failed, its connect still runs
+        connect.release()
+        await asyncio.sleep(0.1)  # past the leave bound: the leave still runs
+
+        while_leaving = await client.post(path, json=body)
+        leave.release()
+        await _settle()
+        after = await client.post(path, json=body)
+
+    assert leave.entered
+    assert not leave.cancelled
+    assert while_leaving.status_code == 409
+    assert first.disconnects == 1
+    assert after.status_code == 202
