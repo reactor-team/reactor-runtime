@@ -1314,6 +1314,34 @@ def test_start_under_a_reused_id_drops_everything_the_earlier_run_left(tmp_path:
         recorder.close()
 
 
+@pytest.mark.parametrize("session_id", ["../victim", "", "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA"])
+def test_start_refuses_an_id_that_is_not_a_uuid_before_touching_the_filesystem(
+    tmp_path: Path, session_id: str
+) -> None:
+    # The start empties the directory the id names, so an id that escapes the
+    # recordings root would delete a sibling directory's contents.
+    root = tmp_path / "recordings"
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "weights.bin").write_bytes(b"keep")
+    recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(root)))
+    with pytest.raises(ValueError, match="lowercase UUID"):
+        recorder.start(session_id)
+    recorder.close()
+    assert (victim / "weights.bin").read_bytes() == b"keep"
+
+
+def test_start_refuses_an_absolute_path_as_an_id(tmp_path: Path) -> None:
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "weights.bin").write_bytes(b"keep")
+    recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path / "recordings")))
+    with pytest.raises(ValueError, match="lowercase UUID"):
+        recorder.start(str(victim))
+    recorder.close()
+    assert (victim / "weights.bin").read_bytes() == b"keep"
+
+
 def test_reap_skips_the_active_recording_even_with_a_stale_marker(tmp_path: Path) -> None:
     recorder = Recorder(RecordingConfig(enabled=True, recording_dir=str(tmp_path)))
     recorder.start(_SID)

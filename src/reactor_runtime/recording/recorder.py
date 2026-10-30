@@ -129,9 +129,10 @@ _IDLE_CADENCE_FACTOR = 1.5
 # pause is one long gap among regular ones, so a robust middle of a few recent
 # gaps follows the model's cadence without being stretched by a pause.
 _CADENCE_WINDOW = 5
-# A recording id is a lowercase UUID. Validating a URL path segment against this
-# shape before joining it onto the recordings root closes the path-traversal
-# vector on ``/clips`` and ``/clips/chunks/{id}/{file}``.
+# A recording id is a lowercase UUID. Validating an id against this shape before
+# joining it onto the recordings root closes the path-traversal vector on
+# ``start`` (which empties the directory) and on ``/clips`` and
+# ``/clips/chunks/{id}/{file}``.
 _SESSION_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 # init plus the zero-padded fMP4 segments the encoder produces; anything else is
 # not a recording artifact.
@@ -404,9 +405,16 @@ class Recorder:
 
         Args:
             session_id: The id this recording is stored and addressed under.
+
+        Raises:
+            ValueError: If *session_id* is not a lowercase UUID. The id names a
+                directory the start empties, so an id like ``../weights`` or an
+                absolute path must never reach the filesystem.
         """
         if not self._config.enabled or self._started:
             return
+        if not _SESSION_ID_RE.match(session_id):
+            raise ValueError(f"a recording id must be a lowercase UUID, got {session_id!r}")
         self._reset_session_state()
         if self._root is None:
             self._root = (
