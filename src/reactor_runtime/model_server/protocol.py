@@ -310,6 +310,10 @@ def _exactly(sock: socket.socket, n: int) -> bytes:
 def _batch_failure(request_id: int, exc: BatchFailed) -> Failed:
     cause = exc.cause
     description = _describe(cause)
+    if not isinstance(cause, Exception):
+        # Raised again on the session's side, it would cancel the session's
+        # task or end its process, as failure() says for a direct failure.
+        exc = BatchFailed(RuntimeError(description))
     carried, error = portable_pickle(exc, limit=FAILURE_LIMIT, description=description)
     if carried is not exc:
         # The cause cannot travel as itself: keep the wrapper, replace the cause.

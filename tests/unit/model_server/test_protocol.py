@@ -205,6 +205,16 @@ def test_a_base_exception_that_is_not_an_exception_arrives_as_a_runtime_error(
     assert type(raised).__name__ in str(error)
 
 
+@pytest.mark.parametrize("raised", [asyncio.CancelledError(), KeyboardInterrupt(), SystemExit(3)])
+def test_a_batch_failure_whose_cause_is_not_an_exception_carries_a_runtime_error(
+    raised: BaseException,
+) -> None:
+    error = error_of(failure(3, BatchFailed(raised)))
+    assert isinstance(error, BatchFailed)
+    assert type(error.cause) is RuntimeError
+    assert type(raised).__name__ in str(error.cause)
+
+
 @pytest.mark.parametrize("kind", [WorkerRejected, PayloadTooLarge])
 def test_the_runtimes_own_exceptions_arrive_as_themselves(kind: type[Exception]) -> None:
     error = error_of(failure(3, kind("too large")))
