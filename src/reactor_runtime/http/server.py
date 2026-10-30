@@ -14,12 +14,19 @@ import asyncio
 from collections.abc import Callable
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-from reactor_runtime.core import Health, HealthStatus, RuntimeConfig, ServiceComponent
+from reactor_runtime.core import (
+    Health,
+    HealthStatus,
+    RuntimeConfig,
+    RuntimeState,
+    ServiceComponent,
+)
 from reactor_runtime.http.routes import (
     EgressRoutes,
+    HealthResponse,
     RecordingRoutes,
     SessionRoutes,
     StepRoutes,
@@ -102,46 +109,14 @@ class _ServerWithoutSignals(uvicorn.Server):
         """Do nothing — the service owns process signals."""
 
 
-class HttpServer(ServiceComponent):
-    """The single HTTP ingress, mounting the route groups and transport routers.
+class _AsgiServer:
+    """One ASGI app served by uvicorn as a service component, on one address."""
 
-    Built with the runner it exposes and the transport routers that grow the
-    surface per connection type. The FastAPI app is assembled at construction;
-    the uvicorn server is created and run on :meth:`start`.
-
-    It holds the concrete :class:`~reactor_runtime.runner.Runner` deliberately:
-    as the assembler of the route groups it hands them the full session-control
-    and read surface they drive (start/stop session, descriptor, schema, events,
-    health, recorder, uploads), which is broader than the neutral
-    :class:`~reactor_runtime.transport.router.SessionControl` the transports it
-    mounts hold.
-    """
-
-    name = "http"
-    depends_on: tuple[str, ...] = ("runner",)
-
-    def __init__(
-        self,
-        cfg: RuntimeConfig,
-        runner: Runner,
-        transports: list[TransportRouter],
-        process_health: Callable[[], Health],
-        metrics: RuntimeMetrics,
-    ) -> None:
-        """Assemble the app from the route groups and each transport's routes.
-
-        Args:
-            cfg: The configuration naming the address to bind.
-            runner: The runner the routes drive and the transports report into.
-            transports: One router per connection type, each mounted onto the app.
-            process_health: The health report ``/health`` answers with,
-                injected by the assembly so the endpoint speaks for the whole
-                process rather than any one component.
-            metrics: The registry ``/metrics`` renders, injected by the assembly
-                that also hands it to the components which observe on it.
-        """
-        self._cfg = cfg
-        self._app = build_app(runner, transports, process_health, metrics)
+    def __init__(self, app: FastAPI, host: str, port: int) -> None:
+        """Hold the app and the address it is served on; :meth:`start` binds it."""
+        self._app = app
+        self._host = host
+        self._port = port
         self._server: uvicorn.Server | None = None
         self._serve_task: asyncio.Task[None] | None = None
 
@@ -160,8 +135,8 @@ class HttpServer(ServiceComponent):
         # cannot linger on a long-lived connection.
         config = uvicorn.Config(
             self._app,
-            host=self._cfg.host,
-            port=self._cfg.port,
+            host=self._host,
+            port=self._port,
             log_level="warning",
             timeout_graceful_shutdown=_HTTP_SHUTDOWN_SECONDS,
         )
@@ -213,3 +188,83 @@ class HttpServer(ServiceComponent):
         if self._server is not None and self._server.started:
             return Health.healthy()
         return Health(HealthStatus.UNHEALTHY, "http server not started")
+
+
+class HttpServer(_AsgiServer, ServiceComponent):
+    """The single HTTP ingress, mounting the route groups and transport routers.
+
+    Built with the runner it exposes and the transport routers that grow the
+    surface per connection type. The FastAPI app is assembled at construction;
+    the uvicorn server is created and run on :meth:`start`.
+
+    It holds the concrete :class:`~reactor_runtime.runner.Runner` deliberately:
+    as the assembler of the route groups it hands them the full session-control
+    and read surface they drive (start/stop session, descriptor, schema, events,
+    health, recorder, uploads), which is broader than the neutral
+    :class:`~reactor_runtime.transport.router.SessionControl` the transports it
+    mounts hold.
+    """
+
+    name = "http"
+    depends_on: tuple[str, ...] = ("runner",)
+
+    def __init__(
+        self,
+        cfg: RuntimeConfig,
+        runner: Runner,
+        transports: list[TransportRouter],
+        process_health: Callable[[], Health],
+        metrics: RuntimeMetrics,
+    ) -> None:
+        """Assemble the app from the route groups and each transport's routes.
+
+        Args:
+            cfg: The configuration naming the address to bind.
+            runner: The runner the routes drive and the transports report into.
+            transports: One router per connection type, each mounted onto the app.
+            process_health: The health report ``/health`` answers with,
+                injected by the assembly so the endpoint speaks for the whole
+                process rather than any one component.
+            metrics: The registry ``/metrics`` renders, injected by the assembly
+                that also hands it to the components which observe on it.
+        """
+        super().__init__(build_app(runner, transports, process_health, metrics), cfg.host, cfg.port)
+
+
+class HealthServer(_AsgiServer, ServiceComponent):
+    """The HTTP surface of a process that serves no sessions: ``GET /health`` alone.
+
+    It answers with the same response model as the session runtime's
+    ``/health``: the process's verdict (``200`` healthy, ``503`` unhealthy),
+    its lifecycle word, and why. It starts before the components it reports
+    on, so a slow start is observable as ``loading``.
+
+    Args:
+        host: The address to bind.
+        port: The port to bind.
+        process_health: The health report ``/health`` answers with.
+        state: The process's lifecycle word.
+        depends_on: The components it reports on, which start after it.
+    """
+
+    name = "http"
+
+    def __init__(
+        self,
+        *,
+        host: str,
+        port: int,
+        process_health: Callable[[], Health],
+        state: Callable[[], RuntimeState],
+        depends_on: tuple[str, ...] = (),
+    ) -> None:
+        self.depends_on = depends_on
+        app = FastAPI(title="reactor-runtime")
+
+        @app.get("/health", responses={503: {"description": "The process is unhealthy."}})
+        async def health(response: Response) -> HealthResponse:
+            report = process_health()
+            response.status_code = 503 if report.status is HealthStatus.UNHEALTHY else 200
+            return HealthResponse(status=report.status, state=state(), detail=report.detail)
+
+        super().__init__(app, host, port)

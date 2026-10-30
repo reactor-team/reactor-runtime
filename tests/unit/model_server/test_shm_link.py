@@ -147,6 +147,39 @@ def test_arrays_travel_in_the_slot_directory_and_arrive_as_copies(root: Path) ->
         pair.listener.close()
 
 
+def test_the_session_removes_the_probe_before_it_allocates_its_request_block(
+    root: Path,
+) -> None:
+    transport = _transport(root)
+    address = str(root / "sock")
+    listener = transport.listen(address)
+    worker: list[ShmLink] = []
+    received: list[object] = []
+
+    def serve() -> None:
+        worker.append(listener.accept())
+        received.append(worker[0].receive())
+
+    server = threading.Thread(target=serve)
+    server.start()
+    session = transport.connect(address, 0)
+    try:
+        # Nothing has crossed the link yet, so the model server has not dropped
+        # the probe itself: a slot sized for two request blocks and one output
+        # block must not have to hold it as well.
+        names = sorted(p.name for p in (root / "s0").iterdir())
+        assert [n[: len("rrms_s0_")] for n in names] == ["rrms_s0_", "rrms_w0_"]
+        assert not any(n.endswith("probe") for n in names)
+        session.send(Hello(slot=0))
+        server.join(timeout=5)
+        assert received == [Hello(slot=0)]
+    finally:
+        session.close()
+        for link in worker:
+            link.close()
+        listener.close()
+
+
 def test_after_a_cancel_the_next_request_is_written_to_a_new_block(root: Path) -> None:
     pair = Pair(root, _transport(root))
     session, worker = pair.open()

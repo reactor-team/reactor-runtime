@@ -20,6 +20,7 @@ imports it without dragging an ASGI server or a media engine along.
 from __future__ import annotations
 
 import importlib
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -91,6 +92,27 @@ def load_config(manifest: Path) -> RuntimeConfig:
         livekit=_livekit_from_manifest(runtime),
         worker=_worker_from_manifest(runtime),
     )
+
+
+def load_workspace(directory: Path | None = None) -> RuntimeConfig:
+    """Load the model workspace in *directory*: its manifest, with its code on the import path.
+
+    The workspace is the directory that holds ``reactor.yaml``, the working
+    directory when omitted. Its directory is put first on the import path, so
+    a model referenced as ``"pipeline:Model"`` resolves to the code beside the
+    manifest. Every entry point of the runtime starts this way.
+
+    Raises:
+        SystemExit: No ``reactor.yaml`` is there, or it is not valid YAML or
+            carries no ``runtime.import``.
+        ValueError: A block of the manifest has the wrong shape.
+    """
+    root = directory or Path.cwd()
+    manifest = root / MANIFEST
+    if not manifest.is_file():
+        raise SystemExit(f"no {MANIFEST} found in {root}")
+    sys.path.insert(0, str(manifest.parent))
+    return load_config(manifest)
 
 
 def _model_name(block: Any) -> str | None:

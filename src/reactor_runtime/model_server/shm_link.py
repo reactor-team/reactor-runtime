@@ -53,9 +53,11 @@ without waiting for a step still running for its session: that step's arrays
 are its own, and its result, sent on the closed link, is dropped. It does the
 same for the previous link of a slot before a new link allocates there, since
 a slot belongs to one session. So a session runtime that restarts during a
-long step finds its slot's directory empty, and the directory holds at most
-``2 * shm_input_bytes + shm_output_bytes``, plus one page for the probe while
-the link opens: the size a deployment gives each slot's volume.
+long step finds its slot's directory empty. The setup probe below is gone
+before the session allocates its first request block. A slot's directory
+therefore holds at most two request blocks and one output block, in whole
+64 KiB pages: :func:`~reactor_runtime.core.shm_slot_bytes`, the size a
+deployment gives each slot's volume.
 
 Blocks are named by who writes them: ``<prefix>s<slot>_`` for a session's
 requests and ``<prefix>w<slot>_`` for the model server's outputs, where the
@@ -70,7 +72,9 @@ The session names its slot and the prefix of its request blocks; the model
 server answers with a probe block it wrote in the slot's directory, and the
 session reads it from its own: a deployment where the two do not see the same
 memory fails at once, with :class:`~reactor_runtime.model_server.WorkerUnreachable`
-saying so, instead of on the first step.
+saying so, instead of on the first step. The session removes the probe once it
+has read it; the model server removes it too, on the link's first message or
+when the link closes, for a session that never got that far.
 """
 
 from __future__ import annotations
@@ -665,7 +669,7 @@ class UnixShmTransport:
                 raise WorkerUnreachable(
                     f"slot {slot}'s shared-memory directory {directory} has no room for a "
                     f"{setup.input_bytes}-byte request block: size the session's volume to at "
-                    "least 2 * shm_input_bytes + shm_output_bytes"
+                    "least 2 * shm_input_bytes + shm_output_bytes, in whole 64 KiB pages"
                 ) from None
         except BaseException:
             stream.close()
@@ -706,6 +710,8 @@ class UnixShmTransport:
             probe.close()
         if seen != answer.nonce:
             raise WorkerUnreachable(_not_shared(directory))
+        with contextlib.suppress(OSError):
+            (directory / answer.probe).unlink()
         return answer
 
 

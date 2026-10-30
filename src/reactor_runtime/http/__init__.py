@@ -14,10 +14,11 @@ from reactor_runtime.http.routes import (
     StepRoutes,
     UploadRoutes,
 )
-from reactor_runtime.http.server import HttpServer
+from reactor_runtime.http.server import HealthServer, HttpServer
 
 __all__ = [
     "EgressRoutes",
+    "HealthServer",
     "HttpServer",
     "RecordingRoutes",
     "SessionRoutes",

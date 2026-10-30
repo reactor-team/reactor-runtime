@@ -11,8 +11,10 @@ import pytest
 from reactor_runtime.core import (
     DEFAULT_SHM_INPUT_BYTES,
     DEFAULT_SHM_OUTPUT_BYTES,
+    SHM_PAGE_BYTES,
     HealthStatus,
     WorkerConfig,
+    shm_slot_bytes,
 )
 from reactor_runtime.model_server import ModelServer, ServerSettings
 
@@ -109,6 +111,15 @@ def test_the_manifest_lowers_max_batch_and_sets_the_rest() -> None:
         shm_output_bytes=32 << 20,
     )
     assert config.shm_slot_bytes == 36 << 20
+
+
+def test_the_slot_bound_counts_each_block_in_whole_64_kib_pages() -> None:
+    page = SHM_PAGE_BYTES
+    assert page == 64 << 10
+    assert shm_slot_bytes(page, 4 * page) == 2 * page + 4 * page
+    assert shm_slot_bytes(1, page + 1) == 2 * page + 2 * page
+    config = WorkerConfig(import_ref="m:M", shm_input_bytes=1, shm_output_bytes=1)
+    assert config.shm_slot_bytes == 3 * page
 
 
 def test_the_effective_sizes_are_the_declared_ones_or_the_defaults() -> None:
