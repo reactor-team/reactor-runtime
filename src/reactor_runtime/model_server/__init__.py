@@ -22,6 +22,14 @@ from reactor_runtime.model_server.errors import (
     WorkerLost,
     WorkerRejected,
     WorkerStopping,
+    WorkerUnreachable,
+)
+from reactor_runtime.model_server.link import (
+    LinkListener,
+    LinkTransport,
+    NoListener,
+    StreamLink,
+    WorkerLink,
 )
 from reactor_runtime.model_server.server import (
     ModelServer,
@@ -31,14 +39,20 @@ from reactor_runtime.model_server.server import (
 
 __all__ = [
     "BatchFailed",
+    "LinkListener",
+    "LinkTransport",
     "ModelServer",
+    "NoListener",
     "PayloadTooLarge",
     "ServerRequest",
     "ServerSettings",
     "StepExpired",
     "StepUnanswered",
+    "StreamLink",
     "WorkerError",
+    "WorkerLink",
     "WorkerLost",
     "WorkerRejected",
     "WorkerStopping",
+    "WorkerUnreachable",
 ]
