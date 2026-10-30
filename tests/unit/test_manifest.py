@@ -5,12 +5,14 @@ import pytest
 
 from reactor_runtime import ReactorApp
 from reactor_runtime.core import (
+    DEFAULT_SHM_INPUT_BYTES,
     LiveKitBlockError,
     LiveKitConfig,
     LiveKitRpcMethod,
     RecordingConfig,
     RuntimeConfig,
     StepResultsConfig,
+    WorkerConfig,
 )
 from reactor_runtime.manifest import import_model_class, load_config
 
@@ -432,3 +434,65 @@ def test_livekit_check_refuses_a_name_the_model_does_not_declare(
 ) -> None:
     with pytest.raises(LiveKitBlockError, match=reason):
         config.check(commands={"c"}, messages={"d"}, input_tracks={"t"})
+
+
+_WORKER_MANIFEST = """\
+runtime:
+  import: plasma:Plasma
+  worker:
+    import: plasma_worker:PlasmaModel
+    max_batch: 2
+    batch_window: 0.005
+    shm_output_bytes: 67108864
+"""
+
+
+def test_load_config_leaves_the_worker_out_when_the_model_does_not_split(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_MANIFEST)
+
+    assert load_config(manifest).worker is None
+
+
+def test_load_config_reads_the_worker_block_into_typed_settings(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_WORKER_MANIFEST)
+
+    worker = load_config(manifest).worker
+
+    assert worker is not None
+    assert worker == WorkerConfig(
+        import_ref="plasma_worker:PlasmaModel",
+        max_batch=2,
+        batch_window=0.005,
+        shm_output_bytes=67108864,
+    )
+    assert worker.shm_slot_bytes == DEFAULT_SHM_INPUT_BYTES + 67108864
+
+
+@pytest.mark.parametrize(
+    ("block", "match"),
+    [
+        ("worker: plasma_worker:PlasmaModel", "must be a block"),
+        ("worker:", "must be a block"),
+        ("worker:\n  import: plasma_worker:PlasmaModel", "must be a block"),
+        ("worker:\n    max_batch: 2", "import must name the model half"),
+        ("worker:\n    import: plasma_worker:PlasmaModel\n    shm_size: 1", "unknown keys"),
+        ("worker:\n    import: plasma_worker:PlasmaModel\n    max_batch: '2'", "positive integer"),
+        ("worker:\n    import: plasma_worker:PlasmaModel\n    shm_input_bytes: 0", "positive"),
+        ("worker:\n    import: plasma_worker:PlasmaModel\n    batch_window: -1", "at least 0"),
+        ("worker:\n    import: plasma_worker", "module:Class"),
+        ("worker:\n    import: 'plasma_model:'", "module:Class"),
+        ("worker:\n    import: ':PlasmaModel'", "module:Class"),
+        ("worker:\n    import: ':'", "module:Class"),
+        ("worker:\n    import: 3", "module:Class"),
+    ],
+)
+def test_load_config_refuses_a_worker_block_of_the_wrong_shape(
+    tmp_path: Path, block: str, match: str
+) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(f"runtime:\n  import: plasma:Plasma\n  {block}\n")
+
+    with pytest.raises(ValueError, match=match):
+        load_config(manifest)

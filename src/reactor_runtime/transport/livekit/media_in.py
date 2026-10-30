@@ -18,16 +18,11 @@ names the stream, as JSON::
 
 and after its last frame comes one with no samples, ``data`` of shape
 ``(1, 0)``, and ``{"stream_id": "AUDIO_x7Kq", "ended": true}``. A stream ends when
-it closes or when its sender leaves. A new stream on the topic never ends one
-that is still open: up to :data:`MAX_OPEN_INPUT_STREAMS` feed the track at
-once, each to its own end, and their frames interleave in the order they
-arrive. A model that plays streams one after another, such as one utterance
-each, tells them apart by ``stream_id``. A stream past the bound is refused.
-
-A stream without the attributes is taken to be at the track's rate, in mono;
-one whose ``sample_rate`` is not between :data:`MIN_STREAM_RATE` and
-:data:`MAX_STREAM_RATE`, or whose ``num_channels`` is not between 1 and
-:data:`MAX_STREAM_CHANNELS`, is refused.
+it closes, when a new stream starts on the same topic while it is open, or when
+its sender leaves. A stream without the attributes is taken to be at the track's
+rate, in mono; one whose ``sample_rate`` is not between
+:data:`MIN_STREAM_RATE` and :data:`MAX_STREAM_RATE`, or whose ``num_channels``
+is not between 1 and :data:`MAX_STREAM_CHANNELS`, is refused.
 
 Each input track has one owner across the session, whatever its transport: the
 first client to feed it holds it, as a WebRTC client's publish request does,
@@ -67,15 +62,6 @@ MAX_STREAM_RATE = 192_000
 
 MAX_STREAM_CHANNELS = 8
 """The most ``num_channels`` a byte stream may declare."""
-
-MAX_OPEN_INPUT_STREAMS = 4
-"""How many byte streams may feed one topic at once.
-
-A sender that closes each stream before it opens the next can still have two
-open here: the next stream's header may arrive before the runtime has read the
-end of the one before. A stream past the bound is refused, so a stream already
-feeding the track is never cut.
-"""
 
 VIDEO_QUEUE_FRAMES = 4
 """How many decoded frames a remote video track may queue; past it, the oldest is dropped.
@@ -205,7 +191,7 @@ class StreamFramer:
 
 @dataclass
 class _Stream:
-    """A byte stream that feeds a topic's input track."""
+    """The byte stream that currently feeds a topic's input track."""
 
     stream_id: str
     sender: str
@@ -255,8 +241,8 @@ class RoomInputs:
         # track id, in arrival order: its sender gets no word that it was
         # refused, so the room starts it once a participant frees the input.
         self._waiting: dict[str, _WaitingTrack] = {}
-        # Each byte stream topic, and the streams open on it, by stream id.
-        self._streams: dict[str, dict[str, _Stream]] = {}
+        # Each byte stream topic, and the stream that currently feeds it.
+        self._streams: dict[str, _Stream] = {}
         # The readers each participant's media runs on, so its leaving stops them.
         self._readers: dict[str, set[asyncio.Task[None]]] = {}
 
@@ -266,11 +252,7 @@ class RoomInputs:
         return list(self._mapped)
 
     def on_byte_stream(self, reader: rtc.ByteStreamReader, sender: str, conn_id: ConnId) -> None:
-        """Start feeding an input track from a byte stream a client opened.
-
-        Streams already open on the topic go on feeding the track. The
-        stream is refused when :data:`MAX_OPEN_INPUT_STREAMS` are open there.
-        """
+        """Start feeding an input track from a byte stream a client opened."""
         topic = reader.info.topic
         track = self._mapped.get(topic)
         info = self._inputs.get(track or "")
@@ -291,19 +273,13 @@ class RoomInputs:
             )
             reader.close()
             return
-        open_count = len(self._streams.get(topic, {}))
-        if open_count >= MAX_OPEN_INPUT_STREAMS:
-            logger.warning(
-                "refused an input byte stream: too many open on its topic",
-                topic=topic,
-                open_streams=open_count,
-            )
-            reader.close()
-            return
         if not self._claim(track, conn_id, streamed=True):
             logger.debug("dropped a stream for an input track another client holds")
             reader.close()
             return
+        previous = self._streams.get(topic)
+        if previous is not None:
+            self._end(topic, previous)
         stream = _Stream(
             stream_id=reader.info.stream_id,
             sender=sender,
@@ -315,7 +291,7 @@ class RoomInputs:
             ).encode(),
             reader=reader,
         )
-        self._streams.setdefault(topic, {})[stream.stream_id] = stream
+        self._streams[topic] = stream
         self._spawn(sender, self._feed(topic, stream, reader))
 
     def on_track(self, track: rtc.Track, sender: str, conn_id: ConnId) -> None:
@@ -369,7 +345,7 @@ class RoomInputs:
 
         A track waiting for one of those inputs then starts feeding it.
         """
-        for topic, stream in self._open_streams():
+        for topic, stream in list(self._streams.items()):
             if stream.sender == sender:
                 self._end(topic, stream)
         for task in self._readers.pop(sender, set()):
@@ -391,7 +367,7 @@ class RoomInputs:
         Each stream's reader is closed directly: a reader task cancelled
         before it first runs never reaches its own cleanup.
         """
-        for topic, stream in self._open_streams():
+        for topic, stream in list(self._streams.items()):
             self._end(topic, stream)
         for tasks in self._readers.values():
             for task in tasks:
@@ -444,6 +420,9 @@ class RoomInputs:
     async def _feed(self, topic: str, stream: _Stream, reader: rtc.ByteStreamReader) -> None:
         try:
             async for chunk in reader:
+                if self._streams.get(topic) is not stream:
+                    # Superseded by a newer stream on the topic, which ended this one.
+                    return
                 for samples in stream.framer.push(chunk):
                     self._push(stream, samples)
         except asyncio.CancelledError:
@@ -452,22 +431,12 @@ class RoomInputs:
             logger.warning("reading an input byte stream failed", topic=topic, exc_info=True)
         finally:
             reader.close()
-        self._end(topic, stream)
-
-    def _open_streams(self) -> list[tuple[str, _Stream]]:
-        """Every open stream with its topic, in the order each topic's streams opened."""
-        return [(topic, s) for topic, streams in self._streams.items() for s in streams.values()]
+        if self._streams.get(topic) is stream:
+            self._end(topic, stream)
 
     def _end(self, topic: str, stream: _Stream) -> None:
-        """Send what the stream left, then its end frame, and stop it feeding the track.
-
-        A stream ends once: ending one that has already ended does nothing.
-        """
-        streams = self._streams.get(topic)
-        if streams is None or streams.get(stream.stream_id) is not stream:
-            return
-        del streams[stream.stream_id]
-        if not streams:
+        """Send what the stream left, then its end frame, and stop it feeding the track."""
+        if self._streams.get(topic) is stream:
             del self._streams[topic]
         stream.reader.close()
         for samples in stream.framer.flush():
