@@ -3155,6 +3155,35 @@ async def test_model_crash_terminates_the_session(monkeypatch: pytest.MonkeyPatc
         await runner.stop()
 
 
+async def test_a_crash_called_while_idle_ends_the_process_as_a_failure(
+    started_runner: Runner,
+) -> None:
+    called: list[bool] = []
+    started_runner.request_shutdown = lambda *, failure=False: called.append(failure)
+    _expect_state(started_runner, SessionState.READY)
+    model = created_models[-1]
+
+    model.crash(RuntimeError("worker_died: the model server closed the link"))
+    assert model._thread is not None
+    model._thread.join(timeout=2)
+    await asyncio.sleep(0.05)  # let the loop run the scheduled eviction callback
+
+    _expect_state(started_runner, SessionState.TERMINATED)
+    assert called == [True]
+    moves = [
+        e.transition
+        for e in _egress(started_runner)
+        if isinstance(e, TransitionEvent) and e.transition.event is SessionEvent.EVICTION
+    ]
+    assert [(m.from_state, m.detail["reason"], m.detail["error"]) for m in moves] == [
+        (
+            SessionState.READY,
+            EndReason.ERROR,
+            "worker_died: the model server closed the link",
+        )
+    ]
+
+
 async def test_model_crash_mid_session_tears_the_connections_down(
     started_runner: Runner,
 ) -> None:

@@ -356,6 +356,21 @@ class ReactorCore:
     output: OutputStream
     """The model's handle onto its outbound media stream."""
 
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        """Refuse a subclass that overrides a method the runtime owns.
+
+        Raises:
+            TypeError: The subclass defines ``crash``, or inherits one other than the
+                runtime's (from a mixin before the runtime's base).
+        """
+        super().__init_subclass__(**kwargs)
+        if getattr(cls, "crash", None) is not ReactorCore.crash:
+            raise TypeError(
+                f"{cls.__name__}.crash: crash() is the runtime's and cannot be overridden; give "
+                'the method another name, and use @event(name="crash") if clients send a '
+                "command called crash"
+            )
+
     def __init__(self) -> None:
         self._loop = asyncio.new_event_loop()
         self._thread: threading.Thread | None = None
@@ -379,6 +394,11 @@ class ReactorCore:
         self._last_emit_fps: float | None = None
         self._media_ops: MediaOps | None = None
         self._on_failure: FailureSink | None = None
+        self._crash: BaseException | None = None
+        # Set with the lifecycle's last read of _crash: a crash() after it
+        # changes nothing, as its docstring says.
+        self._crash_closed = False
+        self._crash_lock = threading.Lock()
         self.output = OutputStream(self)
 
         self._input_buffers: dict[str, InputBuffer] = {}
@@ -452,6 +472,34 @@ class ReactorCore:
             step: What the step produced.
         """
         self._report_step(step, self._sessions_started)
+
+    def crash(self, error: BaseException) -> None:
+        """End the model loop as crashed with *error*, from any thread.
+
+        The outcome is the one a raise out of :meth:`run` has: the runtime
+        logs *error*, ends the session wherever it is, idle between sessions
+        included, with an error the client sees, and the process exits as a
+        failure. Use it for a failure the application learns of outside a
+        step, where nothing raises: a model server link lost between sessions
+        is one, wired as ``ModelClient.connect(..., on_lost=self.crash)``.
+
+        Safe to call from any thread, including the model loop's own. A call
+        made before the loop starts, from :meth:`load` for one, ends the loop
+        as soon as it starts. Only the first call counts, and a call made after
+        the loop has stopped changes nothing. The name is the runtime's: a
+        subclass that defines its own ``crash`` is refused when it is defined.
+
+        Args:
+            error: Why the model cannot go on; it becomes the session's error.
+        """
+        with self._crash_lock:
+            if self._crash is not None or self._crash_closed:
+                return
+            self._crash = error
+            task = self._loop_task
+        if task is not None and not self._loop.is_closed():
+            with contextlib.suppress(RuntimeError):
+                self._loop.call_soon_threadsafe(task.cancel)
 
     def _report_step(
         self,
@@ -683,28 +731,55 @@ class ReactorCore:
         """Bootstrap loop-bound state, start the drain loop, then run the model.
 
         A ``run()`` that raises anything but cancellation is an unrecoverable
-        crash: the model loop is gone and there is nothing left to serve. The
+        crash: the model loop is gone and there is nothing left to serve. So is
+        a :meth:`crash` call, which cancels the loop carrying its error. The
         crash is reported through the bound failure sink once the background
         tasks are cancelled, so the owner can end the session rather than keep
-        serving a dead loop. Cancellation is the normal stop and reports nothing.
+        serving a dead loop. Any other cancellation is the normal stop and
+        reports nothing.
+
+        A recorded :meth:`crash` is read again once ``run()`` is over, however
+        it ended, so it is reported even when ``run()`` called it and then
+        returned or raised before its cancellation could land. It wins over
+        anything ``run()`` raised, which is still logged. That read is the
+        last: a :meth:`crash` after it changes nothing.
         """
         # start_thread made the queue; a loop run without it makes its own.
         if self._inbound_q is None:
             self._inbound_q = asyncio.Queue()
-        self._loop_task = asyncio.current_task()
+        with self._crash_lock:
+            self._loop_task = asyncio.current_task()
+            crashed_early = self._crash is not None
         self._on_loop_ready()
         tasks = [asyncio.create_task(coro) for coro in self._background_coros()]
-        crash: BaseException | None = None
+        raised: BaseException | None = None
+        cancelled = False
         try:
-            await self.run()
+            if not crashed_early:
+                await self.run()
         except asyncio.CancelledError:
-            logger.info("model loop cancelled")
+            cancelled = True
         except Exception as exc:
-            crash = exc
-            logger.exception("model run() crashed")
+            raised = exc
         finally:
             for task in tasks:
                 task.cancel()
+        with self._crash_lock:
+            recorded = self._crash
+            self._crash_closed = True
+        if recorded is not None:
+            when = "before its loop started" if crashed_early else "while it ran"
+            logger.error("model crashed %s: %s", when, recorded)
+            if raised is not None and raised is not recorded:
+                logger.warning("model run() also raised", exc_info=raised)
+            crash: BaseException | None = recorded
+        elif raised is not None:
+            logger.error("model run() crashed", exc_info=raised)
+            crash = raised
+        else:
+            if cancelled:
+                logger.info("model loop cancelled")
+            crash = None
         if crash is not None and self._on_failure is not None:
             self._on_failure(crash)
 

@@ -18,6 +18,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from reactor_runtime import log
 from reactor_runtime.distributed.errors import WorkerTimeout
 from reactor_runtime.log import get_logger, get_session_id
 from reactor_runtime.model_server.config import LinkConfig, link_config
@@ -101,8 +102,8 @@ class ModelClient[RequestT, ResultT]:
 
         class Plasma(ReactorApp):
             def load(self, config_path):
-                # Waits for the model server; the annotation is for type checkers.
-                self.model: ModelClient[Tick, Frame] = ModelClient.connect()
+                # Waits for the model server; a loss between steps ends the runtime.
+                self.model: ModelClient[Tick, Frame] = ModelClient.connect(on_lost=self.crash)
 
             @session_started
             def begin(self):
@@ -117,8 +118,13 @@ class ModelClient[RequestT, ResultT]:
                 ...
 
     A link lost while no step runs, between sessions for one, raises from no
-    call. The ``on_lost`` callback given to :meth:`connect` is how the
-    application hears of that loss, and goes down the same way.
+    call. ``on_lost=self.crash`` is how the application hears of that loss and
+    goes down the same way, through ``ReactorApp.crash()``.
+
+    Once connected, every line the session runtime writes carries
+    ``runtime_role="session"`` and its ``slot``, and the model server's lines
+    about the slot carry the same slot and the session id of its last reset,
+    so one session's lines and the model server's lines for it can be joined.
 
     The model server's own health closes the loop: a model that reports itself
     unhealthy is restarted by its deployment, which drops every session's link,
@@ -149,7 +155,8 @@ class ModelClient[RequestT, ResultT]:
         self._cond = threading.Condition()
         self._call_lock = threading.Lock()
         threading.Thread(target=self._read, name="model-client-reader", daemon=True).start()
-        logger.info("model server link", slot=self._slot, generation=self._generation)
+        log.set_process(role="session", slot=self._slot)
+        logger.info("model server link", generation=self._generation)
 
     @classmethod
     def connect(
@@ -319,7 +326,7 @@ class ModelClient[RequestT, ResultT]:
             if isinstance(answer, ResetDone):
                 self._generation = answer.generation
                 self._reset_required = False
-                logger.info("model server link", slot=self._slot, generation=self._generation)
+                logger.info("model server link", generation=self._generation)
                 return answer.generation
             raise error_of(answer)
 

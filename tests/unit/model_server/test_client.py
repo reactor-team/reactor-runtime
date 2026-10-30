@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import pickle
 import queue
 import socket
@@ -170,6 +171,16 @@ def test_a_step_returns_the_result_after_the_application_resets(rig: Rig) -> Non
 
     assert generation == client.generation == 2
     assert client.step(Tick(4)) == Frame(4, generation=2, session_id="s-1")
+
+
+def test_a_connected_session_runtime_stamps_its_role_and_slot(rig: Rig) -> None:
+    client = rig.client(slot=1)
+    record = logging.LogRecord("x", logging.INFO, __file__, 1, "line", None, None)
+    log.SessionContextFilter().filter(record)
+
+    fields = getattr(record, "reactor_fields", {})
+    assert (fields.get("runtime_role"), fields.get("slot")) == ("session", 1)
+    client.close()
 
 
 def test_a_reset_names_the_live_session_by_default(rig: Rig) -> None:

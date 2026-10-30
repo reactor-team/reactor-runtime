@@ -93,7 +93,7 @@ class StepModel(ReactorApp):
         raise CommandError("no_notes", "notes are closed")
 
     @event(name="crash")
-    def crash(self) -> None:
+    def unplanned_failure(self) -> None:
         raise RuntimeError("an unplanned failure with private detail")
 
     async def process_input(self) -> tuple[str, list[str], list[int]]:
