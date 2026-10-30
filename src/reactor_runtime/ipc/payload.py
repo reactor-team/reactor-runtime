@@ -27,8 +27,11 @@ _INLINE_WARN_BYTES = 1 << 20
 _inline_reported = False
 
 
-def pack(obj: Any, slot: SharedSlot) -> bytes:
-    """Pickle *obj* with its flat buffers written into *slot*.
+def pack(obj: Any, slot: SharedSlot | None) -> bytes:
+    """Pickle *obj* with its flat buffers written into *slot*, or inline with no slot.
+
+    With no slot every buffer stays in the pickle, and the header has the
+    same shape, so :func:`unpack` reads both without telling them apart.
 
     Returns:
         The header: the pickle bytes, the block's name, and the span of each
@@ -40,6 +43,8 @@ def pack(obj: Any, slot: SharedSlot) -> bytes:
             so the bytes written before the limit are never read.
         SharedSlotAllocationFailed: The slot had to grow and could not.
     """
+    if slot is None:
+        return pickle.dumps((pickle.dumps(obj, protocol=5), None, []), protocol=5)
     slot.begin()
     spans: list[tuple[int, int]] = []
     needed = 0

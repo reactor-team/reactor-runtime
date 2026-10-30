@@ -295,8 +295,13 @@ class WorkerConfig:
 
     @property
     def shm_slot_bytes(self) -> int:
-        """The shared memory one session holds: its request and output blocks together."""
-        return self.input_bytes + self.output_bytes
+        """The most shared memory one session's slot holds, with the defaults for what is unset.
+
+        Two request blocks, the second only after a cancelled request, and one
+        output block: ``2 * input_bytes + output_bytes``. A deployment gives
+        each session's memory-backed volume at least this.
+        """
+        return 2 * self.input_bytes + self.output_bytes
 
 
 @dataclass(frozen=True)

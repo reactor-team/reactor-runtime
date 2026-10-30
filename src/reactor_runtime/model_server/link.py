@@ -158,6 +158,11 @@ class StreamLink:
         self._send_lock = threading.Lock()
         self._closed = False
 
+    @property
+    def frame_limit(self) -> int:
+        """The longest frame this link sends or accepts."""
+        return self._frame_limit
+
     def send(self, message: Any) -> None:
         """Send *message* as one frame. Safe from any thread.
 
@@ -211,16 +216,21 @@ class StreamLink:
                     raise Closed("the link is closed") from None
                 raise
 
-    def receive_bytes(self) -> bytes:
+    def receive_bytes(self, *, deadline: float | None = None) -> bytes:
         """Block for the next frame and return its bytes.
+
+        Args:
+            deadline: A ``time.monotonic()`` instant by which the whole frame
+                is read; ``None`` is no bound.
 
         Raises:
             Closed: The peer or this side closed the link.
             ProtocolError: The frame passes the limit.
+            TimeoutError: *deadline* passed before the frame was read.
             OSError: The connection failed.
         """
         try:
-            return recv_frame(self._sock, self._frame_limit)
+            return recv_frame(self._sock, self._frame_limit, deadline=deadline)
         except OSError:
             if self._closed:
                 raise Closed("the link is closed") from None

@@ -238,8 +238,12 @@ class ServerSettings:
 
     @property
     def shm_slot_bytes(self) -> int:
-        """The shared memory one session holds: its request and output blocks together."""
-        return self.shm_input_bytes + self.shm_output_bytes
+        """The most shared memory one session's slot holds, which its volume must fit.
+
+        Two request blocks, the second only after a cancelled request, and one
+        output block: ``2 * shm_input_bytes + shm_output_bytes``.
+        """
+        return 2 * self.shm_input_bytes + self.shm_output_bytes
 
     @classmethod
     def resolve(cls, server: type[ModelServer], config: WorkerConfig | None) -> ServerSettings:

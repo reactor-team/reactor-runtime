@@ -36,6 +36,7 @@ from reactor_runtime.model_server.server import (
     ServerRequest,
     ServerSettings,
 )
+from reactor_runtime.model_server.shm_link import ShmLink, UnixShmListener, UnixShmTransport
 
 __all__ = [
     "BatchFailed",
@@ -46,9 +47,12 @@ __all__ = [
     "PayloadTooLarge",
     "ServerRequest",
     "ServerSettings",
+    "ShmLink",
     "StepExpired",
     "StepUnanswered",
     "StreamLink",
+    "UnixShmListener",
+    "UnixShmTransport",
     "WorkerError",
     "WorkerLink",
     "WorkerLost",

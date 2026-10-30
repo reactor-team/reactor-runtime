@@ -467,7 +467,7 @@ def test_load_config_reads_the_worker_block_into_typed_settings(tmp_path: Path) 
         batch_window=0.005,
         shm_output_bytes=67108864,
     )
-    assert worker.shm_slot_bytes == DEFAULT_SHM_INPUT_BYTES + 67108864
+    assert worker.shm_slot_bytes == 2 * DEFAULT_SHM_INPUT_BYTES + 67108864
 
 
 @pytest.mark.parametrize(
