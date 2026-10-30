@@ -210,6 +210,29 @@ async def test_closing_leaves_the_room_even_when_the_audio_cannot_be_cleared() -
     assert leaves.count == 1
 
 
+async def test_closing_clears_every_audio_track_when_one_cannot_be_cleared() -> None:
+    refusing, kept = RefusingAudioSource(), FakeAudioSource()
+    second = TrackInfo(
+        name="second_audio", kind=TrackKind.AUDIO, rate=24_000, direction=TrackDirection.OUT
+    )
+    conn = RoomConnection(
+        ConnId(4711),
+        asyncio.get_running_loop(),
+        {"main_video": cast(Any, FakeVideoSource())},
+        {"main_audio": cast(Any, refusing), "second_audio": cast(Any, kept)},
+        {"main_video": VIDEO, "main_audio": AUDIO, "second_audio": second},
+        on_close=Leaves(),
+    )
+    # No pump running: the frames wait, as they would for a room that is behind.
+    conn._send_frame(bundle(1))
+    await _settle()
+
+    await conn.close()
+
+    assert kept.cleared == 1
+    assert all(out.pending.empty() for out in conn._audio.values())
+
+
 class StalledAudioSource(FakeAudioSource):
     """An audio source whose capture waits, as one whose own queue is full does."""
 

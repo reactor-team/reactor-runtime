@@ -206,10 +206,7 @@ class RoomConnection:
             for out in self._audio.values():
                 if out.pump is not None:
                     out.pump.cancel()
-            try:
-                self._clear_audio()
-            except Exception:
-                logger.warning("clearing the room's audio on close failed", exc_info=True)
+            self._clear_audio()
             await self._on_close()
 
     def _send_frame(self, bundle: MediaBundle) -> None:
@@ -235,11 +232,18 @@ class RoomConnection:
         out.pending.put_nowait(frame)
 
     def _clear_audio(self) -> None:
-        """Drop the audio waiting for each source and the audio each source queues."""
-        for out in self._audio.values():
+        """Drop the audio waiting for each source and the audio each source queues.
+
+        Each source is cleared on its own: one whose queue cannot be cleared is
+        logged and does not keep the other tracks playing.
+        """
+        for name, out in self._audio.items():
             while not out.pending.empty():
                 out.pending.get_nowait()
-            out.source.clear_queue()
+            try:
+                out.source.clear_queue()
+            except Exception:
+                logger.warning("clearing the queue of audio track %s failed", name, exc_info=True)
 
     async def _pump_audio(self, out: _AudioOut) -> None:
         """Feed one audio source in order, waiting for its queue to have room.
