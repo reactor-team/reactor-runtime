@@ -1,0 +1,7 @@
+# examples/echo split in two: the effect runs in one model server for every
+# session (`python -m reactor_runtime.model_server`), and each session runtime
+# runs the echo app with a remote engine.
+runtime:
+  import: split_echo:SplitEcho
+  worker:
+    import: split_echo_model:SplitEchoModel

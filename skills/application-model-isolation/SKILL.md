@@ -519,14 +519,21 @@ class Plasma(ReactorApp):
     def begin(self):
         self.model.reset()
 
+    async def process_input(self):
+        return Tick(tick=self.next_tick(), hue=self.state.hue)
+
     def generate(self, input):
-        return self.model.step(Tick(tick=input.tick))
+        return self.model.step(input)
 
     async def process_output(self, outcome):
         if isinstance(outcome.error, (WorkerLost, StepUnanswered)):
             raise outcome.error
         ...
 ```
+
+The step input is still built in `process_input()` and `generate()` is still
+the one line of rule 2: `ModelClient.step()` stands where the model half's
+`generate()` stood.
 
 `examples/shared_worker/` is the worked example.
 

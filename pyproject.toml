@@ -151,10 +151,13 @@ extra-paths = [
     "examples/echo",
     "examples/waypoint",
     "examples/stepped_echo",
+    "examples/shared_worker",
+    "tests/integration/pod/split_echo",
     "tests/unit/transport/webrtc",
     "tests/contract",
     "endurance-tests",
     "endurance-tests/model",
+    "endurance-tests/model-shared-worker",
 ]
 
 [tool.ty.src]

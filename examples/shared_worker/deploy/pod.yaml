@@ -1,0 +1,130 @@
+# One pod serving N sessions from one copy of the weights (here N = 2).
+#
+# - The model server is a native sidecar (an init container with
+#   restartPolicy: Always, Kubernetes 1.29+). It is the only container that
+#   requests a GPU, and it stops after the session containers.
+# - Each session container is the model image's ordinary runtime, one session
+#   each, on its own port. It reaches the model server through the socket in
+#   the shared `worker-socket` volume, and waits in load() until the model
+#   server welcomes its slot, so the containers start together. Its arrays
+#   travel in a memory-backed volume of its own, mounted at its `/dev/shm`
+#   and, in the model server, at `/run/reactor-shm/s<slot>`
+#   (REACTOR_SHM_SLOT_DIR): a session sees and fills only its own blocks.
+# - If the model server dies, the kubelet restarts it, and every session
+#   container goes down with it: a live session ends with `worker_died:
+#   <reason>`, an idle one at once. The process exits as a failure, and its
+#   restart waits in load() until the model server is back.
+# - /health answers 200 while a process loads; its `state` says when it
+#   serves, so readiness reads the state and liveness the status code.
+# - Every container runs as the same user: the model server's socket and
+#   shared blocks are open to its own user alone.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: shared-worker
+spec:
+  # A session drains within SIGTERM_GRACE_PERIOD plus EXIT_TIMEOUT_SECONDS
+  # (30 s + 10 s by default), then the sidecar model server stops after its step.
+  terminationGracePeriodSeconds: 60
+  volumes:
+    - name: worker-socket
+      emptyDir: {}
+    # One memory-backed volume per session. It holds at most two request
+    # blocks, the second only after a cancelled step, and one result block:
+    # 2 * shm_input_bytes + shm_output_bytes from reactor.yaml, 34 MiB by
+    # default. The session's blocks count toward the session container's
+    # memory, the result block toward the model server's. The model server
+    # refuses to start when a slot's volume cannot hold them, and a payload
+    # larger than its block fails that step, naming the key to raise.
+    - name: shm-s0
+      emptyDir: {medium: Memory, sizeLimit: 64Mi}
+    - name: shm-s1
+      emptyDir: {medium: Memory, sizeLimit: 64Mi}
+  initContainers:
+    - name: model-server
+      image: example.com/shared-worker:latest
+      restartPolicy: Always
+      # Under an init such as tini when the model starts processes of its own,
+      # so they are reaped: ["/usr/bin/tini", "--", "python", "-m", "reactor_runtime.model_server"].
+      command: ["python", "-m", "reactor_runtime.model_server"]
+      env:
+        - name: REACTOR_MODEL_WORKER_SOCKET
+          value: /run/reactor-worker/sock
+        - name: REACTOR_MAX_SESSIONS
+          value: "2"
+        - name: REACTOR_SHM_SLOT_DIR
+          value: /run/reactor-shm/s{slot}
+      ports:
+        - name: worker-health
+          containerPort: 8090
+      livenessProbe:
+        # 503 once the model's health() reports it unhealthy, or once one step
+        # has run past REACTOR_MODEL_WORKER_STUCK_SECONDS; 200 while it loads.
+        httpGet: {path: /health, port: 8090}
+        periodSeconds: 10
+        failureThreshold: 3
+        # The model server stops on SIGTERM only between steps, so a stuck one
+        # is killed after this, not after the pod's grace.
+        terminationGracePeriodSeconds: 30
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+      volumeMounts:
+        - {name: worker-socket, mountPath: /run/reactor-worker}
+        - {name: shm-s0, mountPath: /run/reactor-shm/s0}
+        - {name: shm-s1, mountPath: /run/reactor-shm/s1}
+  containers:
+    - name: session-0
+      image: example.com/shared-worker:latest
+      env:
+        - {name: PORT, value: "8080"}
+        - {name: REACTOR_SESSION_SLOT, value: "0"}
+        - {name: REACTOR_MODEL_WORKER_SOCKET, value: /run/reactor-worker/sock}
+        # Containers of a pod share its network: give each its own ICE range.
+        - {name: WEBRTC_PORT_RANGE, value: "40000:40999"}
+        # glibc's arenas grow with churn; a session process needs two.
+        - {name: MALLOC_ARENA_MAX, value: "2"}
+      ports:
+        - {name: http-0, containerPort: 8080}
+      readinessProbe:
+        exec:
+          command:
+            - python
+            - -c
+            - >-
+              import json, urllib.request;
+              body = json.load(urllib.request.urlopen('http://127.0.0.1:8080/health'));
+              raise SystemExit(body['state'] not in ('available', 'serving'))
+        periodSeconds: 2
+      livenessProbe:
+        tcpSocket: {port: 8080}
+        periodSeconds: 10
+      volumeMounts:
+        - {name: worker-socket, mountPath: /run/reactor-worker}
+        - {name: shm-s0, mountPath: /dev/shm}
+    - name: session-1
+      image: example.com/shared-worker:latest
+      env:
+        - {name: PORT, value: "8081"}
+        - {name: REACTOR_SESSION_SLOT, value: "1"}
+        - {name: REACTOR_MODEL_WORKER_SOCKET, value: /run/reactor-worker/sock}
+        - {name: WEBRTC_PORT_RANGE, value: "41000:41999"}
+        - {name: MALLOC_ARENA_MAX, value: "2"}
+      ports:
+        - {name: http-1, containerPort: 8081}
+      readinessProbe:
+        exec:
+          command:
+            - python
+            - -c
+            - >-
+              import json, urllib.request;
+              body = json.load(urllib.request.urlopen('http://127.0.0.1:8081/health'));
+              raise SystemExit(body['state'] not in ('available', 'serving'))
+        periodSeconds: 2
+      livenessProbe:
+        tcpSocket: {port: 8081}
+        periodSeconds: 10
+      volumeMounts:
+        - {name: worker-socket, mountPath: /run/reactor-worker}
+        - {name: shm-s1, mountPath: /dev/shm}

@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 _EXAMPLES = Path(__file__).parents[3] / "examples"
-for workspace in ("starter", "echo", "waypoint", "stepped_echo"):
+for workspace in ("starter", "echo", "waypoint", "stepped_echo", "shared_worker"):
     path = str(_EXAMPLES / workspace)
     if path not in sys.path:
         sys.path.insert(0, path)
