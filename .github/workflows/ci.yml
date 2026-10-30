@@ -223,10 +223,10 @@ jobs:
           version: ${{ env.MISE_VERSION }}
           sha256: ${{ env.MISE_SHA256 }}
 
-      # A LiveKit server for the room churn, in dev mode: it accepts tokens
+      # A LiveKit server for the room scenarios, in dev mode: it accepts tokens
       # signed with the key `devkey` and the secret `secret`.
       - name: Start a LiveKit server
-        if: matrix.scenario == 'room_participant_churn'
+        if: startsWith(matrix.scenario, 'room_')
         run: |
           docker run -d --name livekit --network host livekit/livekit-server:v1.13.10 \
             --dev --bind 127.0.0.1 --node-ip 127.0.0.1
