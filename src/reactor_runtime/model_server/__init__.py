@@ -16,6 +16,7 @@ this package.
 from reactor_runtime.model_server.errors import (
     BatchFailed,
     PayloadTooLarge,
+    ResetRequired,
     StepExpired,
     StepUnanswered,
     WorkerError,
@@ -37,6 +38,7 @@ from reactor_runtime.model_server.server import (
     ServerSettings,
 )
 from reactor_runtime.model_server.shm_link import ShmLink, UnixShmListener, UnixShmTransport
+from reactor_runtime.model_server.worker import WorkerServer
 
 __all__ = [
     "BatchFailed",
@@ -45,6 +47,7 @@ __all__ = [
     "ModelServer",
     "NoListener",
     "PayloadTooLarge",
+    "ResetRequired",
     "ServerRequest",
     "ServerSettings",
     "ShmLink",
@@ -57,6 +60,7 @@ __all__ = [
     "WorkerLink",
     "WorkerLost",
     "WorkerRejected",
+    "WorkerServer",
     "WorkerStopping",
     "WorkerUnreachable",
 ]
