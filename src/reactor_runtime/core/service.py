@@ -214,6 +214,91 @@ class LiveKitConfig:
                 )
 
 
+DEFAULT_SHM_INPUT_BYTES = 1 << 20
+"""Each session's request block when the ``runtime.worker`` block names none: 1 MiB."""
+
+DEFAULT_SHM_OUTPUT_BYTES = 32 << 20
+"""Each session's output block when the ``runtime.worker`` block names none: 32 MiB.
+
+Sized for a step that returns video. A model whose results are larger sets
+``runtime.worker.shm_output_bytes``; one whose results are small sets it lower,
+since every session's blocks are reserved up front.
+"""
+
+
+@dataclass(frozen=True)
+class WorkerConfig:
+    """The model half of a model split in two, drawn from the manifest's ``runtime.worker`` block.
+
+    Read by the model server's entry point; a session runtime reads only that
+    the block exists. The shared-memory sizes are set here and nowhere else,
+    because a deployment sizes each session's memory from the manifest: what
+    the block declares is what a deployment gives the model.
+
+    Attributes:
+        import_ref: The model half, a ``ModelServer`` subclass, as ``"module:Class"``.
+        max_batch: The most requests one step receives; ``None`` keeps the
+            class's ``max_batch``, which this may only lower.
+        batch_window: Seconds the worker waits for a batch to fill; ``None``
+            keeps the class's ``batch_window``.
+        shm_input_bytes: Each session's request block as the block declares
+            it, ``None`` when it declares none; :attr:`input_bytes` is the
+            size used.
+        shm_output_bytes: Each session's output block as the block declares
+            it, ``None`` when it declares none; :attr:`output_bytes` is the
+            size used.
+
+    Raises:
+        ValueError: ``import`` is not ``"module:Class"`` with both parts, a size
+            or ``max_batch`` is not a positive integer, or ``batch_window`` is
+            not a finite number of seconds, at least 0.
+    """
+
+    import_ref: str
+    max_batch: int | None = None
+    batch_window: float | None = None
+    shm_input_bytes: int | None = None
+    shm_output_bytes: int | None = None
+
+    def __post_init__(self) -> None:
+        """Refuse a value of the wrong type or range, naming its key."""
+        module, separator, name = (
+            self.import_ref.partition(":") if isinstance(self.import_ref, str) else ("", "", "")
+        )
+        if not separator or not module or not name:
+            raise ValueError(
+                f"runtime.worker.import must name the model half as 'module:Class', "
+                f"got {self.import_ref!r}"
+            )
+        for key in ("max_batch", "shm_input_bytes", "shm_output_bytes"):
+            value = getattr(self, key)
+            if value is not None and (type(value) is not int or value < 1):
+                raise ValueError(f"runtime.worker.{key} must be a positive integer, got {value!r}")
+        window = self.batch_window
+        if window is not None and (
+            type(window) not in (int, float) or not 0 <= window < float("inf")
+        ):
+            raise ValueError(
+                f"runtime.worker.batch_window must be a number of seconds, at least 0, "
+                f"got {window!r}"
+            )
+
+    @property
+    def input_bytes(self) -> int:
+        """Each session's request block: the declared size, or :data:`DEFAULT_SHM_INPUT_BYTES`."""
+        return self.shm_input_bytes or DEFAULT_SHM_INPUT_BYTES
+
+    @property
+    def output_bytes(self) -> int:
+        """Each session's output block: the declared size, or :data:`DEFAULT_SHM_OUTPUT_BYTES`."""
+        return self.shm_output_bytes or DEFAULT_SHM_OUTPUT_BYTES
+
+    @property
+    def shm_slot_bytes(self) -> int:
+        """The shared memory one session holds: its request and output blocks together."""
+        return self.input_bytes + self.output_bytes
+
+
 @dataclass(frozen=True)
 class RuntimeConfig:
     """The single configuration object threaded through ``serve``.
@@ -240,6 +325,8 @@ class RuntimeConfig:
         recording: The recorder's configuration; disabled by default.
         step_results: How each finished step is saved; disabled by default.
         livekit: How a LiveKit room reaches the model; empty by default.
+        worker: The model half of a model split in two, from ``runtime.worker``;
+            ``None`` for a model that does not split.
     """
 
     model_ref: str
@@ -253,3 +340,4 @@ class RuntimeConfig:
     recording: RecordingConfig = field(default_factory=RecordingConfig)
     step_results: StepResultsConfig = field(default_factory=StepResultsConfig)
     livekit: LiveKitConfig = field(default_factory=LiveKitConfig)
+    worker: WorkerConfig | None = None

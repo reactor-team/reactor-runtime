@@ -22,6 +22,8 @@ from reactor_runtime.core.model import (
     UploadedFile,
 )
 from reactor_runtime.core.service import (
+    DEFAULT_SHM_INPUT_BYTES,
+    DEFAULT_SHM_OUTPUT_BYTES,
     LiveKitBlockError,
     LiveKitConfig,
     LiveKitRpcMethod,
@@ -29,6 +31,7 @@ from reactor_runtime.core.service import (
     RuntimeConfig,
     ServiceComponent,
     StepResultsConfig,
+    WorkerConfig,
 )
 from reactor_runtime.core.session import (
     JOURNAL_EVENTS,
@@ -79,6 +82,8 @@ from reactor_runtime.core.values import (
 )
 
 __all__ = [
+    "DEFAULT_SHM_INPUT_BYTES",
+    "DEFAULT_SHM_OUTPUT_BYTES",
     "JOURNAL_EVENTS",
     "ClientConnected",
     "ClientConnectionStat",
@@ -142,4 +147,5 @@ __all__ = [
     "TransportTrackReading",
     "TypeSpec",
     "UploadedFile",
+    "WorkerConfig",
 ]

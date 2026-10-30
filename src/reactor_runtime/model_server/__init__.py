@@ -2,9 +2,15 @@
 
 A model split in two runs its model half in one process, the model server, and
 its application half in ordinary one-session runtimes, one per session, that
-all call it. The rules of the split are in
-``skills/application-model-isolation``. A model that does not split is served
-exactly as before: the runtime does not import this package.
+all call it. The two halves are written together, in one workspace, and what
+they exchange is pickled::
+
+    class PlasmaModel(ModelServer[Tick, Frame]):   # the model half, in the model server
+        def step(self, requests): ...
+
+The rules of the split are in ``skills/application-model-isolation``. A model
+that does not split is served exactly as before: the runtime does not import
+this package.
 """
 
 from reactor_runtime.model_server.errors import (
@@ -17,10 +23,18 @@ from reactor_runtime.model_server.errors import (
     WorkerRejected,
     WorkerStopping,
 )
+from reactor_runtime.model_server.server import (
+    ModelServer,
+    ServerRequest,
+    ServerSettings,
+)
 
 __all__ = [
     "BatchFailed",
+    "ModelServer",
     "PayloadTooLarge",
+    "ServerRequest",
+    "ServerSettings",
     "StepExpired",
     "StepUnanswered",
     "WorkerError",
