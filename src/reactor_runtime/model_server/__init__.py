@@ -8,16 +8,24 @@ they exchange is pickled::
     class PlasmaModel(ModelServer[Tick, Frame]):   # the model half, in the model server
         def step(self, requests): ...
 
+    self.model = ModelClient.connect()             # the application half, in each session
+    frame = self.model.step(Tick(tick=n))
+
 The rules of the split are in ``skills/application-model-isolation``. A model
 that does not split is served exactly as before: the runtime does not import
 this package.
 """
 
+from reactor_runtime.model_server.client import LinkState, ModelClient
+from reactor_runtime.model_server.config import LinkConfig, link_config
 from reactor_runtime.model_server.errors import (
     BatchFailed,
+    ClientClosed,
     PayloadTooLarge,
     ResetRequired,
     StepExpired,
+    StepStillRunning,
+    StepTimedOut,
     StepUnanswered,
     WorkerError,
     WorkerLost,
@@ -42,8 +50,12 @@ from reactor_runtime.model_server.worker import WorkerServer
 
 __all__ = [
     "BatchFailed",
+    "ClientClosed",
+    "LinkConfig",
     "LinkListener",
+    "LinkState",
     "LinkTransport",
+    "ModelClient",
     "ModelServer",
     "NoListener",
     "PayloadTooLarge",
@@ -52,6 +64,8 @@ __all__ = [
     "ServerSettings",
     "ShmLink",
     "StepExpired",
+    "StepStillRunning",
+    "StepTimedOut",
     "StepUnanswered",
     "StreamLink",
     "UnixShmListener",
@@ -63,4 +77,5 @@ __all__ = [
     "WorkerServer",
     "WorkerStopping",
     "WorkerUnreachable",
+    "link_config",
 ]

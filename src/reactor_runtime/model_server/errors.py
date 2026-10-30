@@ -80,6 +80,25 @@ class StepExpired(StepUnanswered):
     """The worker dropped the request before stepping it: its timeout passed in the queue."""
 
 
+class StepTimedOut(StepUnanswered):
+    """No answer came within the step's timeout; the request was cancelled.
+
+    A cancel withdraws a request still waiting in the worker's queue. A step the
+    model is already running cannot be withdrawn: it keeps the session's one
+    request until it ends, and a step sent meanwhile is refused with
+    :class:`StepStillRunning`. The worker is slow or stuck; a worker that stays
+    stuck reports itself unhealthy, and its deployment restarts it.
+    """
+
+
+class StepStillRunning(WorkerRejected):
+    """The session's previous request, abandoned after a timeout, is still running on the worker.
+
+    A session has one request at a time on the worker. Retry once the
+    abandoned step ends; a worker stuck in it reports itself unhealthy.
+    """
+
+
 class ResetRequired(RuntimeError):  # noqa: N818 (named for the state a caller catches)
     """A step on a connection whose slot the application has not reset yet.
 
@@ -94,6 +113,10 @@ class WorkerLost(WorkerCrashed):
 
 class WorkerStopping(WorkerLost):
     """The worker is stopping, and answered a request still queued with this."""
+
+
+class ClientClosed(WorkerLost):
+    """The application closed its client: every call raises this from then on."""
 
 
 class WorkerUnreachable(RuntimeError):  # noqa: N818 (named for the state a caller catches)

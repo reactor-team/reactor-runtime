@@ -59,6 +59,7 @@ from reactor_runtime.model_server.errors import (
     BatchFailed,
     ResetRequired,
     StepExpired,
+    StepStillRunning,
     WorkerRejected,
     WorkerStopping,
 )
@@ -415,7 +416,9 @@ class WorkerServer:
                     "a reset is still pending: wait for ResetDone before stepping"
                 )
             elif not self._policy.add(waiting):
-                refusal = WorkerRejected("the session already has a request waiting or running")
+                refusal = StepStillRunning(
+                    "the session's previous request is still waiting or running: retry once it ends"
+                )
             else:
                 self._cond.notify_all()
         if refusal is not None:
