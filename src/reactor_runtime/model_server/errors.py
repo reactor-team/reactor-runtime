@@ -80,6 +80,14 @@ class StepExpired(StepUnanswered):
     """The worker dropped the request before stepping it: its timeout passed in the queue."""
 
 
+class ResetRequired(RuntimeError):  # noqa: N818 (named for the state a caller catches)
+    """A step on a connection whose slot the application has not reset yet.
+
+    The application resets its slot when its session starts, so a session never
+    runs on state the worker kept for another one.
+    """
+
+
 class WorkerLost(WorkerCrashed):
     """The connection to the worker is gone, or the worker is going away: its message says why."""
 
