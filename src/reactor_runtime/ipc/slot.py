@@ -157,9 +157,15 @@ class SharedSlot:
         name = f"{self._prefix}{self._generation}"
         try:
             replacement = create_block(name, size, self._directory)
-        except SharedSlotAllocationFailed:
+        except SharedSlotAllocationFailed as exc:
             if size == needed:
                 raise
+            logger.warning(
+                "shared block cannot double; growing to what the call needs",
+                wanted_bytes=size,
+                needed_bytes=needed,
+                reason=str(exc),
+            )
             replacement = create_block(name, needed, self._directory)
         replacement.buf[: self._cursor] = self._block.buf[: self._cursor]
         logger.info("shared block grown", from_bytes=self.capacity, to_bytes=replacement.size)

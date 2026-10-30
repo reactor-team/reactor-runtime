@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import pickle
 from collections.abc import Iterator
 from pathlib import Path
@@ -65,7 +66,10 @@ def test_the_block_grows_keeping_what_was_written_and_the_old_block_goes(
 
 
 def test_a_growth_that_cannot_double_takes_exactly_what_the_call_needs(
-    slot: SharedSlot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    slot: SharedSlot,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     real = slot_module.create_block
 
@@ -77,9 +81,12 @@ def test_a_growth_that_cannot_double_takes_exactly_what_the_call_needs(
     monkeypatch.setattr(slot_module, "create_block", tight)
     slot.begin()
     slot.write(b"x" * 3000)
-    slot.write(b"y" * 3000)  # 6000 fits; 8192, the doubled block, does not
+    with caplog.at_level(logging.WARNING, logger=slot_module.__name__):
+        slot.write(b"y" * 3000)  # 6000 fits; 8192, the doubled block, does not
 
     assert slot.capacity == 6000
+    reports = [r for r in caplog.records if "cannot double" in r.getMessage()]
+    assert len(reports) == 1
 
 
 def test_a_growth_that_does_not_fit_at_all_leaves_the_block_usable(
