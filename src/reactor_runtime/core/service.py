@@ -226,6 +226,29 @@ since every session's blocks are reserved up front.
 """
 
 
+SHM_PAGE_BYTES = 64 << 10
+"""The unit :func:`shm_slot_bytes` counts a block in: 64 KiB, a multiple of
+every common kernel page size (4, 16 and 64 KiB), so the bound is the same on
+whichever host computes it and never below what a memory-backed volume
+charges."""
+
+
+def shm_slot_bytes(input_bytes: int, output_bytes: int) -> int:
+    """Return the most shared memory one session's slot holds, which its volume must fit.
+
+    Two request blocks of *input_bytes*, the second only after a cancelled
+    request, and one output block of *output_bytes* (see
+    :mod:`reactor_runtime.model_server.shm_link`). Each block is counted in
+    whole :data:`SHM_PAGE_BYTES`. For sizes that are a multiple of 64 KiB, as
+    the defaults are, that is ``2 * input_bytes + output_bytes``.
+    """
+    return 2 * _whole_pages(input_bytes) + _whole_pages(output_bytes)
+
+
+def _whole_pages(size: int) -> int:
+    return -(-size // SHM_PAGE_BYTES) * SHM_PAGE_BYTES
+
+
 @dataclass(frozen=True)
 class WorkerConfig:
     """The model half of a model split in two, drawn from the manifest's ``runtime.worker`` block.
@@ -297,11 +320,10 @@ class WorkerConfig:
     def shm_slot_bytes(self) -> int:
         """The most shared memory one session's slot holds, with the defaults for what is unset.
 
-        Two request blocks, the second only after a cancelled request, and one
-        output block: ``2 * input_bytes + output_bytes``. A deployment gives
-        each session's memory-backed volume at least this.
+        :func:`shm_slot_bytes` of :attr:`input_bytes` and :attr:`output_bytes`.
+        A deployment gives each session's memory-backed volume at least this.
         """
-        return 2 * self.input_bytes + self.output_bytes
+        return shm_slot_bytes(self.input_bytes, self.output_bytes)
 
 
 @dataclass(frozen=True)

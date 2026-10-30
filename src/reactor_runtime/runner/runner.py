@@ -26,7 +26,7 @@ import uuid
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -110,6 +110,7 @@ from reactor_runtime.runner.stages import RunnerStages
 from reactor_runtime.runner.state_machine import SessionStateMachine
 from reactor_runtime.runner.system_client import SYSTEM_CONN_ID, SystemConnection
 from reactor_runtime.runner.upload_resolution import declares_upload, resolve_uploads
+from reactor_runtime.service import ShutdownHook, no_shutdown
 from reactor_runtime.step_results import SavedStep, StepStore, content_type_of
 from reactor_runtime.transport.router import (
     SessionNotRunningError,
@@ -271,23 +272,6 @@ def _server_version() -> str:
         return "0.0.0"
 
 
-class ShutdownHook(Protocol):
-    """The process-shutdown hook the assembly wires into the runner.
-
-    ``failure`` says whether the process is going down because something broke
-    — the model loop crashed — rather than because it was asked to stop or
-    refused to load; the service turns it into the exit status and the exit
-    deadline.
-    """
-
-    def __call__(self, *, failure: bool = False) -> None:
-        """Ask the process to shut down."""
-
-
-def _no_shutdown(*, failure: bool = False) -> None:
-    """Default process-shutdown hook — a no-op until the service wires one in."""
-
-
 class Runner(ServiceComponent, ConnectionSink):
     """Orchestrates one model and its session, transport- and platform-neutral.
 
@@ -438,7 +422,7 @@ class Runner(ServiceComponent, ConnectionSink):
         # the service to bring the process down when the session is terminated
         # (a failed model load, or a crashed model loop). A no-op until then, so
         # the runner stays usable on its own.
-        self.request_shutdown: ShutdownHook = _no_shutdown
+        self.request_shutdown: ShutdownHook = no_shutdown
 
     # -- lifecycle (ServiceComponent) -----------------------------------------
 

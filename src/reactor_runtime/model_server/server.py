@@ -25,6 +25,7 @@ from reactor_runtime.core import (
     DEFAULT_SHM_OUTPUT_BYTES,
     Health,
     WorkerConfig,
+    shm_slot_bytes,
 )
 
 _MANIFEST_ONLY = ("shm_input_bytes", "shm_output_bytes")
@@ -240,10 +241,9 @@ class ServerSettings:
     def shm_slot_bytes(self) -> int:
         """The most shared memory one session's slot holds, which its volume must fit.
 
-        Two request blocks, the second only after a cancelled request, and one
-        output block: ``2 * shm_input_bytes + shm_output_bytes``.
+        :func:`~reactor_runtime.core.shm_slot_bytes` of the two block sizes.
         """
-        return 2 * self.shm_input_bytes + self.shm_output_bytes
+        return shm_slot_bytes(self.shm_input_bytes, self.shm_output_bytes)
 
     @classmethod
     def resolve(cls, server: type[ModelServer], config: WorkerConfig | None) -> ServerSettings:

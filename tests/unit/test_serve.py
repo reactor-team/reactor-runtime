@@ -6,13 +6,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from reactor_runtime.core import ConnId, RuntimeConfig
+from reactor_runtime.environment import log_level_from_env
 from reactor_runtime.http import HttpServer
 from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.runner import Runner
 from reactor_runtime.serve import (
     _apply_env,
     _assemble,
-    _log_level_from_env,
     _port_range_from_env,
     _version,
     _video_codecs_from_env,
@@ -566,8 +566,8 @@ def test_apply_env_rejects_a_non_integer_port(monkeypatch: pytest.MonkeyPatch) -
 
 def test_log_level_reads_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("REACTOR_LOG_LEVEL", "debug")
-    assert _log_level_from_env() == logging.DEBUG
+    assert log_level_from_env() == logging.DEBUG
 
 
 def test_log_level_defaults_to_info() -> None:
-    assert _log_level_from_env() == logging.INFO
+    assert log_level_from_env() == logging.INFO

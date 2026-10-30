@@ -21,16 +21,13 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import importlib.metadata
-import logging
-import math
 import os
-import sys
-from pathlib import Path
 
 from reactor_runtime import log
 from reactor_runtime.core import RuntimeConfig, RuntimeState, SessionState
+from reactor_runtime.environment import duration_env, float_env, int_env, log_level_from_env
 from reactor_runtime.http import HttpServer
-from reactor_runtime.manifest import MANIFEST, load_config
+from reactor_runtime.manifest import load_workspace
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.runner import Runner
 from reactor_runtime.service import Service
@@ -153,53 +150,6 @@ def _video_codecs_from_env() -> tuple[CodecEntry, ...]:
     return tuple(codecs)
 
 
-def _float_env(name: str, default: float) -> float:
-    """Return env var *name* as a float, or *default* when unset/empty.
-
-    Raises:
-        SystemExit: If the value is set but not a number.
-    """
-    raw = os.getenv(name, "").strip()
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        raise SystemExit(f"{name} {raw!r} must be a number") from None
-
-
-def _duration_env(name: str, default: float) -> float:
-    """Return env var *name* as a finite, non-negative number of seconds.
-
-    For a window that arms a timer. ``float`` also parses ``inf`` and ``nan``,
-    which a timer cannot hold — an infinite deadline never fires and a NaN or
-    negative one fires at once — so those are refused at boot rather than
-    left to disable or trip the guarantee the window exists for.
-
-    Raises:
-        SystemExit: If the value is set but not a finite number of at least zero.
-    """
-    value = _float_env(name, default)
-    if not math.isfinite(value) or value < 0:
-        raise SystemExit(f"{name} {os.getenv(name, '').strip()!r} must be a finite number >= 0")
-    return value
-
-
-def _int_env(name: str, default: int) -> int:
-    """Return env var *name* as an int, or *default* when unset/empty.
-
-    Raises:
-        SystemExit: If the value is set but not an integer.
-    """
-    raw = os.getenv(name, "").strip()
-    if not raw:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        raise SystemExit(f"{name} {raw!r} must be an integer") from None
-
-
 def _bwe_limits_from_env() -> tuple[int, int, int]:
     """Read the congestion-control bitrate limits, enforcing libwebrtc's own ordering.
 
@@ -210,9 +160,9 @@ def _bwe_limits_from_env() -> tuple[int, int, int]:
     Raises:
         SystemExit: If any value is negative or the ordering does not hold.
     """
-    min_kbps = _int_env("WEBRTC_BWE_MIN_KBPS", WebRtcConfig.bwe_min_kbps)
-    max_kbps = _int_env("WEBRTC_BWE_MAX_KBPS", WebRtcConfig.bwe_max_kbps)
-    initial_kbps = _int_env("WEBRTC_BWE_INITIAL_KBPS", WebRtcConfig.bwe_initial_kbps)
+    min_kbps = int_env("WEBRTC_BWE_MIN_KBPS", WebRtcConfig.bwe_min_kbps)
+    max_kbps = int_env("WEBRTC_BWE_MAX_KBPS", WebRtcConfig.bwe_max_kbps)
+    initial_kbps = int_env("WEBRTC_BWE_INITIAL_KBPS", WebRtcConfig.bwe_initial_kbps)
     if not 0 <= min_kbps <= initial_kbps <= max_kbps:
         raise SystemExit(
             "WEBRTC_BWE_MIN_KBPS, WEBRTC_BWE_INITIAL_KBPS, and WEBRTC_BWE_MAX_KBPS must "
@@ -237,8 +187,8 @@ def _sender_limits_from_env() -> tuple[int, int]:
     Raises:
         SystemExit: If the ordering does not hold.
     """
-    max_kbps = _int_env("WEBRTC_SENDER_MAX_KBPS", WebRtcConfig.sender_max_kbps)
-    min_kbps = _int_env("WEBRTC_SENDER_MIN_KBPS", WebRtcConfig.sender_min_kbps)
+    max_kbps = int_env("WEBRTC_SENDER_MAX_KBPS", WebRtcConfig.sender_max_kbps)
+    min_kbps = int_env("WEBRTC_SENDER_MIN_KBPS", WebRtcConfig.sender_min_kbps)
     if min_kbps > 0 < max_kbps and min_kbps > max_kbps:
         raise SystemExit(
             "WEBRTC_SENDER_MIN_KBPS must not exceed WEBRTC_SENDER_MAX_KBPS; "
@@ -259,7 +209,7 @@ def _webrtc_config_from_env() -> WebRtcConfig:
         ice_servers=_ice_servers_from_env(),
         port_range=_port_range_from_env(),
         transport_policy=_ice_policy_from_env(),
-        ping_timeout=_float_env("WEBRTC_CLIENT_PING_TIMEOUT_SECONDS", 20.0),
+        ping_timeout=float_env("WEBRTC_CLIENT_PING_TIMEOUT_SECONDS", 20.0),
         supported_video_codecs=_video_codecs_from_env(),
         bwe_min_kbps=bwe_min_kbps,
         bwe_max_kbps=bwe_max_kbps,
@@ -294,17 +244,11 @@ def _apply_env(cfg: RuntimeConfig) -> RuntimeConfig:
         cfg,
         host=os.getenv("HOST", cfg.host),
         port=port,
-        orphan_timeout=_float_env("ORPHAN_TIMEOUT_SECONDS", cfg.orphan_timeout),
-        grace_period=_duration_env("SIGTERM_GRACE_PERIOD", cfg.grace_period),
-        exit_timeout=_duration_env("EXIT_TIMEOUT_SECONDS", cfg.exit_timeout),
+        orphan_timeout=float_env("ORPHAN_TIMEOUT_SECONDS", cfg.orphan_timeout),
+        grace_period=duration_env("SIGTERM_GRACE_PERIOD", cfg.grace_period),
+        exit_timeout=duration_env("EXIT_TIMEOUT_SECONDS", cfg.exit_timeout),
         recording=recording,
     )
-
-
-def _log_level_from_env() -> int:
-    """Resolve ``REACTOR_LOG_LEVEL`` to a logging level, defaulting to ``INFO``."""
-    name = os.getenv("REACTOR_LOG_LEVEL", "INFO").strip().upper()
-    return logging.getLevelNamesMapping().get(name, logging.INFO)
 
 
 def _assemble(
@@ -417,18 +361,14 @@ def main() -> None:
     """
     from reactor_runtime.transport.webrtc.peer import libwebrtc_peer_factory
 
-    log.configure(level=_log_level_from_env())
+    log.configure(level=log_level_from_env())
     # The runner re-stamps this at construction and on every move; stamping here
     # too covers the lines written before it exists — the process is up and the
     # model is not loaded, which is exactly what CREATED names and what LOADING
     # projects it to — so every record the process writes carries its lifecycle,
     # the first one included.
     log.set_state(SessionState.CREATED.name.lower(), RuntimeState.LOADING.value)
-    manifest = Path.cwd() / MANIFEST
-    if not manifest.is_file():
-        raise SystemExit(f"no {MANIFEST} found in {Path.cwd()}")
-    sys.path.insert(0, str(manifest.parent))
-    cfg = _apply_env(load_config(manifest))
+    cfg = _apply_env(load_workspace())
     webrtc = _webrtc_config_from_env()
     logger.info(
         "starting reactor runtime",

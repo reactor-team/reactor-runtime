@@ -1,10 +1,12 @@
-"""Where a session runtime finds its model server: one typed configuration, read in one place.
+"""What a deployment tells a split model's processes: typed configuration, read in one place.
 
 A deployment tells each session runtime where the model server listens and
-which slot the session serves through the environment. :func:`link_config`
-is the one function that reads those variables, into a :class:`LinkConfig`;
-the client and the runtime's log fields both take that value instead of
-reading the environment themselves.
+which slot the session serves, and tells the model server how many sessions it
+serves and where their shared memory is, through the environment.
+:func:`link_config` and :func:`server_process_config` are the functions that
+read those variables, into a :class:`LinkConfig` and a
+:class:`ServerProcessConfig`; nothing else in the package reads the
+environment.
 """
 
 from __future__ import annotations
@@ -13,6 +15,8 @@ import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
+
+from reactor_runtime.environment import duration_env, int_env
 
 SOCKET_ENV = "REACTOR_MODEL_WORKER_SOCKET"
 """The model server's socket."""
@@ -117,3 +121,85 @@ def _seconds(name: str, default: float) -> float | None:
     if not 0 <= value < math.inf:
         raise ValueError(f"{name} {raw!r} must be a number of seconds, at least 0")
     return None if value == 0 else value
+
+
+MAX_SESSIONS_ENV = "REACTOR_MAX_SESSIONS"
+"""How many session runtimes the deployment runs beside the model server; required."""
+
+SLOT_DIR_ENV = "REACTOR_SHM_SLOT_DIR"
+"""Each slot's shared memory as the model server sees it, a path with ``{slot}``; required."""
+
+HEALTH_PORT_ENV = "REACTOR_MODEL_WORKER_HEALTH_PORT"
+"""The port the model server answers ``GET /health`` on; 8090 when unset."""
+
+STUCK_ENV = "REACTOR_MODEL_WORKER_STUCK_SECONDS"
+"""Seconds one step may run before the model server reports itself stuck; 120 when unset."""
+
+DEFAULT_SOCKET = "/run/reactor-worker/sock"
+DEFAULT_HEALTH_PORT = 8090
+DEFAULT_STUCK_SECONDS = 120.0
+
+
+@dataclass(frozen=True)
+class ServerProcessConfig:
+    """What the deployment tells the model server's process.
+
+    Attributes:
+        socket: Where session runtimes connect.
+        max_sessions: How many session runtimes the deployment runs; slots
+            ``0`` to ``max_sessions - 1`` are served.
+        slot_directory: Each slot's shared memory, a path with ``{slot}``.
+        host: The address ``/health`` binds.
+        health_port: The port ``/health`` binds.
+        stuck_after: Seconds one step may run before ``/health`` reports the
+            model server stuck.
+        exit_timeout: Seconds the orderly shutdown may take.
+        grace_period: Seconds a draining step is given to finish.
+    """
+
+    socket: str
+    max_sessions: int
+    slot_directory: str
+    host: str = "0.0.0.0"
+    health_port: int = DEFAULT_HEALTH_PORT
+    stuck_after: float = DEFAULT_STUCK_SECONDS
+    exit_timeout: float = 10.0
+    grace_period: float = 30.0
+
+
+def server_process_config() -> ServerProcessConfig:
+    """Read the model server's process settings from the environment.
+
+    Reads :data:`MAX_SESSIONS_ENV` and :data:`SLOT_DIR_ENV`, which a deployment
+    must set, and :data:`SOCKET_ENV`, ``HOST``, :data:`HEALTH_PORT_ENV`,
+    :data:`STUCK_ENV`, ``EXIT_TIMEOUT_SECONDS`` and ``SIGTERM_GRACE_PERIOD``,
+    which have defaults.
+
+    Raises:
+        SystemExit: A required variable is unset, or a value is malformed,
+            naming the variable.
+    """
+    max_sessions = int_env(MAX_SESSIONS_ENV, 0)
+    if max_sessions < 1:
+        raise SystemExit(
+            f"{MAX_SESSIONS_ENV} must be set to the deployment's session count, at least 1"
+        )
+    slot_directory = os.getenv(SLOT_DIR_ENV, "").strip()
+    if "{slot}" not in slot_directory:
+        raise SystemExit(
+            f"{SLOT_DIR_ENV} must be set to each slot's shared-memory directory, a path with "
+            "{slot} in it, such as /run/reactor-shm/s{slot}"
+        )
+    stuck_after = duration_env(STUCK_ENV, DEFAULT_STUCK_SECONDS)
+    if stuck_after <= 0:
+        raise SystemExit(f"{STUCK_ENV} must be above 0")
+    return ServerProcessConfig(
+        socket=os.getenv(SOCKET_ENV, "").strip() or DEFAULT_SOCKET,
+        max_sessions=max_sessions,
+        slot_directory=slot_directory,
+        host=os.getenv("HOST", "").strip() or "0.0.0.0",
+        health_port=int_env(HEALTH_PORT_ENV, DEFAULT_HEALTH_PORT),
+        stuck_after=stuck_after,
+        exit_timeout=duration_env("EXIT_TIMEOUT_SECONDS", 10.0),
+        grace_period=duration_env("SIGTERM_GRACE_PERIOD", 30.0),
+    )
