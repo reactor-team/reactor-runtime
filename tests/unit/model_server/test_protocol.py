@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import pickle
 import socket
 import sys
@@ -179,6 +180,31 @@ def test_a_batch_failure_whose_cause_only_the_worker_imports_is_still_a_batch_fa
     assert str(error.cause) == "only_in_the_worker.Missing: gone"
 
 
+def test_a_batch_failure_that_falls_back_whole_is_still_a_batch_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected(request_id: int, exc: BatchFailed) -> Any:
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(protocol, "_batch_failure", unexpected)
+    failed = failure(3, BatchFailed(NoFaceError("bad input")))
+
+    error = error_of(failed)
+
+    assert isinstance(error, BatchFailed)
+    assert type(error.cause) is RuntimeError
+    assert "BatchFailed" in str(error.cause)
+
+
+@pytest.mark.parametrize("raised", [asyncio.CancelledError(), KeyboardInterrupt(), SystemExit(3)])
+def test_a_base_exception_that_is_not_an_exception_arrives_as_a_runtime_error(
+    raised: BaseException,
+) -> None:
+    error = error_of(failure(3, raised))
+    assert type(error) is RuntimeError
+    assert type(raised).__name__ in str(error)
+
+
 @pytest.mark.parametrize("kind", [WorkerRejected, PayloadTooLarge])
 def test_the_runtimes_own_exceptions_arrive_as_themselves(kind: type[Exception]) -> None:
     error = error_of(failure(3, kind("too large")))
@@ -228,6 +254,28 @@ def test_the_pickle_checked_is_the_pickle_sent() -> None:
     error = error_of(failure(3, ProtocolPickyError("picky")))
     assert type(error) is RuntimeError
     assert "ProtocolPickyError: picky" in str(error)
+
+
+def _rebuild_heavy(payload: bytes) -> HeavyError:
+    HeavyError.rebuilt += 1
+    return HeavyError(payload)
+
+
+class HeavyError(Exception):
+    """Counts how often it is unpickled."""
+
+    rebuilt = 0
+
+    def __reduce__(self) -> Any:
+        return (_rebuild_heavy, self.args)
+
+
+def test_portable_pickle_never_unpickles_an_exception_past_its_limit() -> None:
+    replaced, _ = portable_pickle(HeavyError(b"x" * 4096), limit=1024)
+
+    assert type(replaced) is RuntimeError
+    assert "too large to send whole" in str(replaced)
+    assert HeavyError.rebuilt == 0
 
 
 def test_portable_pickle_checks_the_protocol_it_is_given() -> None:

@@ -200,7 +200,11 @@ def failure(request_id: int, exc: BaseException) -> Failed:
     :class:`BatchFailed` always travels as one: when its cause cannot travel,
     only the cause is replaced. The description is ``"module.Type: message"``,
     cut at :data:`DESCRIPTION_LIMIT` characters, and an exception that cannot
-    print is described by its type alone.
+    print is described by its type alone. A ``BaseException`` that is not an
+    ``Exception`` (``CancelledError``, ``KeyboardInterrupt``, ``SystemExit``)
+    always travels as a ``RuntimeError`` carrying its description: raised
+    again on the session's side it would cancel the session's task or end its
+    process.
 
     The model server answers with it on the thread that runs every step, so a
     raise here would stop every session's answers: anything unexpected while
@@ -210,7 +214,8 @@ def failure(request_id: int, exc: BaseException) -> Failed:
         if isinstance(exc, BatchFailed):
             return _batch_failure(request_id, exc)
         description = _describe(exc)
-        _, error = portable_pickle(exc, limit=FAILURE_LIMIT, description=description)
+        carried = exc if isinstance(exc, Exception) else RuntimeError(description)
+        _, error = portable_pickle(carried, limit=FAILURE_LIMIT, description=description)
         return Failed(request_id, error, description)
     except Exception:
         kind = type(exc)
@@ -222,15 +227,18 @@ def failure(request_id: int, exc: BaseException) -> Failed:
 def error_of(failed: Failed) -> BaseException:
     """Return the exception *failed* carries, or a :class:`WorkerError` if it cannot be rebuilt.
 
-    A batch failure whose exception cannot be rebuilt (its cause's class is
-    not in this process) is still a :class:`BatchFailed`, with the
-    :class:`WorkerError` as its cause.
+    A batch failure is always a :class:`BatchFailed`: when what arrives is
+    not one (a stand-in the sender fell back to), it becomes the cause, and
+    when it cannot be rebuilt at all (its cause's class is not in this
+    process), the :class:`WorkerError` is.
     """
     try:
         error = pickle.loads(failed.error)
     except Exception:
         error = None
     if isinstance(error, BaseException):
+        if failed.batch and not isinstance(error, BatchFailed):
+            return BatchFailed(error)
         return error
     stand_in = WorkerError(failed.description)
     return BatchFailed(stand_in) if failed.batch else stand_in

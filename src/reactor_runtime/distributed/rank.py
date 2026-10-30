@@ -180,13 +180,16 @@ def portable_pickle[E: BaseException](
     text = description if description is not None else f"{type(exc).__name__}: {_text(exc)}"
     try:
         blob = pickle.dumps(exc, protocol=protocol)
+        # Measured before the round trip: an exception too large to send is
+        # never unpickled, which is where its large state would cost the most.
+        if limit is not None and len(blob) > limit:
+            stand_in = RuntimeError(f"{text} (too large to send whole)")
+            return stand_in, pickle.dumps(stand_in, protocol=protocol)
         pickle.loads(blob)
     except Exception:
         stand_in = RuntimeError(text)
     else:
-        if limit is None or len(blob) <= limit:
-            return exc, blob
-        stand_in = RuntimeError(f"{text} (too large to send whole)")
+        return exc, blob
     return stand_in, pickle.dumps(stand_in, protocol=protocol)
 
 
