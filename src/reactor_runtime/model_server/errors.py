@@ -63,11 +63,12 @@ class WorkerRejected(ValueError):  # noqa: N818 (named for the event a caller ca
 
 
 class PayloadTooLarge(ValueError):  # noqa: N818 (named for the event a caller catches)
-    """A request or a result is larger than the shared memory ``reactor.yaml`` gives it.
+    """A request or a result is larger than the link carries.
 
-    The message names the payload's size, the block's, and the
-    ``runtime.worker`` key that sets it. Nothing was sent: the request fails
-    alone, and the link and every other request go on.
+    The message names the payload's size and the limit it passed: the
+    shared-memory block, with the ``runtime.worker`` key in ``reactor.yaml``
+    that sizes it, or the link's frame limit. Nothing was sent: the request
+    fails alone, and the link and every other request go on.
     """
 
 
@@ -85,3 +86,12 @@ class WorkerLost(WorkerCrashed):
 
 class WorkerStopping(WorkerLost):
     """The worker is stopping, and answered a request still queued with this."""
+
+
+class WorkerUnreachable(RuntimeError):  # noqa: N818 (named for the state a caller catches)
+    """This deployment cannot reach a model server, and trying again will not help.
+
+    The message says what is missing: the socket's directory (the volume the
+    two halves share is not mounted), a socket this process may not open, or
+    shared memory the two ends do not both see.
+    """
