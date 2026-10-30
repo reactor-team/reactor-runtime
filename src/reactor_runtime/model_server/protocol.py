@@ -21,6 +21,7 @@ from __future__ import annotations
 import pickle
 import socket
 import struct
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -281,25 +282,36 @@ def send_frame(sock: socket.socket, data: bytes) -> None:
     sock.sendall(data)
 
 
-def recv_frame(sock: socket.socket, limit: int) -> bytes:
+def recv_frame(sock: socket.socket, limit: int, *, deadline: float | None = None) -> bytes:
     """Read one frame, refusing one longer than *limit* before reading its body.
+
+    With *deadline*, a ``time.monotonic()`` instant, the whole frame is read
+    by then: the socket's timeout is set to the time left before each read.
 
     Raises:
         Closed: The peer closed the connection.
         ProtocolError: The frame is longer than *limit*.
+        TimeoutError: *deadline* passed before the frame was read.
         OSError: The socket failed, a timeout included.
     """
-    (length,) = FRAME_HEADER.unpack(_exactly(sock, FRAME_HEADER.size))
+    (length,) = FRAME_HEADER.unpack(_exactly(sock, FRAME_HEADER.size, deadline))
     if length > limit:
         raise ProtocolError(f"a frame of {length} bytes passes the {limit} byte limit")
-    return _exactly(sock, length) if length else b""
+    return _exactly(sock, length, deadline) if length else b""
 
 
-def _exactly(sock: socket.socket, n: int) -> bytes:
+def _exactly(sock: socket.socket, n: int, deadline: float | None = None) -> bytes:
     buf = bytearray(n)
     view = memoryview(buf)
     got = 0
     while got < n:
+        if deadline is not None:
+            # A timeout of 0 would make the socket non-blocking: a spent
+            # deadline is a timeout, not an EAGAIN.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("the deadline passed while a frame was read")
+            sock.settimeout(remaining)
         read = sock.recv_into(view[got:], n - got)
         if read == 0:
             raise Closed("the peer closed the connection")

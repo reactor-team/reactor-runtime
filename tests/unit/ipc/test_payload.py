@@ -129,6 +129,17 @@ def test_a_call_above_the_limit_is_refused_and_the_slot_goes_on(
         slot.close()
 
 
+def test_with_no_slot_every_array_travels_inline_in_the_same_header(tmp_path: Path) -> None:
+    frames = np.arange(4096, dtype=np.uint8)
+    header = pack({"frames": frames}, None)
+    _, name, spans = pickle.loads(header)
+
+    assert (name, spans) == (None, [])
+    assert len(header) > frames.nbytes
+    back = unpack(header, SlotReader(directory=tmp_path / "unused"))
+    np.testing.assert_array_equal(back["frames"], frames)
+
+
 def test_an_object_without_buffers_needs_no_block(slot: SharedSlot, tmp_path: Path) -> None:
     header = pack({"step": 3}, slot)
     assert unpack(header, SlotReader(directory=tmp_path / "unused")) == {"step": 3}

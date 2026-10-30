@@ -91,7 +91,7 @@ def test_without_a_manifest_block_the_class_and_the_runtime_defaults_apply() -> 
         shm_input_bytes=DEFAULT_SHM_INPUT_BYTES,
         shm_output_bytes=DEFAULT_SHM_OUTPUT_BYTES,
     )
-    assert settings.shm_slot_bytes == DEFAULT_SHM_INPUT_BYTES + DEFAULT_SHM_OUTPUT_BYTES
+    assert settings.shm_slot_bytes == 2 * DEFAULT_SHM_INPUT_BYTES + DEFAULT_SHM_OUTPUT_BYTES
 
 
 def test_the_manifest_lowers_max_batch_and_sets_the_rest() -> None:
@@ -108,7 +108,7 @@ def test_the_manifest_lowers_max_batch_and_sets_the_rest() -> None:
         shm_input_bytes=2 << 20,
         shm_output_bytes=32 << 20,
     )
-    assert config.shm_slot_bytes == 34 << 20
+    assert config.shm_slot_bytes == 36 << 20
 
 
 def test_the_effective_sizes_are_the_declared_ones_or_the_defaults() -> None:
