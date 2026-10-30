@@ -500,7 +500,7 @@ async def test_the_session_reopens_a_timed_out_room_only_once_the_first_join_has
 
 @pytest.fixture
 def short_leave(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(room_module, "LEAVE_TIMEOUT_SECONDS", 0.05, raising=False)
+    monkeypatch.setattr(room_module, "LEAVE_TIMEOUT_SECONDS", 0.05)
 
 
 def _slow_leave(monkeypatch: pytest.MonkeyPatch, room: FakeRoom) -> Gate:
