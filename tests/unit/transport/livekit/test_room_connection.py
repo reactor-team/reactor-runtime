@@ -176,6 +176,80 @@ async def test_a_flush_clears_the_audio_waiting_for_the_room() -> None:
     await conn.close()
 
 
+async def test_closing_drops_the_audio_waiting_for_the_room() -> None:
+    conn, _, audio = make_connection()
+    # No pump running: the frames wait, as they would for a room that is behind.
+    for value in range(3):
+        conn._send_frame(bundle(value))
+    await _settle()
+
+    await conn.close()
+
+    assert audio.cleared == 1
+
+
+class RefusingAudioSource(FakeAudioSource):
+    def clear_queue(self) -> None:
+        raise AssertionError("the native source is gone")
+
+
+async def test_closing_leaves_the_room_even_when_the_audio_cannot_be_cleared() -> None:
+    leaves = Leaves()
+    conn = RoomConnection(
+        ConnId(4711),
+        asyncio.get_running_loop(),
+        {"main_video": cast(Any, FakeVideoSource())},
+        {"main_audio": cast(Any, RefusingAudioSource())},
+        {"main_video": VIDEO, "main_audio": AUDIO},
+        on_close=leaves,
+    )
+    conn.start()
+
+    await conn.close()
+
+    assert leaves.count == 1
+
+
+class StalledAudioSource(FakeAudioSource):
+    """An audio source whose capture waits, as one whose own queue is full does."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.capturing = asyncio.Event()
+        self.cancelled = False
+
+    async def capture_frame(self, frame: rtc.AudioFrame) -> None:
+        self.capturing.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+
+
+async def test_closing_while_a_frame_is_being_captured_cancels_it_and_leaves() -> None:
+    leaves, audio = Leaves(), StalledAudioSource()
+    conn = RoomConnection(
+        ConnId(4711),
+        asyncio.get_running_loop(),
+        {"main_video": cast(Any, FakeVideoSource())},
+        {"main_audio": cast(Any, audio)},
+        {"main_video": VIDEO, "main_audio": AUDIO},
+        on_close=leaves,
+    )
+    conn.start()
+    for value in range(3):
+        conn._send_frame(bundle(value))
+    await asyncio.wait_for(audio.capturing.wait(), timeout=1.0)
+
+    await conn.close()
+    await _settle()
+
+    assert audio.cancelled
+    assert audio.cleared == 1
+    assert leaves.count == 1
+
+
 async def test_messages_to_the_system_client_are_dropped() -> None:
     conn, video, audio = make_connection()
 

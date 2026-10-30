@@ -72,6 +72,19 @@ logger = get_logger(__name__)
 JOIN_TIMEOUT_SECONDS = 30.0
 """How long a join, connecting and publishing the output tracks, may take before it fails."""
 
+LEAVE_TIMEOUT_SECONDS = 3.0
+"""How long closing a room connection waits for the room to be left.
+
+The session's teardown waits for the leave, so a room that never answers would
+otherwise hold the session closing, and the model unavailable to the next one.
+Past the bound the close goes on without waiting, and logs it; the leave itself
+is never cancelled, since a leave cut short may never reach the server and the
+participant would stay in the room. It runs on in the background, and the room
+connection is not :attr:`RoomSession.settled` until it has finished. The bound
+sits above the SDK's own two-second limit on unwinding in-flight RPC calls, so
+that step completes inside it.
+"""
+
 _JOIN_REFUSED = "the LiveKit room could not be joined: {cause}"
 _JOIN_TIMED_OUT = "joining the LiveKit room timed out"
 _ROOM_LOST = "the LiveKit room connection closed ({reason})"
@@ -350,8 +363,8 @@ class RoomSession:
         if connection is not None:
             self._control.connection_closed(self.conn_id)
             await connection.close()
-        await self._disconnect()
-        logger.info("left the LiveKit room", conn_id=self.conn_id, reason=reason)
+        if await self._disconnect():
+            logger.info("left the LiveKit room", conn_id=self.conn_id, reason=reason)
 
     async def _connection_closed(self) -> None:
         """Leave the room when the session closes the room connection itself.
@@ -366,11 +379,39 @@ class RoomSession:
         await asyncio.gather(*(participant.close() for participant in participants))
         await self._finish(_SESSION_ENDED)
 
-    async def _disconnect(self) -> None:
-        try:
-            await self._room.disconnect()
-        except Exception:
-            logger.warning("leaving the LiveKit room failed", exc_info=True)
+    async def _disconnect(self) -> bool:
+        """Leave the room, waiting at most :data:`LEAVE_TIMEOUT_SECONDS` for it.
+
+        Returns:
+            Whether the leave finished within the bound. One that did not goes
+            on in the background, tracked until it ends.
+        """
+        leave = asyncio.get_running_loop().create_task(
+            self._room.disconnect(), name=f"livekit-leave-{self.conn_id}"
+        )
+        self._closing.add(leave)
+        leave.add_done_callback(self._closing.discard)
+        leave.add_done_callback(self._log_leave_failure)
+        done, _ = await asyncio.wait({leave}, timeout=LEAVE_TIMEOUT_SECONDS)
+        if not done:
+            logger.warning(
+                "leaving the LiveKit room is taking long; going on without waiting",
+                conn_id=self.conn_id,
+                timeout_s=LEAVE_TIMEOUT_SECONDS,
+            )
+        return bool(done)
+
+    def _log_leave_failure(self, leave: asyncio.Task[None]) -> None:
+        """Log a leave that raised, retrieving its exception so it is not reported as lost."""
+        if leave.cancelled():
+            return
+        error = leave.exception()
+        if error is not None:
+            logger.warning(
+                "leaving the LiveKit room failed",
+                conn_id=self.conn_id,
+                error=_masked(str(error), *self._secrets),
+            )
 
     def _tracks(self, direction: TrackDirection) -> dict[str, TrackInfo]:
         """The model's declared tracks that flow in *direction*."""
