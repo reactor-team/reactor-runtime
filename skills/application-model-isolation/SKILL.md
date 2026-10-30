@@ -474,6 +474,62 @@ caught by the loop before the model runs and never reaches `process_output()`.
 `StepOutcome`, or catches its own exception to return an error value, has
 taken over a job the runtime does.
 
+## A model half in its own process
+
+A model whose weights fill most of a GPU can serve several sessions from one
+copy of them: the model half runs once, in its own process, as a
+`ModelServer` (`reactor_runtime.model_server`), and each session runtime runs
+the application half, holding a `ModelClient` to it. Every rule above still
+holds; the boundary between the halves is now a process boundary, which adds
+five:
+
+- **What crosses is data, by convention.** Requests, results and signals are
+  pickled as they are, so anything pickle takes crosses, and nothing checks
+  it. Send plain data, such as frozen dataclasses of numbers, strings and
+  numpy arrays, defined in a module both halves import with the exceptions
+  the model raises for a request, so the application catches them as
+  themselves. A CUDA tensor cannot be rebuilt in a session process, which
+  holds no GPU, and a callable runs in whichever process calls it.
+  `ModelServer[Tick, Frame]` and `ModelClient[Tick, Frame]` name the types
+  for type checkers alone.
+- **The application resets its slot.** `@session_started` calls
+  `self.model.reset()`, so a session never runs on state the model kept for
+  the one before; until it does, `step()` raises `ResetRequired`.
+- **A failure of the model half is decided in `process_output()`.** The
+  model's own exception arrives as itself, `BatchFailed` when its whole step
+  raised. A lost or stuck model server arrives as `WorkerLost` or a
+  `StepUnanswered`; the application re-raises it, the session runtime goes
+  down, and its restart waits in `load()` until the model server is back.
+  Nothing reconnects underneath the application.
+- **A loss between steps is wired, not waited for.** A link lost while no
+  step runs raises from no call, so `connect()` takes `on_lost=self.crash`:
+  the session runtime ends the same way a raise out of `process_output()`
+  ends it, idle or not, and no session ever starts on a dead link.
+- **Health is the model half's to report.** `ModelServer.health()` returns a
+  `Health`; a model that reports itself unhealthy is restarted by its
+  deployment, and every session runtime then sees `WorkerLost` and goes down
+  as above.
+
+```python
+class Plasma(ReactorApp):
+    def load(self, config_path):
+        self.model: ModelClient[Tick, Frame] = ModelClient.connect(on_lost=self.crash)
+
+    @session_started
+    def begin(self):
+        self.model.reset()
+
+    def generate(self, input):
+        return self.model.step(Tick(tick=input.tick))
+
+    async def process_output(self, outcome):
+        if isinstance(outcome.error, (WorkerLost, StepUnanswered)):
+            raise outcome.error
+        ...
+```
+
+`examples/shared_worker/` is the worked example.
+
 ## Which loop you are on
 
 The default `run()` of `ReactorApp` is the loop that drives the three hooks.

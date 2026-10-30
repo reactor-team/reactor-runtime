@@ -8,7 +8,8 @@ they exchange is pickled::
     class PlasmaModel(ModelServer[Tick, Frame]):   # the model half, in the model server
         def step(self, requests): ...
 
-    self.model = ModelClient.connect()             # the application half, in each session
+    # The application half, in each session; a lost model server ends it.
+    self.model = ModelClient.connect(on_lost=self.crash)
     frame = self.model.step(Tick(tick=n))
 
 The rules of the split are in ``skills/application-model-isolation``. A model
