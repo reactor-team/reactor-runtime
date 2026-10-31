@@ -29,7 +29,7 @@ runtime:
 
 build:
   # Must match the `reactor-runtime==<version>` pin in requirements.txt.
-  runtime_version: "3.10.1"
+  runtime_version: "3.11.0"
   # The engine compiles kernels at load, so the image builds against the CUDA
   # toolkit rather than the slim Python base.
   cuda_version: "12.9.1"
