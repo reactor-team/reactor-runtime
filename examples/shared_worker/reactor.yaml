@@ -1,0 +1,24 @@
+$schema: reactor/v2
+
+# `runtime.worker` splits the model: `python -m reactor_runtime.model_server`
+# loads the model half once and steps every session, and `runtime.import`
+# names the application half each session runtime (`python -m
+# reactor_runtime.serve`) runs. The worker block's serving settings may lower
+# the class's max_batch; the shared-memory sizes live here alone, 1 MiB per
+# request and 32 MiB per result when unset, which a 320x192 frame fits.
+model:
+  name: shared-worker
+  version: v0.0.1
+  description: |
+    A color field that drifts at the speed each client sets, rendered for
+    every session by one model server process that holds the palette.
+
+runtime:
+  import: plasma:Plasma
+  worker:
+    import: plasma_model:PlasmaModel
+    max_batch: 4
+
+build:
+  # Must match the `reactor-runtime==<version>` pin in requirements.txt.
+  runtime_version: "3.10.1"

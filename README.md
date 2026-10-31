@@ -20,6 +20,7 @@ Reactor Runtime turns an inference pipeline into a real-time, interactive media 
 - 🏠 **LiveKit rooms.** A session can join a LiveKit room: the model's tracks are published there, and every other participant in the room is a client.
 - ✅ **Typed, validated commands.** Declare the commands your model accepts with standard Python types and constraints. The runtime validates every payload before your handler runs and compiles the surface into an OpenAPI schema that drives typed client SDKs.
 - 🗂️ **Step results.** Start a session with its input and a number of steps, and keep each step's output as a folder of files.
+- 🧩 **Many sessions, one copy of the weights.** Split a model into a model half that one model server process loads once and an application half each session runtime runs, and every session shares its weights and GPU. See `examples/shared_worker`.
 - 🔎 **Traceable logs.** `get_logger()` writes structured records, and every record a session writes carries its id, so one filter recovers a whole run.
 - 📦 **One container, anywhere.** The `reactor` CLI scaffolds a workspace, builds a small image, and runs it locally. The same image deploys to [Reactor](https://reactor.inc)'s GPU cloud unchanged.
 
@@ -166,6 +167,7 @@ Not on macOS, or pinning a release in CI? See [Install the CLI](https://docs.rea
 - [Echo example](./examples/echo/README.md): the client's webcam and microphone in, an effect applied, both sent back, in batches
 - [Waypoint example](./examples/waypoint/README.md): a world model on a GPU, seeded from an upload and steered live
 - [Stepped echo example](./examples/stepped_echo/README.md): one frame and a JSON report back for every step, the reference for a stepped session
+- [Shared worker example](./examples/shared_worker/README.md): one model server batching the frames of several sessions, the reference for a model half in its own process
 
 ## Development
 
