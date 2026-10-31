@@ -1,5 +1,0 @@
-# Python dependencies installed into the model image, in one pip pass.
-#
-# reactor-runtime is the runtime itself. Its version is pinned here; bump
-# this line to upgrade, and reactor.yaml's build.runtime_version to match.
-reactor-runtime==3.10.1

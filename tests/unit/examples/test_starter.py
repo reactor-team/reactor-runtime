@@ -14,7 +14,10 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from reactor_runtime.core import ConnId
 from reactor_runtime.core.model import EndReason, SessionEnded, SessionStarted
+from reactor_runtime.core.values import CompletedStep
+from reactor_runtime.interface.internal.reactor_core import StepEnvelope
 from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.manifest import import_model_class, load_config
 from starter import Starter, StarterOutput, StarterState
@@ -75,6 +78,11 @@ def test_the_step_is_generate_alone() -> None:
     # runtime's defaults, so the state reaches generate() as it is.
     assert "process_input" not in vars(Starter)
     assert "process_output" not in vars(Starter)
+
+
+def test_the_model_runs_the_default_loop_so_it_can_be_stepped() -> None:
+    assert "run" not in vars(Starter)
+    assert Starter.supports_stepped()
 
 
 def test_manifest_resolves_to_the_app_class() -> None:
@@ -181,3 +189,29 @@ async def test_a_session_end_starts_the_animation_over(
     assert model.index == 1
     await model._dispatch_reactor_event(SessionEnded("s", EndReason.STOPPED))
     assert (model.angle, model.index, model.static) == (0.0, 0, None)
+
+
+async def test_a_stepped_session_renders_one_frame_per_requested_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = _loaded(tmp_path, monkeypatch)
+    steps: list[CompletedStep] = []
+    model._on_loop_ready()
+    model.bind_output(
+        broadcast=lambda *args: None,
+        addressed=lambda *args: None,
+        media=lambda c: None,
+        step=steps.append,
+    )
+    await model._dispatch_reactor_event(SessionStarted("s", stepped=True))
+    for n in range(2):
+        await model._run_requested_step(
+            StepEnvelope(media_input={}, conn_id=ConnId(1), request_id=f"r{n}")
+        )
+
+    assert [step.request.index for step in steps if step.request] == [1, 2]
+    for step in steps:
+        assert step.bundle is not None
+        assert step.bundle.frame_count == 1
+        assert np.asarray(step.bundle.tracks["main_video"].data).shape == (40, 64, 3)
+    assert model.index == 2

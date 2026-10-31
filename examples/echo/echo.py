@@ -17,6 +17,11 @@ bursts drives the same loop.
 Per-frame metadata round-trips: whatever a client attaches to a webcam frame
 comes back on the frame it produced, so a client can correlate the two
 without a side channel.
+
+The class leaves ``run()`` to the runtime, so the same code serves a stepped
+session: a client request carries the step's frames and settings, the refusal
+answers the request, and the step's result carries what ``process_output``
+returned.
 """
 
 from __future__ import annotations

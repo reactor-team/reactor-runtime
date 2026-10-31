@@ -140,6 +140,11 @@ def test_manifest_resolves_to_the_app_class() -> None:
     assert cfg.config_path == _EXAMPLE_DIR / "config.yml"
 
 
+def test_the_model_runs_the_default_loop_so_it_can_be_stepped() -> None:
+    assert "run" not in vars(Waypoint)
+    assert Waypoint.supports_stepped()
+
+
 def test_button_set_merges_the_action_with_the_extra_buttons() -> None:
     state = WaypointState()
     state.action = "forward_left"
