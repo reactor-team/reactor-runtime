@@ -17,6 +17,8 @@ from typing import Any, NewType
 import numpy as np
 import numpy.typing as npt
 
+from reactor_runtime.core.external_file import ExternalFile
+
 ConnId = NewType("ConnId", int)
 """Identifier for one client connection within a session.
 
@@ -623,6 +625,7 @@ class CompletedStep:
     Attributes:
         bundle: The media the step produced, or ``None`` when it produced none.
         files: Extra files the model keeps with the step, keyed by file name.
+        external_files: References to files held by an external service.
         error: Why the step failed, or ``None`` when it worked.
         elapsed: Wall-clock seconds the step took, when measured.
         session: The session the step belongs to, as the number of session
@@ -647,6 +650,7 @@ class CompletedStep:
     fps: float = 30.0
     stages: Mapping[str, float] = field(default_factory=dict)
     request: RequestedStep | None = None
+    external_files: tuple[ExternalFile, ...] = ()
 
 
 @dataclass(frozen=True)

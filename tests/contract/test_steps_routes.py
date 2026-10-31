@@ -19,7 +19,14 @@ import numpy as np
 import pytest
 from contract_helpers import Harness, JournalReader, SteppingState, running_runtime
 
-from reactor_runtime import CommandError, ReactorApp, StepCompleted, StepOutcome, event
+from reactor_runtime import (
+    CommandError,
+    ExternalFile,
+    ReactorApp,
+    StepCompleted,
+    StepOutcome,
+    event,
+)
 from reactor_runtime.core import RuntimeConfig, StepResultsConfig
 from reactor_runtime.interface.tracks import Output, Video
 
@@ -42,6 +49,42 @@ class SavingModel(ReactorApp):
 
     async def process_output(self, outcome: StepOutcome) -> StepCompleted:
         return StepCompleted(output=outcome.to_output(), files={"note.txt": b"two frames"})
+
+
+class ExternalSavingModel(SavingModel):
+    """A model whose output stays at its external source."""
+
+    async def process_output(self, outcome: StepOutcome) -> StepCompleted:
+        return StepCompleted(
+            external_files=(
+                ExternalFile(
+                    "output.mp4", "video/mp4", "example", "job-1", "https://media.example/v"
+                ),
+            )
+        )
+
+
+async def test_external_sources_are_available_to_the_runner_after_session_stop(
+    tmp_path: Path,
+) -> None:
+    async with running_runtime(model_cls=ExternalSavingModel, cfg=_saving_config()) as harness:
+        ready = await _run_two_saved_steps(harness, tmp_path)
+        assert ready[0]["detail"]["files"] == ["_external_results.json"]
+        assert ready[0]["detail"]["usage"] == []
+        await harness.client.post("/stop_session")
+        result = await harness.client.get(f"/sessions/{_SESSION_ID}/steps/1")
+        assert result.status_code == 200
+        assert result.json()["external_files"] == [
+            {"name": "output.mp4", "content_type": "video/mp4", "expires_at": None}
+        ]
+        assert "media.example" not in result.text
+        descriptor = await harness.client.get(
+            f"/sessions/{_SESSION_ID}/steps/1/_external_results.json"
+        )
+        assert descriptor.status_code == 200
+        assert descriptor.json()["files"][0]["job_id"] == "job-1"
+        output = await harness.client.get(f"/sessions/{_SESSION_ID}/steps/1/output.mp4")
+        assert output.status_code == 404
 
 
 async def _run_two_saved_steps(harness: Harness, root: Path) -> list[dict[str, Any]]:

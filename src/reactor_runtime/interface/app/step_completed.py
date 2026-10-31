@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from reactor_runtime.core.external_file import EXTERNAL_RESULTS_FILE, ExternalFile
 from reactor_runtime.interface.tracks import Output
 
-RESERVED_FILE_NAMES = frozenset({"result.json", "output.mp4"})
+RESERVED_FILE_NAMES = frozenset({"result.json", "output.mp4", EXTERNAL_RESULTS_FILE})
 """File names the runtime writes into a step result itself."""
 
 
@@ -29,6 +31,10 @@ class StepCompleted:
             by the runtime.
         error: Why the step failed, or ``None`` when it worked.
         elapsed: Wall-clock seconds the step took, when measured.
+        external_files: References to files held by an external service. The
+            runtime saves their descriptors without downloading their bytes.
+            At most 256 references and 1 MB of descriptor JSON may be supplied;
+            names must be unique across local and external files.
 
     Raises:
         ValueError: A file name is empty, holds a path separator, is ``.`` or
@@ -40,6 +46,7 @@ class StepCompleted:
     files: Mapping[str, bytes] = field(default_factory=dict)
     error: str | None = None
     elapsed: float | None = None
+    external_files: tuple[ExternalFile, ...] = ()
 
     def __post_init__(self) -> None:
         """Check the extra files and keep a copy the caller cannot change."""
@@ -48,6 +55,21 @@ class StepCompleted:
             if not isinstance(data, bytes):
                 raise TypeError(f"step file {name!r} must be bytes, got {type(data).__name__}")
         object.__setattr__(self, "files", dict(self.files))
+        sources = tuple(self.external_files)
+        if sources and len(sources) + len(self.files) + int(self.output is not None) > 256:
+            raise ValueError("a step may contain at most 256 external files")
+        names = set(self.files)
+        if self.output is not None:
+            names.add("output.mp4")
+        for source in sources:
+            if not isinstance(source, ExternalFile):
+                raise TypeError("external_files must contain ExternalFile values")
+            if source.name in names:
+                raise ValueError("step file names must be unique")
+            names.add(source.name)
+        if len(json.dumps([source.source_entry() for source in sources]).encode()) > 1_000_000:
+            raise ValueError("external file descriptors must fit within 1 MB")
+        object.__setattr__(self, "external_files", sources)
 
 
 def _check_file_name(name: str) -> None:
