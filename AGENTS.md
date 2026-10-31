@@ -47,22 +47,21 @@ them.
 
 ## Examples
 
-`examples/` holds five workspaces, and each shows one shape on purpose.
+`examples/` holds three workspaces, and each shows one shape on purpose.
 `starter` is the smallest complete model: one class that writes `generate()`
 alone, with the runtime's default `process_input()` and `process_output()`.
 It stays that way; a change that adds either hook, or splits it into two
 files, removes the example's reason to exist. `echo` and `waypoint` carry the
 application/model split, and they are where that pattern is taught. Its rules
 live in `skills/application-model-isolation`, which says the split is
-optional and when to make it. `stepped_echo` is the reference for a stepped
-session: it writes the three step hooks, never `run()`, and reports back
-everything a step carried, so its report is a contract clients and tests rely
-on. `shared_worker` is the reference for the same split with the model half
-in a process of its own (`reactor_runtime.model_server`): the model server
-owns the weights, each session runtime's application half asks it for its
-frames with plain data both halves import, and a lost model server
-takes the session runtime down, wired with `on_lost=self.crash`. Its
-`deploy/` files show the pod the two run in.
+optional and when to make it. All three leave `run()` to the runtime, so each
+serves a stepped session with the same code; `echo` is the reference for one,
+and its tests drive it as a client does.
+
+The set is fixed. A new feature is shown in the existing example it fits,
+never in a new one, and every version bump moves all three pins with it:
+`skills/maintaining-examples` has the rules, and a unit test fails when a pin
+falls behind.
 
 ## Toolchain
 
@@ -94,6 +93,8 @@ mise run test-integration-matrix  # integration tests on every supported Python
   `vX.Y.Z`, publishes the GitHub release, and uploads to PyPI. Every other merge
   publishes an `X.Y.Z.dev<run>` pre-release on GitHub alone. CI writes the tag,
   so never tag by hand, and never edit the version field in an unrelated change.
+  The bump moves every example's runtime pin with it
+  (`skills/maintaining-examples`).
 
 ## Tests
 

@@ -535,7 +535,10 @@ The step input is still built in `process_input()` and `generate()` is still
 the one line of rule 2: `ModelClient.step()` stands where the model half's
 `generate()` stood.
 
-`examples/shared_worker/` is the worked example.
+`tests/integration/pod/split_echo/` is a worked example: `examples/echo` with
+its model half in a model server, which the pod tests run as separate
+processes. The `reactor_runtime.model_server` docstrings document the
+settings, limits and errors.
 
 ## Which loop you are on
 

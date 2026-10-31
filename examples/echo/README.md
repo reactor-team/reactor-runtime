@@ -4,8 +4,8 @@ Loop the client's webcam and microphone back, with a real-time video effect.
 Two inbound tracks, two outbound tracks, four settings, no weights. It runs on
 a CPU and needs nothing installed but the CLI and Docker.
 
-This is the reference for a model that consumes the client's media, written
-as two halves:
+This is the reference for a model that consumes the client's media, in a
+streamed session or a stepped one, written as two halves:
 
 - `echo_model.py` is the model. It applies one of seven effects to one frame
   and draws a caption over it, behind `load`, `generate`, and `reset`. It holds
@@ -65,3 +65,37 @@ Every setting is held: the model reads the current value of each field on
 every step. Whatever a client attaches to a webcam frame as metadata comes
 back on the frame it produced; in a batch, a frame that carried nothing comes
 back with an empty entry.
+
+## Stepped session
+
+The application writes the three step hooks and leaves `run()` to the
+runtime, so the same code serves a stepped session, where each client request
+runs one step instead of streaming. Start the session with
+`"generation": "stepped"`. A request carries its webcam frames, and any
+microphone audio, in `media_input`, and sets any of the four settings through
+`state`. Its result carries the newest of those frames on `main_video`, with
+the effect applied and the metadata it arrived with, and the audio on
+`main_audio`. The settings hold from one step to the next.
+
+A step that carries no webcam frame is refused: `process_input` answers
+`REFUSED` with `waiting for a webcam frame`, and the step takes no number.
+With `burst` above `1`, a step that only gathers its frame carries no media,
+and the step that fills the batch carries every frame of it.
+
+With the Python SDK, from the release that adds stepped sessions
+(`Reactor.step()`), against the `reactor run` above:
+
+```python
+from reactor_sdk import Reactor
+
+reactor = Reactor("echo", local=True, generation="stepped")
+await reactor.connect()
+
+webcam = await reactor.track("webcam").publish()
+webcam.push_frame(frame, user_data=b'{"seq": 1}')   # buffered for the next step
+
+result = await reactor.step(state={"effect": "sepia", "caption": "hello"})
+[out] = result.track("main_video").frames
+out.array                  # the frame pushed above, in sepia, captioned
+out.metadata               # b'{"seq": 1}'
+```

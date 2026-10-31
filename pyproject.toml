@@ -150,8 +150,6 @@ extra-paths = [
     "examples/starter",
     "examples/echo",
     "examples/waypoint",
-    "examples/stepped_echo",
-    "examples/shared_worker",
     "tests/integration/pod/split_echo",
     "tests/unit/transport/webrtc",
     "tests/contract",

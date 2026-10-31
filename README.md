@@ -20,7 +20,7 @@ Reactor Runtime turns an inference pipeline into a real-time, interactive media 
 - 🏠 **LiveKit rooms.** A session can join a LiveKit room: the model's tracks are published there, and every other participant in the room is a client.
 - ✅ **Typed, validated commands.** Declare the commands your model accepts with standard Python types and constraints. The runtime validates every payload before your handler runs and compiles the surface into an OpenAPI schema that drives typed client SDKs.
 - 🗂️ **Step results.** Start a session with its input and a number of steps, and keep each step's output as a folder of files.
-- 🧩 **Many sessions, one copy of the weights.** Split a model into a model half that one model server process loads once and an application half each session runtime runs, and every session shares its weights and GPU. See `examples/shared_worker`.
+- 🧩 **Many sessions, one copy of the weights.** Split a model into a model half that one model server process loads once and an application half each session runtime runs, and every session shares its weights and GPU.
 - 🔎 **Traceable logs.** `get_logger()` writes structured records, and every record a session writes carries its id, so one filter recovers a whole run.
 - 📦 **One container, anywhere.** The `reactor` CLI scaffolds a workspace, builds a small image, and runs it locally. The same image deploys to [Reactor](https://reactor.inc)'s GPU cloud unchanged.
 
@@ -99,7 +99,7 @@ runtime:
 
 A step's tracks are saved as one `output.mp4`, with a `result.json` that lists the step's files, and `GET /sessions/{id}/steps` serves the folders.
 
-A session can also be stepped: `POST /start_session` with `"generation": "stepped"` runs one step per `RequestStep` a client sends on the data channel instead of streaming, and answers each request with a `StepResult` that carries the step's media, so a stepped client must negotiate data-channel chunking. The model code is the same in both modes; a model that overrides `run()` or `submit_command()` cannot be stepped. The [stepped echo example](./examples/stepped_echo/README.md) answers each step with what it saw, so a client can check every part of its request.
+A session can also be stepped: `POST /start_session` with `"generation": "stepped"` runs one step per `RequestStep` a client sends on the data channel instead of streaming, and answers each request with a `StepResult` that carries the step's media, so a stepped client must negotiate data-channel chunking. The model code is the same in both modes; a model that overrides `run()` or `submit_command()` cannot be stepped. Every example serves both; the [echo example](./examples/echo/README.md#stepped-session) shows a stepped session end to end.
 
 A session can join a LiveKit room. The room connection publishes the model's output tracks, and every other participant in the room is a client of the session. The model's `reactor.yaml` says which RPC methods, data topics, and byte streams reach which of its commands, messages, and input tracks:
 
@@ -164,10 +164,8 @@ Not on macOS, or pinning a release in CI? See [Install the CLI](https://docs.rea
 - [Events and messages](https://docs.reactor.inc/deploy/development/reactor-app/events-and-messages): commands, refusals with `CommandError`, and messages to clients
 - [Video and audio tracks](https://docs.reactor.inc/deploy/development/reactor-app/video-and-audio-tracks): output and input tracks, and how input is buffered
 - [Starter example](./examples/starter/README.md): the model `reactor init` scaffolds: one class, `generate()` alone, the smallest complete `ReactorApp`
-- [Echo example](./examples/echo/README.md): the client's webcam and microphone in, an effect applied, both sent back, in batches
+- [Echo example](./examples/echo/README.md): the client's webcam and microphone in, an effect applied, both sent back, in batches, streamed or one step per request
 - [Waypoint example](./examples/waypoint/README.md): a world model on a GPU, seeded from an upload and steered live
-- [Stepped echo example](./examples/stepped_echo/README.md): one frame and a JSON report back for every step, the reference for a stepped session
-- [Shared worker example](./examples/shared_worker/README.md): one model server batching the frames of several sessions, the reference for a model half in its own process
 
 ## Development
 

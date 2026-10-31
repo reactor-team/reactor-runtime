@@ -1,7 +1,7 @@
 """A pod of one model server and several session runtimes, as separate processes.
 
-Each process stands in for one container of the pod ``examples/shared_worker``
-describes: the model server is ``python -m reactor_runtime.model_server``, and
+Each process stands in for one container of a pod that splits a model in two:
+the model server is ``python -m reactor_runtime.model_server``, and
 every session is an unchanged ``python -m reactor_runtime.serve`` on its own
 port. They share one socket directory, and each slot has a shared-memory
 directory of its own. The model is ``examples/echo`` split in two. The test
