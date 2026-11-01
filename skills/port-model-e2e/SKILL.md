@@ -49,13 +49,13 @@ one definition every file of this skill uses:
 |---|---|---|---|
 | **config** | fixed for the life of the server | the config file `load()` reads | checkpoint subpaths, step count, dtype, sampler; the resolution when the checkpoint supports only one |
 | **setup** | set before generation starts, fixed until a reset; a value sent while running is refused | a command valid while idle | first frame, seed; the resolution when the model offers several |
-| **live** | may change while generating; lands at the next chunk (or clip) boundary and holds until changed | a public state field or a command applied at the next step | prompt, actions; reference images when the architecture can take them at a chunk boundary (otherwise setup) |
+| **live** | may change while generating; lands at the next chunk boundary and holds until changed | a public state field or a command applied at the next step | prompt, actions; reference images when the architecture can take them at a chunk boundary (otherwise setup) |
 
 Inputs that exist only for the offline script (output paths, frame-count caps, video writers) are
 deleted. None of the three kinds carries a default for a client input in the model or its config.
 
 **Proposing setup or live.** Start from the code: an input the source consumes inside its per-chunk
-(or per-clip) loop is live; one it encodes once before the loop is setup. Then correct for what an
+loop is live; one it encodes once before the loop is setup. Then correct for what an
 interactive model needs. A research script often fixes the prompt or the actions for the whole run
 only because it renders one offline video, while a person playing the model changes them between
 turns. When the architecture can take a new value at a chunk boundary (the text or action
@@ -63,8 +63,7 @@ conditioning is applied per chunk, or can be re-encoded there), propose the prom
 as live even though the source never changes them; say so in the proposal, and say what the
 architecture does with the change. A value that changes mid-run where the source never did has no
 baseline to compare against: the replay proves the schedule the source ran, and the person judges
-the mid-run change by playing it. A clip model's fields all belong to one clip, so the split applies
-per clip.
+the mid-run change by playing it.
 
 These are read from the code, never asked:
 
@@ -89,7 +88,7 @@ These are read from the code, never asked:
 | 0 | Orient | below | latest runtime release looked up; step shape read; workspaces created |
 | 1 | The source, in your container | [source-and-weights.md](references/source-and-weights.md) | the repository's own example runs in your image with the network off, loading only from the weights root |
 | 2 | The baseline | [baseline-and-replay.md](references/baseline-and-replay.md) | the source reproduces itself bit for bit across two processes, or its residual run-to-run difference is recorded as a floor with the operation that causes it; conditions file and trajectory recorded |
-| 3 | The port | [port-on-reactor-app.md](references/port-on-reactor-app.md), [streaming-refactor.md](references/streaming-refactor.md) when the source generates offline | a `ReactorApp` workspace that builds, renders its schema and passes its GPU-free tests |
+| 3 | The port | [port-on-reactor-app.md](references/port-on-reactor-app.md), [streaming-refactor.md](references/streaming-refactor.md) when the source plans a whole video in advance | a `ReactorApp` workspace that builds, renders its schema and passes its GPU-free tests |
 | 4 | The replay | [baseline-and-replay.md](references/baseline-and-replay.md); the port is built and served as in [serving.md](references/serving.md) §1–2 | the port under the baseline's conditions matches it bit for bit at every step (or within the floor), or within a tolerance declared before the run for a named, unavoidable change |
 | 5 | Serve | [serving.md](references/serving.md) | the port is healthy on the node; every command round-trips; a second session starts clean; the log shows no handler error; the Sandbox connects to it |
 | 6 | Checklist | [checklist.md](references/checklist.md) | every item passes or is explained |
@@ -121,10 +120,13 @@ comparison; Phase 5 a served model; Phase 6 a table.
   (`reactor upgrade`) and record `reactor version`. Every other file of this skill refers here for
   the pin.
 - **The step shape.** Read the source's inference entry point and name what one step of the port
-  will be: a chunk of a continuous stream, one clip per request, a chunk of output per chunk of an
-  input video, or one answer (data, no frames) per input. The step shape decides the baseline's
-  input schedule ([baseline-and-replay.md](references/baseline-and-replay.md)) and whether
-  [streaming-refactor.md](references/streaming-refactor.md) applies.
+  will be: a chunk of a continuous stream, a chunk of output per chunk of an input video, or one
+  answer (data, no frames) per input. The step shape decides the baseline's
+  input schedule ([baseline-and-replay.md](references/baseline-and-replay.md)) and the Phase 3 route:
+  a source that plans a whole video in advance but is causal (later frames see only earlier ones)
+  becomes a chunk stream through [streaming-refactor.md](references/streaming-refactor.md). A model
+  that is bidirectional over a whole clip (every frame attends to every other, so it cannot become
+  a chunk stream) is outside this skill: stop and report it ("When a phase cannot finish").
 - **The template.** `examples/waypoint` in this repository: a GPU model with Hugging Face weights, a
   `build:` block, and the application/model split. `examples/echo` is the reference for a stepped
   session.
@@ -157,14 +159,13 @@ model and device count:
 
 | Number | How it is stated |
 |---|---|
-| Step size | video frames per chunk (or per clip), the latent frames behind them, and the resolution |
+| Step size | video frames per chunk, the latent frames behind them, and the resolution |
 | Frames | frames per session in the baseline, and frames the served session produced |
 | Trained fps | the rate the model was trained at, and where it was read |
 | Generation fps | steady state and lower bound side by side, the lower bound with the chunk where it occurred; never an average alone. Then faster or slower than trained, by how much, and, when faster, the question whether to keep it or pace down |
-| Action latency | an estimate from the measured step time, not a separate measurement: an input waits for the chunk being generated to finish and shows in the next one, so the latency lies between one step time (it arrived just before a chunk boundary) and two (just after). State it as that range in milliseconds. A clip model states instead how long an enqueued clip waits behind the clips already queued, plus its build time |
+| Action latency | an estimate from the measured step time, not a separate measurement: an input waits for the chunk being generated to finish and shows in the next one, so the latency lies between one step time (it arrived just before a chunk boundary) and two (just after). State it as that range in milliseconds. |
 
-A clip model states the build time of one clip against that clip's playback time instead of a
-per-chunk rate. Then the checklist table, the environment deviation record (every version that differs from the
+Then the checklist table, the environment deviation record (every version that differs from the
 source's own environment, and why), every edit made to the source (including any change to how it
 draws random numbers, with its side-by-side against the untouched source), and every decision you
 took in place of a person: slug, the config, setup and live split, fps, the example used as the
@@ -184,6 +185,9 @@ than something to work around:
   operation is recorded as the floor and the run continues
   ([baseline-and-replay.md](references/baseline-and-replay.md) §2.1). A difference no operation
   accounts for leaves the baseline without an anchor: report what varies and stop.
+- **The model is bidirectional over a whole clip.** Every frame of a clip attends to every other,
+  so it cannot become a chunk stream; each request would have to generate a whole clip. This skill
+  ports chunk-by-chunk models only: report the model, the evidence in its code, and stop.
 - **No free device on the node.** Report what holds the devices; never share one.
 - **The person can reach the node only through SSH, and no TURN server is available.** Signalling
   crosses an SSH tunnel; WebRTC media does not, so the Sandbox on a laptop connects but shows no video

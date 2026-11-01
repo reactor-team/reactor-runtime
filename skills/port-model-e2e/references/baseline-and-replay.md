@@ -16,11 +16,11 @@ be turned into a stepping loop, [`streaming-refactor.md`](streaming-refactor.md)
 ### 2.0 Plan the steps and the random draws before recording
 
 A baseline is recorded per step, and a step is what the port will make it: one
-chunk, one clip, or one action step. Before recording anything, read the source
+chunk, or one action step. Before recording anything, read the source
 and write down two things:
 
 - **Where the port's step boundaries fall.** For a source that already loops
-  per chunk or per clip, they are its own iterations. For a source that renders
+  per chunk, they are its own iterations. For a source that renders
   offline, map its pipeline first, as step 1 of
   [`streaming-refactor.md`](streaming-refactor.md) describes, and take the
   boundaries from that map.
@@ -133,7 +133,6 @@ The schedule's shape follows the step shape read in SKILL.md Phase 0:
 | Step shape | The schedule is |
 |---|---|
 | A chunk of a continuous stream, driven by text or by held actions | a timeline: for each chunk index, the inputs that arrive before it (a prompt change, a held action) |
-| One clip per request | one entry per clip: that clip's prompt, first and last frame, references, and length |
 | A chunk of output per chunk of an input video | a recorded input video under `baseline/inputs/`, plus any prompt or reference changes by chunk index |
 | A chunk repainted from a draft a program renders (a game drawing a rough frame per chunk) | the program's recorded draft frames under `baseline/inputs/`, one set per chunk, plus the prompt and reference changes by chunk index; the program itself is not replayed, because its state would depend on timing |
 | One answer (data, no frames) per observation, as a robot policy gives | a recorded episode replayed open loop: the observation at each step and the instruction, never a live simulator, whose state would depend on the actions taken |
@@ -184,7 +183,7 @@ environment, talking to `localhost`.
 | Route | What it exercises | Use it when |
 |---|---|---|
 | **Stepped session** (default) | the served path: the runtime's dispatch, the setters, all three hooks, one step per request | the app leaves `run()` and `submit_command()` to the runtime, which is the normal case |
-| **Model-half driver** | `load()` and `generate()` of the model half only | the first comparison after a restructure, to isolate the model from the application; or the app drives its own `run()` |
+| **Model-half driver** | `load()` and `generate()` of the model half only | the first comparison after a restructure, to isolate the model from the application |
 | **Starting input with a step count** | a streamed session that applies its inputs before any client connects and closes after N steps | the inputs are fixed at the start and the comparison only needs per-step files |
 
 **Stepped session.** A session started with `"generation": "stepped"` runs
@@ -208,8 +207,8 @@ into that step's request.
   that step's request.
 - A model that overrides `run()` or `submit_command()` cannot be stepped; the
   start is refused with a message naming the model
-  (`ReactorApp.supports_stepped`, `Runner._check_generation`). This is one
-  more reason a port leaves `run()` to the runtime.
+  (`ReactorApp.supports_stepped`, `Runner._check_generation`). A port leaves
+  `run()` and `submit_command()` to the runtime.
 - `examples/echo` is the reference: its README shows a stepped session from
   the Python SDK (`Reactor(name, local=True, generation="stepped")`, then
   `reactor.step(state=...)`), and `tests/unit/examples/test_echo.py` drives

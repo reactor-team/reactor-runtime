@@ -13,8 +13,9 @@ input before the next chunk, and may stop at any time.
 
 **Scope.** This applies when one step of the port is a chunk of a stream:
 text-driven streams, action-driven worlds, video-to-video. A model whose step is
-one clip per request usually keeps its offline generator, called once per clip,
-and skips this file.
+one clip per request because it is bidirectional over the whole clip cannot
+become a chunk stream; this skill does not port it (SKILL.md, "When a phase
+cannot finish").
 
 ## The target shape
 
