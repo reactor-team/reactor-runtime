@@ -1,15 +1,15 @@
 # Baseline and replay
 
-Phase 2 records what the source does. Phase 4 runs the port under the same
+Phase 2 records what the source does. Phase 5 runs the port under the same
 conditions and proves it does the same thing. Together they are the reason a
 port can be trusted: a playable model that is shown to agree with the code it
 came from. Everything in this file serves one comparison, and the bar for it
 is **bit-identical output, step by step**.
 
 The source environment and the weights come from
-[`source-and-weights.md`](source-and-weights.md); the port itself from
-[`port-on-reactor-app.md`](port-on-reactor-app.md) and, for a model that must
-be turned into a stepping loop, [`streaming-refactor.md`](streaming-refactor.md).
+[`source-and-weights.md`](source-and-weights.md); the streaming refactor, when the source needs one, from
+[`streaming-refactor.md`](streaming-refactor.md) (Phase 3); the port itself from
+[`port-on-reactor-app.md`](port-on-reactor-app.md) (Phase 4).
 
 ## Phase 2: record the baseline
 
@@ -28,8 +28,9 @@ and write down two things:
   map: which generator, what shapes, in what order. When the two plans differ,
   the source edit in 2.2 is needed before recording.
 
-If Phase 3 later changes either plan, the baseline is re-recorded under the new
-plan before Phase 4 runs.
+The plan decides whether Phase 3 has work to do. If the refactor there arrives
+at a different plan, the baseline is re-recorded under the new plan before the
+refactor continues.
 
 ### 2.1 Freeze nondeterminism, then prove the source agrees with itself
 
@@ -49,12 +50,13 @@ conditions, and diff every step's output. Two calls inside one process share
 warm caches and autotune results, so they agree more often than two processes
 do; the comparison the port will face is cross-process.
 
-- **Identical:** the bar for Phase 4 is bit-identical.
+- **Identical:** the bar for the refactor (Phase 3) and the replay (Phase 5)
+  is bit-identical.
 - **Not identical after everything above:** name the operation that still
   varies (a kernel with no deterministic version, say). Record the source's own
   per-step `max|diff|` between its two runs; that series is the **floor**, and
-  the run continues. In Phase 4 the port's per-step diff against the baseline is
-  held within the floor at every step. For an autoregressive model the floor
+  the run continues. In Phases 3 and 5 the per-step diff against the baseline
+  is held within the floor at every step. For an autoregressive model the floor
   grows with the step index, because each step's difference feeds the next;
   the floor recorded from the source's own two runs already carries that growth.
 - **Not identical, and no operation accounts for it:** the baseline has no
@@ -132,20 +134,17 @@ The schedule's shape follows the step shape read in SKILL.md Phase 0:
 
 | Step shape | The schedule is |
 |---|---|
-| A chunk of a continuous stream, driven by text or by held actions | a timeline: for each chunk index, the inputs that arrive before it (a prompt change, a held action) |
+| A chunk of a continuous stream, driven by text or by actions | a timeline: for each chunk index, the inputs that arrive before it (a prompt change, the keys held, a click with its coordinates, the points of a drag that fall in that chunk) |
 | A chunk of output per chunk of an input video | a recorded input video under `baseline/inputs/`, plus any prompt or reference changes by chunk index |
-| A chunk repainted from a draft a program renders (a game drawing a rough frame per chunk) | the program's recorded draft frames under `baseline/inputs/`, one set per chunk, plus the prompt and reference changes by chunk index; the program itself is not replayed, because its state would depend on timing |
-| One answer (data, no frames) per observation, as a robot policy gives | a recorded episode replayed open loop: the observation at each step and the instruction, never a live simulator, whose state would depend on the actions taken |
 
 ### 2.4 The trajectory
 
 The source run writes `baseline/source/`:
 
 - per step, the output in its native form: decoded frames as arrays (`.npy`),
-  actions for a policy, and latents where they are cheap to save;
+  and latents where they are cheap to save;
 - per step, the wall-clock time;
-- one rendered artifact in the model's own medium: a clip for a video model, a
-  rollout render with action traces for a policy.
+- one rendered clip of the whole run.
 
 Save frames as arrays, not as encoded video. An encoded file is lossy, and a
 diff of two decodes measures the encoder.
@@ -158,16 +157,16 @@ looks like per-step time, check whether it is cumulative before dividing by it.
 
 ### 2.5 Exit
 
-- The source ran twice in two processes with identical output, or the floor is
+- The source ran twice in two processes with the same output, or the floor is
   recorded with the operation that causes it.
 - Any random-number edit is applied, its patch kept, and its side-by-side
   against the untouched source rendered.
 - `baseline/conditions.yaml`, `baseline/inputs/`, and `baseline/source/` are
   written, with per-step time.
 
-## Phase 4: replay the baseline on the port
+## Phase 5: replay the baseline on the port
 
-### 4.1 Pick the route
+### 5.1 Pick the route
 
 All three routes run the port's own code inside the port's image, under the
 same `conditions.yaml`, and write `baseline/port/` in the same layout as
@@ -236,7 +235,7 @@ files instead (`StepCompleted.files`, returned from `process_output()`), or
 use one of the other two routes. Inputs that change mid-session cannot be
 scheduled this way.
 
-### 4.2 Compare, step by step
+### 5.2 Compare, step by step
 
 For every step, both sides' outputs as arrays:
 
@@ -244,11 +243,14 @@ For every step, both sides' outputs as arrays:
 |---|---|
 | `max\|diff\|` | the largest absolute difference anywhere in the step's output |
 | `mean\|diff\|` | the average absolute difference |
+| max relative | the largest difference relative to the baseline's magnitude |
+| cosine | cosine similarity of the two flattened outputs |
 | source time, port time | each side's wall clock for that step |
 
-**The bar is bit-identical: `max|diff| = 0` on every step.** A port moves code;
-it changes no numerics. Precision changes, kernel swaps, and compilation are
-optimizations and come after the port.
+**The bar is bit-identical: `max|diff| = 0` on every step**, or within the
+source's own floor (§2.1) when one was recorded. A port moves code; it changes
+no numerics. Precision changes, kernel swaps, fused ops and compilation are
+acceleration work and come after the port.
 
 A tolerance is allowed only for a change the port could not avoid (a
 dependency that cannot be installed, replaced by an equivalent). Name the
@@ -259,23 +261,39 @@ change and state the tolerance **before** the run, in this form:
 - cosine similarity of the flattened outputs,
 
 each with its threshold. A tolerance chosen after seeing the numbers is not a
-bar.
+bar. The report lists each such change with its declared tolerance.
+
+**When a step does not match, find where it diverged.** The other columns are
+the diagnostic:
+
+- A difference that is small and spread like noise across the output (no
+  region, frame or channel stands out, the side-by-side shows the same
+  content) points at numerics that changed without anyone meaning them to: a
+  different dtype resolved, a different kernel picked, an autotune result.
+  The resolved-configuration log below usually names it.
+- A difference that is large or structured (wrong content, a frame offset, a
+  channel swapped, a conditioning input ignored, a different random draw) is a
+  logic difference: the port does something the source does not.
+- Compare against the floor first: a difference near it is what the source
+  does to itself.
+- For an autoregressive model a difference grows over steps, because each
+  step's difference feeds the next; the first step that differs is the one to
+  debug.
 
 Log the configuration each side actually resolved (dtype, attention backend,
 compile mode, the seeds) at the start of each run, and diff the two logs. A
 setting that never applied on one side shows up there, not in the output diff.
 
-### 4.3 One side-by-side artifact
+### 5.3 One side-by-side artifact
 
-Render one file in the model's own medium: source on the left, port on the
-right, the same step aligned, with labels burned in: which side is which, the
-step index, that step's `max|diff|`, and each side's step time. For a policy,
-the two rollout renders side by side with the action traces overlaid. One
-file for the whole trajectory, not one per step.
+Render one video: source on the left, port on the right, the same step aligned, with labels burned in: which side is which, the
+step index, that step's `max|diff|` and cosine, and each side's step time. One file for
+the whole trajectory, not one per step.
 
-### 4.4 Read the result
+### 5.4 Read the result
 
-- **Bit-identical on every step:** the port reproduces the source.
+- **Bit-identical on every step** (or within the floor): the port reproduces
+  the source.
 - **Diverges on the port, and the source run was good:** a porting bug, by
   construction. The first diverging step and the first diverging part of that
   step (compare intermediate tensors through the model-half driver) say where.
@@ -287,12 +305,12 @@ file for the whole trajectory, not one per step.
   where it installs, and compare that to the original baseline before
   touching the port.
 
-### 4.5 Exit
+### 5.5 Exit
 
 `baseline/port/` is written under the same conditions; the per-step table
 shows `max|diff| = 0` on every step (or stays within the floor from 2.1), or
-stays inside a tolerance declared before the run for a named change; the
-side-by-side artifact is rendered.
+stays inside a tolerance declared before the run for a named, unavoidable
+change; the side-by-side artifact is rendered.
 
 ## Who looks, and when
 
@@ -303,7 +321,7 @@ order:
 1. the random-number edit side by side against the untouched source, when one
    was made: if that edit hurt quality, everything after it is measured
    against the wrong reference;
-2. the source's own rollout: whether the model itself is any good;
+2. the source's own output: whether the model itself is any good;
 3. the replay side by side with its per-step table.
 
 One switch, chosen at the start: **stop after the source example.** The

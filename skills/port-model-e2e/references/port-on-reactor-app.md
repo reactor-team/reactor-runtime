@@ -1,21 +1,20 @@
-# Phase 3 — the port: a research repo becomes a `ReactorApp`
+# Phase 4 — the port: a research repo becomes a `ReactorApp`
 
 The input to this phase is a research repo whose own example already ran in
 your image (Phase 1), a baseline recorded from it (Phase 2,
-[`baseline-and-replay.md`](baseline-and-replay.md)), and a weights root on the
+[`baseline-and-replay.md`](baseline-and-replay.md)), a source that already
+generates one chunk per call (Phase 3, after the streaming refactor when it was
+needed), and a weights root on the
 node with every hub dependency removed
 ([`source-and-weights.md`](source-and-weights.md)). The output is a model
 directory that serves the same computation through the step loop, ready for
-the replay in Phase 4.
+the replay in Phase 5.
 
 The rules the finished class must satisfy, which half a line belongs to, and
 how the two halves meet are in
 [`application-model-isolation`](../../application-model-isolation/SKILL.md).
-Read it first; this file does not restate it. A model that already ran on an
-older 3.x runtime goes through
-[`porting-to-reactor-app`](../../porting-to-reactor-app/SKILL.md) instead.
-What follows is what a repo with no runtime in it needs on top of those rules,
-and the facts of the current runtime release that a port depends on.
+Read it first; this file does not restate it. What follows is what a repo with
+no runtime in it needs on top of those rules, and the facts of the current runtime release that a port depends on.
 
 All runtime facts below were read from the `v3.10.2` tag. When the release
 SKILL.md Phase 0 looked up is newer, re-read the facts you rely on from that
@@ -44,7 +43,8 @@ config; a ported model reads a local path instead (below).
 ## 1. Vendor the source whole, then edit in place
 
 Copy the research repo into the model directory **whole**, at the exact commit
-Phase 2 recorded, with its licence file. Edit it in place and keep the edits
+Phase 2 recorded plus the Phase 3 refactor commits when there were any, with
+its licence file. Edit it in place and keep the edits
 small enough to read as a diff against that commit. Do not cherry-pick the
 modules the example imports: research code reaches helpers through dynamic
 imports, config-named classes and relative paths, and a partial copy fails at
@@ -130,6 +130,15 @@ pattern). Live inputs ride every step input.
   that work once, on the step that applies it. If that work draws random
   numbers, it must run exactly as often as in the source: calling it per step
   advances the generator and the output diverges for no visible reason.
+- **Actions enter the model in the form it was trained on.** Read how the source turns an
+  action into a tensor before writing the command for it: held keys as a one-hot or a direction
+  vector, camera or mouse look as continuous angles or as direction plus speed, a click as
+  coordinates normalised to the output frame, a drag as a sequence of points. A drag, or several
+  fingers at once, gives a variable number of points; bring it to the fixed shape the model takes
+  (a fixed point count, resampled or padded with a mask) on arrival, so it adds no compile shape
+  ([§6](#6-warm-up-covers-every-shape-a-client-can-produce)). Coordinates are relative to the frame
+  the client sees, so state in the command's description which frame and which corner is the origin.
+  A point or a drag that spans several chunks is split by chunk the way the source consumes it.
 - **`reset` and session end clear every setup input on every rank.** A stale
   reference image raises nothing; it silently conditions the next session.
 
@@ -213,7 +222,7 @@ build:
 `build.runtime_version` is the one exact pin of the runtime (SKILL.md Phase 0
 has the lookup and the rule for `requirements.txt`). Take `build:` from Phase 1 unchanged —
 the source and the port run in one environment, which is what makes the
-Phase 4 comparison clean — and add the offline switches
+Phase 5 comparison clean — and add the offline switches
 (`HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`) the weights phase established.
 
 Render the schema to check the contract, inside the image:
@@ -230,7 +239,7 @@ Each checked in the `v3.10.2` source.
   `submit_command()`. A class that keeps both can serve a stepped session —
   one step per request, with state, commands and frames in the request
   (`ReactorApp.supports_stepped`, `src/reactor_runtime/interface/app/reactor_app.py:446-455`).
-  Phase 4 replays the baseline through exactly that.
+  Phase 5 replays the baseline through exactly that.
 - **`process_output()` returns `Output | StepCompleted | None`**
   (`reactor_app.py:233`). Return `StepCompleted` when a step's report to a
   step-count session should carry more than the frames.
@@ -260,15 +269,16 @@ Each checked in the `v3.10.2` source.
 
 ## 11. Grow it one proven change at a time
 
-Serving a research model means rewriting a loop it was never asked to expose:
-a batch rollout becomes one that steps, state is lifted out of a function, an
-offline generator is cut into chunks
-([`streaming-refactor.md`](streaming-refactor.md) has the order for that).
+The model arrives from Phase 3 already generating one chunk per call. What is
+left to change here is smaller but of the same kind: state lifted out of a
+function, a dependency replaced, a feature wired through. Each is a change to
+the code that produces the output.
 
 - **Prove each restructure bit-identical before building on it.** Run the old
   and new form on the same input and compare: `max|diff| == 0.0`. The same
   kernels on the same data give the same bits; anything else means the
-  restructure changed what runs. When the restructure legitimately moves one
+  restructure changed what runs ([`baseline-and-replay.md`](baseline-and-replay.md)
+  §5.2 helps find where). When the restructure legitimately moves one
   thing — how random numbers are drawn, most often — that move is made in the
   source and becomes the baseline, so the port itself stays bit-identical to
   it; a change to the draw plan here means the baseline is re-recorded
@@ -295,4 +305,4 @@ image.
 The model directory is complete; `tests/` pass inside the image; the schema
 renders from the image; the server built from the `build:` block starts, warms
 up and reports ready; and the class keeps `run()` and `submit_command()`
-unoverridden, so Phase 4 can replay the baseline through a stepped session.
+unoverridden, so Phase 5 can replay the baseline through a stepped session.

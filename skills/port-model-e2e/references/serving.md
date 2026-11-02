@@ -1,7 +1,7 @@
 # Serving the port
 
-Sections 1 and 2 (build and serve) are also how Phase 4's replay gets a served
-port. The rest of this file is Phase 5: it starts with a ported workspace whose
+Sections 1 and 2 (build and serve) are also how Phase 5's replay gets a served
+port. The rest of this file is Phase 6: it starts with a ported workspace whose
 replay already matches the baseline, and ends with the model built into an
 image, served on the GPU node, healthy, with every declared command proven to
 work through the real dispatch, and reachable from the
@@ -83,7 +83,7 @@ builds its controls from the same document.
 The replay stepped the model one request at a time. This step drives the same
 code the way a client does: a live, streaming session. The client is the
 Python SDK on the node, the same one the replay uses
-([`baseline-and-replay.md`](baseline-and-replay.md) §4.1).
+([`baseline-and-replay.md`](baseline-and-replay.md) §5.1).
 
 1. **Drive every declared command once,** with a valid value, inside a live
    session: one connection, each command from `schema.json` in turn, then one
@@ -107,71 +107,61 @@ Python SDK on the node, the same one the replay uses
    (A step the application refused is logged as `step refused` at DEBUG
    level only; serve with `-e REACTOR_LOG_LEVEL=DEBUG` to see those.)
 
-### Where the time goes, from the runtime itself
+### The timing numbers, and where they come from
 
-During a session the runtime records a stage reading roughly every five
-seconds. It streams these readings, together with every other journal fact,
-as server-sent events:
+The report and the checklist need a few numbers about speed, and they come
+from two places:
+
+| Number | Used for | Where it comes from |
+|---|---|---|
+| Every step's generation time | the slowest step and any stall (checklist A1); generation fps, steady and lowest, set against the trained fps (the report) | `StepOutcome.elapsed`, logged per step ([`checklist.md`](checklist.md) §1) |
+| How each step's time splits between the model (`generate`) and the application code around it (`process_input`, `process_output`), and how long the loop waited for input (`input_wait`) | whether the application half is eating the budget: decoding an upload, copying frames on the host (checklist B1, B3) | `runtime_stats` |
+| The fps actually delivered, and the longest gap between two frames a viewer received | whether a viewer would see a stall the step times do not show (pacing, a slow send) | `runtime_stats` |
+| Input frames dropped | a model that reads a video in and falls behind it | `runtime_stats` |
+
+`runtime_stats` is a reading the runtime takes itself, roughly every five
+seconds, and streams with its other journal facts as server-sent events:
 
 ```sh
 curl -sN localhost:8080/events > events.sse
 ```
 
-A `runtime_stats` fact contains:
-
-- `model_output`: per output track, `frames_emitted`, `frames_per_second` and
-  `max_emit_interval_ms`;
-- `model_input`: per input track, `frames_received` and `frames_dropped`;
-- `connection_stats[].track_stats[].frame_stages`: one `{name, total_ms,
-  frames}` entry per stage, including `input_wait`, `process_input`,
-  `generate`, `process_output` and `output_pacing`.
-
-Use these readings for the checklist's timing items. They are measured on the
-path a client actually uses, they split each step into the application's work
-and the model's work, and the port needs no added timers to get them.
-`max_emit_interval_ms` is the longest gap the viewer saw in that window, and
-that gap is the stall a person notices.
+Each reading carries `model_output` (per output track: `frames_emitted`,
+`frames_per_second`, `max_emit_interval_ms`), `model_input` (per input
+track: `frames_received`, `frames_dropped`) and, per connection, one
+`{name, total_ms, frames}` entry per stage (`input_wait`, `process_input`,
+`generate`, `process_output`, `output_pacing`). A reading sums a five-second
+window, so it shows where time goes and whether a gap occurred, not which
+single step was slowest; that comes from the per-step times. Save the
+readings of one full session for the checklist and the report.
 
 ## 4. Play it from the Reactor Sandbox
 
 The [Reactor Sandbox](https://reactor-sandbox.vercel.app/) is a public page
-that connects to a local `reactor run` and builds its controls from the
-model's schema. A person opens it on a laptop and points it at the served
-port. Two kinds of traffic have to get from the laptop to the node, and they
-travel differently.
+that connects to a running `reactor run` and builds its controls from the
+model's schema. It is how a person tries the port by hand. It decides nothing
+about correctness: the replay (Phase 5) and the checks in §3 already ran on
+the node, through the same runtime, with the client on `localhost`.
 
-- **Signalling** is plain HTTP on the serve port. An SSH tunnel carries it:
+Two kinds of traffic go from the person's browser to the node:
 
-  ```sh
-  ssh -N -L 8080:localhost:8080 <node>
-  ```
+- **Signalling** is plain HTTP on the serve port. When the browser can reach
+  the node, point the Sandbox at `http://<node>:8080`; otherwise an SSH
+  tunnel carries it (`ssh -N -L 8080:localhost:8080 <node>`, then
+  `http://localhost:8080`).
+- **Media** is WebRTC over UDP. When the browser and the node are on the same
+  network or VPN and UDP between them is open, it flows directly and nothing
+  else is needed. When a firewall sits between them, fix the UDP range the
+  runtime uses (`WEBRTC_PORT_RANGE=min:max`), run the image with
+  `--network host` so that range is the node's own, and open it. When only SSH
+  reaches the node, UDP cannot cross the tunnel: media then needs a TURN
+  server both ends can reach (`TURN_SERVERS`, and `ICE_TRANSPORT_POLICY=relay`
+  to force it), or the person plays from a machine on the node's network.
 
-  The Sandbox then reaches the model at `http://localhost:8080`.
-
-- **Media.** WebRTC carries media over UDP, and an SSH tunnel cannot carry
-  UDP. `reactor run` publishes only the HTTP port. The runtime reads three
-  variables that decide how media gets through:
-  - `WEBRTC_PORT_RANGE` (`min:max`) fixes the UDP ports it uses;
-  - `STUN_SERVERS` and `TURN_SERVERS` (`username;credential;turn:host:port`,
-    comma-separated) set its ICE servers. With neither set, a public STUN
-    server is used;
-  - `ICE_TRANSPORT_POLICY=relay` forces all media through TURN.
-
-  Pick whichever case applies:
-  - **The laptop can reach the node's address directly** (same network or a
-    VPN). Run the image with host networking so the UDP range is the node's
-    own: `docker run --network host` on the same `reactor-local/<dir>:dev`
-    tag, with the GPU, weights mount, `--shm-size` and `PORT` that
-    `reactor run --help` lists, plus `-e WEBRTC_PORT_RANGE=…`. Allow that
-    range in the node's firewall.
-  - **Only SSH reaches the node.** Use a TURN server both ends can reach: set
-    `TURN_SERVERS` and `ICE_TRANSPORT_POLICY=relay` on the runtime. With no
-    TURN server available, this is a stop-and-report item (SKILL.md, "When a
-    phase cannot finish"): the Sandbox connects, and the person cannot see
-    the video.
-
-If the Sandbox connects but the video stays black, the signalling path works
-and the media path does not. Check the media path first.
+If the Sandbox connects but the video stays black, signalling works and media
+does not; check the media path. A person who cannot play from where they sit
+does not make the port unfinished: say so in the report, with which of the
+cases above applies.
 
 ## Exit
 

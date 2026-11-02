@@ -1,11 +1,19 @@
 # Turning an offline generator into one chunk per step
 
-Phase 3 reference. Use it when the research code can produce a video but plans
-it in advance. In that case it does one of three things:
+This is Phase 3 of the workflow, done after the baseline and before any
+`ReactorApp` code is written (SKILL.md, "Phase 3: Streaming refactor, only when
+needed"). Use it when the source, as written, cannot produce one chunk at a time
+from only the input known when that chunk starts. The test is that property, not
+a list of patterns: look for any work sized to more than the current chunk, any
+input consumed before it would be known, any stage that cannot run without the
+whole sequence. Some forms it takes, for example:
 
-- allocates noise for the whole video,
-- pre-computes every condition for the whole trajectory,
-- staggers its stages across "ticks" in a pipelined scheduler.
+- noise allocated for the whole video up front;
+- every condition pre-computed for the whole trajectory;
+- stages staggered across "ticks" in a pipelined scheduler;
+- a buffer, a mask or a position table sized to the full length.
+
+A source can show several of these, or a form not listed here.
 
 The step loop needs the opposite. Each step generates one chunk, and it knows
 only the input that is current when that step starts. The user may change that
@@ -18,6 +26,8 @@ become a chunk stream; this skill does not port it (SKILL.md, "When a phase
 cannot finish").
 
 ## The target shape
+
+The sketch below names typical stages; the model's own stages take their place.
 
 ```
 for each step (driven live, one input at a time):
@@ -75,7 +85,8 @@ write it in the port notes.
 Do these steps **in order, one commit each**. Run the source's own example
 after every step and compare it with the previous step's output. The bar is
 bit-identical: `max|diff| = 0.0` on the same input. A step that is not
-bit-identical changed what runs; find out why before starting the next step.
+bit-identical changed what runs; find out why before starting the next step
+([`baseline-and-replay.md`](baseline-and-replay.md) §5.2 helps find where).
 The baseline Phase 2 recorded is the reference that all of these steps are
 held to.
 
@@ -115,7 +126,7 @@ source and the baseline is recorded from the edited source, as
 [baseline-and-replay.md](baseline-and-replay.md) §2.2 lays out; the stage map
 of step 1 is what Phase 2 reads to know the change is coming (§2.0 there). If
 this refactor arrives at a draw plan different from the one the baseline was
-recorded under, re-record the baseline before Phase 4. Every other step stays
+recorded under, re-record the baseline before the next step of the refactor. Every other step stays
 held to bit-identity.
 
 ## Find the length ceiling — the session is endless by default

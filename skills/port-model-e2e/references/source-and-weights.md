@@ -43,10 +43,7 @@ Pin the devices you take, and pass them explicitly on every container you start
 (`--gpus '"device=N"'`, or `--gpus device=N` for `reactor run`). Never use
 `--gpus all`, and never rely on "the first free device".
 
-**Put the weights root on the node's large volume.** Run `df -h`, and also look
-at Docker's root (`docker info -f '{{.DockerRootDir}}'`). A 136 GB download
-onto a 172 GB disk that also holds the image store fills it halfway through the
-build.
+**Put the weights root on the node's large volume** (`df -h`).
 
 Choose one absolute path for the root, for example `/data/weights/<slug>`, and
 keep using it.
@@ -109,10 +106,7 @@ export HF_TOKEN=...          # from your secret store; never on the command line
 hf download <org>/<repo> --revision <sha> --local-dir /data/weights/<slug>/<subdir>
 ```
 
-**`--include` takes one pattern.** A second pattern is re-read as a positional
-filename, and explicit filenames switch `--include` off with a single warning
-line. On one port, a multi-pattern `--include` skipped a 134 GiB package and the
-download still finished cleanly. Run one `hf download` per pattern:
+**Pass one pattern per `--include`.** Run one `hf download` per pattern:
 
 ```sh
 for p in "transformer/**" "vae/**" "text_encoder/**"; do
@@ -120,16 +114,15 @@ for p in "transformer/**" "vae/**" "text_encoder/**"; do
 done
 ```
 
-**Verify against the Hub, and exit non-zero on a mismatch.** For every file the
-tree listing (section 2) names under the patterns you fetched, the local file
-must exist at exactly that size. A staging step that cannot fail cannot be
-trusted. On one port, an audit that excluded `*/.cache/*` matched the entire
-weights root, because the root lived under `~/.cache`. It counted the missing
-files as zero and printed `done`.
+**Verify the download against the Hub, with a check that can fail.** For every
+file the tree listing (section 2) names under the patterns you fetched, the local
+file must exist at exactly that size; on any mismatch the check exits non-zero. A
+download or a check that reports success without comparing against the Hub's own
+list proves nothing, so test the check itself by making it fail once.
 
 **Rehearse on a public repo first.** Run any download or verify script end to end
 against a small public repo of the same shape before pointing it at the real
-one. Both failures above show up in a twenty-second dry run.
+one.
 
 **A 403 on a gated repo.** Report one link per repo
 (`https://huggingface.co/<org>/<repo>`) together with the account the token
@@ -142,11 +135,9 @@ belongs to (`hf auth whoami`), and stop. Two facts matter here:
 **From a local directory:** use it as the weights root if it already holds real
 files in the layout the code expects. Otherwise, copy it into the root.
 
-**No symlinks anywhere under the root.** A bind mount carries a link, not its
-target, so a link that resolves on the host is dead inside the container. It
-fails late and looks like an offline-mode error, for example
-`Local entry not found … offline mode is enabled`, three minutes into a load. In
-fact the content was complete and only the layout was wrong.
+**The weights root holds real files only, checked from inside the container.** A
+bind mount carries a link, not its target, so a link that resolves on the host is
+dead inside the container, and the loader then reports a missing file.
 
 Audit the root; this should print nothing:
 
@@ -314,8 +305,7 @@ eval $RUN <the README's script and arguments> --output /src/out/example
 Change only what the environment forces: a path, a `weights_only=False`, a
 removed import. Note every source edit in `ENVIRONMENT.md`.
 
-The run produces something a person can judge, in the model's own medium: a
-clip, frames, an action trace.
+The run produces something a person can judge: a clip, or its frames.
 
 **Record what the run cost:** its wall clock, and per-step time if the script
 prints any. When a field looks like per-step time, check whether it is

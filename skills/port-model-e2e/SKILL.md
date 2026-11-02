@@ -1,6 +1,6 @@
 ---
 name: port-model-e2e
-description: "Port a research model that has never run on Reactor, end to end, on one GPU node. Given a code repository and a checkpoint (a Hugging Face repo or a local directory), run the repository's own example in a container you built, record it as a baseline, port the model to a ReactorApp on the latest reactor-runtime, replay the baseline on the port and prove the two agree, serve the port on the node so a person can play it from the Reactor Sandbox, and hold it to the served-model checklist. Runs unattended by default. Use when asked to port, bring up, or make playable a model from a research repo or a Hugging Face link. A model already on reactor-runtime 3.0 to 3.4 goes through porting-to-reactor-app; a 2.x model through porting-models-to-standalone-runtime."
+description: "Port a research video model that has never run on Reactor, end to end, on one GPU node; written for chunk-by-chunk models (prompt-driven streams, action-driven world models, video-to-video). Given a code repository and a checkpoint (a Hugging Face repo or a local directory), run the repository's own example in a container you built, record it as a baseline, refactor it into a chunk stream when the source plans a whole video at once, port the model to a ReactorApp on the latest reactor-runtime, replay the baseline on the port and prove the two agree, serve the port on the node so a person can play it from the Reactor Sandbox, and hold it to the served-model checklist. Asks a few questions once at the start, then runs to the end without stopping. Use when asked to port, bring up, or make playable a model from a research repo or a Hugging Face link."
 ---
 
 # Porting a research model, end to end
@@ -11,12 +11,24 @@ description: "Port a research model that has never run on Reactor, end to end, o
    and its per-step cost recorded.
 2. **A served port**: the model as a `ReactorApp`, served on the node, which a person plays from
    the [Reactor Sandbox](https://reactor-sandbox.vercel.app/).
-3. **Proof that the two agree**: the port replays the baseline's exact conditions and produces the
-   same output, bit for bit, step for step.
+3. **Proof that the two agree**: the port runs the baseline's exact inputs and produces the same
+   output, bit for bit, at every step.
 
-Every phase below serves those three. A port that serves but has not been replayed against the
-baseline is not finished, and neither is one that replays but behaves badly when served: a port is
-done when the model behaves well, not when it runs.
+## What this skill covers well
+
+Video models that generate chunk by chunk, of three kinds:
+
+- **Prompt-driven streams**: text, optionally a first frame; the prompt can change mid-stream.
+- **Action-driven world models**: text and a first frame, then actions applied chunk by chunk.
+  An action is whatever the model was trained to take: held keys for movement, camera or mouse
+  look, a click on a point of the frame, or a drag with one or several points.
+- **Video-to-video**: a video comes in, with a prompt or references, and each output chunk rewrites
+  the matching input chunk.
+
+A model that is bidirectional over a whole clip (every frame attends to every other, so it cannot
+become a chunk stream) is outside this skill: Phase 0 recognises it, and the run stops and reports.
+Other kinds of model are not covered by its guidance: the phases still apply, but the baseline schedule, the replay comparison and the
+checklist are written for video, and the report says so.
 
 ## Inputs
 
@@ -24,7 +36,7 @@ done when the model behaves well, not when it runs.
 |---|---|---|
 | Code repository | yes | URL or path, and a commit. Its README's example is the baseline |
 | Checkpoint | yes | `hf://org/repo[@revision]`, a Hugging Face URL, or a local directory |
-| GPU node | yes | You run on it. Use only the devices you were given, pinned explicitly |
+| GPU node | yes | You run on it. Use only the GPU numbers you were given, and name them in every command (`--gpus '"device=2"'`, `CUDA_VISIBLE_DEVICES=2`), so nothing falls back to GPU 0 or to all GPUs on a node others share |
 
 ## Questions, asked once, at the start
 
@@ -38,9 +50,11 @@ Almost everything about a port is read from the code. Ask only what the code can
 | Model slug | the repository name, lowercased |
 | Stop after the source example, so you can judge the model before it is ported? | no. When yes, the run stops once the untouched source example has run and rendered, before any edit to the source |
 
-A run is either **interactive** (a person is there: send the questions and wait for the reply) or
-**unattended** (no one is: proceed at once on the proposed defaults and list each one in the report).
-After this message nothing in the run waits for a person.
+**These are the only questions in the whole run.** Ask them once, at the start, and then work to the
+end without stopping to ask anything else; a port takes hours, and a person should not have to sit
+beside it. When you have no way to ask at all (you were started as a headless or scheduled job, with
+no one reading your output), do not ask: take the proposed defaults, and put them at the top of the
+report so the person can see what was decided for them and rerun with other answers.
 
 **Config, setup and live.** Every input the source takes gets exactly one kind. This table is the
 one definition every file of this skill uses:
@@ -51,8 +65,11 @@ one definition every file of this skill uses:
 | **setup** | set before generation starts, fixed until a reset; a value sent while running is refused | a command valid while idle | first frame, seed; the resolution when the model offers several |
 | **live** | may change while generating; lands at the next chunk boundary and holds until changed | a public state field or a command applied at the next step | prompt, actions; reference images when the architecture can take them at a chunk boundary (otherwise setup) |
 
-Inputs that exist only for the offline script (output paths, frame-count caps, video writers) are
-deleted. None of the three kinds carries a default for a client input in the model or its config.
+Some arguments exist only because the research script renders one video to a file and exits: an
+output path, a limit on how many frames to make, the code that saves the mp4. A served model streams
+frames to a client and runs until it is stopped, so these are removed rather than mapped to
+anything. And no client input gets a default value in the model or its config: every value a client
+can set comes from the client.
 
 **Proposing setup or live.** Start from the code: an input the source consumes inside its per-chunk
 loop is live; one it encodes once before the loop is setup. Then correct for what an
@@ -85,14 +102,15 @@ These are read from the code, never asked:
 
 | Phase | What | Detail | Exit criterion |
 |---|---|---|---|
-| 0 | Orient | below | latest runtime release looked up; step shape read; workspaces created |
+| 0 | Orient | below | the node runs a GPU container; latest runtime release looked up; step shape read; workspaces created |
 | 1 | The source, in your container | [source-and-weights.md](references/source-and-weights.md) | the repository's own example runs in your image with the network off, loading only from the weights root |
-| 2 | The baseline | [baseline-and-replay.md](references/baseline-and-replay.md) | the source reproduces itself bit for bit across two processes, or its residual run-to-run difference is recorded as a floor with the operation that causes it; conditions file and trajectory recorded |
-| 3 | The port | [port-on-reactor-app.md](references/port-on-reactor-app.md), [streaming-refactor.md](references/streaming-refactor.md) when the source plans a whole video in advance | a `ReactorApp` workspace that builds, renders its schema and passes its GPU-free tests |
-| 4 | The replay | [baseline-and-replay.md](references/baseline-and-replay.md); the port is built and served as in [serving.md](references/serving.md) §1–2 | the port under the baseline's conditions matches it bit for bit at every step (or within the floor), or within a tolerance declared before the run for a named, unavoidable change |
-| 5 | Serve | [serving.md](references/serving.md) | the port is healthy on the node; every command round-trips; a second session starts clean; the log shows no handler error; the Sandbox connects to it |
-| 6 | Checklist | [checklist.md](references/checklist.md) | every item passes or is explained |
-| 7 | Report | below | one report with the three deliverables and every decision made |
+| 2 | The baseline | [baseline-and-replay.md](references/baseline-and-replay.md) | the source reproduces itself bit for bit across two processes, or its remaining run-to-run difference is recorded as a floor with the operation that causes it; conditions file and trajectory recorded |
+| 3 | **Streaming refactor**, only when needed | below, and [streaming-refactor.md](references/streaming-refactor.md) | "not needed" recorded with its reason, or a per-chunk function whose output over the baseline's schedule equals the baseline bit for bit (or within the floor) |
+| 4 | The port | [port-on-reactor-app.md](references/port-on-reactor-app.md) | a `ReactorApp` workspace that builds, renders its schema and passes its GPU-free tests |
+| 5 | The replay | [baseline-and-replay.md](references/baseline-and-replay.md); the port is built and served as in [serving.md](references/serving.md) §1–2 | the port under the baseline's conditions matches it bit for bit at every step (or within the floor), or within a tolerance declared before the run for a named, unavoidable change ([baseline-and-replay.md](references/baseline-and-replay.md) §5.2) |
+| 6 | Serve | [serving.md](references/serving.md) | the port is healthy on the node; every command round-trips; a second session starts clean; the log shows no handler error |
+| 7 | Checklist | [checklist.md](references/checklist.md) | every check under the four principles passes or is explained. A new finding joins the principle it belongs to; only a finding no principle covers adds a principle |
+| 8 | Report | below | one report with the three deliverables and every decision made |
 
 Do not start a phase before the previous one's exit criterion holds. A late failure in a port is
 almost always an early check that was skipped: weights that only load from the hub, an example that
@@ -100,11 +118,28 @@ never ran in a container, a "porting bug" that was in the source all along becau
 source's output.
 
 Each phase hands the next one values, not reasoning: Phase 1 an image, a passing command and a
-weights root; Phase 2 a conditions file and a trajectory; Phase 3 a workspace; Phase 4 a step-by-step
-comparison; Phase 5 a served model; Phase 6 a table.
+weights root; Phase 2 a conditions file, a trajectory and the stage map; Phase 3 a source
+that generates one chunk per call (or "not needed"); Phase 4 a workspace; Phase 5 a step-by-step
+comparison; Phase 6 a served model; Phase 7 a table.
 
 ## Phase 0: Orient
 
+- **The node can run GPU containers.** Every later phase builds and runs Docker images on this
+  node, so check it before anything else:
+
+  ```sh
+  docker version                    # client and daemon both answer; no sudo needed
+  docker buildx version             # BuildKit, which `reactor build` uses
+  nvidia-smi                        # the driver sees the GPUs
+  docker run --rm --gpus '"device=N"' nvidia/cuda:12.9.1-base-ubuntu24.04 nvidia-smi
+                                    # a container sees device N: the NVIDIA container toolkit works
+  reactor doctor                    # the CLI's own checks, Docker included
+  ```
+
+  Use a device you were given (Phase 1 explains how to tell it is free). A failure in
+  `reactor doctor` about an API key or server does not block a local port; a failure about Docker
+  does. Installing Docker or the NVIDIA container toolkit needs root on the node, so a missing
+  piece is a stop-and-report, not something to install around.
 - **The runtime release.** Look up the latest release every time:
 
   ```sh
@@ -120,11 +155,11 @@ comparison; Phase 5 a served model; Phase 6 a table.
   (`reactor upgrade`) and record `reactor version`. Every other file of this skill refers here for
   the pin.
 - **The step shape.** Read the source's inference entry point and name what one step of the port
-  will be: a chunk of a continuous stream, a chunk of output per chunk of an input video, or one
-  answer (data, no frames) per input. The step shape decides the baseline's
-  input schedule ([baseline-and-replay.md](references/baseline-and-replay.md)) and the Phase 3 route:
-  a source that plans a whole video in advance but is causal (later frames see only earlier ones)
-  becomes a chunk stream through [streaming-refactor.md](references/streaming-refactor.md). A model
+  will be: a chunk of a continuous stream, or a chunk of output per chunk of an input video. The
+  step shape decides the baseline's
+  input schedule ([baseline-and-replay.md](references/baseline-and-replay.md)) and whether Phase 3
+  has work to do: a source that plans a whole video in advance but is causal (later frames see only
+  earlier ones) becomes a chunk stream there. A model
   that is bidirectional over a whole clip (every frame attends to every other, so it cannot become
   a chunk stream) is outside this skill: stop and report it ("When a phase cannot finish").
 - **The template.** `examples/waypoint` in this repository: a GPU model with Hugging Face weights, a
@@ -137,13 +172,43 @@ comparison; Phase 5 a served model; Phase 6 a table.
   | Directory | Phases | Image tag |
   |---|---|---|
   | `<slug>-source-<you>-<YYYYMMDD>` | 1–2: runs the source and records the baseline | `reactor-local/<slug>-source-<you>-<YYYYMMDD>:dev` |
-  | `<slug>-<you>-<YYYYMMDD>` | 3–6: the port, built, replayed, served and checked | `reactor-local/<slug>-<you>-<YYYYMMDD>:dev` |
+  | `<slug>-<you>-<YYYYMMDD>` | 4–7: the port, built, replayed, served and checked | `reactor-local/<slug>-<you>-<YYYYMMDD>:dev` |
 
   The port directory starts as a copy of the source directory's `reactor.yaml` `build:` block and
   `requirements.txt`, so both images come from one declared environment. Everything this run
   produces (logs, `baseline/`, the report) goes in the run directory.
 
-## Phase 7: Report
+## Phase 3: Streaming refactor, only when needed
+
+A served model is called once per step and must hand back one chunk each time, carrying what it
+needs from earlier chunks (a KV cache, a rolling latent buffer, a position index) to the next call.
+Many research repositories do not work that way: their example renders a whole video in one call, or
+runs a multi-stage scheduler over the full length, because it only ever writes one file. Wrapping
+such code in a `ReactorApp` gives a model that cannot take a new prompt or action until the whole
+video is done. So the source is reshaped **before** any `ReactorApp` code exists, against the
+baseline, in its own phase.
+
+Decide from the stage map Phase 2 drew
+([baseline-and-replay.md](references/baseline-and-replay.md) §2.0):
+
+- **Not needed.** The source already produces one chunk per iteration of a loop, and everything that
+  carries across chunks is explicit state. Record "not needed" with that reason (the loop and its
+  state, by file and line) and go to Phase 4.
+- **Needed.** The source cannot produce one chunk at a time from only the input known when that
+  chunk starts (work sized to the whole video, an input consumed early, a stage that needs the full
+  sequence; [streaming-refactor.md](references/streaming-refactor.md) gives examples, not a closed list).
+  Refactor the source, in its own git history on top of the baseline commit, as
+  [streaming-refactor.md](references/streaming-refactor.md)
+  orders it: one commit per step, each proven bit-identical to the Phase 2 baseline before the next
+  begins. The result is a per-chunk function that, driven through the baseline's schedule, produces
+  the baseline exactly. If the refactor changes how random numbers are drawn, the baseline is
+  re-recorded under the noise rule
+  ([baseline-and-replay.md](references/baseline-and-replay.md) §2.2), never to make a diff pass.
+
+The refactor is done on the source, offline, with nothing of the runtime involved: a bug found here
+is a refactor bug, and Phase 4 then only wraps a model that already streams.
+
+## Phase 8: Report
 
 One report, in the run directory, opening with the three deliverables:
 
@@ -152,7 +217,7 @@ One report, in the run directory, opening with the three deliverables:
 - **Port**: the workspace path, the command that serves it, and how to play it from the Reactor
   Sandbox (the SSH tunnel command and the address to enter, [serving.md](references/serving.md) §4).
 - **Agreement**: the per-step comparison table, the side-by-side render, and the verdict. Any
-  tolerance names the change that needed it and was declared before the run.
+  tolerance names the unavoidable change that needed it and was declared before the run.
 
 Then the model's shape and speed, measured on the served port over one full session, with the GPU
 model and device count:
@@ -166,8 +231,7 @@ model and device count:
 | Action latency | an estimate from the measured step time, not a separate measurement: an input waits for the chunk being generated to finish and shows in the next one, so the latency lies between one step time (it arrived just before a chunk boundary) and two (just after). State it as that range in milliseconds. |
 
 Then the checklist table, the environment deviation record (every version that differs from the
-source's own environment, and why), every edit made to the source (including any change to how it
-draws random numbers, with its side-by-side against the untouched source), and every decision you
+source's own environment, and why), every edit made to the source (the streaming refactor's steps with their bit-identical checks, or its "not needed" reason; any change to how it draws random numbers, with its side-by-side against the untouched source), and every decision you
 took in place of a person: slug, the config, setup and live split, fps, the example used as the
 baseline.
 
@@ -188,10 +252,9 @@ than something to work around:
 - **The model is bidirectional over a whole clip.** Every frame of a clip attends to every other,
   so it cannot become a chunk stream; each request would have to generate a whole clip. This skill
   ports chunk-by-chunk models only: report the model, the evidence in its code, and stop.
+- **The node cannot run GPU containers.** Docker, BuildKit, the GPU driver or the NVIDIA container
+  toolkit is missing, or the current user cannot reach the Docker daemon. Installing them needs
+  root: report which check in Phase 0 failed, with its output, and stop.
 - **No free device on the node.** Report what holds the devices; never share one.
-- **The person can reach the node only through SSH, and no TURN server is available.** Signalling
-  crosses an SSH tunnel; WebRTC media does not, so the Sandbox on a laptop connects but shows no video
-  ([serving.md](references/serving.md) §4). Report it, with the two ways to fix it: a network route
-  to the node, or a TURN server.
 
 Everything else is yours to decide and to write down.
