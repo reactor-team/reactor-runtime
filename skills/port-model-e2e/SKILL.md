@@ -1,6 +1,6 @@
 ---
 name: port-model-e2e
-description: "Port a research video model that has never run on Reactor, end to end, on one GPU node; written for chunk-by-chunk models (prompt-driven streams, action-driven world models, video-to-video). Given a code repository and a checkpoint (a Hugging Face repo or a local directory), run the repository's own example in a container you built, record it as a baseline, refactor it into a chunk stream when the source plans a whole video at once, port the model to a ReactorApp on the latest reactor-runtime, replay the baseline on the port and prove the two agree, serve the port on the node so a person can play it from the Reactor Sandbox, and hold it to the served-model checklist. Asks a few questions once at the start, then runs to the end without stopping. Use when asked to port, bring up, or make playable a model from a research repo or a Hugging Face link."
+description: "Port a research video model that has never run on Reactor, end to end, on one GPU node; written for chunk-by-chunk models (prompt-driven streams, action-driven world models, video-to-video). Given a code repository and a checkpoint (a Hugging Face repo or a local directory), run the repository's own example in a container you built, record it as a baseline, refactor it into a chunk stream when the source plans a whole video at once, port the model to a ReactorApp on the latest reactor-runtime, replay the baseline on the port and prove the two agree, serve the port on the node, hold it to the served-model checklist, and build a local play page for it with the baseline's examples. Asks a few questions once at the start, runs to the end without stopping, then offers to contribute the port to the Reactor Cookbook. Use when asked to port, bring up, or make playable a model from a research repo or a Hugging Face link."
 ---
 
 # Porting a research model, end to end
@@ -9,8 +9,9 @@ description: "Port a research video model that has never run on Reactor, end to 
 
 1. **A baseline**: the repository's own example, run in a container you built, with its outputs
    and its per-step cost recorded.
-2. **A served port**: the model as a `ReactorApp`, served on the node, which a person plays from
-   the [Reactor Sandbox](https://reactor-sandbox.vercel.app/).
+2. **A served port**: the model as a `ReactorApp`, served on the node, with a local play page that
+   loads the baseline's examples, and instructions for opening it from where the person sits. The
+   [Reactor Sandbox](https://reactor-sandbox.vercel.app/) reaches the same server as a fallback.
 3. **Proof that the two agree**: the port runs the baseline's exact inputs and produces the same
    output, bit for bit, at every step.
 
@@ -50,7 +51,7 @@ Almost everything about a port is read from the code. Ask only what the code can
 | Model slug | the repository name, lowercased |
 | Stop after the source example, so you can judge the model before it is ported? | no. When yes, the run stops once the untouched source example has run and rendered, before any edit to the source |
 
-**These are the only questions in the whole run.** Ask them once, at the start, and then work to the
+**These are the only questions until the report.** Ask them once, at the start, and then work to the
 end without stopping to ask anything else; a port takes hours, and a person should not have to sit
 beside it. When you have no way to ask at all (you were started as a headless or scheduled job, with
 no one reading your output), do not ask: take the proposed defaults, and put them at the top of the
@@ -98,7 +99,7 @@ These are read from the code, never asked:
 - **Starting.** The model waits until the client has set what it needs and starts generation on the
   client's command. The model half carries no default prompt, image or action; values the source
   hard-codes in its example script go into the baseline's conditions file, not into the model, and a
-  person playing the port enters values in the Sandbox.
+  person playing the port enters values on the play page.
 - **An empty prompt is a value.** A prompt the client sets to empty (or to only spaces, which strip
   to empty) is accepted and encoded as the source encodes the empty string, the way a text-to-video
   model's unconditional branch already does. What the model refuses is starting before the client
@@ -126,7 +127,8 @@ These are read from the code, never asked:
 | 5 | The replay | [baseline-and-replay.md](references/baseline-and-replay.md); the port is built and served as in [serving.md](references/serving.md) §1–2 | the port under the baseline's conditions matches it bit for bit at every step (or within the floor), or within a tolerance declared before the run for a named, unavoidable change ([baseline-and-replay.md](references/baseline-and-replay.md) §5.2) |
 | 6 | Serve | [serving.md](references/serving.md) | the port is healthy on the node; every command round-trips; a second session starts clean; the log shows no handler error |
 | 7 | Checklist | [checklist.md](references/checklist.md) | every check under the four principles passes or is explained. A new finding joins the principle it belongs to; only a finding no principle covers adds a principle |
-| 8 | Report | below | one report with the three deliverables and every decision made |
+| 8 | Play page | [play-page.md](references/play-page.md) | a local page served on the node drives every command, loads the baseline's examples, and passed a headless browser run on the node |
+| 9 | Report, then the Cookbook offer | below | one report with the three deliverables and every decision made; the person answered whether to contribute the port |
 
 Do not start a phase before the previous one's exit criterion holds. A late failure in a port is
 almost always an early check that was skipped: weights that only load from the hub, an example that
@@ -136,7 +138,7 @@ source's output.
 Each phase hands the next one values, not reasoning: Phase 1 an image, a passing command and a
 weights root; Phase 2 a conditions file, a trajectory and the stage map; Phase 3 a source
 that generates one chunk per call (or "not needed"); Phase 4 a workspace; Phase 5 a step-by-step
-comparison; Phase 6 a served model; Phase 7 a table.
+comparison; Phase 6 a served model; Phase 7 a table; Phase 8 a page and its address.
 
 ## Phase 0: Orient
 
@@ -224,14 +226,15 @@ Decide from the stage map Phase 2 drew
 The refactor is done on the source, offline, with nothing of the runtime involved: a bug found here
 is a refactor bug, and Phase 4 then only wraps a model that already streams.
 
-## Phase 8: Report
+## Phase 9: Report, then the Cookbook offer
 
 One report, in the run directory, opening with the three deliverables:
 
 - **Baseline**: the command that produced it, the source commit, the image, the conditions file,
   the rendered output, the per-step cost.
-- **Port**: the workspace path, the command that serves it, and how to play it from the Reactor
-  Sandbox (the SSH tunnel command and the address to enter, [serving.md](references/serving.md) §4).
+- **Port**: the workspace path, the command that serves it, the play page's address, and how to
+  open it from where the person sits: the case that applies, with its commands
+  ([play-page.md](references/play-page.md) §6). The Reactor Sandbox is named as the fallback.
 - **Agreement**: the per-step comparison table, the side-by-side render, and the verdict. Any
   tolerance names the unavoidable change that needed it and was declared before the run.
 
@@ -251,6 +254,27 @@ source's own environment, and why), every edit made to the source (the streaming
 took in place of a person: slug, the split into server config, set before play and changed
 during play, fps, the example used as the
 baseline.
+
+### The Cookbook offer
+
+The [Reactor Cookbook](https://github.com/reactor-team/reactor-cookbook) collects model workspaces
+other people build and run. After the report, and only then, ask the person once whether to
+contribute this port there. It is the one question after the start: the person decides after
+seeing the report and playing the model. First check, and put in the question, the three things a
+contribution needs:
+
+- **The licence.** The source repository's licence allows redistribution, and its notice files go
+  along.
+- **The weights.** A person outside can download them from a public source the workspace fetches
+  itself (a public Hugging Face repository, for example). A file shared by hand is not one.
+- **The shape.** The workspace follows the Cookbook's
+  [GUIDELINES.md](https://github.com/reactor-team/reactor-cookbook/blob/main/GUIDELINES.md): file
+  names, the application/model split, its tests.
+
+Say which hold and what would have to change for the rest. Only on an explicit yes, prepare the
+workspace under `models/<slug>/` on a branch of a fork or clone and open the pull request as a draft;
+the play page stays with the person and is not part of it. Without an answer, or on a no, stop at
+the report.
 
 ## When a phase cannot finish
 

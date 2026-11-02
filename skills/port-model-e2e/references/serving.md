@@ -135,11 +135,12 @@ window, so it shows where time goes and whether a gap occurred, not which
 single step was slowest; that comes from the per-step times. Save the
 readings of one full session for the checklist and the report.
 
-## 4. Play it from the Reactor Sandbox
+## 4. Reaching the served port from a browser
 
-The [Reactor Sandbox](https://reactor-sandbox.vercel.app/) is a public page
+A person plays the port from its play page ([play-page.md](play-page.md)), or
+from the [Reactor Sandbox](https://reactor-sandbox.vercel.app/), a public page
 that connects to a running `reactor run` and builds its controls from the
-model's schema. It is how a person tries the port by hand. It decides nothing
+model's schema. Both are the same kind of client. It decides nothing
 about correctness: the replay (Phase 5) and the checks in §3 already ran on
 the node, through the same runtime, with the client on `localhost`.
 
