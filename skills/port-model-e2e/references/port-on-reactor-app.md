@@ -58,8 +58,9 @@ without a server.
 
 List every argument the source's entry point takes — CLI flags, config keys,
 function parameters, constants buried in the example script — and give each
-exactly one kind: config, setup or live, as defined in SKILL.md ("Config, setup
-and live"), or delete it when it exists only for the offline script (output
+exactly one kind: server config, set before play or changed during play, as defined
+in SKILL.md ("Server config, set before play, changed during play"), or delete
+it when it exists only for the offline script (output
 paths, `--num_frames` / `--max_chunks` caps, video writers, progress bars). The
 split for client inputs is the one proposed at the start of the run, and
 confirmed or taken as default. Settle it before writing any command, because it
@@ -109,12 +110,12 @@ or `reset()` call may take up to `call_timeout` (default 30 s)
 the slowest step the model ever takes, first step included. The GPU count is
 `model.resources.gpu.count` in `reactor.yaml`.
 
-## 5. Setup inputs, live inputs, and where encoding happens
+## 5. Inputs set before play, inputs changed during play, and where encoding happens
 
-Setup inputs travel once, before the first step, and the application hands them
+Inputs set before play travel once, before the first step, and the application hands them
 to the model inside the step input on the first step after they change (the
 `seed_id` / `applied_seed_id` handshake in `examples/waypoint/waypoint.py` is the
-pattern). Live inputs ride every step input.
+pattern). Inputs changed during play ride every step input.
 
 - **A setter stores; it does not compute.** A command handler validates,
   decodes and stores the newest value. Text encoding, VAE encoding of an image
@@ -126,7 +127,7 @@ pattern). Live inputs ride every step input.
   that is also serving the stream.
 - **Encode only what is new.** Cache an encoded condition by value for the life
   of the session; a repeated value is not encoded again.
-- **A setup input that implies one-time work** (encoding a first frame) runs
+- **An input set before play that implies one-time work** (encoding a first frame) runs
   that work once, on the step that applies it. If that work draws random
   numbers, it must run exactly as often as in the source: calling it per step
   advances the generator and the output diverges for no visible reason.
@@ -139,7 +140,7 @@ pattern). Live inputs ride every step input.
   ([§6](#6-warm-up-covers-every-shape-a-client-can-produce)). Coordinates are relative to the frame
   the client sees, so state in the command's description which frame and which corner is the origin.
   A point or a drag that spans several chunks is split by chunk the way the source consumes it.
-- **`reset` and session end clear every setup input on every rank.** A stale
+- **`reset` and session end clear every input set before play on every rank.** A stale
   reference image raises nothing; it silently conditions the next session.
 
 ## 6. Warm-up covers every shape a client can produce
@@ -297,7 +298,7 @@ vendored model, the workspace directory goes on `sys.path` as the runtime puts
 it (`tests/unit/examples/conftest.py`), and the application half is driven
 through its hooks. At minimum: the contract assembles, every command validates
 and refuses with its documented codes, `reset` and session end clear every
-setup input, and a joining client receives the snapshot. Run them inside the
+input set before play, and a joining client receives the snapshot. Run them inside the
 image.
 
 ## Exit criterion

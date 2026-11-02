@@ -91,7 +91,7 @@ it is paid inside `load()`, before ready.
 
 **A2. Warm-up runs the real path end to end**, through the real dispatch, over every shape a session
 can take; what it must cover is in [`port-on-reactor-app.md`](port-on-reactor-app.md) §6.
-**Check:** on a freshly started server, send the first step with each optional setup input present
+**Check:** on a freshly started server, send the first step with each optional input that is set before play present
 and absent, and with inputs at a client's size; no compile line appears and no step leaves the band.
 
 **A3. Inputs that would change a tensor's shape are fixed to one shape on arrival.** A prompt is
@@ -162,7 +162,7 @@ needs.
 
 **C1. A reset or a new session leaves nothing behind.** No image, cache, counter or conditioning
 carries over from the previous session. The first step of a second session matches the first step
-of a fresh process. A stale setup input does not raise an error; it silently conditions the next
+of a fresh process. A stale input set before play does not raise an error; it silently conditions the next
 session, so compare outputs, not just logs.
 
 **C2. A restart reproduces.** The same inputs and seed give the same output after the server

@@ -46,7 +46,7 @@ Almost everything about a port is read from the code. Ask only what the code can
 | Question | Proposed default |
 |---|---|
 | Which of the source's examples is the baseline? (only when the README has several) | the README's canonical invocation |
-| For each input a person playing the model will set: can they change it while the video plays, or only before they press start? (wording below) | your proposal per input, with its reason |
+| Each input, as **server config**, **set before play** or **changed during play** (table below) | your proposal per input, with its reason |
 | Model slug | the repository name, lowercased |
 | Stop after the source example, so you can judge the model before it is ported? | no. When yes, the run stops once the untouched source example has run and rendered, before any edit to the source |
 
@@ -56,14 +56,14 @@ beside it. When you have no way to ask at all (you were started as a headless or
 no one reading your output), do not ask: take the proposed defaults, and put them at the top of the
 report so the person can see what was decided for them and rerun with other answers.
 
-**Config, setup and live.** Every input the source takes gets exactly one kind. This table is the
-one definition every file of this skill uses:
+**Server config, set before play, changed during play.** Every input the source takes gets exactly one
+kind. This table is the one definition every file of this skill uses:
 
-| Kind | What it is | Where it lives | Typical inputs |
+| Kind | What it means for the person playing | Where it lives | Typical inputs |
 |---|---|---|---|
-| **config** | fixed for the life of the server | the config file `load()` reads | checkpoint subpaths, step count, dtype, sampler; the resolution when the checkpoint supports only one |
-| **setup** | set before generation starts, fixed until a reset; a value sent while running is refused | a command valid while idle | first frame, seed; the resolution when the model offers several |
-| **live** | may change while generating; lands at the next chunk boundary and holds until changed | a public state field or a command applied at the next step | prompt, actions; reference images when the architecture can take them at a chunk boundary (otherwise setup) |
+| **server config** | set by the server, not by the person; the same for every session | the config file `load()` reads | checkpoint subpaths, step count, dtype, sampler; the resolution when the checkpoint supports only one |
+| **set before play** | the person sets it, then presses start; locked until a reset, and a value sent while running is refused | a command valid while idle | first frame, seed; the resolution when the model offers several |
+| **changed during play** | the person changes it while the video plays; it takes effect at the next chunk and holds until changed | a public state field or a command applied at the next step | prompt, actions; reference images when the architecture can take them at a chunk boundary (otherwise set before play) |
 
 Some arguments exist only because the research script renders one video to a file and exits: an
 output path, a limit on how many frames to make, the code that saves the mp4. A served model streams
@@ -71,24 +71,24 @@ frames to a client and runs until it is stopped, so these are removed rather tha
 anything. And no client input gets a default value in the model or its config: every value a client
 can set comes from the client.
 
-The three kinds are this skill's working vocabulary, not the person's. The question names each input
-and what changing it does in the played video, and never uses the words config, setup or live. Ask
-only about the inputs a person will set; the config values are decided from the code and listed in
-the same message for information. For example:
+**Asking it.** Give each kind its name and its one-line meaning from the table, then list the inputs
+under it, with a reason wherever the proposal departs from what the source does. For example:
 
-> **What you set before pressing start:** the first frame (an image), the seed.
-> **What you can change while it plays, taking effect from the next ~0.5 s chunk:** the prompt, the
-> camera keys. The source keeps the prompt fixed for a whole video; the model re-reads the text at
-> every chunk, so changing it mid-play steers what comes next.
-> **Fixed by the server, not set by the person:** 4 denoising steps, 480×832, bf16.
+> **Server config** (set by the server, not by you): 4 denoising steps, 480×832, bf16.
+> **Set before play** (you set it, then press start; locked until reset): the first frame, the
+> seed.
+> **Changed during play** (change it while the video plays; takes effect at the next ~0.5 s chunk): the
+> prompt, the camera keys. The source keeps one prompt for a whole video, but the model re-reads the
+> text at every chunk, so a new prompt steers what comes next.
 
-**Proposing setup or live.** Start from the code: an input the source consumes inside its per-chunk
-loop is live; one it encodes once before the loop is setup. Then correct for what an
+**Proposing what is set before play and what changes during play.** Start from the code: an input
+the source consumes inside its per-chunk loop changes during play; one it encodes once before the
+loop is set before play. Then correct for what an
 interactive model needs. A research script often fixes the prompt or the actions for the whole run
 only because it renders one offline video, while a person playing the model changes them between
 turns. When the architecture can take a new value at a chunk boundary (the text or action
 conditioning is applied per chunk, or can be re-encoded there), propose the prompt and the actions
-as live even though the source never changes them; say so in the proposal, and say what the
+as changed during play even though the source never changes them; say so in the proposal, and say what the
 architecture does with the change. A value that changes mid-run where the source never did has no
 baseline to compare against: the replay proves the schedule the source ran, and the person judges
 the mid-run change by playing it.
@@ -248,8 +248,8 @@ model and device count:
 
 Then the checklist table, the environment deviation record (every version that differs from the
 source's own environment, and why), every edit made to the source (the streaming refactor's steps with their bit-identical checks, or its "not needed" reason; any change to how it draws random numbers, with its side-by-side against the untouched source), and every decision you
-took in place of a person: slug, which inputs are set before start and which can change while
-playing, fps, the example used as the
+took in place of a person: slug, the split into server config, set before play and changed
+during play, fps, the example used as the
 baseline.
 
 ## When a phase cannot finish
