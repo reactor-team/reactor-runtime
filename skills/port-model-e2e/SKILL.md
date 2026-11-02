@@ -46,7 +46,7 @@ Almost everything about a port is read from the code. Ask only what the code can
 | Question | Proposed default |
 |---|---|
 | Which of the source's examples is the baseline? (only when the README has several) | the README's canonical invocation |
-| Each input the inference entry point takes, as **config**, **setup** or **live** (table below) | your proposal per input, with its reason |
+| For each input a person playing the model will set: can they change it while the video plays, or only before they press start? (wording below) | your proposal per input, with its reason |
 | Model slug | the repository name, lowercased |
 | Stop after the source example, so you can judge the model before it is ported? | no. When yes, the run stops once the untouched source example has run and rendered, before any edit to the source |
 
@@ -71,6 +71,17 @@ frames to a client and runs until it is stopped, so these are removed rather tha
 anything. And no client input gets a default value in the model or its config: every value a client
 can set comes from the client.
 
+The three kinds are this skill's working vocabulary, not the person's. The question names each input
+and what changing it does in the played video, and never uses the words config, setup or live. Ask
+only about the inputs a person will set; the config values are decided from the code and listed in
+the same message for information. For example:
+
+> **What you set before pressing start:** the first frame (an image), the seed.
+> **What you can change while it plays, taking effect from the next ~0.5 s chunk:** the prompt, the
+> camera keys. The source keeps the prompt fixed for a whole video; the model re-reads the text at
+> every chunk, so changing it mid-play steers what comes next.
+> **Fixed by the server, not set by the person:** 4 denoising steps, 480×832, bf16.
+
 **Proposing setup or live.** Start from the code: an input the source consumes inside its per-chunk
 loop is live; one it encodes once before the loop is setup. Then correct for what an
 interactive model needs. A research script often fixes the prompt or the actions for the whole run
@@ -88,6 +99,11 @@ These are read from the code, never asked:
   client's command. The model half carries no default prompt, image or action; values the source
   hard-codes in its example script go into the baseline's conditions file, not into the model, and a
   person playing the port enters values in the Sandbox.
+- **An empty prompt is a value.** A prompt the client sets to empty (or to only spaces, which strip
+  to empty) is accepted and encoded as the source encodes the empty string, the way a text-to-video
+  model's unconditional branch already does. What the model refuses is starting before the client
+  has sent a prompt at all. Refuse the empty prompt only when the source's own code fails on it, and
+  say so in the report.
 - **Clients per session.** One client per session. Several clients sharing one session (spectators,
   multiplayer) is a product feature added later, not part of a port.
 - **Playback fps.** Nothing to decide up front. Read the frame rate the model was trained at from
@@ -232,7 +248,8 @@ model and device count:
 
 Then the checklist table, the environment deviation record (every version that differs from the
 source's own environment, and why), every edit made to the source (the streaming refactor's steps with their bit-identical checks, or its "not needed" reason; any change to how it draws random numbers, with its side-by-side against the untouched source), and every decision you
-took in place of a person: slug, the config, setup and live split, fps, the example used as the
+took in place of a person: slug, which inputs are set before start and which can change while
+playing, fps, the example used as the
 baseline.
 
 ## When a phase cannot finish

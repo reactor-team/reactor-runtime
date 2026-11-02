@@ -124,9 +124,11 @@ Refusals still happen at once, in the setter.
 the newest value.
 
 **B2. Free text is stripped once, in the handler.** That stripped value is the only one stored,
-encoded and echoed, and "blank" is decided on it.
-**Check:** send a prompt of only spaces, and a padded prompt; the first is refused, the second is
-stored and echoed stripped.
+encoded and echoed. A prompt that strips to empty is a value the client chose, encoded as the
+source encodes the empty string ([`SKILL.md`](../SKILL.md), "An empty prompt is a value").
+**Check:** send a prompt of only spaces, then a padded prompt. The first is stored and echoed as
+empty and generation runs on it; the second is stored and echoed stripped. Starting before any
+prompt was sent is refused.
 
 **B3. Every host-side array operation earns its place.** List each array operation between the
 generator and the transport (`np.stack`, `np.concatenate`, `.astype`, `np.ascontiguousarray`,
