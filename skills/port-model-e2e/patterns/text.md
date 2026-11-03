@@ -1,15 +1,15 @@
 # Text
 
-## `set_prompt(prompt)`, changed during play (live)
+## `set_prompt(prompt)`
 
 All the text a model reads goes through `set_prompt`, in the model's own layout: a model whose
 prompt has sections (a picture description, a soundscape) takes them in one string or one
 structured value, as its source does, and the description shows the layout. A second, independent
-text is a new feature with its own command (`set_audio_prompt`).
+text is its own role with its own command (`set_audio_prompt`).
 
-- **Applies at the next chunk boundary.** Nothing restarts; the next chunks follow the new text.
-- **A model whose history must restart for a new prompt to take effect** declares `set_prompt` setup in
-  `capabilities`. It never restarts silently.
+Its kind is read from the source. Changed during play (live) in most chunk-by-chunk models: a new
+prompt applies at the next chunk boundary and nothing restarts. Set before play (setup) when the
+model's history must restart for new text to take effect; it never restarts silently.
 
 ## On arrival
 
@@ -21,3 +21,4 @@ text is a new feature with its own command (`set_audio_prompt`).
 - **One shape.** Pad or truncate the token sequence to the traced length, as the source does.
 - **Encode at the boundary, not in the handler.** The handler stores the newest prompt; the model
   encodes it once, at the boundary that applies it, and caches encodings by text for the session.
+  Prompts superseded before that boundary are never encoded.

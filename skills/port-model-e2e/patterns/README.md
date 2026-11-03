@@ -1,109 +1,97 @@
 # The command standard for chunk-by-chunk models
 
-A client that drives one ported model should drive the next with the same calls, changing only
-arguments. This directory fixes those calls. Every port follows it: reuse a standard name for a
-standard concept, and give a genuinely new feature one short name in the same shape.
-
-The standard fixes names and meanings, not features. A model may lack a standard command (it then
-does not expose it), and may have commands the standard does not mention.
+A client that drives one ported model should drive the next by changing arguments only. This
+directory fixes the calls that make that possible: one lifecycle, one set of events, and one command
+per concept. It fixes names and meanings, not features: a model exposes only the commands it has,
+and may add its own.
 
 ## Three axes per input
 
 Every input a model takes is described on three axes, none derived from another.
 
-| Axis | The question | Fixed by |
+| Axis | The question | Where it is fixed |
 |---|---|---|
 | **Modality** | How does the data travel? Text, image, video, movement, a pointer | the modality's page |
-| **Role** | What does the model do with it? First frame, reference, scene description, camera | the model's input table |
-| **Kind** | When may it be set? | the standard's default for the command, and the model's `capabilities` |
+| **Role** | What does the model do with it? First frame, reference, scene description, camera | the command's name |
+| **Kind** | When may it be set? | the model's input table, read from its source, and published in `capabilities` |
 
-The three kinds, named for the person first, with the formal term in parentheses:
+No command has a fixed kind. A prompt is changed during play in most chunk-by-chunk models and set
+before play in one whose history must restart for new text; a reference is re-read every chunk in
+one model and encoded once in another. Read each input's kind from the source.
+
+The kinds, named for the person first, with the formal term in parentheses:
 
 | Kind | Meaning |
 |---|---|
 | **Server config** | set by the server, the same for every session; not a command |
-| **Set before play** (setup) | accepted while idle only; holds for the whole session; sent while running, it is refused with `locked_while_running` |
-| **Changed during play** (live) | accepted at any time; sent before `start`, it is the starting value; applies at the next chunk boundary and holds until changed |
+| **Set before play** (setup) | accepted while idle; holds for the whole run; sent while running, refused with `locked_while_running` |
+| **Changed during play** (live) | accepted at any time: sent before `start` it is the starting value, sent while running it applies at the next chunk boundary; held until changed |
 
-Each standard command has a default kind. A model whose source cannot take a live input mid-run
-(it encodes a reference once into its context) declares that command setup in `capabilities`; a
-mid-run call is then refused, never answered by a silent restart.
-
-## Lifecycle: five commands, the same on every model
+## Lifecycle: the same on every model
 
 | Command | Behaviour |
 |---|---|
-| `start()` | idle → running. Refused when a required input is missing or when already running. The model never starts on its own when an input arrives |
+| `start()` | idle → running. Refused when a required input is missing or when already running. A model never starts on its own when an input arrives |
 | `pause()` / `resume()` | hold on the last frame; resume continues from there. Live inputs sent while paused apply on resume |
-| `stop()` | end generation and **keep** every setting; `start()` again replays the same conditions |
-| `reset()` | end generation and **clear** every setting; allowed from any state |
+| `stop()` | end generation and **keep** every input; `start()` again replays the same conditions |
+| `reset()` | end generation and **clear** every input, on every rank; allowed from any state |
 
-## Events: one fixed set
+## Events
 
 | Message | Sent | Carries |
 |---|---|---|
-| `state_update` | from `@connected` and as the answer to every command | `state` (idle, running, paused), `settings` (every input's value sent, and the value applied at the last chunk), `capabilities` |
+| `state_update` | from `@connected` and as the answer to every command | `state` (idle, running, paused); `settings`: each input's value last sent and the value applied at the last chunk; `capabilities` |
 | `chunk_complete` | after every chunk | `index` |
 | `generation_started`, `generation_complete` | when a run starts and ends | |
 
-A refused command raises `CommandError(code, message)`; the runtime delivers it to the client, so
-there is no model message for it. A change meant for chunk N is sent by the client after
-`chunk_complete` of chunk N−1; no model has a scheduling command.
+`capabilities` lists every command the model exposes with its kind, its accepted values or range,
+and what the values mean where the source defines it.
 
-`capabilities` lists every command the model exposes with its kind, its value set or range, and what
-its values mean where the source defines it ([movement.md](movement.md)).
+A refused command raises `CommandError(code, message)`; the runtime delivers it to the client, so no
+model message is needed. A change meant for chunk N is sent by the client after `chunk_complete` of
+chunk N−1, so no model needs a scheduling command.
 
-## The standard commands
+## One command per concept
 
-```
-# lifecycle
-start() · pause() · resume() · stop() · reset()
+| Concept | Command | Page |
+|---|---|---|
+| text the model reads | `set_prompt(prompt)` | [text.md](text.md) |
+| the frame the video starts on | `set_first_frame(image)` | [image.md](image.md) |
+| what to look or sound like | `set_references(items)` | [image.md](image.md) |
+| a video to rewrite | `video_in` input track, or `set_source_video(video)` for a file | [video.md](video.md) |
+| walk and turn | `set_move(forward, right)`, `set_look(yaw, pitch)` | [movement.md](movement.md) |
+| a camera trajectory | `set_camera_pose(poses)` | [movement.md](movement.md) |
+| raw keys and mouse that are not movement | `set_input(keys, mouse)` | [movement.md](movement.md) |
+| a touch or a drag | `set_pointer(x, y, down)` | [pointer.md](pointer.md) |
+| randomness | `set_seed(seed)`, −1 for random | |
+| output size, when the model offers several | `set_resolution(name)` | |
 
-# set before play (setup)
-set_first_frame(image)            image.md
-video_in                          input track; video.md
-set_seed(seed)                    -1 = random
-set_resolution(name)              only when the model offers several
+Every other input is named `set_<its role>` (`set_style_image`, `set_audio_prompt`), and two roles of
+one modality are two commands. An argument a model or an application needs on a standard command is
+added as a keyword with a default, so a client that does not send it is unaffected.
 
-# changed during play (live)
-set_prompt(prompt)                text.md
-set_references(items)             image.md; images, clips, voice
-set_move(forward, right)          movement.md; -1..1
-set_look(yaw, pitch)              movement.md; -1..1
-set_speed(move, turn)             movement.md
-set_camera_pose(poses)            movement.md; overrides move and look while set
-set_input(keys, mouse)            movement.md; full held state, for button models
-set_pointer(x, y, down)           pointer.md; x, y in 0..1 over the output frame
-```
-
-A new feature gets `set_<what it is>`, a kind, and a row in the input table: a separate text for
-the sound is `set_audio_prompt(prompt)`, live. A model or an application that needs an extra
-argument on a standard command adds it as a keyword with a default, so a client that does not send
-it is unaffected.
-
-**Setting an empty value removes an input**: `set_references([])`, `set_camera_pose([])`. There are no
-clear commands.
+**Setting an empty value removes an input** (`""`, `None`, `[]`); there are no clear commands.
 
 **Positions use one coordinate system**: `x, y` in 0…1 over the output frame, origin at the top
-left, or a region in the same units. No command defines its own.
+left, or a region in the same units.
 
 ## The model's input table
 
 Phase 4 writes one row per client input before any command exists; the play page, the checklist and
-the report read it.
+the report read it, and `capabilities` publishes it.
 
 | Input | Modality | Role | Kind | Command |
 |---|---|---|---|---|
 | first frame | image | the frame the video starts on | set before play (setup) | `set_first_frame` |
-| reference | image | an appearance the model keeps to | changed during play (live), or setup when the source encodes it once | `set_references` |
+| reference | image | an appearance the model keeps to | changed during play (live): re-read at every chunk | `set_references` |
 | prompt | text | the scene description | changed during play (live) | `set_prompt` |
-| movement | movement | where the camera goes | changed during play (live) | `set_move`, `set_look`, and `set_camera_pose` when the model takes poses |
+| movement | movement | where the camera goes | changed during play (live) | `set_move`, `set_look` |
 
 ## When two inputs control the same thing
 
 | Both set | Wins | The other |
 |---|---|---|
 | `set_camera_pose`, and `set_move` / `set_look` | the camera pose | ignored until the pose is set to `[]`; `state_update` says which is in control |
-| `video_in`, and `set_first_frame` | what the source does; read it | the description says which wins |
+| a video to rewrite, and `set_first_frame` | what the source does; read it | the description says which wins |
 
 A conflict found in a port is added here.
