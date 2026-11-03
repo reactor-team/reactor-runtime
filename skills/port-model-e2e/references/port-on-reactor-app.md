@@ -67,6 +67,11 @@ confirmed or taken as default. Settle it before writing any command, because it
 fixes the request API, what `reset` must clear, and which shapes the warm-up
 must cover.
 
+Then write the input table of [patterns/README.md](../patterns/README.md): one row per client
+input with its modality, role, timing, the boundary that applies it, and its command. Each
+modality's page fixes the command names, arguments and refusals; follow it rather than the source's
+own names, so a client that drives one ported model drives the next.
+
 The model half and the config file hold no default for any client input; values
 the source's example hard-codes go into the baseline's conditions file.
 
@@ -131,8 +136,10 @@ pattern). Inputs changed during play ride every step input.
   that work once, on the step that applies it. If that work draws random
   numbers, it must run exactly as often as in the source: calling it per step
   advances the generator and the output diverges for no visible reason.
-- **Actions enter the model in the form it was trained on.** Read how the source turns an
-  action into a tensor before writing the command for it: held keys as a one-hot or a direction
+- **Actions enter the model in the form it was trained on.** Movement takes the commands of
+  [patterns/movement.md](../patterns/movement.md) whatever the model was trained on; the port
+  converts them to that form. Read how the source turns an
+  action into a tensor before writing the conversion: held keys as a one-hot or a direction
   vector, camera or mouse look as continuous angles or as direction plus speed, a click as
   coordinates normalised to the output frame, a drag as a sequence of points. A drag, or several
   fingers at once, gives a variable number of points; bring it to the fixed shape the model takes

@@ -47,7 +47,7 @@ Almost everything about a port is read from the code. Ask only what the code can
 | Question | Proposed default |
 |---|---|
 | Which of the source's examples is the baseline? (only when the README has several) | the README's canonical invocation |
-| Each input, as **server config**, **set before play** or **changed during play** (table below) | your proposal per input, with its reason |
+| Each input, as **server config**, **set before play** or **changed during play** (table below), with its modality and role | your proposal per input, with its reason |
 | Model slug | the repository name, lowercased |
 | Stop after the source example, so you can judge the model before it is ported? | no. When yes, the run stops once the untouched source example has run and rendered, before any edit to the source |
 
@@ -65,6 +65,12 @@ kind. This table is the one definition every file of this skill uses:
 | **server config** | set by the server, not by the person; the same for every session | the config file `load()` reads | checkpoint subpaths, step count, dtype, sampler; the resolution when the checkpoint supports only one |
 | **set before play** | the person sets it, then presses start; locked until a reset, and a value sent while running is refused | a command valid while idle | first frame, seed; the resolution when the model offers several |
 | **changed during play** | the person changes it while the video plays; it takes effect at the next chunk and holds until changed | a public state field or a command applied at the next step | prompt, actions; reference images when the architecture can take them at a chunk boundary (otherwise set before play) |
+
+The kind is one of three things declared for each input, beside its **modality** (how it travels:
+text, image, video, movement) and its **role** (what the model does with it: first frame, reference,
+prompt). None follows from another: an image can be a first frame set before play or a reference
+changed during play. [patterns/](patterns/README.md) fixes the commands each modality gets, so every
+ported model that takes the same modality is driven the same way.
 
 Some arguments exist only because the research script renders one video to a file and exits: an
 output path, a limit on how many frames to make, the code that saves the mp4. A served model streams
