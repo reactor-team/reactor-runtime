@@ -33,7 +33,7 @@ Every key binding has an on-screen control that does the same thing.
 - **The display**: the output tracks from `x-reactor.tracks`, with the empty, loading and stopped
   states shown inside it.
 - **A sidebar, in this order**: examples, then the **session setup** inputs, then the prompt,
-  then a collapsed Advanced section (seed and rarely used settings). The session setup inputs are locked while a session runs and unlock on stop or reset.
+  then a collapsed Advanced section (seed and rarely used settings). The session setup inputs are locked while a session runs and unlock on reset.
 - **A controls card under the display**: a telemetry row (chunk, frames, delivered fps, the
   current action), the **live controls**, and Reset.
 - **Refusals** appear where the person is looking, each code in plain words. The client SDK's

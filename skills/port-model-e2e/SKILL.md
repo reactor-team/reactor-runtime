@@ -65,7 +65,7 @@ explanation tells them what it means. This table is the one definition every fil
 | Kind | What it means for the person playing | Where it lives | Typical inputs |
 |---|---|---|---|
 | **serving config** | set by the server, not by the person; the same for every session | the config file `load()` reads | checkpoint subpaths, step count, dtype, sampler; the resolution when the checkpoint supports only one |
-| **session setup** | the person sets it, then presses start; locked while it plays (a value sent while running is refused) and editable again after `stop` or `reset` | a command valid while idle | first frame, seed; the resolution when the model offers several |
+| **session setup** | the person sets it, then presses start; locked while it plays (a value sent while running is refused) and editable again after `reset` | a command valid while idle | first frame, seed; the resolution when the model offers several |
 | **live control** | the person changes it while the video plays; it takes effect at the next chunk and holds until changed | a public state field or a command applied at the next step | prompt, actions; reference images when the architecture can take them at a chunk boundary (otherwise session setup) |
 
 The kind is one of three things declared for each input, beside its **modality** (how it travels:

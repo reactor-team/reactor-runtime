@@ -32,8 +32,7 @@ The kinds, each with the plain explanation to give a person the first time it is
 |---|---|
 | `start()` | idle → running. Refused when a required input is missing or when already running. A model never starts on its own when an input arrives |
 | `pause()` / `resume()` | hold on the last frame; resume continues from there. Live inputs sent while paused apply on resume |
-| `stop()` | end generation and **keep** every input; `start()` again replays the same conditions |
-| `reset()` | end generation and **clear** every input, on every rank; allowed from any state |
+| `reset()` | end generation and **clear** every input, on every rank; allowed from any state. To run the same conditions again, set them again (on a play page: reset, then pick the example) |
 
 ## Events
 

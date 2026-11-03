@@ -69,7 +69,7 @@ must cover.
 
 Then write the input table of [patterns/README.md](../patterns/README.md): one row per client
 input with its modality, role, kind and command. The standard there fixes the lifecycle
-(`start`, `pause`, `resume`, `stop`, `reset`), the events (`state_update`, `chunk_complete`) and the
+(`start`, `pause`, `resume`, `reset`), the events (`state_update`, `chunk_complete`) and the
 command for each concept; follow it rather than the source's own names, so a client that drives one
 ported model drives the next.
 
