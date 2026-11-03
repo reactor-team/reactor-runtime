@@ -45,7 +45,8 @@ A command applies at the next step, so the two differ for a step or two; that la
 the command arrived, and without it a slow model looks like a dropped command. Reset sends the
 model's reset command, clears the display at once and keeps the connection.
 
-The page works at phone width without horizontal scrolling.
+The page works at phone width without horizontal scrolling. Its exact look (shell, card, key and
+type rules, colours) is in [play-page-style.md](play-page-style.md); follow it for every page.
 
 ## 3. The examples are the baseline's
 
