@@ -34,7 +34,8 @@ the play page, the checklist and the report all read it.
 
 **One command per input, named `set_<role>`.** The role is the input's name: `set_first_frame`,
 `set_reference`, `set_prompt`, `set_negative_prompt`. Two inputs of one modality are two commands,
-because they are two roles. Movement is the exception: its commands are fixed by
+because they are two roles. Setting an empty value (`""`, `None`, `[]`) is how an optional input is
+removed; there are no separate clear commands. Movement is the exception: its commands are fixed by
 [movement.md](movement.md), whatever the model calls them internally.
 
 **One state snapshot answers every command** (see [port-on-reactor-app.md](../references/port-on-reactor-app.md)
@@ -52,7 +53,7 @@ Inputs interact only when two of them control the same thing. Those cases are li
 
 | When both are set | The one that wins | What the other does |
 |---|---|---|
-| a camera path, and held keys or mouse look | the camera path | refused with `camera_path_active` until the path is cleared |
+| a camera path, and held keys or mouse look | the camera path | refused with `camera_path_active` until the path is set to empty |
 | an input video, and a first frame | whatever the source does; read it | the port follows the source and the description says which wins |
 
 A new conflict found in a port is added as a row here.

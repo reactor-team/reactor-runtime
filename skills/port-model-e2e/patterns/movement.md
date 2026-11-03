@@ -13,7 +13,7 @@ on camera poses also accepts a camera path, for someone who designs the trajecto
    the port converts each chunk's                     the keys and look go
    keys and look into that chunk's poses              to the model as trained
           │                                                  │
-   also accepts set_camera_path;                      no set_camera_path
+   also accepts set_camera_path;                        no set_camera_path
    an active path overrides keys and look             in its schema
 ```
 
@@ -59,13 +59,14 @@ State both, and where each was read, in the `set_keys` and `set_look` descriptio
 
 | Command | Argument | Meaning |
 |---|---|---|
-| `set_camera_path` | `path: UploadedFile` (JSON) | a whole trajectory; set before play |
-| `clear_camera_path` | none | back to keys and look |
+| `set_camera_path` | `path: UploadedFile \| None` (JSON) | a whole trajectory; `None` returns control to keys and look |
 
 The file holds `poses`: a list of 4×4 camera-to-world matrices in the OpenCV convention, in the
 model's world units, one per frame or per latent frame as the description states; and, when the
 model takes them, `intrinsics` as the source expects them. A path whose length does not match what
 the session will generate is refused with `invalid_camera_path`, giving the expected count.
 
-While a path is active, `set_keys` and `set_look` are refused with `camera_path_active`. A
+Its timing is declared in the input table like any other input: set before play when the model
+plans the whole path at the start, changed during play when it reads the next chunk's poses at each
+boundary. While a path is active, `set_keys` and `set_look` are refused with `camera_path_active`. A
 key-trained model has no `set_camera_path`; a client reads its absence from the schema.

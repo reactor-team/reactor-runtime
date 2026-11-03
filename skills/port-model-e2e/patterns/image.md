@@ -8,13 +8,14 @@ own timing.
 
 | Command | Argument | Answers with |
 |---|---|---|
-| `set_<role>`: `set_first_frame`, `set_reference`, `set_style` | `image: UploadedFile` | the state snapshot |
+| `set_<role>`: `set_first_frame`, `set_reference`, `set_style` | `image: UploadedFile \| None` | the state snapshot |
 | `set_<role>` for a role that takes several images: `set_references` | `images: list[UploadedFile]`, replacing the whole set | the state snapshot |
-| `clear_<role>`, for an optional role | none | the state snapshot |
 
-A role the model needs before it can start (a first frame, in an image-to-video model) is refused at
-start when missing (`missing_first_frame`). An optional role is absent until set and absent again
-after `clear_<role>`.
+Setting an empty value removes the input: `None` for one image, `[]` for a set. There is no
+separate command for it. A role the model needs before it can start (a first frame, in an
+image-to-video model) is refused at start when missing (`missing_first_frame`); an optional role is
+absent until set and after it is set to empty. Removing an input follows the same timing as
+setting it.
 
 ## On arrival
 

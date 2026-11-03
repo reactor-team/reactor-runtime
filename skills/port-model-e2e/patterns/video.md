@@ -1,41 +1,53 @@
 # Video in
 
-A video reaches a model in one of two ways, chosen from what the source consumes.
+This page fixes how a video reaches a served model. What the model does with it (its role) and
+when it may be set (its timing) are declared per input in the model's input table: a model may
+take a video to rewrite chunk by chunk, a reference video it keeps to, a clip whose motion it
+follows, or several of these at once.
 
-| The source | Transport | Role name, for example |
+| Role, for example | What the model does with it |
+|---|---|
+| `source` | rewrites it: each output chunk is the matching input chunk, transformed |
+| `reference_video` | keeps to its appearance or style |
+| `motion_reference` | follows its motion |
+
+## Two transports
+
+| Transport | Use it when | Declared as |
 |---|---|---|
-| rewrites each input chunk into the matching output chunk, in time | a **live input track** | `source` |
-| needs the whole clip before it starts, or reads ahead of the output | an **uploaded clip**, set before play | `source_clip` |
+| **A live input track** | the client sends frames as they happen (a camera, a screen) and the model consumes them in time | a `Video` field of a `MediaInput` subclass, named for its role, as `examples/echo/echo.py` declares `webcam` |
+| **An uploaded clip** | the client picks a file | `set_<role>(video: UploadedFile \| None)`; `None` removes it |
 
-A model may take both (a live stream plus a reference clip). Each is its own input row.
+Choose by how the input arrives, not by the role: a reference can be a file or a stream, and a
+source to rewrite can be a recorded file played into the model.
 
-## A live input track
+## On arrival
 
-Declare it as a `Video` field of a `MediaInput` subclass, named for its role, the way
-`examples/echo/echo.py` declares `webcam`. The client publishes frames to it over the same
-connection that carries the output.
+For both transports, bring the frames to what the model takes, the way the source preprocesses its
+input: its resolution (resize and crop, or pad, as the source does) and its frame rate (resampled by
+timestamp). State both in the description.
 
-- **Per chunk, read exactly the frames that chunk rewrites**: the number of input frames the source
-  takes per output chunk, at the model's frame rate. Frames that arrived in between are resampled to
-  that count by timestamp, not taken first-come.
-- **Fit every frame to the model's resolution on arrival**, as the source preprocesses its input.
-- **Refuse a step until enough frames have arrived** for the first chunk (`waiting_for_video`), and
-  say in the state how many have arrived. When the stream stalls mid-run, the model waits for the
-  frames of the next chunk; it does not repeat or invent frames, and the state reports the stall.
-- **Latency is reported**, not tuned away: the time from an input frame's arrival to its output
-  frame, measured on the served model.
+**An uploaded clip** is decoded off the event loop. Refuse what is not a video (`unsupported_media`)
+or cannot be decoded (`undecodable_video`). A clip longer than the model can take is refused with
+`video_too_long`, giving the limit in frames and seconds; it is never cut silently. Bring it to the
+fixed frame count the model was traced at, the way the source does (pad, loop or stop at its end),
+and say which in the description.
 
-## An uploaded clip
+**A live track** is read per chunk:
 
-`set_<role>(video: UploadedFile)`, set before play. Decode off the event loop, refuse what is not a
-video (`unsupported_media`) or cannot be decoded (`undecodable_video`), and bring it to the model's
-resolution and frame rate the way the source does. A clip longer than the model can take is
-refused with `video_too_long`, giving the limit in frames and seconds; never cut silently. A shorter
-clip follows the source (stop at its end, or loop), and the description says which.
+- each chunk reads exactly the input frames it consumes, by timestamp, not first-come;
+- a step is refused until the frames of the first chunk have arrived (`waiting_for_video`), and the
+  state says how many have;
+- when the stream stalls mid-run, the model waits for the next chunk's frames; it does not repeat or
+  invent frames, and the state reports the stall;
+- the latency from an input frame's arrival to its output frame is measured on the served model and
+  reported.
 
-## Timing and other inputs
+## Timing
 
-The live track is changed during play by nature: every chunk reads new frames. Everything that
-conditions how the frames are rewritten (prompt, references) is its own input on its own page. When
-the input video and a first frame both define the start, the [README](README.md) precedence table
-says which wins.
+Read it from the source, per input. A video the model encodes once before the generation loop is
+set before play. A video it reads again at every chunk (a reference re-injected into each chunk's
+attention, or a source consumed chunk by chunk) can change during play, applying at the next chunk
+boundary: a new uploaded clip replaces the old one there, and a live track changes with every frame
+by nature. When an input video and a first frame both define the start, the
+[README](README.md) precedence table says which wins.
