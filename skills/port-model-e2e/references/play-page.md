@@ -34,7 +34,7 @@ Every key binding has an on-screen control that does the same thing.
   states shown inside it.
 - **A sidebar, in this order**: examples, then the inputs **set before play**, then the prompt,
   then a collapsed Advanced section (seed and rarely used settings). The inputs set before play
-  are locked while a session runs and unlock on reset.
+  are locked while a session runs and unlock on stop or reset.
 - **A controls card under the display**: a telemetry row (chunk, frames, delivered fps, the
   current action), the inputs **changed during play**, and Reset.
 - **Refusals** appear where the person is looking, each code in plain words. The client SDK's

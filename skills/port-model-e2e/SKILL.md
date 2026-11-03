@@ -47,7 +47,7 @@ Almost everything about a port is read from the code. Ask only what the code can
 | Question | Proposed default |
 |---|---|
 | Which of the source's examples is the baseline? (only when the README has several) | the README's canonical invocation |
-| Each input, as **server config**, **set before play** or **changed during play** (table below), with its modality and role | your proposal per input, with its reason |
+| Each input, as **server config**, **set before play** (setup) or **changed during play** (live) (table below), with its modality and role | your proposal per input, with its reason |
 | Model slug | the repository name, lowercased |
 | Stop after the source example, so you can judge the model before it is ported? | no. When yes, the run stops once the untouched source example has run and rendered, before any edit to the source |
 
@@ -57,20 +57,23 @@ beside it. When you have no way to ask at all (you were started as a headless or
 no one reading your output), do not ask: take the proposed defaults, and put them at the top of the
 report so the person can see what was decided for them and rerun with other answers.
 
-**Server config, set before play, changed during play.** Every input the source takes gets exactly one
-kind. This table is the one definition every file of this skill uses:
+**Server config, set before play (setup), changed during play (live).** Every input the source takes
+gets exactly one kind. Name each kind for the person first and give its formal term in parentheses,
+in the question and in the report, so the person can understand it now and recognise it later in
+the commands. This table is the one definition every file of this skill uses:
 
 | Kind | What it means for the person playing | Where it lives | Typical inputs |
 |---|---|---|---|
 | **server config** | set by the server, not by the person; the same for every session | the config file `load()` reads | checkpoint subpaths, step count, dtype, sampler; the resolution when the checkpoint supports only one |
-| **set before play** | the person sets it, then presses start; locked until a reset, and a value sent while running is refused | a command valid while idle | first frame, seed; the resolution when the model offers several |
-| **changed during play** | the person changes it while the video plays; it takes effect at the next chunk and holds until changed | a public state field or a command applied at the next step | prompt, actions; reference images when the architecture can take them at a chunk boundary (otherwise set before play) |
+| **set before play** (setup) | the person sets it, then presses start; locked while it plays (a value sent while running is refused) and editable again after `stop` or `reset` | a command valid while idle | first frame, seed; the resolution when the model offers several |
+| **changed during play** (live) | the person changes it while the video plays; it takes effect at the next chunk and holds until changed | a public state field or a command applied at the next step | prompt, actions; reference images when the architecture can take them at a chunk boundary (otherwise set before play) |
 
 The kind is one of three things declared for each input, beside its **modality** (how it travels:
 text, image, video, movement) and its **role** (what the model does with it: first frame, reference,
 prompt). None follows from another: an image can be a first frame set before play or a reference
-changed during play. [patterns/](patterns/README.md) fixes the commands each modality gets, so every
-ported model that takes the same modality is driven the same way.
+changed during play. [patterns/](patterns/README.md) is the command standard: the lifecycle, the
+events, and one command name per concept, so a client that drives one ported model drives the next
+by changing arguments only.
 
 Some arguments exist only because the research script renders one video to a file and exits: an
 output path, a limit on how many frames to make, the code that saves the mp4. A served model streams
@@ -82,9 +85,9 @@ can set comes from the client.
 under it, with a reason wherever the proposal departs from what the source does. For example:
 
 > **Server config** (set by the server, not by you): 4 denoising steps, 480×832, bf16.
-> **Set before play** (you set it, then press start; locked until reset): the first frame, the
-> seed.
-> **Changed during play** (change it while the video plays; takes effect at the next ~0.5 s chunk): the
+> **Set before play** (setup): you set it, then press start; locked while it plays. The first frame,
+> the seed.
+> **Changed during play** (live): change it while the video plays; takes effect at the next ~0.5 s chunk. The
 > prompt, the camera keys. The source keeps one prompt for a whole video, but the model re-reads the
 > text at every chunk, so a new prompt steers what comes next.
 

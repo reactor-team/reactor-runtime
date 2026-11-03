@@ -1,72 +1,69 @@
 # Movement
 
-Every model that moves through a scene accepts the same held keys and mouse look, so a person can
-play any of them from a keyboard and a client drives all of them with the same calls. A model trained
-on camera poses also accepts a camera path, for someone who designs the trajectory in advance.
+Movement has two layers. Every model that moves takes the simple layer; a model that can take camera
+poses also takes the layer below it.
 
 ```
-                      held keys + mouse look  (every movement model)
-                                   │
-          ┌────────────────────────┴────────────────────────┐
-   trained on camera poses                           trained on keys
-          │                                                  │
-   the port converts each chunk's                     the keys and look go
-   keys and look into that chunk's poses              to the model as trained
-          │                                                  │
-   also accepts set_camera_path;                        no set_camera_path
-   an active path overrides keys and look             in its schema
+ set_move(forward, right)   set_look(yaw, pitch)        simple layer: every movement model
+          │                         │
+          └────────────┬────────────┘
+                       │ the model, or the port, turns them into its own action
+                       ▼
+               set_camera_pose(poses)                    pose layer: models that take poses
+                       │ overrides move and look while set; [] hands control back
+                       ▼
+                 the next chunk
 ```
 
-The model's native form is read from the source: what its conditioning tensor is built from during
-training (a pose per frame or per latent frame, or a key and mouse encoding).
+## The simple layer: `set_move` and `set_look`, changed during play (live)
 
-## Commands every movement model has
-
-| Command | Argument | Meaning |
+| Command | Arguments | Meaning |
 |---|---|---|
-| `set_keys` | `held: list[str]` | the complete set of keys held now; replaces the previous set; `[]` releases all |
-| `set_look` | `yaw: float`, `pitch: float` | look speed in degrees per second, held until changed; `0, 0` stops turning |
+| `set_move(forward, right)` | each −1…1 | forward/back and right/left; 0 stands still |
+| `set_look(yaw, pitch)` | each −1…1 | positive yaw turns right, positive pitch looks up; 0 stops turning |
 
-- **Keys are named by what they do**, from this vocabulary: `forward`, `back`, `left`, `right`,
-  `up`, `down`, `run`, `jump`. A model declares the subset it supports in the `set_keys`
-  description; a key outside it is refused with `unsupported_key`, listing the supported ones. A
-  key specific to one model (an action with no equivalent here) keeps a descriptive name and is
-  listed the same way.
-- **Look is a speed, not a delta**, so it holds across chunk boundaries the way a held key does.
-  Positive yaw turns right, positive pitch looks up. The description states the range.
-- **A model whose look is discrete** (trained on a few look directions or speeds) accepts exactly
-  those values and refuses any other with `unsupported_value`, listing them. A value is never snapped
-  to the nearest one.
-- **Both apply at the next chunk boundary and hold until changed.** The snapshot reports the keys
-  and look sent and those applied at the last step.
+Values hold until changed and apply at the next chunk boundary.
 
-## Converting keys and look to poses (pose-trained models)
+**−1…1 is a fraction of the model's own full action, not a physical unit.** Models are trained at
+different scales, many with no unit at all (a key is pressed or not), so 1 means "as far or as fast
+as this model moves at full input", and the same value moves different models differently. Where the
+source does define what full input means (a step size in its own world units, a turn in degrees per
+frame), `capabilities` states it with where it was read; where it does not, `capabilities` says the
+scale is the model's own. Never fill in a number the source does not give.
 
-The conversion lives in the port, in the application half, and runs once per chunk: integrate the
-held keys and the look speed over the chunk's duration into that chunk's camera poses, starting from
-the pose the previous chunk ended at, in the cadence the model takes (one pose per frame or per
-latent frame).
+**A discrete axis takes −1, 0 and 1 only.** A model trained on keys declares its axes discrete in
+`capabilities`, and a fractional value is refused with `unsupported_value`, listing the accepted
+values. It is never rounded. An axis the model lacks (no strafing) is declared absent; a non-zero
+value on it is refused the same way.
 
-Two numbers fix it, and both come from the model, never from feel:
+**Turning the simple layer into the model's action** happens in the port, once per chunk: keys as the
+one-hot or direction vector the source builds, or, for a model conditioned on poses, poses
+integrated from the held move and look over the chunk's duration, starting where the previous chunk
+ended. Take the step size and turn per frame from the source's own controls (its demo's key mapping,
+its path builder). When the source has none, choose them, say in the report that they were chosen and
+not read, and let `set_speed` adjust them while playing.
 
-- **translation speed**: the model's world units per second at full forward speed, read from the
-  camera paths it was trained on or from the source's own path builder;
-- **turn rate scale**: degrees per second that a look speed of 1 maps to, from the same source.
+## `set_speed(move, turn)`, changed during play (live)
 
-State both, and where each was read, in the `set_keys` and `set_look` descriptions and in the report.
+Scales what full input means: `move` and `turn` are multipliers on the model's full-input step and
+turn, 1 being the model's own. A model with discrete or fixed-speed actions does not expose it.
 
-## The camera path (pose-trained models only)
+## The pose layer: `set_camera_pose(poses)`, changed during play (live)
 
-| Command | Argument | Meaning |
-|---|---|---|
-| `set_camera_path` | `path: UploadedFile \| None` (JSON) | a whole trajectory; `None` returns control to keys and look |
+For models that can be conditioned on camera poses, directly or through a conversion in the port.
 
-The file holds `poses`: a list of 4×4 camera-to-world matrices in the OpenCV convention, in the
-model's world units, one per frame or per latent frame as the description states; and, when the
-model takes them, `intrinsics` as the source expects them. A path whose length does not match what
-the session will generate is refused with `invalid_camera_path`, giving the expected count.
+- `poses`: 4×4 camera-to-world matrices in the OpenCV convention, in the model's own world units,
+  one per frame or one per chunk as `capabilities` states. Each call gives the poses for the chunks
+  from the next boundary on; the model consumes them in order.
+- While poses are set, `set_move` and `set_look` are ignored, and `state_update` says the camera pose
+  is in control. `set_camera_pose([])` hands control back to move and look. When the given poses run
+  out, the model holds the last pose and says so in `state_update`.
+- A model that cannot take poses does not expose `set_camera_pose`; a client reads that from
+  `capabilities`.
 
-Its timing is declared in the input table like any other input: set before play when the model
-plans the whole path at the start, changed during play when it reads the next chunk's poses at each
-boundary. While a path is active, `set_keys` and `set_look` are refused with `camera_path_active`. A
-key-trained model has no `set_camera_path`; a client reads its absence from the schema.
+## `set_input(keys, mouse)`, changed during play (live)
+
+For a model trained on raw keyboard and mouse state whose buttons are not movement (jump, attack,
+use): `keys` is the full set of keys held now, `mouse` the held mouse state, both in the model's own
+vocabulary listed in `capabilities`. Movement on such a model still goes through `set_move` and
+`set_look` when its keys move the camera.
