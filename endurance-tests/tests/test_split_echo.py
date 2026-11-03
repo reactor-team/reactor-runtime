@@ -14,13 +14,18 @@ import time
 import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-# A runtime from before the model server (runtime_ref) has nothing for this
-# scenario to test. Only a missing package skips.
+# The scenario requires a runtime_ref that exposes deferred model-server answers.
 if importlib.util.find_spec("reactor_runtime.model_server") is None:
     pytest.skip("this runtime has no model_server package", allow_module_level=True)
+import reactor_runtime.model_server as model_server
+
+if not hasattr(model_server, "DEFERRED"):
+    pytest.skip("this runtime has no deferred model-server answers", allow_module_level=True)
+
 from endurance.churn import run_churn
 from endurance.harness import SUITE_DIR, RuntimeProcess, V1Client
 from endurance.report import DEFAULT_OUTPUT_DIR
@@ -33,8 +38,29 @@ DESCRIPTION = (
     "reactor_runtime.model_server) beside it, so every frame goes to the model server "
     "and back through its socket and shared memory. Each cycle a v1 client joins, "
     "streams until 60 frames come back, and closes. The session's one link to the "
-    "model server lasts the whole run, so what the churn checks must not grow with it."
+    "model server lasts the whole run, so what the churn checks must not grow with it. "
+    "The model defers each answer to a completion thread, and after each cycle the "
+    "model server's probe must report zero retained requests."
 )
+
+
+class _SharedRuntime(RuntimeProcess):
+    model_server_port: int
+
+    def settled_probe(
+        self, *, connections: int = 0, tasks: int | None = None
+    ) -> tuple[dict[str, Any], float | None]:
+        reading, released = super().settled_probe(connections=connections, tasks=tasks)
+        deadline = time.monotonic() + 10
+        while True:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{self.model_server_port}/_endurance/model_server", timeout=5
+            ) as response:
+                pending = json.load(response)["pending_requests"]
+            if pending == 0:
+                return reading, released
+            assert time.monotonic() < deadline, f"model server retained {pending} requests"
+            time.sleep(0.1)
 
 
 def _free_port() -> int:
@@ -69,6 +95,7 @@ def runtime(
     (directory / "s0").mkdir()
     pythonpath = os.pathsep.join(
         [
+            str(SUITE_DIR),
             str(MODEL_DIR),
             str(SUITE_DIR / "model"),
             str(SUITE_DIR.parent / "examples" / "echo"),
@@ -78,7 +105,7 @@ def runtime(
     health_port = _free_port()
     log = (DEFAULT_OUTPUT_DIR / f"{request.node.name}-model-server.log").open("w")
     server = subprocess.Popen(
-        [sys.executable, "-m", "reactor_runtime.model_server"],
+        [sys.executable, "-m", "endurance.model_server_launcher"],
         cwd=MODEL_DIR,
         env={
             **os.environ,
@@ -100,9 +127,10 @@ def runtime(
         monkeypatch.setenv("REACTOR_SESSION_SLOT", "0")
         monkeypatch.setenv("REACTOR_SHM_DIR", str(directory / "s0"))
         monkeypatch.setenv("PYTHONPATH", pythonpath)
-        proc = RuntimeProcess(
+        proc = _SharedRuntime(
             DEFAULT_OUTPUT_DIR / f"{request.node.name}-runtime.log", model_dir=MODEL_DIR
         )
+        proc.model_server_port = health_port
         proc.wait_ready()
         yield proc
     finally:

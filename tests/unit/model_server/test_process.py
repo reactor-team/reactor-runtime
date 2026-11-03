@@ -435,3 +435,33 @@ def test_python_m_model_server_finishes_the_load_then_exits_on_a_sigterm_during_
         if server.poll() is None:
             server.kill()
             server.wait()
+
+
+def test_answer_hook_is_installed_before_load_and_health_stays_healthy_while_loading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from reactor_runtime.model_server import process as process_module
+    from reactor_runtime.model_server.server_core import ModelServerCore
+
+    process = _process(tmp_path)
+
+    class DuringLoad(Doubler):
+        def load(self, config_path: Path | None) -> None:
+            assert process.health().status is HealthStatus.HEALTHY
+            self.answer(ServerRequest(0, 1, Tick(np.zeros(1))), Frame(np.zeros(1)))
+            super().load(config_path)
+
+        def health(self) -> Any:
+            raise RuntimeError("model health is checked after loading")
+
+    async def start(server: ModelServerCore) -> None:
+        assert isinstance(server._model, DuringLoad)
+        assert server._model.loaded_from == tmp_path / "config.yml"
+
+    monkeypatch.setattr(process_module, "_import", lambda ref: DuringLoad)
+    monkeypatch.setattr(process_module, "_device", lambda: "cpu")
+    monkeypatch.setattr(ModelServerCore, "start", start)
+    asyncio.run(process.start())
+    assert process.state() is RuntimeState.AVAILABLE
+    assert process.health().status is HealthStatus.UNHEALTHY
+    asyncio.run(process.stop())

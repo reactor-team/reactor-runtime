@@ -14,8 +14,9 @@ drives such ranks serves every session from weights spread over those GPUs.
 
 from __future__ import annotations
 
+import enum
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
@@ -31,6 +32,20 @@ _MANIFEST_ONLY = {
     "shm_input_bytes": "model.resources.workers.shared_memory.input",
     "shm_output_bytes": "model.resources.workers.shared_memory.output",
 }
+
+
+class Deferred(enum.Enum):
+    """Mark a step output that the model will supply through :meth:`ModelServer.answer`."""
+
+    TOKEN = "deferred"
+
+
+DEFERRED = Deferred.TOKEN
+"""Return this sentinel for a request whose result will arrive through ``answer()``.
+
+The request stays running until answered, reset, disconnected, or stopped.
+It is control data for the model server and cannot be used as a request's result.
+"""
 
 
 @dataclass(frozen=True)
@@ -90,6 +105,33 @@ class ModelServer[RequestT, ResultT]:
       joins the next step, never the running one.
     * A request whose timeout passed while it waited is answered as expired and
       never reaches ``step()``.
+    * Return :data:`DEFERRED` for any request whose work continues after
+      ``step()`` returns. Other sessions can join subsequent steps while that
+      request stays running. Call :meth:`answer` once with the exact request
+      object and its result or exception, from any thread. An answer that races
+      with the return is held until the model server sees ``DEFERRED``.
+    * Reset and disconnect free a deferred request's session immediately when
+      applied between steps. Late answers are logged and dropped. Drain waits
+      for deferred answers within the service's drain timeout; stop fails any
+      leftovers with :class:`~reactor_runtime.model_server.ModelServerStopping`.
+
+    A pipeline can queue work in ``step()`` and answer on its own thread::
+
+        def load(self, config_path):
+            self.pipeline = Pipeline(on_complete=self.answer)
+            self.pipeline.start()
+
+        def step(self, requests):
+            for request in requests:
+                self.pipeline.submit(request)
+            return [DEFERRED] * len(requests)
+
+        def session_closed(self, slot, generation):
+            self.pipeline.discard(slot, generation)
+
+    The pipeline calls ``on_complete(request, output)`` once work finishes;
+    its discard operation releases work for that generation and synchronizes
+    with its completion thread.
 
     What crosses between the halves is pickled, so a request, a result and a
     signal can be any value pickle takes. Plain data, such as frozen
@@ -124,6 +166,7 @@ class ModelServer[RequestT, ResultT]:
     batch_window: ClassVar[float] = 0.0
 
     device: str
+    _answerer: Callable[[ServerRequest[RequestT], ResultT | Exception], None] | None = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Check the subclass's declarations as it is defined."""
@@ -147,7 +190,9 @@ class ModelServer[RequestT, ResultT]:
         A raise here fails the model server's start, and its process exits.
         """
 
-    def step(self, requests: list[ServerRequest[RequestT]]) -> Sequence[ResultT | Exception]:
+    def step(
+        self, requests: list[ServerRequest[RequestT]]
+    ) -> Sequence[ResultT | Exception | Deferred]:
         """Run one step for every request and return one output per request, in order.
 
         An output that is an exception instance fails that request alone, and
@@ -157,8 +202,9 @@ class ModelServer[RequestT, ResultT]:
         A raise from ``step()`` fails every request of the batch: each session
         sees a :class:`~reactor_runtime.model_server.BatchFailed` carrying the
         error, and its application decides what to do. Nothing is stepped
-        again, and the model server goes on serving; :meth:`health` says
-        whether it can.
+        again. Requests deferred by earlier steps are not part of the batch:
+        they stay running until the model answers them. The model server goes
+        on serving; :meth:`health` says whether it can.
 
         Args:
             requests: Between one and the effective ``max_batch`` requests, at
@@ -166,9 +212,29 @@ class ModelServer[RequestT, ResultT]:
 
         Returns:
             One output per request, in the order of *requests*: its result,
-            or an exception.
+            an exception, or :data:`DEFERRED` to complete it through :meth:`answer`.
         """
         raise NotImplementedError(f"{type(self).__name__} must define step()")
+
+    def answer(self, request: ServerRequest[RequestT], output: ResultT | Exception) -> None:
+        """Complete a deferred request from any thread.
+
+        Pass the exact object received by :meth:`step` and a result or an
+        exception instance, with the same meaning as a step output. Call once
+        per request. Duplicate answers, answers for requests not returned as
+        :data:`DEFERRED`, and answers after reset, leave, failure, or stop are
+        logged and ignored. The model server retains no completed request history.
+        An answer arriving during ``step()`` is held until it returns; an
+        immediate step output takes precedence over such an answer. Passing
+        ``DEFERRED`` as the output is also logged and ignored.
+
+        Raises:
+            RuntimeError: No model server runs this model, as when it is used alone
+                in a unit test.
+        """
+        if self._answerer is None:
+            raise RuntimeError("answer() needs the model server that runs this model")
+        self._answerer(request, output)
 
     def session_opened(self, slot: int, generation: int) -> None:
         """Set up the state of the session that just opened *slot*.
@@ -181,7 +247,9 @@ class ModelServer[RequestT, ResultT]:
         """Drop the state of the session that held *slot*.
 
         Runs when the session runtime disconnects or dies, and before a reset
-        reopens the slot; for any slot it runs before the next
+        reopens the slot. Discard deferred work for this slot and generation,
+        synchronizing with any model threads that hold it. Late answers are
+        dropped by the model server. For any slot it runs before the next
         :meth:`session_opened`. A raise is logged and ignored.
         """
 

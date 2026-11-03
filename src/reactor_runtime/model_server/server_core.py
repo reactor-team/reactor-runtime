@@ -48,7 +48,7 @@ import enum
 import itertools
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from reactor_runtime.core import Health, HealthStatus
@@ -79,7 +79,7 @@ from reactor_runtime.model_server.protocol import (
     check_hello,
     failure,
 )
-from reactor_runtime.model_server.server import ModelServer, ServerRequest, ServerSettings
+from reactor_runtime.model_server.server import DEFERRED, ModelServer, ServerRequest, ServerSettings
 
 logger = get_logger(__name__)
 
@@ -126,6 +126,15 @@ class _Reset:
     connection: Connection
     request_id: int
     session_id: str | None
+
+
+@dataclass
+class _Pending:
+    request: ServerRequest
+    waiting: Waiting
+    connection: Connection
+    deferred: bool = False
+    answers: list[Any] = field(default_factory=list)
 
 
 class ModelServerCore:
@@ -176,6 +185,8 @@ class ModelServerCore:
         self._step_started: float | None = None
         self._step_thread: threading.Thread | None = None
         self._broken: str | None = None
+        self._pending: dict[int, _Pending] = {}
+        model._answerer = self._answer_deferred
 
     @property
     def state(self) -> ServerState:
@@ -201,7 +212,7 @@ class ModelServerCore:
         )
 
     async def drain(self) -> None:
-        """Stop taking work, let the running step finish, and answer everything still in flight.
+        """Stop taking work, wait for running and deferred work, and fail queued work.
 
         From the moment this is called, a step or a reset is answered at once
         with :class:`~reactor_runtime.model_server.ModelServerStopping`, and a
@@ -210,7 +221,9 @@ class ModelServerCore:
         step thread has ended, every request still queued and every pending
         reset is answered with ``ModelServerStopping``, and every connection still
         opening is closed the same way. Open sessions stay connected until
-        :meth:`stop`.
+        :meth:`stop`. Deferred work may answer while draining. This wait is
+        bounded by the calling service's drain timeout; :meth:`stop` fails
+        remaining deferred requests with ``ModelServerStopping``.
         """
         with self._cond:
             if self._state is ServerState.SERVING:
@@ -223,7 +236,12 @@ class ModelServerCore:
         self._answer_in_flight()
 
     async def stop(self) -> None:
-        """Close every session's connection, after the model closed its state."""
+        """Fail remaining deferred work and close every session's connection.
+
+        Deferred requests receive ``ModelServerStopping`` through their session's
+        outbox before its link closes. Later calls to ``answer()`` are logged
+        and ignored. Model state closes after the step thread ends.
+        """
         with self._cond:
             if self._state is not ServerState.STOPPED:
                 self._move(ServerState.STOPPED)
@@ -264,7 +282,7 @@ class ModelServerCore:
         self._state = state
 
     def _answer_in_flight(self) -> None:
-        """Answer what the step thread left: queued requests, pending events, opening links.
+        """Fail queued and deferred requests and finish pending events and opening links.
 
         Runs once the step thread has ended, or on it as it ends after a fault,
         so it is the only thread that calls into the model.
@@ -276,8 +294,14 @@ class ModelServerCore:
                 (connection, self._policy.drop(connection.number))
                 for connection in self._connections.values()
             ]
+            pending = list(self._pending.values())
+            self._pending.clear()
+            self._policy.finished([p.waiting.connection for p in pending])
+            self._cond.notify_all()
             opening = list(self._opening)
             self._opening.clear()
+        for item in pending:
+            self._answer(item.connection, failure(item.waiting.request_id, stopping))
         for event in events:
             if isinstance(event, _Leave):
                 self._leave(event.connection)
@@ -478,11 +502,20 @@ class ModelServerCore:
     def _step_until_drained(self) -> None:
         while True:
             with self._cond:
-                if self._state is not ServerState.SERVING:
+                if self._state is ServerState.STOPPED:
                     return
-                events, self._events = self._events, []
+                if self._state is ServerState.DRAINING:
+                    if not self._pending:
+                        return
+                    events, self._events = self._events, []
+                    if not events:
+                        self._cond.wait(_IDLE_WAIT)
+                        continue
+                else:
+                    events, self._events = self._events, []
+                # Draining applies lifecycle events but takes no new batches.
                 turn = None
-                if not events:
+                if not events and self._state is ServerState.SERVING:
                     open_sessions = sum(
                         1 for c in self._connections.values() if c.state is ConnectionState.OPEN
                     )
@@ -494,7 +527,16 @@ class ModelServerCore:
                         self._cond.wait(max(wait, 0.0))
                         continue
             for event in events:
-                self._apply(event)
+                if self._state is ServerState.DRAINING and isinstance(event, _Reset):
+                    self._reset_answered(event.connection)
+                    self._answer(
+                        event.connection,
+                        failure(
+                            event.request_id, ModelServerStopping("the model server is stopping")
+                        ),
+                    )
+                else:
+                    self._apply(event)
             if turn is None:
                 continue
             for request in turn.expired:
@@ -602,6 +644,7 @@ class ModelServerCore:
         connection.move(ConnectionState.CLOSING)
         with self._cond:
             self._policy.drop(connection.number)
+            self._drop_pending(connection)
             self._reset_pending.discard(connection.number)
             self._connections.pop(connection.number, None)
             if connection.slot is not None and self._by_slot.get(connection.slot) is connection:
@@ -615,6 +658,7 @@ class ModelServerCore:
         assert connection.slot is not None
         with self._cond:
             dropped = self._policy.drop(connection.number)
+            dropped.extend(self._drop_pending(connection))
         for request in dropped:
             self._answer(connection, failure(request.request_id, StepExpired("the session reset")))
         try:
@@ -672,27 +716,79 @@ class ModelServerCore:
             with self._cond:
                 self._policy.finished([r.connection for r in batch])
             return
-        requests = [
-            ServerRequest(c.slot or 0, c.generation, r.payload, c.session_id) for r, c in live
+        pending = [
+            _Pending(ServerRequest(c.slot or 0, c.generation, r.payload, c.session_id), r, c)
+            for r, c in live
         ]
+        with self._cond:
+            self._pending.update((id(p.request), p) for p in pending)
         self._step_started = time.monotonic()
         try:
-            outputs = self._model.step(requests)
-            if not _is_sequence(outputs) or len(outputs) != len(requests):
+            outputs = self._model.step([p.request for p in pending])
+            if not _is_sequence(outputs) or len(outputs) != len(pending):
                 count = len(outputs) if _is_sequence(outputs) else type(outputs).__name__
-                raise RuntimeError(f"step() returned {count} outputs for {len(requests)} requests")
+                raise RuntimeError(f"step() returned {count} outputs for {len(pending)} requests")
         except Exception as exc:
-            logger.exception("step() raised; failing its batch", size=len(requests))
-            failed = BatchFailed(exc)
-            for request, connection in live:
-                self._answer(connection, failure(request.request_id, failed))
+            logger.exception("step() raised; failing its batch", size=len(pending))
+            with self._cond:
+                for item in pending:
+                    if self._pending.get(id(item.request)) is item:
+                        self._complete(item, BatchFailed(exc))
             return
         finally:
             self._step_started = None
-            with self._cond:
-                self._policy.finished([r.connection for r in batch])
-        for (request, connection), output in zip(live, outputs, strict=True):
-            self._answer(connection, self._outcome(request.request_id, output))
+        with self._cond:
+            for item, output in zip(pending, outputs, strict=True):
+                if output is DEFERRED:
+                    item.deferred = True
+                    if item.answers and self._state is not ServerState.STOPPED:
+                        self._complete(item, item.answers[0])
+                else:
+                    if item.answers:
+                        logger.warning("ignoring answer for a request with an immediate output")
+                    self._complete(item, output)
+            self._cond.notify_all()
+
+    def _answer_deferred(self, request: ServerRequest, output: Any) -> None:
+        with self._cond:
+            item = self._pending.get(id(request))
+            if (
+                self._state is ServerState.STOPPED
+                or item is None
+                or item.request is not request
+                or item.answers
+                or output is DEFERRED
+            ):
+                logger.info("ignoring an invalid, duplicate, or late deferred answer")
+                return
+            if item.deferred:
+                self._complete(item, output)
+            else:
+                # A completion thread can finish before step() returns its sentinels.
+                item.answers.append(output)
+
+    def _complete(self, item: _Pending, output: Any) -> None:
+        """Finish a pending request while holding the server's condition."""
+        del self._pending[id(item.request)]
+        connection = item.connection
+        if (
+            connection.state is ConnectionState.OPEN
+            and connection.generation == item.request.generation
+            and self._connections.get(connection.number) is connection
+        ):
+            self._answer(connection, self._outcome(item.waiting.request_id, output))
+        else:
+            logger.debug("dropping an answer for a closed generation", **connection.where())
+        self._policy.finished([connection.number])
+        self._cond.notify_all()
+
+    def _drop_pending(self, connection: Connection) -> list[Waiting]:
+        """Release a generation's deferred work while holding the server's condition."""
+        dropped = [p for p in self._pending.values() if p.connection is connection]
+        for item in dropped:
+            del self._pending[id(item.request)]
+        self._cond.notify_all()
+        return [p.waiting for p in dropped]
 
     def _outcome(self, request_id: int, output: Any) -> Any:
         if isinstance(output, BaseException):
