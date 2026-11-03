@@ -27,7 +27,7 @@ Which one a model is comes from the source: what its conditioning tensor is buil
 | `set_look(yaw, pitch)` | each −1…1 | positive yaw turns right, positive pitch looks up; 0 stops turning |
 
 Values hold until changed. Their kind is read from the source like any other input; for a world
-model that is almost always changed during play (live), applying at the next chunk boundary.
+model that is almost always a live control, applying at the next chunk boundary.
 
 **−1…1 is a fraction of the model's own full action, not a physical unit.** Models are trained at
 different scales, many with no unit at all (a key is pressed or not), so 1 means "as far or as fast
@@ -51,8 +51,8 @@ none, choose them and say in the report that they were chosen, not read.
 
 - `poses`: 4×4 camera-to-world matrices in the OpenCV convention, in the model's own world units, one
   per frame or one per chunk as `capabilities` states.
-- Its kind is read from the source: set before play (setup) when the model plans the whole trajectory
-  at the start; changed during play (live) when it reads the next chunk's poses at each boundary,
+- Its kind is read from the source: session setup when the model plans the whole trajectory
+  at the start; a live control when it reads the next chunk's poses at each boundary,
   in which case each call gives the poses from the next boundary on.
 - While poses are set, `set_move` and `set_look` are ignored and `state_update` says the camera pose
   is in control. `set_camera_pose([])` hands control back. When the poses run out, the model holds

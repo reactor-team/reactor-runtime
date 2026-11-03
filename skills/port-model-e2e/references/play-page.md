@@ -32,16 +32,15 @@ Every key binding has an on-screen control that does the same thing.
 - **A connection bar**: status, Connect / Disconnect, and the model URL in one row.
 - **The display**: the output tracks from `x-reactor.tracks`, with the empty, loading and stopped
   states shown inside it.
-- **A sidebar, in this order**: examples, then the inputs **set before play**, then the prompt,
-  then a collapsed Advanced section (seed and rarely used settings). The inputs set before play
-  are locked while a session runs and unlock on stop or reset.
+- **A sidebar, in this order**: examples, then the **session setup** inputs, then the prompt,
+  then a collapsed Advanced section (seed and rarely used settings). The session setup inputs are locked while a session runs and unlock on stop or reset.
 - **A controls card under the display**: a telemetry row (chunk, frames, delivered fps, the
-  current action), the inputs **changed during play**, and Reset.
+  current action), the **live controls**, and Reset.
 - **Refusals** appear where the person is looking, each code in plain words. The client SDK's
   `sendCommand` does not reject on a refused command; it emits an `error` event carrying the
   command and the code, so listen there.
 
-For every input changed during play, show both what was sent and what the model reports using.
+For every live control, show both what was sent and what the model reports using.
 A command applies at the next step, so the two differ for a step or two; that lag tells the person
 the command arrived, and without it a slow model looks like a dropped command. Reset sends the
 model's reset command, clears the display at once and keeps the connection.
@@ -79,7 +78,7 @@ signalling and media all reach `localhost`:
 2. count decoded frames (`requestVideoFrameCallback`, or `getVideoPlaybackQuality().totalVideoFrames`)
    over wall-clock time; a live track's `currentTime` advances even when no frame arrives, so it
    proves nothing;
-3. change each input changed during play while it runs and confirm the next frames keep arriving;
+3. change each live control while it runs and confirm the next frames keep arriving;
 4. send one command that must be refused and confirm the refusal shows;
 5. reset, and confirm the display clears and the connection stays.
 

@@ -47,7 +47,7 @@ Almost everything about a port is read from the code. Ask only what the code can
 | Question | Proposed default |
 |---|---|
 | Which of the source's examples is the baseline? (only when the README has several) | the README's canonical invocation |
-| Each input, as **server config**, **set before play** (setup) or **changed during play** (live) (table below), with its modality and role | your proposal per input, with its reason |
+| Each input, as **serving config**, **session setup** or **live control** (table below), with its modality and role | your proposal per input, with its reason |
 | Model slug | the repository name, lowercased |
 | Stop after the source example, so you can judge the model before it is ported? | no. When yes, the run stops once the untouched source example has run and rendered, before any edit to the source |
 
@@ -57,21 +57,20 @@ beside it. When you have no way to ask at all (you were started as a headless or
 no one reading your output), do not ask: take the proposed defaults, and put them at the top of the
 report so the person can see what was decided for them and rerun with other answers.
 
-**Server config, set before play (setup), changed during play (live).** Every input the source takes
-gets exactly one kind. Name each kind for the person first and give its formal term in parentheses,
-in the question and in the report, so the person can understand it now and recognise it later in
-the commands. This table is the one definition every file of this skill uses:
+**Serving config, session setup, live control.** Every input the source takes gets exactly one kind.
+The first time you name a kind to the person, follow it with a plain explanation in parentheses, in
+the question and in the report: the name is the term they will meet in the commands, and the
+explanation tells them what it means. This table is the one definition every file of this skill uses:
 
 | Kind | What it means for the person playing | Where it lives | Typical inputs |
 |---|---|---|---|
-| **server config** | set by the server, not by the person; the same for every session | the config file `load()` reads | checkpoint subpaths, step count, dtype, sampler; the resolution when the checkpoint supports only one |
-| **set before play** (setup) | the person sets it, then presses start; locked while it plays (a value sent while running is refused) and editable again after `stop` or `reset` | a command valid while idle | first frame, seed; the resolution when the model offers several |
-| **changed during play** (live) | the person changes it while the video plays; it takes effect at the next chunk and holds until changed | a public state field or a command applied at the next step | prompt, actions; reference images when the architecture can take them at a chunk boundary (otherwise set before play) |
+| **serving config** | set by the server, not by the person; the same for every session | the config file `load()` reads | checkpoint subpaths, step count, dtype, sampler; the resolution when the checkpoint supports only one |
+| **session setup** | the person sets it, then presses start; locked while it plays (a value sent while running is refused) and editable again after `stop` or `reset` | a command valid while idle | first frame, seed; the resolution when the model offers several |
+| **live control** | the person changes it while the video plays; it takes effect at the next chunk and holds until changed | a public state field or a command applied at the next step | prompt, actions; reference images when the architecture can take them at a chunk boundary (otherwise session setup) |
 
 The kind is one of three things declared for each input, beside its **modality** (how it travels:
 text, image, video, movement) and its **role** (what the model does with it: first frame, reference,
-prompt). None follows from another: an image can be a first frame set before play or a reference
-changed during play. [patterns/](patterns/README.md) is the command standard: the lifecycle, the
+prompt). None follows from another: an image can be a first frame that is session setup or a reference that is a live control. [patterns/](patterns/README.md) is the command standard: the lifecycle, the
 events, and one command name per concept, so a client that drives one ported model drives the next
 by changing arguments only.
 
@@ -84,21 +83,22 @@ can set comes from the client.
 **Asking it.** Give each kind its name and its one-line meaning from the table, then list the inputs
 under it, with a reason wherever the proposal departs from what the source does. For example:
 
-> **Server config** (set by the server, not by you): 4 denoising steps, 480×832, bf16.
-> **Set before play** (setup): you set it, then press start; locked while it plays. The first frame,
-> the seed.
-> **Changed during play** (live): change it while the video plays; takes effect at the next ~0.5 s chunk. The
+> **Serving config** (decided when the model starts, the same for every session): 4 denoising
+> steps, 480×832, bf16.
+> **Session setup** (you set it before pressing start; locked while it plays): the first frame, the
+> seed.
+> **Live control** (you change it while the video plays; takes effect at the next ~0.5 s chunk): the
 > prompt, the camera keys. The source keeps one prompt for a whole video, but the model re-reads the
 > text at every chunk, so a new prompt steers what comes next.
 
-**Proposing what is set before play and what changes during play.** Start from the code: an input
+**Proposing what is session setup and what is a live control.** Start from the code: an input
 the source consumes inside its per-chunk loop changes during play; one it encodes once before the
-loop is set before play. Then correct for what an
+loop is session setup. Then correct for what an
 interactive model needs. A research script often fixes the prompt or the actions for the whole run
 only because it renders one offline video, while a person playing the model changes them between
 turns. When the architecture can take a new value at a chunk boundary (the text or action
 conditioning is applied per chunk, or can be re-encoded there), propose the prompt and the actions
-as changed during play even though the source never changes them; say so in the proposal, and say what the
+as live controls even though the source never changes them; say so in the proposal, and say what the
 architecture does with the change. A value that changes mid-run where the source never did has no
 baseline to compare against: the replay proves the schedule the source ran, and the person judges
 the mid-run change by playing it.
@@ -260,8 +260,7 @@ model and device count:
 
 Then the checklist table, the environment deviation record (every version that differs from the
 source's own environment, and why), every edit made to the source (the streaming refactor's steps with their bit-identical checks, or its "not needed" reason; any change to how it draws random numbers, with its side-by-side against the untouched source), and every decision you
-took in place of a person: slug, the split into server config, set before play and changed
-during play, fps, the example used as the
+took in place of a person: slug, the split into serving config, session setup and live control, fps, the example used as the
 baseline.
 
 ### The Cookbook offer

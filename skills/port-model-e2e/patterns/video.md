@@ -30,7 +30,6 @@ follows the source (stop at its end, or loop), and the description says which.
 
 ## Kind
 
-Read from the source, per input. A video the model encodes once before the generation loop is set
-before play (setup). One it reads again at every chunk is changed during play (live): a new file
+Read from the source, per input. A video the model encodes once before the generation loop is session setup. One it reads again at every chunk is a live control: a new file
 replaces the old one at the next chunk boundary, and a live track changes with every frame by
 nature.

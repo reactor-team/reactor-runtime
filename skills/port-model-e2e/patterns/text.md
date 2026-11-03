@@ -7,8 +7,8 @@ prompt has sections (a picture description, a soundscape) takes them in one stri
 structured value, as its source does, and the description shows the layout. A second, independent
 text is its own role with its own command (`set_audio_prompt`).
 
-Its kind is read from the source. Changed during play (live) in most chunk-by-chunk models: a new
-prompt applies at the next chunk boundary and nothing restarts. Set before play (setup) when the
+Its kind is read from the source. A live control in most chunk-by-chunk models: a new
+prompt applies at the next chunk boundary and nothing restarts. Session setup when the
 model's history must restart for new text to take effect; it never restarts silently.
 
 ## On arrival

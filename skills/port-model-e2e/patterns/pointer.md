@@ -3,7 +3,7 @@
 ## `set_pointer(x, y, down)`
 
 A touch or a drag on the video: `x, y` in 0…1 over the output frame, origin at the top left; `down`
-true while pressed. A pointer acts on what is playing, so it is changed during play (live). Each call is the pointer's state now; a drag is a sequence of calls. The model
+true while pressed. A pointer acts on what is playing, so it is a live control. Each call is the pointer's state now; a drag is a sequence of calls. The model
 reads the states that arrived during a chunk at that chunk's boundary.
 
 - **One shape per chunk.** The states of one chunk are brought to the fixed point count the model was

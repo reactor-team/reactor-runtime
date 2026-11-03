@@ -15,17 +15,16 @@ Every input a model takes is described on three axes, none derived from another.
 | **Role** | What does the model do with it? First frame, reference, scene description, camera | the command's name |
 | **Kind** | When may it be set? | the model's input table, read from its source, and published in `capabilities` |
 
-No command has a fixed kind. A prompt is changed during play in most chunk-by-chunk models and set
-before play in one whose history must restart for new text; a reference is re-read every chunk in
+No command has a fixed kind. A prompt is a live control in most chunk-by-chunk models and session setup in one whose history must restart for new text; a reference is re-read every chunk in
 one model and encoded once in another. Read each input's kind from the source.
 
-The kinds, named for the person first, with the formal term in parentheses:
+The kinds, each with the plain explanation to give a person the first time it is named:
 
 | Kind | Meaning |
 |---|---|
-| **Server config** | set by the server, the same for every session; not a command |
-| **Set before play** (setup) | accepted while idle; holds for the whole run; sent while running, refused with `locked_while_running` |
-| **Changed during play** (live) | accepted at any time: sent before `start` it is the starting value, sent while running it applies at the next chunk boundary; held until changed |
+| **Serving config** | decided when the model starts, the same for every session; not a command |
+| **Session setup** | accepted while idle; holds for the whole run; sent while running, refused with `locked_while_running` |
+| **Live control** | accepted at any time: sent before `start` it is the starting value, sent while running it applies at the next chunk boundary; held until changed |
 
 ## Lifecycle: the same on every model
 
@@ -82,10 +81,10 @@ the report read it, and `capabilities` publishes it.
 
 | Input | Modality | Role | Kind | Command |
 |---|---|---|---|---|
-| first frame | image | the frame the video starts on | set before play (setup) | `set_first_frame` |
-| reference | image | an appearance the model keeps to | changed during play (live): re-read at every chunk | `set_references` |
-| prompt | text | the scene description | changed during play (live) | `set_prompt` |
-| movement | movement | where the camera goes | changed during play (live) | `set_move`, `set_look` |
+| first frame | image | the frame the video starts on | session setup | `set_first_frame` |
+| reference | image | an appearance the model keeps to | live control: re-read at every chunk | `set_references` |
+| prompt | text | the scene description | live control | `set_prompt` |
+| movement | movement | where the camera goes | live control | `set_move`, `set_look` |
 
 ## When two inputs control the same thing
 
