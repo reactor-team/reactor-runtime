@@ -66,7 +66,7 @@ set_seed(seed)                    -1 = random
 set_resolution(name)              only when the model offers several
 
 # changed during play (live)
-set_prompt(prompt, cut=False)     text.md
+set_prompt(prompt)                text.md
 set_references(items)             image.md; images, clips, voice
 set_move(forward, right)          movement.md; -1..1
 set_look(yaw, pitch)              movement.md; -1..1
@@ -77,7 +77,9 @@ set_pointer(x, y, down)           pointer.md; x, y in 0..1 over the output frame
 ```
 
 A new feature gets `set_<what it is>`, a kind, and a row in the input table: a separate text for
-the sound is `set_audio_prompt(prompt)`, live.
+the sound is `set_audio_prompt(prompt)`, live. A model or an application that needs an extra
+argument on a standard command adds it as a keyword with a default, so a client that does not send
+it is unaffected.
 
 **Setting an empty value removes an input**: `set_references([])`, `set_camera_pose([])`. There are no
 clear commands.

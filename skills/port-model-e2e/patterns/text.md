@@ -1,6 +1,6 @@
 # Text
 
-## `set_prompt(prompt, cut=False)`, changed during play (live)
+## `set_prompt(prompt)`, changed during play (live)
 
 All the text a model reads goes through `set_prompt`, in the model's own layout: a model whose
 prompt has sections (a picture description, a soundscape) takes them in one string or one
@@ -8,8 +8,6 @@ structured value, as its source does, and the description shows the layout. A se
 text is a new feature with its own command (`set_audio_prompt`).
 
 - **Applies at the next chunk boundary.** Nothing restarts; the next chunks follow the new text.
-- **`cut=True`** asks for a hard scene cut at that boundary, for a model whose source can start a new
-  shot. A model that cannot cut refuses `cut=True` with `unsupported`.
 - **A model whose history must restart for a new prompt to take effect** declares `set_prompt` setup in
   `capabilities`. It never restarts silently.
 
