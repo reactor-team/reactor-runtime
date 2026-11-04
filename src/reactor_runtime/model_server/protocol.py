@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from reactor_runtime.distributed.rank import portable_pickle
-from reactor_runtime.model_server.errors import BatchFailed, WorkerError
+from reactor_runtime.model_server.errors import BatchFailed, ModelServerError
 
 PROTOCOL = 1
 """The version of this exchange; it moves with any change to a message."""
@@ -226,12 +226,12 @@ def failure(request_id: int, exc: BaseException) -> Failed:
 
 
 def error_of(failed: Failed) -> BaseException:
-    """Return the exception *failed* carries, or a :class:`WorkerError` if it cannot be rebuilt.
+    """Return the exception *failed* carries, or a :class:`ModelServerError` standing in for it.
 
     A batch failure is always a :class:`BatchFailed`: when what arrives is
     not one (a stand-in the sender fell back to), it becomes the cause, and
     when it cannot be rebuilt at all (its cause's class is not in this
-    process), the :class:`WorkerError` is.
+    process), the :class:`ModelServerError` is.
     """
     try:
         error = pickle.loads(failed.error)
@@ -241,7 +241,7 @@ def error_of(failed: Failed) -> BaseException:
         if failed.batch and not isinstance(error, BatchFailed):
             return BatchFailed(error)
         return error
-    stand_in = WorkerError(failed.description)
+    stand_in = ModelServerError(failed.description)
     return BatchFailed(stand_in) if failed.batch else stand_in
 
 

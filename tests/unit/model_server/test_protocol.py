@@ -15,9 +15,9 @@ import pytest
 from reactor_runtime.distributed.rank import portable_pickle
 from reactor_runtime.model_server import (
     BatchFailed,
+    ModelServerError,
+    ModelServerRejected,
     PayloadTooLarge,
-    WorkerError,
-    WorkerRejected,
     protocol,
 )
 from reactor_runtime.model_server.protocol import (
@@ -176,7 +176,7 @@ def test_a_batch_failure_whose_cause_only_the_worker_imports_is_still_a_batch_fa
     error = error_of(failed)
 
     assert isinstance(error, BatchFailed)
-    assert type(error.cause) is WorkerError
+    assert type(error.cause) is ModelServerError
     assert str(error.cause) == "only_in_the_worker.Missing: gone"
 
 
@@ -215,7 +215,7 @@ def test_a_batch_failure_whose_cause_is_not_an_exception_carries_a_runtime_error
     assert type(raised).__name__ in str(error.cause)
 
 
-@pytest.mark.parametrize("kind", [WorkerRejected, PayloadTooLarge])
+@pytest.mark.parametrize("kind", [ModelServerRejected, PayloadTooLarge])
 def test_the_runtimes_own_exceptions_arrive_as_themselves(kind: type[Exception]) -> None:
     error = error_of(failure(3, kind("too large")))
     assert type(error) is kind
@@ -299,7 +299,7 @@ def test_portable_pickle_checks_the_protocol_it_is_given() -> None:
     assert type(replaced) is RuntimeError
 
 
-def test_an_exception_this_process_cannot_import_arrives_as_a_worker_error(
+def test_an_exception_this_process_cannot_import_arrives_as_a_model_server_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = types.ModuleType("only_in_the_worker")
@@ -310,7 +310,7 @@ def test_an_exception_this_process_cannot_import_arrives_as_a_worker_error(
 
     error = error_of(failed)
 
-    assert type(error) is WorkerError
+    assert type(error) is ModelServerError
     assert str(error) == "only_in_the_worker.Missing: gone"
 
 

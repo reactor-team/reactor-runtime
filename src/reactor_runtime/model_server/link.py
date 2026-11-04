@@ -131,7 +131,7 @@ class LinkTransport(Protocol):
             NoListener: Nothing accepts there yet, or the model server did not
                 finish setting the link up within *timeout*; trying again
                 later may work.
-            WorkerUnreachable: This deployment cannot reach a model server at
+            ModelServerUnreachable: This deployment cannot reach a model server at
                 all; trying again will not help.
         """
         ...

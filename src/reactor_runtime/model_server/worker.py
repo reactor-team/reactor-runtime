@@ -31,7 +31,7 @@ a session sends the steps of its new generation only after its
 The worker's own life is a state machine too, ``serving``, then ``draining``,
 then ``stopped``, and every message is answered in every state. Once the
 worker drains, a step or a reset is answered at once with
-:class:`~reactor_runtime.model_server.WorkerStopping`, a hello is refused, and
+:class:`~reactor_runtime.model_server.ModelServerStopping`, a hello is refused, and
 whatever was still queued is answered before the step thread ends. A
 connection is tracked from the moment it is accepted: one that does not send
 its hello within :data:`HELLO_TIMEOUT` is closed, at most ``max_sessions``
@@ -57,11 +57,11 @@ from reactor_runtime.model_server.batching import BatchPolicy, Waiting
 from reactor_runtime.model_server.connection import Connection, ConnectionState
 from reactor_runtime.model_server.errors import (
     BatchFailed,
+    ModelServerRejected,
+    ModelServerStopping,
     ResetRequired,
     StepExpired,
     StepStillRunning,
-    WorkerRejected,
-    WorkerStopping,
 )
 from reactor_runtime.model_server.link import LinkListener, LinkTransport
 from reactor_runtime.model_server.protocol import (
@@ -204,11 +204,11 @@ class WorkerServer:
         """Stop taking work, let the running step finish, and answer everything still in flight.
 
         From the moment this is called, a step or a reset is answered at once
-        with :class:`~reactor_runtime.model_server.WorkerStopping`, and a
+        with :class:`~reactor_runtime.model_server.ModelServerStopping`, and a
         connection that sends its hello is closed without a refusal, so its
         session waits for the model server that replaces this one. Once the
         step thread has ended, every request still queued and every pending
-        reset is answered with ``WorkerStopping``, and every connection still
+        reset is answered with ``ModelServerStopping``, and every connection still
         opening is closed the same way. Open sessions stay connected until
         :meth:`stop`.
         """
@@ -269,7 +269,7 @@ class WorkerServer:
         Runs once the step thread has ended, or on it as it ends after a fault,
         so it is the only thread that calls into the model.
         """
-        stopping = WorkerStopping("worker_died: the model server is stopping")
+        stopping = ModelServerStopping("worker_died: the model server is stopping")
         with self._cond:
             events, self._events = self._events, []
             dropped = [
@@ -408,9 +408,9 @@ class WorkerServer:
         refusal: BaseException | None = None
         with self._cond:
             if self._state is not ServerState.SERVING:
-                refusal = WorkerStopping("worker_died: the model server is stopping")
+                refusal = ModelServerStopping("worker_died: the model server is stopping")
             elif connection.state is not ConnectionState.OPEN:
-                refusal = WorkerRejected("the session is not open")
+                refusal = ModelServerRejected("the session is not open")
             elif connection.number in self._reset_pending:
                 refusal = ResetRequired(
                     "a reset is still pending: wait for ResetDone before stepping"
@@ -432,7 +432,7 @@ class WorkerServer:
                 self._events.append(_Reset(connection, reset.request_id, reset.session_id))
                 self._cond.notify_all()
         if not serving:
-            stopping = WorkerStopping("worker_died: the model server is stopping")
+            stopping = ModelServerStopping("worker_died: the model server is stopping")
             self._answer(connection, failure(reset.request_id, stopping))
 
     def _reset_answered(self, connection: Connection) -> None:
@@ -635,7 +635,7 @@ class WorkerServer:
                 connection,
                 failure(
                     event.request_id,
-                    WorkerRejected(
+                    ModelServerRejected(
                         f"session_opened() refused the reset: {type(exc).__name__}: {exc}"
                     ),
                 ),

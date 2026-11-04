@@ -30,7 +30,7 @@ from reactor_runtime.core import (
 )
 from reactor_runtime.log import get_logger, set_state
 from reactor_runtime.model_server.config import ServerProcessConfig
-from reactor_runtime.model_server.errors import WorkerUnreachable
+from reactor_runtime.model_server.errors import ModelServerUnreachable
 from reactor_runtime.model_server.link import LinkTransport
 from reactor_runtime.model_server.server import ModelServer, ServerSettings
 from reactor_runtime.model_server.shm_link import UnixShmTransport
@@ -140,7 +140,7 @@ class ModelServerProcess:
         )
         try:
             await self._server.start()
-        except WorkerUnreachable as exc:
+        except ModelServerUnreachable as exc:
             raise SystemExit(str(exc)) from None
         self._move(RuntimeState.AVAILABLE)
 

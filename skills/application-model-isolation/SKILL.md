@@ -497,7 +497,7 @@ five:
   the one before; until it does, `step()` raises `ResetRequired`.
 - **A failure of the model half is decided in `process_output()`.** The
   model's own exception arrives as itself, `BatchFailed` when its whole step
-  raised. A lost or stuck model server arrives as `WorkerLost` or a
+  raised. A lost or stuck model server arrives as `ModelServerLost` or a
   `StepUnanswered`; the application re-raises it, the session runtime goes
   down, and its restart waits in `load()` until the model server is back.
   Nothing reconnects underneath the application.
@@ -507,7 +507,7 @@ five:
   ends it, idle or not, and no session ever starts on a dead link.
 - **Health is the model half's to report.** `ModelServer.health()` returns a
   `Health`; a model that reports itself unhealthy is restarted by its
-  deployment, and every session runtime then sees `WorkerLost` and goes down
+  deployment, and every session runtime then sees `ModelServerLost` and goes down
   as above.
 
 ```python
@@ -526,7 +526,7 @@ class Plasma(ReactorApp):
         return self.model.step(input)
 
     async def process_output(self, outcome):
-        if isinstance(outcome.error, (WorkerLost, StepUnanswered)):
+        if isinstance(outcome.error, (ModelServerLost, StepUnanswered)):
             raise outcome.error
         ...
 ```

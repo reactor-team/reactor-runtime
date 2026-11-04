@@ -17,11 +17,11 @@ import pytest
 from reactor_runtime.ipc import Block, SharedSlotAllocationFailed, blocks
 from reactor_runtime.ipc import slot as slot_module
 from reactor_runtime.model_server import (
+    ModelServerUnreachable,
     PayloadTooLarge,
     ShmLink,
     UnixShmTransport,
     WorkerLink,
-    WorkerUnreachable,
     shm_link,
 )
 from reactor_runtime.model_server.link import NoListener, StreamLink
@@ -641,7 +641,7 @@ def test_a_session_that_does_not_see_the_servers_memory_is_unreachable(root: Pat
     address = str(root / "sock")
     _start_accepting(transport, address)
 
-    with pytest.raises(WorkerUnreachable, match="not visible in"):
+    with pytest.raises(ModelServerUnreachable, match="not visible in"):
         transport.connect(address, 0)
 
 
@@ -650,7 +650,7 @@ def test_a_slot_without_a_directory_is_unreachable_naming_it(root: Path) -> None
     address = str(root / "sock")
     _start_accepting(transport, address)
 
-    with pytest.raises(WorkerUnreachable, match="slot 3 has no shared-memory directory"):
+    with pytest.raises(ModelServerUnreachable, match="slot 3 has no shared-memory directory"):
         transport.connect(address, 3)
 
 
@@ -665,7 +665,7 @@ def test_a_slot_without_room_for_its_blocks_is_unreachable_naming_it(
     address = str(root / "sock")
     _start_accepting(transport, address)
 
-    with pytest.raises(WorkerUnreachable, match="no shared memory for slot 0"):
+    with pytest.raises(ModelServerUnreachable, match="no shared memory for slot 0"):
         transport.connect(address, 0)
     assert list((root / "s0").iterdir()) == []
 
@@ -674,9 +674,9 @@ def test_nothing_listening_is_worth_retrying_and_no_socket_directory_is_not(root
     transport = _transport(root)
     with pytest.raises(NoListener):
         transport.connect(str(root / "sock"), 0)
-    with pytest.raises(WorkerUnreachable, match="socket directory"):
+    with pytest.raises(ModelServerUnreachable, match="socket directory"):
         transport.connect(str(root / "missing" / "sock"), 0)
-    with pytest.raises(WorkerUnreachable, match="socket directory"):
+    with pytest.raises(ModelServerUnreachable, match="socket directory"):
         transport.listen(str(root / "missing" / "sock"))
 
 
@@ -699,7 +699,7 @@ def test_a_live_socket_is_never_taken_over(root: Path) -> None:
     address = str(root / "sock")
     first = transport.listen(address)
     try:
-        with pytest.raises(WorkerUnreachable, match="already listens"):
+        with pytest.raises(ModelServerUnreachable, match="already listens"):
             transport.listen(address)
         assert Path(address).exists()
         pair_session = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -781,7 +781,7 @@ def test_a_session_without_room_for_its_request_block_is_unreachable(
         return real(name, size, directory)
 
     monkeypatch.setattr(slot_module, "create_block", session_full)
-    with pytest.raises(WorkerUnreachable, match="no room for a 4096-byte request block"):
+    with pytest.raises(ModelServerUnreachable, match="no room for a 4096-byte request block"):
         transport.connect(address, 0)
     assert not any(p.name.startswith("rrms_s0_") for p in (root / "s0").iterdir())
     for link in accepted:

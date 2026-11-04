@@ -18,14 +18,14 @@ from reactor_runtime.core import Health, HealthStatus
 from reactor_runtime.model_server import (
     BatchFailed,
     ModelServer,
+    ModelServerRejected,
+    ModelServerStopping,
     PayloadTooLarge,
     ResetRequired,
     ServerRequest,
     ServerSettings,
     StepExpired,
     StreamLink,
-    WorkerRejected,
-    WorkerStopping,
 )
 from reactor_runtime.model_server import worker as worker_module
 from reactor_runtime.model_server.batching import Waiting
@@ -342,7 +342,7 @@ def test_a_second_request_while_one_runs_is_refused(rig: Rig) -> None:
     refused = link.receive()
     rig.model.hold.set()
 
-    assert isinstance(error_of(refused), WorkerRejected)
+    assert isinstance(error_of(refused), ModelServerRejected)
     assert refused.request_id == 2
     assert link.receive() == Result(1, Echo(1, 0, 1, None))
 
@@ -407,7 +407,7 @@ def test_drain_answers_what_still_waits_as_stopping() -> None:
     asyncio.run(rig.server.stop())
 
     assert busy.receive() == Result(1, Echo(1, 0, 1, None))
-    assert isinstance(error_of(waiting.receive()), WorkerStopping)
+    assert isinstance(error_of(waiting.receive()), ModelServerStopping)
     assert ("closed", 0, 1) in rig.model.events
 
 
@@ -482,7 +482,7 @@ def test_a_reset_whose_reopen_raises_refuses_and_closes_the_session(rig: Rig) ->
 
     refused = link.receive()
 
-    assert isinstance(error_of(refused), WorkerRejected)
+    assert isinstance(error_of(refused), ModelServerRejected)
     with pytest.raises(Closed):
         link.receive()
     assert rig.model.events == [("opened", 0, 1), ("closed", 0, 1)]
@@ -494,9 +494,9 @@ def test_a_step_and_a_reset_after_drain_are_answered_as_stopping() -> None:
     asyncio.run(rig.server.drain())
     try:
         link.send(Step(request_id=1, timeout=None, payload=Tick(1)))
-        assert isinstance(error_of(link.receive()), WorkerStopping)
+        assert isinstance(error_of(link.receive()), ModelServerStopping)
         link.send(Reset(request_id=2, session_id=None))
-        assert isinstance(error_of(link.receive()), WorkerStopping)
+        assert isinstance(error_of(link.receive()), ModelServerStopping)
     finally:
         asyncio.run(rig.server.stop())
 
@@ -580,7 +580,7 @@ def test_drain_closes_a_pending_open_and_answers_a_pending_reset_as_stopping() -
     rig.model.hold.set()
     drained.join(timeout=5)
     try:
-        assert isinstance(error_of(resetting.receive()), WorkerStopping)
+        assert isinstance(error_of(resetting.receive()), ModelServerStopping)
         with pytest.raises(Closed):  # closed, not refused: the session waits for the next one
             opening.receive()
     finally:
@@ -749,7 +749,7 @@ def test_a_step_loop_that_stops_reports_the_worker_unhealthy(rig: Rig) -> None:
         rig.server.health().detail
     )
     link.send(Step(request_id=1, timeout=None, payload=Tick(1)))
-    assert isinstance(error_of(link.receive()), WorkerStopping)
+    assert isinstance(error_of(link.receive()), ModelServerStopping)
 
 
 def test_a_full_outbox_closes_the_link_at_close() -> None:
