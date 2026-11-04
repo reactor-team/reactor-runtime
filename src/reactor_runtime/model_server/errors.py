@@ -129,7 +129,11 @@ class ResetRequired(RuntimeError):  # noqa: N818 (named for the state a caller c
 class ModelServerLost(RuntimeError):  # noqa: N818 (named for the event a caller catches)
     """The connection to the model server is gone, or the model server is going away.
 
-    Its message says why.
+    For a lost link and for :class:`ModelServerStopping`, the message starts
+    with ``model_server_lost:`` and says why, for example
+    ``model_server_lost: the model server closed the link``; a session runtime
+    that re-raises it ends its session with that message as the error.
+    :class:`ClientClosed` says the client is closed.
     """
 
 

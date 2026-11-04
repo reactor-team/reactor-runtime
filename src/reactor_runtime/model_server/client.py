@@ -427,7 +427,7 @@ class ModelClient[RequestT, ResultT]:
             if self._state is not LinkState.OPEN:
                 return
             self._state = LinkState.LOST
-            message = f"worker_died: {reason}"
+            message = f"model_server_lost: {reason}"
             self._ended = (ModelServerLost, message)
             lost = ModelServerLost(message)
             self._cond.notify_all()

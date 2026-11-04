@@ -247,7 +247,7 @@ def test_a_lost_link_stays_lost_for_every_call(rig: Rig) -> None:
         time.sleep(0.01)
     assert client.state is LinkState.LOST
     for call in (lambda: client.step(Tick(1)), client.reset, lambda: client.signal(Stop("x"))):
-        with pytest.raises(ModelServerLost, match="worker_died"):
+        with pytest.raises(ModelServerLost, match="model_server_lost"):
             call()
 
 
@@ -392,7 +392,7 @@ def test_link_config_reads_the_environment_with_defaults(monkeypatch: pytest.Mon
     monkeypatch.setenv("REACTOR_MODEL_SERVER_SOCKET", "/run/reactor-model-server/sock")
     monkeypatch.setenv("REACTOR_SESSION_SLOT", "2")
     monkeypatch.delenv("REACTOR_SHM_DIR", raising=False)
-    monkeypatch.setenv("REACTOR_WORKER_STEP_TIMEOUT", "0")
+    monkeypatch.setenv("REACTOR_MODEL_SERVER_STEP_TIMEOUT", "0")
 
     config = link_config()
 
@@ -413,7 +413,7 @@ def test_link_config_reads_the_environment_with_defaults(monkeypatch: pytest.Mon
             {
                 "REACTOR_MODEL_SERVER_SOCKET": "/s",
                 "REACTOR_SESSION_SLOT": "0",
-                "REACTOR_WORKER_CONNECT_TIMEOUT": "soon",
+                "REACTOR_MODEL_SERVER_CONNECT_TIMEOUT": "soon",
             },
             "number of seconds",
         ),
@@ -425,7 +425,7 @@ def test_link_config_refuses_a_missing_or_malformed_variable(
     for name in (
         "REACTOR_MODEL_SERVER_SOCKET",
         "REACTOR_SESSION_SLOT",
-        "REACTOR_WORKER_CONNECT_TIMEOUT",
+        "REACTOR_MODEL_SERVER_CONNECT_TIMEOUT",
     ):
         monkeypatch.delenv(name, raising=False)
     for name, value in env.items():

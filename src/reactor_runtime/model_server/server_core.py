@@ -269,7 +269,7 @@ class ModelServerCore:
         Runs once the step thread has ended, or on it as it ends after a fault,
         so it is the only thread that calls into the model.
         """
-        stopping = ModelServerStopping("worker_died: the model server is stopping")
+        stopping = ModelServerStopping("model_server_lost: the model server is stopping")
         with self._cond:
             events, self._events = self._events, []
             dropped = [
@@ -408,7 +408,7 @@ class ModelServerCore:
         refusal: BaseException | None = None
         with self._cond:
             if self._state is not ServerState.SERVING:
-                refusal = ModelServerStopping("worker_died: the model server is stopping")
+                refusal = ModelServerStopping("model_server_lost: the model server is stopping")
             elif connection.state is not ConnectionState.OPEN:
                 refusal = ModelServerRejected("the session is not open")
             elif connection.number in self._reset_pending:
@@ -432,7 +432,7 @@ class ModelServerCore:
                 self._events.append(_Reset(connection, reset.request_id, reset.session_id))
                 self._cond.notify_all()
         if not serving:
-            stopping = ModelServerStopping("worker_died: the model server is stopping")
+            stopping = ModelServerStopping("model_server_lost: the model server is stopping")
             self._answer(connection, failure(reset.request_id, stopping))
 
     def _reset_answered(self, connection: Connection) -> None:

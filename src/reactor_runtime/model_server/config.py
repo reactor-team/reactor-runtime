@@ -31,10 +31,10 @@ SLOT_ENV = "REACTOR_SESSION_SLOT"
 SHM_DIR_ENV = "REACTOR_SHM_DIR"
 """This session's shared-memory directory; ``/dev/shm`` when unset."""
 
-STEP_TIMEOUT_ENV = "REACTOR_WORKER_STEP_TIMEOUT"
+STEP_TIMEOUT_ENV = "REACTOR_MODEL_SERVER_STEP_TIMEOUT"
 """Seconds a step or a reset waits for its answer by default; 30 when unset, ``0`` for no bound."""
 
-CONNECT_TIMEOUT_ENV = "REACTOR_WORKER_CONNECT_TIMEOUT"
+CONNECT_TIMEOUT_ENV = "REACTOR_MODEL_SERVER_CONNECT_TIMEOUT"
 """Seconds ``connect()`` waits for the model server in all; 1800 when unset, ``0`` for no bound."""
 
 DEFAULT_STEP_TIMEOUT = 30.0
