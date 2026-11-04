@@ -30,6 +30,8 @@ Decode and fit off the event loop (`asyncio.to_thread`), as `set_image` in
   `undecodable_image` (`undecodable_video`, `undecodable_audio`);
 - fit to the model's resolution exactly as the source does (resize then centre crop, or pad), and
   state the rule and the size in the description.
+- an uploaded image or video is declared with `InputField(..., moderate=True)`
+  ([port-on-reactor-app.md](../references/port-on-reactor-app.md) §8).
 
 The handler stores decoded pixels. VAE or image-encoder work runs in the model half, once, at the
 step that applies the input, and is cached for the session. `reset` clears every image on every rank:

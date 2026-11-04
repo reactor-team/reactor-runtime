@@ -76,8 +76,15 @@ You can get the bytes without a credential. A gated repo's file list and sizes
 are public even when its files are not:
 
 ```sh
-curl -s "https://huggingface.co/api/models/<org>/<repo>/tree/<revision>?recursive=true" \
-  | jq -r '.[] | select(.type=="file") | "\(.size)\t\(.path)"'
+# The listing is paged: follow the `Link: <…>; rel="next"` header until there is none,
+# or a large repo's later files are silently missing from the inventory.
+url="https://huggingface.co/api/models/<org>/<repo>/tree/<revision>?recursive=true"
+while [ -n "$url" ]; do
+  page=$(curl -sS -D headers.txt "$url")
+  printf '%s' "$page" | jq -r '.[] | select(.type=="file") | "\(.size)\t\(.path)"'
+  url=$(tr -d '\r' < headers.txt | sed -n 's/^[Ll]ink: .*<\([^>]*\)>; rel="next".*/\1/p')
+done
+rm -f headers.txt
 ```
 
 **Grep for the hazards that decide the environment:**
@@ -321,7 +328,9 @@ speed can be measured cheaply.
   staged, so reference it directly. A hub id hard-coded in a helper needs a code
   change to accept a path.
 - The root comes from the environment (`REACTOR_WEIGHTS_PATH`), not from a
-  constant. In the port it becomes `reactor_runtime.get_weights_path()`.
+  constant. In the port the application resolves it with
+  `reactor_runtime.get_weights_path()` and passes it to the model half's
+  `load()`; the model half never reads the environment.
 
 **Force offline in the image.** Add `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1`
 to `build.build_env` and to the run's environment. When the port is written,

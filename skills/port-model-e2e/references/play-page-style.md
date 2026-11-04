@@ -50,7 +50,7 @@ where the exact value matters.
     from the keyboard and the on-screen controls.
 11. **Controls card** under the display, same card style as the sidebar. Top to bottom: a telemetry
     row (mono `text-[10px] white/40`: chunk counter, last step time, delivered fps, the active action
-    in amber; a spacer; then Pause / Resume and Reset side by side, Reset red-tinted and disabled while
+    in amber; a spacer; then a Pause / Resume toggle (`set_paused`) and Reset side by side, Reset red-tinted and disabled while
     nothing is running); the live controls, in clusters of `grid-cols-2`, each a centred column with a
     `text-[9px] uppercase tracking-wider white/40` caption over its control.
 12. **Keys.** Flat 40×40 `rounded border bg-white/5 border-white/15 text-white/80`, mono `text-xs`.

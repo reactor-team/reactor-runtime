@@ -20,27 +20,40 @@ one model and encoded once in another. Read each input's kind from the source.
 
 The kinds, each with the plain explanation to give a person the first time it is named:
 
-| Kind | Meaning |
-|---|---|
-| **Serving config** | decided when the model starts, the same for every session; not a command |
-| **Session setup** | accepted while idle; holds for the whole run; sent while running, refused with `locked_while_running` |
-| **Live control** | accepted at any time: sent before `start` it is the starting value, sent while running it applies at the next chunk boundary; held until changed |
+| Kind | Meaning | How it is declared |
+|---|---|---|
+| **Serving config** | decided when the model starts, the same for every session; not a command | a key in the config file `load()` reads |
+| **Session setup** | set while idle; holds for the whole run | a hand-written command that refuses with `locked_while_running` while a run is live, when the value needs decoding (an upload) or the change must be refused; otherwise a public field the model reads when the run starts, whose description says a value sent while running applies to the next run |
+| **Live control** | accepted at any time: sent before `start` it is the starting value, sent while running it applies at the next chunk boundary; held until changed | a public `InputState` field with its generated `set_<field>`, unless it needs decoding |
+
+Public fields and their generated setters are the default, as
+[`application-model-isolation`](../../application-model-isolation/SKILL.md) rule 7 says; a
+hand-written command exists only for a decision the state cannot carry.
 
 ## Lifecycle: the same on every model
 
-| Command | Behaviour |
+| Control | Behaviour |
 |---|---|
-| `start()` | idle → running. Refused when a required input is missing or when already running. A model never starts on its own when an input arrives |
-| `pause()` / `resume()` | hold on the last frame; resume continues from there. Live inputs sent while paused apply on resume |
-| `reset()` | end generation and **clear** every input, on every rank; allowed from any state. To run the same conditions again, set them again (on a play page: reset, then pick the example) |
+| `start()` | hand-written. idle → running. Refused when a required input is missing or when already running. A model never starts on its own when an input arrives |
+| `paused` | a public `paused: bool` field, so the client gets `set_paused`, as in `examples/waypoint`. While true, `process_input()` refuses the step: the stream holds on the last frame, and live inputs sent meanwhile apply at the first chunk after it turns false |
+| `reset()` | hand-written. End generation and **clear** every input, on every rank; allowed from any state |
+
+`reset` here differs from `examples/waypoint` on purpose. Waypoint's reset restarts its world from
+the seed it holds, because a world model plays continuously from a seed. A chunk-by-chunk port
+returns to idle and waits for `start`, so clearing makes the next run start from exactly what its
+client sends, with nothing left from the run before. To run the same conditions again, set them
+again (on a play page: reset, then pick the example).
 
 ## Events
 
 | Message | Sent | Carries |
 |---|---|---|
-| `state_update` | from `@connected` and as the answer to every command | `state` (idle, running, paused); `settings`: each input's value last sent and the value applied at the last chunk; `capabilities` |
+| `state_update` | from `@connected`; as the reply of the hand-written commands; from `process_output()` on the step that applies a change made through a generated setter | `state` (idle, running, paused); `settings`: each input's value last sent and the value applied at the last chunk; `capabilities` |
 | `chunk_complete` | after every chunk | `index` |
 | `generation_started`, `generation_complete` | when a run starts and ends | |
+
+A generated setter answers with nothing; the client sees its change in the next `state_update`,
+sent from the step that applies it.
 
 `capabilities` lists every command the model exposes with its kind, its accepted values or range,
 and what the values mean where the source defines it.
@@ -68,7 +81,9 @@ Every other input is named `set_<its role>` (`set_style_image`, `set_audio_promp
 one modality are two commands. An argument a model or an application needs on a standard command is
 added as a keyword with a default, so a client that does not send it is unaffected.
 
-**Setting an empty value removes an input** (`""`, `None`, `[]`); there are no clear commands.
+**Setting an empty value removes an input** (`None`, `[]`); there are no clear commands. Text is the
+exception: an empty prompt is a value, encoded as the source encodes the empty string
+([text.md](text.md)).
 
 **Positions use one coordinate system**: `x, y` in 0…1 over the output frame, origin at the top
 left, or a region in the same units.

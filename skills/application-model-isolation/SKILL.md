@@ -245,10 +245,16 @@ caches) and starts the next from the frame the step carries. That is not the
 "silent reset" rule 8 forbids: the step asked for it, and the result reports
 the id the new run holds.
 
-**What the model applies at run start stays fixed for the run.** A prompt
-the client changes mid-run takes effect on the next run, because the caches
-were prefilled with the old one. Say so in the field's description; do not
-try to re-encode inside a live run.
+**What the model built its run from stays fixed for the run.** When a
+condition went into state the run carries forward (a prompt that prefilled a
+cache, an image encoded into the history), a change mid-run takes effect on
+the next run, because that state already holds the old value. Say so in the
+field's description; do not try to re-encode inside a live run. A model that
+reads a condition afresh at every chunk, as many chunk-by-chunk video models
+do with their text, takes a new value at the next chunk boundary instead: the
+value rides the step input like any other change, and the model encodes it on
+the step that applies it. Which case a model is follows from how its source
+uses the condition, not from the field's name.
 
 ### 5. The model's state is read-only from the application
 

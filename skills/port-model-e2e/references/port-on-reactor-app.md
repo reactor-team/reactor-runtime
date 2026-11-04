@@ -16,9 +16,11 @@ how the two halves meet are in
 Read it first; this file does not restate it. What follows is what a repo with
 no runtime in it needs on top of those rules, and the facts of the current runtime release that a port depends on.
 
-All runtime facts below were read from the `v3.10.2` tag. When the release
-SKILL.md Phase 0 looked up is newer, re-read the facts you rely on from that
-tag's source.
+Runtime facts below cite public names under `reactor_runtime` and their
+docstrings, which are the runtime's reference; read the docstring when a detail
+matters. They are re-read at every release bump (see
+[`maintaining-examples`](../../maintaining-examples/SKILL.md)), and a unit test
+imports every `reactor_runtime` name the skills cite.
 
 ## Start from the reference example
 
@@ -69,7 +71,7 @@ must cover.
 
 Then write the input table of [patterns/README.md](../patterns/README.md): one row per client
 input with its modality, role, kind and command. The standard there fixes the lifecycle
-(`start`, `pause`, `resume`, `reset`), the events (`state_update`, `chunk_complete`) and the
+(`start`, the `paused` field, `reset`), the events (`state_update`, `chunk_complete`) and the
 command for each concept; follow it rather than the source's own names, so a client that drives one
 ported model drives the next.
 
@@ -83,18 +85,24 @@ prompt reaches the model exactly as the client sent it.
 
 ## 3. Weights: one root, local paths, the checkpoint asserted
 
-`load(self, config_path: Path | None)` receives the path `runtime.config`
-names; the runtime parses nothing in it. Resolve every weight file as a path
-under `reactor_runtime.get_weights_path()`, which returns
-`$REACTOR_WEIGHTS_PATH` when it is set and `~/.cache/reactor_registry`
-otherwise (`src/reactor_runtime/paths.py:23`). The config names each weight as a
-path **relative to that root**, in the exact layout Phase 1 staged, so the tree
-you serve from is the tree the config expects.
+The application's `load(self, config_path: Path | None)` receives the path
+`runtime.config` names; the runtime parses nothing in it. The application
+resolves the weights root once, with `reactor_runtime.get_weights_path()`
+(`$REACTOR_WEIGHTS_PATH` when set, else `~/.cache/reactor_registry`; see its
+docstring), and passes it on: `self.engine.load(config_path, get_weights_path())`.
+The model half imports nothing from `reactor_runtime`
+([`application-model-isolation`](../../application-model-isolation/SKILL.md)
+rule 1 and checklist item 14), so it never calls `get_weights_path()`; it joins
+the relative paths its config names onto the `weights_root` it was given. The
+config names each weight as a path **relative to that root**, in the exact
+layout Phase 1 staged, so the tree you serve from is the tree the config
+expects. Passing the root as an argument is also what keeps
+`DistributedRunner(..., load_kwargs=...)` in §4 a one-line change.
 
 - Every hub load was already rewritten to a local path in Phase 1
-  ([`source-and-weights.md`](source-and-weights.md) §7); here the root becomes
-  `get_weights_path()`, so `from_pretrained(f"{root}/<subdir>")` reads
-  `from_pretrained(get_weights_path() / "<subdir>")`.
+  ([`source-and-weights.md`](source-and-weights.md) §7); in the model half the
+  root is the `weights_root` argument, so `from_pretrained(f"{root}/<subdir>")`
+  reads `from_pretrained(weights_root / "<subdir>")`.
 - Assert the checkpoint you loaded is the one the baseline used: compare a
   recorded fact (file size, a tensor shape, a config hash, a step counter in
   the checkpoint) and raise from `load()` on a mismatch. Two releases of one
@@ -111,8 +119,8 @@ it on every rank with `reactor_runtime.distributed.DistributedRunner`
 (`DistributedRunner`, `DistributedWorker`, `RankDesync`, `WorkerCrashed`,
 `WorkerTimeout` are its exports). Call `start()` from `load()`; it waits up to
 `start_timeout` (default 3600 s) for every rank to load, and each `generate()`
-or `reset()` call may take up to `call_timeout` (default 30 s)
-(`src/reactor_runtime/distributed/runner.py:74-100`). Set `call_timeout` above
+or `reset()` call may take up to `call_timeout` (default 30 s), as
+`reactor_runtime.distributed.DistributedRunner`'s docstring states. Set `call_timeout` above
 the slowest step the model ever takes, first step included. The GPU count is
 `model.resources.gpu.count` in `reactor.yaml`.
 
@@ -150,7 +158,13 @@ pattern). Live controls ride every step input.
   the client sees, so state in the command's description which frame and which corner is the origin.
   A point or a drag that spans several chunks is split by chunk the way the source consumes it.
 - **`reset` and session end clear every session setup input on every rank.** A stale
-  reference image raises nothing; it silently conditions the next session.
+  reference image raises nothing; it silently conditions the next session. Put each in
+  its hook: per-session defaults are restored in `@session_started`, where the runtime
+  has built a fresh state; teardown and `self.engine.reset()` go in `@session_ended`.
+  Neither goes in `@connected` / `@disconnected` behind a client counter: when the
+  session itself ends, its connections are torn down without `@disconnected` (see that
+  decorator's docstring), so the counter never returns to zero and the next session
+  runs on the last one's state.
 
 ## 6. Warm-up covers every shape a client can produce
 
@@ -182,7 +196,7 @@ What each caller sees, verified against the current SDKs:
 |---|---|
 | Python SDK `send_command` | raises `ReactorError` carrying the code and message |
 | JS SDK 3.x `sendCommand` | never rejects: resolves `undefined` and emits `error` with a `ReactorError` whose `operation` is `"sendCommand"` and `command_code` is your code; also readable from `getLastError()` |
-| A session started with a step count | a starting command that raises fails the session's remaining steps (`Runner._fails_remaining_steps`, `src/reactor_runtime/runner/runner.py:2396`, and `_emit_handler_failure` below it) |
+| A session started with a step count | a starting command that raises ends the session and fails its remaining steps ([`application-model-isolation`](../../application-model-isolation/SKILL.md) rule 7) |
 
 Catch what a check raises (a decoder's `ValueError`, Pillow's
 `DecompressionBombError`) and re-raise it as a `CommandError` with its own code,
@@ -203,9 +217,18 @@ client author reads.
 - Wrap an `UploadedFile` parameter in `InputField(description=…)`.
 - Name `ModelMessage` classes for what they carry, with no model-name prefix,
   and start each docstring with "Emitted …".
-- Send one state snapshot message: from `@connected` and as the reply to every
-  command that changes state. A client that joins late or misses a reply
-  recovers from the next snapshot.
+- Send one state snapshot message: from `@connected`, as the reply of each
+  hand-written command, and from `process_output()` on the step that applies a
+  change made through a generated setter (which itself answers with nothing).
+  A client that joins late or misses a reply recovers from the next snapshot.
+- **Mark what needs moderation.** Every input a person fills freely, free text
+  and uploaded files (the prompt, a first frame, references), is declared with
+  `InputField(..., moderate=True)`; bounded fields (choices, numbers) stay
+  unmarked. The schema publishes the mark as `x-reactor-moderate`; the runtime
+  checks nothing itself, and whether a deployment checks a marked field is its
+  decision, taken from that schema. `InputField`'s docstring has the rule;
+  the Reactor Cookbook's `models/lingbot-world-v1-fast` marks its prompt and
+  image this way.
 
 ## 9. The manifest and the runtime pin
 
@@ -243,38 +266,43 @@ python -m reactor_runtime.schema --path . --version v0.1.0 --out schema.json
 
 ## 10. Runtime facts a port relies on
 
-Each checked in the `v3.10.2` source.
+Each names the public symbol whose docstring states it.
 
 - **The step loop decides replay.** Do not override `run()` or
   `submit_command()`. A class that keeps both can serve a stepped session —
   one step per request, with state, commands and frames in the request
-  (`ReactorApp.supports_stepped`, `src/reactor_runtime/interface/app/reactor_app.py:446-455`).
-  Phase 5 replays the baseline through exactly that.
+  (`reactor_runtime.ReactorApp.supports_stepped`). Phase 5 replays the baseline
+  through exactly that.
 - **`process_output()` returns `Output | StepCompleted | None`**
-  (`reactor_app.py:233`). Return `StepCompleted` when a step's report to a
-  step-count session should carry more than the frames.
+  (`reactor_runtime.ReactorApp.process_output`). Return
+  `reactor_runtime.StepCompleted` when a step's report to a step-count session
+  should carry more than the frames.
 - **`self.output.flush(hold=True)`** drops queued frames and keeps the last one
   on screen instead of cutting to black; `flush()` cuts.
 - **The system client.** A session started with a starting input or a step
-  count has one `ClientInfo` with `system=True`; it fires `@connected` like any
-  client, and nothing sent to it is delivered
-  (`src/reactor_runtime/interface/client.py:27-36`). Count viewers with
-  `not client.system`; a model that only steps when a non-system client is
-  present never runs a stepped replay.
+  count has one `reactor_runtime.ClientInfo` with `system=True`; it fires
+  `@connected` like any client, and nothing sent to it is delivered. Count
+  viewers with `not client.system`; a model that only steps when a non-system
+  client is present never runs a stepped replay.
 - **One hook per kind.** A class has one method per lifecycle hook; a
   subclass extends an inherited hook by overriding the method and calling
   `super()`. A second method marked with the same hook fails when the class is
-  defined (`src/reactor_runtime/interface/events/decorators.py:18-22`).
+  defined (`reactor_runtime.ReactorApp`).
+- **Session hooks, not connection hooks, for per-session work.**
+  `reactor_runtime.session_started` and `reactor_runtime.session_ended` fire
+  once per session; `reactor_runtime.disconnected` does not fire when the
+  session itself ends (§5).
 - **Posted order.** Commands, step requests and lifecycle events are handled
   one at a time in the order posted, so a handler or hook must never wait for
-  a later event — it is queued behind the wait
-  (`reactor_app.py:556-563`). `await self.connected.wait()` inside a hook is
-  the shape this rules out.
+  a later event — it is queued behind the wait. `await self.connected.wait()`
+  inside a hook is the shape this rules out.
+- **Refusing.** `reactor_runtime.CommandError` refuses a command;
+  `reactor_runtime.ApplicationError` from `process_input()` refuses a step, and
+  the loop asks again.
 - **Exit status.** A crashed step loop exits the process with status 1; a stop
-  that was asked for, and a model that refuses to load, exit 0
-  (`src/reactor_runtime/service.py:37-40`).
+  that was asked for, and a model that refuses to load, exit 0.
 - **Step count cap.** A session started with a step count takes at most
-  10,000 steps (`src/reactor_runtime/runner/session_start.py:26`).
+  `reactor_runtime.runner.session_start.MAX_STEPS` steps (10,000).
 - **Logging** goes through `reactor_runtime.get_logger`, never `print()`.
 
 ## 11. Grow it one proven change at a time

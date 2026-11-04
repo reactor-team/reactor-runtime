@@ -1,3 +1,20 @@
+**A live track** is read per chunk, in `process_input()`, as `examples/echo/echo.py` reads its
+webcam:
+
+- read with `try_read(n)`, which returns at once; never `await read()` in the step: it waits while
+  the step holds the session, and every command queues behind it until frames arrive;
+- a short read refuses the step with `ApplicationError` (the runtime retries it on the next loop),
+  and the frames go into the step input unwrapped from `.data`;
+- an audio track is read with `ReadMode.FIFO`, so no samples are dropped; video keeps the default,
+  the latest frames;
+- each chunk takes exactly the input frames it rewrites, chosen by timestamp, not first-come;
+- `start()` is refused until the frames of the first chunk have arrived (`waiting_for_video`), and
+  `state_update` says how many have;
+- when the stream stalls mid-run, steps are refused until the next chunk's frames are there; the
+  model never repeats or invents frames, and `state_update` reports the stall;
+- the latency from an input frame's arrival to its output frame is measured on the served model and
+  reported.
+
 # Video in
 
 A video reaches a model in one of two ways, chosen by how it arrives, not by its role.
