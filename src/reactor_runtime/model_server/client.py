@@ -19,13 +19,13 @@ from collections.abc import Callable
 from typing import Any
 
 from reactor_runtime import log
-from reactor_runtime.distributed.errors import WorkerTimeout
 from reactor_runtime.log import get_logger, get_session_id
 from reactor_runtime.model_server.config import LinkConfig, link_config
 from reactor_runtime.model_server.errors import (
     ClientClosed,
     ModelServerLost,
     ModelServerRejected,
+    ModelServerTimeout,
     ResetRequired,
     StepTimedOut,
 )
@@ -194,7 +194,7 @@ class ModelClient[RequestT, ResultT]:
             ModelServerUnreachable: At once, for a deployment that cannot reach a
                 model server however long it waits.
             ModelServerRejected: The model server refused this session.
-            WorkerTimeout: No model server opened the session within the
+            ModelServerTimeout: No model server opened the session within the
                 configured connect timeout.
         """
         config = config or link_config()
@@ -207,7 +207,7 @@ class ModelClient[RequestT, ResultT]:
         while True:
             remaining = None if deadline is None else deadline - time.monotonic()
             if remaining is not None and remaining <= 0:
-                raise WorkerTimeout(
+                raise ModelServerTimeout(
                     f"no model server opened this session within {config.connect_timeout} s: {last}"
                 )
             try:
@@ -234,7 +234,7 @@ class ModelClient[RequestT, ResultT]:
                         )
                     last = f"the model server answered the hello with a {type(answer).__name__}"
             if deadline is not None and time.monotonic() >= deadline:
-                raise WorkerTimeout(
+                raise ModelServerTimeout(
                     f"no model server opened this session within {config.connect_timeout} s: {last}"
                 )
             wait = poll if deadline is None else min(poll, max(deadline - time.monotonic(), 0.0))

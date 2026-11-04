@@ -5,11 +5,26 @@ application catches a class instead of matching text. A model's own exception
 reaches the application as itself: the model server sends it whole, and the
 application catches the model's type. The classes here cover what the model
 server and the link report around the model.
+
+Three families group them for an ``except`` clause:
+
+* :class:`ModelServerLost` (a ``RuntimeError``): the model server is gone or
+  going away. :class:`ModelServerStopping` and :class:`ClientClosed` are its
+  kinds.
+* :class:`StepUnanswered` (a ``TimeoutError``): a step or a reset got no answer
+  in time, and the link is still up. :class:`StepExpired` and
+  :class:`StepTimedOut` are its kinds.
+* :class:`ModelServerRejected` (a ``ValueError``): the model server refused
+  this request or this session. :class:`StepStillRunning` is its kind.
+
+``ModelClient.connect()`` also raises :class:`ModelServerTimeout` and
+:class:`ModelServerUnreachable`. ``ModelServerTimeout`` is a ``TimeoutError``
+beside ``StepUnanswered``, not above it, so ``except ModelServerTimeout``
+around a connect and ``except StepUnanswered`` around a step each catch their
+own case, and ``except TimeoutError`` catches both.
 """
 
 from __future__ import annotations
-
-from reactor_runtime.distributed.errors import WorkerCrashed, WorkerTimeout
 
 
 class ModelServerError(RuntimeError):
@@ -75,7 +90,7 @@ class PayloadTooLarge(ValueError):  # noqa: N818 (named for the event a caller c
     """
 
 
-class StepUnanswered(WorkerTimeout):
+class StepUnanswered(TimeoutError):  # noqa: N818 (named for the event a caller catches)
     """A step the model did not answer. The connection is still up."""
 
 
@@ -111,7 +126,7 @@ class ResetRequired(RuntimeError):  # noqa: N818 (named for the state a caller c
     """
 
 
-class ModelServerLost(WorkerCrashed):
+class ModelServerLost(RuntimeError):  # noqa: N818 (named for the event a caller catches)
     """The connection to the model server is gone, or the model server is going away.
 
     Its message says why.
@@ -124,6 +139,18 @@ class ModelServerStopping(ModelServerLost):
 
 class ClientClosed(ModelServerLost):
     """The application closed its client: every call raises this from then on."""
+
+
+class ModelServerTimeout(TimeoutError):  # noqa: N818 (named for the event a caller catches)
+    """No model server opened this session within the connect timeout.
+
+    ``ModelClient.connect()`` raises it once the link's ``connect_timeout``
+    has passed. The message names
+    the timeout and the last thing the client saw: no listener yet, a link
+    the model server accepted but did not open, or a link it closed first.
+    A model server that comes up later may still open the session, so a
+    caller may try again.
+    """
 
 
 class ModelServerUnreachable(RuntimeError):  # noqa: N818 (named for the state a caller catches)

@@ -17,7 +17,6 @@ from typing import Any
 import pytest
 
 from reactor_runtime import log
-from reactor_runtime.distributed.errors import WorkerTimeout
 from reactor_runtime.ipc import SharedSlotAllocationFailed
 from reactor_runtime.model_server import (
     BatchFailed,
@@ -28,6 +27,7 @@ from reactor_runtime.model_server import (
     ModelServer,
     ModelServerLost,
     ModelServerRejected,
+    ModelServerTimeout,
     ModelServerUnreachable,
     PayloadTooLarge,
     ResetRequired,
@@ -352,7 +352,7 @@ def test_connect_waits_for_a_model_server_that_starts_later() -> None:
 
 def test_connect_gives_up_after_its_timeout_naming_why() -> None:
     config = LinkConfig(socket="unused", slot=0, connect_timeout=0.3)
-    with pytest.raises(WorkerTimeout, match="nothing listens yet"):
+    with pytest.raises(ModelServerTimeout, match="nothing listens yet"):
         ModelClient.connect(config, transport=PairTransport())
 
 
@@ -365,7 +365,7 @@ def test_connect_gives_up_on_a_model_server_that_never_opens_the_session() -> No
 
     config = LinkConfig(socket="unused", slot=0, connect_timeout=0.3)
     started = time.monotonic()
-    with pytest.raises(WorkerTimeout, match="did not open the session"):
+    with pytest.raises(ModelServerTimeout, match="did not open the session"):
         ModelClient.connect(config, transport=Silent())
     assert time.monotonic() - started < 5
 
@@ -479,7 +479,7 @@ def test_connect_timeout_bounds_a_transport_whose_setup_stalls() -> None:
 
     config = LinkConfig(socket="unused", slot=0, connect_timeout=0.5)
     started = time.monotonic()
-    with pytest.raises(WorkerTimeout, match="did not finish setting up"):
+    with pytest.raises(ModelServerTimeout, match="did not finish setting up"):
         ModelClient.connect(config, transport=Stalling())
     assert time.monotonic() - started < 3
 
@@ -493,7 +493,7 @@ def test_a_connect_with_no_time_left_times_out_naming_the_last_reason() -> None:
             raise NoListener("nothing accepts there")
 
     config = LinkConfig(socket="unused", slot=0, connect_timeout=0.2)
-    with pytest.raises(WorkerTimeout, match="nothing accepts there"):
+    with pytest.raises(ModelServerTimeout, match="nothing accepts there"):
         ModelClient.connect(config, transport=Absent())
     assert calls
     assert all(t is not None and t > 0 for t in calls)  # never a non-blocking 0
