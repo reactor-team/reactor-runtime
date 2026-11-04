@@ -222,10 +222,10 @@ _CLOSE_DRAIN_S = 5.0
 
 # The largest message a plain data channel carries: libwebrtc's SCTP limit.
 _PLAIN_MAX_MESSAGE_SIZE = 256 * 1024
-# The largest message this side's chunking declares, set on the media engine.
-# A client may declare less; the engine then refuses the send, and that refusal
-# is what decides a step result does not fit.
-_CHUNKED_MAX_MESSAGE_SIZE = 64 * 1024 * 1024
+# The least a chunked channel may queue ahead of the wire, the media engine's
+# default. A larger message limit raises it to twice the limit, so one full
+# message can wait behind another.
+_MIN_SEND_BUFFER_LIMIT = 128 * 1024 * 1024
 # How long a step result waits at a time for a full chunked queue to drain
 # before it is offered again. It keeps waiting while the connection is open.
 _STEP_RESULT_DRAIN_S = 5.0
@@ -242,8 +242,9 @@ def _get_factory(config: WebRtcConfig) -> rw.PeerConnectionFactory:
 
     The engine carries the SPED half of *config*'s WARP setting, which libwebrtc
     reads from the engine's environment rather than per connection, and its
-    data-channel chunking. The engine outlives the connection that built it, so
-    the first connection to arrive fixes both for the process.
+    data-channel chunking with its largest message. The engine outlives the
+    connection that built it, so the first connection to arrive fixes all of
+    them for the process.
     """
     global _factory
     if _factory is None:
@@ -252,9 +253,17 @@ def _get_factory(config: WebRtcConfig) -> rw.PeerConnectionFactory:
                 builder = rw.PeerConnectionFactoryBuilder()
                 builder.with_dtls_in_stun(config.warp)
                 if config.dc_chunking:
-                    builder.with_dc_chunking(max_message_size=_CHUNKED_MAX_MESSAGE_SIZE)
+                    builder.with_dc_chunking(
+                        max_message_size=config.max_message_size,
+                        send_buffer_limit=_send_buffer_limit(config.max_message_size),
+                    )
                 _factory = builder.build()
     return _factory
+
+
+def _send_buffer_limit(max_message_size: int) -> int:
+    """Return what a chunked channel may queue for messages of up to *max_message_size*."""
+    return max(_MIN_SEND_BUFFER_LIMIT, 2 * max_message_size)
 
 
 def _build_rtc_config(config: WebRtcConfig) -> rw.RtcConfiguration:
@@ -1334,11 +1343,14 @@ class WebRTCPeer:
     def max_message_size(self) -> int:
         """The largest message, in bytes, this side sends on the data channel.
 
-        On a chunked channel it is the limit this side's chunking declares; the
-        client may take less, which :meth:`send_step_result` learns from the
-        media engine. On a plain channel it is what one SCTP message takes.
+        On a chunked channel it is the limit this side's chunking declares,
+        the config's ``max_message_size``; the client may take less, which
+        :meth:`send_step_result` learns from the media engine. On a plain
+        channel it is what one SCTP message takes.
         """
-        return _CHUNKED_MAX_MESSAGE_SIZE if self.message_chunking else _PLAIN_MAX_MESSAGE_SIZE
+        if self.message_chunking:
+            return self._config.max_message_size
+        return _PLAIN_MAX_MESSAGE_SIZE
 
     async def send_step_result(self, payload: bytes) -> bool:
         """Send a step result on the data channel, reporting whether the engine took it.

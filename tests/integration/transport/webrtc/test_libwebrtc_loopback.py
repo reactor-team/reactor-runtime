@@ -17,7 +17,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
+import subprocess
+import sys
 import threading
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -557,6 +560,93 @@ async def test_a_chunking_client_exchanges_messages_past_the_plain_limits() -> N
             await trickle_task
         await peer.close()
         client.pc = None  # type: ignore[assignment]
+
+
+_MIB = 1024 * 1024
+# A step result past the 64 MiB default, inside the raised limit.
+_LARGE_STEP_RESULT = 72 * _MIB
+_RAISED_LIMIT = 96 * _MIB
+# Moving 72 MiB over loopback SCTP takes several times what 20 MiB does.
+_LARGE_TIMEOUT_S = 90.0
+
+
+async def round_trip_a_step_result_past_64_mib() -> None:
+    """Send a 72 MiB step result from a runtime whose limit is 96 MiB to a client declaring 96 MiB.
+
+    Builds the process's media engine with the raised limit, so it must run in
+    a process that has none yet: reactor-webrtc allows one engine per process.
+    The client comes from the same engine, so both sides declare the limit.
+    """
+    config = WebRtcConfig(ice_gathering_timeout_ms=4000, max_message_size=_RAISED_LIMIT)
+    factory = _get_factory(config)
+    client = await _Client.create(factory)
+    offer_sdp = await client.create_offer()
+    assert f"max-message-size={_RAISED_LIMIT}" in offer_sdp
+    payload = bytes(range(256)) * (_LARGE_STEP_RESULT // 256)
+    at_client: list[bytes] = []
+    client_got = threading.Event()
+
+    def _on_client_message(data: bytes, _binary: bool) -> None:
+        at_client.append(bytes(data))
+        client_got.set()
+
+    assert client.data is not None
+    client.data.on_message(_on_client_message)
+    peer, answer = await libwebrtc_peer_factory(
+        ConnId(21), SdpOffer(sdp=offer_sdp), client.track_map(), config, ProtocolVersion.V0
+    )
+    assert f"max-message-size={_RAISED_LIMIT}" in answer.sdp
+    connected = asyncio.Event()
+    peer.on_message(lambda *_: None)
+    peer.on_media(lambda *_: None)
+    peer.on_ping(lambda: None)
+    peer.on_connected(connected.set)
+    peer.on_disconnect(lambda: None)
+
+    stop_trickle = asyncio.Event()
+    trickle_task = asyncio.create_task(_trickle_until(client, peer, stop_trickle))
+    try:
+        await client.accept_answer(answer.sdp)
+        assert await _reached(connected), "the peers never connected"
+        assert peer.max_message_size == _RAISED_LIMIT
+        assert await peer.send_step_result(payload), "the engine refused the step result"
+        assert await asyncio.to_thread(client_got.wait, _LARGE_TIMEOUT_S), (
+            "the 72 MiB step result never reached the client"
+        )
+        assert [len(message) for message in at_client] == [len(payload)]
+        assert at_client[0] == payload
+        assert client.data.state() == rw.DataChannelState.Open
+    finally:
+        stop_trickle.set()
+        trickle_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await trickle_task
+        await peer.close()
+        client.pc = None  # type: ignore[assignment]
+
+
+async def test_a_step_result_past_64_mib_arrives_when_both_sides_raise_the_limit() -> None:
+    """A raised ``max_message_size`` carries a step result the 64 MiB default refuses.
+
+    The media engine is process-wide and this module's other tests already hold
+    one at the default, so the round trip runs in a fresh interpreter. Its
+    traceback, when it fails, is the assertion message.
+    """
+    script = (
+        "import asyncio, sys\n"
+        f"sys.path.insert(0, {str(Path(__file__).parent)!r})\n"
+        "import test_libwebrtc_loopback as loopback\n"
+        "asyncio.run(loopback.round_trip_a_step_result_past_64_mib())\n"
+    )
+    done = await asyncio.to_thread(
+        subprocess.run,
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=_LARGE_TIMEOUT_S + 60,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
 
 
 async def test_a_large_frame_sent_just_before_close_still_arrives() -> None:

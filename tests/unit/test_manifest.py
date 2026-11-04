@@ -5,6 +5,7 @@ import pytest
 
 from reactor_runtime import ReactorApp
 from reactor_runtime.core import (
+    DEFAULT_MAX_MESSAGE_BYTES,
     DEFAULT_SHM_INPUT_BYTES,
     DEFAULT_SHM_OUTPUT_BYTES,
     LiveKitBlockError,
@@ -734,3 +735,86 @@ def test_a_shared_memory_block_may_size_one_block_and_leave_the_other_at_its_def
     )
     manifest.write_text(_with_shared_memory("shared_memory: {}"))
     assert load_config(manifest).shared_memory == SharedMemoryConfig()
+
+
+def _with_webrtc(block: str) -> str:
+    return f"runtime:\n  import: world:World\n  {block}\n"
+
+
+def test_a_manifest_without_a_webrtc_block_keeps_the_64_mib_message_limit(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_MANIFEST)
+
+    assert load_config(manifest).webrtc_max_message_size == DEFAULT_MAX_MESSAGE_BYTES == 64 << 20
+
+
+@pytest.mark.parametrize(
+    ("value", "size"),
+    [
+        ("256Mi", 256 << 20),
+        ("'96Mi'", 96 << 20),
+        ("100M", 100 * 10**6),
+        ("268435456", 256 << 20),
+        ("256Ki", 256 << 10),
+        ("1Gi", 1 << 30),
+    ],
+)
+def test_the_webrtc_message_limit_is_read_as_a_quantity(
+    tmp_path: Path, value: str, size: int
+) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_with_webrtc(f"webrtc: {{max_message_size: {value}}}"))
+
+    assert load_config(manifest).webrtc_max_message_size == size
+
+
+def test_a_webrtc_block_without_a_size_keeps_the_default(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_with_webrtc("webrtc: {}"))
+
+    assert load_config(manifest).webrtc_max_message_size == DEFAULT_MAX_MESSAGE_BYTES
+
+
+@pytest.mark.parametrize("value", ["255Ki", "262143", "1025Mi", "2Gi"])
+def test_a_webrtc_message_limit_outside_256ki_to_1gi_is_refused(tmp_path: Path, value: str) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_with_webrtc(f"webrtc: {{max_message_size: {value}}}"))
+
+    with pytest.raises(
+        ValueError, match=r"^runtime\.webrtc\.max_message_size must be from 256Ki to 1Gi; got "
+    ):
+        load_config(manifest)
+
+
+@pytest.mark.parametrize("value", ["0", "-1Mi", "64MiB", "abc", "'1.5'", "null"])
+def test_a_webrtc_message_limit_that_is_not_whole_bytes_is_refused_naming_its_key(
+    tmp_path: Path, value: str
+) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_with_webrtc(f"webrtc: {{max_message_size: {value}}}"))
+
+    with pytest.raises(
+        ValueError, match=r"^runtime\.webrtc\.max_message_size must be a quantity of whole bytes"
+    ):
+        load_config(manifest)
+
+
+@pytest.mark.parametrize(
+    ("block", "match"),
+    [
+        ("webrtc:", r"webrtc must be a block with `max_message_size`, got None"),
+        ("webrtc: 256Mi", r"webrtc must be a block with `max_message_size`"),
+        (
+            "webrtc: {max_mesage_size: 256Mi}",
+            r"webrtc has unknown keys \['max_mesage_size'\]; it takes max_message_size",
+        ),
+    ],
+)
+def test_load_config_refuses_a_webrtc_block_of_the_wrong_shape(
+    tmp_path: Path, block: str, match: str
+) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_with_webrtc(block))
+
+    with pytest.raises(ValueError, match=rf"^runtime\.{match}"):
+        load_config(manifest)
