@@ -6,11 +6,11 @@ $schema: reactor/v2
 # so every step crosses to the model server and back through its socket and
 # shared memory.
 model:
-  name: echo-endurance-shared-worker
+  name: echo-endurance-split
   version: v0.0.1
   description: The endurance suite's tracked echo, its engine in a shared model server.
 
 runtime:
-  import: shared_worker_echo:SharedWorkerEcho
+  import: split_echo_app:SplitEcho
   model_server:
     import: echo_server:EchoServer

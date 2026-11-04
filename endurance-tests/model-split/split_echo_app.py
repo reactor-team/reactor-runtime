@@ -29,7 +29,7 @@ class _RemoteEngine:
         self._client.reset()
 
 
-class SharedWorkerEcho(TrackedEcho):
+class SplitEcho(TrackedEcho):
     """The tracked echo with ``EchoModel`` in the shared model server."""
 
     def load(self, config_path: Path | None) -> None:

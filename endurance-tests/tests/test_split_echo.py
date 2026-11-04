@@ -1,4 +1,4 @@
-"""shared_worker_echo: the v1 connection churn, the model's engine in a shared model server."""
+"""split_echo: the v1 connection churn, the model's engine in a shared model server."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from endurance.churn import run_churn
 from endurance.harness import SUITE_DIR, RuntimeProcess, V1Client
 from endurance.report import DEFAULT_OUTPUT_DIR
 
-MODEL_DIR = SUITE_DIR / "model-shared-worker"
+MODEL_DIR = SUITE_DIR / "model-split"
 
 DESCRIPTION = (
     "One long-lived session on a model split in two: the tracked echo runs in the "
@@ -118,8 +118,6 @@ def runtime(
         shutil.rmtree(directory, ignore_errors=True)
 
 
-async def test_shared_worker_echo(runtime: RuntimeProcess) -> None:
+async def test_split_echo(runtime: RuntimeProcess) -> None:
     """Release everything a connection held, with the model's engine in a shared model server."""
-    await run_churn(
-        runtime, test_name="shared-worker-echo", description=DESCRIPTION, client=V1Client
-    )
+    await run_churn(runtime, test_name="split-echo", description=DESCRIPTION, client=V1Client)
