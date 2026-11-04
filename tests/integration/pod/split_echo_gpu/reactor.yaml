@@ -1,8 +1,12 @@
 # The split echo with its model half on a GPU: the same application half
 # (`split_echo:SplitEcho`, from ../split_echo on the import path), and a model
 # half that holds one large weight tensor on the GPU.
+model:
+  resources:
+    workers:
+      shared_memory:
+        output: 1Mi
 runtime:
   import: split_echo:SplitEcho
-  worker:
+  model_server:
     import: gpu_model:GpuEchoModel
-    shm_output_bytes: 1048576

@@ -389,7 +389,7 @@ def test_a_refused_session_and_an_unreachable_deployment_raise_at_once(rig: Rig)
 
 
 def test_link_config_reads_the_environment_with_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("REACTOR_MODEL_WORKER_SOCKET", "/run/reactor-worker/sock")
+    monkeypatch.setenv("REACTOR_MODEL_SERVER_SOCKET", "/run/reactor-model-server/sock")
     monkeypatch.setenv("REACTOR_SESSION_SLOT", "2")
     monkeypatch.delenv("REACTOR_SHM_DIR", raising=False)
     monkeypatch.setenv("REACTOR_WORKER_STEP_TIMEOUT", "0")
@@ -397,7 +397,7 @@ def test_link_config_reads_the_environment_with_defaults(monkeypatch: pytest.Mon
     config = link_config()
 
     assert config == LinkConfig(
-        socket="/run/reactor-worker/sock", slot=2, shm_dir=None, step_timeout=None
+        socket="/run/reactor-model-server/sock", slot=2, shm_dir=None, step_timeout=None
     )
     monkeypatch.setenv("REACTOR_SHM_DIR", "/dev/shm/s2")
     assert link_config().shm_dir == Path("/dev/shm/s2")
@@ -406,12 +406,12 @@ def test_link_config_reads_the_environment_with_defaults(monkeypatch: pytest.Mon
 @pytest.mark.parametrize(
     ("env", "match"),
     [
-        ({"REACTOR_SESSION_SLOT": "0"}, "REACTOR_MODEL_WORKER_SOCKET is not set"),
-        ({"REACTOR_MODEL_WORKER_SOCKET": "/s"}, "REACTOR_SESSION_SLOT is not set"),
-        ({"REACTOR_MODEL_WORKER_SOCKET": "/s", "REACTOR_SESSION_SLOT": "-1"}, "non-negative"),
+        ({"REACTOR_SESSION_SLOT": "0"}, "REACTOR_MODEL_SERVER_SOCKET is not set"),
+        ({"REACTOR_MODEL_SERVER_SOCKET": "/s"}, "REACTOR_SESSION_SLOT is not set"),
+        ({"REACTOR_MODEL_SERVER_SOCKET": "/s", "REACTOR_SESSION_SLOT": "-1"}, "non-negative"),
         (
             {
-                "REACTOR_MODEL_WORKER_SOCKET": "/s",
+                "REACTOR_MODEL_SERVER_SOCKET": "/s",
                 "REACTOR_SESSION_SLOT": "0",
                 "REACTOR_WORKER_CONNECT_TIMEOUT": "soon",
             },
@@ -423,7 +423,7 @@ def test_link_config_refuses_a_missing_or_malformed_variable(
     monkeypatch: pytest.MonkeyPatch, env: dict[str, str], match: str
 ) -> None:
     for name in (
-        "REACTOR_MODEL_WORKER_SOCKET",
+        "REACTOR_MODEL_SERVER_SOCKET",
         "REACTOR_SESSION_SLOT",
         "REACTOR_WORKER_CONNECT_TIMEOUT",
     ):

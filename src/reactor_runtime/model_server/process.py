@@ -21,7 +21,13 @@ import sys
 import time
 from pathlib import Path
 
-from reactor_runtime.core import Health, HealthStatus, RuntimeState, WorkerConfig
+from reactor_runtime.core import (
+    Health,
+    HealthStatus,
+    ModelServerConfig,
+    RuntimeState,
+    SharedMemoryConfig,
+)
 from reactor_runtime.log import get_logger, set_state
 from reactor_runtime.model_server.config import ServerProcessConfig
 from reactor_runtime.model_server.errors import WorkerUnreachable
@@ -38,7 +44,9 @@ class ModelServerProcess:
     """Load the model half named in the manifest, then serve it to the session runtimes.
 
     Args:
-        worker: The manifest's ``runtime.worker`` block.
+        model_server: The manifest's ``runtime.model_server`` block.
+        shared_memory: The manifest's ``model.resources.workers.shared_memory``
+            block, the size of each worker's blocks.
         config_path: The model's config file, handed to ``load()``.
         process: What the deployment set: the socket, the session count, the
             slot directories, the stuck limit.
@@ -51,13 +59,15 @@ class ModelServerProcess:
 
     def __init__(
         self,
-        worker: WorkerConfig,
+        model_server: ModelServerConfig,
+        shared_memory: SharedMemoryConfig,
         config_path: Path | None,
         process: ServerProcessConfig,
         *,
         transport: LinkTransport | None = None,
     ) -> None:
-        self._worker = worker
+        self._model_server = model_server
+        self._shared_memory = shared_memory
         self._config_path = config_path
         self._process = process
         self._transport = transport
@@ -85,11 +95,12 @@ class ModelServerProcess:
                 volume is too small, or another model server already listens on
                 the socket.
         """
-        cls = _import(self._worker.import_ref)
+        ref = self._model_server.import_ref
+        cls = _import(ref)
         try:
-            settings = ServerSettings.resolve(cls, self._worker)
+            settings = ServerSettings.resolve(cls, self._model_server, self._shared_memory)
         except ValueError as exc:
-            raise SystemExit(f"{self._worker.import_ref}: {exc}") from None
+            raise SystemExit(f"{ref}: {exc}") from None
         transport = self._transport or UnixShmTransport(
             slot_directory=self._process.slot_directory,
             input_bytes=settings.shm_input_bytes,
@@ -104,17 +115,17 @@ class ModelServerProcess:
         model = cls()
         model.device = _device()
         started = time.monotonic()
-        logger.info("loading the model", model=self._worker.import_ref, device=model.device)
+        logger.info("loading the model", model=ref, device=model.device)
         try:
             await asyncio.to_thread(model.load, self._config_path)
         except Exception:
-            logger.exception("the model failed to load", model=self._worker.import_ref)
+            logger.exception("the model failed to load", model=ref)
             self._move(RuntimeState.TERMINATED)
             self.request_shutdown(failure=False)
             return
         logger.info(
             "model loaded",
-            model=self._worker.import_ref,
+            model=ref,
             seconds=round(time.monotonic() - started, 2),
             max_batch=settings.max_batch,
             shm_slot_bytes=settings.shm_slot_bytes,
@@ -173,11 +184,14 @@ def _import(ref: str) -> type[ModelServer]:
         ):
             raise
         raise SystemExit(
-            f"runtime.worker.import {ref!r} names module {module_name!r}, which does not exist"
+            f"runtime.model_server.import {ref!r} names module {module_name!r}, "
+            "which does not exist"
         ) from None
     cls = getattr(module, class_name, None)
     if not (isinstance(cls, type) and issubclass(cls, ModelServer)):
-        raise SystemExit(f"runtime.worker.import {ref!r} does not name a ModelServer subclass")
+        raise SystemExit(
+            f"runtime.model_server.import {ref!r} does not name a ModelServer subclass"
+        )
     return cls
 
 
@@ -217,8 +231,8 @@ def _check_room(transport: UnixShmTransport, slots: int, settings: ServerSetting
         if total < settings.shm_slot_bytes:
             raise SystemExit(
                 f"slot {slot}'s shared-memory volume {directory} holds {total} bytes and one "
-                f"session needs up to {settings.shm_slot_bytes} (2 * runtime.worker."
-                "shm_input_bytes + shm_output_bytes, in whole 64 KiB pages): size the "
+                f"session needs up to {settings.shm_slot_bytes} (2 * input + output of "
+                "model.resources.workers.shared_memory, in whole 64 KiB pages): size the "
                 "session's memory-backed volume to fit them"
             )
 

@@ -3,5 +3,5 @@
 # runs the echo app with a remote engine.
 runtime:
   import: split_echo:SplitEcho
-  worker:
+  model_server:
     import: split_echo_model:SplitEchoModel

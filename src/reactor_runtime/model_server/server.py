@@ -21,14 +21,16 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from reactor_runtime.core import (
-    DEFAULT_SHM_INPUT_BYTES,
-    DEFAULT_SHM_OUTPUT_BYTES,
     Health,
-    WorkerConfig,
+    ModelServerConfig,
+    SharedMemoryConfig,
     shm_slot_bytes,
 )
 
-_MANIFEST_ONLY = ("shm_input_bytes", "shm_output_bytes")
+_MANIFEST_ONLY = {
+    "shm_input_bytes": "model.resources.workers.shared_memory.input",
+    "shm_output_bytes": "model.resources.workers.shared_memory.output",
+}
 
 
 @dataclass(frozen=True)
@@ -80,7 +82,7 @@ class ModelServer[RequestT, ResultT]:
     How requests are batched:
 
     * A session has at most one request waiting or running.
-    * Requests are taken in arrival order. When the worker is free and a
+    * Requests are taken in arrival order. When the model server is free and a
       request waits, it waits up to ``batch_window`` more seconds for others,
       stopping early once ``max_batch`` wait or every open session has one,
       then steps up to ``max_batch`` of them together.
@@ -98,15 +100,15 @@ class ModelServer[RequestT, ResultT]:
 
     Class attributes:
         max_batch: The most requests one step can take, 1 by default.
-            ``runtime.worker.max_batch`` in ``reactor.yaml`` may lower it, never
-            raise it.
+            ``runtime.model_server.max_batch`` in ``reactor.yaml`` may lower
+            it, never raise it.
         batch_window: Seconds to wait for a batch to fill, 0 by default;
-            ``runtime.worker.batch_window`` overrides it.
+            ``runtime.model_server.batch_window`` overrides it.
 
     The sizes of the shared memory each session holds are set in
-    ``reactor.yaml`` (``runtime.worker``) and nowhere else: a deployment sizes
-    each session's memory from the manifest, so a class that declares them is
-    refused.
+    ``reactor.yaml`` (``model.resources.workers.shared_memory``) and nowhere
+    else: a deployment sizes each worker's memory from the manifest, so a class
+    that declares them is refused.
 
     Attributes:
         device: ``"cuda"`` when torch sees a GPU in the model server's process,
@@ -126,10 +128,10 @@ class ModelServer[RequestT, ResultT]:
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Check the subclass's declarations as it is defined."""
         super().__init_subclass__(**kwargs)
-        for key in _MANIFEST_ONLY:
-            if hasattr(cls, key):
+        for attribute, key in _MANIFEST_ONLY.items():
+            if hasattr(cls, attribute):
                 raise TypeError(
-                    f"{cls.__name__}.{key}: set it in reactor.yaml as runtime.worker.{key}, "
+                    f"{cls.__name__}.{attribute}: set it in reactor.yaml as {key}, "
                     "where a deployment reads it"
                 )
         _positive_int(f"{cls.__name__}.max_batch", cls.max_batch)
@@ -155,8 +157,8 @@ class ModelServer[RequestT, ResultT]:
         A raise from ``step()`` fails every request of the batch: each session
         sees a :class:`~reactor_runtime.model_server.BatchFailed` carrying the
         error, and its application decides what to do. Nothing is stepped
-        again, and the worker goes on serving; :meth:`health` says whether it
-        can.
+        again, and the model server goes on serving; :meth:`health` says
+        whether it can.
 
         Args:
             requests: Between one and the effective ``max_batch`` requests, at
@@ -198,8 +200,8 @@ class ModelServer[RequestT, ResultT]:
         """Report whether the model can serve, as every runtime component does.
 
         The model server's health check calls it on every probe and reports
-        the worker unhealthy, with the detail, when it is, so the deployment
-        can restart the worker. The default reports healthy; override it with
+        the model server unhealthy, with the detail, when it is, so the
+        deployment can restart it. The default reports healthy; override it with
         the model's own signals of trouble. It runs on the health check's
         thread, concurrently with :meth:`step`: read state the step writes
         without blocking on it, and keep it quick. A raise is reported as
@@ -228,8 +230,10 @@ class ServerSettings:
     Attributes:
         max_batch: The most requests one step receives.
         batch_window: Seconds to wait for a batch to fill.
-        shm_input_bytes: Each session's request block.
-        shm_output_bytes: Each session's output block.
+        shm_input_bytes: Each session's request block, from
+            ``model.resources.workers.shared_memory.input``.
+        shm_output_bytes: Each session's output block, from
+            ``model.resources.workers.shared_memory.output``.
     """
 
     max_batch: int
@@ -246,39 +250,46 @@ class ServerSettings:
         return shm_slot_bytes(self.shm_input_bytes, self.shm_output_bytes)
 
     @classmethod
-    def resolve(cls, server: type[ModelServer], config: WorkerConfig | None) -> ServerSettings:
-        """Return the settings *server* serves with under the manifest's *config*.
+    def resolve(
+        cls,
+        server: type[ModelServer],
+        config: ModelServerConfig | None,
+        shared_memory: SharedMemoryConfig | None = None,
+    ) -> ServerSettings:
+        """Return the settings *server* serves with under the manifest.
 
         The class is the authority on ``max_batch``: the manifest may lower it,
         not raise it. The manifest sets the rest, with the runtime's defaults
         for what it leaves out.
 
+        Args:
+            server: The model half's class.
+            config: The manifest's ``runtime.model_server`` block, or ``None``
+                to serve with the class's settings.
+            shared_memory: The manifest's ``model.resources.workers.shared_memory``
+                block; the default sizes when omitted.
+
         Raises:
             ValueError: The manifest raises ``max_batch`` above the class's.
         """
+        blocks = shared_memory or SharedMemoryConfig()
         max_batch = server.max_batch
+        batch_window = float(server.batch_window)
         if config is not None and config.max_batch is not None:
             if config.max_batch > server.max_batch:
                 raise ValueError(
-                    f"runtime.worker.max_batch is {config.max_batch}, above "
+                    f"runtime.model_server.max_batch is {config.max_batch}, above "
                     f"{server.__name__}.max_batch = {server.max_batch}: the manifest may only "
                     "lower it"
                 )
             max_batch = config.max_batch
-        if config is None:
-            return cls(
-                max_batch=max_batch,
-                batch_window=float(server.batch_window),
-                shm_input_bytes=DEFAULT_SHM_INPUT_BYTES,
-                shm_output_bytes=DEFAULT_SHM_OUTPUT_BYTES,
-            )
+        if config is not None and config.batch_window is not None:
+            batch_window = float(config.batch_window)
         return cls(
             max_batch=max_batch,
-            batch_window=float(
-                server.batch_window if config.batch_window is None else config.batch_window
-            ),
-            shm_input_bytes=config.input_bytes,
-            shm_output_bytes=config.output_bytes,
+            batch_window=batch_window,
+            shm_input_bytes=blocks.input_bytes,
+            shm_output_bytes=blocks.output_bytes,
         )
 
 

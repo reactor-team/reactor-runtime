@@ -26,8 +26,9 @@ from reactor_runtime import log
 from reactor_runtime.core import (
     SHM_PAGE_BYTES,
     HealthStatus,
+    ModelServerConfig,
     RuntimeState,
-    WorkerConfig,
+    SharedMemoryConfig,
     shm_slot_bytes,
 )
 from reactor_runtime.model_server import (
@@ -75,8 +76,9 @@ def _process(root: Path, ref: str = f"{__name__}:Doubler", sessions: int = 1) ->
     config = ServerProcessConfig(
         socket=str(root / "sock"), max_sessions=sessions, slot_directory=str(root / "s{slot}")
     )
-    worker = WorkerConfig(import_ref=ref, shm_input_bytes=_BLOCK, shm_output_bytes=_BLOCK)
-    return ModelServerProcess(worker, root / "config.yml", config)
+    model_server = ModelServerConfig(import_ref=ref)
+    shared_memory = SharedMemoryConfig(input_bytes=_BLOCK, output_bytes=_BLOCK)
+    return ModelServerProcess(model_server, shared_memory, root / "config.yml", config)
 
 
 def test_it_loads_the_model_then_serves_sessions_over_shared_memory(tmp_path: Path) -> None:
@@ -184,7 +186,11 @@ def test_a_slot_volume_smaller_than_the_slot_bound_stops_the_start(
     monkeypatch.setattr("reactor_runtime.model_server.process.os.statvfs", _Volume(small))
 
     with pytest.raises(
-        SystemExit, match=rf"holds {small} bytes and one session needs up to {_SLOT}"
+        SystemExit,
+        match=(
+            rf"holds {small} bytes and one session needs up to {_SLOT} "
+            r"\(2 \* input \+ output of model\.resources\.workers\.shared_memory,"
+        ),
     ):
         asyncio.run(process.start())
 
@@ -209,7 +215,10 @@ def test_a_failed_load_terminates_and_asks_the_process_to_exit_cleanly(
 
 
 def test_a_misspelled_module_stops_the_start_naming_it(tmp_path: Path) -> None:
-    with pytest.raises(SystemExit, match=r"names module 'doubleer', which does not exist"):
+    with pytest.raises(
+        SystemExit,
+        match=r"runtime\.model_server\.import 'doubleer:Doubler' names module 'doubleer', which",
+    ):
         asyncio.run(_process(tmp_path, "doubleer:Doubler").start())
 
 
@@ -241,15 +250,22 @@ def test_the_process_configuration_needs_the_session_count_and_the_slot_director
     with pytest.raises(SystemExit, match="REACTOR_SHM_SLOT_DIR"):
         server_process_config()
     monkeypatch.setenv("REACTOR_SHM_SLOT_DIR", "/run/reactor-shm/s{slot}")
-    monkeypatch.setenv("REACTOR_MODEL_WORKER_HEALTH_PORT", "9100")
+    monkeypatch.delenv("REACTOR_MODEL_SERVER_SOCKET", raising=False)
+    monkeypatch.setenv("REACTOR_MODEL_SERVER_HEALTH_PORT", "9100")
+    monkeypatch.setenv("REACTOR_MODEL_SERVER_STUCK_SECONDS", "45")
 
     config = server_process_config()
 
-    assert (config.max_sessions, config.slot_directory, config.health_port) == (
-        3,
-        "/run/reactor-shm/s{slot}",
-        9100,
-    )
+    assert (
+        config.max_sessions,
+        config.slot_directory,
+        config.socket,
+        config.health_port,
+        config.stuck_after,
+    ) == (3, "/run/reactor-shm/s{slot}", "/run/reactor-model-server/sock", 9100, 45.0)
+
+    monkeypatch.setenv("REACTOR_MODEL_SERVER_SOCKET", "/run/elsewhere/sock")
+    assert server_process_config().socket == "/run/elsewhere/sock"
 
 
 # -- end to end -----------------------------------------------------------------------------
@@ -298,12 +314,16 @@ def _spawn(
     (root / "reactor.yaml").write_text(
         textwrap.dedent(
             f"""\
+            model:
+              resources:
+                workers:
+                  shared_memory:
+                    input: 64Ki
+                    output: 64Ki
             runtime:
               import: app:App
-              worker:
+              model_server:
                 import: {ref}
-                shm_input_bytes: 65536
-                shm_output_bytes: 65536
             """
         )
     )
@@ -311,10 +331,10 @@ def _spawn(
     port = _free_port()
     env = {
         **os.environ,
-        "REACTOR_MODEL_WORKER_SOCKET": str(root / "sock"),
+        "REACTOR_MODEL_SERVER_SOCKET": str(root / "sock"),
         "REACTOR_MAX_SESSIONS": "1",
         "REACTOR_SHM_SLOT_DIR": str(root / "s{slot}"),
-        "REACTOR_MODEL_WORKER_HEALTH_PORT": str(port),
+        "REACTOR_MODEL_SERVER_HEALTH_PORT": str(port),
         "HOST": "127.0.0.1",
     }
     process = subprocess.Popen(

@@ -83,7 +83,7 @@ class Pod:
         self.env = {
             **os.environ,
             "HOST": "127.0.0.1",
-            "REACTOR_MODEL_WORKER_SOCKET": str(self.socket),
+            "REACTOR_MODEL_SERVER_SOCKET": str(self.socket),
             "REACTOR_LOG_FORMAT": "json",
             "PYTHONPATH": os.pathsep.join(
                 [
@@ -112,7 +112,7 @@ class Pod:
     def start_server(self) -> None:
         env = {
             **self.env,
-            "REACTOR_MODEL_WORKER_HEALTH_PORT": str(self.server_port),
+            "REACTOR_MODEL_SERVER_HEALTH_PORT": str(self.server_port),
             "REACTOR_MAX_SESSIONS": str(_SESSIONS),
             "REACTOR_SHM_SLOT_DIR": str(self.dir / "s{slot}"),
         }

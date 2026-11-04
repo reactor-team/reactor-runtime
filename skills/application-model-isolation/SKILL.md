@@ -535,6 +535,11 @@ The step input is still built in `process_input()` and `generate()` is still
 the one line of rule 2: `ModelClient.step()` stands where the model half's
 `generate()` stood.
 
+In `reactor.yaml`, `runtime.import` still names the application half, and
+`runtime.model_server.import` names the `ModelServer`. The session runtimes
+are the model's workers: `model.resources.workers.shared_memory` sizes the
+request and output blocks each of them exchanges with the model server.
+
 `tests/integration/pod/split_echo/` is a worked example: `examples/echo` with
 its model half in a model server, which the pod tests run as separate
 processes. The `reactor_runtime.model_server` docstrings document the
