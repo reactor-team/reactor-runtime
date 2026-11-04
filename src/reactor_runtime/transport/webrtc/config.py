@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import NotRequired, TypedDict
 
+from reactor_runtime.core import DEFAULT_MAX_MESSAGE_BYTES
+
 
 class IceTransportPolicy(StrEnum):
     """Which ICE candidate types to gather.
@@ -183,8 +185,8 @@ class WebRtcConfig:
             it. The runtime answers, so a connection uses it only when the
             client's offer declares ``a=x-reactor-dc-chunking``; any other
             client keeps the plain channel. On a chunked channel a message of
-            up to 64 MiB passes in either direction, and sends past
-            libwebrtc's 16 MiB buffer queue instead of closing the channel.
+            up to ``max_message_size`` passes in either direction, and sends
+            past libwebrtc's 16 MiB buffer queue instead of closing the channel.
 
             It is process-wide like SPED, for the same reason: the media
             engine carries it and is built on the first connection. With it
@@ -193,6 +195,18 @@ class WebRtcConfig:
             channel it creates, plain or chunked, so a connection's ``False``
             does not restore the previous send timing; congestion control
             still bounds every send.
+        max_message_size: The largest message, in bytes, a chunked channel
+            sends or accepts; 64 MiB by default. ``runtime.webrtc.max_message_size``
+            in ``reactor.yaml`` sets it. A stepped session returns each step's
+            result in one message, so a step whose media is larger is answered
+            with ``step_result_too_large``. The runtime declares the size in
+            its SDP answer, and a connection carries the smaller of what the
+            two sides declare, so a client that declares less sets the limit
+            for its connection. Each chunked channel may queue up to twice the
+            size, and at least 128 MiB, ahead of the wire.
+
+            It is process-wide like ``dc_chunking``: the media engine carries
+            it and is built on the first connection.
     """
 
     ice_servers: tuple[IceServer, ...] = ()
@@ -220,3 +234,4 @@ class WebRtcConfig:
     negotiation_timeout: float = 30.0
     warp: bool = True
     dc_chunking: bool = True
+    max_message_size: int = DEFAULT_MAX_MESSAGE_BYTES

@@ -277,7 +277,8 @@ def _assemble(
     Args:
         cfg: The configuration for this runtime process.
         webrtc: The WebRTC transport configuration; defaults to the plain
-            ``WebRtcConfig`` when omitted (as in tests that don't exercise it).
+            ``WebRtcConfig``, with *cfg*'s largest message, when omitted (as in
+            tests that don't exercise it).
         peer_factory: The media engine to mount; defaults to the libwebrtc
             engine when omitted.
 
@@ -297,7 +298,11 @@ def _assemble(
     runner.request_shutdown = service.request_shutdown
     service.add(runner)
     transports: list[TransportRouter] = [
-        WebRtcRouter(webrtc or WebRtcConfig(), peer_factory, metrics)
+        WebRtcRouter(
+            webrtc or WebRtcConfig(max_message_size=cfg.webrtc_max_message_size),
+            peer_factory,
+            metrics,
+        )
     ]
     if livekit_available():
         transports.append(LiveKitRouter(cfg.livekit))
@@ -350,9 +355,10 @@ def main() -> None:
 
     Refuses to start when no manifest is present. The manifest's directory is
     put first on the import path so a model referenced as ``"pipeline:Model"``
-    resolves to the code sitting beside it. The manifest names the model; the
-    bind address, ICE/transport configuration, lifecycle timeouts, and log level
-    are read from the environment around it.
+    resolves to the code sitting beside it. The manifest names the model and
+    the largest WebRTC message (``runtime.webrtc.max_message_size``); the bind
+    address, ICE/transport configuration, lifecycle timeouts, and log level are
+    read from the environment around it.
 
     Raises:
         SystemExit: If no ``reactor.yaml`` is found or an environment variable
@@ -369,7 +375,9 @@ def main() -> None:
     # the first one included.
     log.set_state(SessionState.CREATED.name.lower(), RuntimeState.LOADING.value)
     cfg = _apply_env(load_workspace())
-    webrtc = _webrtc_config_from_env()
+    webrtc = dataclasses.replace(
+        _webrtc_config_from_env(), max_message_size=cfg.webrtc_max_message_size
+    )
     logger.info(
         "starting reactor runtime",
         version=_version(),
@@ -379,6 +387,7 @@ def main() -> None:
         ice_servers=[server.urls[0] for server in webrtc.ice_servers],
         port_range=webrtc.port_range,
         ice_policy=str(webrtc.transport_policy),
+        max_message_size=webrtc.max_message_size,
     )
     code = asyncio.run(serve(cfg, webrtc, peer_factory=libwebrtc_peer_factory))
     if code:

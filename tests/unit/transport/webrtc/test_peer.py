@@ -1148,11 +1148,16 @@ def test_build_rtc_config_leaves_snap_off_when_warp_is_off() -> None:
     assert _build_rtc_config(WebRtcConfig(warp=False)).sctp_snap is False
 
 
+# The message limit and the queue limit the last recorded chunking request asked for.
+_chunking_sizes: list[int] = []
+
+
 def _record_factory_builds(monkeypatch: pytest.MonkeyPatch) -> list[object]:
     """Point the peer at a recording builder, returning what it is asked for.
 
     Each SPED flag is recorded as itself and each chunking request as
-    ``"dc_chunking"``, in call order.
+    ``"dc_chunking"``, in call order; the sizes of the last chunking request
+    are in ``_chunking_sizes``.
     """
     recorded: list[object] = []
 
@@ -1160,13 +1165,14 @@ def _record_factory_builds(monkeypatch: pytest.MonkeyPatch) -> list[object]:
         def with_dtls_in_stun(self, enabled: bool) -> None:
             recorded.append(enabled)
 
-        def with_dc_chunking(self, *, max_message_size: int) -> None:
-            assert max_message_size == peer_module._CHUNKED_MAX_MESSAGE_SIZE
+        def with_dc_chunking(self, *, max_message_size: int, send_buffer_limit: int) -> None:
+            _chunking_sizes[:] = [max_message_size, send_buffer_limit]
             recorded.append("dc_chunking")
 
         def build(self) -> object:
             return SimpleNamespace()
 
+    _chunking_sizes.clear()
     monkeypatch.setattr(peer_module, "_factory", None)
     monkeypatch.setattr(peer_module.rw, "PeerConnectionFactoryBuilder", _Builder)
     return recorded
@@ -1206,6 +1212,27 @@ def test_get_factory_offers_chunking_only_when_asked(
     recorded = _record_factory_builds(monkeypatch)
     peer_module._get_factory(WebRtcConfig(dc_chunking=dc_chunking))
     assert ("dc_chunking" in recorded) is dc_chunking
+
+
+def test_the_default_engine_keeps_64_mib_messages_and_a_128_mib_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _record_factory_builds(monkeypatch)
+    peer_module._get_factory(WebRtcConfig())
+    assert _chunking_sizes == [64 << 20, 128 << 20]
+
+
+@pytest.mark.parametrize(
+    ("max_message_size", "send_buffer_limit"),
+    [(256 << 10, 128 << 20), (64 << 20, 128 << 20), (96 << 20, 192 << 20), (1 << 30, 2 << 30)],
+)
+def test_the_engine_takes_the_configured_message_limit_and_queues_twice_it(
+    monkeypatch: pytest.MonkeyPatch, max_message_size: int, send_buffer_limit: int
+) -> None:
+    """The queue holds one full message behind another, and never less than the engine's default."""
+    _record_factory_builds(monkeypatch)
+    peer_module._get_factory(WebRtcConfig(max_message_size=max_message_size))
+    assert _chunking_sizes == [max_message_size, send_buffer_limit]
 
 
 # ── Trickle ICE ──────────────────────────────────────────────────────────────
@@ -2730,6 +2757,17 @@ def test_the_largest_message_is_this_sides_limit(chunked: bool, expected: int) -
     data: Any = _FakeChannel(chunked=chunked)
     peer._data_channel = data
     assert peer.message_chunking is chunked
+    assert peer.max_message_size == expected
+
+
+@pytest.mark.parametrize(("chunked", "expected"), [(True, 256 << 20), (False, 256 * 1024)])
+def test_a_raised_message_limit_applies_to_chunked_channels_alone(
+    chunked: bool, expected: int
+) -> None:
+    peer = WebRTCPeer()
+    peer._config = WebRtcConfig(max_message_size=256 << 20)
+    data: Any = _FakeChannel(chunked=chunked)
+    peer._data_channel = data
     assert peer.max_message_size == expected
 
 

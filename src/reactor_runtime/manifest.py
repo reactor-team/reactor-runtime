@@ -6,7 +6,8 @@ The ``reactor.yaml`` manifest is the runtime's one configuration file:
 ``runtime.recording`` block configures the recorder, the
 ``runtime.step_results`` block says how each finished step is saved, the
 ``runtime.livekit`` block says how a LiveKit room reaches the model, the
-``runtime.model_server`` block names the model half of a model split in two,
+``runtime.webrtc`` block sizes the largest message a WebRTC connection carries,
+the ``runtime.model_server`` block names the model half of a model split in two,
 and ``model.resources.workers.shared_memory`` sizes the shared memory each of
 that model's workers exchanges with its model server. This module turns that
 file into a :class:`~reactor_runtime.core.RuntimeConfig` and the reference into
@@ -31,6 +32,9 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from reactor_runtime.core import (
+    DEFAULT_MAX_MESSAGE_BYTES,
+    MAX_MAX_MESSAGE_BYTES,
+    MIN_MAX_MESSAGE_BYTES,
     LiveKitBlockError,
     LiveKitConfig,
     LiveKitRpcMethod,
@@ -57,7 +61,8 @@ def load_config(manifest: Path) -> RuntimeConfig:
     model, ``model.name`` is the name it is published under, the
     ``runtime.recording`` block configures the recorder, the
     ``runtime.step_results`` block configures step results, the
-    ``runtime.livekit`` block configures room sessions, and the
+    ``runtime.livekit`` block configures room sessions, the ``runtime.webrtc``
+    block sizes WebRTC messages, and the
     ``runtime.model_server`` block with ``model.resources.workers.shared_memory``
     configures a model split in two; the rest of the manifest, the rest of
     ``model.resources`` included, describes the model to the platform and is
@@ -70,16 +75,18 @@ def load_config(manifest: Path) -> RuntimeConfig:
     Returns:
         A configuration naming the model the manifest points at, the name it
         publishes under, the path to its config file when present, the
-        recorder's settings, the step-results settings, the room settings, and
-        a split model's model server and shared-memory settings.
+        recorder's settings, the step-results settings, the room settings, the
+        largest WebRTC message, and a split model's model server and
+        shared-memory settings.
 
     Raises:
         SystemExit: If the manifest is not valid YAML, is not a mapping, or
             carries no ``runtime.import``.
         ValueError: If a block the runtime refuses to guess about has the
             wrong shape: a ``step_results.queue`` below 1, a malformed
-            ``livekit`` block, a malformed ``model_server`` block, or a
-            malformed ``model.resources.workers.shared_memory`` block.
+            ``livekit`` block, a malformed ``webrtc`` block, a malformed
+            ``model_server`` block, or a malformed
+            ``model.resources.workers.shared_memory`` block.
     """
     try:
         document = yaml.safe_load(manifest.read_text())
@@ -101,6 +108,7 @@ def load_config(manifest: Path) -> RuntimeConfig:
         livekit=_livekit_from_manifest(runtime),
         model_server=_model_server_from_manifest(runtime),
         shared_memory=_shared_memory_from_manifest(document.get("model")),
+        webrtc_max_message_size=_webrtc_max_message_size_from_manifest(runtime),
     )
 
 
@@ -253,6 +261,63 @@ def _shared_memory_from_manifest(model: Any) -> SharedMemoryConfig:
             for key, value in block.items()
         }
     )
+
+
+_WEBRTC = "runtime.webrtc"
+_WEBRTC_KEYS = ("max_message_size",)
+
+
+def _webrtc_max_message_size_from_manifest(runtime: dict[str, Any]) -> int:
+    """Parse ``runtime.webrtc.max_message_size``, the largest WebRTC data-channel message.
+
+    The size is a Kubernetes resource quantity (see :func:`_byte_quantity`)::
+
+        runtime:
+          import: world:World
+          webrtc:
+            max_message_size: 256Mi
+
+    A stepped session returns each step's result in one data-channel message,
+    so a model whose steps return more media than the default 64 MiB raises it
+    here. The runtime declares the size to every client in its SDP answer, and
+    a connection carries the smaller of the two sides' limits: a client that
+    declares less still gets ``step_result_too_large`` for a larger step. The
+    limit holds in both directions and is process-wide, set on the media
+    engine. The engine may queue up to twice the limit, and at least 128 MiB,
+    on each data channel.
+
+    An unknown key is refused rather than ignored: a misspelt size would
+    otherwise leave the limit at its default without a word.
+
+    Args:
+        runtime: The manifest's ``runtime`` section.
+
+    Returns:
+        The size in bytes, or :data:`~reactor_runtime.core.DEFAULT_MAX_MESSAGE_BYTES`
+        when the manifest has no ``webrtc`` block or the block sets no size.
+
+    Raises:
+        ValueError: ``webrtc`` is not a mapping (an empty ``webrtc:``
+            included), names a key other than ``max_message_size``, or holds a
+            size that is not a quantity of whole bytes from 256Ki to 1Gi.
+    """
+    if "webrtc" not in runtime:
+        return DEFAULT_MAX_MESSAGE_BYTES
+    block = runtime["webrtc"]
+    if not isinstance(block, dict):
+        raise ValueError(f"{_WEBRTC} must be a block with `max_message_size`, got {block!r}")
+    unknown = sorted(set(block) - set(_WEBRTC_KEYS), key=str)
+    if unknown:
+        raise ValueError(
+            f"{_WEBRTC} has unknown keys {unknown}; it takes {', '.join(_WEBRTC_KEYS)}"
+        )
+    if "max_message_size" not in block:
+        return DEFAULT_MAX_MESSAGE_BYTES
+    key = f"{_WEBRTC}.max_message_size"
+    size = _byte_quantity(key, block["max_message_size"])
+    if not MIN_MAX_MESSAGE_BYTES <= size <= MAX_MAX_MESSAGE_BYTES:
+        raise ValueError(f"{key} must be from 256Ki to 1Gi; got {block['max_message_size']!r}")
+    return size
 
 
 _QUANTITY = re.compile(

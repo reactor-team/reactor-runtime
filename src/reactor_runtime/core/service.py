@@ -228,6 +228,27 @@ sets it lower, since every worker's blocks are reserved up front.
 """
 
 
+DEFAULT_MAX_MESSAGE_BYTES = 64 << 20
+"""The largest data-channel message a WebRTC connection carries when
+``runtime.webrtc.max_message_size`` sets none: 64 MiB.
+
+A stepped session returns each step's result in one message, so this bounds the
+media one step returns. A model whose steps are larger raises it in
+``reactor.yaml``.
+"""
+
+MIN_MAX_MESSAGE_BYTES = 256 << 10
+"""The lowest ``runtime.webrtc.max_message_size``: 256 KiB, what a data channel
+carries without chunking."""
+
+MAX_MAX_MESSAGE_BYTES = 1 << 30
+"""The highest ``runtime.webrtc.max_message_size``: 1 GiB.
+
+A step result is one protobuf message, which cannot reach 2 GiB, and the media
+engine queues up to twice the limit on each channel.
+"""
+
+
 SHM_PAGE_BYTES = 64 << 10
 """The unit :func:`shm_slot_bytes` counts a block in: 64 KiB, a multiple of
 every common kernel page size (4, 16 and 64 KiB), so the bound is the same on
@@ -381,6 +402,10 @@ class RuntimeConfig:
         shared_memory: Each worker's shared-memory blocks for a split model,
             from ``model.resources.workers.shared_memory``; the defaults when
             the manifest sets none.
+        webrtc_max_message_size: The largest data-channel message, in bytes,
+            a WebRTC connection sends or accepts, from
+            ``runtime.webrtc.max_message_size``;
+            :data:`DEFAULT_MAX_MESSAGE_BYTES` when the manifest sets none.
     """
 
     model_ref: str
@@ -396,3 +421,4 @@ class RuntimeConfig:
     livekit: LiveKitConfig = field(default_factory=LiveKitConfig)
     model_server: ModelServerConfig | None = None
     shared_memory: SharedMemoryConfig = field(default_factory=SharedMemoryConfig)
+    webrtc_max_message_size: int = DEFAULT_MAX_MESSAGE_BYTES
