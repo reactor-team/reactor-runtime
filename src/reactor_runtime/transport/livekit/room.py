@@ -79,19 +79,32 @@ LEAVE_TIMEOUT_SECONDS = 3.0
 The session's teardown waits for the leave, so a room that never answers would
 otherwise hold the session closing, and the model unavailable to the next one.
 Past the bound the close goes on without waiting, and logs it; the leave itself
-is never cancelled, since a leave cut short may never reach the server and the
-participant would stay in the room. It runs on in the background, and the room
+is not cancelled by the close, since a leave cut short may never reach the
+server and the participant would stay in the room; at shutdown the process
+waits for it a bounded time (``TransportRouter.settle``) before its event loop
+ends. It runs on in the background, and the room
 connection is not :attr:`RoomSession.settled` until it has finished. The bound
 sits above the SDK's own two-second limit on unwinding in-flight RPC calls, so
 that step completes inside it.
 """
 
 LEAVE_STUCK_SECONDS = 60.0
-"""How long a leave may run before the LiveKit transport reports itself unhealthy.
+"""How long a leave, or an abandoned join, may run before it counts as stuck.
 
-A room that has not answered a leave for this long is not slow but gone, and
-each session that ends against it leaves one more room connection behind; the
-LiveKit router's ``health()`` reports it so the deployment replaces the process.
+A room that has not answered for this long is not slow but gone, and each
+session that ends against it leaves one more room connection behind. The
+LiveKit router's ``health()`` reports the process unhealthy once
+:data:`LEAVE_STUCK_ROOMS` room connections are stuck at once, so the deployment
+replaces a process that keeps accumulating them.
+"""
+
+LEAVE_STUCK_ROOMS = 2
+"""How many room connections must be stuck at once before the transport reports itself unhealthy.
+
+One stuck room connection is what a single session ending during a LiveKit
+server outage leaves, on every process at once; replacing each process for it
+would end the sessions it serves and fix nothing. More than one means the
+process keeps losing room connections, which a replacement does release.
 """
 
 _JOIN_REFUSED = "the LiveKit room could not be joined: {cause}"
@@ -194,11 +207,13 @@ class RoomSession:
         self._room = room if room is not None else rtc.Room()
         self._connection: RoomConnection | None = None
         self._join: asyncio.Task[None] | None = None
-        self._closing: set[asyncio.Task[None]] = set()
+        self._closing: set[asyncio.Task[Any]] = set()
         # Each leave still running, with when it started; and those the close
         # stopped waiting for.
         self._leaves: dict[asyncio.Task[None], float] = {}
         self._late: set[asyncio.Task[None]] = set()
+        # When a timed-out join was abandoned, while its attempt still holds the room.
+        self._abandoned_at: float | None = None
         # An abandoned attempt that will leave the room once it settles: set
         # when the attempt is abandoned, cleared once the room is left.
         self._leave_pending = False
@@ -239,22 +254,39 @@ class RoomSession:
         return all(task is None or task.done() for task in (self._join, *self._closing))
 
     def leave_age(self) -> float | None:
-        """Return how long the oldest leave still running has run, in seconds, or ``None``."""
-        if not self._leaves:
+        """Return how long the room connection has been leaving its room, in seconds, or ``None``.
+
+        Counted from the oldest leave still running, or from when a timed-out
+        join was abandoned while its attempt still runs: either holds the room.
+        """
+        starts = list(self._leaves.values())
+        if self._leave_pending and self._abandoned_at is not None:
+            starts.append(self._abandoned_at)
+        if not starts:
             return None
-        return time.monotonic() - min(self._leaves.values())
+        return time.monotonic() - min(starts)
 
     async def settle(self) -> None:
-        """Wait until the room connection is :attr:`settled`, cancelling nothing.
+        """Wait for the room connection's join and leave work to end, cancelling nothing.
 
         A join attempt and a leave keep running to their end; this only waits
-        for them, including a leave that starts while it waits. Cancelling the
-        wait leaves them running.
+        for them, including a timed-out join's attempt and the leave that
+        follows it. A room connection still open has nothing to wait for and
+        returns at once. Cancelling the wait leaves them running.
         """
-        while pending := [
-            task for task in (self._join, *self._closing) if task is not None and not task.done()
-        ]:
-            await asyncio.wait(pending)
+        while True:
+            pending = [
+                task
+                for task in (self._join, *self._closing)
+                if task is not None and not task.done()
+            ]
+            if pending:
+                await asyncio.wait(pending)
+            elif self._leave_pending:
+                # The leave an abandoned attempt starts from its done-callback.
+                await asyncio.sleep(0.01)
+            else:
+                return
 
     @property
     def active(self) -> bool:
@@ -293,6 +325,11 @@ class RoomSession:
         done, _ = await asyncio.wait({attempt}, timeout=JOIN_TIMEOUT_SECONDS)
         if not done:
             self._leave_pending = True
+            self._abandoned_at = time.monotonic()
+            # Tracked until it settles, before the callback that starts the leave,
+            # so a settle() waiting on it moves on to that leave.
+            self._closing.add(attempt)
+            attempt.add_done_callback(self._closing.discard)
             attempt.add_done_callback(self._leave_when_settled)
             if self.joining:
                 await self._fail(_JOIN_TIMED_OUT, leave=False)
@@ -426,9 +463,13 @@ class RoomSession:
         self._leaves[leave] = time.monotonic()
         leave.add_done_callback(self._closing.discard)
         leave.add_done_callback(self._leave_ended)
-        done, _ = await asyncio.wait({leave}, timeout=LEAVE_TIMEOUT_SECONDS)
+        try:
+            done, _ = await asyncio.wait({leave}, timeout=LEAVE_TIMEOUT_SECONDS)
+        finally:
+            # Also when the caller is cancelled mid-wait: the leave runs on.
+            if not leave.done():
+                self._late.add(leave)
         if not done:
-            self._late.add(leave)
             logger.warning(
                 "leaving the LiveKit room is taking long; going on without waiting",
                 conn_id=self.conn_id,

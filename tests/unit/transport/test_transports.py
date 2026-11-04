@@ -59,7 +59,10 @@ async def test_stop_gives_up_at_the_bound_and_says_so(caplog: pytest.LogCaptureF
 
     assert slow.cancelled
     assert not slow.settled
-    assert "transport work still running at shutdown" in [r.getMessage() for r in caplog.records]
+    assert any(
+        r.getMessage().startswith("transport work still running at shutdown")
+        for r in caplog.records
+    )
 
 
 def test_health_aggregates_the_routers() -> None:

@@ -216,12 +216,22 @@ def _live_transport_objects() -> dict[str, int]:
     from reactor_runtime.transport.webrtc.peer import WebRTCPeer
 
     participant: type | None = None
+    room_session: type | None = None
     if livekit_available():
         from reactor_runtime.transport.livekit.participant import ParticipantConnection
+        from reactor_runtime.transport.livekit.room import RoomSession
 
         participant = ParticipantConnection
+        room_session = RoomSession
 
-    counts = {"connections": 0, "peers": 0, "pacers": 0, "participants": 0, "step_decoders": 0}
+    counts = {
+        "connections": 0,
+        "peers": 0,
+        "pacers": 0,
+        "participants": 0,
+        "step_decoders": 0,
+        "rooms_leaving": 0,
+    }
     for obj in gc.get_objects():
         if isinstance(obj, WebRTCConnection):
             counts["connections"] += 1
@@ -233,6 +243,9 @@ def _live_transport_objects() -> dict[str, int]:
             counts["step_decoders"] += 1
         elif participant is not None and isinstance(obj, participant):
             counts["participants"] += 1
+        elif room_session is not None and isinstance(obj, room_session):
+            # A runtime from before room connections tracked their leave counts none.
+            counts["rooms_leaving"] += not getattr(obj, "settled", True)
     return counts
 
 

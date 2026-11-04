@@ -75,6 +75,11 @@ def _stop_while_silent(runtime: RuntimeProcess, relay: StallingRelay) -> list[st
             "did not answer"
         )
     time.sleep(max(0.0, _SILENT_S - (time.monotonic() - stopped_at)))
+    try:
+        # One room connection still leaving is not a reason to replace the process.
+        runtime.request("GET", "/health")
+    except urllib.error.HTTPError as error:
+        failures.append(f"/health answered {error.code} while one room connection was leaving")
     relay.resume()
     try:
         runtime.wait_ready(timeout_s=CLOSE_TIMEOUT_S)

@@ -28,6 +28,8 @@ from pydantic import BaseModel
 from reactor_runtime.core import ConnectionSink, ConnId, Health, SessionState
 from reactor_runtime.log import get_logger
 
+logger = get_logger(__name__)
+
 
 class ErrorDetail(BaseModel):
     """The body every rejected request carries: a human-readable motive.
@@ -353,16 +355,15 @@ class TransportRouter(ABC):
         return Health.healthy()
 
 
-logger = get_logger(__name__)
-
-
 class Transports:
     """The transports as one service component, released after the runner.
 
     Its stop awaits every router's :meth:`TransportRouter.settle`, at most
     *settle_timeout* seconds in all, and its health aggregates theirs. The
-    assembly makes the runner depend on it, so it stops after the runner has
-    torn the session down and closed its connections.
+    service stops components in the reverse of their dependencies, so the
+    assembly adds it to the runner's ``depends_on``: that orders the stop
+    after the runner has torn the session down and closed its connections,
+    and adds nothing the runner uses.
 
     Args:
         routers: The transports the runtime serves.
@@ -395,9 +396,8 @@ class Transports:
         if pending:
             await asyncio.wait(pending)
             logger.warning(
-                "transport work still running at shutdown",
+                "transport work still running at shutdown; the event loop's end cancels it",
                 timeout_s=self._settle_timeout,
-                health=self.health().detail,
             )
 
     def health(self) -> Health:

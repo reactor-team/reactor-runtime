@@ -1214,6 +1214,7 @@ class ResourceSampler:
                 live_client_stats=reading["client_stats_connections"],
                 tasks=reading["tasks"],
                 live_participants=reading["live"].get("participants", 0),
+                live_rooms_leaving=reading["live"].get("rooms_leaving", 0),
                 child_processes=children,
                 child_rss_bytes=children_rss,
                 shm_blocks=shm[0] if shm else None,

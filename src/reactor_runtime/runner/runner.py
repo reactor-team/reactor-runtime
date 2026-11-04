@@ -298,6 +298,7 @@ class Runner(ServiceComponent, ConnectionSink):
     """
 
     name = "runner"
+    # The assembly adds the transports component, so they stop after the runner (serve._assemble).
     depends_on: tuple[str, ...] = ()
 
     def __init__(self, cfg: RuntimeConfig, metrics: RuntimeMetrics | None = None) -> None:

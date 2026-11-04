@@ -28,6 +28,7 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field, SecretStr, field_validator
 
 from reactor_runtime.core import ConnId, Health, HealthStatus, LiveKitConfig
+from reactor_runtime.log import get_logger
 from reactor_runtime.transport.livekit.version import TRANSPORT_NAME, TRANSPORT_VERSION
 from reactor_runtime.transport.router import (
     CHOSEN_CONN_ID_MIN,
@@ -42,6 +43,8 @@ from reactor_runtime.transport.router import (
 
 if TYPE_CHECKING:
     from reactor_runtime.transport.livekit.room import RoomSession
+
+logger = get_logger(__name__)
 
 _PREFIX = "/sessions/{sid}/transport/livekit"
 
@@ -219,6 +222,7 @@ class LiveKitRouter(TransportRouter):
                     raise
                 if previous is not None and not previous.settled:
                     self._leaving.add(previous)
+                self._leaving = {r for r in self._leaving if not r.settled}
                 self._room = room
                 self._room_epoch = epoch
             return RoomConnectionAccepted(connection_id=conn_id)
@@ -272,34 +276,51 @@ class LiveKitRouter(TransportRouter):
         """Wait for every room connection this router holds to leave its room.
 
         Leaves are never cancelled here: a leave cut short may never reach the
-        server, and the participant would stay in the room.
+        server, and the participant would stay in the room. Cancelled at the
+        process's bound, it logs each room connection still leaving and for
+        how long.
         """
         rooms = self._rooms()
-        if rooms:
+        if not rooms:
+            return
+        try:
             await asyncio.gather(*(room.settle() for room in rooms))
+        except asyncio.CancelledError:
+            for room in self._rooms():
+                age = room.leave_age()
+                logger.warning(
+                    "a LiveKit room connection was still leaving at shutdown",
+                    conn_id=room.conn_id,
+                    leaving_s=None if age is None else round(age, 1),
+                )
+            raise
 
     def health(self) -> Health:
-        """Report unhealthy once a leave has run past :data:`~.room.LEAVE_STUCK_SECONDS`.
+        """Report unhealthy once :data:`~.room.LEAVE_STUCK_ROOMS` room connections are stuck.
 
-        A room that never answers a leave holds the room connection, and the
-        next session's leave against it would hold one more: the deployment
-        should replace the process.
+        A room connection is stuck once it has been leaving its room for
+        :data:`~.room.LEAVE_STUCK_SECONDS`. One alone stays healthy: a LiveKit
+        server outage leaves one on every process whose session ended during
+        it, and replacing them all would end live sessions and fix nothing.
+        Several mean the process keeps losing room connections, and the
+        deployment should replace it. ``/health`` answers 503 while this is
+        unhealthy.
         """
-        from reactor_runtime.transport.livekit.room import LEAVE_STUCK_SECONDS
+        from reactor_runtime.transport.livekit.room import LEAVE_STUCK_ROOMS, LEAVE_STUCK_SECONDS
 
         ages = [age for room in self._rooms() if (age := room.leave_age()) is not None]
-        if ages and max(ages) > LEAVE_STUCK_SECONDS:
+        stuck = [age for age in ages if age > LEAVE_STUCK_SECONDS]
+        if len(stuck) >= LEAVE_STUCK_ROOMS:
             return Health(
                 HealthStatus.UNHEALTHY,
-                f"a LiveKit room leave has run for {max(ages):.0f} s "
-                f"({len(ages)} room connection(s) still leaving)",
+                f"{len(stuck)} LiveKit room connections have been leaving for over "
+                f"{LEAVE_STUCK_SECONDS:.0f} s (the oldest {max(stuck):.0f} s)",
             )
         return Health.healthy()
 
     def _rooms(self) -> list[RoomSession]:
         """Return the room connections not yet settled, the current one included."""
-        self._leaving = {room for room in self._leaving if not room.settled}
-        rooms = list(self._leaving)
+        rooms = [room for room in self._leaving if not room.settled]
         if self._room is not None and self._room not in self._leaving and not self._room.settled:
             rooms.append(self._room)
         return rooms

@@ -670,6 +670,7 @@ async def test_a_room_still_leaving_when_the_next_session_opens_is_kept_and_repo
     rooms = iter([first, FakeRoom()])
     monkeypatch.setattr(room_module.rtc, "Room", lambda: next(rooms))
     monkeypatch.setattr(room_module, "LEAVE_STUCK_SECONDS", 0.1)
+    monkeypatch.setattr(room_module, "LEAVE_STUCK_ROOMS", 1)
     runner = RouterRunner()
     router = LiveKitRouter()
     app = FastAPI()
@@ -688,7 +689,7 @@ async def test_a_room_still_leaving_when_the_next_session_opens_is_kept_and_repo
         await asyncio.sleep(0.2)  # past the bound and the stuck limit: the first leave still runs
         health = router.health()
         assert health.status is HealthStatus.UNHEALTHY
-        assert "1 room connection(s) still leaving" in str(health.detail)
+        assert "1 LiveKit room connections have been leaving" in str(health.detail)
 
         settling = asyncio.create_task(router.settle())
         await asyncio.sleep(0.05)
@@ -701,3 +702,129 @@ async def test_a_room_still_leaving_when_the_next_session_opens_is_kept_and_repo
     assert not leave.cancelled
     assert first.disconnects == 1
     assert router.health().status is HealthStatus.HEALTHY
+
+
+@pytest.mark.usefixtures("short_leave")
+async def test_one_room_connection_stuck_leaving_keeps_the_process_healthy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rooms = [FakeRoom(), FakeRoom(), FakeRoom()]
+    leaves = [_slow_leave(monkeypatch, room) for room in rooms[:2]]
+    queue = iter(rooms)
+    monkeypatch.setattr(room_module.rtc, "Room", lambda: next(queue))
+    monkeypatch.setattr(room_module, "LEAVE_STUCK_SECONDS", 0.1)
+    runner = RouterRunner()
+    router = LiveKitRouter()
+    app = FastAPI()
+    router.mount(app, cast(Any, runner))
+    path = "/sessions/s1/transport/livekit/connections"
+    body = {"url": "wss://rooms.example", "token": "a-token"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://runtime") as client:
+        assert (await client.post(path, json=body)).status_code == 202
+        await _settle()
+        runner.epoch = 2
+        assert (await client.post(path, json=body)).status_code == 202
+        await asyncio.sleep(0.2)
+        assert router.health().status is HealthStatus.HEALTHY  # one stuck: an outage, not a leak
+
+        runner.epoch = 3
+        last = await client.post(path, json=body)
+        await asyncio.sleep(0.2)
+        assert (
+            router.health().status is HealthStatus.UNHEALTHY
+        )  # two stuck: the process keeps losing them
+
+        for leave in leaves:
+            leave.release()
+        await asyncio.wait_for(router.settle(), timeout=1.0)
+        assert (await client.delete(f"{path}/{last.json()['connection_id']}")).status_code == 204
+    assert router.health().status is HealthStatus.HEALTHY
+
+
+@pytest.mark.usefixtures("short_deadline")
+async def test_settle_waits_for_a_timed_out_join_and_the_leave_after_it() -> None:
+    connect = Gate(open_=False)
+    room, control = FakeRoom(connect=connect), FakeControl(_VIDEO_OUT)
+    session = _session(room, control)
+    session.start()
+    await asyncio.sleep(0.1)  # past the deadline: the join failed, its connect still runs
+    assert not session.settled
+    assert session.leave_age() is not None  # the abandoned attempt holds the room
+
+    settling = asyncio.create_task(session.settle())
+    await asyncio.sleep(0.05)
+    assert not settling.done()
+    connect.release()
+    await asyncio.wait_for(settling, timeout=1.0)
+
+    assert session.settled
+    assert room.disconnects == 1
+    assert session.leave_age() is None
+
+
+@pytest.mark.usefixtures("short_leave")
+async def test_a_leave_whose_caller_gave_up_still_logs_its_late_end(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    room, control = FakeRoom(), FakeControl(_VIDEO_OUT)
+    leave = _slow_leave(monkeypatch, room)
+    session = _session(room, control)
+    session.start()
+    await _settle()
+    with caplog.at_level(logging.INFO, logger="reactor_runtime.transport.livekit.room"):
+        leaving = asyncio.create_task(session.leave())
+        await asyncio.sleep(0.01)
+        leaving.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await leaving
+        leave.release()
+        await _settle()
+
+    assert not leave.cancelled
+    assert "left the LiveKit room late" in [r.getMessage() for r in caplog.records]
+
+
+@pytest.mark.usefixtures("short_leave")
+async def test_a_settle_cut_off_at_shutdown_names_each_room_still_leaving(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    room = FakeRoom()
+    leave = _slow_leave(monkeypatch, room)
+    monkeypatch.setattr(room_module.rtc, "Room", lambda: room)
+    router = LiveKitRouter()
+    app = FastAPI()
+    router.mount(app, cast(Any, RouterRunner()))
+    path = "/sessions/s1/transport/livekit/connections"
+    body = {"url": "wss://rooms.example", "token": "a-token"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://runtime") as client:
+        opened = await client.post(path, json=body)
+        await _settle()
+        assert (await client.delete(f"{path}/{opened.json()['connection_id']}")).status_code == 204
+
+    with (
+        caplog.at_level(logging.WARNING, logger="reactor_runtime.transport.livekit.router"),
+        pytest.raises(TimeoutError),
+    ):
+        await asyncio.wait_for(router.settle(), timeout=0.05)
+
+    (record,) = [
+        r
+        for r in caplog.records
+        if r.getMessage() == "a LiveKit room connection was still leaving at shutdown"
+    ]
+    assert record.__dict__["reactor_fields"]["leaving_s"] >= 0
+    assert not leave.cancelled
+    leave.release()
+    await _settle()
+
+
+async def test_settle_returns_at_once_for_a_room_connection_still_open() -> None:
+    room, control = FakeRoom(), FakeControl(_VIDEO_OUT)
+    session = _session(room, control)
+    session.start()
+    await _settle()
+    assert session.state is RoomState.OPEN
+
+    await asyncio.wait_for(session.settle(), timeout=0.5)
+
+    await session.leave()

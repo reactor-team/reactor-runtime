@@ -37,6 +37,7 @@ Exact counts, which must be 0 on every cycle:
 | `live_connections`, `live_peers`, `live_pacers` | Transport objects still alive after a collection, with no client connected. |
 | `live_client_stats` | Connections the runtime still keeps client-stats state for, with no client connected. |
 | `live_participants` | Room participant connections still alive after a collection, with no participant in the room. |
+| `live_rooms_leaving` | Room connections still joining or leaving their LiveKit room after a collection, with no session open: a leave the runtime stopped waiting for that never finished. |
 | `live_step_requests` | Step requests whose order the runtime still keeps for a connection, or whose failure the model still keeps, with no client connected. |
 | `live_step_decoders` | H.264 decoders a connection opened for its step frames, still alive after a collection, with no client connected. |
 | `tasks` | asyncio tasks on the runtime's loop; must never rise above the reading taken before the first client. |
