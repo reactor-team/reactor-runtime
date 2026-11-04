@@ -142,6 +142,8 @@ STUCK_ENV = "REACTOR_MODEL_SERVER_STUCK_SECONDS"
 DEFAULT_SOCKET = "/run/reactor-model-server/sock"
 DEFAULT_HEALTH_PORT = 8090
 DEFAULT_STUCK_SECONDS = 120.0
+DEFAULT_GRACE_SECONDS = 30.0
+"""Seconds a draining model server gives its running requests; ``SIGTERM_GRACE_PERIOD`` sets it."""
 
 
 @dataclass(frozen=True)
@@ -158,7 +160,8 @@ class ServerProcessConfig:
         stuck_after: Seconds one step may run before ``/health`` reports the
             model server stuck.
         exit_timeout: Seconds the orderly shutdown may take.
-        grace_period: Seconds a draining step is given to finish.
+        grace_period: Seconds a draining model server gives its running
+            requests, futures included, before it fails the ones left.
     """
 
     socket: str
@@ -168,7 +171,7 @@ class ServerProcessConfig:
     health_port: int = DEFAULT_HEALTH_PORT
     stuck_after: float = DEFAULT_STUCK_SECONDS
     exit_timeout: float = 10.0
-    grace_period: float = 30.0
+    grace_period: float = DEFAULT_GRACE_SECONDS
 
 
 def server_process_config() -> ServerProcessConfig:
@@ -205,5 +208,5 @@ def server_process_config() -> ServerProcessConfig:
         health_port=int_env(HEALTH_PORT_ENV, DEFAULT_HEALTH_PORT),
         stuck_after=stuck_after,
         exit_timeout=duration_env("EXIT_TIMEOUT_SECONDS", 10.0),
-        grace_period=duration_env("SIGTERM_GRACE_PERIOD", 30.0),
+        grace_period=duration_env("SIGTERM_GRACE_PERIOD", DEFAULT_GRACE_SECONDS),
     )

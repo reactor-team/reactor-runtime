@@ -14,6 +14,7 @@ import time
 import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -25,6 +26,8 @@ from endurance.churn import run_churn
 from endurance.harness import SUITE_DIR, RuntimeProcess, V1Client
 from endurance.report import DEFAULT_OUTPUT_DIR
 
+from reactor_runtime.model_server import ModelServer
+
 MODEL_DIR = SUITE_DIR / "model-split"
 
 DESCRIPTION = (
@@ -33,8 +36,37 @@ DESCRIPTION = (
     "reactor_runtime.model_server) beside it, so every frame goes to the model server "
     "and back through its socket and shared memory. Each cycle a v1 client joins, "
     "streams until 60 frames come back, and closes. The session's one link to the "
-    "model server lasts the whole run, so what the churn checks must not grow with it."
+    "model server lasts the whole run, so what the churn checks must not grow with it. "
+    "It runs twice: the model returns each result from step(), then returns a future "
+    "that a completion thread resolves. After each cycle the model server's probe must "
+    "report zero retained requests."
 )
+
+ANSWER_MODES = ("immediate", "future")
+
+
+def _returns_futures() -> bool:
+    """Whether this runtime's model server takes a future as a step output."""
+    return "Future" in str(ModelServer.step.__annotations__.get("return", ""))
+
+
+class _SharedRuntime(RuntimeProcess):
+    model_server_port: int
+
+    def settled_probe(
+        self, *, connections: int = 0, tasks: int | None = None
+    ) -> tuple[dict[str, Any], float | None]:
+        reading, released = super().settled_probe(connections=connections, tasks=tasks)
+        deadline = time.monotonic() + 10
+        while True:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{self.model_server_port}/_endurance/model_server", timeout=5
+            ) as response:
+                pending = json.load(response)["pending_requests"]
+            if pending == 0:
+                return reading, released
+            assert time.monotonic() < deadline, f"model server retained {pending} requests"
+            time.sleep(0.1)
 
 
 def _free_port() -> int:
@@ -58,17 +90,21 @@ def _wait_available(server: subprocess.Popen[bytes], port: int, timeout_s: float
     raise TimeoutError("the model server never became available")
 
 
-@pytest.fixture
+@pytest.fixture(params=ANSWER_MODES)
 def runtime(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[RuntimeProcess]:
     """The model server, then a runtime serving the application half against it."""
+    mode = request.param
+    if mode == "future" and not _returns_futures():
+        pytest.skip("this runtime's model server takes no futures from step()")
     DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     directory = Path(tempfile.mkdtemp(prefix="rre"))
     socket_path = directory / "sock"
     (directory / "s0").mkdir()
     pythonpath = os.pathsep.join(
         [
+            str(SUITE_DIR),
             str(MODEL_DIR),
             str(SUITE_DIR / "model"),
             str(SUITE_DIR.parent / "examples" / "echo"),
@@ -78,7 +114,7 @@ def runtime(
     health_port = _free_port()
     log = (DEFAULT_OUTPUT_DIR / f"{request.node.name}-model-server.log").open("w")
     server = subprocess.Popen(
-        [sys.executable, "-m", "reactor_runtime.model_server"],
+        [sys.executable, "-m", "endurance.model_server_launcher"],
         cwd=MODEL_DIR,
         env={
             **os.environ,
@@ -89,6 +125,7 @@ def runtime(
             "REACTOR_MAX_SESSIONS": "1",
             "REACTOR_SHM_SLOT_DIR": str(directory / "s{slot}"),
             "REACTOR_LOG_LEVEL": os.environ.get("REACTOR_LOG_LEVEL", "WARNING"),
+            "ECHO_ANSWER_MODE": mode,
         },
         stdout=log,
         stderr=subprocess.STDOUT,
@@ -100,9 +137,10 @@ def runtime(
         monkeypatch.setenv("REACTOR_SESSION_SLOT", "0")
         monkeypatch.setenv("REACTOR_SHM_DIR", str(directory / "s0"))
         monkeypatch.setenv("PYTHONPATH", pythonpath)
-        proc = RuntimeProcess(
+        proc = _SharedRuntime(
             DEFAULT_OUTPUT_DIR / f"{request.node.name}-runtime.log", model_dir=MODEL_DIR
         )
+        proc.model_server_port = health_port
         proc.wait_ready()
         yield proc
     finally:
@@ -118,6 +156,9 @@ def runtime(
         shutil.rmtree(directory, ignore_errors=True)
 
 
-async def test_split_echo(runtime: RuntimeProcess) -> None:
+async def test_split_echo(runtime: RuntimeProcess, request: pytest.FixtureRequest) -> None:
     """Release everything a connection held, with the model's engine in a shared model server."""
-    await run_churn(runtime, test_name="split-echo", description=DESCRIPTION, client=V1Client)
+    mode = request.node.callspec.params["runtime"]
+    await run_churn(
+        runtime, test_name=f"split-echo-{mode}", description=DESCRIPTION, client=V1Client
+    )

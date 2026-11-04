@@ -137,6 +137,7 @@ class ModelServerProcess:
             settings=settings,
             max_sessions=self._process.max_sessions,
             stuck_after=self._process.stuck_after,
+            drain_timeout=self._process.grace_period,
         )
         try:
             await self._server.start()

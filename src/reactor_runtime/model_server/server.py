@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
@@ -90,6 +91,30 @@ class ModelServer[RequestT, ResultT]:
       joins the next step, never the running one.
     * A request whose timeout passed while it waited is answered as expired and
       never reaches ``step()``.
+    * A request whose output is a :class:`concurrent.futures.Future` keeps
+      running after ``step()`` returns, while other sessions' requests are
+      stepped, and its session stays busy until the future is done. See
+      :meth:`step`.
+
+    A pipeline hands each request to its first stage and returns a future
+    that its last stage completes::
+
+        def step(self, requests):
+            futures = []
+            for request in requests:
+                future = Future()
+                future.set_running_or_notify_cancel()   # its work starts now
+                self.pipeline.submit(request, future)
+                futures.append(future)
+            return futures
+
+        # on the pipeline's last stage, once per request
+        future.set_result(frame)          # or future.set_exception(error)
+
+        def session_closed(self, slot, generation):
+            # Stop that generation's work and wait for any stage still
+            # writing the slot's state, then resolve its futures.
+            self.pipeline.discard(slot, generation)
 
     What crosses between the halves is pickled, so a request, a result and a
     signal can be any value pickle takes. Plain data, such as frozen
@@ -147,7 +172,9 @@ class ModelServer[RequestT, ResultT]:
         A raise here fails the model server's start, and its process exits.
         """
 
-    def step(self, requests: list[ServerRequest[RequestT]]) -> Sequence[ResultT | Exception]:
+    def step(
+        self, requests: list[ServerRequest[RequestT]]
+    ) -> Sequence[ResultT | Exception | Future[ResultT]]:
         """Run one step for every request and return one output per request, in order.
 
         An output that is an exception instance fails that request alone, and
@@ -158,7 +185,37 @@ class ModelServer[RequestT, ResultT]:
         sees a :class:`~reactor_runtime.model_server.BatchFailed` carrying the
         error, and its application decides what to do. Nothing is stepped
         again, and the model server goes on serving; :meth:`health` says
-        whether it can.
+        whether it can. Requests whose futures earlier steps returned are not
+        part of the batch, and keep running.
+
+        An output that is a :class:`concurrent.futures.Future` completes its
+        request later, from any thread, as a stdlib executor completes one:
+
+        * Call ``set_running_or_notify_cancel()`` when the request's work
+          starts, before anything it does is visible, and skip the work if it
+          returns ``False``. Then call ``set_result()`` or ``set_exception()``
+          exactly once. An exception fails that request alone, as an
+          exception output does.
+        * The model server cancels the future when the request's timeout
+          passes, when its session gives up on it, resets or leaves, and when
+          the model server stops. ``cancel()`` only reaches work that has not
+          started: once running, the work goes on, and its result is dropped
+          if the session no longer waits for it. ``set_result()`` on a future
+          cancelled before it ran raises ``InvalidStateError``, which is why
+          the work starts with ``set_running_or_notify_cancel()``.
+        * Until the future is done, its session stays busy: a step it sends is
+          answered with :class:`~reactor_runtime.model_server.StepStillRunning`,
+          even after the request's timeout passed and the session got
+          :class:`~reactor_runtime.model_server.StepExpired`, so the model
+          never has two requests of one session running. A reset or a leave
+          frees the session at once instead, and :meth:`session_closed` keeps
+          the closed generation's work away from the next one's state.
+        * Every future must be done eventually, its session closed or not: one
+          that is not done ``stuck_after`` seconds after ``step()`` returned it
+          makes the model server report itself unhealthy, so a pipeline that
+          stops making progress is restarted.
+        * The future's done-callbacks run on the thread that completes it,
+          and are short: they finish the request and queue its answer.
 
         Args:
             requests: Between one and the effective ``max_batch`` requests, at
@@ -166,7 +223,7 @@ class ModelServer[RequestT, ResultT]:
 
         Returns:
             One output per request, in the order of *requests*: its result,
-            or an exception.
+            an exception, or a future that resolves to one of them.
         """
         raise NotImplementedError(f"{type(self).__name__} must define step()")
 
@@ -181,8 +238,14 @@ class ModelServer[RequestT, ResultT]:
         """Drop the state of the session that held *slot*.
 
         Runs when the session runtime disconnects or dies, and before a reset
-        reopens the slot; for any slot it runs before the next
+        reopens the slot. For any slot it runs before the next
         :meth:`session_opened`. A raise is logged and ignored.
+
+        A model that returns futures stops this generation's work here: work
+        that already started is out of ``cancel()``'s reach (see :meth:`step`),
+        so return only once no thread will write state the next session on
+        *slot* uses, and resolve the generation's futures, whose results the
+        model server drops. Its time counts toward ``stuck_after``.
         """
 
     def signal(self, slot: int, signal: Any) -> None:

@@ -21,6 +21,18 @@ exception, or a result the link cannot carry, fails that request alone. A
 :class:`~reactor_runtime.model_server.BatchFailed`, and the model server goes on: it
 never steps a request twice.
 
+A request whose output is a :class:`concurrent.futures.Future` stays running
+after ``step()`` returns, and keeps its session busy until the future is
+done. The future's done-callback, which runs on whichever thread completes
+it, finishes the request under the server's lock and posts the answer to the
+session's outbox; the server never calls ``cancel()`` or
+``add_done_callback()`` while it holds that lock. A request whose timeout
+passes, or whose session sends a cancel, is answered at once, but its session
+stays busy until the future is done, unless ``cancel()`` shows the work never
+started. A reset or a leave releases the session at once and leaves the old
+generation's work to ``session_closed()``; until its future is done, it still
+counts toward :meth:`ModelServerCore.health`.
+
 A session's messages are applied in the order it sent them. While a
 :class:`~reactor_runtime.model_server.protocol.Reset` is pending, the session's
 steps are refused with :class:`~reactor_runtime.model_server.ResetRequired`:
@@ -45,15 +57,18 @@ from __future__ import annotations
 import asyncio
 import collections.abc
 import enum
+import functools
 import itertools
 import threading
 import time
+from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Any
 
 from reactor_runtime.core import Health, HealthStatus
 from reactor_runtime.log import get_logger
 from reactor_runtime.model_server.batching import BatchPolicy, Waiting
+from reactor_runtime.model_server.config import DEFAULT_GRACE_SECONDS
 from reactor_runtime.model_server.connection import Connection, ConnectionState
 from reactor_runtime.model_server.errors import (
     BatchFailed,
@@ -84,12 +99,14 @@ from reactor_runtime.model_server.server import ModelServer, ServerRequest, Serv
 logger = get_logger(__name__)
 
 DEFAULT_STUCK_SECONDS = 120.0
-"""How long one step may run before the model server reports itself unhealthy."""
+"""How long one call into the model, or one request's future, may run before health fails."""
 
 HELLO_TIMEOUT = 10.0
 """Seconds an accepted connection may take to send its hello before it is closed."""
 
 _IDLE_WAIT = 0.5
+
+_STOPPING = "model_server_lost: the model server is stopping"
 
 
 class ServerState(enum.Enum):
@@ -128,6 +145,30 @@ class _Reset:
     session_id: str | None
 
 
+@dataclass
+class _Pending:
+    """A request handed to ``step()`` that has no answer from the model yet.
+
+    ``answered`` means its session already got an answer (its timeout passed,
+    it was cancelled), so the model's result is dropped; ``detached`` means
+    its session reset or left, so its session is no longer held for it.
+    """
+
+    ticket: int
+    request: ServerRequest
+    waiting: Waiting
+    connection: Connection
+    since: float
+    future: Future[Any] | None = None
+    answered: bool = False
+    detached: bool = False
+
+    @property
+    def awaited(self) -> bool:
+        """Whether a session still waits for this request's answer."""
+        return not self.answered and not self.detached
+
+
 class ModelServerCore:
     """Serve one loaded model to the session runtimes that connect, as a service component.
 
@@ -139,8 +180,11 @@ class ModelServerCore:
         max_sessions: The deployment's session count: only slots ``0`` to
             ``max_sessions - 1`` are served, and at most that many connections
             may be opening at once.
-        stuck_after: Seconds one step may run before :meth:`health` reports
-            the model server stuck.
+        stuck_after: Seconds one call into the model, or one request's
+            future, may run before :meth:`health` reports the model server
+            stuck.
+        drain_timeout: Seconds :meth:`drain` waits for running requests
+            before it fails the ones left.
     """
 
     name = "model_server"
@@ -155,6 +199,7 @@ class ModelServerCore:
         settings: ServerSettings,
         max_sessions: int,
         stuck_after: float = DEFAULT_STUCK_SECONDS,
+        drain_timeout: float = DEFAULT_GRACE_SECONDS,
     ) -> None:
         self._model = model
         self._transport = transport
@@ -162,6 +207,8 @@ class ModelServerCore:
         self._settings = settings
         self._max_sessions = max_sessions
         self._stuck_after = stuck_after
+        self._drain_timeout = drain_timeout
+        self._drain_deadline: float | None = None
         self._policy = BatchPolicy(settings.max_batch, settings.batch_window)
         self._cond = threading.Condition()
         self._state = ServerState.SERVING
@@ -173,9 +220,11 @@ class ModelServerCore:
         self._generations: dict[int, int] = {}
         self._numbers = itertools.count(1)
         self._listener: LinkListener | None = None
-        self._step_started: float | None = None
+        self._call: tuple[str, float] | None = None
         self._step_thread: threading.Thread | None = None
         self._broken: str | None = None
+        self._pending: dict[int, _Pending] = {}
+        self._tickets = itertools.count(1)
 
     @property
     def state(self) -> ServerState:
@@ -201,20 +250,24 @@ class ModelServerCore:
         )
 
     async def drain(self) -> None:
-        """Stop taking work, let the running step finish, and answer everything still in flight.
+        """Stop taking work, wait for running requests, and fail what is left.
 
         From the moment this is called, a step or a reset is answered at once
         with :class:`~reactor_runtime.model_server.ModelServerStopping`, and a
         connection that sends its hello is closed without a refusal, so its
-        session waits for the model server that replaces this one. Once the
-        step thread has ended, every request still queued and every pending
-        reset is answered with ``ModelServerStopping``, and every connection still
-        opening is closed the same way. Open sessions stay connected until
+        session waits for the model server that replaces this one. The running
+        step finishes, and a request whose future is not done yet may still be
+        answered, until its own timeout or ``drain_timeout`` seconds after this
+        call, whichever comes first. Then every request still running or
+        queued, and every pending reset, is answered with
+        ``ModelServerStopping``, a future not done yet is cancelled, and every
+        connection still opening is closed. Open sessions stay connected until
         :meth:`stop`.
         """
         with self._cond:
             if self._state is ServerState.SERVING:
                 self._move(ServerState.DRAINING)
+                self._drain_deadline = time.monotonic() + self._drain_timeout
             self._cond.notify_all()
         if self._listener is not None:
             self._listener.close()
@@ -223,7 +276,12 @@ class ModelServerCore:
         self._answer_in_flight()
 
     async def stop(self) -> None:
-        """Close every session's connection, after the model closed its state."""
+        """Fail the requests left and close every session's connection.
+
+        A request still running is answered with ``ModelServerStopping``
+        through its session's outbox before the link closes, and its future
+        is cancelled; a result that arrives later is dropped.
+        """
         with self._cond:
             if self._state is not ServerState.STOPPED:
                 self._move(ServerState.STOPPED)
@@ -239,17 +297,29 @@ class ModelServerCore:
             self._leave(connection)
 
     def health(self) -> Health:
-        """Report the model's own health, a step that has run too long, and a stopped step thread.
+        """Report the model's own health, the model server's own faults, and stuck work.
 
-        A ``health()`` of the model that raises is reported as unhealthy.
+        Unhealthy when the step thread stopped, when one call into the model
+        (``step()``, ``session_opened()``, ``session_closed()``) has run longer
+        than ``stuck_after``, or when a request's future has not been done for
+        longer than ``stuck_after`` since ``step()`` returned it, whether or not
+        its session is still open. A ``health()`` of the model that raises is
+        reported as unhealthy.
         """
         if self._broken is not None:
             return Health(HealthStatus.UNHEALTHY, self._broken)
-        started = self._step_started
-        if started is not None and time.monotonic() - started > self._stuck_after:
+        now = time.monotonic()
+        call = self._call
+        if call is not None and now - call[1] > self._stuck_after:
+            return Health(
+                HealthStatus.UNHEALTHY, f"stuck: one {call[0]} has run for {now - call[1]:.0f} s"
+            )
+        with self._cond:
+            oldest = min((p.since for p in self._pending.values() if p.future), default=None)
+        if oldest is not None and now - oldest > self._stuck_after:
             return Health(
                 HealthStatus.UNHEALTHY,
-                f"stuck: one step has run for {time.monotonic() - started:.0f} s",
+                f"stuck: a request's future has not been done for {now - oldest:.0f} s",
             )
         try:
             return self._model.health()
@@ -264,26 +334,30 @@ class ModelServerCore:
         self._state = state
 
     def _answer_in_flight(self) -> None:
-        """Answer what the step thread left: queued requests, pending events, opening links.
+        """Fail queued and running requests and finish pending events and opening links.
 
         Runs once the step thread has ended, or on it as it ends after a fault,
         so it is the only thread that calls into the model.
         """
-        stopping = ModelServerStopping("model_server_lost: the model server is stopping")
+        stopping = ModelServerStopping(_STOPPING)
         with self._cond:
             events, self._events = self._events, []
             dropped = [
                 (connection, self._policy.drop(connection.number))
                 for connection in self._connections.values()
             ]
+            pending = list(self._pending.values())
+            self._pending.clear()
+            self._policy.finished([p.waiting.connection for p in pending if not p.detached])
+            self._cond.notify_all()
             opening = list(self._opening)
             self._opening.clear()
+        for item in pending:
+            if item.awaited:
+                self._answer(item.connection, failure(item.waiting.request_id, stopping))
+        _cancel(pending)
         for event in events:
-            if isinstance(event, _Leave):
-                self._leave(event.connection)
-            elif isinstance(event, _Reset):
-                self._reset_answered(event.connection)
-                self._answer(event.connection, failure(event.request_id, stopping))
+            self._refuse_while_stopping(event)
         for connection, requests in dropped:
             for request in requests:
                 self._answer(connection, failure(request.request_id, stopping))
@@ -293,6 +367,20 @@ class ModelServerCore:
             if connection.state in (ConnectionState.CONNECTING, ConnectionState.OPENING):
                 connection.move(ConnectionState.CLOSING)
                 connection.close()
+
+    def _refuse_while_stopping(self, event: _Open | _Leave | _Reset) -> None:
+        """Finish a lifecycle event that arrives while the model server stops.
+
+        An open stays among the opening connections, which are closed with the
+        others; a leave closes the session; a reset is refused.
+        """
+        if isinstance(event, _Leave):
+            self._leave(event.connection)
+        elif isinstance(event, _Reset):
+            self._reset_answered(event.connection)
+            self._answer(
+                event.connection, failure(event.request_id, ModelServerStopping(_STOPPING))
+            )
 
     # -- connections --------------------------------------------------------------------------
 
@@ -387,8 +475,7 @@ class ModelServerCore:
         if isinstance(message, Step):
             self._take(connection, message)
         elif isinstance(message, Cancel):
-            with self._cond:
-                self._policy.cancel(connection.number, message.request_id)
+            self._cancel_request(connection, message.request_id)
         elif isinstance(message, Signal):
             self._signal(connection, message)
         elif isinstance(message, Reset):
@@ -408,7 +495,7 @@ class ModelServerCore:
         refusal: BaseException | None = None
         with self._cond:
             if self._state is not ServerState.SERVING:
-                refusal = ModelServerStopping("model_server_lost: the model server is stopping")
+                refusal = ModelServerStopping(_STOPPING)
             elif connection.state is not ConnectionState.OPEN:
                 refusal = ModelServerRejected("the session is not open")
             elif connection.number in self._reset_pending:
@@ -424,6 +511,29 @@ class ModelServerCore:
         if refusal is not None:
             self._answer(connection, failure(step.request_id, refusal))
 
+    def _cancel_request(self, connection: Connection, request_id: int) -> None:
+        """Withdraw a waiting request, or stop answering a running one.
+
+        The session sent the cancel because it gave up on the answer, so a
+        running request gets none. Its session stays busy until its future is
+        done, unless ``cancel()`` shows the work never started.
+        """
+        with self._cond:
+            if self._policy.cancel(connection.number, request_id):
+                return
+            running = [
+                p
+                for p in self._pending.values()
+                if p.connection is connection
+                and p.waiting.request_id == request_id
+                and p.future is not None
+                and p.awaited
+            ]
+            for item in running:
+                item.answered = True
+            self._cond.notify_all()
+        _cancel(running)
+
     def _take_reset(self, connection: Connection, reset: Reset) -> None:
         with self._cond:
             serving = self._state is ServerState.SERVING
@@ -432,8 +542,7 @@ class ModelServerCore:
                 self._events.append(_Reset(connection, reset.request_id, reset.session_id))
                 self._cond.notify_all()
         if not serving:
-            stopping = ModelServerStopping("model_server_lost: the model server is stopping")
-            self._answer(connection, failure(reset.request_id, stopping))
+            self._answer(connection, failure(reset.request_id, ModelServerStopping(_STOPPING)))
 
     def _reset_answered(self, connection: Connection) -> None:
         with self._cond:
@@ -478,23 +587,48 @@ class ModelServerCore:
     def _step_until_drained(self) -> None:
         while True:
             with self._cond:
-                if self._state is not ServerState.SERVING:
+                if self._state is ServerState.STOPPED:
                     return
+                now = time.monotonic()
+                draining = self._state is ServerState.DRAINING
+                if draining:
+                    # What is left when this returns is answered by
+                    # _answer_in_flight(), events included.
+                    deadline = self._drain_deadline
+                    assert deadline is not None
+                    if now >= deadline or not any(p.awaited for p in self._pending.values()):
+                        return
+                overdue = self._expire_running(now)
                 events, self._events = self._events, []
                 turn = None
-                if not events:
+                if draining:
+                    # Draining applies lifecycle events but takes no new batches.
+                    if not events and not overdue:
+                        self._cond.wait(max(min(self._next_wake(_IDLE_WAIT), deadline - now), 0.0))
+                        continue
+                elif not events:
                     open_sessions = sum(
                         1 for c in self._connections.values() if c.state is ConnectionState.OPEN
                     )
-                    turn = self._policy.take(time.monotonic(), open_sessions)
-                    if not turn.batch and not turn.expired:
-                        wait = (
-                            _IDLE_WAIT if turn.wake_at is None else turn.wake_at - time.monotonic()
-                        )
-                        self._cond.wait(max(wait, 0.0))
+                    turn = self._policy.take(now, open_sessions)
+                    if not turn.batch and not turn.expired and not overdue:
+                        wait = _IDLE_WAIT if turn.wake_at is None else turn.wake_at - now
+                        self._cond.wait(max(self._next_wake(wait), 0.0))
                         continue
+            for item in overdue:
+                self._answer(
+                    item.connection,
+                    failure(
+                        item.waiting.request_id,
+                        StepExpired("the request's timeout passed while it ran"),
+                    ),
+                )
+            _cancel(overdue)
             for event in events:
-                self._apply(event)
+                if draining:
+                    self._refuse_while_stopping(event)
+                else:
+                    self._apply(event)
             if turn is None:
                 continue
             for request in turn.expired:
@@ -507,6 +641,34 @@ class ModelServerCore:
                 )
             if turn.batch:
                 self._run(turn.batch)
+
+    def _expire_running(self, now: float) -> list[_Pending]:
+        """Mark running requests whose timeout passed as answered; hold the condition."""
+        overdue = [
+            p
+            for p in self._pending.values()
+            if p.future is not None
+            and p.awaited
+            and p.waiting.deadline is not None
+            and p.waiting.deadline <= now
+        ]
+        for item in overdue:
+            item.answered = True
+        return overdue
+
+    def _next_wake(self, wait: float) -> float:
+        """Shorten *wait* to the earliest timeout of a running request; hold the condition."""
+        deadlines = [
+            p.waiting.deadline
+            for p in self._pending.values()
+            if p.future is not None and p.awaited and p.waiting.deadline is not None
+        ]
+        if not deadlines:
+            return wait
+        return min(wait, min(deadlines) - time.monotonic())
+
+    def _calling(self, what: str) -> _Timed:
+        return _Timed(self, what)
 
     def _apply(self, event: _Open | _Leave | _Reset) -> None:
         try:
@@ -536,7 +698,8 @@ class ModelServerCore:
             self._leave(held)
         connection.generation = self._next_generation(connection.slot)
         try:
-            self._model.session_opened(connection.slot, connection.generation)
+            with self._calling("session_opened()"):
+                self._model.session_opened(connection.slot, connection.generation)
         except Exception as exc:
             with self._cond:
                 self._opening.discard(connection)
@@ -563,7 +726,8 @@ class ModelServerCore:
             # close it, not refuse it, as _hello does, after the model closed the
             # state it just opened.
             try:
-                self._model.session_closed(connection.slot, connection.generation)
+                with self._calling("session_closed()"):
+                    self._model.session_closed(connection.slot, connection.generation)
             except Exception:
                 logger.exception("session_closed() raised", **connection.where())
             connection.move(ConnectionState.CLOSING)
@@ -590,7 +754,8 @@ class ModelServerCore:
         if was_open:
             assert connection.slot is not None
             try:
-                self._model.session_closed(connection.slot, connection.generation)
+                with self._calling("session_closed()"):
+                    self._model.session_closed(connection.slot, connection.generation)
             except Exception:
                 logger.exception("session_closed() raised", **connection.where())
             logger.info("session closed", generation=connection.generation, **connection.where())
@@ -602,10 +767,12 @@ class ModelServerCore:
         connection.move(ConnectionState.CLOSING)
         with self._cond:
             self._policy.drop(connection.number)
+            running = self._drop_pending(connection)
             self._reset_pending.discard(connection.number)
             self._connections.pop(connection.number, None)
             if connection.slot is not None and self._by_slot.get(connection.slot) is connection:
                 del self._by_slot[connection.slot]
+        _cancel(running)
 
     def _reset(self, event: _Reset) -> None:
         connection = event.connection
@@ -615,16 +782,21 @@ class ModelServerCore:
         assert connection.slot is not None
         with self._cond:
             dropped = self._policy.drop(connection.number)
+            running = self._drop_pending(connection)
+            dropped.extend(p.waiting for p in running if not p.answered)
+        _cancel(running)
         for request in dropped:
             self._answer(connection, failure(request.request_id, StepExpired("the session reset")))
         try:
-            self._model.session_closed(connection.slot, connection.generation)
+            with self._calling("session_closed()"):
+                self._model.session_closed(connection.slot, connection.generation)
         except Exception:
             logger.exception("session_closed() raised", **connection.where())
         connection.generation = self._next_generation(connection.slot)
         connection.session_id = event.session_id
         try:
-            self._model.session_opened(connection.slot, connection.generation)
+            with self._calling("session_opened()"):
+                self._model.session_opened(connection.slot, connection.generation)
         except Exception as exc:
             # The old state is closed and the new one never opened: the session
             # is refused, as a raise from session_opened() is documented to do,
@@ -672,32 +844,132 @@ class ModelServerCore:
             with self._cond:
                 self._policy.finished([r.connection for r in batch])
             return
-        requests = [
-            ServerRequest(c.slot or 0, c.generation, r.payload, c.session_id) for r, c in live
+        now = time.monotonic()
+        pending = [
+            _Pending(
+                next(self._tickets),
+                ServerRequest(c.slot or 0, c.generation, r.payload, c.session_id),
+                r,
+                c,
+                now,
+            )
+            for r, c in live
         ]
-        self._step_started = time.monotonic()
+        with self._cond:
+            self._pending.update((p.ticket, p) for p in pending)
         try:
-            outputs = self._model.step(requests)
-            if not _is_sequence(outputs) or len(outputs) != len(requests):
+            with self._calling("step()"):
+                outputs = self._model.step([p.request for p in pending])
+            if not _is_sequence(outputs) or len(outputs) != len(pending):
                 count = len(outputs) if _is_sequence(outputs) else type(outputs).__name__
-                raise RuntimeError(f"step() returned {count} outputs for {len(requests)} requests")
+                raise RuntimeError(f"step() returned {count} outputs for {len(pending)} requests")
         except Exception as exc:
-            logger.exception("step() raised; failing its batch", size=len(requests))
-            failed = BatchFailed(exc)
-            for request, connection in live:
-                self._answer(connection, failure(request.request_id, failed))
-            return
-        finally:
-            self._step_started = None
+            logger.exception("step() raised; failing its batch", size=len(pending))
             with self._cond:
-                self._policy.finished([r.connection for r in batch])
-        for (request, connection), output in zip(live, outputs, strict=True):
-            self._answer(connection, self._outcome(request.request_id, output))
+                for item in pending:
+                    if self._pending.get(item.ticket) is item:
+                        self._complete(item, BatchFailed(exc))
+            return
+        futures: list[tuple[int, Future[Any]]] = []
+        with self._cond:
+            returned = time.monotonic()
+            for item, output in zip(pending, outputs, strict=True):
+                if self._pending.get(item.ticket) is not item:
+                    continue
+                if isinstance(output, Future):
+                    # Registered before its callback, which runs at once on a
+                    # future that is already done.
+                    item.future = output
+                    item.since = returned
+                    futures.append((item.ticket, output))
+                else:
+                    self._complete(item, output)
+            self._cond.notify_all()
+        for ticket, future in futures:
+            future.add_done_callback(functools.partial(self._resolve, ticket))
+
+    def _resolve(self, ticket: int, future: Future[Any]) -> None:
+        """Finish the request behind *ticket* from its done future, on the completing thread."""
+        try:
+            if future.cancelled():
+                output: Any = StepExpired("the request was cancelled")
+            else:
+                error = future.exception()
+                output = future.result() if error is None else error
+            with self._cond:
+                item = self._pending.get(ticket)
+                if item is not None:
+                    self._complete(item, output)
+        except Exception as exc:
+            # concurrent.futures only logs what a callback raises, and the
+            # session would stay busy for good: make the fault visible.
+            logger.exception("finishing a request's future failed")
+            with self._cond:
+                self._broken = f"finishing a request's future failed: {type(exc).__name__}: {exc}"
+
+    def _complete(self, item: _Pending, output: Any) -> None:
+        """Finish a pending request while holding the server's condition."""
+        del self._pending[item.ticket]
+        connection = item.connection
+        if (
+            item.awaited
+            and connection.state is ConnectionState.OPEN
+            and connection.generation == item.request.generation
+            and self._connections.get(connection.number) is connection
+        ):
+            self._answer(connection, self._outcome(item.waiting.request_id, output))
+        else:
+            logger.debug(
+                "dropping a result its session no longer waits for",
+                generation=item.request.generation,
+                request_id=item.waiting.request_id,
+                **connection.where(),
+            )
+        if not item.detached:
+            self._policy.finished([connection.number])
+        self._cond.notify_all()
+
+    def _drop_pending(self, connection: Connection) -> list[_Pending]:
+        """Detach a generation's running requests while holding the server's condition.
+
+        They stay pending until their futures are done, so :meth:`health`
+        still sees work the model never finished.
+        """
+        # Answered requests too: their session was held for them, and a result
+        # that arrives after the reset must not free the next generation's.
+        running = [
+            p for p in self._pending.values() if p.connection is connection and not p.detached
+        ]
+        for item in running:
+            item.detached = True
+        self._cond.notify_all()
+        return [p for p in running if p.future is not None]
 
     def _outcome(self, request_id: int, output: Any) -> Any:
         if isinstance(output, BaseException):
             return failure(request_id, output)
         return Result(request_id, output)
+
+
+class _Timed:
+    """Time one call into the model, for :meth:`ModelServerCore.health`."""
+
+    def __init__(self, server: ModelServerCore, what: str) -> None:
+        self._server = server
+        self._what = what
+
+    def __enter__(self) -> None:
+        self._server._call = (self._what, time.monotonic())
+
+    def __exit__(self, *exc: object) -> None:
+        self._server._call = None
+
+
+def _cancel(items: list[_Pending]) -> None:
+    """Cancel the futures of *items*, never while holding the server's condition."""
+    for item in items:
+        if item.future is not None:
+            item.future.cancel()
 
 
 def _is_sequence(outputs: Any) -> bool:
