@@ -95,16 +95,23 @@ class StepUnanswered(TimeoutError):  # noqa: N818 (named for the event a caller 
 
 
 class StepExpired(StepUnanswered):
-    """The model server dropped the request unstepped: its timeout passed in the queue."""
+    """The model server answered the request without a result.
+
+    Its timeout passed while it waited in the queue, so it was never stepped,
+    or while the model ran it, or its session reset. A request the model was
+    running still keeps the session's one request until the model finishes
+    it, so a step sent meanwhile is refused with :class:`StepStillRunning`.
+    """
 
 
 class StepTimedOut(StepUnanswered):
     """No answer came within the step's timeout; the request was cancelled.
 
-    A cancel withdraws a request still waiting in the model server's queue. A
-    step the model is already running cannot be withdrawn: it keeps the
-    session's one request until it ends, and a step sent meanwhile is refused
-    with :class:`StepStillRunning`. The model server is slow or stuck; a model
+    A cancel withdraws a request still waiting in the model server's queue,
+    and tells the model to skip one whose work has not started. A step the
+    model is already running keeps the session's one request until it ends,
+    and a step sent meanwhile is refused with :class:`StepStillRunning`. The
+    model server is slow or stuck; a model
     server that stays stuck reports itself unhealthy, and its deployment
     restarts it.
     """

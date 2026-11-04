@@ -43,8 +43,6 @@ from reactor_runtime.model_server.link import (
     StreamLink,
 )
 from reactor_runtime.model_server.server import (
-    DEFERRED,
-    Deferred,
     ModelServer,
     ServerRequest,
     ServerSettings,
@@ -53,10 +51,8 @@ from reactor_runtime.model_server.server_core import ModelServerCore
 from reactor_runtime.model_server.shm_link import ShmLink, UnixShmListener, UnixShmTransport
 
 __all__ = [
-    "DEFERRED",
     "BatchFailed",
     "ClientClosed",
-    "Deferred",
     "LinkConfig",
     "LinkListener",
     "LinkState",

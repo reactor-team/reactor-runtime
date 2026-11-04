@@ -1,56 +1,57 @@
-"""The model half: answer echo requests from a pipeline thread."""
+"""The model half: examples/echo's model, stepped for the sessions that connect.
+
+``ECHO_ANSWER_MODE`` picks how a step answers: ``immediate`` (the default)
+returns each result from ``step()``; ``future`` hands each request to a
+completion thread and returns a future it completes.
+"""
 
 from __future__ import annotations
 
+import os
 import queue
 import threading
+from concurrent.futures import Future
 from pathlib import Path
 
 from echo_model import EchoInput, EchoModel, EchoResult
 
-from reactor_runtime.model_server import DEFERRED, Deferred, ModelServer, ServerRequest
+from reactor_runtime.model_server import ModelServer, ServerRequest
 
 
 class EchoServer(ModelServer[EchoInput, EchoResult]):
-    """Apply each effect on a completion thread and defer its answer."""
+    """Apply the effect for each request, in ``step()`` or on a completion thread."""
 
     def load(self, config_path: Path | None) -> None:
-        """Construct the echo model and start its completion thread."""
+        """Construct the echo model, and its completion thread in future mode."""
         self.model = EchoModel()
         self.model.load()
-        self._work: queue.Queue[ServerRequest[EchoInput]] = queue.Queue()
-        self._lock = threading.Lock()
-        self._generations: dict[int, int] = {}
-        threading.Thread(target=self._complete, name="echo-pipeline", daemon=True).start()
+        self.mode = os.environ.get("ECHO_ANSWER_MODE", "immediate")
+        if self.mode not in ("immediate", "future"):
+            raise ValueError(f"ECHO_ANSWER_MODE must be immediate or future, got {self.mode!r}")
+        self._work: queue.Queue[tuple[EchoInput, Future[EchoResult]]] = queue.Queue()
+        if self.mode == "future":
+            threading.Thread(target=self._complete, name="echo-completion", daemon=True).start()
 
-    def step(self, requests: list[ServerRequest[EchoInput]]) -> list[Deferred]:
-        """Queue each request for the completion thread and return immediately."""
+    def step(
+        self, requests: list[ServerRequest[EchoInput]]
+    ) -> list[EchoResult] | list[Future[EchoResult]]:
+        """Run the echo model for every request, or queue each for the completion thread."""
+        if self.mode == "immediate":
+            return [self.model.generate(r.payload) for r in requests]
+        futures: list[Future[EchoResult]] = []
         for request in requests:
-            self._work.put(request)
-        return [DEFERRED] * len(requests)
-
-    def session_opened(self, slot: int, generation: int) -> None:
-        """Allow work for this generation on the completion thread."""
-        with self._lock:
-            self._generations[slot] = generation
-
-    def session_closed(self, slot: int, generation: int) -> None:
-        """Discard this generation's pending work between pipeline stages."""
-        with self._lock:
-            self._generations.pop(slot, None)
+            future: Future[EchoResult] = Future()
+            self._work.put((request.payload, future))
+            futures.append(future)
+        return futures
 
     def _complete(self) -> None:
         while True:
-            request = self._work.get()
-            with self._lock:
-                live = self._generations.get(request.slot) == request.generation
-            if live:
+            payload, future = self._work.get()
+            # A request cancelled before its work starts is skipped.
+            if future.set_running_or_notify_cancel():
                 try:
-                    output = self.model.generate(request.payload)
+                    future.set_result(self.model.generate(payload))
                 except Exception as exc:
-                    self.answer(request, exc)
-                else:
-                    self.answer(request, output)
-                    del output
-            self._work.task_done()
-            del request
+                    future.set_exception(exc)
+            del payload, future

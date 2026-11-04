@@ -158,7 +158,8 @@ class ServerProcessConfig:
         stuck_after: Seconds one step may run before ``/health`` reports the
             model server stuck.
         exit_timeout: Seconds the orderly shutdown may take.
-        grace_period: Seconds a draining step is given to finish.
+        grace_period: Seconds a draining model server gives its running
+            requests, futures included, before it fails the ones left.
     """
 
     socket: str

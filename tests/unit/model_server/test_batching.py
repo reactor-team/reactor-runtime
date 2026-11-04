@@ -64,6 +64,18 @@ def test_a_batch_is_taken_early_once_every_open_session_has_a_request() -> None:
     assert [r.connection for r in policy.take(now=0.0, open_sessions=2).batch] == [1, 2]
 
 
+def test_a_session_whose_request_runs_does_not_count_toward_a_full_batch() -> None:
+    policy = BatchPolicy(max_batch=8, batch_window=1.0)
+    policy.add(_request(1, 1, 0.0))
+    assert [r.connection for r in policy.take(now=1.0, open_sessions=3).batch] == [1]
+
+    # Session 1's request still runs, so sessions 2 and 3 are all that can send.
+    policy.add(_request(2, 2, 1.1))
+    assert policy.take(now=1.1, open_sessions=3).batch == []
+    policy.add(_request(3, 3, 1.2))
+    assert [r.connection for r in policy.take(now=1.2, open_sessions=3).batch] == [2, 3]
+
+
 def test_a_request_past_its_deadline_is_expired_and_frees_its_session() -> None:
     policy = BatchPolicy(max_batch=4, batch_window=0.0)
     policy.add(_request(1, 1, arrived=0.0, timeout=0.5))

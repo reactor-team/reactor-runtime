@@ -114,14 +114,6 @@ class ModelServerProcess:
             _check_room(transport, self._process.max_sessions, settings)
         model = cls()
         model.device = _device()
-        self._server = ModelServerCore(
-            model,
-            transport,
-            self._process.socket,
-            settings=settings,
-            max_sessions=self._process.max_sessions,
-            stuck_after=self._process.stuck_after,
-        )
         started = time.monotonic()
         logger.info("loading the model", model=ref, device=model.device)
         try:
@@ -138,6 +130,15 @@ class ModelServerProcess:
             max_batch=settings.max_batch,
             shm_slot_bytes=settings.shm_slot_bytes,
         )
+        self._server = ModelServerCore(
+            model,
+            transport,
+            self._process.socket,
+            settings=settings,
+            max_sessions=self._process.max_sessions,
+            stuck_after=self._process.stuck_after,
+            drain_timeout=self._process.grace_period,
+        )
         try:
             await self._server.start()
         except ModelServerUnreachable as exc:
@@ -145,7 +146,7 @@ class ModelServerProcess:
         self._move(RuntimeState.AVAILABLE)
 
     async def drain(self) -> None:
-        """Stop accepting sessions and wait for running steps and deferred answers."""
+        """Stop accepting sessions and finish the running step."""
         if self._server is not None:
             await self._server.drain()
 
@@ -167,7 +168,7 @@ class ModelServerProcess:
         """
         if self._state is RuntimeState.TERMINATED:
             return Health(HealthStatus.UNHEALTHY, "the model server terminated")
-        if self._state is RuntimeState.LOADING or self._server is None:
+        if self._server is None:
             return Health.healthy()
         return self._server.health()
 

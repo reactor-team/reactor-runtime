@@ -1,4 +1,4 @@
-"""Run the model server with a probe for requests held by its workers."""
+"""Run the model server with a probe for the requests it still holds."""
 
 from __future__ import annotations
 
@@ -11,18 +11,18 @@ from reactor_runtime.model_server import __main__ as entrypoint
 
 
 def pending_requests() -> int:
-    """Count requests still held by model-server workers after collection."""
+    """Count the requests the model server holds without an answer from the model."""
     gc.collect()
     count = 0
     for obj in gc.get_objects():
         if isinstance(obj, ModelServerCore):
             with obj._cond:
-                count += len(obj._pending)
+                count += len(getattr(obj, "_pending", ()))
     return count
 
 
 class ProbedHealthServer(HealthServer):
-    """Expose the worker's retained request count beside its health route."""
+    """Expose the model server's held request count beside its health route."""
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)

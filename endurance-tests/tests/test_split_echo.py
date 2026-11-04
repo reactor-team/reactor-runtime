@@ -18,17 +18,15 @@ from typing import Any
 
 import pytest
 
-# The scenario requires a runtime_ref that exposes deferred model-server answers.
+# A runtime from before the model server (runtime_ref) has nothing for this
+# scenario to test. Only a missing package skips.
 if importlib.util.find_spec("reactor_runtime.model_server") is None:
     pytest.skip("this runtime has no model_server package", allow_module_level=True)
-import reactor_runtime.model_server as model_server
-
-if not hasattr(model_server, "DEFERRED"):
-    pytest.skip("this runtime has no deferred model-server answers", allow_module_level=True)
-
 from endurance.churn import run_churn
 from endurance.harness import SUITE_DIR, RuntimeProcess, V1Client
 from endurance.report import DEFAULT_OUTPUT_DIR
+
+from reactor_runtime.model_server import ModelServer
 
 MODEL_DIR = SUITE_DIR / "model-split"
 
@@ -39,9 +37,17 @@ DESCRIPTION = (
     "and back through its socket and shared memory. Each cycle a v1 client joins, "
     "streams until 60 frames come back, and closes. The session's one link to the "
     "model server lasts the whole run, so what the churn checks must not grow with it. "
-    "The model defers each answer to a completion thread, and after each cycle the "
-    "model server's probe must report zero retained requests."
+    "It runs twice: the model returns each result from step(), then returns a future "
+    "that a completion thread resolves. After each cycle the model server's probe must "
+    "report zero retained requests."
 )
+
+ANSWER_MODES = ("immediate", "future")
+
+
+def _returns_futures() -> bool:
+    """Whether this runtime's model server takes a future as a step output."""
+    return "Future" in str(ModelServer.step.__annotations__.get("return", ""))
 
 
 class _SharedRuntime(RuntimeProcess):
@@ -84,11 +90,14 @@ def _wait_available(server: subprocess.Popen[bytes], port: int, timeout_s: float
     raise TimeoutError("the model server never became available")
 
 
-@pytest.fixture
+@pytest.fixture(params=ANSWER_MODES)
 def runtime(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[RuntimeProcess]:
     """The model server, then a runtime serving the application half against it."""
+    mode = request.param
+    if mode == "future" and not _returns_futures():
+        pytest.skip("this runtime's model server takes no futures from step()")
     DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     directory = Path(tempfile.mkdtemp(prefix="rre"))
     socket_path = directory / "sock"
@@ -116,6 +125,7 @@ def runtime(
             "REACTOR_MAX_SESSIONS": "1",
             "REACTOR_SHM_SLOT_DIR": str(directory / "s{slot}"),
             "REACTOR_LOG_LEVEL": os.environ.get("REACTOR_LOG_LEVEL", "WARNING"),
+            "ECHO_ANSWER_MODE": mode,
         },
         stdout=log,
         stderr=subprocess.STDOUT,
@@ -146,6 +156,9 @@ def runtime(
         shutil.rmtree(directory, ignore_errors=True)
 
 
-async def test_split_echo(runtime: RuntimeProcess) -> None:
+async def test_split_echo(runtime: RuntimeProcess, request: pytest.FixtureRequest) -> None:
     """Release everything a connection held, with the model's engine in a shared model server."""
-    await run_churn(runtime, test_name="split-echo", description=DESCRIPTION, client=V1Client)
+    mode = request.node.callspec.params["runtime"]
+    await run_churn(
+        runtime, test_name=f"split-echo-{mode}", description=DESCRIPTION, client=V1Client
+    )

@@ -71,7 +71,7 @@ counts live memory rather than the free memory glibc keeps cached.
 | `multi_connection` | One session shared by several clients. Each cycle a v1 client publishes the webcam, and three v1 viewers that publish nothing, receive-only with no webcam track negotiated, join and each get 60 frames of the same output. They leave in two steps, in turn the viewers first or the publisher first; when the publisher leaves first, a new publisher takes over the webcam while the viewers stay, and must be granted it. |
 | `steady_stream` | One v1 client stays connected for the whole run, streaming while it pings, sends client stats and a command once a second. The runtime is read every 15 s as it streams: what the live connection holds (`live_*`, `tasks`) must never rise above the first reading, `pacers_holding_output` and `pinned_batches` stay 0, and every interval gets 60 frames back. Once the client leaves, the reading after teardown must be 0 on every count (`*_after_close`), with the tasks back to the reading before it joined. The trends judge the streaming readings. |
 | `distributed_echo` | The v1 connection churn on `model-distributed/`, where the echo's engine runs in a worker process behind a `DistributedRunner`, so every frame crosses to the worker and back through shared memory. |
-| `split_echo` | The v1 connection churn on `model-split/`, the echo split in two: the runtime serves the application half, and the scenario starts a model server (`python -m reactor_runtime.model_server`) beside it, so every frame crosses its socket and shared memory. The session's one link to the model server lasts the run. Each step defers its answer to a completion thread; after every cycle the model-server probe must report zero retained requests. |
+| `split_echo` | The v1 connection churn on `model-split/`, the echo split in two: the runtime serves the application half, and the scenario starts a model server (`python -m reactor_runtime.model_server`) beside it, so every frame crosses its socket and shared memory. The session's one link to the model server lasts the run. It runs twice: the model returns each result from `step()`, then returns a future a completion thread resolves (skipped on a runtime that takes no futures); after every cycle the model-server probe must report zero retained requests. |
 | `abrupt_disconnect` | The v1 churn, with each client in its own process (`endurance/abrupt.py`), killed with `SIGKILL` a moment after its frames came back instead of closing. The runtime learns the client is gone only from the wire going silent, as it does when a client crashes or loses its network. |
 | `stepped_session_churn` | One long-lived stepped session. Each cycle a v1 client requests 10 steps one after another, each setting the effect through `state` and carrying one webcam frame in `media_input`, waits for every result, and closes. Every step must run (`short_cycles`) and every request must get its result (`unanswered_requests`). |
 
@@ -123,9 +123,9 @@ every PR that touches the runtime:
   buffers, caches, file descriptors, processes, shared memory): say which
   existing count covers it (`live_connections`, `live_peers`, `live_pacers`,
   `tasks`, `child_processes`, `shm_blocks`, the trends), or
-  extend the probe in `endurance/launcher.py` with a count that does. The shared
-  worker scenario uses `endurance/model_server_launcher.py` to count the model
-  server's pending requests and requires zero after every cycle.
+  extend the probe in `endurance/launcher.py` with a count that does. The
+  `split_echo` scenario uses `endurance/model_server_launcher.py` to count the
+  requests the model server holds and requires zero after every cycle.
 - **A new client-facing path** (commands, uploads, client stats, clips and
   recordings, several clients on one session, a control protocol version):
   add a scenario that drives it, or extend an existing one. Today's scenarios

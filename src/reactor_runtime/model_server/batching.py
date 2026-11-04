@@ -63,7 +63,11 @@ class BatchPolicy:
     * Requests are taken in arrival order, up to ``max_batch`` at a time.
     * Once a request waits, the batch may wait up to ``batch_window`` seconds
       after it arrived for others, and is taken early once ``max_batch``
-      requests wait or every open session has one waiting.
+      requests wait or every open session that can send one has one waiting.
+      A session whose request is running, its future included, cannot send
+      another, so it does not count. A model that schedules work across its
+      own stages, and returns futures, sets ``batch_window`` to 0 and is
+      stepped as soon as a request arrives.
     * A request whose deadline passed while it waited is expired, never stepped.
 
     Args:
@@ -116,6 +120,8 @@ class BatchPolicy:
     def take(self, now: float, open_sessions: int) -> Turn:
         """Decide what to step at *now*, given how many sessions are open.
 
+        Of the *open_sessions*, those whose request is running count as unable
+        to send, so a batch is full once every other one has a request waiting.
         The batch taken is removed from the queue, and its sessions stay busy
         until :meth:`finished`.
         """
@@ -127,7 +133,8 @@ class BatchPolicy:
         if not self._waiting:
             return Turn([], expired, None)
         first = self._waiting[0]
-        full = len(self._waiting) >= min(self._max_batch, max(open_sessions, 1))
+        running = len(self._busy) - len({r.connection for r in self._waiting})
+        full = len(self._waiting) >= min(self._max_batch, max(open_sessions - running, 1))
         until = first.arrived + self._window
         if not full and now < until:
             deadlines = [r.deadline for r in self._waiting if r.deadline is not None]
