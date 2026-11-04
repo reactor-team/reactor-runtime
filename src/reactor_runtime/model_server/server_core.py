@@ -68,6 +68,7 @@ from typing import Any
 from reactor_runtime.core import Health, HealthStatus
 from reactor_runtime.log import get_logger
 from reactor_runtime.model_server.batching import BatchPolicy, Waiting
+from reactor_runtime.model_server.config import DEFAULT_GRACE_SECONDS
 from reactor_runtime.model_server.connection import Connection, ConnectionState
 from reactor_runtime.model_server.errors import (
     BatchFailed,
@@ -198,7 +199,7 @@ class ModelServerCore:
         settings: ServerSettings,
         max_sessions: int,
         stuck_after: float = DEFAULT_STUCK_SECONDS,
-        drain_timeout: float = 30.0,
+        drain_timeout: float = DEFAULT_GRACE_SECONDS,
     ) -> None:
         self._model = model
         self._transport = transport
@@ -530,6 +531,7 @@ class ModelServerCore:
             ]
             for item in running:
                 item.answered = True
+            self._cond.notify_all()
         _cancel(running)
 
     def _take_reset(self, connection: Connection, reset: Reset) -> None:

@@ -39,15 +39,25 @@ from reactor_runtime.model_server.server_core import ModelServerCore, ServerStat
 
 
 class _Link:
-    def __init__(self, incoming: queue.Queue[Any], outgoing: queue.Queue[Any]) -> None:
+    """One end of an in-memory link.
+
+    The test's end bounds every receive, so a missed wake-up fails at the
+    assertion that waits for it; the server's end blocks, as a socket does,
+    so a session that stays quiet is never closed by the rig.
+    """
+
+    def __init__(
+        self, incoming: queue.Queue[Any], outgoing: queue.Queue[Any], wait: float | None = 5
+    ) -> None:
         self.incoming = incoming
         self.outgoing = outgoing
+        self.wait = wait
 
     def send(self, message: Any) -> None:
         self.outgoing.put(message)
 
-    def receive(self, timeout: float = 5) -> Any:
-        message = self.incoming.get(timeout=timeout)
+    def receive(self) -> Any:
+        message = self.incoming.get(timeout=self.wait)
         if message is Closed:
             raise Closed()
         return message
@@ -83,7 +93,7 @@ class _Transport:
     def connect(self, address: str, slot: int, *, timeout: float | None = None) -> _Link:
         incoming: queue.Queue[Any] = queue.Queue()
         outgoing: queue.Queue[Any] = queue.Queue()
-        self.pending.put(_Link(outgoing, incoming))
+        self.pending.put(_Link(outgoing, incoming, wait=None))
         return _Link(incoming, outgoing)
 
 
