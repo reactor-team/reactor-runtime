@@ -277,8 +277,9 @@ def _assemble(
     Args:
         cfg: The configuration for this runtime process.
         webrtc: The WebRTC transport configuration; defaults to the plain
-            ``WebRtcConfig``, with *cfg*'s largest message, when omitted (as in
-            tests that don't exercise it).
+            ``WebRtcConfig``, with *cfg*'s ``webrtc_max_message_size`` as its
+            largest message, when omitted (as in tests that don't exercise
+            it). A config given here is used as is.
         peer_factory: The media engine to mount; defaults to the libwebrtc
             engine when omitted.
 
@@ -329,7 +330,8 @@ async def serve(
     Args:
         cfg: The configuration for this runtime process.
         webrtc: The WebRTC transport configuration; defaults to the plain
-            ``WebRtcConfig`` when omitted.
+            ``WebRtcConfig``, with *cfg*'s ``webrtc_max_message_size`` as its
+            largest message, when omitted. A config given here is used as is.
         peer_factory: The media engine to mount; defaults to the libwebrtc
             engine when omitted.
 
