@@ -17,11 +17,11 @@ import pytest
 from reactor_runtime.ipc import Block, SharedSlotAllocationFailed, blocks
 from reactor_runtime.ipc import slot as slot_module
 from reactor_runtime.model_server import (
+    ModelServerLink,
+    ModelServerUnreachable,
     PayloadTooLarge,
     ShmLink,
     UnixShmTransport,
-    WorkerLink,
-    WorkerUnreachable,
     shm_link,
 )
 from reactor_runtime.model_server.link import NoListener, StreamLink
@@ -66,20 +66,20 @@ class Pair:
         # The model server's end sets itself up on its first receive, while the
         # session's connect waits for the answer: run that receive on a thread.
         received: list[object] = []
-        worker_end: list[ShmLink] = []
+        server_end: list[ShmLink] = []
 
         def serve() -> None:
             self._acceptor.join(timeout=5)
-            worker_end.append(self._accepted[0])
+            server_end.append(self._accepted[0])
             received.append(self._accepted[0].receive())
 
-        server = threading.Thread(target=serve)
-        server.start()
+        serving = threading.Thread(target=serve)
+        serving.start()
         self.session = self.transport.connect(self.address, slot)
         self.session.send(Hello(slot=slot))
-        server.join(timeout=5)
+        serving.join(timeout=5)
         assert received == [Hello(slot=slot)]
-        return self.session, worker_end[0]
+        return self.session, server_end[0]
 
 
 @pytest.fixture
@@ -104,21 +104,21 @@ def _start_accepting(transport: UnixShmTransport, address: str) -> list[ShmLink]
     return accepted
 
 
-def test_a_shm_link_is_a_worker_link(root: Path) -> None:
+def test_a_shm_link_is_a_model_server_link(root: Path) -> None:
     pair = Pair(root, _transport(root))
-    session, worker = pair.open()
+    session, server = pair.open()
     try:
-        assert isinstance(session, WorkerLink)
-        assert isinstance(worker, WorkerLink)
+        assert isinstance(session, ModelServerLink)
+        assert isinstance(server, ModelServerLink)
     finally:
         session.close()
-        worker.close()
+        server.close()
         pair.listener.close()
 
 
 def test_arrays_travel_in_the_slot_directory_and_arrive_as_copies(root: Path) -> None:
     pair = Pair(root, _transport(root, size=64 << 10))
-    session, worker = pair.open()
+    session, server = pair.open()
     frames = np.random.default_rng(0).integers(0, 255, (4, 64, 64, 3), dtype=np.uint8)
     audio = np.arange(26880, dtype=np.int16)
     sent: list[int] = []
@@ -131,19 +131,19 @@ def test_arrays_travel_in_the_slot_directory_and_arrive_as_copies(root: Path) ->
     session._stream.send_bytes = measure  # type: ignore[method-assign]  # ty: ignore[invalid-assignment]  # count the bytes on the socket
     try:
         session.send(Step(request_id=1, timeout=None, payload={"audio": audio}))
-        step = worker.receive()
+        step = server.receive()
         np.testing.assert_array_equal(step.payload["audio"], audio)
         assert sent[0] < audio.nbytes // 10  # only the header crossed the socket
         step.payload["audio"][0] = 7  # its own copy, writable
 
-        worker.send(Result(request_id=1, output={"frames": frames}))
+        server.send(Result(request_id=1, output={"frames": frames}))
         result = session.receive()
         np.testing.assert_array_equal(result.output["frames"], frames)
         names = sorted(p.name for p in (root / "s0").iterdir())
         assert len(names) == 2  # one block for each end's writes; the probe is gone
     finally:
         session.close()
-        worker.close()
+        server.close()
         pair.listener.close()
 
 
@@ -153,60 +153,60 @@ def test_the_session_removes_the_probe_before_it_allocates_its_request_block(
     transport = _transport(root)
     address = str(root / "sock")
     listener = transport.listen(address)
-    worker: list[ShmLink] = []
+    server: list[ShmLink] = []
     received: list[object] = []
 
     def serve() -> None:
-        worker.append(listener.accept())
-        received.append(worker[0].receive())
+        server.append(listener.accept())
+        received.append(server[0].receive())
 
-    server = threading.Thread(target=serve)
-    server.start()
+    serving = threading.Thread(target=serve)
+    serving.start()
     session = transport.connect(address, 0)
     try:
         # Nothing has crossed the link yet, so the model server has not dropped
         # the probe itself: a slot sized for two request blocks and one output
         # block must not have to hold it as well.
         names = sorted(p.name for p in (root / "s0").iterdir())
-        assert [n[: len("rrms_s0_")] for n in names] == ["rrms_s0_", "rrms_w0_"]
+        assert [n[: len("rrms_s0_")] for n in names] == ["rrms_m0_", "rrms_s0_"]
         assert not any(n.endswith("probe") for n in names)
         session.send(Hello(slot=0))
-        server.join(timeout=5)
+        serving.join(timeout=5)
         assert received == [Hello(slot=0)]
     finally:
         session.close()
-        for link in worker:
+        for link in server:
             link.close()
         listener.close()
 
 
 def test_after_a_cancel_the_next_request_is_written_to_a_new_block(root: Path) -> None:
     pair = Pair(root, _transport(root))
-    session, worker = pair.open()
+    session, server = pair.open()
     try:
         session.send(Step(request_id=1, timeout=None, payload=np.ones(16, dtype=np.uint8)))
-        worker.receive()
+        server.receive()
         before = session._writer.name if session._writer is not None else None
         session.send(Cancel(request_id=1))
-        worker.receive()
+        server.receive()
         after = session._writer.name if session._writer is not None else None
         assert before != after
         assert (root / "s0" / str(before)).exists()  # retired, kept until the next rotation
         session.send(Step(request_id=2, timeout=None, payload=np.full(16, 3, dtype=np.uint8)))
-        np.testing.assert_array_equal(worker.receive().payload, np.full(16, 3, dtype=np.uint8))
+        np.testing.assert_array_equal(server.receive().payload, np.full(16, 3, dtype=np.uint8))
         session.send(Cancel(request_id=2))
-        worker.receive()
+        server.receive()
         assert not (root / "s0" / str(before)).exists()  # released by the next rotation
         assert (root / "s0" / str(after)).exists()
     finally:
         session.close()
-        worker.close()
+        server.close()
         pair.listener.close()
 
 
 def test_a_request_larger_than_its_block_is_refused_and_the_link_goes_on(root: Path) -> None:
     pair = Pair(root, _transport(root))
-    session, worker = pair.open()
+    session, server = pair.open()
     try:
         block = session._writer.name if session._writer is not None else None
         with pytest.raises(PayloadTooLarge) as refused:
@@ -217,65 +217,65 @@ def test_a_request_larger_than_its_block_is_refused_and_the_link_goes_on(root: P
         )
 
         session.send(Step(request_id=2, timeout=None, payload=np.ones(4096, dtype=np.uint8)))
-        assert worker.receive().request_id == 2  # nothing of the refused request was sent
+        assert server.receive().request_id == 2  # nothing of the refused request was sent
         assert session._writer is not None
         assert (session._writer.name, session._writer.capacity) == (block, 4096)
     finally:
         session.close()
-        worker.close()
+        server.close()
         pair.listener.close()
 
 
 def test_a_result_larger_than_its_block_is_refused_naming_the_output_size(root: Path) -> None:
     pair = Pair(root, _transport(root))
-    session, worker = pair.open()
+    session, server = pair.open()
     try:
         with pytest.raises(
             PayloadTooLarge, match=r"model\.resources\.workers\.shared_memory\.output"
         ):
-            worker.send(Result(request_id=1, output=np.ones(5000, dtype=np.uint8)))
+            server.send(Result(request_id=1, output=np.ones(5000, dtype=np.uint8)))
 
-        worker.send(Result(request_id=1, output=np.ones(16, dtype=np.uint8)))
+        server.send(Result(request_id=1, output=np.ones(16, dtype=np.uint8)))
         assert session.receive().request_id == 1
     finally:
         session.close()
-        worker.close()
+        server.close()
         pair.listener.close()
 
 
 def test_a_slot_holds_at_most_two_request_blocks_and_one_output_block(root: Path) -> None:
     pair = Pair(root, _transport(root))
-    session, worker = pair.open()
+    session, server = pair.open()
     try:
         for request_id in range(1, 4):
             payload = np.ones(4096, dtype=np.uint8)
             session.send(Step(request_id=request_id, timeout=None, payload=payload))
-            worker.receive()
-            worker.send(Result(request_id=request_id, output=np.ones(4096, dtype=np.uint8)))
+            server.receive()
+            server.send(Result(request_id=request_id, output=np.ones(4096, dtype=np.uint8)))
             session.receive()
             session.send(Cancel(request_id=request_id))
-            worker.receive()
+            server.receive()
             sizes = sorted(path.stat().st_size for path in (root / "s0").iterdir())
             assert sizes in ([4096, 4096], [4096, 4096, 4096])
     finally:
         session.close()
-        worker.close()
+        server.close()
         pair.listener.close()
 
 
 def test_a_link_that_cancels_hundreds_of_times_keeps_short_block_names(root: Path) -> None:
     pair = Pair(root, _transport(root))
-    session, worker = pair.open()
+    session, server = pair.open()
     try:
         for request_id in range(1, 301):
             session.send(Cancel(request_id=request_id))
-            worker.receive()
+            server.receive()
         session.send(Step(request_id=301, timeout=None, payload=np.ones(16, dtype=np.uint8)))
-        np.testing.assert_array_equal(worker.receive().payload, np.ones(16, dtype=np.uint8))
+        np.testing.assert_array_equal(server.receive().payload, np.ones(16, dtype=np.uint8))
         assert max(len(path.name) for path in (root / "s0").iterdir()) < 64
     finally:
         session.close()
-        worker.close()
+        server.close()
         pair.listener.close()
 
 
@@ -283,7 +283,7 @@ def test_a_cancel_whose_replacement_cannot_be_allocated_is_not_sent(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pair = Pair(root, _transport(root))
-    session, worker = pair.open()
+    session, server = pair.open()
     try:
         block = session._writer.name if session._writer is not None else None
 
@@ -296,18 +296,18 @@ def test_a_cancel_whose_replacement_cannot_be_allocated_is_not_sent(
         monkeypatch.undo()
 
         session.send(Step(request_id=2, timeout=None, payload=np.ones(16, dtype=np.uint8)))
-        assert worker.receive().request_id == 2  # the cancel never reached the peer
+        assert server.receive().request_id == 2  # the cancel never reached the peer
         assert session._writer is not None
         assert session._writer.name == block
     finally:
         session.close()
-        worker.close()
+        server.close()
         pair.listener.close()
 
 
 def test_a_cancel_whose_send_fails_leaves_no_replacement_behind(root: Path) -> None:
     pair = Pair(root, _transport(root))
-    session, worker = pair.open()
+    session, server = pair.open()
     try:
         before = sorted(path.name for path in (root / "s0").iterdir())
 
@@ -321,7 +321,7 @@ def test_a_cancel_whose_send_fails_leaves_no_replacement_behind(root: Path) -> N
         assert sorted(path.name for path in (root / "s0").iterdir()) == before
     finally:
         session.close()
-        worker.close()
+        server.close()
         pair.listener.close()
 
 
@@ -329,25 +329,25 @@ def test_a_step_cancelled_before_the_model_server_read_it_still_arrives_intact(
     root: Path,
 ) -> None:
     pair = Pair(root, _transport(root))
-    session, worker = pair.open()
+    session, server = pair.open()
     try:
         frames = np.arange(4096, dtype=np.uint8)
         session.send(Step(request_id=1, timeout=None, payload=frames))
         session.send(Cancel(request_id=1))
         session.send(Step(request_id=2, timeout=None, payload=np.zeros(4096, dtype=np.uint8)))
 
-        np.testing.assert_array_equal(worker.receive().payload, frames)
-        assert worker.receive() == Cancel(request_id=1)
-        np.testing.assert_array_equal(worker.receive().payload, np.zeros(4096, dtype=np.uint8))
+        np.testing.assert_array_equal(server.receive().payload, frames)
+        assert server.receive() == Cancel(request_id=1)
+        np.testing.assert_array_equal(server.receive().payload, np.zeros(4096, dtype=np.uint8))
     finally:
         session.close()
-        worker.close()
+        server.close()
         pair.listener.close()
 
 
 def test_a_step_whose_block_two_cancels_released_is_skipped(root: Path) -> None:
     pair = Pair(root, _transport(root))
-    session, worker = pair.open()
+    session, server = pair.open()
     try:
         second = np.full(4096, 2, dtype=np.uint8)
         third = np.full(4096, 3, dtype=np.uint8)
@@ -359,13 +359,13 @@ def test_a_step_whose_block_two_cancels_released_is_skipped(root: Path) -> None:
         session.send(Cancel(request_id=2))
         session.send(Step(request_id=3, timeout=None, payload=third))
 
-        assert worker.receive() == Cancel(request_id=1)
-        np.testing.assert_array_equal(worker.receive().payload, second)
-        assert worker.receive() == Cancel(request_id=2)
-        np.testing.assert_array_equal(worker.receive().payload, third)
+        assert server.receive() == Cancel(request_id=1)
+        np.testing.assert_array_equal(server.receive().payload, second)
+        assert server.receive() == Cancel(request_id=2)
+        np.testing.assert_array_equal(server.receive().payload, third)
     finally:
         session.close()
-        worker.close()
+        server.close()
         pair.listener.close()
 
 
@@ -384,21 +384,21 @@ def _open_on(
     listener: object, transport: UnixShmTransport, address: str, slot: int
 ) -> tuple[ShmLink, ShmLink]:
     """Accept one more link on *listener* and set it up, as Pair.open does."""
-    worker_end: list[ShmLink] = []
+    server_end: list[ShmLink] = []
     received: list[object] = []
 
     def serve() -> None:
         link = listener.accept()  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]  # the listener under test
-        worker_end.append(link)
+        server_end.append(link)
         received.append(link.receive())
 
-    server = threading.Thread(target=serve)
-    server.start()
+    serving = threading.Thread(target=serve)
+    serving.start()
     session = transport.connect(address, slot)
     session.send(Hello(slot=slot))
-    server.join(timeout=5)
+    serving.join(timeout=5)
     assert received == [Hello(slot=slot)]
-    return session, worker_end[0]
+    return session, server_end[0]
 
 
 def _output_blocks(root: Path, transport: UnixShmTransport) -> list[str]:
@@ -411,57 +411,57 @@ def test_a_payload_that_raises_file_not_found_while_unpickled_is_a_protocol_erro
     root: Path,
 ) -> None:
     pair = Pair(root, _transport(root))
-    session, worker = pair.open()
+    session, server = pair.open()
     try:
         session.send(Step(request_id=1, timeout=None, payload=_MissingOnLoad()))
         with pytest.raises(ProtocolError, match="cannot be read"):
-            worker.receive()
+            server.receive()
     finally:
         session.close()
-        worker.close()
+        server.close()
         pair.listener.close()
 
 
 def test_the_model_server_releases_a_links_blocks_once_its_session_is_gone(root: Path) -> None:
     transport = _transport(root)
     pair = Pair(root, transport)
-    session, worker = pair.open()
+    session, server = pair.open()
     try:
         assert _output_blocks(root, transport)
         session.close()  # the session runtime exits during a step
         with pytest.raises(Closed):
-            worker.receive()
+            server.receive()
 
         assert _output_blocks(root, transport) == []
         with pytest.raises(Closed, match="the link is closed"):
-            worker.send(Result(1, np.zeros(16, dtype=np.uint8)))  # the step's late result
+            server.send(Result(1, np.zeros(16, dtype=np.uint8)))  # the step's late result
     finally:
-        worker.close()
+        server.close()
         pair.listener.close()
 
 
 def test_a_new_link_for_a_slot_releases_the_previous_links_blocks_first(root: Path) -> None:
     transport = _transport(root)
     pair = Pair(root, transport)
-    first_session, first_worker = pair.open()
+    first_session, first_server = pair.open()
     try:
         first_blocks = _output_blocks(root, transport)
-        second_session, second_worker = _open_on(pair.listener, transport, pair.address, 0)
+        second_session, second_server = _open_on(pair.listener, transport, pair.address, 0)
         try:
             remaining = _output_blocks(root, transport)
             assert len(remaining) == 1
             assert remaining != first_blocks
             with pytest.raises(Closed, match="the link is closed"):
-                first_worker.send(Result(1, np.zeros(16, dtype=np.uint8)))
+                first_server.send(Result(1, np.zeros(16, dtype=np.uint8)))
             frames = np.arange(4096, dtype=np.uint8)
             second_session.send(Step(request_id=1, timeout=None, payload=frames))
-            np.testing.assert_array_equal(second_worker.receive().payload, frames)
+            np.testing.assert_array_equal(second_server.receive().payload, frames)
         finally:
             second_session.close()
-            second_worker.close()
+            second_server.close()
     finally:
         first_session.close()
-        first_worker.close()
+        first_server.close()
         pair.listener.close()
 
 
@@ -485,12 +485,12 @@ def test_overlapping_handshakes_for_one_slot_leave_one_output_block(
         return real(prefix, size, directory)
 
     monkeypatch.setattr(shm_link, "_fixed_slot", paused)
-    workers: list[ShmLink] = []
+    servers: list[ShmLink] = []
     sessions: list[ShmLink] = []
 
     def serve() -> None:
         link = listener.accept()
-        workers.append(link)
+        servers.append(link)
         with contextlib.suppress(Exception):
             link.receive()
 
@@ -519,22 +519,22 @@ def test_overlapping_handshakes_for_one_slot_leave_one_output_block(
         assert len(_output_blocks(root, transport)) == 1
     finally:
         go_on.set()
-        for link in sessions + workers:
+        for link in sessions + servers:
             link.close()
         listener.close()
 
 
 def test_receive_on_a_released_link_is_closed(root: Path) -> None:
     pair = Pair(root, _transport(root))
-    session, worker = pair.open()
+    session, server = pair.open()
     try:
-        worker.release_blocks()  # as a newer link for the slot does
+        server.release_blocks()  # as a newer link for the slot does
         session.send(Cancel(request_id=1))  # a frame the old peer still sends
         with pytest.raises(Closed, match="the link is closed"):
-            worker.receive()
+            server.receive()
     finally:
         session.close()
-        worker.close()
+        server.close()
         pair.listener.close()
 
 
@@ -542,38 +542,38 @@ def test_a_step_and_a_signal_with_arrays_sent_back_to_back_both_arrive_intact(
     root: Path,
 ) -> None:
     pair = Pair(root, _transport(root))
-    session, worker = pair.open()
+    session, server = pair.open()
     try:
         frames = np.arange(4096, dtype=np.uint8)
         hint = np.full(256, 9, dtype=np.uint8)
         session.send(Step(request_id=1, timeout=None, payload=frames))
         session.send(Signal(signal={"hint": hint}))
 
-        np.testing.assert_array_equal(worker.receive().payload, frames)
-        np.testing.assert_array_equal(worker.receive().signal["hint"], hint)
+        np.testing.assert_array_equal(server.receive().payload, frames)
+        np.testing.assert_array_equal(server.receive().signal["hint"], hint)
     finally:
         session.close()
-        worker.close()
+        server.close()
         pair.listener.close()
 
 
 def test_a_signal_past_the_frame_limit_is_refused_and_the_link_goes_on(root: Path) -> None:
     pair = Pair(root, _transport(root))
-    session, worker = pair.open()
+    session, server = pair.open()
     try:
         with pytest.raises(PayloadTooLarge, match="a signal carries small values"):
             session.send(Signal(signal=bytes(2 << 20)))
         session.send(Signal(signal="small"))
-        assert worker.receive() == Signal(signal="small")
+        assert server.receive() == Signal(signal="small")
     finally:
         session.close()
-        worker.close()
+        server.close()
         pair.listener.close()
 
 
 def test_an_inline_payload_past_the_frame_limit_is_refused_both_ways(root: Path) -> None:
     pair = Pair(root, _transport(root))
-    session, worker = pair.open()
+    session, server = pair.open()
     inline = np.zeros((3000, 1000), dtype=np.uint8)[
         :, ::2
     ]  # 1.5 MB, not contiguous: pickled inline
@@ -581,26 +581,26 @@ def test_an_inline_payload_past_the_frame_limit_is_refused_both_ways(root: Path)
         with pytest.raises(PayloadTooLarge, match=r"a request pickled \d+ bytes inline"):
             session.send(Step(request_id=1, timeout=None, payload=inline))
         with pytest.raises(PayloadTooLarge, match=r"np\.ascontiguousarray"):
-            worker.send(Result(request_id=1, output=inline))
+            server.send(Result(request_id=1, output=inline))
 
         session.send(Step(request_id=2, timeout=None, payload=b"ok"))
-        assert worker.receive().request_id == 2
-        worker.send(Result(request_id=2, output=b"ok"))
+        assert server.receive().request_id == 2
+        server.send(Result(request_id=2, output=b"ok"))
         assert session.receive().request_id == 2
     finally:
         session.close()
-        worker.close()
+        server.close()
         pair.listener.close()
 
 
 def test_closing_the_model_servers_end_reclaims_what_a_dead_session_left(root: Path) -> None:
     pair = Pair(root, _transport(root))
-    session, worker = pair.open()
+    session, server = pair.open()
     session.send(Step(request_id=1, timeout=None, payload=np.ones(16, dtype=np.uint8)))
-    worker.receive()
+    server.receive()
     session._stream.close()  # the session dies without releasing its blocks
 
-    worker.close()
+    server.close()
 
     assert list((root / "s0").iterdir()) == []
     pair.listener.close()
@@ -615,33 +615,33 @@ def test_blocks_are_named_by_role_and_slot_and_a_restart_clears_its_own(root: Pa
         output_bytes=4096,
     )
     # What a killed session runtime and a killed model server left behind.
-    for name in ("rrms_s1_dead_0", "rrms_w1_dead_0", "rrms_w0_dead_0", "other_0"):
-        target = root / ("s0" if "w0" in name else "s1") / name
+    for name in ("rrms_s1_dead_0", "rrms_m1_dead_0", "rrms_m0_dead_0", "other_0"):
+        target = root / ("s0" if "m0" in name else "s1") / name
         target.write_bytes(b"x")
 
     assert transport.reclaim(2) == 2
     pair = Pair(root, transport)
-    session, worker = pair.open(slot=1)
+    session, server = pair.open(slot=1)
     try:
         names = sorted(p.name for p in (root / "s1").iterdir())
         assert "rrms_s1_dead_0" not in names
         assert "other_0" in names
         assert any(n.startswith("rrms_s1_") for n in names)
-        assert any(n.startswith("rrms_w1_") for n in names)
+        assert any(n.startswith("rrms_m1_") for n in names)
     finally:
         session.close()
-        worker.close()
+        server.close()
         pair.listener.close()
 
 
-def test_a_session_that_does_not_see_the_servers_memory_is_unreachable(root: Path) -> None:
+def test_a_session_that_does_not_see_the_model_servers_memory_is_unreachable(root: Path) -> None:
     elsewhere = root / "elsewhere"
     elsewhere.mkdir()
     transport = _transport(root, session_directory=elsewhere)
     address = str(root / "sock")
     _start_accepting(transport, address)
 
-    with pytest.raises(WorkerUnreachable, match="not visible in"):
+    with pytest.raises(ModelServerUnreachable, match="not visible in"):
         transport.connect(address, 0)
 
 
@@ -650,7 +650,7 @@ def test_a_slot_without_a_directory_is_unreachable_naming_it(root: Path) -> None
     address = str(root / "sock")
     _start_accepting(transport, address)
 
-    with pytest.raises(WorkerUnreachable, match="slot 3 has no shared-memory directory"):
+    with pytest.raises(ModelServerUnreachable, match="slot 3 has no shared-memory directory"):
         transport.connect(address, 3)
 
 
@@ -665,7 +665,7 @@ def test_a_slot_without_room_for_its_blocks_is_unreachable_naming_it(
     address = str(root / "sock")
     _start_accepting(transport, address)
 
-    with pytest.raises(WorkerUnreachable, match="no shared memory for slot 0"):
+    with pytest.raises(ModelServerUnreachable, match="no shared memory for slot 0"):
         transport.connect(address, 0)
     assert list((root / "s0").iterdir()) == []
 
@@ -674,9 +674,9 @@ def test_nothing_listening_is_worth_retrying_and_no_socket_directory_is_not(root
     transport = _transport(root)
     with pytest.raises(NoListener):
         transport.connect(str(root / "sock"), 0)
-    with pytest.raises(WorkerUnreachable, match="socket directory"):
+    with pytest.raises(ModelServerUnreachable, match="socket directory"):
         transport.connect(str(root / "missing" / "sock"), 0)
-    with pytest.raises(WorkerUnreachable, match="socket directory"):
+    with pytest.raises(ModelServerUnreachable, match="socket directory"):
         transport.listen(str(root / "missing" / "sock"))
 
 
@@ -699,7 +699,7 @@ def test_a_live_socket_is_never_taken_over(root: Path) -> None:
     address = str(root / "sock")
     first = transport.listen(address)
     try:
-        with pytest.raises(WorkerUnreachable, match="already listens"):
+        with pytest.raises(ModelServerUnreachable, match="already listens"):
             transport.listen(address)
         assert Path(address).exists()
         pair_session = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -741,7 +741,7 @@ def test_an_invalid_request_prefix_refuses_the_link_and_unlinks_nothing(
     transport = _transport(root)
     address = str(root / "sock")
     listener = transport.listen(address)
-    keep = root / "s0" / "rrms_w0_keep"
+    keep = root / "s0" / "rrms_m0_keep"
     keep.write_bytes(b"x")
     raised: list[BaseException] = []
 
@@ -754,11 +754,11 @@ def test_an_invalid_request_prefix_refuses_the_link_and_unlinks_nothing(
         finally:
             link.close()
 
-    server = threading.Thread(target=serve)
-    server.start()
+    serving = threading.Thread(target=serve)
+    serving.start()
     try:
         answer = _raw_hello(address, ShmHello(0, prefix))
-        server.join(timeout=5)
+        serving.join(timeout=5)
         assert isinstance(answer, ShmRefused)
         assert "invalid request prefix" in answer.reason
         assert [type(exc) for exc in raised] == [ProtocolError]
@@ -781,7 +781,7 @@ def test_a_session_without_room_for_its_request_block_is_unreachable(
         return real(name, size, directory)
 
     monkeypatch.setattr(slot_module, "create_block", session_full)
-    with pytest.raises(WorkerUnreachable, match="no room for a 4096-byte request block"):
+    with pytest.raises(ModelServerUnreachable, match="no room for a 4096-byte request block"):
         transport.connect(address, 0)
     assert not any(p.name.startswith("rrms_s0_") for p in (root / "s0").iterdir())
     for link in accepted:
@@ -873,7 +873,7 @@ def test_a_slot_directory_names_its_slot() -> None:
 
 def test_closing_the_session_end_ends_a_blocked_receive(root: Path) -> None:
     pair = Pair(root, _transport(root))
-    session, worker = pair.open()
+    session, server = pair.open()
     outcome: list[BaseException] = []
 
     def wait() -> None:
@@ -886,7 +886,7 @@ def test_closing_the_session_end_ends_a_blocked_receive(root: Path) -> None:
     reader.start()
     session.close()
     reader.join(timeout=5)
-    worker.close()
+    server.close()
     pair.listener.close()
 
     assert len(outcome) == 1

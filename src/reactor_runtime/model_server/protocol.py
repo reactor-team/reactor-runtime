@@ -6,8 +6,8 @@ sends it as one length-prefixed frame; how a message's arrays travel (in shared
 memory, or inline) is the link's to decide, so the messages carry the request
 and the output as the objects themselves.
 
-From a session to the worker: :class:`Hello` once, then :class:`Step`,
-:class:`Cancel`, :class:`Signal` and :class:`Reset`. From the worker to a
+From a session to the model server: :class:`Hello` once, then :class:`Step`,
+:class:`Cancel`, :class:`Signal` and :class:`Reset`. From the model server to a
 session: :class:`Welcome` or :class:`Refused` once, then :class:`Result`,
 :class:`Failed` and :class:`ResetDone`. A request is answered by exactly one
 :class:`Result` or :class:`Failed` carrying its id, or by nothing once it was
@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from reactor_runtime.distributed.rank import portable_pickle
-from reactor_runtime.model_server.errors import BatchFailed, WorkerError
+from reactor_runtime.model_server.errors import BatchFailed, ModelServerError
 
 PROTOCOL = 1
 """The version of this exchange; it moves with any change to a message."""
@@ -49,7 +49,7 @@ class Closed(Exception):  # noqa: N818 (named for the event a caller catches)
     """The peer closed the connection, at a frame boundary or inside one."""
 
 
-# -- session to worker ----------------------------------------------------------------------
+# -- session to model server -------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -72,7 +72,7 @@ class Step:
 
     Attributes:
         request_id: Names the answer, which carries the same id.
-        timeout: Seconds the request may wait in the worker's queue before it is
+        timeout: Seconds the request may wait in the model server's queue before it is
             answered as expired, or ``None`` for no bound.
         payload: The request, an instance of the model's request type.
     """
@@ -102,11 +102,11 @@ class Signal:
 
 @dataclass(frozen=True)
 class Reset:
-    """Close the slot's session on the worker and open a new one.
+    """Close the slot's session on the model server and open a new one.
 
     Attributes:
         request_id: Names the answer.
-        session_id: The id of the session that starts, which the worker puts on
+        session_id: The id of the session that starts, which the model server puts on
             its log lines about the slot until the next reset, and uses for
             nothing else; ``None`` when the session runtime has none.
     """
@@ -115,12 +115,12 @@ class Reset:
     session_id: str | None
 
 
-# -- worker to session ----------------------------------------------------------------------
+# -- model server to session -------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class Welcome:
-    """The worker opened the session: what it serves the session with.
+    """The model server opened the session: what it serves the session with.
 
     Attributes:
         slot: The slot the session holds.
@@ -135,7 +135,7 @@ class Welcome:
 
 @dataclass(frozen=True)
 class Refused:
-    """The worker refused the session, and why; it closes the connection after this."""
+    """The model server refused the session, and why; it closes the connection after this."""
 
     reason: str
 
@@ -172,7 +172,7 @@ class Failed:
 
 @dataclass(frozen=True)
 class ResetDone:
-    """The worker reopened the slot.
+    """The model server reopened the slot.
 
     Attributes:
         request_id: The reset it answers.
@@ -183,11 +183,11 @@ class ResetDone:
     generation: int
 
 
-ToWorker = Hello | Step | Cancel | Signal | Reset
+ToModelServer = Hello | Step | Cancel | Signal | Reset
 """A message a session sends."""
 
 ToSession = Welcome | Refused | Result | Failed | ResetDone
-"""A message the worker sends."""
+"""A message the model server sends."""
 
 _MESSAGES = (Hello, Step, Cancel, Signal, Reset, Welcome, Refused, Result, Failed, ResetDone)
 
@@ -226,12 +226,12 @@ def failure(request_id: int, exc: BaseException) -> Failed:
 
 
 def error_of(failed: Failed) -> BaseException:
-    """Return the exception *failed* carries, or a :class:`WorkerError` if it cannot be rebuilt.
+    """Return the exception *failed* carries, or a :class:`ModelServerError` standing in for it.
 
     A batch failure is always a :class:`BatchFailed`: when what arrives is
     not one (a stand-in the sender fell back to), it becomes the cause, and
     when it cannot be rebuilt at all (its cause's class is not in this
-    process), the :class:`WorkerError` is.
+    process), the :class:`ModelServerError` is.
     """
     try:
         error = pickle.loads(failed.error)
@@ -241,7 +241,7 @@ def error_of(failed: Failed) -> BaseException:
         if failed.batch and not isinstance(error, BatchFailed):
             return BatchFailed(error)
         return error
-    stand_in = WorkerError(failed.description)
+    stand_in = ModelServerError(failed.description)
     return BatchFailed(stand_in) if failed.batch else stand_in
 
 
@@ -253,8 +253,8 @@ def check_hello(hello: Hello) -> None:
     """
     if hello.protocol != PROTOCOL:
         raise ProtocolError(
-            f"the session speaks model server protocol {hello.protocol} and the worker speaks "
-            f"{PROTOCOL}: run both halves from the same reactor-runtime"
+            f"the session speaks model server protocol {hello.protocol} and the model server "
+            f"speaks {PROTOCOL}: run both halves from the same reactor-runtime"
         )
 
 

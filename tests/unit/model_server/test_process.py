@@ -83,14 +83,14 @@ def _process(root: Path, ref: str = f"{__name__}:Doubler", sessions: int = 1) ->
 
 def test_it_loads_the_model_then_serves_sessions_over_shared_memory(tmp_path: Path) -> None:
     process = _process(tmp_path)
-    (tmp_path / "s0" / "rrms_w0_left_0").write_bytes(b"x")  # a previous run's output block
+    (tmp_path / "s0" / "rrms_m0_left_0").write_bytes(b"x")  # a previous run's output block
 
     async def run() -> np.ndarray:
         assert process.state() is RuntimeState.LOADING
         await process.start()
         assert process.state() is RuntimeState.AVAILABLE
         assert (log.get_state(), log.get_runtime_state()) == (None, "available")
-        assert not (tmp_path / "s0" / "rrms_w0_left_0").exists()
+        assert not (tmp_path / "s0" / "rrms_m0_left_0").exists()
         config = LinkConfig(socket=str(tmp_path / "sock"), slot=0, shm_dir=tmp_path / "s0")
         client = await asyncio.to_thread(ModelClient.connect, config)
         await asyncio.to_thread(client.reset)
@@ -160,7 +160,7 @@ def test_a_full_slot_volume_starts_once_the_previous_runs_blocks_are_reclaimed(
     monkeypatch.setattr("reactor_runtime.model_server.process.os.statvfs", _Volume(_SLOT))
     # A run killed while a session held a request block and its retired one:
     # the volume is full until the model server reclaims its output block.
-    (tmp_path / "s0" / "rrms_w0_left").write_bytes(b"x" * _BLOCK)
+    (tmp_path / "s0" / "rrms_m0_left").write_bytes(b"x" * _BLOCK)
     (tmp_path / "s0" / "rrms_s0_left").write_bytes(b"x" * _BLOCK)
     (tmp_path / "s0" / "rrms_s0_retired").write_bytes(b"x" * _BLOCK)
 
@@ -348,11 +348,11 @@ def _spawn(
 
 
 def test_python_m_model_server_serves_a_workspace_and_stops_on_sigterm(tmp_path: Path) -> None:
-    worker, port = _spawn(tmp_path, _MODEL)
+    server, port = _spawn(tmp_path, _MODEL)
     try:
         deadline = time.monotonic() + 60
         while (_health(port) or {}).get("state") != "available":
-            assert worker.poll() is None, worker.stdout.read().decode() if worker.stdout else ""
+            assert server.poll() is None, server.stdout.read().decode() if server.stdout else ""
             assert time.monotonic() < deadline, "the model server did not become available"
             time.sleep(0.1)
 
@@ -368,13 +368,13 @@ def test_python_m_model_server_serves_a_workspace_and_stops_on_sigterm(tmp_path:
         client.close()
         np.testing.assert_array_equal(frame.pixels, np.full(4, 6, dtype=np.uint8))
 
-        worker.send_signal(signal.SIGTERM)
-        assert worker.wait(timeout=60) == 0
+        server.send_signal(signal.SIGTERM)
+        assert server.wait(timeout=60) == 0
         assert not (tmp_path / "sock").exists()
     finally:
-        if worker.poll() is None:
-            worker.kill()
-            worker.wait()
+        if server.poll() is None:
+            server.kill()
+            server.wait()
         sys.modules.pop("doubler", None)
 
 
@@ -386,17 +386,17 @@ def test_python_m_model_server_exits_cleanly_when_the_model_fails_to_load(tmp_pa
                 raise RuntimeError("no weights")
         """
     )
-    worker, _ = _spawn(tmp_path, model, "doubler:Broken")
+    server, _ = _spawn(tmp_path, model, "doubler:Broken")
     try:
-        assert worker.wait(timeout=60) == 0
-        output = worker.stdout.read().decode() if worker.stdout else ""
+        assert server.wait(timeout=60) == 0
+        output = server.stdout.read().decode() if server.stdout else ""
         assert "the model failed to load" in output
         assert "no weights" in output
         assert not (tmp_path / "sock").exists()
     finally:
-        if worker.poll() is None:
-            worker.kill()
-            worker.wait()
+        if server.poll() is None:
+            server.kill()
+            server.wait()
 
 
 def test_python_m_model_server_finishes_the_load_then_exits_on_a_sigterm_during_it(
@@ -414,24 +414,24 @@ def test_python_m_model_server_finishes_the_load_then_exits_on_a_sigterm_during_
                 pathlib.Path("loaded").touch()
         """
     )
-    worker, _ = _spawn(tmp_path, model, "doubler:Slow")
+    server, _ = _spawn(tmp_path, model, "doubler:Slow")
     try:
         deadline = time.monotonic() + 60
         while not (tmp_path / "loading").exists():
-            assert worker.poll() is None, worker.stdout.read().decode() if worker.stdout else ""
+            assert server.poll() is None, server.stdout.read().decode() if server.stdout else ""
             assert time.monotonic() < deadline, "the model never started loading"
             time.sleep(0.05)
-        worker.send_signal(signal.SIGTERM)
+        server.send_signal(signal.SIGTERM)
         time.sleep(0.5)
-        assert worker.poll() is None, "the SIGTERM cut the load short"
+        assert server.poll() is None, "the SIGTERM cut the load short"
         (tmp_path / "release").touch()
 
-        assert worker.wait(timeout=60) == 0
-        output = worker.stdout.read().decode() if worker.stdout else ""
+        assert server.wait(timeout=60) == 0
+        output = server.stdout.read().decode() if server.stdout else ""
         assert (tmp_path / "loaded").exists()
         assert "shutdown requested" in output
         assert not (tmp_path / "sock").exists()
     finally:
-        if worker.poll() is None:
-            worker.kill()
-            worker.wait()
+        if server.poll() is None:
+            server.kill()
+            server.wait()

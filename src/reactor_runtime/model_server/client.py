@@ -19,17 +19,17 @@ from collections.abc import Callable
 from typing import Any
 
 from reactor_runtime import log
-from reactor_runtime.distributed.errors import WorkerTimeout
 from reactor_runtime.log import get_logger, get_session_id
 from reactor_runtime.model_server.config import LinkConfig, link_config
 from reactor_runtime.model_server.errors import (
     ClientClosed,
+    ModelServerLost,
+    ModelServerRejected,
+    ModelServerTimeout,
     ResetRequired,
     StepTimedOut,
-    WorkerLost,
-    WorkerRejected,
 )
-from reactor_runtime.model_server.link import LinkTransport, NoListener, WorkerLink
+from reactor_runtime.model_server.link import LinkTransport, ModelServerLink, NoListener
 from reactor_runtime.model_server.protocol import (
     Cancel,
     Closed,
@@ -77,8 +77,8 @@ class ModelClient[RequestT, ResultT]:
     * the model's own exception for a request it failed, as itself, and
       :class:`~reactor_runtime.model_server.BatchFailed` when the model's
       ``step()`` raised for the whole batch;
-    * :class:`~reactor_runtime.model_server.WorkerRejected` when the worker
-      refused the request or the session, and its subclass
+    * :class:`~reactor_runtime.model_server.ModelServerRejected` when the model
+      server refused the request or the session, and its subclass
       :class:`~reactor_runtime.model_server.StepStillRunning` when a step this
       client abandoned after a timeout is still running there (retry once it
       ends);
@@ -86,14 +86,14 @@ class ModelClient[RequestT, ResultT]:
       in time: the request is cancelled, which withdraws it if it is still
       queued, and the client stays usable; and
       :class:`~reactor_runtime.model_server.StepExpired` when the request's
-      timeout passed in the worker's queue;
+      timeout passed in the model server's queue;
     * :class:`~reactor_runtime.model_server.ResetRequired` from a step before
       the application has reset its slot;
     * :class:`~reactor_runtime.model_server.PayloadTooLarge` for a request, or
       its result, larger than the shared memory ``reactor.yaml`` gives it, and
       the pickling error for a request that does not pickle (the client stays
       usable in both cases);
-    * :class:`~reactor_runtime.model_server.WorkerLost` once the link is lost,
+    * :class:`~reactor_runtime.model_server.ModelServerLost` once the link is lost,
       from every call from then on.
 
     A lost link stays lost: the client does not reconnect. The application
@@ -113,7 +113,7 @@ class ModelClient[RequestT, ResultT]:
                 return PlasmaOutput(main_video=self.model.step(Tick(tick=self.tick)).pixels)
 
             async def process_output(self, outcome):
-                if isinstance(outcome.error, (WorkerLost, StepUnanswered)):
+                if isinstance(outcome.error, (ModelServerLost, StepUnanswered)):
                     raise outcome.error                    # down; the restart waits
                 ...
 
@@ -133,10 +133,10 @@ class ModelClient[RequestT, ResultT]:
 
     def __init__(
         self,
-        link: WorkerLink,
+        link: ModelServerLink,
         welcome: Welcome,
         config: LinkConfig,
-        on_lost: Callable[[WorkerLost], None] | None = None,
+        on_lost: Callable[[ModelServerLost], None] | None = None,
     ) -> None:
         """Hold an open link; use :meth:`connect`."""
         self._link = link
@@ -147,7 +147,7 @@ class ModelClient[RequestT, ResultT]:
         self._state = LinkState.OPEN
         # What every call raises once the link is lost or closed: a fresh
         # exception per call, so no traceback chain grows on a stored one.
-        self._ended: tuple[type[WorkerLost], str] | None = None
+        self._ended: tuple[type[ModelServerLost], str] | None = None
         self._reset_required = True
         self._ids = itertools.count(1)
         self._replies: dict[int, Any] = {}
@@ -163,7 +163,7 @@ class ModelClient[RequestT, ResultT]:
         cls,
         config: LinkConfig | None = None,
         *,
-        on_lost: Callable[[WorkerLost], None] | None = None,
+        on_lost: Callable[[ModelServerLost], None] | None = None,
         transport: LinkTransport | None = None,
     ) -> ModelClient[RequestT, ResultT]:
         """Connect to the model server and block until it has opened this session.
@@ -177,7 +177,7 @@ class ModelClient[RequestT, ResultT]:
             config: Where the model server is and which slot this session
                 serves; :func:`~reactor_runtime.model_server.config.link_config`
                 reads it from the environment when omitted.
-            on_lost: Called once, with a :class:`WorkerLost` carrying the message
+            on_lost: Called once, with a :class:`ModelServerLost` carrying the message
                 every later call raises, when the open link is lost; never for
                 :meth:`close`. It
                 runs on the thread that saw the loss, which can be the client's
@@ -191,10 +191,10 @@ class ModelClient[RequestT, ResultT]:
         setup with the model server included.
 
         Raises:
-            WorkerUnreachable: At once, for a deployment that cannot reach a
+            ModelServerUnreachable: At once, for a deployment that cannot reach a
                 model server however long it waits.
-            WorkerRejected: The model server refused this session.
-            WorkerTimeout: No model server opened the session within the
+            ModelServerRejected: The model server refused this session.
+            ModelServerTimeout: No model server opened the session within the
                 configured connect timeout.
         """
         config = config or link_config()
@@ -207,7 +207,7 @@ class ModelClient[RequestT, ResultT]:
         while True:
             remaining = None if deadline is None else deadline - time.monotonic()
             if remaining is not None and remaining <= 0:
-                raise WorkerTimeout(
+                raise ModelServerTimeout(
                     f"no model server opened this session within {config.connect_timeout} s: {last}"
                 )
             try:
@@ -229,12 +229,12 @@ class ModelClient[RequestT, ResultT]:
                         return cls(link, answer, config, on_lost)
                     link.close()
                     if isinstance(answer, Refused):
-                        raise WorkerRejected(
+                        raise ModelServerRejected(
                             f"the model server refused this session: {answer.reason}"
                         )
                     last = f"the model server answered the hello with a {type(answer).__name__}"
             if deadline is not None and time.monotonic() >= deadline:
-                raise WorkerTimeout(
+                raise ModelServerTimeout(
                     f"no model server opened this session within {config.connect_timeout} s: {last}"
                 )
             wait = poll if deadline is None else min(poll, max(deadline - time.monotonic(), 0.0))
@@ -379,7 +379,7 @@ class ModelClient[RequestT, ResultT]:
         """Withdraw a request that timed out; a cancel that cannot be sent is logged."""
         try:
             self._send(Cancel(request_id))
-        except WorkerLost:
+        except ModelServerLost:
             raise
         except Exception as exc:
             logger.warning(
@@ -427,9 +427,9 @@ class ModelClient[RequestT, ResultT]:
             if self._state is not LinkState.OPEN:
                 return
             self._state = LinkState.LOST
-            message = f"worker_died: {reason}"
-            self._ended = (WorkerLost, message)
-            lost = WorkerLost(message)
+            message = f"model_server_lost: {reason}"
+            self._ended = (ModelServerLost, message)
+            lost = ModelServerLost(message)
             self._cond.notify_all()
         logger.error("lost the model server", slot=self._slot, reason=reason)
         self._link.close()
@@ -440,7 +440,7 @@ class ModelClient[RequestT, ResultT]:
                 logger.exception("the on_lost callback raised", slot=self._slot)
 
 
-def _receive_until(link: WorkerLink, deadline: float | None) -> Any:
+def _receive_until(link: ModelServerLink, deadline: float | None) -> Any:
     """Receive one message, giving up at *deadline*: a model server opens a session between steps.
 
     Raises:

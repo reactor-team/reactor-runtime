@@ -22,7 +22,7 @@ import threading
 from typing import Any
 
 from reactor_runtime.log import get_logger
-from reactor_runtime.model_server.link import WorkerLink
+from reactor_runtime.model_server.link import ModelServerLink
 from reactor_runtime.model_server.protocol import Closed, Result, failure
 
 logger = get_logger(__name__)
@@ -65,7 +65,7 @@ class Connection:
         outbox: How many answers may wait for the session to read them.
     """
 
-    def __init__(self, link: WorkerLink, number: int, *, outbox: int = DEFAULT_OUTBOX) -> None:
+    def __init__(self, link: ModelServerLink, number: int, *, outbox: int = DEFAULT_OUTBOX) -> None:
         self.link = link
         self.number = number
         self.slot: int | None = None

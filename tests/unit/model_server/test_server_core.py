@@ -18,16 +18,16 @@ from reactor_runtime.core import Health, HealthStatus
 from reactor_runtime.model_server import (
     BatchFailed,
     ModelServer,
+    ModelServerRejected,
+    ModelServerStopping,
     PayloadTooLarge,
     ResetRequired,
     ServerRequest,
     ServerSettings,
     StepExpired,
     StreamLink,
-    WorkerRejected,
-    WorkerStopping,
+    server_core,
 )
-from reactor_runtime.model_server import worker as worker_module
 from reactor_runtime.model_server.batching import Waiting
 from reactor_runtime.model_server.connection import (
     Connection,
@@ -49,7 +49,7 @@ from reactor_runtime.model_server.protocol import (
     Welcome,
     error_of,
 )
-from reactor_runtime.model_server.worker import ServerMoveError, ServerState, WorkerServer
+from reactor_runtime.model_server.server_core import ModelServerCore, ServerMoveError, ServerState
 
 
 @dataclass(frozen=True)
@@ -169,7 +169,7 @@ def _wait(condition: Callable[[], bool], timeout: float = 5.0) -> None:
 @dataclass
 class Rig:
     model: EchoModel
-    server: WorkerServer
+    server: ModelServerCore
     transport: PairTransport
 
     def session(self, slot: int = 0) -> StreamLink:
@@ -190,7 +190,7 @@ def _rig(
     model = model or EchoModel()
     transport = transport or PairTransport()
     settings = ServerSettings(max_batch, batch_window, 1 << 20, 1 << 20)
-    server = WorkerServer(
+    server = ModelServerCore(
         model, transport, "unused", settings=settings, max_sessions=4, stuck_after=stuck_after
     )
     asyncio.run(server.start())
@@ -221,10 +221,12 @@ def test_a_session_is_welcomed_with_its_slot_and_first_generation(rig: Rig) -> N
     ("hello", "match"),
     [
         (Hello(slot=4), "slot 4 is out of range"),
-        (Hello(slot=0, protocol=PROTOCOL + 1), "the worker speaks"),
+        (Hello(slot=0, protocol=PROTOCOL + 1), "the model server speaks"),
     ],
 )
-def test_a_hello_the_worker_cannot_serve_is_refused(rig: Rig, hello: Hello, match: str) -> None:
+def test_a_hello_the_model_server_cannot_serve_is_refused(
+    rig: Rig, hello: Hello, match: str
+) -> None:
     link = rig.transport.connect("unused", 0)
     link.send(hello)
 
@@ -342,7 +344,7 @@ def test_a_second_request_while_one_runs_is_refused(rig: Rig) -> None:
     refused = link.receive()
     rig.model.hold.set()
 
-    assert isinstance(error_of(refused), WorkerRejected)
+    assert isinstance(error_of(refused), ModelServerRejected)
     assert refused.request_id == 2
     assert link.receive() == Result(1, Echo(1, 0, 1, None))
 
@@ -407,7 +409,7 @@ def test_drain_answers_what_still_waits_as_stopping() -> None:
     asyncio.run(rig.server.stop())
 
     assert busy.receive() == Result(1, Echo(1, 0, 1, None))
-    assert isinstance(error_of(waiting.receive()), WorkerStopping)
+    assert isinstance(error_of(waiting.receive()), ModelServerStopping)
     assert ("closed", 0, 1) in rig.model.events
 
 
@@ -482,7 +484,7 @@ def test_a_reset_whose_reopen_raises_refuses_and_closes_the_session(rig: Rig) ->
 
     refused = link.receive()
 
-    assert isinstance(error_of(refused), WorkerRejected)
+    assert isinstance(error_of(refused), ModelServerRejected)
     with pytest.raises(Closed):
         link.receive()
     assert rig.model.events == [("opened", 0, 1), ("closed", 0, 1)]
@@ -494,9 +496,9 @@ def test_a_step_and_a_reset_after_drain_are_answered_as_stopping() -> None:
     asyncio.run(rig.server.drain())
     try:
         link.send(Step(request_id=1, timeout=None, payload=Tick(1)))
-        assert isinstance(error_of(link.receive()), WorkerStopping)
+        assert isinstance(error_of(link.receive()), ModelServerStopping)
         link.send(Reset(request_id=2, session_id=None))
-        assert isinstance(error_of(link.receive()), WorkerStopping)
+        assert isinstance(error_of(link.receive()), ModelServerStopping)
     finally:
         asyncio.run(rig.server.stop())
 
@@ -531,7 +533,7 @@ def test_a_step_sent_while_its_reset_is_pending_is_refused_in_order(rig: Rig) ->
 def test_a_connection_that_sends_no_hello_is_closed_after_the_timeout(
     rig: Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(worker_module, "HELLO_TIMEOUT", 0.2)
+    monkeypatch.setattr(server_core, "HELLO_TIMEOUT", 0.2)
     silent = rig.transport.connect("unused", 0)
 
     started = time.monotonic()
@@ -580,14 +582,14 @@ def test_drain_closes_a_pending_open_and_answers_a_pending_reset_as_stopping() -
     rig.model.hold.set()
     drained.join(timeout=5)
     try:
-        assert isinstance(error_of(resetting.receive()), WorkerStopping)
+        assert isinstance(error_of(resetting.receive()), ModelServerStopping)
         with pytest.raises(Closed):  # closed, not refused: the session waits for the next one
             opening.receive()
     finally:
         asyncio.run(rig.server.stop())
 
 
-def _opening(server: WorkerServer) -> int:
+def _opening(server: ModelServerCore) -> int:
     with server._cond:
         return len(server._opening)
 
@@ -734,7 +736,7 @@ def test_a_result_that_does_not_pickle_fails_that_request_alone() -> None:
         asyncio.run(rig.server.stop())
 
 
-def test_a_step_loop_that_stops_reports_the_worker_unhealthy(rig: Rig) -> None:
+def test_a_step_loop_that_stops_reports_the_model_server_unhealthy(rig: Rig) -> None:
     link = rig.session(0)
 
     def broken(now: float, open_sessions: int) -> Any:
@@ -749,7 +751,7 @@ def test_a_step_loop_that_stops_reports_the_worker_unhealthy(rig: Rig) -> None:
         rig.server.health().detail
     )
     link.send(Step(request_id=1, timeout=None, payload=Tick(1)))
-    assert isinstance(error_of(link.receive()), WorkerStopping)
+    assert isinstance(error_of(link.receive()), ModelServerStopping)
 
 
 def test_a_full_outbox_closes_the_link_at_close() -> None:

@@ -1,4 +1,4 @@
-"""The client against a real worker: results, failures, and a lost link that stays lost."""
+"""The client against a real model server: results, failures, and a lost link that stays lost."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from typing import Any
 import pytest
 
 from reactor_runtime import log
-from reactor_runtime.distributed.errors import WorkerTimeout
 from reactor_runtime.ipc import SharedSlotAllocationFailed
 from reactor_runtime.model_server import (
     BatchFailed,
@@ -26,6 +25,11 @@ from reactor_runtime.model_server import (
     LinkState,
     ModelClient,
     ModelServer,
+    ModelServerCore,
+    ModelServerLost,
+    ModelServerRejected,
+    ModelServerTimeout,
+    ModelServerUnreachable,
     PayloadTooLarge,
     ResetRequired,
     ServerRequest,
@@ -33,10 +37,6 @@ from reactor_runtime.model_server import (
     StepStillRunning,
     StepTimedOut,
     StreamLink,
-    WorkerLost,
-    WorkerRejected,
-    WorkerServer,
-    WorkerUnreachable,
     link_config,
 )
 from reactor_runtime.model_server.link import NoListener
@@ -135,7 +135,7 @@ class PairTransport:
 @dataclass
 class Rig:
     model: Model
-    server: WorkerServer
+    server: ModelServerCore
     transport: PairTransport
 
     def client(self, slot: int = 0, *, step_timeout: float | None = 5.0) -> ModelClient:
@@ -145,9 +145,9 @@ class Rig:
         return ModelClient.connect(config, transport=self.transport)
 
 
-def _server(model: Model, transport: PairTransport) -> WorkerServer:
+def _server(model: Model, transport: PairTransport) -> ModelServerCore:
     settings = ServerSettings(max_batch=4, batch_window=0.0, shm_input_bytes=1, shm_output_bytes=1)
-    server = WorkerServer(model, transport, "unused", settings=settings, max_sessions=2)
+    server = ModelServerCore(model, transport, "unused", settings=settings, max_sessions=2)
     asyncio.run(server.start())
     return server
 
@@ -247,20 +247,20 @@ def test_a_lost_link_stays_lost_for_every_call(rig: Rig) -> None:
         time.sleep(0.01)
     assert client.state is LinkState.LOST
     for call in (lambda: client.step(Tick(1)), client.reset, lambda: client.signal(Stop("x"))):
-        with pytest.raises(WorkerLost, match="worker_died"):
+        with pytest.raises(ModelServerLost, match="model_server_lost"):
             call()
 
 
-def _connect_watching(rig: Rig, on_lost: Callable[[WorkerLost], None]) -> ModelClient:
+def _connect_watching(rig: Rig, on_lost: Callable[[ModelServerLost], None]) -> ModelClient:
     config = LinkConfig(socket="unused", slot=0, step_timeout=5.0, connect_timeout=5)
     return ModelClient.connect(config, on_lost=on_lost, transport=rig.transport)
 
 
 def test_a_link_lost_between_steps_reaches_on_lost_once(rig: Rig) -> None:
-    lost: list[WorkerLost] = []
+    lost: list[ModelServerLost] = []
     heard = threading.Event()
 
-    def on_lost(error: WorkerLost) -> None:
+    def on_lost(error: ModelServerLost) -> None:
         lost.append(error)
         heard.set()
 
@@ -269,7 +269,7 @@ def test_a_link_lost_between_steps_reaches_on_lost_once(rig: Rig) -> None:
     asyncio.run(rig.server.stop())
 
     assert heard.wait(5)
-    with pytest.raises(WorkerLost) as raised:
+    with pytest.raises(ModelServerLost) as raised:
         client.reset()
     assert [(type(e), str(e)) for e in lost] == [(type(raised.value), str(raised.value))]
     client.close()
@@ -279,7 +279,7 @@ def test_a_link_lost_between_steps_reaches_on_lost_once(rig: Rig) -> None:
 def test_a_payload_too_large_for_the_link_fails_that_step_and_the_client_goes_on() -> None:
     model, transport = Model(), PairTransport(link=SmallLink)
     server = _server(model, transport)
-    lost: list[WorkerLost] = []
+    lost: list[ModelServerLost] = []
     config = LinkConfig(socket="unused", slot=0, step_timeout=5.0, connect_timeout=5)
     client = ModelClient.connect(config, on_lost=lost.append, transport=transport)
     try:
@@ -299,7 +299,7 @@ def test_a_payload_too_large_for_the_link_fails_that_step_and_the_client_goes_on
 
 
 def test_close_never_reaches_on_lost(rig: Rig) -> None:
-    lost: list[WorkerLost] = []
+    lost: list[ModelServerLost] = []
     client = _connect_watching(rig, lost.append)
 
     client.close()
@@ -310,7 +310,7 @@ def test_close_never_reaches_on_lost(rig: Rig) -> None:
 
 
 def test_an_on_lost_that_raises_leaves_the_client_lost(rig: Rig) -> None:
-    def on_lost(error: WorkerLost) -> None:
+    def on_lost(error: ModelServerLost) -> None:
         raise RuntimeError("the callback broke")
 
     client = _connect_watching(rig, on_lost)
@@ -321,7 +321,7 @@ def test_an_on_lost_that_raises_leaves_the_client_lost(rig: Rig) -> None:
     while client.state is LinkState.OPEN and time.monotonic() < deadline:
         time.sleep(0.01)
     assert client.state is LinkState.LOST
-    with pytest.raises(WorkerLost):
+    with pytest.raises(ModelServerLost):
         client.reset()
 
 
@@ -337,7 +337,7 @@ def test_close_makes_every_call_raise_client_closed(rig: Rig) -> None:
 
 def test_connect_waits_for_a_model_server_that_starts_later() -> None:
     model, transport = Model(), PairTransport()
-    started: list[WorkerServer] = []
+    started: list[ModelServerCore] = []
     threading.Timer(0.3, lambda: started.append(_server(model, transport))).start()
 
     config = LinkConfig(socket="unused", slot=1, connect_timeout=10)
@@ -352,7 +352,7 @@ def test_connect_waits_for_a_model_server_that_starts_later() -> None:
 
 def test_connect_gives_up_after_its_timeout_naming_why() -> None:
     config = LinkConfig(socket="unused", slot=0, connect_timeout=0.3)
-    with pytest.raises(WorkerTimeout, match="nothing listens yet"):
+    with pytest.raises(ModelServerTimeout, match="nothing listens yet"):
         ModelClient.connect(config, transport=PairTransport())
 
 
@@ -365,22 +365,22 @@ def test_connect_gives_up_on_a_model_server_that_never_opens_the_session() -> No
 
     config = LinkConfig(socket="unused", slot=0, connect_timeout=0.3)
     started = time.monotonic()
-    with pytest.raises(WorkerTimeout, match="did not open the session"):
+    with pytest.raises(ModelServerTimeout, match="did not open the session"):
         ModelClient.connect(config, transport=Silent())
     assert time.monotonic() - started < 5
 
 
 def test_a_refused_session_and_an_unreachable_deployment_raise_at_once(rig: Rig) -> None:
-    with pytest.raises(WorkerRejected, match="out of range"):
+    with pytest.raises(ModelServerRejected, match="out of range"):
         rig.client(slot=5)
 
     class Unreachable(PairTransport):
         def connect(self, address: str, slot: int, *, timeout: float | None = None) -> StreamLink:
-            raise WorkerUnreachable("no socket directory")
+            raise ModelServerUnreachable("no socket directory")
 
     config = LinkConfig(socket="unused", slot=0, connect_timeout=30)
     started = time.monotonic()
-    with pytest.raises(WorkerUnreachable):
+    with pytest.raises(ModelServerUnreachable):
         ModelClient.connect(config, transport=Unreachable())
     assert time.monotonic() - started < 1
 
@@ -392,7 +392,7 @@ def test_link_config_reads_the_environment_with_defaults(monkeypatch: pytest.Mon
     monkeypatch.setenv("REACTOR_MODEL_SERVER_SOCKET", "/run/reactor-model-server/sock")
     monkeypatch.setenv("REACTOR_SESSION_SLOT", "2")
     monkeypatch.delenv("REACTOR_SHM_DIR", raising=False)
-    monkeypatch.setenv("REACTOR_WORKER_STEP_TIMEOUT", "0")
+    monkeypatch.setenv("REACTOR_MODEL_SERVER_STEP_TIMEOUT", "0")
 
     config = link_config()
 
@@ -413,7 +413,7 @@ def test_link_config_reads_the_environment_with_defaults(monkeypatch: pytest.Mon
             {
                 "REACTOR_MODEL_SERVER_SOCKET": "/s",
                 "REACTOR_SESSION_SLOT": "0",
-                "REACTOR_WORKER_CONNECT_TIMEOUT": "soon",
+                "REACTOR_MODEL_SERVER_CONNECT_TIMEOUT": "soon",
             },
             "number of seconds",
         ),
@@ -425,7 +425,7 @@ def test_link_config_refuses_a_missing_or_malformed_variable(
     for name in (
         "REACTOR_MODEL_SERVER_SOCKET",
         "REACTOR_SESSION_SLOT",
-        "REACTOR_WORKER_CONNECT_TIMEOUT",
+        "REACTOR_MODEL_SERVER_CONNECT_TIMEOUT",
     ):
         monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
@@ -438,7 +438,7 @@ def test_link_config_refuses_a_missing_or_malformed_variable(
 
 
 def test_a_request_that_does_not_pickle_is_raised_and_the_client_stays_open(rig: Rig) -> None:
-    lost: list[WorkerLost] = []
+    lost: list[ModelServerLost] = []
     client = _connect_watching(rig, lost.append)
     client.reset()
 
@@ -461,7 +461,7 @@ def test_every_call_after_a_loss_raises_a_fresh_exception(rig: Rig) -> None:
 
     raised = []
     for _ in range(1000):
-        with pytest.raises(WorkerLost) as error:
+        with pytest.raises(ModelServerLost) as error:
             client.reset()
         raised.append(error.value)
 
@@ -479,7 +479,7 @@ def test_connect_timeout_bounds_a_transport_whose_setup_stalls() -> None:
 
     config = LinkConfig(socket="unused", slot=0, connect_timeout=0.5)
     started = time.monotonic()
-    with pytest.raises(WorkerTimeout, match="did not finish setting up"):
+    with pytest.raises(ModelServerTimeout, match="did not finish setting up"):
         ModelClient.connect(config, transport=Stalling())
     assert time.monotonic() - started < 3
 
@@ -493,7 +493,7 @@ def test_a_connect_with_no_time_left_times_out_naming_the_last_reason() -> None:
             raise NoListener("nothing accepts there")
 
     config = LinkConfig(socket="unused", slot=0, connect_timeout=0.2)
-    with pytest.raises(WorkerTimeout, match="nothing accepts there"):
+    with pytest.raises(ModelServerTimeout, match="nothing accepts there"):
         ModelClient.connect(config, transport=Absent())
     assert calls
     assert all(t is not None and t > 0 for t in calls)  # never a non-blocking 0

@@ -3163,7 +3163,7 @@ async def test_a_crash_called_while_idle_ends_the_process_as_a_failure(
     _expect_state(started_runner, SessionState.READY)
     model = created_models[-1]
 
-    model.crash(RuntimeError("worker_died: the model server closed the link"))
+    model.crash(RuntimeError("model_server_lost: the model server closed the link"))
     assert model._thread is not None
     model._thread.join(timeout=2)
     await asyncio.sleep(0.05)  # let the loop run the scheduled eviction callback
@@ -3179,7 +3179,7 @@ async def test_a_crash_called_while_idle_ends_the_process_as_a_failure(
         (
             SessionState.READY,
             EndReason.ERROR,
-            "worker_died: the model server closed the link",
+            "model_server_lost: the model server closed the link",
         )
     ]
 

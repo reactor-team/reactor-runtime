@@ -1,7 +1,7 @@
 """How the model server's messages travel: one link per session, and the transport that makes it.
 
 The protocol (:mod:`reactor_runtime.model_server.protocol`) says what the two
-halves say; a link says how the bytes move. A :class:`WorkerLink` sends and
+halves say; a link says how the bytes move. A :class:`ModelServerLink` sends and
 receives whole protocol messages, and decides itself where a message's arrays
 go: inline in the frame, or in memory both ends share. A :class:`LinkTransport`
 opens links: ``connect()`` on a session's side, ``listen()`` and ``accept()`` on
@@ -55,7 +55,7 @@ class NoListener(Exception):  # noqa: N818 (named for the state a caller catches
 
 
 @runtime_checkable
-class WorkerLink(Protocol):
+class ModelServerLink(Protocol):
     """One connection between a session runtime and the model server, on either side.
 
     ``send()`` and ``receive()`` carry whole protocol messages. ``receive()``
@@ -99,7 +99,7 @@ class WorkerLink(Protocol):
 class LinkListener(Protocol):
     """The model server's end of a transport: the links sessions open."""
 
-    def accept(self) -> WorkerLink:
+    def accept(self) -> ModelServerLink:
         """Block for the next session's link and return it.
 
         Raises:
@@ -120,7 +120,7 @@ class LinkTransport(Protocol):
         """Start accepting links at *address*, for the model server."""
         ...
 
-    def connect(self, address: str, slot: int, *, timeout: float | None = None) -> WorkerLink:
+    def connect(self, address: str, slot: int, *, timeout: float | None = None) -> ModelServerLink:
         """Open a link to the model server at *address* for the session in *slot*.
 
         An implementation blocks no longer than *timeout* seconds in total,
@@ -131,7 +131,7 @@ class LinkTransport(Protocol):
             NoListener: Nothing accepts there yet, or the model server did not
                 finish setting the link up within *timeout*; trying again
                 later may work.
-            WorkerUnreachable: This deployment cannot reach a model server at
+            ModelServerUnreachable: This deployment cannot reach a model server at
                 all; trying again will not help.
         """
         ...

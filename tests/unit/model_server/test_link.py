@@ -14,10 +14,10 @@ import pytest
 from reactor_runtime.model_server import (
     LinkListener,
     LinkTransport,
+    ModelServerLink,
     NoListener,
     PayloadTooLarge,
     StreamLink,
-    WorkerLink,
 )
 from reactor_runtime.model_server.link import NoListener as LinkNoListener
 from reactor_runtime.model_server.protocol import (
@@ -33,31 +33,31 @@ from reactor_runtime.model_server.protocol import (
 @pytest.fixture
 def links() -> Iterator[tuple[StreamLink, StreamLink]]:
     a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-    session, worker = StreamLink(a), StreamLink(b, frame_limit=1 << 22)
-    yield session, worker
+    session, server = StreamLink(a), StreamLink(b, frame_limit=1 << 22)
+    yield session, server
     session.close()
-    worker.close()
+    server.close()
 
 
-def test_a_stream_link_is_a_worker_link() -> None:
+def test_a_stream_link_is_a_model_server_link() -> None:
     a, b = socket.socketpair()
     with a, b:
-        assert isinstance(StreamLink(a), WorkerLink)
+        assert isinstance(StreamLink(a), ModelServerLink)
 
 
 def test_messages_cross_whole_with_their_arrays_inline(
     links: tuple[StreamLink, StreamLink],
 ) -> None:
-    session, worker = links
+    session, server = links
     audio = np.arange(26880, dtype=np.int16)
 
     session.send(Hello(slot=1))
     session.send(Step(request_id=4, timeout=None, payload={"audio": audio}))
-    worker.send(Result(request_id=4, output={"echo": audio}))
-    worker.send(failure(5, ValueError("bad")))
+    server.send(Result(request_id=4, output={"echo": audio}))
+    server.send(failure(5, ValueError("bad")))
 
-    assert worker.receive() == Hello(slot=1)
-    step = worker.receive()
+    assert server.receive() == Hello(slot=1)
+    step = server.receive()
     np.testing.assert_array_equal(step.payload["audio"], audio)
     np.testing.assert_array_equal(session.receive().output["echo"], audio)
     assert session.receive().request_id == 5
@@ -66,36 +66,36 @@ def test_messages_cross_whole_with_their_arrays_inline(
 def test_only_protocol_messages_are_sent_or_received(
     links: tuple[StreamLink, StreamLink],
 ) -> None:
-    session, worker = links
+    session, server = links
     with pytest.raises(ProtocolError, match="not a protocol message"):
         session.send({"step": 1})
     session.send_bytes(pickle.dumps({"step": 1}))
     with pytest.raises(ProtocolError, match="not a protocol message"):
-        worker.receive()
+        server.receive()
 
 
 def test_a_message_past_the_frame_limit_is_refused_and_the_link_goes_on(
     links: tuple[StreamLink, StreamLink],
 ) -> None:
-    session, worker = links
+    session, server = links
 
     with pytest.raises(PayloadTooLarge, match="1048576-byte frame limit"):
         session.send(Step(request_id=1, timeout=None, payload=bytes(2 << 20)))
     session.send(Step(request_id=2, timeout=None, payload=b"small"))
 
-    assert worker.receive() == Step(request_id=2, timeout=None, payload=b"small")
+    assert server.receive() == Step(request_id=2, timeout=None, payload=b"small")
 
 
 def test_a_message_that_does_not_pickle_is_raised_and_the_link_goes_on(
     links: tuple[StreamLink, StreamLink],
 ) -> None:
-    session, worker = links
+    session, server = links
 
     with pytest.raises((pickle.PicklingError, AttributeError, TypeError)):
         session.send(Step(request_id=1, timeout=None, payload=lambda: None))
     session.send(Step(request_id=2, timeout=None, payload=1))
 
-    assert worker.receive().request_id == 2
+    assert server.receive().request_id == 2
 
 
 @pytest.mark.parametrize(
@@ -106,11 +106,11 @@ def test_a_message_that_does_not_pickle_is_raised_and_the_link_goes_on(
 def test_a_frame_that_cannot_be_unpickled_is_a_protocol_error(
     links: tuple[StreamLink, StreamLink], data: bytes
 ) -> None:
-    session, worker = links
+    session, server = links
     session.send_bytes(data)
 
     with pytest.raises(ProtocolError, match="does not hold a message"):
-        worker.receive()
+        server.receive()
 
 
 def test_a_send_racing_close_raises_closed(links: tuple[StreamLink, StreamLink]) -> None:
@@ -140,15 +140,15 @@ def test_no_listener_is_exported_with_the_package() -> None:
 def test_a_frame_past_the_limit_from_a_peer_with_a_larger_limit_is_refused(
     links: tuple[StreamLink, StreamLink],
 ) -> None:
-    session, worker = links
+    session, server = links
 
-    # The worker end was built with a larger limit than the session end, which
+    # The server end was built with a larger limit than the session end, which
     # a deployment never does; the reader still refuses the frame from its
     # header. Sent on its own thread: the frame is larger than the socket's
     # buffer, and the reader refuses it without draining it.
     def push() -> None:
         with contextlib.suppress(OSError):
-            worker.send(Result(request_id=1, output=bytes(2 << 20)))
+            server.send(Result(request_id=1, output=bytes(2 << 20)))
 
     sender = threading.Thread(target=push, daemon=True)
     sender.start()
@@ -184,14 +184,14 @@ def test_close_from_another_thread_ends_a_blocked_receive(
 
 
 def test_the_peer_closing_ends_receive(links: tuple[StreamLink, StreamLink]) -> None:
-    session, worker = links
-    worker.close()
+    session, server = links
+    server.close()
     with pytest.raises(Closed):
         session.receive()
 
 
 class _Listener:
-    def accept(self) -> WorkerLink:
+    def accept(self) -> ModelServerLink:
         raise OSError("closed")
 
     def close(self) -> None:
@@ -202,7 +202,7 @@ class _Transport:
     def listen(self, address: str) -> LinkListener:
         return _Listener()
 
-    def connect(self, address: str, slot: int, *, timeout: float | None = None) -> WorkerLink:
+    def connect(self, address: str, slot: int, *, timeout: float | None = None) -> ModelServerLink:
         a, _ = socket.socketpair()
         return StreamLink(a)
 

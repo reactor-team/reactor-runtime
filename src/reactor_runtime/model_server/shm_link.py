@@ -61,7 +61,7 @@ therefore holds at most two request blocks and one output block, in whole
 deployment gives each slot's volume.
 
 Blocks are named by who writes them: ``<prefix>s<slot>_`` for a session's
-requests and ``<prefix>w<slot>_`` for the model server's outputs, where the
+requests and ``<prefix>m<slot>_`` for the model server's outputs, where the
 prefix is the deployment's (``rrms_`` by default). A process that starts
 again clears what its previous run left behind under its own names: a session
 runtime, the blocks of its slot; the model server, every output block, in every
@@ -72,7 +72,7 @@ Before the protocol's first message the two ends set the link up themselves.
 The session names its slot and the prefix of its request blocks; the model
 server answers with a probe block it wrote in the slot's directory, and the
 session reads it from its own: a deployment where the two do not see the same
-memory fails at once, with :class:`~reactor_runtime.model_server.WorkerUnreachable`
+memory fails at once, with :class:`~reactor_runtime.model_server.ModelServerUnreachable`
 saying so, instead of on the first step. The session removes the probe once it
 has read it; the model server removes it too, on the link's first message or
 when the link closes, for a session that never got that far.
@@ -106,7 +106,7 @@ from reactor_runtime.ipc import (
     unpack,
 )
 from reactor_runtime.log import get_logger
-from reactor_runtime.model_server.errors import PayloadTooLarge, WorkerUnreachable
+from reactor_runtime.model_server.errors import ModelServerUnreachable, PayloadTooLarge
 from reactor_runtime.model_server.link import DEFAULT_FRAME_LIMIT, NoListener, StreamLink
 from reactor_runtime.model_server.protocol import (
     Cancel,
@@ -566,7 +566,7 @@ class UnixShmTransport:
 
     def output_prefix(self, slot: int) -> str:
         """The name every output block of slot *slot* starts with."""
-        return f"{self.block_prefix}w{slot}_"
+        return f"{self.block_prefix}m{slot}_"
 
     def reclaim(self, slots: int) -> int:
         """Unlink the output blocks a previous model server left in slots ``0`` to *slots* - 1.
@@ -602,7 +602,7 @@ class UnixShmTransport:
         and is never taken over.
 
         Raises:
-            WorkerUnreachable: The socket's directory does not exist, or a model
+            ModelServerUnreachable: The socket's directory does not exist, or a model
                 server already listens at *address*.
             ValueError: The transport was built without a ``slot_directory``.
         """
@@ -610,10 +610,10 @@ class UnixShmTransport:
             raise ValueError("this transport has no slot_directory: it can connect, not listen")
         path = Path(address)
         if not path.parent.is_dir():
-            raise WorkerUnreachable(_missing_directory(path.parent))
+            raise ModelServerUnreachable(_missing_directory(path.parent))
         if path.exists() or path.is_symlink():
             if _accepts(address):
-                raise WorkerUnreachable(f"a model server already listens at {address}")
+                raise ModelServerUnreachable(f"a model server already listens at {address}")
             with contextlib.suppress(FileNotFoundError):
                 path.unlink()
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -631,7 +631,7 @@ class UnixShmTransport:
         Raises:
             NoListener: Nothing accepts at *address* yet, or the model server
                 did not finish setting the link up within *timeout*.
-            WorkerUnreachable: The socket's directory does not exist, the
+            ModelServerUnreachable: The socket's directory does not exist, the
                 socket is not open to this user, the model server has no
                 directory for the slot, the two ends do not see the same
                 memory, or the session's directory has no room for its
@@ -646,9 +646,9 @@ class UnixShmTransport:
         except OSError as exc:
             sock.close()
             if exc.errno == errno.ENOENT and not path.parent.is_dir():
-                raise WorkerUnreachable(_missing_directory(path.parent)) from None
+                raise ModelServerUnreachable(_missing_directory(path.parent)) from None
             if exc.errno in (errno.EACCES, errno.EPERM):
-                raise WorkerUnreachable(
+                raise ModelServerUnreachable(
                     f"the model server's socket {address} is not open to this user: run the "
                     "session runtimes as the model server's user"
                 ) from None
@@ -668,7 +668,7 @@ class UnixShmTransport:
             try:
                 writer = _fixed_slot(prefix, setup.input_bytes, directory)
             except SharedSlotAllocationFailed:
-                raise WorkerUnreachable(
+                raise ModelServerUnreachable(
                     f"slot {slot}'s shared-memory directory {directory} has no room for a "
                     f"{setup.input_bytes}-byte request block: size the session's volume to at "
                     "least 2 * input + output of model.resources.workers.shared_memory, in "
@@ -700,19 +700,19 @@ class UnixShmTransport:
                 f"the model server answered the link's hello unreadably: {exc!r}"
             ) from None
         if isinstance(answer, ShmRefused):
-            raise WorkerUnreachable(answer.reason)
+            raise ModelServerUnreachable(answer.reason)
         if not isinstance(answer, ShmSetup):
             raise ProtocolError("the model server answered the link's hello with something else")
         try:
             probe = attach_block(answer.probe, directory)
         except (OSError, ValueError):
-            raise WorkerUnreachable(_not_shared(directory)) from None
+            raise ModelServerUnreachable(_not_shared(directory)) from None
         try:
             seen = bytes(probe.buf[: len(answer.nonce)])
         finally:
             probe.close()
         if seen != answer.nonce:
-            raise WorkerUnreachable(_not_shared(directory))
+            raise ModelServerUnreachable(_not_shared(directory))
         with contextlib.suppress(OSError):
             (directory / answer.probe).unlink()
         return answer

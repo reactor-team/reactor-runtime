@@ -174,7 +174,7 @@ class ModelServer[RequestT, ResultT]:
         """Set up the state of the session that just opened *slot*.
 
         A raise refuses the session: its application sees a
-        :class:`~reactor_runtime.model_server.WorkerRejected`.
+        :class:`~reactor_runtime.model_server.ModelServerRejected`.
         """
 
     def session_closed(self, slot: int, generation: int) -> None:
