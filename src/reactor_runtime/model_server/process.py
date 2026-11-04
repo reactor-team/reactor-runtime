@@ -6,7 +6,7 @@ runs, beside a :class:`~reactor_runtime.http.HealthServer`, under the runtime's
 deployment before anything heavy happens (the model half's class, its settings,
 and each slot's shared-memory directory), reclaims the blocks a previous run
 left, loads the weights, and then starts a
-:class:`~reactor_runtime.model_server.WorkerServer`. Its lifecycle word is
+:class:`~reactor_runtime.model_server.ModelServerCore`. Its lifecycle word is
 ``loading`` until the weights are in, ``available`` while it serves, and
 ``terminated`` once stopped; every record the process writes carries it as
 ``runtime_state``.
@@ -33,8 +33,8 @@ from reactor_runtime.model_server.config import ServerProcessConfig
 from reactor_runtime.model_server.errors import ModelServerUnreachable
 from reactor_runtime.model_server.link import LinkTransport
 from reactor_runtime.model_server.server import ModelServer, ServerSettings
+from reactor_runtime.model_server.server_core import ModelServerCore
 from reactor_runtime.model_server.shm_link import UnixShmTransport
-from reactor_runtime.model_server.worker import WorkerServer
 from reactor_runtime.service import ShutdownHook, no_shutdown
 
 logger = get_logger(__name__)
@@ -72,7 +72,7 @@ class ModelServerProcess:
         self._process = process
         self._transport = transport
         self._state = RuntimeState.LOADING
-        self._server: WorkerServer | None = None
+        self._server: ModelServerCore | None = None
         self.request_shutdown: ShutdownHook = no_shutdown
 
     def state(self) -> RuntimeState:
@@ -130,7 +130,7 @@ class ModelServerProcess:
             max_batch=settings.max_batch,
             shm_slot_bytes=settings.shm_slot_bytes,
         )
-        self._server = WorkerServer(
+        self._server = ModelServerCore(
             model,
             transport,
             self._process.socket,

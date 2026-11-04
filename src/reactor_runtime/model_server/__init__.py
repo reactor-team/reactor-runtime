@@ -38,17 +38,17 @@ from reactor_runtime.model_server.errors import (
 from reactor_runtime.model_server.link import (
     LinkListener,
     LinkTransport,
+    ModelServerLink,
     NoListener,
     StreamLink,
-    WorkerLink,
 )
 from reactor_runtime.model_server.server import (
     ModelServer,
     ServerRequest,
     ServerSettings,
 )
+from reactor_runtime.model_server.server_core import ModelServerCore
 from reactor_runtime.model_server.shm_link import ShmLink, UnixShmListener, UnixShmTransport
-from reactor_runtime.model_server.worker import WorkerServer
 
 __all__ = [
     "BatchFailed",
@@ -59,7 +59,9 @@ __all__ = [
     "LinkTransport",
     "ModelClient",
     "ModelServer",
+    "ModelServerCore",
     "ModelServerError",
+    "ModelServerLink",
     "ModelServerLost",
     "ModelServerRejected",
     "ModelServerStopping",
@@ -78,7 +80,5 @@ __all__ = [
     "StreamLink",
     "UnixShmListener",
     "UnixShmTransport",
-    "WorkerLink",
-    "WorkerServer",
     "link_config",
 ]

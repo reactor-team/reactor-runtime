@@ -1,4 +1,4 @@
-"""The client against a real worker: results, failures, and a lost link that stays lost."""
+"""The client against a real model server: results, failures, and a lost link that stays lost."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from reactor_runtime.model_server import (
     LinkState,
     ModelClient,
     ModelServer,
+    ModelServerCore,
     ModelServerLost,
     ModelServerRejected,
     ModelServerTimeout,
@@ -36,7 +37,6 @@ from reactor_runtime.model_server import (
     StepStillRunning,
     StepTimedOut,
     StreamLink,
-    WorkerServer,
     link_config,
 )
 from reactor_runtime.model_server.link import NoListener
@@ -135,7 +135,7 @@ class PairTransport:
 @dataclass
 class Rig:
     model: Model
-    server: WorkerServer
+    server: ModelServerCore
     transport: PairTransport
 
     def client(self, slot: int = 0, *, step_timeout: float | None = 5.0) -> ModelClient:
@@ -145,9 +145,9 @@ class Rig:
         return ModelClient.connect(config, transport=self.transport)
 
 
-def _server(model: Model, transport: PairTransport) -> WorkerServer:
+def _server(model: Model, transport: PairTransport) -> ModelServerCore:
     settings = ServerSettings(max_batch=4, batch_window=0.0, shm_input_bytes=1, shm_output_bytes=1)
-    server = WorkerServer(model, transport, "unused", settings=settings, max_sessions=2)
+    server = ModelServerCore(model, transport, "unused", settings=settings, max_sessions=2)
     asyncio.run(server.start())
     return server
 
@@ -337,7 +337,7 @@ def test_close_makes_every_call_raise_client_closed(rig: Rig) -> None:
 
 def test_connect_waits_for_a_model_server_that_starts_later() -> None:
     model, transport = Model(), PairTransport()
-    started: list[WorkerServer] = []
+    started: list[ModelServerCore] = []
     threading.Timer(0.3, lambda: started.append(_server(model, transport))).start()
 
     config = LinkConfig(socket="unused", slot=1, connect_timeout=10)

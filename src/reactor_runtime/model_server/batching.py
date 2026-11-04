@@ -1,7 +1,7 @@
 """Which waiting requests the model steps together, and when: the batching policy, on its own.
 
 :class:`BatchPolicy` holds no sockets, no threads and no clock of its own: the
-worker hands it requests and the time, and it answers with the next batch, the
+model server hands it requests and the time, and it answers with the next batch, the
 requests whose timeout passed, and when to look again. That keeps the policy
 :class:`~reactor_runtime.model_server.ModelServer` documents testable on its own.
 """
@@ -21,10 +21,10 @@ class Waiting:
     payload may hold arrays, which do not compare as a single truth value.
 
     Attributes:
-        connection: Names the session's connection on the worker.
+        connection: Names the session's connection on the model server.
         request_id: The id its answer carries.
         payload: The request.
-        arrived: When it arrived, in the worker's monotonic clock.
+        arrived: When it arrived, in the model server's monotonic clock.
         deadline: When it expires if it is still waiting, or ``None``.
     """
 

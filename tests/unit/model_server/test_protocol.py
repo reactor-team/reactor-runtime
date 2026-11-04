@@ -124,7 +124,7 @@ def test_a_frame_that_holds_no_message_is_refused() -> None:
 
 def test_a_hello_in_another_protocol_is_refused_naming_both_versions() -> None:
     check_hello(Hello(slot=0))
-    with pytest.raises(ProtocolError, match=f"protocol {PROTOCOL + 1} and the worker speaks"):
+    with pytest.raises(ProtocolError, match=f"protocol {PROTOCOL + 1} and the model server speaks"):
         check_hello(Hello(slot=0, protocol=PROTOCOL + 1))
 
 
@@ -164,20 +164,20 @@ def test_a_batch_failure_whose_cause_is_too_large_is_still_a_batch_failure() -> 
     assert "too large to send whole" in str(error.cause)
 
 
-def test_a_batch_failure_whose_cause_only_the_worker_imports_is_still_a_batch_failure(
+def test_a_batch_failure_whose_cause_only_the_model_server_imports_is_still_a_batch_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    module = types.ModuleType("only_in_the_worker")
+    module = types.ModuleType("only_in_the_model_server")
     exec("class Missing(Exception):\n    pass\n", module.__dict__)
-    monkeypatch.setitem(sys.modules, "only_in_the_worker", module)
+    monkeypatch.setitem(sys.modules, "only_in_the_model_server", module)
     failed = failure(3, BatchFailed(module.Missing("gone")))
-    monkeypatch.delitem(sys.modules, "only_in_the_worker")
+    monkeypatch.delitem(sys.modules, "only_in_the_model_server")
 
     error = error_of(failed)
 
     assert isinstance(error, BatchFailed)
     assert type(error.cause) is ModelServerError
-    assert str(error.cause) == "only_in_the_worker.Missing: gone"
+    assert str(error.cause) == "only_in_the_model_server.Missing: gone"
 
 
 def test_a_batch_failure_that_falls_back_whole_is_still_a_batch_failure(
@@ -302,16 +302,16 @@ def test_portable_pickle_checks_the_protocol_it_is_given() -> None:
 def test_an_exception_this_process_cannot_import_arrives_as_a_model_server_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    module = types.ModuleType("only_in_the_worker")
+    module = types.ModuleType("only_in_the_model_server")
     exec("class Missing(Exception):\n    pass\n", module.__dict__)
-    monkeypatch.setitem(sys.modules, "only_in_the_worker", module)
+    monkeypatch.setitem(sys.modules, "only_in_the_model_server", module)
     failed = failure(3, module.Missing("gone"))
-    monkeypatch.delitem(sys.modules, "only_in_the_worker")
+    monkeypatch.delitem(sys.modules, "only_in_the_model_server")
 
     error = error_of(failed)
 
     assert type(error) is ModelServerError
-    assert str(error) == "only_in_the_worker.Missing: gone"
+    assert str(error) == "only_in_the_model_server.Missing: gone"
 
 
 def test_a_huge_exception_travels_bounded_as_its_description() -> None:

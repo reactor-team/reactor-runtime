@@ -1,6 +1,6 @@
 """The model server's process core: sessions in, batches stepped, answers out.
 
-:class:`WorkerServer` serves one loaded :class:`~reactor_runtime.model_server.ModelServer`
+:class:`ModelServerCore` serves one loaded :class:`~reactor_runtime.model_server.ModelServer`
 to the session runtimes that connect through a
 :class:`~reactor_runtime.model_server.LinkTransport`. It is a service component,
 started, drained and stopped by the runtime's service like every other.
@@ -18,7 +18,7 @@ waits is refused for that session alone; a session that breaks the protocol,
 or stops reading its answers, is closed alone; an output that is an
 exception, or a result the link cannot carry, fails that request alone. A
 ``step()`` that raises fails every request of its batch with
-:class:`~reactor_runtime.model_server.BatchFailed`, and the worker goes on: it
+:class:`~reactor_runtime.model_server.BatchFailed`, and the model server goes on: it
 never steps a request twice.
 
 A session's messages are applied in the order it sent them. While a
@@ -28,15 +28,15 @@ a session sends the steps of its new generation only after its
 :class:`~reactor_runtime.model_server.protocol.ResetDone`, as
 :class:`~reactor_runtime.model_server.ModelClient` does.
 
-The worker's own life is a state machine too, ``serving``, then ``draining``,
+The model server's own life is a state machine too, ``serving``, then ``draining``,
 then ``stopped``, and every message is answered in every state. Once the
-worker drains, a step or a reset is answered at once with
+model server drains, a step or a reset is answered at once with
 :class:`~reactor_runtime.model_server.ModelServerStopping`, a hello is refused, and
 whatever was still queued is answered before the step thread ends. A
 connection is tracked from the moment it is accepted: one that does not send
 its hello within :data:`HELLO_TIMEOUT` is closed, at most ``max_sessions``
 connections may be opening at once, and draining or stopping closes the ones
-still opening. An exception that escapes the step thread latches the worker
+still opening. An exception that escapes the step thread latches the model server
 unhealthy with the reason, so the deployment restarts it.
 """
 
@@ -84,7 +84,7 @@ from reactor_runtime.model_server.server import ModelServer, ServerRequest, Serv
 logger = get_logger(__name__)
 
 DEFAULT_STUCK_SECONDS = 120.0
-"""How long one step may run before the worker reports itself unhealthy."""
+"""How long one step may run before the model server reports itself unhealthy."""
 
 HELLO_TIMEOUT = 10.0
 """Seconds an accepted connection may take to send its hello before it is closed."""
@@ -93,7 +93,7 @@ _IDLE_WAIT = 0.5
 
 
 class ServerState(enum.Enum):
-    """Where the worker is in its life: serving, draining, or stopped."""
+    """Where the model server is in its life: serving, draining, or stopped."""
 
     SERVING = "serving"
     DRAINING = "draining"
@@ -108,7 +108,7 @@ _SERVER_MOVES: dict[ServerState, frozenset[ServerState]] = {
 
 
 class ServerMoveError(RuntimeError):
-    """The worker was asked to move to a state its sequence does not allow from where it is."""
+    """The model server was asked to move to a state its sequence does not allow from here."""
 
 
 @dataclass(frozen=True)
@@ -128,7 +128,7 @@ class _Reset:
     session_id: str | None
 
 
-class WorkerServer:
+class ModelServerCore:
     """Serve one loaded model to the session runtimes that connect, as a service component.
 
     Args:
@@ -140,7 +140,7 @@ class WorkerServer:
             ``max_sessions - 1`` are served, and at most that many connections
             may be opening at once.
         stuck_after: Seconds one step may run before :meth:`health` reports
-            the worker stuck.
+            the model server stuck.
     """
 
     name = "model_server"
@@ -179,7 +179,7 @@ class WorkerServer:
 
     @property
     def state(self) -> ServerState:
-        """Where the worker is in its life."""
+        """Where the model server is in its life."""
         return self._state
 
     # -- the service component ----------------------------------------------------------------
@@ -598,7 +598,7 @@ class WorkerServer:
         connection.close()
 
     def _forget(self, connection: Connection) -> None:
-        """Move *connection* to closing and drop everything the worker holds for it."""
+        """Move *connection* to closing and drop everything the model server holds for it."""
         connection.move(ConnectionState.CLOSING)
         with self._cond:
             self._policy.drop(connection.number)

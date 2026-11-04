@@ -29,7 +29,7 @@ from reactor_runtime.model_server.errors import (
     ResetRequired,
     StepTimedOut,
 )
-from reactor_runtime.model_server.link import LinkTransport, NoListener, WorkerLink
+from reactor_runtime.model_server.link import LinkTransport, ModelServerLink, NoListener
 from reactor_runtime.model_server.protocol import (
     Cancel,
     Closed,
@@ -133,7 +133,7 @@ class ModelClient[RequestT, ResultT]:
 
     def __init__(
         self,
-        link: WorkerLink,
+        link: ModelServerLink,
         welcome: Welcome,
         config: LinkConfig,
         on_lost: Callable[[ModelServerLost], None] | None = None,
@@ -440,7 +440,7 @@ class ModelClient[RequestT, ResultT]:
                 logger.exception("the on_lost callback raised", slot=self._slot)
 
 
-def _receive_until(link: WorkerLink, deadline: float | None) -> Any:
+def _receive_until(link: ModelServerLink, deadline: float | None) -> Any:
     """Receive one message, giving up at *deadline*: a model server opens a session between steps.
 
     Raises:

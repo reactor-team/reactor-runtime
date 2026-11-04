@@ -61,7 +61,7 @@ therefore holds at most two request blocks and one output block, in whole
 deployment gives each slot's volume.
 
 Blocks are named by who writes them: ``<prefix>s<slot>_`` for a session's
-requests and ``<prefix>w<slot>_`` for the model server's outputs, where the
+requests and ``<prefix>m<slot>_`` for the model server's outputs, where the
 prefix is the deployment's (``rrms_`` by default). A process that starts
 again clears what its previous run left behind under its own names: a session
 runtime, the blocks of its slot; the model server, every output block, in every
@@ -566,7 +566,7 @@ class UnixShmTransport:
 
     def output_prefix(self, slot: int) -> str:
         """The name every output block of slot *slot* starts with."""
-        return f"{self.block_prefix}w{slot}_"
+        return f"{self.block_prefix}m{slot}_"
 
     def reclaim(self, slots: int) -> int:
         """Unlink the output blocks a previous model server left in slots ``0`` to *slots* - 1.
