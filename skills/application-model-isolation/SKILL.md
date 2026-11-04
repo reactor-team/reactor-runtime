@@ -481,7 +481,7 @@ copy of them: the model half runs once, in its own process, as a
 `ModelServer` (`reactor_runtime.model_server`), and each session runtime runs
 the application half, holding a `ModelClient` to it. Every rule above still
 holds; the boundary between the halves is now a process boundary, which adds
-five:
+six:
 
 - **What crosses is data, by convention.** Requests, results and signals are
   pickled as they are, so anything pickle takes crosses, and nothing checks
@@ -509,6 +509,11 @@ five:
   `Health`; a model that reports itself unhealthy is restarted by its
   deployment, and every session runtime then sees `ModelServerLost` and goes down
   as above.
+- **Work that outlives `step()` returns a future.** A model half that runs a
+  request across its own threads, such as a pipeline over several GPUs,
+  returns a `concurrent.futures.Future` from `step()` and resolves it when the
+  result is ready; the session stays busy until it is done. The application
+  half does not change. `ModelServer.step()` documents the rules.
 
 ```python
 class Plasma(ReactorApp):
