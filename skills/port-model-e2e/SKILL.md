@@ -37,12 +37,18 @@ checklist are written for video, and the report says so.
 |---|---|---|
 | Code repository | yes | URL or path, and a commit. Its README's example is the baseline |
 | Checkpoint | yes | `hf://org/repo[@revision]`, a Hugging Face URL, or a local directory |
-| GPU node | yes | You run on it. Use only the GPU numbers you were given, and name them in every command (`--gpus '"device=2"'`, `CUDA_VISIBLE_DEVICES=2`), so nothing falls back to GPU 0 or to all GPUs on a node others share |
+| GPU node and devices | no | When the person names a node and GPU numbers (they have arranged them), use exactly those. When they do not, find a free device yourself on the nodes you can reach: free means no process holds it (`nvidia-smi --query-compute-apps`), not low memory; book it in whatever reservation system your environment uses; and name the node and device in your first message. Either way, name the devices in every command (`--gpus '"device=2"'`, `CUDA_VISIBLE_DEVICES=2`), so nothing falls back to GPU 0 or to all GPUs on a node others share |
 
 ## Questions, asked once, at the start
 
-Almost everything about a port is read from the code. Ask only what the code cannot decide, in
-**one** message before Phase 1, each with a proposed answer so the person can reply "all defaults":
+Almost everything about a port is read from the code. That first message opens with the **model
+facts**: chunk size, forwards per chunk, resolution, maximum length, input and output modalities and
+the rest of the template in [model-facts.md](references/model-facts.md) (or the person's own template,
+when they give one), each with the file it was read from. The person sees what the model is in the
+first minutes, not in the report.
+
+Then ask only what the code cannot decide, in the same message, before Phase 1, each with a proposed
+answer so the person can reply "all defaults":
 
 | Question | Proposed default |
 |---|---|
@@ -128,7 +134,7 @@ These are read from the code, never asked:
 
 | Phase | What | Detail | Exit criterion |
 |---|---|---|---|
-| 0 | Orient | below | the node runs a GPU container; latest runtime release looked up; step shape read; workspaces created |
+| 0 | Orient | below | the node runs a GPU container; latest runtime release looked up; step shape read; workspaces created; the model facts ([model-facts.md](references/model-facts.md)) and the questions sent in one message |
 | 1 | The source, in your container | [source-and-weights.md](references/source-and-weights.md) | the repository's own example runs in your image with the network off, loading only from the weights root |
 | 2 | The baseline | [baseline-and-replay.md](references/baseline-and-replay.md) | the source reproduces itself bit for bit across two processes, or its remaining run-to-run difference is recorded as a floor with the operation that causes it; conditions file and trajectory recorded |
 | 3 | **Streaming refactor**, only when needed | below, and [streaming-refactor.md](references/streaming-refactor.md) | "not needed" recorded with its reason, or a per-chunk function whose output over the baseline's schedule equals the baseline bit for bit (or within the floor) |
@@ -248,7 +254,8 @@ One report, in the run directory, opening with the three deliverables:
   tolerance names the unavoidable change that needed it and was declared before the run.
 
 Then the model's shape and speed, measured on the served port over one full session, with the GPU
-model and device count:
+model and device count. Where a measurement differs from a model fact reported at the start, say so
+beside it:
 
 | Number | How it is stated |
 |---|---|
