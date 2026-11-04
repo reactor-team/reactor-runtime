@@ -6,7 +6,9 @@ either direction, as a server that has stopped responding does: the runtime
 sees no close and no error, only silence. Media does not pass through it.
 
 The relay runs on threads of its own, so it keeps forwarding while a scenario
-waits on the runtime's blocking HTTP calls.
+waits on the runtime's blocking HTTP calls. It forwards raw TCP, so it serves a
+local ``ws://`` server only: a ``wss://`` server's certificate would not match
+the relay's address.
 """
 
 from __future__ import annotations
@@ -25,11 +27,16 @@ class StallingRelay:
     """Forward TCP connections to one upstream address, until told to stall.
 
     Args:
-        upstream_url: The LiveKit server's ``ws://`` or ``wss://`` URL.
+        upstream_url: The LiveKit server's ``ws://`` URL.
+
+    Raises:
+        ValueError: The URL is not a ``ws://`` URL.
     """
 
     def __init__(self, upstream_url: str) -> None:
         parsed = urlparse(upstream_url)
+        if parsed.scheme != "ws":
+            raise ValueError(f"the relay forwards raw TCP to a ws:// server, not {upstream_url!r}")
         self._scheme = parsed.scheme
         self._upstream = (parsed.hostname or "127.0.0.1", parsed.port or 7880)
         self._flowing = threading.Event()
@@ -76,10 +83,34 @@ class StallingRelay:
                 continue
             with self._lock:
                 self._sockets += [client, upstream]
+            # The pair is closed once both directions have ended.
+            ends = threading.Barrier(2, action=lambda c=client, u=upstream: self._release(c, u))
             for src, dst in ((client, upstream), (upstream, client)):
                 threading.Thread(
-                    target=self._pump, args=(src, dst), name="relay-pump", daemon=True
+                    target=self._pump_then_end,
+                    args=(src, dst, ends),
+                    name="relay-pump",
+                    daemon=True,
                 ).start()
+
+    def _release(self, *pair: socket.socket) -> None:
+        with self._lock:
+            for sock in pair:
+                sock.close()
+                if sock in self._sockets:
+                    self._sockets.remove(sock)
+
+    def open_sockets(self) -> int:
+        """Return how many relayed sockets are still open."""
+        with self._lock:
+            return len(self._sockets)
+
+    def _pump_then_end(
+        self, src: socket.socket, dst: socket.socket, ends: threading.Barrier
+    ) -> None:
+        self._pump(src, dst)
+        with contextlib.suppress(threading.BrokenBarrierError):
+            ends.wait()
 
     def _pump(self, src: socket.socket, dst: socket.socket) -> None:
         # A socket the other side, or close(), already shut ends the pump quietly.

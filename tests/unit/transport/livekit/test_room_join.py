@@ -1,5 +1,6 @@
 import asyncio
 import gc
+import logging
 import weakref
 from typing import Any, cast
 
@@ -8,7 +9,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from tests.unit.transport.livekit.test_livekit_router import FakeRunner as RouterRunner
 
-from reactor_runtime.core import ConnId, TrackDirection, TrackKind
+from reactor_runtime.core import ConnId, HealthStatus, TrackDirection, TrackKind
 from reactor_runtime.transport.livekit import LiveKitRouter
 from reactor_runtime.transport.livekit import room as room_module
 from reactor_runtime.transport.livekit.room import RoomSession, RoomState, _masked
@@ -544,7 +545,7 @@ async def test_a_slow_leave_ends_the_close_at_the_bound_and_runs_on_uncancelled(
 
 @pytest.mark.usefixtures("short_leave")
 async def test_a_leave_that_fails_settles_the_room_connection(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     room, control = FakeRoom(), FakeControl(_VIDEO_OUT)
     leave = _slow_leave(monkeypatch, room)
@@ -552,11 +553,17 @@ async def test_a_leave_that_fails_settles_the_room_connection(
     session.start()
     await _settle()
 
-    await asyncio.wait_for(session.leave(), timeout=1.0)
-    leave.release(RuntimeError("the room is gone"))
-    await _settle()
+    with caplog.at_level(logging.INFO, logger="reactor_runtime.transport.livekit.room"):
+        await asyncio.wait_for(session.leave(), timeout=1.0)
+        leave.release(RuntimeError("the room is gone, token=a-token"))
+        await _settle()
 
     assert session.settled
+    (failed,) = [r for r in caplog.records if r.getMessage() == "leaving the LiveKit room failed"]
+    fields = failed.__dict__["reactor_fields"]
+    assert "a-token" not in fields["error"]
+    assert fields["error_type"] == "RuntimeError"
+    assert fields["leave_s"] >= 0
 
 
 @pytest.mark.usefixtures("short_deadline", "short_leave")
@@ -588,3 +595,109 @@ async def test_the_session_reopens_a_room_only_once_a_slow_leave_has_finished(
     assert while_leaving.status_code == 409
     assert first.disconnects == 1
     assert after.status_code == 202
+
+
+async def test_a_leave_that_fails_within_the_bound_is_not_logged_as_left(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    room, control = FakeRoom(), FakeControl(_VIDEO_OUT)
+
+    async def disconnect() -> None:
+        raise RuntimeError("refused")
+
+    monkeypatch.setattr(room, "disconnect", disconnect)
+    session = _session(room, control)
+    session.start()
+    await _settle()
+    with caplog.at_level(logging.INFO, logger="reactor_runtime.transport.livekit.room"):
+        await session.leave()
+        await _settle()
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert "leaving the LiveKit room failed" in messages
+    assert "left the LiveKit room" not in messages
+    assert session.settled
+
+
+@pytest.mark.usefixtures("short_leave")
+async def test_a_slow_leave_logs_its_late_end_with_how_long_it_took(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    room, control = FakeRoom(), FakeControl(_VIDEO_OUT)
+    leave = _slow_leave(monkeypatch, room)
+    session = _session(room, control)
+    session.start()
+    await _settle()
+    with caplog.at_level(logging.INFO, logger="reactor_runtime.transport.livekit.room"):
+        await asyncio.wait_for(session.leave(), timeout=1.0)
+        assert session.leave_age() is not None
+        leave.release()
+        await _settle()
+
+    (late,) = [r for r in caplog.records if r.getMessage() == "left the LiveKit room late"]
+    assert late.__dict__["reactor_fields"]["leave_s"] >= room_module.LEAVE_TIMEOUT_SECONDS
+    assert session.leave_age() is None
+
+
+@pytest.mark.usefixtures("short_leave")
+async def test_settle_waits_for_a_slow_leave_and_cancels_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    room, control = FakeRoom(), FakeControl(_VIDEO_OUT)
+    leave = _slow_leave(monkeypatch, room)
+    session = _session(room, control)
+    session.start()
+    await _settle()
+    await asyncio.wait_for(session.leave(), timeout=1.0)
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(session.settle(), timeout=0.1)
+    assert not leave.cancelled
+    settling = asyncio.create_task(session.settle())
+    leave.release()
+    await asyncio.wait_for(settling, timeout=1.0)
+
+    assert session.settled
+    assert room.disconnects == 1
+
+
+@pytest.mark.usefixtures("short_leave")
+async def test_a_room_still_leaving_when_the_next_session_opens_is_kept_and_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = FakeRoom()
+    leave = _slow_leave(monkeypatch, first)
+    rooms = iter([first, FakeRoom()])
+    monkeypatch.setattr(room_module.rtc, "Room", lambda: next(rooms))
+    monkeypatch.setattr(room_module, "LEAVE_STUCK_SECONDS", 0.1)
+    runner = RouterRunner()
+    router = LiveKitRouter()
+    app = FastAPI()
+    router.mount(app, cast(Any, runner))
+    path = "/sessions/s1/transport/livekit/connections"
+    body = {"url": "wss://rooms.example", "token": "a-token"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://runtime") as client:
+        assert (await client.post(path, json=body)).status_code == 202
+        await _settle()
+        runner.epoch = 2  # the first session ended; the next one opens its room
+        opened = await client.post(path, json=body)
+        assert opened.status_code == 202
+        await _settle()
+
+        assert router.health().status is HealthStatus.HEALTHY
+        await asyncio.sleep(0.2)  # past the bound and the stuck limit: the first leave still runs
+        health = router.health()
+        assert health.status is HealthStatus.UNHEALTHY
+        assert "1 room connection(s) still leaving" in str(health.detail)
+
+        settling = asyncio.create_task(router.settle())
+        await asyncio.sleep(0.05)
+        assert not settling.done()
+        leave.release()
+        await asyncio.wait_for(settling, timeout=1.0)
+        cid = opened.json()["connection_id"]
+        assert (await client.delete(f"{path}/{cid}")).status_code == 204
+
+    assert not leave.cancelled
+    assert first.disconnects == 1
+    assert router.health().status is HealthStatus.HEALTHY

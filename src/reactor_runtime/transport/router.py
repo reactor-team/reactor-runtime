@@ -16,15 +16,17 @@ shape, and signalling never crosses it.
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar, Protocol, runtime_checkable
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from reactor_runtime.core import ConnectionSink, ConnId, SessionState
+from reactor_runtime.core import ConnectionSink, ConnId, Health, SessionState
+from reactor_runtime.log import get_logger
 
 
 class ErrorDetail(BaseModel):
@@ -329,3 +331,75 @@ class TransportRouter(ABC):
     @abstractmethod
     def mount(self, app: FastAPI, runner: SessionControl) -> None:
         """Register this transport's routes against *app*, bound to *runner*."""
+
+    async def settle(self) -> None:
+        """Wait for the work this transport's closed connections left running.
+
+        A connection's close may stop waiting on work it must not cut short,
+        such as leaving a room that is slow to answer, and leave it running.
+        The process awaits this once at shutdown, after the session has torn
+        down, so that work ends before the event loop does; the wait is
+        bounded and cancelled at the bound, and must cancel nothing itself.
+        A router with no such work returns at once.
+        """
+        return
+
+    def health(self) -> Health:
+        """Report whether the transport is releasing what its connections held.
+
+        Aggregated into the process's ``/health``. Healthy unless the router
+        overrides it.
+        """
+        return Health.healthy()
+
+
+logger = get_logger(__name__)
+
+
+class Transports:
+    """The transports as one service component, released after the runner.
+
+    Its stop awaits every router's :meth:`TransportRouter.settle`, at most
+    *settle_timeout* seconds in all, and its health aggregates theirs. The
+    assembly makes the runner depend on it, so it stops after the runner has
+    torn the session down and closed its connections.
+
+    Args:
+        routers: The transports the runtime serves.
+        settle_timeout: Seconds the stop waits for the routers to settle; past
+            it, the stop logs and returns, and what still runs is cancelled
+            when the event loop ends.
+    """
+
+    name = "transports"
+    depends_on: tuple[str, ...] = ()
+
+    def __init__(self, routers: Sequence[TransportRouter], *, settle_timeout: float) -> None:
+        self._routers = list(routers)
+        self._settle_timeout = settle_timeout
+
+    async def start(self) -> None:
+        """Nothing to start: the routers are mounted with the HTTP app."""
+
+    async def drain(self) -> None:
+        """Nothing to drain: the runner's drain ends the session and its connections."""
+
+    async def stop(self) -> None:
+        """Wait for every router to settle, bounded by *settle_timeout*."""
+        settling = [asyncio.create_task(router.settle()) for router in self._routers]
+        if not settling:
+            return
+        _, pending = await asyncio.wait(settling, timeout=self._settle_timeout)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.wait(pending)
+            logger.warning(
+                "transport work still running at shutdown",
+                timeout_s=self._settle_timeout,
+                health=self.health().detail,
+            )
+
+    def health(self) -> Health:
+        """Aggregate the routers' health."""
+        return Health.aggregate(router.health() for router in self._routers)

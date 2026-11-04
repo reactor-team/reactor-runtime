@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from enum import StrEnum
@@ -83,6 +84,14 @@ participant would stay in the room. It runs on in the background, and the room
 connection is not :attr:`RoomSession.settled` until it has finished. The bound
 sits above the SDK's own two-second limit on unwinding in-flight RPC calls, so
 that step completes inside it.
+"""
+
+LEAVE_STUCK_SECONDS = 60.0
+"""How long a leave may run before the LiveKit transport reports itself unhealthy.
+
+A room that has not answered a leave for this long is not slow but gone, and
+each session that ends against it leaves one more room connection behind; the
+LiveKit router's ``health()`` reports it so the deployment replaces the process.
 """
 
 _JOIN_REFUSED = "the LiveKit room could not be joined: {cause}"
@@ -186,6 +195,10 @@ class RoomSession:
         self._connection: RoomConnection | None = None
         self._join: asyncio.Task[None] | None = None
         self._closing: set[asyncio.Task[None]] = set()
+        # Each leave still running, with when it started; and those the close
+        # stopped waiting for.
+        self._leaves: dict[asyncio.Task[None], float] = {}
+        self._late: set[asyncio.Task[None]] = set()
         # An abandoned attempt that will leave the room once it settles: set
         # when the attempt is abandoned, cleared once the room is left.
         self._leave_pending = False
@@ -224,6 +237,24 @@ class RoomSession:
         if self.active or self._leave_pending:
             return False
         return all(task is None or task.done() for task in (self._join, *self._closing))
+
+    def leave_age(self) -> float | None:
+        """Return how long the oldest leave still running has run, in seconds, or ``None``."""
+        if not self._leaves:
+            return None
+        return time.monotonic() - min(self._leaves.values())
+
+    async def settle(self) -> None:
+        """Wait until the room connection is :attr:`settled`, cancelling nothing.
+
+        A join attempt and a leave keep running to their end; this only waits
+        for them, including a leave that starts while it waits. Cancelling the
+        wait leaves them running.
+        """
+        while pending := [
+            task for task in (self._join, *self._closing) if task is not None and not task.done()
+        ]:
+            await asyncio.wait(pending)
 
     @property
     def active(self) -> bool:
@@ -383,26 +414,38 @@ class RoomSession:
         """Leave the room, waiting at most :data:`LEAVE_TIMEOUT_SECONDS` for it.
 
         Returns:
-            Whether the leave finished within the bound. One that did not goes
-            on in the background, tracked until it ends.
+            Whether the room was left within the bound. A leave that fails
+            returns ``False`` and is logged; one past the bound goes on in the
+            background, tracked until it ends, and its end is logged with how
+            long it took.
         """
         leave = asyncio.get_running_loop().create_task(
             self._room.disconnect(), name=f"livekit-leave-{self.conn_id}"
         )
         self._closing.add(leave)
+        self._leaves[leave] = time.monotonic()
         leave.add_done_callback(self._closing.discard)
-        leave.add_done_callback(self._log_leave_failure)
+        leave.add_done_callback(self._leave_ended)
         done, _ = await asyncio.wait({leave}, timeout=LEAVE_TIMEOUT_SECONDS)
         if not done:
+            self._late.add(leave)
             logger.warning(
                 "leaving the LiveKit room is taking long; going on without waiting",
                 conn_id=self.conn_id,
                 timeout_s=LEAVE_TIMEOUT_SECONDS,
             )
-        return bool(done)
+            return False
+        return not leave.cancelled() and leave.exception() is None
 
-    def _log_leave_failure(self, leave: asyncio.Task[None]) -> None:
-        """Log a leave that raised, retrieving its exception so it is not reported as lost."""
+    def _leave_ended(self, leave: asyncio.Task[None]) -> None:
+        """Log a leave that raised, or that ended past the bound, with how long it took.
+
+        Retrieving a failed leave's exception here keeps it from being reported
+        as lost.
+        """
+        leave_s = round(time.monotonic() - self._leaves.pop(leave), 3)
+        late = leave in self._late
+        self._late.discard(leave)
         if leave.cancelled():
             return
         error = leave.exception()
@@ -410,8 +453,12 @@ class RoomSession:
             logger.warning(
                 "leaving the LiveKit room failed",
                 conn_id=self.conn_id,
-                error=_masked(str(error), *self._secrets),
+                error=_masked(str(error), *self._secrets) or type(error).__name__,
+                error_type=type(error).__name__,
+                leave_s=leave_s,
             )
+        elif late:
+            logger.info("left the LiveKit room late", conn_id=self.conn_id, leave_s=leave_s)
 
     def _tracks(self, direction: TrackDirection) -> dict[str, TrackInfo]:
         """The model's declared tracks that flow in *direction*."""

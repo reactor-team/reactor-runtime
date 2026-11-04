@@ -2874,18 +2874,24 @@ class Runner(ServiceComponent, ConnectionSink):
         while connection-close coroutines are still in flight. A wire that fails
         to close is logged rather than left to abort the teardown, so one bad
         connection cannot strand the session in ``CLOSING``. How long closing
-        the wires took is logged just before ``CLEANUP_COMPLETE``.
+        the wires took is logged just before ``CLEANUP_COMPLETE``, with the
+        error when a close failed.
         """
         started = time.monotonic()
         try:
             await self._connections.close_all()
         except Exception:
-            logger.exception("error closing session connections during teardown")
-        logger.info(
-            "session connections closed",
-            reason=reason.value,
-            teardown_s=round(time.monotonic() - started, 3),
-        )
+            logger.exception(
+                "error closing session connections during teardown",
+                reason=reason.value,
+                teardown_s=round(time.monotonic() - started, 3),
+            )
+        else:
+            logger.info(
+                "session connections closed",
+                reason=reason.value,
+                teardown_s=round(time.monotonic() - started, 3),
+            )
         self._sm.send(SessionEvent.CLEANUP_COMPLETE, reason=reason)
 
     def _spawn_teardown(self, coro: Coroutine[Any, Any, None]) -> None:

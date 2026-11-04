@@ -27,7 +27,7 @@ from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field, SecretStr, field_validator
 
-from reactor_runtime.core import ConnId, LiveKitConfig
+from reactor_runtime.core import ConnId, Health, HealthStatus, LiveKitConfig
 from reactor_runtime.transport.livekit.version import TRANSPORT_NAME, TRANSPORT_VERSION
 from reactor_runtime.transport.router import (
     CHOSEN_CONN_ID_MIN,
@@ -152,7 +152,10 @@ class LiveKitRouter(TransportRouter):
     """Mount the LiveKit routes and join one room per room connection.
 
     Holds the session's room connection between requests: one at a time,
-    the latest a caller opened.
+    the latest a caller opened. A room connection a later one replaces, in
+    this session or the next, is kept until it has left its room, so its
+    leave is awaited at shutdown (:meth:`settle`) and reported by
+    :meth:`health` when the room stops answering.
 
     Args:
         config: The manifest's ``runtime.livekit`` block, which maps the
@@ -166,6 +169,8 @@ class LiveKitRouter(TransportRouter):
         self._config = config or LiveKitConfig()
         self._room: RoomSession | None = None
         self._room_epoch = 0
+        # Replaced room connections that have not left their room yet.
+        self._leaving: set[RoomSession] = set()
         # One open at a time: retiring an ended session's room yields, and a
         # second open must not pass the check meanwhile.
         self._opening = asyncio.Lock()
@@ -212,6 +217,8 @@ class LiveKitRouter(TransportRouter):
                 except BaseException:
                     runner.release_conn_id(conn_id, self.protocol)
                     raise
+                if previous is not None and not previous.settled:
+                    self._leaving.add(previous)
                 self._room = room
                 self._room_epoch = epoch
             return RoomConnectionAccepted(connection_id=conn_id)
@@ -260,6 +267,42 @@ class LiveKitRouter(TransportRouter):
             responses=_GUARD_RESPONSES,
             route_class_override=_UnechoedValidationRoute,
         )
+
+    async def settle(self) -> None:
+        """Wait for every room connection this router holds to leave its room.
+
+        Leaves are never cancelled here: a leave cut short may never reach the
+        server, and the participant would stay in the room.
+        """
+        rooms = self._rooms()
+        if rooms:
+            await asyncio.gather(*(room.settle() for room in rooms))
+
+    def health(self) -> Health:
+        """Report unhealthy once a leave has run past :data:`~.room.LEAVE_STUCK_SECONDS`.
+
+        A room that never answers a leave holds the room connection, and the
+        next session's leave against it would hold one more: the deployment
+        should replace the process.
+        """
+        from reactor_runtime.transport.livekit.room import LEAVE_STUCK_SECONDS
+
+        ages = [age for room in self._rooms() if (age := room.leave_age()) is not None]
+        if ages and max(ages) > LEAVE_STUCK_SECONDS:
+            return Health(
+                HealthStatus.UNHEALTHY,
+                f"a LiveKit room leave has run for {max(ages):.0f} s "
+                f"({len(ages)} room connection(s) still leaving)",
+            )
+        return Health.healthy()
+
+    def _rooms(self) -> list[RoomSession]:
+        """Return the room connections not yet settled, the current one included."""
+        self._leaving = {room for room in self._leaving if not room.settled}
+        rooms = list(self._leaving)
+        if self._room is not None and self._room not in self._leaving and not self._room.settled:
+            rooms.append(self._room)
+        return rooms
 
     def _claim(self, runner: SessionControl, chosen: int | None) -> ConnId:
         """Return the room connection's id, claimed for this transport: *chosen*, or a minted one.

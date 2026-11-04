@@ -16,6 +16,7 @@ from reactor_runtime.transport.router import (
     SessionNotRunningError,
     TooManyConnectionsError,
     TransportRouter,
+    Transports,
     UnknownSessionError,
 )
 
@@ -27,5 +28,6 @@ __all__ = [
     "SessionNotRunningError",
     "TooManyConnectionsError",
     "TransportRouter",
+    "Transports",
     "UnknownSessionError",
 ]

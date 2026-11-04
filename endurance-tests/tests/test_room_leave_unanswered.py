@@ -87,6 +87,8 @@ async def test_room_leave_unanswered(runtime: RuntimeProcess) -> None:
     """Free the session at the bound while its room is silent; release the leave once it answers."""
     if not LIVEKIT_URL:
         pytest.skip("the room leave scenario needs a LiveKit server: set LIVEKIT_URL")
+    if not LIVEKIT_URL.startswith("ws://"):
+        pytest.skip("the relay forwards raw TCP: set LIVEKIT_URL to a local ws:// server")
     descriptor = runtime.get("/session")
     if not any(t["protocol"] == "livekit" for t in descriptor.get("transports", [])):
         pytest.skip("the runtime under test serves no LiveKit transport")
