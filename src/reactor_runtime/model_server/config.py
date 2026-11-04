@@ -18,8 +18,12 @@ from pathlib import Path
 
 from reactor_runtime.environment import duration_env, int_env
 
-SOCKET_ENV = "REACTOR_MODEL_WORKER_SOCKET"
-"""The model server's socket."""
+SOCKET_ENV = "REACTOR_MODEL_SERVER_SOCKET"
+"""The model server's socket.
+
+Required on a session runtime; the model server listens on :data:`DEFAULT_SOCKET`
+when it is unset.
+"""
 
 SLOT_ENV = "REACTOR_SESSION_SLOT"
 """The slot this session runtime serves, ``0`` to the deployment's session count minus one."""
@@ -129,13 +133,13 @@ MAX_SESSIONS_ENV = "REACTOR_MAX_SESSIONS"
 SLOT_DIR_ENV = "REACTOR_SHM_SLOT_DIR"
 """Each slot's shared memory as the model server sees it, a path with ``{slot}``; required."""
 
-HEALTH_PORT_ENV = "REACTOR_MODEL_WORKER_HEALTH_PORT"
+HEALTH_PORT_ENV = "REACTOR_MODEL_SERVER_HEALTH_PORT"
 """The port the model server answers ``GET /health`` on; 8090 when unset."""
 
-STUCK_ENV = "REACTOR_MODEL_WORKER_STUCK_SECONDS"
+STUCK_ENV = "REACTOR_MODEL_SERVER_STUCK_SECONDS"
 """Seconds one step may run before the model server reports itself stuck; 120 when unset."""
 
-DEFAULT_SOCKET = "/run/reactor-worker/sock"
+DEFAULT_SOCKET = "/run/reactor-model-server/sock"
 DEFAULT_HEALTH_PORT = 8090
 DEFAULT_STUCK_SECONDS = 120.0
 

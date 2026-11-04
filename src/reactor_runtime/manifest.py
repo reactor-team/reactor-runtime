@@ -5,12 +5,13 @@ The ``reactor.yaml`` manifest is the runtime's one configuration file:
 ``runtime.config`` points at the model's own config file, the
 ``runtime.recording`` block configures the recorder, the
 ``runtime.step_results`` block says how each finished step is saved, the
-``runtime.livekit`` block says how a LiveKit room reaches the model, and the
-``runtime.worker`` block names the model half of a model split in two. This
-module turns that file into
-a :class:`~reactor_runtime.core.RuntimeConfig` and the reference into the model
-class — and it is the only code that does either, so every entry point resolves
-the same model from the same directory.
+``runtime.livekit`` block says how a LiveKit room reaches the model, the
+``runtime.model_server`` block names the model half of a model split in two,
+and ``model.resources.workers.shared_memory`` sizes the shared memory each of
+that model's workers exchanges with its model server. This module turns that
+file into a :class:`~reactor_runtime.core.RuntimeConfig` and the reference into
+the model class — and it is the only code that does either, so every entry
+point resolves the same model from the same directory.
 
 The module stays deliberately light: it needs YAML and the core config types,
 nothing from the server or the transport stack. Rendering a model's schema
@@ -20,7 +21,10 @@ imports it without dragging an ASGI server or a media engine along.
 from __future__ import annotations
 
 import importlib
+import re
 import sys
+from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -30,11 +34,12 @@ from reactor_runtime.core import (
     LiveKitBlockError,
     LiveKitConfig,
     LiveKitRpcMethod,
+    ModelServerConfig,
     RecordingConfig,
     RuntimeConfig,
+    SharedMemoryConfig,
     StepResultsConfig,
     TrackDirection,
-    WorkerConfig,
 )
 from reactor_runtime.interface.internal.reactor_core import ReactorCore
 
@@ -51,11 +56,13 @@ def load_config(manifest: Path) -> RuntimeConfig:
     ``runtime.config`` — the path to the model's own config file — name the
     model, ``model.name`` is the name it is published under, the
     ``runtime.recording`` block configures the recorder, the
-    ``runtime.step_results`` block configures step results, and the
-    ``runtime.livekit`` block configures room sessions; the rest of the manifest
-    describes the model to the platform and is not the runtime's concern. The
-    config path is passed to the model verbatim (resolved to an absolute path);
-    the runtime never parses its contents.
+    ``runtime.step_results`` block configures step results, the
+    ``runtime.livekit`` block configures room sessions, and the
+    ``runtime.model_server`` block with ``model.resources.workers.shared_memory``
+    configures a model split in two; the rest of the manifest, the rest of
+    ``model.resources`` included, describes the model to the platform and is
+    not the runtime's concern. The config path is passed to the model verbatim
+    (resolved to an absolute path); the runtime never parses its contents.
 
     Args:
         manifest: Path to the ``reactor.yaml`` file.
@@ -63,14 +70,16 @@ def load_config(manifest: Path) -> RuntimeConfig:
     Returns:
         A configuration naming the model the manifest points at, the name it
         publishes under, the path to its config file when present, the
-        recorder's settings, the step-results settings, and the room settings.
+        recorder's settings, the step-results settings, the room settings, and
+        a split model's model server and shared-memory settings.
 
     Raises:
         SystemExit: If the manifest is not valid YAML, is not a mapping, or
             carries no ``runtime.import``.
         ValueError: If a block the runtime refuses to guess about has the
             wrong shape: a ``step_results.queue`` below 1, a malformed
-            ``livekit`` block, or a malformed ``worker`` block.
+            ``livekit`` block, a malformed ``model_server`` block, or a
+            malformed ``model.resources.workers.shared_memory`` block.
     """
     try:
         document = yaml.safe_load(manifest.read_text())
@@ -90,7 +99,8 @@ def load_config(manifest: Path) -> RuntimeConfig:
         recording=_recording_from_manifest(runtime, document),
         step_results=_step_results_from_manifest(runtime),
         livekit=_livekit_from_manifest(runtime),
-        worker=_worker_from_manifest(runtime),
+        model_server=_model_server_from_manifest(runtime),
+        shared_memory=_shared_memory_from_manifest(document.get("model")),
     )
 
 
@@ -134,56 +144,186 @@ def _model_name(block: Any) -> str | None:
     return name if isinstance(name, str) and name else None
 
 
-_WORKER_KEYS = {
+_MODEL_SERVER_KEYS = {
     "import": "import_ref",
     "max_batch": "max_batch",
     "batch_window": "batch_window",
-    "shm_input_bytes": "shm_input_bytes",
-    "shm_output_bytes": "shm_output_bytes",
 }
 
 
-def _worker_from_manifest(runtime: dict[str, Any]) -> WorkerConfig | None:
-    """Parse the manifest's ``runtime.worker`` block into a :class:`WorkerConfig`.
+def _model_server_from_manifest(runtime: dict[str, Any]) -> ModelServerConfig | None:
+    """Parse the manifest's ``runtime.model_server`` block into a :class:`ModelServerConfig`.
 
     The block names the model half and its serving settings::
 
         runtime:
           import: plasma:Plasma
-          worker:
-            import: plasma_worker:PlasmaWorker
+          model_server:
+            import: plasma_model:PlasmaModel
             max_batch: 2
-            shm_output_bytes: 67108864
+            batch_window: 0.005
 
-    An unknown key is refused rather than ignored: a misspelt size would
-    otherwise leave a session's memory at its default without a word.
+    An unknown key is refused rather than ignored: a misspelt setting would
+    otherwise leave the model server at its class's value without a word.
 
     Args:
         runtime: The manifest's ``runtime`` section.
 
     Returns:
-        The parsed block, or ``None`` when the manifest has no ``worker`` key.
+        The parsed block, or ``None`` when the manifest has no ``model_server`` key.
 
     Raises:
-        ValueError: The block is not a mapping (an empty ``worker:`` included),
-            names a key it does not take, or holds a value of the wrong type or
-            range.
+        ValueError: The block is not a mapping (an empty ``model_server:``
+            included), names a key it does not take, or holds a value of the
+            wrong type or range.
     """
-    if "worker" not in runtime:
+    if "model_server" not in runtime:
         return None
-    block = runtime["worker"]
+    block = runtime["model_server"]
     if not isinstance(block, dict):
         raise ValueError(
-            f"runtime.worker must be a block with `import: module:Class`, got {block!r}"
+            f"runtime.model_server must be a block with `import: module:Class`, got {block!r}"
         )
     if not isinstance(block.get("import"), str):
-        raise ValueError("runtime.worker.import must name the model half as 'module:Class'")
-    unknown = sorted(set(block) - set(_WORKER_KEYS))
+        raise ValueError("runtime.model_server.import must name the model half as 'module:Class'")
+    unknown = sorted(set(block) - set(_MODEL_SERVER_KEYS))
     if unknown:
         raise ValueError(
-            f"runtime.worker has unknown keys {unknown}; it takes {', '.join(_WORKER_KEYS)}"
+            f"runtime.model_server has unknown keys {unknown}; "
+            f"it takes {', '.join(_MODEL_SERVER_KEYS)}"
         )
-    return WorkerConfig(**{_WORKER_KEYS[key]: value for key, value in block.items()})
+    return ModelServerConfig(**{_MODEL_SERVER_KEYS[key]: value for key, value in block.items()})
+
+
+_SHARED_MEMORY = "model.resources.workers.shared_memory"
+_SHARED_MEMORY_KEYS = {"input": "input_bytes", "output": "output_bytes"}
+
+
+def _shared_memory_from_manifest(model: Any) -> SharedMemoryConfig:
+    """Parse ``model.resources.workers.shared_memory`` into a :class:`SharedMemoryConfig`.
+
+    The block sizes the two shared-memory blocks of each worker of a split
+    model, as Kubernetes resource quantities (see :func:`_byte_quantity`)::
+
+        model:
+          resources:
+            workers:
+              shared_memory:
+                input: 1Mi
+                output: 24Mi
+
+    Only ``shared_memory`` is read. Every other key under ``model.resources``
+    and ``model.resources.workers`` sizes the deployment, not the runtime, and
+    is ignored, as is a ``resources`` or ``workers`` that is not a mapping.
+    Inside ``shared_memory`` an unknown key is refused: a misspelt size would
+    otherwise leave a worker's memory at its default without a word.
+
+    Args:
+        model: The raw ``model:`` value from the manifest, if any.
+
+    Returns:
+        The declared sizes, with :data:`~reactor_runtime.core.DEFAULT_SHM_INPUT_BYTES`
+        and :data:`~reactor_runtime.core.DEFAULT_SHM_OUTPUT_BYTES` for what the
+        block leaves out or when there is no block.
+
+    Raises:
+        ValueError: ``shared_memory`` is not a mapping (an empty
+            ``shared_memory:`` included), names a key other than ``input`` and
+            ``output``, or holds a size that is not a quantity of whole bytes,
+            at least 1.
+    """
+    resources = model.get("resources") if isinstance(model, dict) else None
+    workers = resources.get("workers") if isinstance(resources, dict) else None
+    if not isinstance(workers, dict) or "shared_memory" not in workers:
+        return SharedMemoryConfig()
+    block = workers["shared_memory"]
+    if not isinstance(block, dict):
+        raise ValueError(
+            f"{_SHARED_MEMORY} must be a block with `input` and `output` sizes, got {block!r}"
+        )
+    unknown = sorted(set(block) - set(_SHARED_MEMORY_KEYS), key=str)
+    if unknown:
+        raise ValueError(
+            f"{_SHARED_MEMORY} has unknown keys {unknown}; it takes "
+            f"{', '.join(_SHARED_MEMORY_KEYS)}"
+        )
+    return SharedMemoryConfig(
+        **{
+            _SHARED_MEMORY_KEYS[key]: _byte_quantity(f"{_SHARED_MEMORY}.{key}", value)
+            for key, value in block.items()
+        }
+    )
+
+
+_QUANTITY = re.compile(
+    r"(?P<number>[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))"
+    r"(?:(?P<suffix>[KMGTPE]i|[numkMGTPE])|[eE](?P<exponent>[+-]?[0-9]+))?"
+)
+_SUFFIX_FACTORS: dict[str, Fraction] = {
+    "": Fraction(1),
+    **{f"{s}i": Fraction(2) ** (10 * (i + 1)) for i, s in enumerate("KMGTPE")},
+    **{s: Fraction(10) ** (3 * (i + 1)) for i, s in enumerate("kMGTPE")},
+    "m": Fraction(1, 10**3),
+    "u": Fraction(1, 10**6),
+    "n": Fraction(1, 10**9),
+}
+_MAX_BYTES = 2**63 - 1
+
+
+def _byte_quantity(key: str, value: Any) -> int:
+    """Read a size given as a Kubernetes resource quantity into a number of bytes.
+
+    A YAML integer is a number of bytes. A string is a quantity: a decimal
+    number, with an optional sign and fraction, then an optional suffix, binary
+    (``Ki Mi Gi Ti Pi Ei``), decimal (``n u m k M G T P E``), or a decimal
+    exponent (``e6``, ``E-3``). This is the grammar of Kubernetes'
+    ``resource.ParseQuantity``. The value is computed exactly and must be a
+    whole number of bytes from 1 to ``2**63 - 1``: ``24Mi``, ``1.5Mi``,
+    ``1e6``, ``1G`` and ``1048576`` are sizes; ``0``, ``-1Mi``, ``100m``,
+    ``0.5``, ``1MiB`` and ``abc`` are not. A YAML float, such as an unquoted
+    ``2.0``, is refused: a quantity with a fraction is written as a string.
+
+    Args:
+        key: The manifest key the value sits under, for the error message.
+        value: The raw value from the manifest.
+
+    Returns:
+        The size in bytes.
+
+    Raises:
+        ValueError: The value is not a quantity of whole bytes, at least 1 and at
+            most ``2**63 - 1``, naming *key*.
+    """
+    wrong = f"{key} must be a quantity of whole bytes, at least 1, such as 24Mi; got {value!r}"
+    too_large = f"{key} must be at most {_MAX_BYTES} bytes; got {value!r}"
+    if isinstance(value, float):
+        raise ValueError(
+            f"{wrong}, which YAML reads as a float: write the quantity as a string, such as '1.5Mi'"
+        )
+    if type(value) is int:
+        size = Fraction(value)
+    elif isinstance(value, str) and (match := _QUANTITY.fullmatch(value)):
+        number = Fraction(Decimal(match["number"]))
+        if match["exponent"] is None:
+            size = number * _SUFFIX_FACTORS[match["suffix"] or ""]
+        else:
+            exponent = int(match["exponent"])
+            # A number written in n characters lies within [10**-n, 10**n) when positive, so
+            # outside these exponents it is below 1 or above _MAX_BYTES (under 10**19). Settling
+            # those first keeps an exponent such as e999999999 from being computed.
+            digits = len(match["number"])
+            if exponent < -digits:
+                raise ValueError(wrong)
+            if exponent > digits + 19:
+                raise ValueError(too_large if number > 0 else wrong)
+            size = number * Fraction(10) ** exponent
+    else:
+        raise ValueError(wrong)
+    if size.denominator != 1 or size < 1:
+        raise ValueError(wrong)
+    if size > _MAX_BYTES:
+        raise ValueError(too_large)
+    return int(size)
 
 
 def import_model_class(model_ref: str) -> type[ReactorCore]:

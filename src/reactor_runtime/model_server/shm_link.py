@@ -29,8 +29,9 @@ Each end creates the blocks it writes, and their pages count toward the memory
 of the process that creates them: the session creates its request block when it
 connects (:meth:`UnixShmTransport.connect`), the model server creates the slot's
 output block when it sets the link up. A block is created at the size
-``reactor.yaml`` declares, ``runtime.worker.shm_input_bytes`` for a request and
-``runtime.worker.shm_output_bytes`` for a result, and never grows. A message
+``reactor.yaml`` declares, ``model.resources.workers.shared_memory.input`` for a
+request and ``model.resources.workers.shared_memory.output`` for a result, and
+never grows. A message
 whose arrays do not fit its block is refused before anything is sent, with
 :class:`~reactor_runtime.model_server.PayloadTooLarge` naming both sizes and
 the key to raise, and so is one whose header, the part pickle keeps inline
@@ -348,12 +349,13 @@ class ShmLink:
 
     def _arrays_too_large(self, exc: SharedSlotLimitExceeded) -> str:
         if self._server is not None:
-            what, key = "result", "shm_output_bytes"
+            what, key = "result", "output"
         else:
-            what, key = "request", "shm_input_bytes"
+            what, key = "request", "input"
         return (
             f"a {what}'s arrays hold {exc.needed} bytes, above the {exc.limit} bytes of its "
-            f"shared-memory block: raise runtime.worker.{key} in reactor.yaml"
+            f"shared-memory block: raise model.resources.workers.shared_memory.{key} in "
+            "reactor.yaml"
         )
 
     def _header_too_large(self, message: Any, size: int, limit: int) -> str:
@@ -503,11 +505,11 @@ class UnixShmTransport:
             omitted. It is the same memory as the model server's directory for
             the session's slot, which the link checks when it opens.
         input_bytes: The size of each request block,
-            ``runtime.worker.shm_input_bytes``. A request whose arrays need
-            more is refused.
+            ``model.resources.workers.shared_memory.input``. A request whose
+            arrays need more is refused.
         output_bytes: The size of each output block,
-            ``runtime.worker.shm_output_bytes``. A result whose arrays need
-            more is refused.
+            ``model.resources.workers.shared_memory.output``. A result whose
+            arrays need more is refused.
         frame_limit: The longest frame a link sends or accepts on the socket;
             the same on both ends of a deployment.
         block_prefix: The prefix of every block both ends create; the same
@@ -669,7 +671,8 @@ class UnixShmTransport:
                 raise WorkerUnreachable(
                     f"slot {slot}'s shared-memory directory {directory} has no room for a "
                     f"{setup.input_bytes}-byte request block: size the session's volume to at "
-                    "least 2 * shm_input_bytes + shm_output_bytes, in whole 64 KiB pages"
+                    "least 2 * input + output of model.resources.workers.shared_memory, in "
+                    "whole 64 KiB pages"
                 ) from None
         except BaseException:
             stream.close()

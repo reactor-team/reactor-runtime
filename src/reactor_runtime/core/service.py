@@ -215,14 +215,16 @@ class LiveKitConfig:
 
 
 DEFAULT_SHM_INPUT_BYTES = 1 << 20
-"""Each session's request block when the ``runtime.worker`` block names none: 1 MiB."""
+"""Each worker's request block when ``model.resources.workers.shared_memory`` sets no
+``input``: 1 MiB."""
 
 DEFAULT_SHM_OUTPUT_BYTES = 32 << 20
-"""Each session's output block when the ``runtime.worker`` block names none: 32 MiB.
+"""Each worker's output block when ``model.resources.workers.shared_memory`` sets no
+``output``: 32 MiB.
 
 Sized for a step that returns video. A model whose results are larger sets
-``runtime.worker.shm_output_bytes``; one whose results are small sets it lower,
-since every session's blocks are reserved up front.
+``model.resources.workers.shared_memory.output``; one whose results are small
+sets it lower, since every worker's blocks are reserved up front.
 """
 
 
@@ -250,38 +252,78 @@ def _whole_pages(size: int) -> int:
 
 
 @dataclass(frozen=True)
-class WorkerConfig:
-    """The model half of a model split in two, drawn from the manifest's ``runtime.worker`` block.
+class SharedMemoryConfig:
+    """Each worker's shared-memory blocks, from ``model.resources.workers.shared_memory``.
 
-    Read by the model server's entry point; a session runtime reads only that
-    the block exists. The shared-memory sizes are set here and nowhere else,
-    because a deployment sizes each session's memory from the manifest: what
-    the block declares is what a deployment gives the model.
+    The workers of a split model are its session runtimes, one per session,
+    beside one model server. Each worker exchanges a step with the model server
+    through a request block it writes and an output block the model server
+    writes, both created at these sizes and never grown. A deployment sizes
+    each worker's memory-backed volume from the same manifest keys, so what the
+    manifest declares is what a deployment gives the model.
+
+    Attributes:
+        input_bytes: Each worker's request block, from
+            ``model.resources.workers.shared_memory.input``;
+            :data:`DEFAULT_SHM_INPUT_BYTES` (1 MiB) when unset. A request whose
+            arrays need more is refused.
+        output_bytes: Each worker's output block, from
+            ``model.resources.workers.shared_memory.output``;
+            :data:`DEFAULT_SHM_OUTPUT_BYTES` (32 MiB) when unset. A result
+            whose arrays need more is refused.
+
+    Raises:
+        ValueError: A size is not a positive integer, naming its manifest key.
+    """
+
+    input_bytes: int = DEFAULT_SHM_INPUT_BYTES
+    output_bytes: int = DEFAULT_SHM_OUTPUT_BYTES
+
+    def __post_init__(self) -> None:
+        """Refuse a size that is not a positive integer, naming its key."""
+        for key, value in (("input", self.input_bytes), ("output", self.output_bytes)):
+            if type(value) is not int or value < 1:
+                raise ValueError(
+                    f"model.resources.workers.shared_memory.{key} must be a positive number "
+                    f"of bytes, got {value!r}"
+                )
+
+    @property
+    def slot_bytes(self) -> int:
+        """The most shared memory one worker's slot holds, which its volume must fit.
+
+        :func:`shm_slot_bytes` of :attr:`input_bytes` and :attr:`output_bytes`.
+        A deployment gives each worker's memory-backed volume at least this.
+        """
+        return shm_slot_bytes(self.input_bytes, self.output_bytes)
+
+
+@dataclass(frozen=True)
+class ModelServerConfig:
+    """The model half of a split model, drawn from the manifest's ``runtime.model_server`` block.
+
+    Read by the model server's entry point, ``python -m
+    reactor_runtime.model_server``. The block takes ``import``, ``max_batch``
+    and ``batch_window``; the shared memory each worker exchanges with the
+    model server is sized in ``model.resources.workers.shared_memory``
+    (:class:`SharedMemoryConfig`).
 
     Attributes:
         import_ref: The model half, a ``ModelServer`` subclass, as ``"module:Class"``.
         max_batch: The most requests one step receives; ``None`` keeps the
             class's ``max_batch``, which this may only lower.
-        batch_window: Seconds the worker waits for a batch to fill; ``None``
-            keeps the class's ``batch_window``.
-        shm_input_bytes: Each session's request block as the block declares
-            it, ``None`` when it declares none; :attr:`input_bytes` is the
-            size used.
-        shm_output_bytes: Each session's output block as the block declares
-            it, ``None`` when it declares none; :attr:`output_bytes` is the
-            size used.
+        batch_window: Seconds the model server waits for a batch to fill;
+            ``None`` keeps the class's ``batch_window``.
 
     Raises:
-        ValueError: ``import`` is not ``"module:Class"`` with both parts, a size
-            or ``max_batch`` is not a positive integer, or ``batch_window`` is
-            not a finite number of seconds, at least 0.
+        ValueError: ``import`` is not ``"module:Class"`` with both parts,
+            ``max_batch`` is not a positive integer, or ``batch_window`` is not
+            a finite number of seconds, at least 0.
     """
 
     import_ref: str
     max_batch: int | None = None
     batch_window: float | None = None
-    shm_input_bytes: int | None = None
-    shm_output_bytes: int | None = None
 
     def __post_init__(self) -> None:
         """Refuse a value of the wrong type or range, naming its key."""
@@ -290,40 +332,22 @@ class WorkerConfig:
         )
         if not separator or not module or not name:
             raise ValueError(
-                f"runtime.worker.import must name the model half as 'module:Class', "
+                f"runtime.model_server.import must name the model half as 'module:Class', "
                 f"got {self.import_ref!r}"
             )
-        for key in ("max_batch", "shm_input_bytes", "shm_output_bytes"):
-            value = getattr(self, key)
-            if value is not None and (type(value) is not int or value < 1):
-                raise ValueError(f"runtime.worker.{key} must be a positive integer, got {value!r}")
+        max_batch = self.max_batch
+        if max_batch is not None and (type(max_batch) is not int or max_batch < 1):
+            raise ValueError(
+                f"runtime.model_server.max_batch must be a positive integer, got {max_batch!r}"
+            )
         window = self.batch_window
         if window is not None and (
             type(window) not in (int, float) or not 0 <= window < float("inf")
         ):
             raise ValueError(
-                f"runtime.worker.batch_window must be a number of seconds, at least 0, "
+                f"runtime.model_server.batch_window must be a number of seconds, at least 0, "
                 f"got {window!r}"
             )
-
-    @property
-    def input_bytes(self) -> int:
-        """Each session's request block: the declared size, or :data:`DEFAULT_SHM_INPUT_BYTES`."""
-        return self.shm_input_bytes or DEFAULT_SHM_INPUT_BYTES
-
-    @property
-    def output_bytes(self) -> int:
-        """Each session's output block: the declared size, or :data:`DEFAULT_SHM_OUTPUT_BYTES`."""
-        return self.shm_output_bytes or DEFAULT_SHM_OUTPUT_BYTES
-
-    @property
-    def shm_slot_bytes(self) -> int:
-        """The most shared memory one session's slot holds, with the defaults for what is unset.
-
-        :func:`shm_slot_bytes` of :attr:`input_bytes` and :attr:`output_bytes`.
-        A deployment gives each session's memory-backed volume at least this.
-        """
-        return shm_slot_bytes(self.input_bytes, self.output_bytes)
 
 
 @dataclass(frozen=True)
@@ -352,8 +376,11 @@ class RuntimeConfig:
         recording: The recorder's configuration; disabled by default.
         step_results: How each finished step is saved; disabled by default.
         livekit: How a LiveKit room reaches the model; empty by default.
-        worker: The model half of a model split in two, from ``runtime.worker``;
-            ``None`` for a model that does not split.
+        model_server: The model half of a model split in two, from
+            ``runtime.model_server``; ``None`` for a model that does not split.
+        shared_memory: Each worker's shared-memory blocks for a split model,
+            from ``model.resources.workers.shared_memory``; the defaults when
+            the manifest sets none.
     """
 
     model_ref: str
@@ -367,4 +394,5 @@ class RuntimeConfig:
     recording: RecordingConfig = field(default_factory=RecordingConfig)
     step_results: StepResultsConfig = field(default_factory=StepResultsConfig)
     livekit: LiveKitConfig = field(default_factory=LiveKitConfig)
-    worker: WorkerConfig | None = None
+    model_server: ModelServerConfig | None = None
+    shared_memory: SharedMemoryConfig = field(default_factory=SharedMemoryConfig)

@@ -28,11 +28,12 @@ from reactor_runtime.core.service import (
     LiveKitBlockError,
     LiveKitConfig,
     LiveKitRpcMethod,
+    ModelServerConfig,
     RecordingConfig,
     RuntimeConfig,
     ServiceComponent,
+    SharedMemoryConfig,
     StepResultsConfig,
-    WorkerConfig,
     shm_slot_bytes,
 )
 from reactor_runtime.core.session import (
@@ -124,6 +125,7 @@ __all__ = [
     "MessageObserver",
     "MessageStage",
     "MessageStageSource",
+    "ModelServerConfig",
     "ReactorEvent",
     "RecordingConfig",
     "ReplyRoute",
@@ -135,6 +137,7 @@ __all__ = [
     "SessionEvent",
     "SessionStarted",
     "SessionState",
+    "SharedMemoryConfig",
     "StartingInputApplied",
     "StepRefusal",
     "StepRefusalKind",
@@ -150,6 +153,5 @@ __all__ = [
     "TransportTrackReading",
     "TypeSpec",
     "UploadedFile",
-    "WorkerConfig",
     "shm_slot_bytes",
 ]

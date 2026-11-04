@@ -12,5 +12,5 @@ model:
 
 runtime:
   import: shared_worker_echo:SharedWorkerEcho
-  worker:
+  model_server:
     import: echo_server:EchoServer

@@ -66,9 +66,9 @@ class PayloadTooLarge(ValueError):  # noqa: N818 (named for the event a caller c
     """A request or a result is larger than the link carries.
 
     The message names the payload's size and the limit it passed: the
-    shared-memory block, with the ``runtime.worker`` key in ``reactor.yaml``
-    that sizes it, or the link's frame limit. Nothing was sent: the request
-    fails alone, and the link and every other request go on.
+    shared-memory block, with the ``model.resources.workers.shared_memory`` key
+    in ``reactor.yaml`` that sizes it, or the link's frame limit. Nothing was
+    sent: the request fails alone, and the link and every other request go on.
     """
 
 

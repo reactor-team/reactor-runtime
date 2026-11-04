@@ -84,8 +84,8 @@ def runtime(
             **os.environ,
             "PYTHONPATH": pythonpath,
             "HOST": "127.0.0.1",
-            "REACTOR_MODEL_WORKER_SOCKET": str(socket_path),
-            "REACTOR_MODEL_WORKER_HEALTH_PORT": str(health_port),
+            "REACTOR_MODEL_SERVER_SOCKET": str(socket_path),
+            "REACTOR_MODEL_SERVER_HEALTH_PORT": str(health_port),
             "REACTOR_MAX_SESSIONS": "1",
             "REACTOR_SHM_SLOT_DIR": str(directory / "s{slot}"),
             "REACTOR_LOG_LEVEL": os.environ.get("REACTOR_LOG_LEVEL", "WARNING"),
@@ -96,7 +96,7 @@ def runtime(
     proc: RuntimeProcess | None = None
     try:
         _wait_available(server, health_port)
-        monkeypatch.setenv("REACTOR_MODEL_WORKER_SOCKET", str(socket_path))
+        monkeypatch.setenv("REACTOR_MODEL_SERVER_SOCKET", str(socket_path))
         monkeypatch.setenv("REACTOR_SESSION_SLOT", "0")
         monkeypatch.setenv("REACTOR_SHM_DIR", str(directory / "s0"))
         monkeypatch.setenv("PYTHONPATH", pythonpath)
