@@ -67,9 +67,17 @@ If the release changes or deprecates a part of the authoring surface, move
 the examples off the old form in the same PR, so no example teaches an API
 the release has left.
 
+The same PR re-reads the runtime facts the porting skill relies on
+(`skills/port-model-e2e/references/port-on-reactor-app.md` §10) against the
+release, and corrects any the release changed.
+`tests/unit/test_skill_citations.py` catches a renamed symbol a skill writes in
+full as `reactor_runtime.<name>`; a changed default or limit, or a bare name,
+only a reading catches.
+
 ## Review checklist
 
 - A new feature is shown in one example, or the PR says why none fits.
 - No new directory under `examples/`.
 - No existing command, track, or default of an example changed.
 - A version bump moves every example's pins.
+- A version bump re-reads `port-model-e2e`'s runtime facts.

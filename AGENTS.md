@@ -63,6 +63,29 @@ never in a new one, and every version bump moves all three pins with it:
 `skills/maintaining-examples` has the rules, and a unit test fails when a pin
 falls behind.
 
+## Skills
+
+`skills/` teaches agents to write models on this runtime:
+`application-model-isolation` (the application/model split),
+`maintaining-examples` (the examples and their pins), `port-model-e2e`
+(porting a research model end to end, with the command standard in its
+`patterns/`), `instrumenting-observability`, and the migration skills for
+models written for older runtimes.
+They state facts about the runtime, so they follow it the way the README does:
+
+- A PR that makes a statement in a skill wrong (a public symbol renamed, a
+  default or a limit changed, a hook added or removed) updates that skill in
+  the same PR. Internal refactors leave skills alone.
+- Skills cite public names and their docstrings, never line numbers or private
+  names, so an internal change cannot make them wrong.
+  `tests/unit/test_skill_citations.py` imports every name a skill writes in
+  full (`reactor_runtime.get_weights_path`) and fails on a rename until the
+  skill follows. A bare name (`CommandError`) is not checked, so write a symbol
+  in full where a rename would make the skill wrong.
+- The PR that bumps the package version re-reads the runtime facts in
+  `skills/port-model-e2e/references/port-on-reactor-app.md` §10, next to the
+  example pins (`skills/maintaining-examples`).
+
 ## Toolchain
 
 `mise` is the task runner and pins the toolchain (uv, ruff, ty, lefthook, buf,
