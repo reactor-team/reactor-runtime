@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import os
+import signal
 import threading
 from pathlib import Path
 
@@ -82,6 +84,7 @@ async def test_starts_edge_first_and_winds_down_edge_first(
     service.add(FakeComponent("runner", (), trace=trace))
 
     task = asyncio.create_task(service.run())
+    await asyncio.sleep(0)  # every component starts before the shutdown
     service.request_shutdown()
     await asyncio.wait_for(task, timeout=2.0)
 
@@ -105,6 +108,7 @@ async def test_lifecycle_is_logged(
 
     with caplog.at_level(logging.INFO, logger="reactor_runtime.service"):
         task = asyncio.create_task(service.run())
+        await asyncio.sleep(0)  # every component starts before the shutdown
         service.request_shutdown()
         await asyncio.wait_for(task, timeout=2.0)
 
@@ -115,6 +119,75 @@ async def test_lifecycle_is_logged(
     assert ("starting component", "runner") in logged
     assert ("stopping component", "runner") in logged
     assert ("runtime stopped", None) in logged
+
+
+class SlowStart(FakeComponent):
+    """A component whose start waits until the test releases it, as a model's load does."""
+
+    def __init__(self, name: str, trace: list[str]) -> None:
+        super().__init__(name, trace=trace)
+        self.starting = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def start(self) -> None:
+        self.starting.set()
+        await self.release.wait()
+        await super().start()
+
+
+async def test_a_sigterm_while_a_component_starts_drains_once_the_start_finishes() -> None:
+    trace: list[str] = []
+    fallback: list[int] = []
+    previous = signal.signal(signal.SIGTERM, lambda signum, _: fallback.append(signum))
+    try:
+        service = Service()
+        slow = SlowStart("model", trace)
+        service.add(slow)
+        service.add(FakeComponent("http", ("model",), trace=trace))
+
+        task = asyncio.create_task(service.run())
+        await asyncio.wait_for(slow.starting.wait(), timeout=2.0)
+        os.kill(os.getpid(), signal.SIGTERM)
+        await asyncio.sleep(0.05)
+        assert not task.done()
+        slow.release.set()
+        await asyncio.wait_for(task, timeout=2.0)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+    assert fallback == []
+    assert service.exit_code == 0
+    assert trace == [
+        "start:http",
+        "start:model",
+        "drain:http",
+        "drain:model",
+        "stop:http",
+        "stop:model",
+    ]
+
+
+async def test_a_sigterm_while_an_early_component_starts_starts_no_later_one() -> None:
+    trace: list[str] = []
+    previous = signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    try:
+        service = Service()
+        slow = SlowStart("http", trace)
+        slow.depends_on = ("model",)  # the edge, which starts first
+        service.add(FakeComponent("model", trace=trace))
+        service.add(slow)
+
+        task = asyncio.create_task(service.run())
+        await asyncio.wait_for(slow.starting.wait(), timeout=2.0)
+        os.kill(os.getpid(), signal.SIGTERM)
+        await asyncio.sleep(0.05)
+        slow.release.set()
+        await asyncio.wait_for(task, timeout=2.0)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+    assert service.exit_code == 0
+    assert trace == ["start:http", "drain:http", "stop:http"]
 
 
 def test_duplicate_component_name_is_rejected() -> None:
@@ -166,6 +239,7 @@ async def test_shutdown_winds_down_the_rest_when_a_component_fails(
     service.add(FakeComponent("http", ("runner",), trace=trace, fail_drain=True, fail_stop=True))
 
     task = asyncio.create_task(service.run())
+    await asyncio.sleep(0)  # every component starts before the shutdown
     service.request_shutdown()
     await asyncio.wait_for(task, timeout=2.0)
 

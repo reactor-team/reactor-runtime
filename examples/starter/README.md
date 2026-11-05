@@ -69,3 +69,23 @@ app writes no handler by hand.
 
 Every setting is held: the model reads the current value of each field on
 every step. A session end puts the animation back to its first frame.
+
+## Stepped session
+
+The class leaves `run()` to the runtime, so the same code serves a stepped
+session, where the animation advances one frame per client request instead of
+streaming. Start the session with `"generation": "stepped"`; each request sets
+any of the settings through `state`, and its result carries the one frame it
+rendered on `main_video`. With the Python SDK, from the release that adds
+stepped sessions (`Reactor.step()`):
+
+```python
+from reactor_sdk import Reactor
+
+reactor = Reactor("starter", local=True, generation="stepped")
+await reactor.connect()
+
+result = await reactor.step(state={"spin_speed": 1.0})
+[frame] = result.track("main_video").frames   # the first frame
+result = await reactor.step()                   # the next one, at the same speed
+```

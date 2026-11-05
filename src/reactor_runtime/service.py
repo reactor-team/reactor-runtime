@@ -28,6 +28,7 @@ import os
 import signal
 import sys
 import threading
+from typing import Protocol
 
 from reactor_runtime.core import Health, ServiceComponent
 from reactor_runtime.log import get_logger
@@ -52,6 +53,23 @@ def _exit(code: int) -> None:
     exit a stuck thread cannot hold up. Wrapped so a test can intercept it.
     """
     os._exit(code)
+
+
+class ShutdownHook(Protocol):
+    """The process-shutdown hook an entry point wires into a component that can end the process.
+
+    ``failure`` says whether the process is going down because something broke
+    (the model loop crashed) rather than because it was asked to stop or
+    refused to load; the service turns it into the exit status and the exit
+    deadline. :meth:`Service.request_shutdown` is one.
+    """
+
+    def __call__(self, *, failure: bool = False) -> None:
+        """Ask the process to shut down."""
+
+
+def no_shutdown(*, failure: bool = False) -> None:
+    """The process-shutdown hook a component holds until its entry point wires one in: a no-op."""
 
 
 class Service:
@@ -122,16 +140,33 @@ class Service:
         the request armed; the caller then leaves the process with
         :attr:`exit_code`, under a deadline of its own from
         :meth:`bound_process_exit`.
+
+        The signal handlers are installed before the first component starts. A
+        ``SIGTERM`` or ``SIGINT`` while a component is still starting (a model
+        loading its weights, possibly on a GPU) requests shutdown and arms the
+        exit deadline like one at any other time: the start in progress runs to
+        completion, is not cut short, no later component is started, and the
+        components that started are then drained and stopped. The exit deadline
+        still bounds the whole wind-down, a start that outlasts it included.
         """
         order = list(reversed(self._topological_order()))
         started: list[ServiceComponent] = []
+        # Before any component starts: a SIGTERM during a long start (a model's
+        # load) is a shutdown request like any other, not the default action.
+        self._install_signal_handlers()
         try:
             for component in order:
                 logger.info("starting component", component=component.name)
                 await component.start()
                 started.append(component)
-            self._install_signal_handlers()
-            logger.info("runtime started", components=[component.name for component in started])
+                if self._shutdown.is_set():
+                    logger.info(
+                        "shutdown requested while starting; not starting the rest",
+                        started=[c.name for c in started],
+                    )
+                    break
+            else:
+                logger.info("runtime started", components=[c.name for c in started])
             await self._shutdown.wait()
             logger.info("shutdown requested; draining")
         finally:

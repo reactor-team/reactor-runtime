@@ -47,17 +47,44 @@ them.
 
 ## Examples
 
-`examples/` holds four workspaces, and each shows one shape on purpose.
+`examples/` holds three workspaces, and each shows one shape on purpose.
 `starter` is the smallest complete model: one class that writes `generate()`
 alone, with the runtime's default `process_input()` and `process_output()`.
 It stays that way; a change that adds either hook, or splits it into two
 files, removes the example's reason to exist. `echo` and `waypoint` carry the
 application/model split, and they are where that pattern is taught. Its rules
 live in `skills/application-model-isolation`, which says the split is
-optional and when to make it. `stepped_echo` is the reference for a stepped
-session: it writes the three step hooks, never `run()`, and reports back
-everything a step carried, so its report is a contract clients and tests rely
-on.
+optional and when to make it. All three leave `run()` to the runtime, so each
+serves a stepped session with the same code; `echo` is the reference for one,
+and its tests drive it as a client does.
+
+The set is fixed. A new feature is shown in the existing example it fits,
+never in a new one, and every version bump moves all three pins with it:
+`skills/maintaining-examples` has the rules, and a unit test fails when a pin
+falls behind.
+
+## Skills
+
+`skills/` teaches agents to write models on this runtime:
+`application-model-isolation` (the application/model split),
+`maintaining-examples` (the examples and their pins), `port-model-e2e`
+(porting a research model end to end, with the command standard in its
+`patterns/`), `instrumenting-observability`, and the migration skills for
+models written for older runtimes.
+They state facts about the runtime, so they follow it the way the README does:
+
+- A PR that makes a statement in a skill wrong (a public symbol renamed, a
+  default or a limit changed, a hook added or removed) updates that skill in
+  the same PR. Internal refactors leave skills alone.
+- Skills cite public names and their docstrings, never line numbers or private
+  names, so an internal change cannot make them wrong.
+  `tests/unit/test_skill_citations.py` imports every name a skill writes in
+  full (`reactor_runtime.get_weights_path`) and fails on a rename until the
+  skill follows. A bare name (`CommandError`) is not checked, so write a symbol
+  in full where a rename would make the skill wrong.
+- The PR that bumps the package version re-reads the runtime facts in
+  `skills/port-model-e2e/references/port-on-reactor-app.md` §10, next to the
+  example pins (`skills/maintaining-examples`).
 
 ## Toolchain
 
@@ -89,6 +116,8 @@ mise run test-integration-matrix  # integration tests on every supported Python
   `vX.Y.Z`, publishes the GitHub release, and uploads to PyPI. Every other merge
   publishes an `X.Y.Z.dev<run>` pre-release on GitHub alone. CI writes the tag,
   so never tag by hand, and never edit the version field in an unrelated change.
+  The bump moves every example's runtime pin with it
+  (`skills/maintaining-examples`).
 
 ## Tests
 

@@ -6,13 +6,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from reactor_runtime.core import ConnId, RuntimeConfig
+from reactor_runtime.environment import log_level_from_env
 from reactor_runtime.http import HttpServer
+from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.runner import Runner
 from reactor_runtime.serve import (
     _apply_env,
     _assemble,
-    _log_level_from_env,
     _port_range_from_env,
     _version,
     _video_codecs_from_env,
@@ -24,6 +25,7 @@ from reactor_runtime.service import Service
 from reactor_runtime.transport.router import Transports
 from reactor_runtime.transport.webrtc.config import CodecEntry, IceTransportPolicy, WebRtcConfig
 from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
+from reactor_runtime.transport.webrtc.router import WebRtcRouter
 from reactor_runtime.transport.webrtc.signaling import SdpAnswer, SdpOffer, TrackMap
 
 
@@ -265,6 +267,50 @@ def test_main_returns_normally_after_a_clean_stop(
     _fake_main_environment(tmp_path, monkeypatch, code=0)
 
     main()
+
+
+def test_main_serves_webrtc_with_the_manifests_message_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "reactor.yaml").write_text(
+        "runtime:\n  import: fake:Model\n  webrtc:\n    max_message_size: 256Mi\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("WEBRTC_BWE_MAX_KBPS", "20000")
+    served: list[WebRtcConfig] = []
+
+    async def fake_serve(cfg: RuntimeConfig, webrtc: WebRtcConfig, **kwargs: object) -> int:
+        served.append(webrtc)
+        return 0
+
+    monkeypatch.setattr("reactor_runtime.serve.serve", fake_serve)
+
+    main()
+
+    assert [config.max_message_size for config in served] == [256 << 20]
+    # The environment's settings are kept beside the manifest's.
+    assert served[0].bwe_max_kbps == 20000
+
+
+def test_assemble_without_a_webrtc_config_takes_the_message_limit_from_the_runtime_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configs: list[WebRtcConfig] = []
+
+    def recording_router(
+        config: WebRtcConfig, peer_factory: WebRtcPeerFactory, metrics: RuntimeMetrics
+    ) -> WebRtcRouter:
+        configs.append(config)
+        return WebRtcRouter(config, peer_factory, metrics)
+
+    monkeypatch.setattr("reactor_runtime.serve.WebRtcRouter", recording_router)
+
+    _assemble(
+        RuntimeConfig(model_ref="fake:Model", webrtc_max_message_size=96 << 20),
+        peer_factory=_UNUSED,
+    )
+
+    assert [config.max_message_size for config in configs] == [96 << 20]
 
 
 def test_version_is_a_non_empty_string() -> None:
@@ -577,8 +623,8 @@ def test_apply_env_rejects_a_non_integer_port(monkeypatch: pytest.MonkeyPatch) -
 
 def test_log_level_reads_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("REACTOR_LOG_LEVEL", "debug")
-    assert _log_level_from_env() == logging.DEBUG
+    assert log_level_from_env() == logging.DEBUG
 
 
 def test_log_level_defaults_to_info() -> None:
-    assert _log_level_from_env() == logging.INFO
+    assert log_level_from_env() == logging.INFO

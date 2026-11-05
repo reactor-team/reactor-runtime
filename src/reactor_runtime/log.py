@@ -27,6 +27,11 @@ happens where records are written rather than where they are made, it reaches a
 model's own ``logging.getLogger(__name__)`` and any third-party library that
 propagates to root, so a line can be traced to the session and phase that
 produced it without model code threading any of it through its call sites.
+
+A model split in two runs as several processes, one model server and a session
+runtime per slot, and each also stamps ``runtime_role`` (``"model_server"`` or
+``"session"``) and, for a session runtime, its ``slot``, so their lines can be
+told apart and joined. A model that does not split stamps neither.
 """
 
 from __future__ import annotations
@@ -139,6 +144,25 @@ def get_runtime_state() -> str | None:
     return _runtime_state
 
 
+# A split model runs as several processes: one model server, and a session
+# runtime per slot. Each stamps what it is on every record, so its lines can
+# be told apart and joined. Unset in a model that does not split.
+_runtime_role: str | None = None
+_slot: int | None = None
+
+
+def set_process(*, role: str | None, slot: int | None = None) -> None:
+    """Stamp this process's role and slot on every record written from now on.
+
+    Set by the runtime for the processes of a split model: ``role`` is
+    ``"session"`` or ``"model_server"``, and ``slot`` the session runtime's
+    slot. ``None`` stamps nothing.
+    """
+    global _runtime_role, _slot
+    _runtime_role = role
+    _slot = slot
+
+
 def _logfmt_value(value: Any) -> str:
     """Render *value* as a logfmt-safe token.
 
@@ -167,7 +191,7 @@ def _record_fields(record: logging.LogRecord) -> dict[str, Any]:
 
 
 class SessionContextFilter(logging.Filter):
-    """Stamp the live session's id and the runtime's state on every record.
+    """Stamp the live session's id, the runtime's state, and the process's role on every record.
 
     Sits on the handler rather than on one logger, so it sees every record a
     handler writes: the runtime's own, a model's ``logging.getLogger(__name__)``,
@@ -184,6 +208,8 @@ class SessionContextFilter(logging.Filter):
             "session_id": _session_id,
             "state": _state,
             "runtime_state": _runtime_state,
+            "runtime_role": _runtime_role,
+            "slot": _slot,
         }
         context = {key: value for key, value in stamped.items() if value is not None}
         if not context:

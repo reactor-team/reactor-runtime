@@ -98,9 +98,6 @@ class Heard(ModelMessage):
     digest: str = MessageField(description="SHA-256 of every sample received, in order.")
     streams: list[str] = MessageField(description="The streams the samples came from.")
     ended: list[str] = MessageField(description="The streams that ended.")
-    stream_digests: dict[str, str] = MessageField(
-        description="SHA-256 of each stream's samples, in order, by stream id."
-    )
     camera_frames: int = MessageField(description="Camera frames received so far.")
     camera_mean: float = MessageField(description="The last camera frame's mean value.")
 
@@ -130,7 +127,6 @@ class ToneModel(ReactorApp):
             if info["stream_id"] not in self.streams:
                 self.streams.append(info["stream_id"])
             self.received.append(frame.data[0])
-            self.by_stream.setdefault(info["stream_id"], []).append(frame.data[0])
         camera = cast(InputBuffer, self.media.camera)
         frames = camera.try_read(camera.available, ReadMode.FIFO) or []
         self.camera_frames += len(frames)
@@ -142,10 +138,6 @@ class ToneModel(ReactorApp):
             digest=hashlib.sha256(samples.astype("<i2").tobytes()).hexdigest(),
             streams=self.streams,
             ended=self.ended,
-            stream_digests={
-                sid: hashlib.sha256(np.concatenate(parts).astype("<i2").tobytes()).hexdigest()
-                for sid, parts in self.by_stream.items()
-            },
             camera_frames=self.camera_frames,
             camera_mean=self.camera_mean,
         )
@@ -171,7 +163,6 @@ class ToneModel(ReactorApp):
         self.received: list[np.ndarray] = []
         self.streams: list[str] = []
         self.ended: list[str] = []
-        self.by_stream: dict[str, list[np.ndarray]] = {}
         self.camera_frames = 0
         self.camera_mean = 0.0
 
@@ -881,47 +872,6 @@ async def test_a_byte_stream_reaches_the_input_track_sample_for_sample(
         assert heard["digest"] == hashlib.sha256(speech.tobytes()).hexdigest()
         assert heard["streams"] == [stream_id]
         assert heard["ended"] == [stream_id]
-    finally:
-        await agent.leave()
-
-
-async def test_a_stream_opened_before_the_last_one_closes_leaves_it_whole(
-    runner: Runner, http: httpx.AsyncClient, room_name: str
-) -> None:
-    await _joined(runner, http, room_name)
-    agent = await _client_in_session(runner, room_name, "agent")
-    attributes = {"sample_rate": str(RATE), "num_channels": "1"}
-    try:
-        t = np.arange(RATE) / RATE
-        first = (12_000 * np.sin(2 * np.pi * 220 * t)).astype("<i2").tobytes()
-        second = (9_000 * np.sin(2 * np.pi * 330 * t)).astype("<i2").tobytes()
-        half = len(first) // 2
-
-        one = await agent.room.local_participant.stream_bytes(
-            "first",
-            topic="lk.audio_stream",
-            destination_identities=["model"],
-            attributes=attributes,
-        )
-        await one.write(first[:half])
-        two = await agent.room.local_participant.stream_bytes(
-            "second",
-            topic="lk.audio_stream",
-            destination_identities=["model"],
-            attributes=attributes,
-        )
-        await two.write(second)
-        await one.write(first[half:])
-        await one.aclose()
-        await two.aclose()
-        await _heard_ended(agent, one.info.stream_id, "overlap-1")
-        heard = await _heard_ended(agent, two.info.stream_id, "overlap-2")
-
-        assert sorted(heard["ended"]) == sorted([one.info.stream_id, two.info.stream_id])
-        assert heard["stream_digests"] == {
-            one.info.stream_id: hashlib.sha256(first).hexdigest(),
-            two.info.stream_id: hashlib.sha256(second).hexdigest(),
-        }
     finally:
         await agent.leave()
 

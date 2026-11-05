@@ -3,7 +3,7 @@
 Requests go from the runner to every rank, in the same order on every rank's
 queue. Every rank answers every request. A large payload never rides on a
 queue: :class:`Generate` and :class:`Answer` carry a header from
-:func:`~reactor_runtime.distributed.ipc.pack`, and the bytes sit in a shared
+:func:`~reactor_runtime.ipc.pack`, and the bytes sit in a shared
 block the header names.
 """
 

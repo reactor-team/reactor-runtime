@@ -4,6 +4,7 @@ import logging
 
 import pytest
 
+from reactor_runtime import log as log_module
 from reactor_runtime.log import (
     JsonFormatter,
     StructuredLogger,
@@ -174,6 +175,22 @@ def test_a_call_site_that_names_the_session_id_keeps_its_own(
     log.info("recorder started", session_id="s-explicit")
     payload = json.loads(buffer.getvalue().strip())
     assert payload["session_id"] == "s-explicit"
+
+
+def test_a_split_models_process_stamps_its_role_and_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logger, buffer = configured_logger(monkeypatch, "json")
+    logger.info("before")
+    log_module.set_process(role="session", slot=2)
+    logger.info("after")
+    logger.info("named", slot=5)
+
+    before, after, named = (json.loads(line) for line in buffer.getvalue().splitlines())
+    assert "slot" not in before
+    assert "runtime_role" not in before
+    assert (after["runtime_role"], after["slot"]) == ("session", 2)
+    assert named["slot"] == 5  # a call site that names the slot keeps its own
 
 
 def test_a_plain_stdlib_logger_is_stamped_too(monkeypatch: pytest.MonkeyPatch) -> None:

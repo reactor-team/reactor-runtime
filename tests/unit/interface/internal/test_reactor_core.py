@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import threading
 import time
 from collections.abc import Callable
 
@@ -360,6 +362,158 @@ def test_cancellation_does_not_reach_the_failure_sink() -> None:
     core.stop()
     assert core._thread is not None
     core._thread.join(timeout=2)
+    assert failures == []
+
+
+def _ended(core: ReactorCore) -> bool:
+    assert core._thread is not None
+    core._thread.join(timeout=2)
+    return not core._thread.is_alive()
+
+
+def test_crash_from_another_thread_reaches_the_failure_sink_once() -> None:
+    core = OutputOnlyCore()
+    failures: list[BaseException] = []
+    core.bind_failure(failures.append)
+    core.start_thread()
+    time.sleep(0.1)  # let run() start idling
+    lost = RuntimeError("lost the model server")
+
+    threading.Thread(target=core.crash, args=(lost,)).start()
+    core.crash(RuntimeError("a second report"))
+
+    assert _ended(core)
+    assert len(failures) == 1
+    assert failures == [core._crash]
+
+
+def test_a_crash_before_the_loop_starts_ends_it_as_it_starts() -> None:
+    ran: list[bool] = []
+
+    class Watched(OutputOnlyCore):
+        async def run(self) -> None:
+            ran.append(True)
+            await super().run()
+
+    core = Watched()
+    failures: list[BaseException] = []
+    core.bind_failure(failures.append)
+    lost = RuntimeError("lost during load")
+    core.crash(lost)
+    core.start_thread()
+
+    assert _ended(core)
+    assert failures == [lost]
+    assert ran == []
+
+
+def test_a_crash_from_run_that_then_returns_still_reaches_the_failure_sink() -> None:
+    lost = RuntimeError("lost")
+
+    class CrashesAndReturns(OutputOnlyCore):
+        async def run(self) -> None:
+            self.crash(lost)  # on the loop's own thread, with no await after it
+
+    core = CrashesAndReturns()
+    failures: list[BaseException] = []
+    core.bind_failure(failures.append)
+    core.start_thread()
+
+    assert _ended(core)
+    assert failures == [lost]
+
+
+def test_a_crash_from_run_that_then_raises_reports_the_crash(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    lost = RuntimeError("lost")
+
+    class CrashesAndRaises(OutputOnlyCore):
+        async def run(self) -> None:
+            self.crash(lost)
+            raise ValueError("raised after the crash")
+
+    core = CrashesAndRaises()
+    failures: list[BaseException] = []
+    core.bind_failure(failures.append)
+    with caplog.at_level(logging.WARNING):
+        core.start_thread()
+        assert _ended(core)
+
+    assert failures == [lost]
+    also = [r for r in caplog.records if "also raised" in r.getMessage()]
+    assert len(also) == 1
+    assert also[0].exc_info is not None
+    assert isinstance(also[0].exc_info[1], ValueError)
+
+
+def test_a_subclass_cannot_override_crash() -> None:
+    with pytest.raises(TypeError, match=r"Shadowing\.crash: crash\(\) is the runtime's"):
+
+        class Shadowing(OutputOnlyCore):
+            def crash(self, error: BaseException) -> None:
+                pass
+
+
+def test_a_subclass_cannot_take_crash_from_a_mixin() -> None:
+    class Mixin:
+        def crash(self, error: BaseException) -> None:
+            pass
+
+    with pytest.raises(TypeError, match=r"Mixed\.crash: crash\(\) is the runtime's"):
+
+        class Mixed(Mixin, OutputOnlyCore):
+            pass
+
+
+class _CrashAfterTheLastRead:
+    """The core's crash lock, which calls crash() the moment the lifecycle's last read ends."""
+
+    def __init__(self, core: ReactorCore, error: BaseException) -> None:
+        self._lock = threading.Lock()
+        self._core = core
+        self._error = error
+        self.fired = False
+
+    def __enter__(self) -> None:
+        self._lock.acquire()
+
+    def __exit__(self, *exc: object) -> None:
+        self._lock.release()
+        if self._core._crash_closed and not self.fired:
+            self.fired = True
+            self._core.crash(self._error)
+
+
+def test_a_crash_right_after_the_lifecycles_last_read_changes_nothing() -> None:
+    class Returns(OutputOnlyCore):
+        async def run(self) -> None:
+            return
+
+    core = Returns()
+    failures: list[BaseException] = []
+    core.bind_failure(failures.append)
+    late = _CrashAfterTheLastRead(core, RuntimeError("too late"))
+    core._crash_lock = late  # type: ignore[assignment]  # ty: ignore[invalid-assignment]  # a hook at the boundary
+    core.start_thread()
+
+    assert _ended(core)
+    assert late.fired
+    assert failures == []
+    assert core._crash is None
+
+
+def test_a_crash_after_the_loop_stopped_reports_nothing() -> None:
+    core = OutputOnlyCore()
+    failures: list[BaseException] = []
+    core.bind_failure(failures.append)
+    core.start_thread()
+    time.sleep(0.1)
+    core.stop()
+    assert _ended(core)
+
+    core.crash(RuntimeError("too late"))
+
     assert failures == []
 
 

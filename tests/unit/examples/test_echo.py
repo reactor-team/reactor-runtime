@@ -2,26 +2,37 @@
 
 The model half is pure OpenCV, so it is tested as it is. The application half
 is driven through its hooks the way the runtime's loop drives them, with frames
-pushed into its input buffers the way the transport pushes them.
+pushed into its input buffers the way the transport pushes them. A stepped
+session is driven two ways: through the model's own step loop and inbound
+queue, and through a runner, the way a client drives it, with step requests in
+on the data channel and step results out.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import asyncio
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import pytest
 from echo_model import EFFECTS, EchoInput, EchoModel, EchoResult
 
 from echo import Echo, EchoMedia, EchoOutput
-from reactor_runtime import ApplicationError, InputFrame, StepOutcome, TrackPayload
-from reactor_runtime.core.model import EndReason, SessionEnded, SessionStarted
+from reactor_runtime import ApplicationError, InputFrame, StepOutcome, TrackPayload, protocol
+from reactor_runtime.core import ConnectionCapabilities, ConnId, MediaChunk, RuntimeConfig
+from reactor_runtime.core.model import ClientConnected, EndReason, SessionEnded, SessionStarted
+from reactor_runtime.core.values import CompletedStep, StepRefusal
+from reactor_runtime.interface.internal.reactor_core import CommandEnvelope, StepEnvelope
 from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.manifest import import_model_class, load_config
+from reactor_runtime.protocol.common import dict_to_struct
+from reactor_runtime.runner.runner import Runner
+from reactor_wire.v1 import common_pb2, data_pb2, platform_pb2, step_pb2
 
 _EXAMPLE_DIR = Path(__file__).parents[3] / "examples" / "echo"
+CLIENT = ConnId(1002)
 
 
 @pytest.fixture(autouse=True)
@@ -86,6 +97,11 @@ def test_manifest_resolves_to_the_app_class() -> None:
     cfg = load_config(_EXAMPLE_DIR / "reactor.yaml")
     assert import_model_class(cfg.model_ref) is Echo
     assert cfg.config_path is None
+
+
+def test_the_model_runs_the_default_loop_so_it_can_be_stepped() -> None:
+    assert "run" not in vars(Echo)
+    assert Echo.supports_stepped()
 
 
 # -- the model half -----------------------------------------------------------
@@ -292,3 +308,315 @@ def test_output_carries_the_metadata_a_frame_arrived_with() -> None:
         main_audio=np.zeros((1, 4), np.int16),
     )
     assert output.__metadata__["main_video"] == b'{"seq":3}'
+
+
+# -- a stepped session, through the model's own loop ---------------------------
+
+
+async def _until(predicate: Callable[[], bool]) -> None:
+    # Generous: a first step on a fresh runner starts the model's thread, which
+    # a loaded CI host can take seconds over. A passing test returns at the
+    # first poll that sees the condition.
+    for _ in range(2000):
+        if predicate():
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError("condition not reached within 10 s")
+
+
+class Harness:
+    """The app in a stepped session, its inbound queue drained and its loop running."""
+
+    def __init__(self) -> None:
+        self.app = Echo()
+        self.app.load(None)
+        self.steps: list[CompletedStep] = []
+        self.refusals: list[StepRefusal] = []
+        self.app._on_loop_ready()
+        self.app.bind_output(
+            broadcast=lambda message: None,
+            addressed=lambda *args: None,
+            media=lambda chunk: None,
+            step=self.steps.append,
+        )
+        self.app._bind_step_refusal(self.refusals.append)
+        self.queue: asyncio.Queue[Any] = asyncio.Queue()
+        self.app._inbound_q = self.queue
+        self.tasks: list[asyncio.Task[None]] = []
+
+    async def start(self) -> None:
+        self.tasks = [
+            asyncio.create_task(self.app._inbound_loop()),
+            asyncio.create_task(self.app.run()),
+        ]
+        self.queue.put_nowait(SessionStarted("s", stepped=True))
+        self.queue.put_nowait(ClientConnected(CLIENT, 1))
+        await self.settle()
+
+    def step(
+        self,
+        request_id: str,
+        *commands: tuple[str, dict[str, Any]],
+        media: Mapping[str, Sequence[InputFrame]] | None = None,
+    ) -> None:
+        """Post a step request the way the runtime does: its commands, then the step."""
+        for name, args in commands:
+            command = ModelContract.of(Echo).validate(name, args)
+            self.queue.put_nowait(CommandEnvelope(command, CLIENT, None))
+        media_input = {
+            track: tuple(_source(frame) for frame in frames)
+            for track, frames in (media or {}).items()
+        }
+        self.queue.put_nowait(
+            StepEnvelope(media_input=media_input, conn_id=CLIENT, request_id=request_id)
+        )
+
+    async def settle(self) -> None:
+        await asyncio.sleep(0.005)
+        await _until(lambda: self.queue.empty() and self.app._pending_step is None)
+
+    async def stop(self) -> None:
+        for task in self.tasks:
+            task.cancel()
+        results = await asyncio.gather(*self.tasks, return_exceptions=True)
+        # Cancelling is how these end; anything else is a failure the test must show.
+        for result in results:
+            if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                raise result
+
+
+def _source(frame: InputFrame) -> Callable[[], InputFrame]:
+    """Wrap a frame as the checked source a step envelope carries."""
+    return lambda: frame
+
+
+def _webcam(*frames: InputFrame) -> dict[str, Sequence[InputFrame]]:
+    return {"webcam": frames}
+
+
+@pytest.fixture
+async def harness() -> Any:
+    h = Harness()
+    await h.start()
+    try:
+        yield h
+    finally:
+        await h.stop()
+
+
+def _video(step: CompletedStep) -> tuple[np.ndarray, Any]:
+    """Return what a step sent on ``main_video``, and the metadata it carried."""
+    assert step.bundle is not None
+    track = step.bundle.tracks["main_video"]
+    return np.asarray(track.data), track.metadata
+
+
+async def test_a_step_answers_with_its_webcam_frame_processed(harness: Harness) -> None:
+    harness.step(
+        "r1",
+        ("set_effect", {"effect": "invert"}),
+        media=_webcam(InputFrame(data=_frame(10), metadata=b'{"seq":1}')),
+    )
+    await harness.settle()
+
+    [step] = harness.steps
+    assert step.error is None
+    assert step.bundle is not None
+    assert set(step.bundle.tracks) == {"main_video", "main_audio"}
+    frame, metadata = _video(step)
+    assert frame.shape == (8, 8, 3)
+    assert int(frame[0, 0, 0]) == 245
+    assert metadata == b'{"seq":1}'
+
+
+async def test_a_step_takes_the_newest_webcam_frame_it_carried(harness: Harness) -> None:
+    harness.step("r1", media=_webcam(InputFrame(_frame(1)), InputFrame(_frame(2))))
+    await harness.settle()
+
+    frame, _ = _video(harness.steps[0])
+    assert int(frame[0, 0, 0]) == 2
+
+
+async def test_a_step_plays_the_microphone_audio_it_carried(harness: Harness) -> None:
+    harness.step(
+        "r1",
+        media={"webcam": [InputFrame(_frame())], "mic": [InputFrame(_audio(3))]},
+    )
+    await harness.settle()
+
+    [step] = harness.steps
+    assert step.bundle is not None
+    assert np.asarray(step.bundle.tracks["main_audio"].data).tolist() == [[0, 1, 2]]
+
+
+async def test_a_step_without_a_webcam_frame_is_refused_and_takes_no_number(
+    harness: Harness,
+) -> None:
+    harness.step("r1")
+    harness.step("r2", media=_webcam(InputFrame(_frame(3))))
+    await harness.settle()
+
+    [refusal] = harness.refusals
+    assert refusal.request_id == "r1"
+    assert "waiting for a webcam frame" in refusal.reason
+    [step] = harness.steps
+    assert step.request is not None
+    assert (step.request.request_id, step.request.index) == ("r2", 1)
+
+
+async def test_the_settings_hold_across_steps(harness: Harness) -> None:
+    harness.step("r1", ("set_effect", {"effect": "invert"}), media=_webcam(InputFrame(_frame(10))))
+    harness.step("r2", media=_webcam(InputFrame(_frame(20))))
+    await harness.settle()
+
+    assert [int(_video(step)[0][0, 0, 0]) for step in harness.steps] == [245, 235]
+
+
+async def test_a_burst_gathers_across_steps_and_the_last_step_carries_it(
+    harness: Harness,
+) -> None:
+    harness.step("r1", ("set_burst", {"burst": 2}), media=_webcam(InputFrame(_frame(1))))
+    harness.step("r2", media=_webcam(InputFrame(_frame(2))))
+    await harness.settle()
+
+    gathering, full = harness.steps
+    assert gathering.bundle is None
+    assert full.bundle is not None
+    assert full.bundle.frame_count == 2
+    frames, _ = _video(full)
+    assert [int(f[0, 0, 0]) for f in frames] == [1, 2]
+
+
+# -- a stepped session, through a runner ----------------------------------------
+
+V1 = protocol.ProtocolVersion.V1
+DATA = protocol.Channel.DATA
+SERVER = protocol.Direction.SERVER
+
+
+class Connection:
+    """A v1 connection that records the data-channel messages sent to it."""
+
+    max_message_size = 64 * 1024 * 1024
+    message_chunking = True
+
+    def __init__(self) -> None:
+        self.id = CLIENT
+        self.capabilities = ConnectionCapabilities(carries_video=True)
+        self.protocol_version = V1
+        self.sent: list[bytes | str] = []
+
+    async def send_step_result(self, payload: bytes) -> bool:
+        self.sent.append(payload)
+        return True
+
+    def send_message(self, payload: bytes | str) -> None:
+        self.sent.append(payload)
+
+    def send_control(self, payload: bytes | str) -> None: ...
+
+    def send_media(self, chunk: MediaChunk) -> None: ...
+
+    def flush_media(self, *, hold: bool = False) -> None: ...
+
+    def set_media_rate(self, fps: float) -> None: ...
+
+    def set_media_depth(self, depth: int) -> None: ...
+
+    def resume_track(self, name: str) -> None: ...
+
+    def pause_track(self, name: str) -> None: ...
+
+    async def close(self) -> None: ...
+
+    def results(self) -> list[step_pb2.StepResult]:
+        codec = protocol.select(V1)
+        results: list[step_pb2.StepResult] = []
+        for frame in self.sent:
+            reply = codec.decode(frame, DATA, SERVER)
+            assert isinstance(reply, data_pb2.DataServerMessage)
+            results.append(reply.step_result)
+        return results
+
+
+@pytest.fixture
+async def runner(monkeypatch: pytest.MonkeyPatch) -> Any:
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: Echo)
+    runner = Runner(RuntimeConfig(model_ref="echo:Echo"))
+    await runner.start()
+    try:
+        yield runner
+    finally:
+        await runner.stop()
+
+
+def _request_step(
+    request_id: str,
+    *,
+    state: dict[str, Any] | None = None,
+    frames: Sequence[tuple[np.ndarray, bytes | None]] = (),
+) -> bytes:
+    media_input = []
+    if frames:
+        media_input.append(
+            step_pb2.TrackFrames(
+                track="webcam",
+                kind=platform_pb2.TRACK_KIND_VIDEO,
+                frames=[
+                    step_pb2.Frame(
+                        encoding=step_pb2.FRAME_ENCODING_RAW,
+                        dtype="uint8",
+                        shape=list(data.shape),
+                        data=data.tobytes(),
+                        metadata=metadata,
+                    )
+                    for data, metadata in frames
+                ],
+            )
+        )
+    return data_pb2.DataClientMessage(
+        request_id=request_id,
+        kind=common_pb2.MessageKind.MESSAGE_KIND_REQUEST,
+        request_step=step_pb2.RequestStep(
+            state=dict_to_struct(state or {}),
+            media_input=media_input,
+        ),
+    ).SerializeToString()
+
+
+def _stepped(runner: Runner) -> Connection:
+    runner.start_session({"generation": "stepped"})
+    conn = Connection()
+    runner.connection_opened(conn)
+    return conn
+
+
+async def test_a_client_step_is_answered_with_the_processed_frame(runner: Runner) -> None:
+    conn = _stepped(runner)
+    runner.message_received(
+        conn.id,
+        _request_step("r1", state={"effect": "invert"}, frames=[(_frame(10), b"seq-1")]),
+        V1,
+        DATA,
+    )
+    await _until(lambda: len(conn.sent) == 1)
+
+    [result] = conn.results()
+    assert result.step == 1
+    assert result.failure_code == step_pb2.STEP_FAILURE_CODE_UNSPECIFIED
+    video = next(track for track in result.tracks if track.track == "main_video")
+    [sent] = video.frames
+    pixels = np.frombuffer(sent.data, np.uint8).reshape(tuple(sent.shape))
+    assert pixels.tolist() == np.full((8, 8, 3), 245, np.uint8).tolist()
+    assert sent.metadata == b"seq-1"
+
+
+async def test_a_client_step_without_a_webcam_frame_is_refused(runner: Runner) -> None:
+    conn = _stepped(runner)
+    runner.message_received(conn.id, _request_step("r1"), V1, DATA)
+    await _until(lambda: len(conn.sent) == 1)
+
+    [result] = conn.results()
+    assert result.failure_code == step_pb2.STEP_FAILURE_CODE_REFUSED
+    assert "waiting for a webcam frame" in result.error
+    assert list(result.tracks) == []

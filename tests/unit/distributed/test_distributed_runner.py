@@ -15,7 +15,6 @@ import sys
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from multiprocessing import shared_memory
 from pathlib import Path
 from typing import Any
 
@@ -27,8 +26,8 @@ from reactor_runtime.distributed import (
     DistributedWorker,
     WorkerCrashed,
     WorkerTimeout,
-    ipc,
 )
+from reactor_runtime.ipc import default_directory
 
 
 @dataclass(frozen=True)
@@ -182,15 +181,7 @@ class InterruptOnce:
 
 def _blocks_left(prefix: str) -> list[str]:
     """The names under *prefix* that still have a shared block behind them."""
-    left = []
-    for generation in range(ipc._MAX_GENERATIONS):
-        name = f"{prefix}{generation}"
-        try:
-            shared_memory.SharedMemory(name=name).close()
-        except FileNotFoundError:
-            continue
-        left.append(name)
-    return left
+    return sorted(path.name for path in default_directory().glob(f"{prefix}*"))
 
 
 class NoReset:

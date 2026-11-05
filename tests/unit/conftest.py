@@ -39,16 +39,18 @@ def _restore_root_logging() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def _clear_log_context() -> Iterator[None]:
-    """Release the stamped session id and runtime state after each test.
+    """Release the stamped session id, runtime state and process role after each test.
 
-    Both are process-global, so a test that opens a session or builds a runner
-    would otherwise leave every later test's records claiming its context.
+    All are process-global, so a test that opens a session, builds a runner, or
+    connects a model client would otherwise leave every later test's records
+    claiming its context.
     """
     try:
         yield
     finally:
         log.clear_session_id()
         log.set_state(None, None)
+        log.set_process(role=None)
 
 
 @pytest.fixture(autouse=True)

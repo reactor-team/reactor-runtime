@@ -5,11 +5,16 @@ import pytest
 
 from reactor_runtime import ReactorApp
 from reactor_runtime.core import (
+    DEFAULT_MAX_MESSAGE_BYTES,
+    DEFAULT_SHM_INPUT_BYTES,
+    DEFAULT_SHM_OUTPUT_BYTES,
     LiveKitBlockError,
     LiveKitConfig,
     LiveKitRpcMethod,
+    ModelServerConfig,
     RecordingConfig,
     RuntimeConfig,
+    SharedMemoryConfig,
     StepResultsConfig,
 )
 from reactor_runtime.manifest import import_model_class, load_config
@@ -432,3 +437,384 @@ def test_livekit_check_refuses_a_name_the_model_does_not_declare(
 ) -> None:
     with pytest.raises(LiveKitBlockError, match=reason):
         config.check(commands={"c"}, messages={"d"}, input_tracks={"t"})
+
+
+_SPLIT_MANIFEST = """\
+model:
+  name: acme/plasma
+  resources:
+    gpu: {type: NVIDIA_H100, count: 1}
+    cpu: {request: "4", limit: "8"}
+    memory: {request: 32Gi, limit: 48Gi}
+    workers:
+      count: 4
+      cpu: {request: "1", limit: "2"}
+      memory: {request: 2Gi, limit: 4Gi}
+      shared_memory:
+        input: 1Mi
+        output: 24Mi
+runtime:
+  import: plasma:Plasma
+  model_server:
+    import: plasma_model:PlasmaModel
+    max_batch: 2
+    batch_window: 0.005
+"""
+
+
+def test_load_config_leaves_the_model_server_out_when_the_model_does_not_split(
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_MANIFEST)
+
+    cfg = load_config(manifest)
+
+    assert cfg.model_server is None
+    assert cfg.shared_memory == SharedMemoryConfig()
+
+
+def test_load_config_reads_a_split_model_into_typed_settings(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_SPLIT_MANIFEST)
+
+    cfg = load_config(manifest)
+
+    assert cfg.model_server == ModelServerConfig(
+        import_ref="plasma_model:PlasmaModel", max_batch=2, batch_window=0.005
+    )
+    assert cfg.shared_memory == SharedMemoryConfig(input_bytes=1 << 20, output_bytes=24 << 20)
+    assert cfg.shared_memory.slot_bytes == 2 * (1 << 20) + (24 << 20)
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        "model_server:\n    import: plasma_model:PlasmaModel",
+        "model_server:\n    import: plasma_model:PlasmaModel\n    max_batch: 1",
+    ],
+)
+def test_a_model_server_block_alone_serves_with_the_default_shared_memory(
+    tmp_path: Path, block: str
+) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(f"runtime:\n  import: plasma:Plasma\n  {block}\n")
+
+    cfg = load_config(manifest)
+
+    assert cfg.model_server is not None
+    assert (cfg.shared_memory.input_bytes, cfg.shared_memory.output_bytes) == (
+        DEFAULT_SHM_INPUT_BYTES,
+        DEFAULT_SHM_OUTPUT_BYTES,
+    )
+
+
+@pytest.mark.parametrize(
+    ("block", "match"),
+    [
+        ("model_server: plasma_model:PlasmaModel", "must be a block"),
+        ("model_server:", "must be a block"),
+        ("model_server:\n  import: plasma_model:PlasmaModel", "must be a block"),
+        ("model_server:\n    max_batch: 2", "import must name the model half"),
+        (
+            "model_server:\n    import: plasma_model:PlasmaModel\n    shm_size: 1",
+            r"unknown keys \['shm_size'\]; it takes import, max_batch, batch_window",
+        ),
+        (
+            "model_server:\n    import: plasma_model:PlasmaModel\n    shm_output_bytes: 1048576",
+            r"runtime\.model_server has unknown keys \['shm_output_bytes'\]",
+        ),
+        (
+            "model_server:\n    import: plasma_model:PlasmaModel\n    max_batch: '2'",
+            r"runtime\.model_server\.max_batch must be a positive integer",
+        ),
+        (
+            "model_server:\n    import: plasma_model:PlasmaModel\n    max_batch: 0",
+            "positive integer",
+        ),
+        (
+            "model_server:\n    import: plasma_model:PlasmaModel\n    batch_window: -1",
+            r"runtime\.model_server\.batch_window must be a number of seconds, at least 0",
+        ),
+        ("model_server:\n    import: plasma_model", "module:Class"),
+        ("model_server:\n    import: 'plasma_model:'", "module:Class"),
+        ("model_server:\n    import: ':PlasmaModel'", "module:Class"),
+        ("model_server:\n    import: ':'", "module:Class"),
+        ("model_server:\n    import: 3", "module:Class"),
+    ],
+)
+def test_load_config_refuses_a_model_server_block_of_the_wrong_shape(
+    tmp_path: Path, block: str, match: str
+) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(f"runtime:\n  import: plasma:Plasma\n  {block}\n")
+
+    with pytest.raises(ValueError, match=match):
+        load_config(manifest)
+
+
+def _with_shared_memory(block: str) -> str:
+    return f"model:\n  resources:\n    workers:\n      {block}\nruntime:\n  import: plasma:Plasma\n"
+
+
+# Each value as the Kubernetes quantity grammar reads it, and the whole number of
+# bytes it names; a deployment sizes each worker's volume from the same text.
+@pytest.mark.parametrize(
+    ("value", "size"),
+    [
+        ("1Mi", 1 << 20),
+        ("24Mi", 24 << 20),
+        ("1048576", 1 << 20),
+        ("'1048576'", 1 << 20),
+        ("1.5Mi", 3 << 19),
+        ("0.5Ki", 512),
+        ("1e6", 10**6),
+        ("'1E6'", 10**6),
+        ("2e+3", 2000),
+        ("1000e-3", 1),
+        ("1G", 10**9),
+        ("1k", 1000),
+        ("1Ki", 1024),
+        ("1Gi", 1 << 30),
+        ("1Ti", 1 << 40),
+        ("1Pi", 1 << 50),
+        ("1Ei", 1 << 60),
+        ("2E", 2 * 10**18),
+        ("2000m", 2),
+        ("'+1Mi'", 1 << 20),
+        ("1.Mi", 1 << 20),
+        ("'.5Ki'", 512),
+        ("007Ki", 7 << 10),
+    ],
+)
+def test_a_shared_memory_size_is_read_as_a_quantity_of_whole_bytes(
+    tmp_path: Path, value: str, size: int
+) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_with_shared_memory(f"shared_memory: {{input: {value}, output: 24Mi}}"))
+
+    assert load_config(manifest).shared_memory == SharedMemoryConfig(
+        input_bytes=size, output_bytes=24 << 20
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "shown"),
+    [
+        ("0", "0"),
+        ("'0'", "'0'"),
+        ("0Mi", "'0Mi'"),
+        ("-1Mi", "'-1Mi'"),
+        ("-1", "-1"),
+        ("100m", "'100m'"),
+        ("1500m", "'1500m'"),
+        ("'0.5'", "'0.5'"),
+        ("'1.5'", "'1.5'"),
+        ("1001e-3", "'1001e-3'"),
+        ("1e-30", "'1e-30'"),
+        ("abc", "'abc'"),
+        ("1MiB", "'1MiB'"),
+        ("1mi", "'1mi'"),
+        ("1K", "'1K'"),
+        ("1 Mi", "'1 Mi'"),
+        ("Mi", "'Mi'"),
+        ("1e", "'1e'"),
+        ("1e1.5", "'1e1.5'"),
+        ("''", "''"),
+        ("true", "True"),
+        ("null", "None"),
+        ("[1]", "[1]"),
+    ],
+)
+def test_a_shared_memory_size_that_is_not_whole_bytes_is_refused_naming_its_key(
+    tmp_path: Path, value: str, shown: str
+) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_with_shared_memory(f"shared_memory: {{output: {value}}}"))
+
+    with pytest.raises(ValueError, match="must be a quantity of whole bytes") as refused:
+        load_config(manifest)
+
+    assert str(refused.value) == (
+        "model.resources.workers.shared_memory.output must be a quantity of whole bytes, "
+        f"at least 1, such as 24Mi; got {shown}"
+    )
+
+
+@pytest.mark.parametrize("value", ["0.5", "1.5", "2.0", "1.5e+6"])
+def test_a_shared_memory_size_yaml_reads_as_a_float_is_refused_asking_for_a_string(
+    tmp_path: Path, value: str
+) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_with_shared_memory(f"shared_memory: {{input: {value}}}"))
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^model\.resources\.workers\.shared_memory\.input must be a quantity of whole "
+            r"bytes, at least 1, such as 24Mi; got [0-9.e+]+, which YAML reads as a float: "
+            "write the quantity as a string"
+        ),
+    ):
+        load_config(manifest)
+
+
+@pytest.mark.parametrize("value", ["8Ei", "9223372036854775808", "1e19", "1e999999999"])
+def test_a_shared_memory_size_beyond_a_64_bit_count_is_refused(tmp_path: Path, value: str) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_with_shared_memory(f"shared_memory: {{output: '{value}'}}"))
+
+    with pytest.raises(
+        ValueError,
+        match=r"shared_memory\.output must be at most 9223372036854775807 bytes",
+    ):
+        load_config(manifest)
+
+
+def test_the_largest_64_bit_count_is_a_size(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_with_shared_memory("shared_memory: {output: 9223372036854775807}"))
+
+    assert load_config(manifest).shared_memory.output_bytes == 2**63 - 1
+
+
+@pytest.mark.parametrize(
+    ("block", "match"),
+    [
+        ("shared_memory:", r"shared_memory must be a block with `input` and `output` sizes"),
+        ("shared_memory: 24Mi", r"shared_memory must be a block"),
+        ("shared_memory: [1Mi, 24Mi]", r"shared_memory must be a block"),
+        (
+            "shared_memory: {input: 1Mi, outptu: 24Mi}",
+            r"shared_memory has unknown keys \['outptu'\]; it takes input, output",
+        ),
+        (
+            "shared_memory: {input_bytes: 1048576}",
+            r"shared_memory has unknown keys \['input_bytes'\]",
+        ),
+    ],
+)
+def test_load_config_refuses_a_shared_memory_block_of_the_wrong_shape(
+    tmp_path: Path, block: str, match: str
+) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_with_shared_memory(block))
+
+    with pytest.raises(ValueError, match=rf"^model\.resources\.workers\.{match}"):
+        load_config(manifest)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "model: {name: plasma}",
+        "model: {resources: 4}",
+        "model: {resources: {gpu: {type: NVIDIA_H100, count: 1}}}",
+        "model: {resources: {workers: 4}}",
+        "model: {resources: {workers: {count: 4, cpu: {request: '1'}, memory: {limit: 4Gi}}}}",
+        "model: {resources: {workers: {count: 4, gpu: banana, shm: 1}, storage: 1Ti}}",
+    ],
+)
+def test_everything_under_model_resources_but_shared_memory_is_left_to_the_deployment(
+    tmp_path: Path, model: str
+) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(f"{model}\nruntime:\n  import: plasma:Plasma\n")
+
+    assert load_config(manifest).shared_memory == SharedMemoryConfig()
+
+
+def test_a_shared_memory_block_may_size_one_block_and_leave_the_other_at_its_default(
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_with_shared_memory("shared_memory: {output: 64Mi}"))
+
+    assert load_config(manifest).shared_memory == SharedMemoryConfig(
+        input_bytes=DEFAULT_SHM_INPUT_BYTES, output_bytes=64 << 20
+    )
+    manifest.write_text(_with_shared_memory("shared_memory: {}"))
+    assert load_config(manifest).shared_memory == SharedMemoryConfig()
+
+
+def _with_webrtc(block: str) -> str:
+    return f"runtime:\n  import: world:World\n  {block}\n"
+
+
+def test_a_manifest_without_a_webrtc_block_keeps_the_64_mib_message_limit(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_MANIFEST)
+
+    assert load_config(manifest).webrtc_max_message_size == DEFAULT_MAX_MESSAGE_BYTES == 64 << 20
+
+
+@pytest.mark.parametrize(
+    ("value", "size"),
+    [
+        ("256Mi", 256 << 20),
+        ("'96Mi'", 96 << 20),
+        ("100M", 100 * 10**6),
+        ("268435456", 256 << 20),
+        ("256Ki", 256 << 10),
+        ("1Gi", 1 << 30),
+    ],
+)
+def test_the_webrtc_message_limit_is_read_as_a_quantity(
+    tmp_path: Path, value: str, size: int
+) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_with_webrtc(f"webrtc: {{max_message_size: {value}}}"))
+
+    assert load_config(manifest).webrtc_max_message_size == size
+
+
+def test_a_webrtc_block_without_a_size_keeps_the_default(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_with_webrtc("webrtc: {}"))
+
+    assert load_config(manifest).webrtc_max_message_size == DEFAULT_MAX_MESSAGE_BYTES
+
+
+@pytest.mark.parametrize("value", ["255Ki", "262143", "1025Mi", "2Gi"])
+def test_a_webrtc_message_limit_outside_256ki_to_1gi_is_refused(tmp_path: Path, value: str) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_with_webrtc(f"webrtc: {{max_message_size: {value}}}"))
+
+    with pytest.raises(
+        ValueError, match=r"^runtime\.webrtc\.max_message_size must be from 256Ki to 1Gi; got "
+    ):
+        load_config(manifest)
+
+
+@pytest.mark.parametrize("value", ["0", "-1Mi", "64MiB", "abc", "'1.5'", "null"])
+def test_a_webrtc_message_limit_that_is_not_whole_bytes_is_refused_naming_its_key(
+    tmp_path: Path, value: str
+) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_with_webrtc(f"webrtc: {{max_message_size: {value}}}"))
+
+    with pytest.raises(
+        ValueError, match=r"^runtime\.webrtc\.max_message_size must be a quantity of whole bytes"
+    ):
+        load_config(manifest)
+
+
+@pytest.mark.parametrize(
+    ("block", "match"),
+    [
+        ("webrtc:", r"webrtc must be a block with `max_message_size`, got None"),
+        ("webrtc: 256Mi", r"webrtc must be a block with `max_message_size`"),
+        (
+            "webrtc: {max_mesage_size: 256Mi}",
+            r"webrtc has unknown keys \['max_mesage_size'\]; it takes max_message_size",
+        ),
+    ],
+)
+def test_load_config_refuses_a_webrtc_block_of_the_wrong_shape(
+    tmp_path: Path, block: str, match: str
+) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_with_webrtc(block))
+
+    with pytest.raises(ValueError, match=rf"^runtime\.{match}"):
+        load_config(manifest)

@@ -22,13 +22,22 @@ from reactor_runtime.core.model import (
     UploadedFile,
 )
 from reactor_runtime.core.service import (
+    DEFAULT_MAX_MESSAGE_BYTES,
+    DEFAULT_SHM_INPUT_BYTES,
+    DEFAULT_SHM_OUTPUT_BYTES,
+    MAX_MAX_MESSAGE_BYTES,
+    MIN_MAX_MESSAGE_BYTES,
+    SHM_PAGE_BYTES,
     LiveKitBlockError,
     LiveKitConfig,
     LiveKitRpcMethod,
+    ModelServerConfig,
     RecordingConfig,
     RuntimeConfig,
     ServiceComponent,
+    SharedMemoryConfig,
     StepResultsConfig,
+    shm_slot_bytes,
 )
 from reactor_runtime.core.session import (
     JOURNAL_EVENTS,
@@ -79,7 +88,13 @@ from reactor_runtime.core.values import (
 )
 
 __all__ = [
+    "DEFAULT_MAX_MESSAGE_BYTES",
+    "DEFAULT_SHM_INPUT_BYTES",
+    "DEFAULT_SHM_OUTPUT_BYTES",
     "JOURNAL_EVENTS",
+    "MAX_MAX_MESSAGE_BYTES",
+    "MIN_MAX_MESSAGE_BYTES",
+    "SHM_PAGE_BYTES",
     "ClientConnected",
     "ClientConnectionStat",
     "ClientDisconnected",
@@ -116,6 +131,7 @@ __all__ = [
     "MessageObserver",
     "MessageStage",
     "MessageStageSource",
+    "ModelServerConfig",
     "ReactorEvent",
     "RecordingConfig",
     "ReplyRoute",
@@ -127,6 +143,7 @@ __all__ = [
     "SessionEvent",
     "SessionStarted",
     "SessionState",
+    "SharedMemoryConfig",
     "StartingInputApplied",
     "StepRefusal",
     "StepRefusalKind",
@@ -142,4 +159,5 @@ __all__ = [
     "TransportTrackReading",
     "TypeSpec",
     "UploadedFile",
+    "shm_slot_bytes",
 ]

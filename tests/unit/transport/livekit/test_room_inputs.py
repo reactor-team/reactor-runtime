@@ -11,7 +11,6 @@ from livekit import rtc
 from reactor_runtime.core import ConnId, InputFrame, TrackDirection, TrackInfo, TrackKind
 from reactor_runtime.transport.livekit.media_in import (
     AUDIO_QUEUE_FRAMES,
-    MAX_OPEN_INPUT_STREAMS,
     VIDEO_QUEUE_FRAMES,
     RoomInputs,
     StreamFramer,
@@ -185,116 +184,26 @@ async def test_a_stream_feeds_its_track_and_ends_with_an_empty_frame() -> None:
     ]
 
 
-class LiveReader:
-    """A byte stream whose chunks arrive one at a time, as the test sends them."""
-
-    def __init__(self, stream_id: str, **info: Any) -> None:
-        self.info = Info(stream_id, **info)
-        self._chunks: asyncio.Queue[bytes | None] = asyncio.Queue()
-        self.closed = False
-
-    def send(self, chunk: bytes) -> None:
-        self._chunks.put_nowait(chunk)
-
-    def finish(self) -> None:
-        self._chunks.put_nowait(None)
-
-    def __aiter__(self) -> AsyncIterator[bytes]:
-        return self._iter()
-
-    async def _iter(self) -> AsyncIterator[bytes]:
-        while not self.closed and (chunk := await self._chunks.get()) is not None:
-            yield chunk
-
-    def close(self) -> None:
-        self.closed = True
-
-
-def frames_by_stream(sink: Sink) -> list[tuple[str, int | str]]:
-    """Each frame as its stream id and first sample, or "end" for an end frame."""
-    out: list[tuple[str, int | str]] = []
-    for (_, _, frame), meta in zip(sink.frames, sink.metadata(), strict=True):
-        out.append((meta["stream_id"], "end" if meta.get("ended") else int(frame.data[0, 0])))
-    return out
-
-
-async def test_a_new_stream_on_the_topic_leaves_the_open_one_feeding() -> None:
+async def test_a_new_stream_on_the_topic_ends_the_open_one() -> None:
     sink = Sink()
     room = inputs(sink)
-    first, second = LiveReader("AUDIO_1"), LiveReader("AUDIO_2")
+    first = Reader("AUDIO_1", [pcm(np.ones(240, np.int16))])
     room.on_byte_stream(cast(Any, first), "agent", ConnId(5120))
-    first.send(pcm(np.full(240, 1, np.int16)))
-    await _settle()
+    second = Reader("AUDIO_2", [pcm(np.full(240, 2, np.int16))])
 
     room.on_byte_stream(cast(Any, second), "agent", ConnId(5120))
-    second.send(pcm(np.full(240, 2, np.int16)))
-    await _settle()
-    first.send(pcm(np.full(240, 3, np.int16)))
-    first.finish()
-    await _settle()
-    second.send(pcm(np.full(240, 4, np.int16)))
-    second.finish()
-    await _settle()
-
-    assert frames_by_stream(sink) == [
-        ("AUDIO_1", 1),
-        ("AUDIO_2", 2),
-        ("AUDIO_1", 3),
-        ("AUDIO_1", "end"),
-        ("AUDIO_2", 4),
-        ("AUDIO_2", "end"),
-    ]
-
-
-async def test_a_stream_still_queued_when_the_next_opens_is_read_to_its_end() -> None:
-    sink = Sink()
-    room = inputs(sink)
-    first = Reader("AUDIO_1", [pcm(np.full(240, 1, np.int16)), pcm(np.full(240, 2, np.int16))])
-    room.on_byte_stream(cast(Any, first), "agent", ConnId(5120))
     first.released.set()
-    second = Reader("AUDIO_2", [pcm(np.full(240, 3, np.int16))])
-
-    # The first stream's chunks and end have arrived, but nothing has read them yet.
-    room.on_byte_stream(cast(Any, second), "agent", ConnId(5120))
     second.released.set()
     await _settle()
 
-    assert frames_by_stream(sink) == [
-        ("AUDIO_1", 1),
-        ("AUDIO_1", 2),
-        ("AUDIO_1", "end"),
-        ("AUDIO_2", 3),
-        ("AUDIO_2", "end"),
+    assert [(m["stream_id"], m.get("ended", False)) for m in sink.metadata()] == [
+        ("AUDIO_1", True),
+        ("AUDIO_2", False),
+        ("AUDIO_2", True),
     ]
-
-
-async def test_a_stream_past_the_open_bound_is_refused_and_the_open_ones_go_on() -> None:
-    sink = Sink()
-    room = inputs(sink)
-    readers = [LiveReader(f"AUDIO_{i}") for i in range(MAX_OPEN_INPUT_STREAMS + 1)]
-    for reader in readers:
-        room.on_byte_stream(cast(Any, reader), "agent", ConnId(5120))
-    for i, reader in enumerate(readers):
-        reader.send(pcm(np.full(240, i, np.int16)))
-    await _settle()
-
-    refused = readers[-1]
-    assert refused.closed
-    assert frames_by_stream(sink) == [(f"AUDIO_{i}", i) for i in range(MAX_OPEN_INPUT_STREAMS)]
-
-
-async def test_a_stream_ends_once_however_many_ways_it_is_ended() -> None:
-    sink = Sink()
-    room = inputs(sink)
-    reader = LiveReader("AUDIO_1")
-    room.on_byte_stream(cast(Any, reader), "agent", ConnId(5120))
-
-    room.release("agent", ConnId(5120))
-    reader.finish()
-    await _settle()
-    room.close()
-
-    assert frames_by_stream(sink) == [("AUDIO_1", "end")]
+    # The superseded stream is closed, so its chunks stop arriving.
+    assert first.closed
+    assert first.read == []
 
 
 async def test_the_first_participant_to_send_holds_the_track() -> None:
@@ -314,28 +223,26 @@ async def test_the_first_participant_to_send_holds_the_track() -> None:
     assert other.read == []
 
 
-async def test_a_participant_that_leaves_ends_its_streams_and_frees_the_track() -> None:
+async def test_a_participant_that_leaves_ends_its_stream_and_frees_the_track() -> None:
     sink = Sink()
     claims = Claims()
     room = inputs(sink, claims)
-    stuck = [LiveReader("AUDIO_1"), LiveReader("AUDIO_2")]
-    for reader in stuck:
-        room.on_byte_stream(cast(Any, reader), "agent", ConnId(5120))
+    stuck = Reader("AUDIO_1", [])
+    room.on_byte_stream(cast(Any, stuck), "agent", ConnId(5120))
 
     room.release("agent", ConnId(5120))
     claims.connection_closed(ConnId(5120))
-    nxt = Reader("AUDIO_3", [pcm(np.ones(240, np.int16))])
+    nxt = Reader("AUDIO_2", [pcm(np.ones(240, np.int16))])
     room.on_byte_stream(cast(Any, nxt), "newcomer", ConnId(10_001))
     nxt.released.set()
     await _settle()
 
     assert [(m["stream_id"], m.get("ended", False)) for m in sink.metadata()] == [
         ("AUDIO_1", True),
+        ("AUDIO_2", False),
         ("AUDIO_2", True),
-        ("AUDIO_3", False),
-        ("AUDIO_3", True),
     ]
-    assert all(reader.closed for reader in stuck)
+    assert stuck.closed
 
 
 async def test_a_stream_mapped_to_a_video_track_is_refused() -> None:
@@ -605,14 +512,10 @@ async def test_an_input_another_transport_holds_is_not_fed_from_the_room() -> No
 async def test_closing_ends_each_open_stream_and_closes_readers_that_never_ran() -> None:
     sink = Sink()
     room = inputs(sink)
-    readers = [Reader(f"AUDIO_{i}", [pcm(np.ones(240, np.int16))]) for i in (1, 2)]
-    for reader in readers:
-        room.on_byte_stream(cast(Any, reader), "agent", ConnId(5120))
+    reader = Reader("AUDIO_1", [pcm(np.ones(240, np.int16))])
+    room.on_byte_stream(cast(Any, reader), "agent", ConnId(5120))
 
     room.close()
 
-    assert all(reader.closed for reader in readers)
-    assert sink.metadata() == [
-        {"stream_id": "AUDIO_1", "ended": True},
-        {"stream_id": "AUDIO_2", "ended": True},
-    ]
+    assert reader.closed
+    assert sink.metadata() == [{"stream_id": "AUDIO_1", "ended": True}]

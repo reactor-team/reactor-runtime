@@ -20,7 +20,7 @@ version = "1.20261024.19"
 
 [project]
 name = "reactor-runtime"
-version = "3.10.2"
+version = "3.11.3"
 description = "A Python framework for building real-time, interactive video models"
 readme = "README.md"
 license = "Apache-2.0"
@@ -50,7 +50,7 @@ dependencies = [
 # The LiveKit transport. A model that joins LiveKit rooms lists
 # `reactor-runtime[livekit]` in its requirements; the runtime pin stays the
 # CLI's `build.runtime_version`.
-livekit = ["livekit==1.1.21"]
+livekit = ["livekit==1.2.0"]
 
 [project.urls]
 Source = "https://github.com/reactor-team/reactor-runtime"
@@ -60,7 +60,7 @@ dev = [
     "certifi>=2026.10.19",
     "httpx>=0.28.1",
     # The LiveKit transport and the token minting its tests use.
-    "livekit==1.1.21",
+    "livekit==1.2.0",
     "livekit-api>=1.2.2",
     "opencv-python-headless>=4.10",
     "pillow>=10.1",
@@ -150,11 +150,12 @@ extra-paths = [
     "examples/starter",
     "examples/echo",
     "examples/waypoint",
-    "examples/stepped_echo",
+    "tests/integration/pod/split_echo",
     "tests/unit/transport/webrtc",
     "tests/contract",
     "endurance-tests",
     "endurance-tests/model",
+    "endurance-tests/model-split",
 ]
 
 [tool.ty.src]
