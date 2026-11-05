@@ -78,8 +78,10 @@ They state facts about the runtime, so they follow it the way the README does:
   the same PR. Internal refactors leave skills alone.
 - Skills cite public names and their docstrings, never line numbers or private
   names, so an internal change cannot make them wrong.
-  `tests/unit/test_skill_citations.py` imports every `reactor_runtime` name a
-  skill cites and fails on a rename until the skill follows.
+  `tests/unit/test_skill_citations.py` imports every name a skill writes in
+  full (`reactor_runtime.get_weights_path`) and fails on a rename until the
+  skill follows. A bare name (`CommandError`) is not checked, so write a symbol
+  in full where a rename would make the skill wrong.
 - The PR that bumps the package version re-reads the runtime facts in
   `skills/port-model-e2e/references/port-on-reactor-app.md` §10, next to the
   example pins (`skills/maintaining-examples`).

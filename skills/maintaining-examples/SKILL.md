@@ -70,8 +70,9 @@ the release has left.
 The same PR re-reads the runtime facts the porting skill relies on
 (`skills/port-model-e2e/references/port-on-reactor-app.md` §10) against the
 release, and corrects any the release changed.
-`tests/unit/test_skill_citations.py` catches a renamed symbol; a changed
-default or limit only a reading catches.
+`tests/unit/test_skill_citations.py` catches a renamed symbol a skill writes in
+full as `reactor_runtime.<name>`; a changed default or limit, or a bare name,
+only a reading catches.
 
 ## Review checklist
 

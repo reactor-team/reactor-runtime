@@ -20,7 +20,7 @@ Runtime facts below cite public names under `reactor_runtime` and their
 docstrings, which are the runtime's reference; read the docstring when a detail
 matters. They are re-read at every release bump (see
 [`maintaining-examples`](../../maintaining-examples/SKILL.md)), and a unit test
-imports every `reactor_runtime` name the skills cite.
+imports every name the skills write in full as `reactor_runtime.<name>`.
 
 ## Start from the reference example
 
