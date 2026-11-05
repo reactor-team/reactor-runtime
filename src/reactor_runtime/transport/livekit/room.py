@@ -60,6 +60,7 @@ from reactor_runtime.transport.livekit.connection import (
 )
 from reactor_runtime.transport.livekit.media_in import RoomInputs
 from reactor_runtime.transport.livekit.participant import TOPIC_CHANNELS, ParticipantConnection
+from reactor_runtime.transport.livekit.router import IceForwarderEntry
 from reactor_runtime.transport.livekit.signals import RoomSignals, payload_args
 from reactor_runtime.transport.livekit.version import TRANSPORT_NAME
 from reactor_runtime.transport.router import (
@@ -112,13 +113,13 @@ _ACCESS_TOKEN_PARAM = re.compile(r"(access_token=)[^&#\s\"']+")
 def _masked(text: str, *secrets: str) -> str:
     """Return *text* with every one of *secrets*, and any URL's ``access_token`` value, masked.
 
-    The secrets are the room token and the TURN credentials of the caller's
-    ICE servers. The SDK's error for a refused connect can repeat the
-    signalling URL it dialled, and that URL carries the token as its
-    ``access_token`` query parameter. A join's reason is served to the caller
-    and journalled, so every secret is masked out of the error's text before
-    it becomes one. A token is URL-safe, so its form in a URL is the token
-    itself.
+    The secrets are the room token, the TURN credentials of the caller's ICE
+    servers, and the ICE password of the caller's forwarder. The SDK's error
+    for a refused connect can repeat the signalling URL it dialled, and that
+    URL carries the token as its ``access_token`` query parameter. A join's
+    reason is served to the caller and journalled, so every secret is masked
+    out of the error's text before it becomes one. A token is URL-safe, so its
+    form in a URL is the token itself.
 
     Longer secrets are masked first: one secret can contain another, and
     masking the shorter first would leave the rest of the longer in the text.
@@ -164,6 +165,10 @@ class RoomSession:
             Empty, the join gathers against the LiveKit server's own. Their
             TURN credentials are secrets, like the token, and are masked out
             of a failed join's :attr:`reason`.
+        ice_forwarder: A forwarder all of the room connection's media goes
+            through; see :class:`IceForwarderEntry`. Its ICE password is a
+            secret, like the token, and is masked out of a failed join's
+            :attr:`reason`. Given, the join uses no ICE server.
     """
 
     def __init__(
@@ -177,6 +182,7 @@ class RoomSession:
         room: rtc.Room | None = None,
         on_answer: Callable[[], None] | None = None,
         ice_servers: Sequence[IceServerEntry] = (),
+        ice_forwarder: IceForwarderEntry | None = None,
     ) -> None:
         self.conn_id = conn_id
         self._on_answer = on_answer
@@ -192,9 +198,11 @@ class RoomSession:
             )
             for entry in ice_servers
         ]
+        self._ice_forwarder = ice_forwarder
         self._secrets = (
             token,
             *(secret for entry in self._ice_servers for secret in (entry.username, entry.password)),
+            *((ice_forwarder.ice_credentials.pwd,) if ice_forwarder is not None else ()),
         )
         self._control = control
         self._config = config or LiveKitConfig()
@@ -366,16 +374,31 @@ class RoomSession:
         )
 
     async def _connect_and_publish(self) -> RoomConnection:
-        if self._ice_servers:
-            options = rtc.RoomOptions(
-                rtc_config=rtc.RtcConfiguration(ice_servers=self._ice_servers)
-            )
-            await self._room.connect(self._url, self._token, options)
+        rtc_config = self._rtc_config()
+        if rtc_config is not None:
+            await self._room.connect(self._url, self._token, rtc.RoomOptions(rtc_config=rtc_config))
         else:
             await self._room.connect(self._url, self._token)
         self._register_methods()
         self._register_inputs()
         return await self._publish(self._tracks(TrackDirection.OUT))
+
+    def _rtc_config(self) -> rtc.RtcConfiguration | None:
+        """Return the join's ICE configuration, or ``None`` to use the LiveKit server's."""
+        fwd = self._ice_forwarder
+        if fwd is not None:
+            return rtc.RtcConfiguration(
+                ice_forwarder=rtc.IceForwarder(
+                    addresses=list(fwd.addresses),
+                    credentials=rtc.IceCredentials(
+                        ufrag=fwd.ice_credentials.ufrag, pwd=fwd.ice_credentials.pwd
+                    ),
+                    local_port=fwd.port,
+                )
+            )
+        if self._ice_servers:
+            return rtc.RtcConfiguration(ice_servers=self._ice_servers)
+        return None
 
     def _leave_when_settled(self, attempt: asyncio.Task[RoomConnection]) -> None:
         """Leave the room once an abandoned attempt has finished, whatever its outcome."""

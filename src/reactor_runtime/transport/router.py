@@ -19,11 +19,11 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from typing import Any, ClassVar, Protocol, runtime_checkable
+from typing import Annotated, Any, ClassVar, Protocol, runtime_checkable
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from reactor_runtime.core import ConnectionSink, ConnId, Health, SessionState
 from reactor_runtime.log import get_logger
@@ -41,6 +41,35 @@ class ErrorDetail(BaseModel):
     """
 
     detail: str
+
+
+# RFC 8445 §15.4: ice-char = ALPHA / DIGIT / "+" / "/". Anchored, so a value
+# is rejected for containing anything else rather than for merely starting with
+# something valid.
+_ICE_CHAR = r"^[A-Za-z0-9+/]+$"
+
+
+class IceCredentialsEntry(BaseModel):
+    """The ICE credentials a connection uses in its local descriptions.
+
+    The constraints are RFC 8445 §15.4: both values are ``ice-char``
+    (ALPHA / DIGIT / "+" / "/"), a ufrag is 4..256 of them and a password
+    22..256.
+
+    They are enforced here rather than left to the media engine because of where
+    each failure surfaces. The routes that take them answer 202 and set the
+    connection up in the background, so a malformed value rejected downstream
+    reaches the caller only as a poll that times out or fails, with the reason in
+    the runtime's logs. Checked here it is a 422 naming the field.
+    """
+
+    ufrag: str = Field(min_length=4, max_length=256, pattern=_ICE_CHAR)
+    pwd: str = Field(min_length=22, max_length=256, pattern=_ICE_CHAR)
+
+
+UdpPort = Annotated[int, Field(ge=1, le=65535)]
+"""A UDP port a caller pins. Zero is excluded: it asks the kernel for an
+ephemeral port, which is the one thing a caller pinning a port cannot mean."""
 
 
 class TurnCredentials(BaseModel):

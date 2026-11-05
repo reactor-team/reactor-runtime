@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import ipaddress
 import time
 from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any, Literal
@@ -26,7 +27,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
-from pydantic import BaseModel, Field, SecretStr, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 
 from reactor_runtime.core import ConnId, Health, HealthStatus, LiveKitConfig
 from reactor_runtime.log import get_logger
@@ -36,9 +37,11 @@ from reactor_runtime.transport.router import (
     CONN_ID_MAX,
     ConnectionIdClaimedError,
     ErrorDetail,
+    IceCredentialsEntry,
     IceServerEntry,
     SessionControl,
     TransportRouter,
+    UdpPort,
     add_session_error_handlers,
 )
 
@@ -58,7 +61,8 @@ _GUARD_RESPONSES: dict[int | str, dict[str, Any]] = {
 
 # Opening a room connection adds a 409 when the session already has one or the
 # id the caller chose is in use, and a 503 when the session's connection-id
-# space is used up.
+# space is used up. Its 400 also covers an ICE forwarder that this runtime's
+# LiveKit SDK cannot use.
 _OPEN_RESPONSES: dict[int | str, dict[str, Any]] = {
     **_GUARD_RESPONSES,
     409: {"model": ErrorDetail},
@@ -72,6 +76,74 @@ def livekit_available() -> bool:
         return importlib.util.find_spec("livekit.rtc") is not None
     except ModuleNotFoundError:
         return False
+
+
+def ice_forwarder_available() -> bool:
+    """Whether the installed LiveKit SDK can send a room connection through an ICE forwarder.
+
+    The option is ``RtcConfiguration.ice_forwarder`` of the ``livekit`` package;
+    a build without it refuses a room connection that asks for a forwarder.
+    """
+    try:
+        from livekit import rtc
+    except ImportError:
+        return False
+    return hasattr(rtc, "IceForwarder")
+
+
+def _forwarder_address(text: str) -> str:
+    """Return *text* if it is an ``ip:port`` address, an IPv6 address in brackets."""
+    host, sep, port = text.rpartition(":")
+    if not sep:
+        raise ValueError(f"address {text!r} is not an ip:port address")
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        raise ValueError(f"address {text!r} does not start with an IP address") from None
+    if ip.is_unspecified:
+        raise ValueError(f"address {text!r} is unspecified")
+    if not port.isdigit() or not 1 <= int(port) <= 65535:
+        raise ValueError(f"address {text!r} has no usable port")
+    return text
+
+
+class IceForwarderEntry(BaseModel):
+    """A UDP forwarder in front of the runtime that all of a room connection's media goes through.
+
+    The forwarder routes each ICE connectivity check by the ICE username
+    fragment it carries, and delivers it to one local port of the runtime. It
+    terminates nothing: DTLS and SRTP stay end to end. With a forwarder, the
+    room connection:
+
+    - carries ``ice_credentials`` in every local description, also across ICE
+      restarts and reconnects;
+    - gathers on ``port`` alone, and gathers no TCP candidates;
+    - shows the room only ``addresses`` as its candidates, the first with the
+      highest priority;
+    - uses no remote candidate and no ICE server, also none the LiveKit server
+      offers, so its media never takes a path of its own: it only answers the
+      checks the forwarder delivers;
+    - asks the LiveKit server for full ICE, since an ICE-lite server sends no
+      check for the forwarder to deliver;
+    - fails to join unless the LiveKit server accepts single peer connection
+      mode, since the forwarder delivers one set of credentials to one port.
+
+    ``port`` must be free: the join gathers on it alone, so a port another
+    socket holds leaves the room connection without a candidate. The password
+    is a credential, like the room token: never logged or journalled, and not
+    repeated by a refused request.
+    """
+
+    addresses: list[str] = Field(min_length=1)
+    ice_credentials: IceCredentialsEntry
+    port: UdpPort
+
+    @field_validator("addresses")
+    @classmethod
+    def _addresses_are_ip_port(cls, addresses: list[str]) -> list[str]:
+        return [_forwarder_address(a) for a in addresses]
 
 
 class RoomConnectionRequest(BaseModel):
@@ -93,12 +165,27 @@ class RoomConnectionRequest(BaseModel):
     empty, the room connection gathers against the LiveKit server's own. Their
     TURN credentials are treated like the token: never logged or journalled,
     and not repeated by a refused request.
+
+    ``ice_forwarder`` sends all of the room connection's media through a
+    forwarder in front of the runtime; see :class:`IceForwarderEntry`. A
+    forwarder uses no ICE server, so a request with both is a 422. A runtime
+    whose LiveKit SDK cannot use a forwarder refuses the request with a 400
+    rather than join without it.
     """
 
     url: str
     token: SecretStr
     connection_id: int | None = Field(default=None, ge=CHOSEN_CONN_ID_MIN, le=CONN_ID_MAX)
     ice_servers: list[IceServerEntry] | None = None
+    ice_forwarder: IceForwarderEntry | None = None
+
+    @model_validator(mode="after")
+    def _forwarder_uses_no_ice_server(self) -> RoomConnectionRequest:
+        if self.ice_forwarder is not None and self.ice_servers:
+            raise ValueError(
+                "ice_forwarder and ice_servers are exclusive: a forwarder uses no ICE server"
+            )
+        return self
 
     @field_validator("url")
     @classmethod
@@ -189,6 +276,12 @@ class LiveKitRouter(TransportRouter):
             sid: str, req: RoomConnectionRequest
         ) -> RoomConnectionAccepted:
             runner.require_session_running(sid)
+            if req.ice_forwarder is not None and not ice_forwarder_available():
+                raise HTTPException(
+                    status_code=400,
+                    detail="this runtime's LiveKit SDK cannot send a room connection "
+                    "through an ICE forwarder",
+                )
             async with self._opening:
                 epoch = runner.session_epoch()
                 previous = self._room
@@ -219,6 +312,7 @@ class LiveKitRouter(TransportRouter):
                         self._config,
                         on_answer=self._server_answered,
                         ice_servers=req.ice_servers or (),
+                        ice_forwarder=req.ice_forwarder,
                     )
                     room.start()
                 except BaseException:
