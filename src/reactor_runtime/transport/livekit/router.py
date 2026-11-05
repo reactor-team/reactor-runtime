@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import time
 from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -174,6 +175,8 @@ class LiveKitRouter(TransportRouter):
         self._room_epoch = 0
         # Replaced room connections that have not left their room yet.
         self._leaving: set[RoomSession] = set()
+        # When the LiveKit server last answered a join or leave of this process.
+        self._answered_at: float | None = None
         # One open at a time: retiring an ended session's room yields, and a
         # second open must not pass the check meanwhile.
         self._opening = asyncio.Lock()
@@ -214,6 +217,7 @@ class LiveKitRouter(TransportRouter):
                         req.token.get_secret_value(),
                         runner,
                         self._config,
+                        on_answer=self._server_answered,
                         ice_servers=req.ice_servers or (),
                     )
                     room.start()
@@ -296,27 +300,34 @@ class LiveKitRouter(TransportRouter):
             raise
 
     def health(self) -> Health:
-        """Report unhealthy once :data:`~.room.LEAVE_STUCK_ROOMS` room connections are stuck.
+        """Report unhealthy when a room connection is stuck while the LiveKit server answers others.
 
-        A room connection is stuck once it has been leaving its room for
-        :data:`~.room.LEAVE_STUCK_SECONDS`. One alone stays healthy: a LiveKit
-        server outage leaves one on every process whose session ended during
-        it, and replacing them all would end live sessions and fix nothing.
-        Several mean the process keeps losing room connections, and the
-        deployment should replace it. ``/health`` answers 503 while this is
-        unhealthy.
+        A room connection is stuck once it has been leaving its room, or a
+        timed-out join has held it, for :data:`~.room.LEAVE_STUCK_SECONDS`.
+        One stuck while the server has answered a join or a leave of this
+        process since it began means this process is losing room connections,
+        and the deployment should replace it. A server that answers no one
+        leaves every process healthy, however many are stuck: replacing them
+        would end live sessions and fix nothing. ``/health`` answers 503 while
+        this is unhealthy.
         """
-        from reactor_runtime.transport.livekit.room import LEAVE_STUCK_ROOMS, LEAVE_STUCK_SECONDS
+        from reactor_runtime.transport.livekit.room import LEAVE_STUCK_SECONDS
 
+        now = time.monotonic()
         ages = [age for room in self._rooms() if (age := room.leave_age()) is not None]
         stuck = [age for age in ages if age > LEAVE_STUCK_SECONDS]
-        if len(stuck) >= LEAVE_STUCK_ROOMS:
+        answered = self._answered_at
+        if stuck and answered is not None and answered > now - max(stuck):
             return Health(
                 HealthStatus.UNHEALTHY,
-                f"{len(stuck)} LiveKit room connections have been leaving for over "
-                f"{LEAVE_STUCK_SECONDS:.0f} s (the oldest {max(stuck):.0f} s)",
+                f"{len(stuck)} LiveKit room connection(s) stuck leaving for over "
+                f"{LEAVE_STUCK_SECONDS:.0f} s (the oldest {max(stuck):.0f} s) while the server "
+                f"answered others, {now - answered:.0f} s ago",
             )
         return Health.healthy()
+
+    def _server_answered(self) -> None:
+        self._answered_at = time.monotonic()
 
     def _rooms(self) -> list[RoomSession]:
         """Return the room connections not yet settled, the current one included."""

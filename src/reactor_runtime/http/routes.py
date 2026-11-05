@@ -555,8 +555,8 @@ class EgressRoutes:
                     "description": (
                         "The process is unhealthy: a component reports it, such as the model, "
                         "the HTTP server, or a transport that keeps failing to release what its "
-                        "connections held (LiveKit: several room connections stuck leaving their "
-                        "room). `detail` says which."
+                        "connections held (LiveKit: a room connection stuck leaving its room while "
+                        "the server answers others). `detail` says which."
                     )
                 }
             },

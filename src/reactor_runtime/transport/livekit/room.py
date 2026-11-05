@@ -91,20 +91,12 @@ that step completes inside it.
 LEAVE_STUCK_SECONDS = 60.0
 """How long a leave, or an abandoned join, may run before it counts as stuck.
 
-A room that has not answered for this long is not slow but gone, and each
-session that ends against it leaves one more room connection behind. The
-LiveKit router's ``health()`` reports the process unhealthy once
-:data:`LEAVE_STUCK_ROOMS` room connections are stuck at once, so the deployment
-replaces a process that keeps accumulating them.
-"""
-
-LEAVE_STUCK_ROOMS = 2
-"""How many room connections must be stuck at once before the transport reports itself unhealthy.
-
-One stuck room connection is what a single session ending during a LiveKit
-server outage leaves, on every process at once; replacing each process for it
-would end the sessions it serves and fix nothing. More than one means the
-process keeps losing room connections, which a replacement does release.
+A room connection stuck this long holds its room and its identity in it. The
+LiveKit router's ``health()`` reports the process unhealthy when one is stuck
+while the LiveKit server has answered this process since: the process, not the
+server, is losing room connections, and a replacement releases them. A server
+that answers no one leaves every process healthy, however many are stuck,
+since replacing them would end live sessions and fix nothing.
 """
 
 _JOIN_REFUSED = "the LiveKit room could not be joined: {cause}"
@@ -165,6 +157,8 @@ class RoomSession:
         control: The runner's session-control surface.
         config: The manifest's ``runtime.livekit`` block.
         room: The room to join; a fresh ``rtc.Room`` unless one is given.
+        on_answer: Called each time the LiveKit server answers this room
+            connection: a join or a leave that completes.
         ice_servers: The STUN/TURN servers the caller supplies for the join to
             gather against, in place of the servers the LiveKit server offers.
             Empty, the join gathers against the LiveKit server's own. Their
@@ -181,9 +175,11 @@ class RoomSession:
         config: LiveKitConfig | None = None,
         *,
         room: rtc.Room | None = None,
+        on_answer: Callable[[], None] | None = None,
         ice_servers: Sequence[IceServerEntry] = (),
     ) -> None:
         self.conn_id = conn_id
+        self._on_answer = on_answer
         self.state = RoomState.JOINING
         self.reason: str | None = None
         self._url = url
@@ -345,6 +341,7 @@ class RoomSession:
             await self._fail(_JOIN_REFUSED.format(cause=cause))
             return
         connection = attempt.result()
+        self._answered()
         self._connection = connection
         self.state = RoomState.OPEN
         connection.start()
@@ -378,8 +375,8 @@ class RoomSession:
 
     def _leave_when_settled(self, attempt: asyncio.Task[RoomConnection]) -> None:
         """Leave the room once an abandoned attempt has finished, whatever its outcome."""
-        if not attempt.cancelled():
-            attempt.exception()  # retrieved, so an abandoned failure is not reported as lost
+        if not attempt.cancelled() and attempt.exception() is None:
+            self._answered()  # late, but the server answered the join
         task = asyncio.get_running_loop().create_task(self._leave_abandoned())
         self._closing.add(task)
         task.add_done_callback(self._closing.discard)
@@ -498,8 +495,14 @@ class RoomSession:
                 error_type=type(error).__name__,
                 leave_s=leave_s,
             )
-        elif late:
-            logger.info("left the LiveKit room late", conn_id=self.conn_id, leave_s=leave_s)
+        else:
+            self._answered()
+            if late:
+                logger.info("left the LiveKit room late", conn_id=self.conn_id, leave_s=leave_s)
+
+    def _answered(self) -> None:
+        if self._on_answer is not None:
+            self._on_answer()
 
     def _tracks(self, direction: TrackDirection) -> dict[str, TrackInfo]:
         """The model's declared tracks that flow in *direction*."""

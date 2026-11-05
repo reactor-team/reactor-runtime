@@ -160,6 +160,7 @@ class FakeRoomSession:
         control: Any,
         config: LiveKitConfig | None = None,
         *,
+        on_answer: Any = None,
         ice_servers: Any = (),
     ) -> None:
         self.conn_id = conn_id

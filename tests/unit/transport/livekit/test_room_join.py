@@ -670,7 +670,6 @@ async def test_a_room_still_leaving_when_the_next_session_opens_is_kept_and_repo
     rooms = iter([first, FakeRoom()])
     monkeypatch.setattr(room_module.rtc, "Room", lambda: next(rooms))
     monkeypatch.setattr(room_module, "LEAVE_STUCK_SECONDS", 0.1)
-    monkeypatch.setattr(room_module, "LEAVE_STUCK_ROOMS", 1)
     runner = RouterRunner()
     router = LiveKitRouter()
     app = FastAPI()
@@ -689,7 +688,8 @@ async def test_a_room_still_leaving_when_the_next_session_opens_is_kept_and_repo
         await asyncio.sleep(0.2)  # past the bound and the stuck limit: the first leave still runs
         health = router.health()
         assert health.status is HealthStatus.UNHEALTHY
-        assert "1 LiveKit room connections have been leaving" in str(health.detail)
+        # the next session's room joined after the first began to leave: the server answers us
+        assert "1 LiveKit room connection(s) stuck leaving" in str(health.detail)
 
         settling = asyncio.create_task(router.settle())
         await asyncio.sleep(0.05)
@@ -705,12 +705,12 @@ async def test_a_room_still_leaving_when_the_next_session_opens_is_kept_and_repo
 
 
 @pytest.mark.usefixtures("short_leave")
-async def test_one_room_connection_stuck_leaving_keeps_the_process_healthy(
+async def test_a_stuck_leave_is_unhealthy_only_once_the_server_answers_others(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    rooms = [FakeRoom(), FakeRoom(), FakeRoom()]
-    leaves = [_slow_leave(monkeypatch, room) for room in rooms[:2]]
-    queue = iter(rooms)
+    first, second = FakeRoom(), FakeRoom()
+    leave = _slow_leave(monkeypatch, first)
+    queue = iter([first, second])
     monkeypatch.setattr(room_module.rtc, "Room", lambda: next(queue))
     monkeypatch.setattr(room_module, "LEAVE_STUCK_SECONDS", 0.1)
     runner = RouterRunner()
@@ -720,25 +720,25 @@ async def test_one_room_connection_stuck_leaving_keeps_the_process_healthy(
     path = "/sessions/s1/transport/livekit/connections"
     body = {"url": "wss://rooms.example", "token": "a-token"}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://runtime") as client:
-        assert (await client.post(path, json=body)).status_code == 202
+        opened = await client.post(path, json=body)
         await _settle()
+        assert (await client.delete(f"{path}/{opened.json()['connection_id']}")).status_code == 204
+        await asyncio.sleep(0.2)
+        # stuck, and the server has answered nothing since: an outage, not this process
+        assert router.health().status is HealthStatus.HEALTHY
+
         runner.epoch = 2
-        assert (await client.post(path, json=body)).status_code == 202
-        await asyncio.sleep(0.2)
-        assert router.health().status is HealthStatus.HEALTHY  # one stuck: an outage, not a leak
-
-        runner.epoch = 3
         last = await client.post(path, json=body)
-        await asyncio.sleep(0.2)
-        assert (
-            router.health().status is HealthStatus.UNHEALTHY
-        )  # two stuck: the process keeps losing them
+        await _settle()
+        # the server answers the next join while the first room connection is still stuck: a leak
+        health = router.health()
+        assert health.status is HealthStatus.UNHEALTHY
+        assert "while the server answered others" in str(health.detail)
 
-        for leave in leaves:
-            leave.release()
+        leave.release()
         await asyncio.wait_for(router.settle(), timeout=1.0)
+        assert router.health().status is HealthStatus.HEALTHY
         assert (await client.delete(f"{path}/{last.json()['connection_id']}")).status_code == 204
-    assert router.health().status is HealthStatus.HEALTHY
 
 
 @pytest.mark.usefixtures("short_deadline")
