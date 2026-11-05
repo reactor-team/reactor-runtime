@@ -2977,6 +2977,46 @@ async def test_cleanup_completes_only_after_connections_close(started_runner: Ru
     assert conn.closed is True
 
 
+async def test_teardown_logs_how_long_the_connections_took_to_close(
+    started_runner: Runner, caplog: pytest.LogCaptureFixture
+) -> None:
+    started_runner.start_session({})
+    started_runner.connection_opened(FakeConnection(1))
+    with caplog.at_level(logging.INFO, logger="reactor_runtime.runner.runner"):
+        started_runner.stop_session()
+        await asyncio.sleep(0.01)
+    _expect_state(started_runner, SessionState.READY)
+    (record,) = [r for r in caplog.records if r.getMessage() == "session connections closed"]
+    fields = record.__dict__["reactor_fields"]
+    assert fields["reason"] == "stopped"
+    assert 0 <= fields["teardown_s"] < 1
+
+
+async def test_a_close_that_fails_logs_the_error_with_the_teardown_time_and_no_success(
+    started_runner: Runner, caplog: pytest.LogCaptureFixture
+) -> None:
+    class FailingClose(FakeConnection):
+        async def close(self) -> None:
+            raise RuntimeError("the wire is gone")
+
+    started_runner.start_session({})
+    started_runner.connection_opened(FailingClose(1))
+    with caplog.at_level(logging.INFO, logger="reactor_runtime.runner.runner"):
+        started_runner.stop_session()
+        await asyncio.sleep(0.01)
+    _expect_state(started_runner, SessionState.READY)
+    messages = [r.getMessage() for r in caplog.records]
+    assert "session connections closed" not in messages
+    (record,) = [
+        r
+        for r in caplog.records
+        if r.getMessage() == "error closing session connections during teardown"
+    ]
+    fields = record.__dict__["reactor_fields"]
+    assert fields["reason"] == "stopped"
+    assert 0 <= fields["teardown_s"] < 1
+
+
 async def test_stop_awaits_outstanding_teardown(monkeypatch: pytest.MonkeyPatch) -> None:
     created_models.clear()
     monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)

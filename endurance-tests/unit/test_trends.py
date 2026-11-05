@@ -130,6 +130,7 @@ def test_exact_metrics_cover_every_count() -> None:
         "live_pacers",
         "live_client_stats",
         "live_participants",
+        "live_rooms_leaving",
         "live_step_requests",
         "live_step_decoders",
         "tasks",

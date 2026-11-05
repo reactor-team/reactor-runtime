@@ -187,8 +187,13 @@ class RoomConnection:
     async def close(self) -> None:
         """Stop pacing and feeding the room, then leave it. Idempotent.
 
-        The room is left even when the pacer fails to stop in time, so a
-        connection that closes never stays in the room with a frozen picture.
+        Once the pacer has stopped, queued frames are dropped, and so is the
+        audio waiting for each source, including what the source itself
+        queues, up to :data:`AUDIO_QUEUE_MS`; at most the one audio frame a
+        source is already taking can still reach the room. The room is left
+        even when the pacer fails to stop in time or the audio cannot be
+        cleared, so a connection that closes never stays in the room with a
+        frozen picture.
         """
         if self._closed:
             return
@@ -201,6 +206,7 @@ class RoomConnection:
             for out in self._audio.values():
                 if out.pump is not None:
                     out.pump.cancel()
+            self._clear_audio()
             await self._on_close()
 
     def _send_frame(self, bundle: MediaBundle) -> None:
@@ -226,11 +232,18 @@ class RoomConnection:
         out.pending.put_nowait(frame)
 
     def _clear_audio(self) -> None:
-        """Drop the audio waiting for each source and the audio each source queues."""
-        for out in self._audio.values():
+        """Drop the audio waiting for each source and the audio each source queues.
+
+        Each source is cleared on its own: one whose queue cannot be cleared is
+        logged and does not keep the other tracks playing.
+        """
+        for name, out in self._audio.items():
             while not out.pending.empty():
                 out.pending.get_nowait()
-            out.source.clear_queue()
+            try:
+                out.source.clear_queue()
+            except Exception:
+                logger.warning("clearing the queue of audio track %s failed", name, exc_info=True)
 
     async def _pump_audio(self, out: _AudioOut) -> None:
         """Feed one audio source in order, waiting for its queue to have room.

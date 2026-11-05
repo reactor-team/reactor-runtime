@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from enum import StrEnum
@@ -71,6 +72,32 @@ logger = get_logger(__name__)
 
 JOIN_TIMEOUT_SECONDS = 30.0
 """How long a join, connecting and publishing the output tracks, may take before it fails."""
+
+LEAVE_TIMEOUT_SECONDS = 3.0
+"""How long closing a room connection waits for the room to be left.
+
+The session's teardown waits for the leave, so a room that never answers would
+otherwise hold the session closing, and the model unavailable to the next one.
+Past the bound the close goes on without waiting, and logs it; the leave itself
+is not cancelled by the close, since a leave cut short may never reach the
+server and the participant would stay in the room; at shutdown the process
+waits for it a bounded time (``TransportRouter.settle``) before its event loop
+ends. It runs on in the background, and the room
+connection is not :attr:`RoomSession.settled` until it has finished. The bound
+sits above the SDK's own two-second limit on unwinding in-flight RPC calls, so
+that step completes inside it.
+"""
+
+LEAVE_STUCK_SECONDS = 60.0
+"""How long a leave, or an abandoned join, may run before it counts as stuck.
+
+A room connection stuck this long holds its room and its identity in it. The
+LiveKit router's ``health()`` reports the process unhealthy when one is stuck
+while the LiveKit server has answered this process since: the process, not the
+server, is losing room connections, and a replacement releases them. A server
+that answers no one leaves every process healthy, however many are stuck,
+since replacing them would end live sessions and fix nothing.
+"""
 
 _JOIN_REFUSED = "the LiveKit room could not be joined: {cause}"
 _JOIN_TIMED_OUT = "joining the LiveKit room timed out"
@@ -130,6 +157,8 @@ class RoomSession:
         control: The runner's session-control surface.
         config: The manifest's ``runtime.livekit`` block.
         room: The room to join; a fresh ``rtc.Room`` unless one is given.
+        on_answer: Called each time the LiveKit server answers this room
+            connection: a join or a leave that completes.
         ice_servers: The STUN/TURN servers the caller supplies for the join to
             gather against, in place of the servers the LiveKit server offers.
             Empty, the join gathers against the LiveKit server's own. Their
@@ -146,9 +175,11 @@ class RoomSession:
         config: LiveKitConfig | None = None,
         *,
         room: rtc.Room | None = None,
+        on_answer: Callable[[], None] | None = None,
         ice_servers: Sequence[IceServerEntry] = (),
     ) -> None:
         self.conn_id = conn_id
+        self._on_answer = on_answer
         self.state = RoomState.JOINING
         self.reason: str | None = None
         self._url = url
@@ -172,7 +203,13 @@ class RoomSession:
         self._room = room if room is not None else rtc.Room()
         self._connection: RoomConnection | None = None
         self._join: asyncio.Task[None] | None = None
-        self._closing: set[asyncio.Task[None]] = set()
+        self._closing: set[asyncio.Task[Any]] = set()
+        # Each leave still running, with when it started; and those the close
+        # stopped waiting for.
+        self._leaves: dict[asyncio.Task[None], float] = {}
+        self._late: set[asyncio.Task[None]] = set()
+        # When a timed-out join was abandoned, while its attempt still holds the room.
+        self._abandoned_at: float | None = None
         # An abandoned attempt that will leave the room once it settles: set
         # when the attempt is abandoned, cleared once the room is left.
         self._leave_pending = False
@@ -212,6 +249,41 @@ class RoomSession:
             return False
         return all(task is None or task.done() for task in (self._join, *self._closing))
 
+    def leave_age(self) -> float | None:
+        """Return how long the room connection has been leaving its room, in seconds, or ``None``.
+
+        Counted from the oldest leave still running, or from when a timed-out
+        join was abandoned while its attempt still runs: either holds the room.
+        """
+        starts = list(self._leaves.values())
+        if self._leave_pending and self._abandoned_at is not None:
+            starts.append(self._abandoned_at)
+        if not starts:
+            return None
+        return time.monotonic() - min(starts)
+
+    async def settle(self) -> None:
+        """Wait for the room connection's join and leave work to end, cancelling nothing.
+
+        A join attempt and a leave keep running to their end; this only waits
+        for them, including a timed-out join's attempt and the leave that
+        follows it. A room connection still open has nothing to wait for and
+        returns at once. Cancelling the wait leaves them running.
+        """
+        while True:
+            pending = [
+                task
+                for task in (self._join, *self._closing)
+                if task is not None and not task.done()
+            ]
+            if pending:
+                await asyncio.wait(pending)
+            elif self._leave_pending:
+                # The leave an abandoned attempt starts from its done-callback.
+                await asyncio.sleep(0.01)
+            else:
+                return
+
     @property
     def active(self) -> bool:
         """Whether the room connection is joining or open."""
@@ -249,6 +321,11 @@ class RoomSession:
         done, _ = await asyncio.wait({attempt}, timeout=JOIN_TIMEOUT_SECONDS)
         if not done:
             self._leave_pending = True
+            self._abandoned_at = time.monotonic()
+            # Tracked until it settles, before the callback that starts the leave,
+            # so a settle() waiting on it moves on to that leave.
+            self._closing.add(attempt)
+            attempt.add_done_callback(self._closing.discard)
             attempt.add_done_callback(self._leave_when_settled)
             if self.joining:
                 await self._fail(_JOIN_TIMED_OUT, leave=False)
@@ -264,6 +341,7 @@ class RoomSession:
             await self._fail(_JOIN_REFUSED.format(cause=cause))
             return
         connection = attempt.result()
+        self._answered()
         self._connection = connection
         self.state = RoomState.OPEN
         connection.start()
@@ -297,8 +375,8 @@ class RoomSession:
 
     def _leave_when_settled(self, attempt: asyncio.Task[RoomConnection]) -> None:
         """Leave the room once an abandoned attempt has finished, whatever its outcome."""
-        if not attempt.cancelled():
-            attempt.exception()  # retrieved, so an abandoned failure is not reported as lost
+        if not attempt.cancelled() and attempt.exception() is None:
+            self._answered()  # late, but the server answered the join
         task = asyncio.get_running_loop().create_task(self._leave_abandoned())
         self._closing.add(task)
         task.add_done_callback(self._closing.discard)
@@ -350,8 +428,8 @@ class RoomSession:
         if connection is not None:
             self._control.connection_closed(self.conn_id)
             await connection.close()
-        await self._disconnect()
-        logger.info("left the LiveKit room", conn_id=self.conn_id, reason=reason)
+        if await self._disconnect():
+            logger.info("left the LiveKit room", conn_id=self.conn_id, reason=reason)
 
     async def _connection_closed(self) -> None:
         """Leave the room when the session closes the room connection itself.
@@ -366,11 +444,65 @@ class RoomSession:
         await asyncio.gather(*(participant.close() for participant in participants))
         await self._finish(_SESSION_ENDED)
 
-    async def _disconnect(self) -> None:
+    async def _disconnect(self) -> bool:
+        """Leave the room, waiting at most :data:`LEAVE_TIMEOUT_SECONDS` for it.
+
+        Returns:
+            Whether the room was left within the bound. A leave that fails
+            returns ``False`` and is logged; one past the bound goes on in the
+            background, tracked until it ends, and its end is logged with how
+            long it took.
+        """
+        leave = asyncio.get_running_loop().create_task(
+            self._room.disconnect(), name=f"livekit-leave-{self.conn_id}"
+        )
+        self._closing.add(leave)
+        self._leaves[leave] = time.monotonic()
+        leave.add_done_callback(self._closing.discard)
+        leave.add_done_callback(self._leave_ended)
         try:
-            await self._room.disconnect()
-        except Exception:
-            logger.warning("leaving the LiveKit room failed", exc_info=True)
+            done, _ = await asyncio.wait({leave}, timeout=LEAVE_TIMEOUT_SECONDS)
+        finally:
+            # Also when the caller is cancelled mid-wait: the leave runs on.
+            if not leave.done():
+                self._late.add(leave)
+        if not done:
+            logger.warning(
+                "leaving the LiveKit room is taking long; going on without waiting",
+                conn_id=self.conn_id,
+                timeout_s=LEAVE_TIMEOUT_SECONDS,
+            )
+            return False
+        return not leave.cancelled() and leave.exception() is None
+
+    def _leave_ended(self, leave: asyncio.Task[None]) -> None:
+        """Log a leave that raised, or that ended past the bound, with how long it took.
+
+        Retrieving a failed leave's exception here keeps it from being reported
+        as lost.
+        """
+        leave_s = round(time.monotonic() - self._leaves.pop(leave), 3)
+        late = leave in self._late
+        self._late.discard(leave)
+        if leave.cancelled():
+            return
+        error = leave.exception()
+        if error is not None:
+            logger.warning(
+                "leaving the LiveKit room failed",
+                conn_id=self.conn_id,
+                error=_masked(str(error), *self._secrets) or type(error).__name__,
+                error_type=type(error).__name__,
+                leave_s=leave_s,
+            )
+        else:
+            self._answered()
+            if late:
+                logger.info("left the LiveKit room late", conn_id=self.conn_id, leave_s=leave_s)
+
+    def _answered(self) -> None:
+        if self._on_answer is not None:
+            self._on_answer()
 
     def _tracks(self, direction: TrackDirection) -> dict[str, TrackInfo]:
         """The model's declared tracks that flow in *direction*."""

@@ -548,7 +548,19 @@ class EgressRoutes:
             resume = since if since is not None else _resume_from(last_event_id)
             return StreamingResponse(_stream_events(runner, resume), media_type="text/event-stream")
 
-        @app.get("/health", responses={503: {"description": "The process is unhealthy."}})
+        @app.get(
+            "/health",
+            responses={
+                503: {
+                    "description": (
+                        "The process is unhealthy: a component reports it, such as the model, "
+                        "the HTTP server, or a transport that keeps failing to release what its "
+                        "connections held (LiveKit: a room connection stuck leaving its room while "
+                        "the server answers others). `detail` says which."
+                    )
+                }
+            },
+        )
         async def health(response: Response) -> HealthResponse:
             report = process_health()
             response.status_code = 503 if report.status is HealthStatus.UNHEALTHY else 200

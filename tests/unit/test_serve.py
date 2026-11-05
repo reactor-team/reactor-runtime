@@ -22,6 +22,7 @@ from reactor_runtime.serve import (
     serve,
 )
 from reactor_runtime.service import Service
+from reactor_runtime.transport.router import Transports
 from reactor_runtime.transport.webrtc.config import CodecEntry, IceTransportPolicy, WebRtcConfig
 from reactor_runtime.transport.webrtc.peer import WebRtcPeerFactory
 from reactor_runtime.transport.webrtc.router import WebRtcRouter
@@ -84,10 +85,20 @@ def test_assemble_hooks_on_runner_then_http() -> None:
     service = _assemble(RuntimeConfig(model_ref="fake:Model"), peer_factory=_UNUSED)
 
     components = service._components
-    assert set(components) == {"runner", "http"}
+    assert set(components) == {"runner", "http", "transports"}
     assert isinstance(components["runner"], Runner)
     assert isinstance(components["http"], HttpServer)
+    assert isinstance(components["transports"], Transports)
     assert components["http"].depends_on == ("runner",)
+
+
+def test_assemble_stops_the_transports_after_the_runner() -> None:
+    service = _assemble(RuntimeConfig(model_ref="fake:Model"), peer_factory=_UNUSED)
+
+    # Service.run starts, drains and stops in the reverse of this order.
+    order = [component.name for component in reversed(service._topological_order())]
+
+    assert order == ["http", "runner", "transports"]
 
 
 def _served(service: Service) -> tuple[list[dict[str, str]], set[str]]:

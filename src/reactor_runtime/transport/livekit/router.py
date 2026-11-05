@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import time
 from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -27,7 +28,8 @@ from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field, SecretStr, field_validator
 
-from reactor_runtime.core import ConnId, LiveKitConfig
+from reactor_runtime.core import ConnId, Health, HealthStatus, LiveKitConfig
+from reactor_runtime.log import get_logger
 from reactor_runtime.transport.livekit.version import TRANSPORT_NAME, TRANSPORT_VERSION
 from reactor_runtime.transport.router import (
     CHOSEN_CONN_ID_MIN,
@@ -42,6 +44,8 @@ from reactor_runtime.transport.router import (
 
 if TYPE_CHECKING:
     from reactor_runtime.transport.livekit.room import RoomSession
+
+logger = get_logger(__name__)
 
 _PREFIX = "/sessions/{sid}/transport/livekit"
 
@@ -152,7 +156,10 @@ class LiveKitRouter(TransportRouter):
     """Mount the LiveKit routes and join one room per room connection.
 
     Holds the session's room connection between requests: one at a time,
-    the latest a caller opened.
+    the latest a caller opened. A room connection a later one replaces, in
+    this session or the next, is kept until it has left its room, so its
+    leave is awaited at shutdown (:meth:`settle`) and reported by
+    :meth:`health` when the room stops answering.
 
     Args:
         config: The manifest's ``runtime.livekit`` block, which maps the
@@ -166,6 +173,10 @@ class LiveKitRouter(TransportRouter):
         self._config = config or LiveKitConfig()
         self._room: RoomSession | None = None
         self._room_epoch = 0
+        # Replaced room connections that have not left their room yet.
+        self._leaving: set[RoomSession] = set()
+        # When the LiveKit server last answered a join or leave of this process.
+        self._answered_at: float | None = None
         # One open at a time: retiring an ended session's room yields, and a
         # second open must not pass the check meanwhile.
         self._opening = asyncio.Lock()
@@ -206,12 +217,16 @@ class LiveKitRouter(TransportRouter):
                         req.token.get_secret_value(),
                         runner,
                         self._config,
+                        on_answer=self._server_answered,
                         ice_servers=req.ice_servers or (),
                     )
                     room.start()
                 except BaseException:
                     runner.release_conn_id(conn_id, self.protocol)
                     raise
+                if previous is not None and not previous.settled:
+                    self._leaving.add(previous)
+                self._leaving = {r for r in self._leaving if not r.settled}
                 self._room = room
                 self._room_epoch = epoch
             return RoomConnectionAccepted(connection_id=conn_id)
@@ -260,6 +275,66 @@ class LiveKitRouter(TransportRouter):
             responses=_GUARD_RESPONSES,
             route_class_override=_UnechoedValidationRoute,
         )
+
+    async def settle(self) -> None:
+        """Wait for every room connection this router holds to leave its room.
+
+        Leaves are never cancelled here: a leave cut short may never reach the
+        server, and the participant would stay in the room. Cancelled at the
+        process's bound, it logs each room connection still leaving and for
+        how long.
+        """
+        rooms = self._rooms()
+        if not rooms:
+            return
+        try:
+            await asyncio.gather(*(room.settle() for room in rooms))
+        except asyncio.CancelledError:
+            for room in self._rooms():
+                age = room.leave_age()
+                logger.warning(
+                    "a LiveKit room connection was still leaving at shutdown",
+                    conn_id=room.conn_id,
+                    leaving_s=None if age is None else round(age, 1),
+                )
+            raise
+
+    def health(self) -> Health:
+        """Report unhealthy when a room connection is stuck while the LiveKit server answers others.
+
+        A room connection is stuck once it has been leaving its room, or a
+        timed-out join has held it, for :data:`~.room.LEAVE_STUCK_SECONDS`.
+        One stuck while the server has answered a join or a leave of this
+        process since it began means this process is losing room connections,
+        and the deployment should replace it. A server that answers no one
+        leaves every process healthy, however many are stuck: replacing them
+        would end live sessions and fix nothing. ``/health`` answers 503 while
+        this is unhealthy.
+        """
+        from reactor_runtime.transport.livekit.room import LEAVE_STUCK_SECONDS
+
+        now = time.monotonic()
+        ages = [age for room in self._rooms() if (age := room.leave_age()) is not None]
+        stuck = [age for age in ages if age > LEAVE_STUCK_SECONDS]
+        answered = self._answered_at
+        if stuck and answered is not None and answered > now - max(stuck):
+            return Health(
+                HealthStatus.UNHEALTHY,
+                f"{len(stuck)} LiveKit room connection(s) stuck leaving for over "
+                f"{LEAVE_STUCK_SECONDS:.0f} s (the oldest {max(stuck):.0f} s) while the server "
+                f"answered others, {now - answered:.0f} s ago",
+            )
+        return Health.healthy()
+
+    def _server_answered(self) -> None:
+        self._answered_at = time.monotonic()
+
+    def _rooms(self) -> list[RoomSession]:
+        """Return the room connections not yet settled, the current one included."""
+        rooms = [room for room in self._leaving if not room.settled]
+        if self._room is not None and self._room not in self._leaving and not self._room.settled:
+            rooms.append(self._room)
+        return rooms
 
     def _claim(self, runner: SessionControl, chosen: int | None) -> ConnId:
         """Return the room connection's id, claimed for this transport: *chosen*, or a minted one.

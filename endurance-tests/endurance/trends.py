@@ -100,6 +100,9 @@ class Sample:
     # Room participant connections alive after the probe's collection, with
     # no participant in the room.
     live_participants: int = 0
+    # Room connections still joining or leaving their room after a collection,
+    # with no session open.
+    live_rooms_leaving: int = 0
     # Processes the runtime started, at any depth: a model's worker ranks and
     # the helpers they bring.
     child_processes: int = 0
@@ -419,6 +422,7 @@ ZERO_FIELDS = (
     "live_pacers",
     "live_client_stats",
     "live_participants",
+    "live_rooms_leaving",
     "live_step_requests",
     "live_step_decoders",
 )

@@ -32,7 +32,7 @@ from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.runner import Runner
 from reactor_runtime.service import Service
 from reactor_runtime.transport.livekit import LiveKitRouter, livekit_available
-from reactor_runtime.transport.router import TransportRouter
+from reactor_runtime.transport.router import TransportRouter, Transports
 from reactor_runtime.transport.webrtc.config import (
     CodecEntry,
     IceServer,
@@ -307,6 +307,11 @@ def _assemble(
     ]
     if livekit_available():
         transports.append(LiveKitRouter(cfg.livekit))
+    # Stopped after the runner, once the session has closed its connections, so
+    # work a close left running (a room still leaving) ends before the loop does.
+    # Half the exit budget: the runner's own stop runs inside the same deadline.
+    service.add(Transports(transports, settle_timeout=cfg.exit_timeout / 2))
+    runner.depends_on = (*runner.depends_on, Transports.name)
     service.add(
         HttpServer(
             cfg,
