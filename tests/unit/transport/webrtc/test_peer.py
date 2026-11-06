@@ -2441,6 +2441,66 @@ async def test_the_transceiver_direction_follows_the_pause() -> None:
     assert pc.transceiver_list[1].directions == [rw.TransceiverDirection.Inactive]
 
 
+async def _drain_loop() -> None:
+    """Let every callback and task the loop holds run to completion."""
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+
+async def test_a_burst_of_pause_requests_schedules_one_pass() -> None:
+    """A client toggling faster than libwebrtc renegotiates must not queue a pass per request."""
+    peer, pc = _negotiated_peer()
+    peer._loop = asyncio.get_running_loop()
+    before = len(asyncio.all_tasks())
+
+    for _ in range(1000):
+        peer.pause_track("v")
+        peer.resume_track("v")
+    await asyncio.sleep(0)
+
+    assert len(asyncio.all_tasks()) - before <= 1
+    await _drain_loop()
+    assert pc.applied == []  # the burst ended where it started
+
+
+async def test_a_coalesced_pass_applies_the_last_request() -> None:
+    peer, pc = _negotiated_peer()
+    peer._loop = asyncio.get_running_loop()
+
+    for _ in range(100):
+        peer.pause_track("v")
+        peer.resume_track("v")
+    peer.pause_track("v")
+    await _drain_loop()
+
+    assert peer._applied_pauses == frozenset({"v"})
+    assert len(pc.applied) == 2  # one remote and one local description
+
+
+async def test_a_request_made_while_a_pass_runs_gets_a_pass_of_its_own() -> None:
+    """The running pass read the pause set before this request changed it."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class _HeldPc(_RecordingPc):
+        async def set_remote_description(self, sdp: Any) -> None:
+            started.set()
+            await release.wait()
+            await super().set_remote_description(sdp)
+
+    peer, _ = _negotiated_peer()
+    peer._pc = cast(Any, _HeldPc())
+    peer._loop = asyncio.get_running_loop()
+
+    peer.pause_track("v")
+    await started.wait()
+    peer.resume_track("v")
+    release.set()
+    await _drain_loop()
+
+    assert peer._applied_pauses == frozenset()
+
+
 async def test_the_transceivers_are_restated_before_the_local_description() -> None:
     """The order negotiation itself uses: remote, transceivers, then local."""
     order: list[str] = []

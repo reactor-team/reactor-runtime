@@ -512,6 +512,12 @@ class WebRTCPeer:
         # Serialises those re-applications: a pause and a resume racing would
         # leave libwebrtc holding whichever description landed last.
         self._sdp_lock = asyncio.Lock()
+        # Whether a pass of `_apply_pauses` is scheduled and has not started
+        # reading the pause set yet. Requests that arrive meanwhile ride on
+        # that pass, so a client toggling a track faster than libwebrtc can
+        # renegotiate queues one pass, not one per request.
+        self._pauses_scheduled = False
+        self._pauses_schedule_lock = threading.Lock()
         self._stop_event = threading.Event()
         # The wire is connected once the peer connection is up and both data
         # channels are open. The three facts arrive from different libwebrtc
@@ -1456,11 +1462,25 @@ class WebRTCPeer:
         self._schedule_direction(name, active=False)
 
     def _schedule_direction(self, name: str, *, active: bool) -> None:
-        """Run the direction change on the loop, from whatever thread asked."""
+        """Run the direction change on the loop, from whatever thread asked.
+
+        At most one pass waits to start at any time. The pass reads the pause
+        set when it starts, so it applies every request made before then; a
+        request made after it started schedules the next one.
+        """
         loop = self._loop
         if loop is None or loop.is_closed() or self._stop_event.is_set():
             return
-        loop.call_soon_threadsafe(lambda: loop.create_task(self._apply_pauses()))
+        with self._pauses_schedule_lock:
+            if self._pauses_scheduled:
+                return
+            self._pauses_scheduled = True
+        loop.call_soon_threadsafe(lambda: loop.create_task(self._apply_scheduled_pauses()))
+
+    async def _apply_scheduled_pauses(self) -> None:
+        with self._pauses_schedule_lock:
+            self._pauses_scheduled = False
+        await self._apply_pauses()
 
     async def _apply_pauses(self) -> None:
         """Put the session's directions in step with which tracks are paused.
