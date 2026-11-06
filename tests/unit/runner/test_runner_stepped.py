@@ -948,7 +948,9 @@ async def test_requests_queued_beyond_the_sessions_steps_are_not_generated(
     conn = await _stepped(runner, steps=1)
     for index in range(10):
         _send(runner, conn, _request_step(f"r{index}"))
-    await _until(lambda: len(conn.sent) == 10)
+    # The session closes its client once its one step is reported, so a
+    # refusal still on its way when it does has no connection to go to: only
+    # the first request is sure of an answer.
     await _until(lambda: runner._sm.current_state is SessionState.READY)
 
     # Replies to different requests are correlated by request id, not order:
