@@ -512,6 +512,13 @@ class WebRTCPeer:
         # Serialises those re-applications: a pause and a resume racing would
         # leave libwebrtc holding whichever description landed last.
         self._sdp_lock = asyncio.Lock()
+        # The one task that applies pauses, and whether the pause set changed
+        # since its current pass read it. A client toggling a track faster than
+        # libwebrtc can renegotiate keeps that task busy rather than queueing a
+        # task per request behind the SDP lock.
+        self._pauses_applier_running = False
+        self._pauses_changed = False
+        self._pauses_lock = threading.Lock()
         self._stop_event = threading.Event()
         # The wire is connected once the peer connection is up and both data
         # channels are open. The three facts arrive from different libwebrtc
@@ -1456,11 +1463,36 @@ class WebRTCPeer:
         self._schedule_direction(name, active=False)
 
     def _schedule_direction(self, name: str, *, active: bool) -> None:
-        """Run the direction change on the loop, from whatever thread asked."""
+        """Run the direction change on the loop, from whatever thread asked.
+
+        One task per peer applies pauses. A request marks the pause set changed
+        and starts that task only when it is not already running; the task
+        applies passes until a pass starts with nothing new to apply, so a
+        request made during a pass gets the next one.
+        """
         loop = self._loop
         if loop is None or loop.is_closed() or self._stop_event.is_set():
             return
-        loop.call_soon_threadsafe(lambda: loop.create_task(self._apply_pauses()))
+        with self._pauses_lock:
+            self._pauses_changed = True
+            if self._pauses_applier_running:
+                return
+            self._pauses_applier_running = True
+        loop.call_soon_threadsafe(lambda: loop.create_task(self._apply_changed_pauses()))
+
+    async def _apply_changed_pauses(self) -> None:
+        try:
+            while True:
+                with self._pauses_lock:
+                    if not self._pauses_changed:
+                        self._pauses_applier_running = False
+                        return
+                    self._pauses_changed = False
+                await self._apply_pauses()
+        except BaseException:
+            with self._pauses_lock:
+                self._pauses_applier_running = False
+            raise
 
     async def _apply_pauses(self) -> None:
         """Put the session's directions in step with which tracks are paused.
