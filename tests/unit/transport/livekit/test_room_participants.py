@@ -404,3 +404,15 @@ async def test_a_participant_that_leaves_mid_stream_ends_it_with_its_end_frame()
     [(conn_id, track, frame)] = control.media
     assert (conn_id, track, frame.data.shape) == (ConnId(5000), "mic", (1, 0))
     assert json.loads(frame.metadata) == {"stream_id": "AUDIO_1", "ended": True}
+
+
+async def test_leaving_the_room_unregisters_its_rpc_methods() -> None:
+    """The LiveKit SDK keeps memory for every method a room leaves registered."""
+    room, control = FakeRoom(), ParticipantControl()
+    session = await _open(room, control, SIGNALS)
+    assert set(room.local_participant.methods) == {"lk.clear_buffer"}
+
+    await session.leave()
+
+    assert room.local_participant.methods == {}
+    assert room.disconnects == 1

@@ -218,6 +218,10 @@ class RoomSession:
         # is a client of a session the room is not connected to.
         self._participants: dict[str, ParticipantConnection] = {}
         self._registered = False
+        # The RPC methods registered on the room's participant, until the room
+        # is left: the LiveKit SDK keeps memory for each one a room leaves
+        # registered, about half a megabyte, for as long as the process runs.
+        self._methods: list[str] = []
         self._room.on("disconnected", self._on_disconnected)
         self._room.on("participant_connected", lambda p: self._add_participant(p.identity))
         self._room.on("participant_disconnected", lambda p: self._remove_participant(p.identity))
@@ -453,6 +457,7 @@ class RoomSession:
             background, tracked until it ends, and its end is logged with how
             long it took.
         """
+        self._unregister_methods()
         leave = asyncio.get_running_loop().create_task(
             self._room.disconnect(), name=f"livekit-leave-{self.conn_id}"
         )
@@ -641,6 +646,21 @@ class RoomSession:
         local = self._room.local_participant
         for method, command in self._signals.inbound.items():
             local.register_rpc_method(method, self._method_handler(command))
+            self._methods.append(method)
+
+    def _unregister_methods(self) -> None:
+        """Unregister the RPC methods :meth:`_register_methods` registered, once."""
+        methods, self._methods = self._methods, []
+        for method in methods:
+            try:
+                self._room.local_participant.unregister_rpc_method(method)
+            except Exception:
+                logger.warning(
+                    "could not unregister an RPC method",
+                    conn_id=self.conn_id,
+                    method=method,
+                    exc_info=True,
+                )
 
     def _method_handler(self, command: str) -> Callable[[rtc.RpcInvocationData], Awaitable[str]]:
         async def handle(call: rtc.RpcInvocationData) -> str:

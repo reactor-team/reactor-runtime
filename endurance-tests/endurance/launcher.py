@@ -244,8 +244,11 @@ def _live_transport_objects() -> dict[str, int]:
         elif participant is not None and isinstance(obj, participant):
             counts["participants"] += 1
         elif room_session is not None and isinstance(obj, room_session):
-            # A runtime from before room connections tracked their leave counts none.
-            counts["rooms_leaving"] += not getattr(obj, "settled", True)
+            # A room connection still open is not leaving, though it is not
+            # settled either. A runtime from before room connections tracked
+            # their leave counts none.
+            leaving = not getattr(obj, "active", False) and not getattr(obj, "settled", True)
+            counts["rooms_leaving"] += leaving
     return counts
 
 

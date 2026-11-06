@@ -60,6 +60,9 @@ class FakeParticipant:
     def register_rpc_method(self, method: str, handler: Any) -> None:
         self.methods[method] = handler
 
+    def unregister_rpc_method(self, method: str) -> None:
+        self.methods.pop(method, None)
+
     async def publish_track(self, track: Any, options: Any) -> None:
         await self._publish.pass_through()
 

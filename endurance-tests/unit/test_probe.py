@@ -4,10 +4,16 @@ import sys
 from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
+from typing import Any, cast
 
 import numpy as np
 import pytest
-from endurance.launcher import _executor_threads, path_to_output, reaches_output
+from endurance.launcher import (
+    _executor_threads,
+    _live_transport_objects,
+    path_to_output,
+    reaches_output,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -115,3 +121,44 @@ async def test_the_executor_count_is_the_default_executor_workers() -> None:
     assert _executor_threads() == 0
     await asyncio.to_thread(lambda: None)
     assert _executor_threads() == 1
+
+
+class _Room:
+    """Just enough of ``rtc.Room`` for a room connection to be built around it."""
+
+    name = "the-room"
+
+    def on(self, event: str, callback: object) -> None:
+        pass
+
+    def register_byte_stream_handler(self, topic: str, handler: object) -> None:
+        pass
+
+
+def _room_session() -> Any:
+    from reactor_runtime.core import ConnId
+    from reactor_runtime.transport.livekit.room import RoomSession
+
+    return RoomSession(
+        ConnId(1), "wss://rooms.example", "a-token", cast(Any, object()), room=cast(Any, _Room())
+    )
+
+
+def test_an_open_room_connection_is_not_counted_as_leaving() -> None:
+    """A session that keeps its room open throughout reads no room leaving."""
+    from reactor_runtime.transport.livekit.room import RoomState
+
+    room = _room_session()
+    room.state = RoomState.OPEN
+
+    assert _live_transport_objects()["rooms_leaving"] == 0
+
+
+def test_a_closed_room_connection_still_leaving_is_counted() -> None:
+    from reactor_runtime.transport.livekit.room import RoomState
+
+    room = _room_session()
+    room.state = RoomState.CLOSED
+    room._leave_pending = True
+
+    assert _live_transport_objects()["rooms_leaving"] == 1
