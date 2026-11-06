@@ -2501,6 +2501,36 @@ async def test_a_request_made_while_a_pass_runs_gets_a_pass_of_its_own() -> None
     assert peer._applied_pauses == frozenset()
 
 
+async def test_requests_during_a_slow_renegotiation_queue_no_tasks() -> None:
+    """Requests made while a pass is stuck in libwebrtc wait for one more pass, not a task each."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class _HeldPc(_RecordingPc):
+        async def set_remote_description(self, sdp: Any) -> None:
+            started.set()
+            await release.wait()
+            await super().set_remote_description(sdp)
+
+    peer, _ = _negotiated_peer()
+    peer._pc = cast(Any, _HeldPc())
+    peer._loop = asyncio.get_running_loop()
+    before = len(asyncio.all_tasks())
+
+    peer.pause_track("v")
+    await started.wait()
+    for _ in range(100):
+        peer.resume_track("v")
+        peer.pause_track("v")
+        await _drain_loop()
+
+    assert len(asyncio.all_tasks()) - before <= 1
+    release.set()
+    await _drain_loop()
+    assert peer._applied_pauses == frozenset({"v"})
+    assert not peer._pauses_applier_running
+
+
 async def test_the_transceivers_are_restated_before_the_local_description() -> None:
     """The order negotiation itself uses: remote, transceivers, then local."""
     order: list[str] = []
