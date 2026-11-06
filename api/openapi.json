@@ -181,7 +181,7 @@
         "type": "object"
       },
       "IceCredentialsEntry": {
-        "description": "The ICE credentials a connection should answer with.\n\nThe constraints are RFC 8445 \u00a715.4: both values are ``ice-char``\n(ALPHA / DIGIT / \"+\" / \"/\"), a ufrag is 4..256 of them and a password\n22..256.\n\nThey are enforced here rather than left to the media engine because of where\neach failure surfaces. Registering an offer answers 202 and the negotiation\nruns in the background, so a malformed value rejected downstream reaches the\ncaller only as its answer poll timing out, with the reason in the runtime's\nlogs. Checked here it is a 422 naming the field.",
+        "description": "The ICE credentials a connection uses in its local descriptions.\n\nThe constraints are RFC 8445 \u00a715.4: both values are ``ice-char``\n(ALPHA / DIGIT / \"+\" / \"/\"), a ufrag is 4..256 of them and a password\n22..256.\n\nThey are enforced here rather than left to the media engine because of where\neach failure surfaces. The routes that take them answer 202 and set the\nconnection up in the background, so a malformed value rejected downstream\nreaches the caller only as a poll that times out or fails, with the reason in\nthe runtime's logs. Checked here it is a 422 naming the field.",
         "properties": {
           "pwd": {
             "maxLength": 256,
@@ -203,6 +203,35 @@
           "pwd"
         ],
         "title": "IceCredentialsEntry",
+        "type": "object"
+      },
+      "IceForwarderEntry": {
+        "description": "A UDP forwarder in front of the runtime that all of a room connection's media goes through.\n\nThe forwarder routes each ICE connectivity check by the ICE username\nfragment it carries, and delivers it to one local port of the runtime. It\nterminates nothing: DTLS and SRTP stay end to end. With a forwarder, the\nroom connection:\n\n- carries ``ice_credentials`` in every local description, also across ICE\n  restarts and reconnects;\n- gathers on ``port`` alone, and gathers no TCP candidates;\n- shows the room only ``addresses`` as its candidates, the first with the\n  highest priority;\n- uses no remote candidate and no ICE server, also none the LiveKit server\n  offers, so its media never takes a path of its own: it only answers the\n  checks the forwarder delivers;\n- asks the LiveKit server for full ICE, since an ICE-lite server sends no\n  check for the forwarder to deliver;\n- fails to join unless the LiveKit server accepts single peer connection\n  mode, since the forwarder delivers one set of credentials to one port.\n\n``port`` must be free: the join gathers on it alone, so a port another\nsocket holds leaves the room connection without a candidate. The password\nis a credential, like the room token: never logged or journalled, and not\nrepeated by a refused request.",
+        "properties": {
+          "addresses": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Addresses",
+            "type": "array"
+          },
+          "ice_credentials": {
+            "$ref": "#/components/schemas/IceCredentialsEntry"
+          },
+          "port": {
+            "maximum": 65535.0,
+            "minimum": 1.0,
+            "title": "Port",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "addresses",
+          "ice_credentials",
+          "port"
+        ],
+        "title": "IceForwarderEntry",
         "type": "object"
       },
       "IceServerEntry": {
@@ -281,7 +310,7 @@
         "type": "object"
       },
       "RoomConnectionRequest": {
-        "description": "Where the room is, and the credential the session's participant joins it with.\n\nThe token is the access token of the session's participant: the room, the\nidentity, and the grants come from it. It is never logged or journalled,\nand a refused request does not repeat it.\n\n``connection_id`` lets the caller choose the room connection's id: any id\nfrom 1002 to 9999. Absent, the runtime mints one from its own range, 5000\nto 9999, so a caller that mints its ids itself keeps to 1002 to 4999. An id\nthe session already uses, through this transport or another, is refused\nwith a 409, since a room connection is never opened again on the same id.\n\n``ice_servers`` lets the caller supply the STUN/TURN servers the room\nconnection gathers against, for a network where the servers the LiveKit\nserver offers do not reach it. Given, they replace those servers; absent or\nempty, the room connection gathers against the LiveKit server's own. Their\nTURN credentials are treated like the token: never logged or journalled,\nand not repeated by a refused request.",
+        "description": "Where the room is, and the credential the session's participant joins it with.\n\nThe token is the access token of the session's participant: the room, the\nidentity, and the grants come from it. It is never logged or journalled,\nand a refused request does not repeat it.\n\n``connection_id`` lets the caller choose the room connection's id: any id\nfrom 1002 to 9999. Absent, the runtime mints one from its own range, 5000\nto 9999, so a caller that mints its ids itself keeps to 1002 to 4999. An id\nthe session already uses, through this transport or another, is refused\nwith a 409, since a room connection is never opened again on the same id.\n\n``ice_servers`` lets the caller supply the STUN/TURN servers the room\nconnection gathers against, for a network where the servers the LiveKit\nserver offers do not reach it. Given, they replace those servers; absent or\nempty, the room connection gathers against the LiveKit server's own. Their\nTURN credentials are treated like the token: never logged or journalled,\nand not repeated by a refused request.\n\n``ice_forwarder`` sends all of the room connection's media through a\nforwarder in front of the runtime; see :class:`IceForwarderEntry`. A\nforwarder uses no ICE server, so a request with both is a 422. A runtime\nwhose LiveKit SDK cannot use a forwarder refuses the request with a 400\nrather than join without it.",
         "properties": {
           "connection_id": {
             "anyOf": [
@@ -295,6 +324,16 @@
               }
             ],
             "title": "Connection Id"
+          },
+          "ice_forwarder": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IceForwarderEntry"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "ice_servers": {
             "anyOf": [
