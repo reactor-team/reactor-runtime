@@ -81,8 +81,9 @@ def livekit_available() -> bool:
 def ice_forwarder_available() -> bool:
     """Whether the installed LiveKit SDK can send a room connection through an ICE forwarder.
 
-    The option is ``RtcConfiguration.ice_forwarder`` of the ``livekit`` package;
-    a build without it refuses a room connection that asks for a forwarder.
+    The option is ``RtcConfiguration.ice_forwarder`` of ``livekit.rtc``, as the
+    ``livekit`` extra installs it. An environment where ``livekit.rtc`` comes
+    from a build without it refuses a room connection that asks for a forwarder.
     """
     try:
         from livekit import rtc
