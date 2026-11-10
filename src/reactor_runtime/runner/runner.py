@@ -164,12 +164,24 @@ def _recording_id_from(params: Mapping[str, Any]) -> str:
     return str(params.get("session_id") or uuid.uuid4())
 
 
+# The most characters of an error's text the journal carries. A failed load can
+# raise a message tens of KB long (a strict state-dict load lists every missing
+# and unexpected key), and the journal replays it to every consumer.
+_ERROR_TEXT_LIMIT = 4096
+_TRUNCATED = "… (truncated)"
+
+
 def _error_text(error: BaseException) -> str:
     """Word *error* for the journal: its message, or its ``repr`` when the message is empty.
 
-    The traceback stays in the log; the journal carries the words a status can show.
+    A text longer than :data:`_ERROR_TEXT_LIMIT` characters is cut there and
+    marked as cut. The traceback and the whole message stay in the log; the
+    journal carries the words a status can show.
     """
-    return str(error) or repr(error)
+    text = str(error) or repr(error)
+    if len(text) > _ERROR_TEXT_LIMIT:
+        return text[:_ERROR_TEXT_LIMIT] + _TRUNCATED
+    return text
 
 
 # How long to wait for an upload's bytes to arrive when a command or notification

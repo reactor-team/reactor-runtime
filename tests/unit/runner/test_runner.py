@@ -87,9 +87,11 @@ from reactor_runtime.recording import ClipResult
 from reactor_runtime.runner.client_stats import ClientStatsGate
 from reactor_runtime.runner.runner import (
     _DRAIN_CLOSE_REASON,
+    _ERROR_TEXT_LIMIT,
     _RUNTIME_STATES,
     SESSION_ID,
     Runner,
+    _error_text,
 )
 from reactor_runtime.runner.session_start import (
     InvalidSessionStartError,
@@ -3193,6 +3195,34 @@ async def test_a_failed_boot_journals_its_error(
         assert called == [False]
     finally:
         await runner.stop()
+
+
+class _MismatchedCheckpoint(FakeModel):
+    def load(self, config_path: Path | None) -> None:
+        keys = ", ".join(f'"blocks.{index}.attn.weight"' for index in range(2000))
+        raise RuntimeError(f"Error(s) in loading state_dict: Missing key(s): {keys}")
+
+
+async def test_a_long_load_error_is_cut_in_the_journal(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "reactor_runtime.runner.runner.import_model_class", lambda ref: _MismatchedCheckpoint
+    )
+    runner = _runner()
+
+    await runner.start()
+    try:
+        (failed,) = _moves(runner, SessionEvent.INITIALIZATION_FAIL)
+        text = failed.detail["error"]
+        assert text.startswith("Error(s) in loading state_dict: Missing key(s): ")
+        assert text.endswith("… (truncated)")
+        assert len(text) == _ERROR_TEXT_LIMIT + len("… (truncated)")
+    finally:
+        await runner.stop()
+
+
+def test_an_error_text_at_the_limit_is_kept_whole() -> None:
+    message = "x" * _ERROR_TEXT_LIMIT
+    assert _error_text(RuntimeError(message)) == message
 
 
 # --- model run-loop crash -------------------------------------------------
