@@ -391,6 +391,10 @@ async def test_start_refuses_a_livekit_block_naming_what_the_model_lacks(
     assert load_failures == []
     assert any("runtime.livekit block does not match" in r.getMessage() for r in caplog.records)
     assert not any("model failed to load" in r.getMessage() for r in caplog.records)
+    # The journal names the mismatch, so a consumer sees it without the log.
+    (failed,) = _moves(runner, SessionEvent.INITIALIZATION_FAIL)
+    assert set(failed.detail) == {"error"}
+    assert failed.detail["error"].startswith("runtime.livekit.")
 
 
 async def test_a_livekit_block_error_from_the_model_itself_is_a_load_failure(
@@ -3147,6 +3151,48 @@ async def test_init_failure_requests_shutdown(monkeypatch: pytest.MonkeyPatch) -
     # A model that refused to load is a clean exit, not a failure: the process
     # had nothing to serve and says so with a zero status.
     assert called == [False]
+
+
+class _ReadOnlyWeights(FakeModel):
+    def load(self, config_path: Path | None) -> None:
+        raise OSError(30, "Read-only file system")
+
+
+class _Silent(FakeModel):
+    def load(self, config_path: Path | None) -> None:
+        raise RuntimeError
+
+
+def _import_fails(ref: str) -> type:
+    raise ModuleNotFoundError("No module named 'tensorrt'")
+
+
+@pytest.mark.parametrize(
+    ("import_model", "error"),
+    [
+        (_import_fails, "No module named 'tensorrt'"),
+        (lambda ref: _ReadOnlyWeights, "[Errno 30] Read-only file system"),
+        # An exception with no message is worded by its repr, not left empty.
+        (lambda ref: _Silent, "RuntimeError()"),
+    ],
+    ids=["import", "load", "no-message"],
+)
+async def test_a_failed_boot_journals_its_error(
+    monkeypatch: pytest.MonkeyPatch, import_model: Callable[[str], type], error: str
+) -> None:
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", import_model)
+    runner = _runner()
+    called: list[bool] = []
+    runner.request_shutdown = lambda *, failure=False: called.append(failure)
+
+    await runner.start()
+    try:
+        (failed,) = _moves(runner, SessionEvent.INITIALIZATION_FAIL)
+        assert failed.detail == {"error": error}
+        # The error carries no reason, so the exit stays clean.
+        assert called == [False]
+    finally:
+        await runner.stop()
 
 
 # --- model run-loop crash -------------------------------------------------

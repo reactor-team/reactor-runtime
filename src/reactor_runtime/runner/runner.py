@@ -164,6 +164,14 @@ def _recording_id_from(params: Mapping[str, Any]) -> str:
     return str(params.get("session_id") or uuid.uuid4())
 
 
+def _error_text(error: BaseException) -> str:
+    """Word *error* for the journal: its message, or its ``repr`` when the message is empty.
+
+    The traceback stays in the log; the journal carries the words a status can show.
+    """
+    return str(error) or repr(error)
+
+
 # How long to wait for an upload's bytes to arrive when a command or notification
 # references it before they are written. A client references an upload over the
 # data channel while its bytes are still being delivered on a separate request,
@@ -441,8 +449,9 @@ class Runner(ServiceComponent, ConnectionSink):
         Bringing the model up is the one step that can fail outright. A failure
         here is terminal for the process — there is no model to serve — so it is
         caught and turned into ``INITIALIZATION_FAIL`` (moving the session to
-        ``TERMINATED``) rather than raised; the dispatch on that move asks the
-        service to bring the process down. ``start`` itself always returns.
+        ``TERMINATED``, with the exception's message as ``detail.error``) rather
+        than raised; the dispatch on that move asks the service to bring the
+        process down, with a clean exit. ``start`` itself always returns.
 
         The model load runs off the event loop (it may block while it reads
         weights), so the HTTP surface — already up by the time this runs — stays
@@ -459,16 +468,16 @@ class Runner(ServiceComponent, ConnectionSink):
         self._sm.send(SessionEvent.INITIALIZING)
         started_at = time.monotonic()
 
-        def load_failed() -> None:
+        def load_failed(error: Exception) -> None:
             self._model_metrics.load_failed(since=started_at)
             logger.exception("model failed to load; terminating the session")
-            self._sm.send(SessionEvent.INITIALIZATION_FAIL)
+            self._fail_initialization(error)
 
         try:
             model_cls = import_model_class(self._cfg.model_ref)
             contract = ModelContract.of(model_cls)
-        except Exception:
-            load_failed()
+        except Exception as error:
+            load_failed(error)
             return
         try:
             check_livekit_block(self._cfg.livekit, contract)
@@ -480,7 +489,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 "terminating the session",
                 reason=str(mismatch),
             )
-            self._sm.send(SessionEvent.INITIALIZATION_FAIL)
+            self._fail_initialization(mismatch)
             return
         try:
             model = model_cls()
@@ -502,8 +511,8 @@ class Runner(ServiceComponent, ConnectionSink):
                 step_refusal=self._on_step_refusal,
             )
             bridge.start()
-        except Exception:
-            load_failed()
+        except Exception as error:
+            load_failed(error)
             return
         self._model_metrics.loaded(since=started_at)
         self._bridge = bridge
@@ -1242,11 +1251,19 @@ class Runner(ServiceComponent, ConnectionSink):
         """
         loop = self._loop
         if loop is not None:
-            loop.call_soon_threadsafe(self._evict_on_failure, str(error) or repr(error))
+            loop.call_soon_threadsafe(self._evict_on_failure, _error_text(error))
 
     def _evict_on_failure(self, error: str) -> None:
         """Evict the session to terminated, carrying the crash as its reason."""
         self._sm.send(SessionEvent.EVICTION, reason=EndReason.ERROR, error=error)
+
+    def _fail_initialization(self, error: BaseException) -> None:
+        """End a boot whose model did not come up, carrying the error as its detail.
+
+        The move carries no ``reason``: an error reason is what makes the
+        process exit as a failure, and a model that did not come up exits clean.
+        """
+        self._sm.send(SessionEvent.INITIALIZATION_FAIL, error=_error_text(error))
 
     def _on_chunk_ready(self, recording_id: str, idx: int) -> None:
         """Journal a recording segment once it closes, hopping onto the loop.

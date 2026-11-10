@@ -301,6 +301,9 @@ Each names the public symbol whose docstring states it.
   the loop asks again.
 - **Exit status.** A crashed step loop exits the process with status 1; a stop
   that was asked for, and a model that refuses to load, exit 0.
+- **A failed load says why on `/events`.** Its `initialization_fail` carries
+  the exception's message in `detail.error`, as a crash's `eviction` does
+  (`reactor_runtime.core.SessionEvent`); the traceback stays in the log.
 - **Step count cap.** A session started with a step count takes at most
   `reactor_runtime.runner.session_start.MAX_STEPS` steps (10,000).
 - **Logging** goes through `reactor_runtime.get_logger`, never `print()`.

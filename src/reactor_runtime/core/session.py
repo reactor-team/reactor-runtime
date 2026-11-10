@@ -69,6 +69,15 @@ class SessionEvent(Enum):
     ``CLOSING``, and carries an :class:`~reactor_runtime.core.model.EndReason`
     in ``detail.reason`` (and, for a crash, the error) so a consumer learns why.
 
+    ``INITIALIZATION_FAIL`` records that the model did not come up: its class
+    did not import, the manifest's ``runtime.livekit`` block does not match it,
+    or building, loading or starting it raised. It moves ``CREATED`` to
+    ``TERMINATED`` and carries the exception's message in ``detail.error`` (its
+    ``repr`` when the message is empty), worded as a crash's error is; the
+    traceback stays in the log. It carries no ``detail.reason``: an error
+    reason ends the process as a failure, and a model that did not come up
+    exits clean.
+
     ``INITIALIZING`` records that the runtime is still loading its weights. It is
     a self-loop legal only in ``CREATED``, emitted once at boot before the load
     blocks, so a consumer replaying the journal observes the loading phase — the
