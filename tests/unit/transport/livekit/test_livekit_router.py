@@ -606,6 +606,14 @@ def test_another_session_id_is_not_found(rooms: list[FakeRoomSession]) -> None:
             {**_ROOM, "ice_forwarder": {**_FORWARDER, "addresses": ["203.0.113.10:0"]}},
             "ice_forwarder",
         ),
+        (
+            {**_ROOM, "ice_forwarder": {**_FORWARDER, "addresses": ["2001:db8::1:443"]}},
+            "ice_forwarder",
+        ),
+        (
+            {**_ROOM, "ice_forwarder": {**_FORWARDER, "addresses": ["[203.0.113.10]:443"]}},
+            "ice_forwarder",
+        ),
         ({**_ROOM, "ice_forwarder": {**_FORWARDER, "port": 0}}, "ice_forwarder"),
         (
             {

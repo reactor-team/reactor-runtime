@@ -93,16 +93,25 @@ def ice_forwarder_available() -> bool:
 
 
 def _forwarder_address(text: str) -> str:
-    """Return *text* if it is an ``ip:port`` address, an IPv6 address in brackets."""
+    """Return *text* if it is an ``ip:port`` address, an IPv6 address in brackets.
+
+    An IPv6 address must be in brackets: ``2001:db8::1:443`` is itself a valid
+    IPv6 address, so without them the port cannot be told apart from the address.
+    """
     host, sep, port = text.rpartition(":")
     if not sep:
         raise ValueError(f"address {text!r} is not an ip:port address")
-    if host.startswith("[") and host.endswith("]"):
+    bracketed = host.startswith("[") and host.endswith("]")
+    if bracketed:
         host = host[1:-1]
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
         raise ValueError(f"address {text!r} does not start with an IP address") from None
+    if ip.version == 6 and not bracketed:
+        raise ValueError(f"address {text!r} must put its IPv6 address in brackets: [ip]:port")
+    if ip.version == 4 and bracketed:
+        raise ValueError(f"address {text!r} must not put its IPv4 address in brackets")
     if ip.is_unspecified:
         raise ValueError(f"address {text!r} is unspecified")
     if not port.isdigit() or not 1 <= int(port) <= 65535:
