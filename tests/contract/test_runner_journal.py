@@ -98,12 +98,13 @@ async def test_the_connection_lifecycle_journals_each_move_with_its_detail(
         await journal.aclose()
 
 
-async def test_a_failed_model_load_journals_initialization_fail() -> None:
+async def test_a_failed_model_load_journals_initialization_fail_with_the_error() -> None:
     async with running_runtime(model_cls=UnloadableModel) as harness:
         journal = JournalReader(harness.runner)
         try:
             failed = await journal.expect("initialization_fail")
             assert (failed["from"], failed["to"]) == ("created", "terminated")
+            assert failed["detail"] == {"error": "weights missing"}
         finally:
             await journal.aclose()
 
