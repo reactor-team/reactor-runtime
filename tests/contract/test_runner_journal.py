@@ -104,8 +104,6 @@ async def test_a_failed_model_load_journals_initialization_fail_with_the_error()
         try:
             failed = await journal.expect("initialization_fail")
             assert (failed["from"], failed["to"]) == ("created", "terminated")
-            # The error alone: a reason would end the process as a failure, and
-            # a model that did not load exits clean.
             assert failed["detail"] == {"error": "weights missing"}
         finally:
             await journal.aclose()

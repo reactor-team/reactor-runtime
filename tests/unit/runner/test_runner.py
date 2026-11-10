@@ -3191,7 +3191,6 @@ async def test_a_failed_boot_journals_its_error(
     try:
         (failed,) = _moves(runner, SessionEvent.INITIALIZATION_FAIL)
         assert failed.detail == {"error": error}
-        # The error carries no reason, so the exit stays clean.
         assert called == [False]
     finally:
         await runner.stop()
@@ -3215,7 +3214,7 @@ async def test_a_long_load_error_is_cut_in_the_journal(monkeypatch: pytest.Monke
         text = failed.detail["error"]
         assert text.startswith("Error(s) in loading state_dict: Missing key(s): ")
         assert text.endswith("… (truncated)")
-        assert len(text) == _ERROR_TEXT_LIMIT + len("… (truncated)")
+        assert len(text) == _ERROR_TEXT_LIMIT
     finally:
         await runner.stop()
 
@@ -3223,6 +3222,34 @@ async def test_a_long_load_error_is_cut_in_the_journal(monkeypatch: pytest.Monke
 def test_an_error_text_at_the_limit_is_kept_whole() -> None:
     message = "x" * _ERROR_TEXT_LIMIT
     assert _error_text(RuntimeError(message)) == message
+
+
+@pytest.mark.parametrize(
+    ("event", "detail", "failure"),
+    [
+        (SessionEvent.EVICTION, {"reason": EndReason.ERROR, "error": "gpu fell off"}, True),
+        (SessionEvent.EVICTION, {"reason": EndReason.EVICTED}, False),
+        (SessionEvent.INITIALIZATION_FAIL, {"error": "weights missing"}, False),
+        # The detail says what happened; it never turns a failed load into a failure.
+        (
+            SessionEvent.INITIALIZATION_FAIL,
+            {"reason": EndReason.ERROR, "error": "weights missing"},
+            False,
+        ),
+    ],
+    ids=["crash", "idle-eviction", "failed-load", "failed-load-with-reason"],
+)
+def test_the_terminal_event_decides_the_exit_status(
+    event: SessionEvent, detail: dict[str, Any], failure: bool
+) -> None:
+    runner = _runner()
+    called: list[bool] = []
+    runner.request_shutdown = lambda *, failure=False: called.append(failure)
+
+    assert runner._sm.send(event, **detail)
+
+    assert runner._sm.current_state is SessionState.TERMINATED
+    assert called == [failure]
 
 
 # --- model run-loop crash -------------------------------------------------

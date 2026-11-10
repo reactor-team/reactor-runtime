@@ -174,13 +174,14 @@ _TRUNCATED = "… (truncated)"
 def _error_text(error: BaseException) -> str:
     """Word *error* for the journal: its message, or its ``repr`` when the message is empty.
 
-    A text longer than :data:`_ERROR_TEXT_LIMIT` characters is cut there and
-    marked as cut. The traceback and the whole message stay in the log; the
-    journal carries the words a status can show.
+    A text longer than :data:`_ERROR_TEXT_LIMIT` characters is cut so that,
+    with the marker that says so, it is exactly that long. The traceback and
+    the whole message stay in the log; the journal carries the words a status
+    can show.
     """
     text = str(error) or repr(error)
     if len(text) > _ERROR_TEXT_LIMIT:
-        return text[:_ERROR_TEXT_LIMIT] + _TRUNCATED
+        return text[: _ERROR_TEXT_LIMIT - len(_TRUNCATED)] + _TRUNCATED
     return text
 
 
@@ -463,7 +464,7 @@ class Runner(ServiceComponent, ConnectionSink):
         caught and turned into ``INITIALIZATION_FAIL`` (moving the session to
         ``TERMINATED``, with the exception's message as ``detail.error``) rather
         than raised; the dispatch on that move asks the service to bring the
-        process down, with a clean exit. ``start`` itself always returns.
+        process down. ``start`` itself always returns.
 
         The model load runs off the event loop (it may block while it reads
         weights), so the HTTP surface — already up by the time this runs — stays
@@ -1270,11 +1271,7 @@ class Runner(ServiceComponent, ConnectionSink):
         self._sm.send(SessionEvent.EVICTION, reason=EndReason.ERROR, error=error)
 
     def _fail_initialization(self, error: BaseException) -> None:
-        """End a boot whose model did not come up, carrying the error as its detail.
-
-        The move carries no ``reason``: an error reason is what makes the
-        process exit as a failure, and a model that did not come up exits clean.
-        """
+        """End a boot whose model did not come up, carrying the error as its detail."""
         self._sm.send(SessionEvent.INITIALIZATION_FAIL, error=_error_text(error))
 
     def _on_chunk_ready(self, recording_id: str, idx: int) -> None:
@@ -2541,12 +2538,12 @@ class Runner(ServiceComponent, ConnectionSink):
         ``CLOSING`` clears the session's uploaded files, tears the connections
         down, and, once they have closed, unwinds the session to ready, carrying
         the end reason through; and entering ``TERMINATED`` asks the service to
-        bring the process down, as a failure when the move carries an error
-        (a crashed model loop) and clean otherwise (a model that refused to
-        load). A crash evicts straight to ``TERMINATED``
-        without passing through ``CLOSING``, so that move runs the same teardown
-        on its way out — minus the ``CLEANUP_COMPLETE`` unwind, which would
-        declare a dead model ready again. Real moves log at info; journal
+        bring the process down, as a failure for an eviction that carries an
+        error (a crashed model loop) and clean for any other end (a model that
+        refused to load, or an idle eviction). A crash evicts straight to
+        ``TERMINATED`` without passing through ``CLOSING``, so that move runs the
+        same teardown on its way out — minus the ``CLEANUP_COMPLETE`` unwind,
+        which would declare a dead model ready again. Real moves log at info; journal
         self-loops log at debug so a per-segment ``chunk_ready`` does not flood
         the log.
 
@@ -2616,11 +2613,15 @@ class Runner(ServiceComponent, ConnectionSink):
                 self._starting_input_done.set()
                 self._spawn_teardown(asyncio.to_thread(self._recorder.stop))
                 self._spawn_teardown(self._connections.close_all())
-            # An eviction carrying an error is a model loop that crashed, and
-            # the process exits as a failure. A failed load is not one: the
-            # process refused to serve before it had anything to serve, and
-            # exits clean.
-            crashed = transition.detail.get("reason") is EndReason.ERROR
+            # The event decides the exit status, so a move's detail only says
+            # what happened. An eviction for an error is a model loop that
+            # crashed, and the process exits as a failure. Any other end exits
+            # clean: a failed load refused to serve before it had anything to
+            # serve, and an idle eviction was asked for.
+            crashed = (
+                transition.event is SessionEvent.EVICTION
+                and transition.detail.get("reason") is EndReason.ERROR
+            )
             self.request_shutdown(failure=crashed)
 
     def _begin_session_inputs(self) -> None:
