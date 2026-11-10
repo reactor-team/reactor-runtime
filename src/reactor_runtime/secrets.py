@@ -4,8 +4,9 @@ A deployment platform mounts one file per secret under :data:`SECRETS_ROOT` and
 names the files in ``REACTOR_SECRETS_EXPECTED_KEYS``, a JSON array of names that
 is ``[]`` when there are none. :func:`export_secrets` checks that the files match
 the names exactly and validates every value before it sets any value in the
-process environment. A mounted value replaces a value that the image set under
-the same name. When the variable is absent, nothing happens.
+process environment. Every entry whose name starts with ``..`` is mount
+bookkeeping and is skipped. A mounted value replaces a value that the image set
+under the same name. When the variable is absent, nothing happens.
 
 Every failure raises :class:`SystemExit` with a message that names keys and the
 failure, never a value.
@@ -33,6 +34,9 @@ logger = log.get_logger(__name__)
 
 def load_expected_secrets(raw: str, root: Path) -> dict[str, str]:
     """Read and validate the secret files that *raw* names under *root*.
+
+    Every entry under *root* whose name starts with ``..`` is mount bookkeeping
+    and is skipped.
 
     Args:
         raw: The value of ``REACTOR_SECRETS_EXPECTED_KEYS``.
@@ -64,7 +68,7 @@ def load_expected_secrets(raw: str, root: Path) -> dict[str, str]:
         entries = []
     except OSError:
         raise SystemExit(f"the secret directory {root} is unreadable") from None
-    # ``..data`` and the timestamped directory beside it are mount bookkeeping.
+    # Every ``..`` entry is mount bookkeeping, such as ``..data`` and its timestamped directory.
     present = {entry for entry in entries if not entry.startswith("..")}
     if present != set(expected):
         missing = sorted(set(expected) - present)
