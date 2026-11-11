@@ -152,6 +152,7 @@ extra-paths = [
     "examples/waypoint",
     "tests/integration/pod/split_echo",
     "tests/unit/transport/webrtc",
+    "tests/unit/flashdreams",
     "tests/contract",
     "endurance-tests",
     "endurance-tests/model",
