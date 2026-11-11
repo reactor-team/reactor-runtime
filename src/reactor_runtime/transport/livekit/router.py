@@ -62,8 +62,8 @@ _GUARD_RESPONSES: dict[int | str, dict[str, Any]] = {
 }
 
 # Opening a room connection adds a 409 when the session already has one, the
-# id the caller chose is in use, or another socket holds its ICE forwarder's
-# port, and a 503 when the session's connection-id
+# id the caller chose is in use, or a socket has already bound its ICE
+# forwarder's port, and a 503 when the session's connection-id
 # space is used up. Its 400 also covers an ICE forwarder that this runtime's
 # LiveKit SDK cannot use.
 _OPEN_RESPONSES: dict[int | str, dict[str, Any]] = {
@@ -181,8 +181,11 @@ class IceForwarderEntry(BaseModel):
 
     ``port`` must be free: the join gathers on it alone, so a port another
     socket holds leaves the room connection without a candidate. A request
-    whose port another socket holds, a WebRTC connection's or a leaving room
-    connection's among them, is refused with a 409. The password
+    whose port an IPv4 socket has already bound, a leaving room connection's
+    among them, is refused with a 409. Only a bound socket is seen: a WebRTC
+    connection pinned to the port that has not bound it yet does not refuse
+    the request, and the WebRTC transport does not check a forwarder's port,
+    so either conflict leaves one of the two without a candidate. The password
     is a credential, like the room token: never logged or journalled, and not
     repeated by a refused request.
     """
