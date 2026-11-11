@@ -144,10 +144,6 @@ _FORWARDER = IceForwarderEntry.model_validate(
     }
 )
 
-needs_ice_forwarder = pytest.mark.skipif(
-    not ice_forwarder_available(), reason="the installed LiveKit SDK has no ICE forwarder"
-)
-
 
 def _session(
     room: FakeRoom,
@@ -272,7 +268,10 @@ async def test_a_refused_connect_keeps_the_turn_credentials_out_of_the_reason() 
     )
 
 
-@needs_ice_forwarder
+def test_the_installed_sdk_can_send_media_through_an_ice_forwarder() -> None:
+    assert ice_forwarder_available()
+
+
 async def test_the_join_sends_its_media_through_the_caller_s_forwarder() -> None:
     room, control = FakeRoom(), FakeControl()
     room.connect_gate.release()
@@ -293,7 +292,6 @@ async def test_the_join_sends_its_media_through_the_caller_s_forwarder() -> None
     await session.leave()
 
 
-@needs_ice_forwarder
 async def test_a_refused_connect_keeps_the_forwarder_password_out_of_the_reason() -> None:
     room, control = FakeRoom(), FakeControl()
     room.connect_gate.release(RuntimeError("bad pwd 5H4joxyoYh0QO3jpq+iQVPqCuDWPsp4I"))

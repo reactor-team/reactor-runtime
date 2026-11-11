@@ -1,5 +1,7 @@
 import asyncio
+import importlib.metadata
 import importlib.util
+import logging
 from collections.abc import Mapping
 from typing import Any
 
@@ -299,6 +301,32 @@ def test_a_room_connection_joins_through_the_ice_forwarder_the_caller_supplies(
     assert response.status_code == 202
     (room,) = rooms
     assert room.ice_forwarder.model_dump() == _FORWARDER
+    assert room.ice_servers == []
+
+
+def test_an_ice_forwarder_s_addresses_reach_the_join_in_canonical_form(
+    rooms: list[FakeRoomSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(router_module, "ice_forwarder_available", lambda: True)
+    forwarder = {**_FORWARDER, "addresses": ["203.0.113.10:0443", "[2001:DB8:0::1]:443"]}
+
+    response = _client(FakeRunner()).post(_CONNECTIONS, json={**_ROOM, "ice_forwarder": forwarder})
+
+    assert response.status_code == 202
+    (room,) = rooms
+    assert room.ice_forwarder.addresses == ["203.0.113.10:443", "[2001:db8::1]:443"]
+
+
+def test_an_ice_forwarder_with_an_empty_ice_servers_list_opens(
+    rooms: list[FakeRoomSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(router_module, "ice_forwarder_available", lambda: True)
+    body = {**_ROOM, "ice_forwarder": _FORWARDER, "ice_servers": []}
+
+    response = _client(FakeRunner()).post(_CONNECTIONS, json=body)
+
+    assert response.status_code == 202
+    (room,) = rooms
     assert room.ice_servers == []
 
 
@@ -614,6 +642,14 @@ def test_another_session_id_is_not_found(rooms: list[FakeRoomSession]) -> None:
             {**_ROOM, "ice_forwarder": {**_FORWARDER, "addresses": ["[203.0.113.10]:443"]}},
             "ice_forwarder",
         ),
+        (
+            {**_ROOM, "ice_forwarder": {**_FORWARDER, "addresses": ["203.0.113.10:٤٤٣"]}},
+            "ice_forwarder",
+        ),
+        (
+            {**_ROOM, "ice_forwarder": {**_FORWARDER, "addresses": ["[fe80::1%eth0]:443"]}},
+            "ice_forwarder",
+        ),
         ({**_ROOM, "ice_forwarder": {**_FORWARDER, "port": 0}}, "ice_forwarder"),
         (
             {
@@ -673,3 +709,38 @@ def test_livekit_is_unavailable_when_the_sdk_is_not_installed(
 
 def test_livekit_is_available_in_the_development_environment() -> None:
     assert livekit_available() is True
+
+
+def _installed(monkeypatch: pytest.MonkeyPatch, *names: str) -> None:
+    def version(name: str) -> str:
+        if name not in names:
+            raise importlib.metadata.PackageNotFoundError(name)
+        return "1.2.0"
+
+    monkeypatch.setattr(importlib.metadata, "version", version)
+
+
+def test_mounting_warns_when_both_livekit_distributions_are_installed(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _installed(monkeypatch, "livekit", "reactor-livekit-transport-client")
+
+    with caplog.at_level(logging.WARNING, logger="reactor_runtime.transport.livekit.router"):
+        _client(FakeRunner())
+
+    (warning,) = [r for r in caplog.records if "two distributions" in r.getMessage()]
+    assert warning.__dict__["reactor_fields"]["distributions"] == [
+        "livekit",
+        "reactor-livekit-transport-client",
+    ]
+
+
+def test_mounting_does_not_warn_with_one_livekit_distribution(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _installed(monkeypatch, "reactor-livekit-transport-client")
+
+    with caplog.at_level(logging.WARNING, logger="reactor_runtime.transport.livekit.router"):
+        _client(FakeRunner())
+
+    assert not [r for r in caplog.records if "two distributions" in r.getMessage()]

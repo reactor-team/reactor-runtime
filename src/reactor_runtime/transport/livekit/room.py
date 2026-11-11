@@ -371,6 +371,8 @@ class RoomSession:
             conn_id=self.conn_id,
             room=self._room.name,
             identity=self._room.local_participant.identity,
+            ice_forwarder_port=self._ice_forwarder.port if self._ice_forwarder else None,
+            ice_forwarder_addresses=self._ice_forwarder.addresses if self._ice_forwarder else None,
         )
 
     async def _connect_and_publish(self) -> RoomConnection:

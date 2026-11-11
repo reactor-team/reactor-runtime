@@ -17,6 +17,7 @@ only when :func:`livekit_available` reports the extra installed.
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
 import importlib.util
 import ipaddress
 import time
@@ -92,11 +93,31 @@ def ice_forwarder_available() -> bool:
     return hasattr(rtc, "IceForwarder")
 
 
+# The distributions that install the ``livekit`` package: LiveKit's own, and the
+# one the ``livekit`` extra pins. Both in one environment overwrite each other's
+# files, the native library included.
+_LIVEKIT_DISTRIBUTIONS = ("livekit", "reactor-livekit-transport-client")
+
+
+def _installed_livekit_distributions() -> list[str]:
+    """Return which of :data:`_LIVEKIT_DISTRIBUTIONS` are installed."""
+    installed: list[str] = []
+    for name in _LIVEKIT_DISTRIBUTIONS:
+        try:
+            importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+        installed.append(name)
+    return installed
+
+
 def _forwarder_address(text: str) -> str:
-    """Return *text* if it is an ``ip:port`` address, an IPv6 address in brackets.
+    """Return *text*, canonical, if it is an ``ip:port`` address, an IPv6 address in brackets.
 
     An IPv6 address must be in brackets: ``2001:db8::1:443`` is itself a valid
     IPv6 address, so without them the port cannot be told apart from the address.
+    The port is ASCII digits, and an IPv6 address carries no zone, since a
+    candidate the room is shown has none.
     """
     host, sep, port = text.rpartition(":")
     if not sep:
@@ -114,9 +135,11 @@ def _forwarder_address(text: str) -> str:
         raise ValueError(f"address {text!r} must not put its IPv4 address in brackets")
     if ip.is_unspecified:
         raise ValueError(f"address {text!r} is unspecified")
-    if not port.isdigit() or not 1 <= int(port) <= 65535:
+    if not (port.isascii() and port.isdigit()) or not 1 <= int(port) <= 65535:
         raise ValueError(f"address {text!r} has no usable port")
-    return text
+    if isinstance(ip, ipaddress.IPv6Address) and ip.scope_id:
+        raise ValueError(f"address {text!r} must not carry an IPv6 zone")
+    return f"[{ip}]:{int(port)}" if ip.version == 6 else f"{ip}:{int(port)}"
 
 
 class IceForwarderEntry(BaseModel):
@@ -178,7 +201,9 @@ class RoomConnectionRequest(BaseModel):
 
     ``ice_forwarder`` sends all of the room connection's media through a
     forwarder in front of the runtime; see :class:`IceForwarderEntry`. A
-    forwarder uses no ICE server, so a request with both is a 422. A runtime
+    forwarder uses no ICE server, so a request with a forwarder and any ICE
+    server is a 422; an empty ``ice_servers``, like an absent one, names none
+    and is accepted with a forwarder. A runtime
     whose LiveKit SDK cannot use a forwarder refuses the request with a 400
     rather than join without it.
     """
@@ -279,7 +304,19 @@ class LiveKitRouter(TransportRouter):
         self._opening = asyncio.Lock()
 
     def mount(self, app: FastAPI, runner: SessionControl) -> None:
-        """Register the LiveKit route group against *app*, bound to *runner*."""
+        """Register the LiveKit route group against *app*, bound to *runner*.
+
+        Warns when both distributions that install ``livekit`` are present: a
+        mix of their files can break every room join, with nothing else
+        pointing at the cause.
+        """
+        installed = _installed_livekit_distributions()
+        if len(installed) > 1:
+            logger.warning(
+                "two distributions install the livekit package in this environment; "
+                "uninstall both, then install reactor-livekit-transport-client alone",
+                distributions=installed,
+            )
         add_session_error_handlers(app)
 
         async def open_room_connection(
