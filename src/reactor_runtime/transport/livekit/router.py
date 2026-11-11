@@ -20,6 +20,7 @@ import asyncio
 import importlib.metadata
 import importlib.util
 import ipaddress
+import socket
 import time
 from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any, Literal
@@ -60,8 +61,9 @@ _GUARD_RESPONSES: dict[int | str, dict[str, Any]] = {
     404: {"model": ErrorDetail},
 }
 
-# Opening a room connection adds a 409 when the session already has one or the
-# id the caller chose is in use, and a 503 when the session's connection-id
+# Opening a room connection adds a 409 when the session already has one, the
+# id the caller chose is in use, or another socket holds its ICE forwarder's
+# port, and a 503 when the session's connection-id
 # space is used up. Its 400 also covers an ICE forwarder that this runtime's
 # LiveKit SDK cannot use.
 _OPEN_RESPONSES: dict[int | str, dict[str, Any]] = {
@@ -142,6 +144,20 @@ def _forwarder_address(text: str) -> str:
     return f"[{ip}]:{int(port)}" if ip.version == 6 else f"{ip}:{int(port)}"
 
 
+def _udp_port_free(port: int) -> bool:
+    """Whether no other socket holds UDP *port*, probed by binding it and letting it go.
+
+    A probe, not a reservation: a socket that binds the port between the probe
+    and the join still leaves the join without a candidate.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        try:
+            probe.bind(("0.0.0.0", port))
+        except OSError:
+            return False
+    return True
+
+
 class IceForwarderEntry(BaseModel):
     """A UDP forwarder in front of the runtime that all of a room connection's media goes through.
 
@@ -164,7 +180,9 @@ class IceForwarderEntry(BaseModel):
       mode, since the forwarder delivers one set of credentials to one port.
 
     ``port`` must be free: the join gathers on it alone, so a port another
-    socket holds leaves the room connection without a candidate. The password
+    socket holds leaves the room connection without a candidate. A request
+    whose port another socket holds, a WebRTC connection's or a leaving room
+    connection's among them, is refused with a 409. The password
     is a credential, like the room token: never logged or journalled, and not
     repeated by a refused request.
     """
@@ -346,6 +364,12 @@ class LiveKitRouter(TransportRouter):
                 elif previous is not None and previous.active:
                     # Admitted by a session that has ended: its room is retired, not reused.
                     await previous.retire()
+                forwarder = req.ice_forwarder
+                if forwarder is not None and not _udp_port_free(forwarder.port):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"port {forwarder.port} is already held by another connection",
+                    )
                 from reactor_runtime.transport.livekit.room import RoomSession
 
                 conn_id = self._claim(runner, req.connection_id)

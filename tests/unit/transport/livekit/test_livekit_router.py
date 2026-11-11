@@ -2,6 +2,7 @@ import asyncio
 import importlib.metadata
 import importlib.util
 import logging
+import socket
 from collections.abc import Mapping
 from typing import Any
 
@@ -340,6 +341,26 @@ def test_an_ice_forwarder_the_runtime_s_sdk_cannot_use_is_refused(
 
     assert response.status_code == 400
     assert "ICE forwarder" in response.json()["detail"]
+    assert _FORWARDER_PWD not in response.text
+    assert _TOKEN not in response.text
+    assert rooms == []
+    assert runner.minted == []
+
+
+def test_an_ice_forwarder_whose_port_another_socket_holds_is_refused(
+    rooms: list[FakeRoomSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(router_module, "ice_forwarder_available", lambda: True)
+    runner = FakeRunner()
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as held:
+        held.bind(("0.0.0.0", 0))
+        port = held.getsockname()[1]
+        forwarder = {**_FORWARDER, "port": port}
+
+        response = _client(runner).post(_CONNECTIONS, json={**_ROOM, "ice_forwarder": forwarder})
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == f"port {port} is already held by another connection"
     assert _FORWARDER_PWD not in response.text
     assert _TOKEN not in response.text
     assert rooms == []
