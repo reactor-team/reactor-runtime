@@ -6,7 +6,9 @@ is ``[]`` when there are none. :func:`export_secrets` checks that the files matc
 the names exactly and validates every value before it sets any value in the
 process environment. Every entry whose name starts with ``..`` is mount
 bookkeeping and is skipped. A mounted value replaces a value that the image set
-under the same name. When the variable is absent, nothing happens.
+under the same name. A name that the runtime reads for its own configuration,
+any ``REACTOR_`` name or one in :data:`RESERVED_NAMES`, is refused. When the
+variable is absent, nothing happens.
 
 Every failure raises :class:`SystemExit` with a message that names keys and the
 failure, never a value.
@@ -24,6 +26,39 @@ from reactor_runtime import log
 
 EXPECTED_KEYS_ENV = "REACTOR_SECRETS_EXPECTED_KEYS"
 SECRETS_ROOT = Path("/run/secrets")
+
+RESERVED_PREFIX = "REACTOR_"
+"""Names under this prefix configure the runtime and cannot be secret names."""
+
+RESERVED_NAMES = frozenset(
+    {
+        "EXIT_TIMEOUT_SECONDS",
+        "HOST",
+        "ICE_TRANSPORT_POLICY",
+        "LOCAL_RANK",
+        "MASTER_ADDR",
+        "MASTER_PORT",
+        "ORPHAN_TIMEOUT_SECONDS",
+        "PORT",
+        "RANK",
+        "SIGTERM_GRACE_PERIOD",
+        "STUN_SERVERS",
+        "TURN_SERVERS",
+        "WEBRTC_BWE_INITIAL_KBPS",
+        "WEBRTC_BWE_MAX_KBPS",
+        "WEBRTC_BWE_MIN_KBPS",
+        "WEBRTC_CLIENT_PING_TIMEOUT_SECONDS",
+        "WEBRTC_PORT_RANGE",
+        "WEBRTC_SENDER_MAX_KBPS",
+        "WEBRTC_SENDER_MIN_KBPS",
+        "WEBRTC_VIDEO_CODECS",
+        "WORLD_SIZE",
+    }
+)
+"""Names outside ``REACTOR_`` that the runtime reads or sets for its own configuration.
+
+A secret under one of them would replace that setting, so the loader refuses it.
+"""
 
 _MAX_BYTES = 32768
 _NAME_PATTERN = "[A-Za-z_][A-Za-z0-9_]*"
@@ -46,7 +81,9 @@ def load_expected_secrets(raw: str, root: Path) -> dict[str, str]:
         The exact text of every expected file, keyed by name.
 
     Raises:
-        SystemExit: If *raw* is not a JSON array of unique valid names, if the
+        SystemExit: If *raw* is not a JSON array of unique valid names, if a
+            name is reserved for the runtime's own configuration (see
+            :data:`RESERVED_PREFIX` and :data:`RESERVED_NAMES`), if the
             files under *root* do not match it exactly, or if a file is not a
             readable regular file inside *root* that holds 1 to 32768 bytes of
             UTF-8 without a NUL byte.
@@ -60,6 +97,10 @@ def load_expected_secrets(raw: str, root: Path) -> dict[str, str]:
     for name in expected:
         if _NAME_RE.fullmatch(name) is None:
             raise SystemExit(f"secret name {name!r} is invalid; names match {_NAME_PATTERN}")
+        if name.startswith(RESERVED_PREFIX) or name in RESERVED_NAMES:
+            raise SystemExit(
+                f"secret name {name!r} is reserved for the runtime's own configuration"
+            )
         if expected.count(name) > 1:
             raise SystemExit(f"{EXPECTED_KEYS_ENV} lists {name!r} more than once")
     try:

@@ -61,6 +61,25 @@ def test_an_invalid_name_blocks_the_start(tmp_path: Path, name: str) -> None:
         load_expected_secrets(json.dumps([name]), tmp_path)
 
 
+@pytest.mark.parametrize(
+    "name", ["REACTOR_LOG_LEVEL", "REACTOR_ANYTHING", "PORT", "TURN_SERVERS", "RANK"]
+)
+def test_a_runtime_name_blocks_the_start_before_any_export(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    _mount(tmp_path, {"API_TOKEN": _GOOD, name: b"synth-reserved-9f41"})
+    monkeypatch.setenv(name, _IMAGE_DEFAULT)
+
+    with pytest.raises(SystemExit) as raised:
+        _export(tmp_path, ["API_TOKEN", name], monkeypatch)
+
+    assert (
+        str(raised.value) == f"secret name {name!r} is reserved for the runtime's own configuration"
+    )
+    assert "API_TOKEN" not in os.environ
+    assert os.environ[name] == _IMAGE_DEFAULT
+
+
 def test_a_duplicate_name_blocks_the_start(tmp_path: Path) -> None:
     (tmp_path / "API_TOKEN").write_bytes(_GOOD)
 
