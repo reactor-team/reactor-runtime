@@ -317,6 +317,22 @@ def test_eviction_detail_carries_reason_and_error() -> None:
     assert payload["detail"] == {"reason": "error", "error": "model exploded"}
 
 
+def test_eviction_detail_carries_a_lost_model_server_cause() -> None:
+    payload = _apply(
+        _machine("streaming"),
+        SessionEvent.EVICTION,
+        reason=EndReason.ERROR,
+        error="no worker answered",
+        cause="model_server_lost",
+    )
+    assert payload is not None
+    assert payload["detail"] == {
+        "reason": "error",
+        "error": "no worker answered",
+        "cause": "model_server_lost",
+    }
+
+
 def test_chunk_ready_detail_names_the_recording_and_segment_index() -> None:
     payload = _apply(
         _machine("streaming"),

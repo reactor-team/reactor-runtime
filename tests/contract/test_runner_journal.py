@@ -23,6 +23,7 @@ from contract_helpers import (
     FakeConnection,
     Harness,
     JournalReader,
+    LostModelServerModel,
     SteppingModel,
     SteppingOutput,
     UnloadableModel,
@@ -117,6 +118,22 @@ async def test_a_run_loop_crash_journals_a_terminal_eviction_with_the_error() ->
             assert evicted["to"] == "terminated"
             assert evicted["detail"]["reason"] == "error"
             assert "model exploded" in evicted["detail"]["error"]
+            assert "cause" not in evicted["detail"]
+        finally:
+            await journal.aclose()
+
+
+async def test_a_model_that_re_raises_a_lost_model_server_journals_its_cause() -> None:
+    async with running_runtime(model_cls=LostModelServerModel) as harness:
+        journal = JournalReader(harness.runner)
+        try:
+            evicted = await journal.expect("eviction")
+            assert evicted["to"] == "terminated"
+            assert evicted["detail"] == {
+                "reason": "error",
+                "error": "no worker answered",
+                "cause": "model_server_lost",
+            }
         finally:
             await journal.aclose()
 

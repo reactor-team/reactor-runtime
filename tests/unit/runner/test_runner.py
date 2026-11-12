@@ -82,6 +82,7 @@ from reactor_runtime.interface.internal.reactor_core import (
 )
 from reactor_runtime.message_gateway import InboundCommand
 from reactor_runtime.metrics import RuntimeMetrics
+from reactor_runtime.model_server import ClientClosed, ModelServerLost, ModelServerStopping
 from reactor_runtime.protocol.common import dict_to_struct, struct_to_dict
 from reactor_runtime.recording import ClipResult
 from reactor_runtime.runner.client_stats import ClientStatsGate
@@ -92,6 +93,7 @@ from reactor_runtime.runner.runner import (
     SESSION_ID,
     Runner,
     _error_text,
+    _lost_model_server,
 )
 from reactor_runtime.runner.session_start import (
     InvalidSessionStartError,
@@ -3325,6 +3327,84 @@ async def test_a_crash_called_while_idle_ends_the_process_as_a_failure(
             "model_server_lost: the model server closed the link",
         )
     ]
+    # The text alone names no cause: only a ModelServerLost does.
+    assert "cause" not in moves[0].detail
+
+
+class _WorkerUnavailableError(RuntimeError):
+    """A model's own error, raised in place of the loss it caught."""
+
+
+def _raised_from(error: BaseException, *, explicit: bool) -> BaseException:
+    """Return a model error raised while handling *error*, chained explicitly or not."""
+    try:
+        try:
+            raise error
+        except BaseException as caught:
+            if explicit:
+                raise _WorkerUnavailableError("no worker answered") from caught
+            raise _WorkerUnavailableError("no worker answered")  # noqa: B904 (the implicit chain is the case)
+    except _WorkerUnavailableError as wrapped:
+        return wrapped
+
+
+_LOST = "model_server_lost: the model server closed the link"
+
+
+@pytest.mark.parametrize(
+    ("error", "cause"),
+    [
+        (ModelServerLost(_LOST), "model_server_lost"),
+        (
+            ModelServerStopping("model_server_lost: the model server is stopping"),
+            "model_server_lost",
+        ),
+        (_raised_from(ModelServerLost(_LOST), explicit=True), "model_server_lost"),
+        (_raised_from(ModelServerLost(_LOST), explicit=False), "model_server_lost"),
+        (
+            ExceptionGroup("step failed", [ValueError("x"), ModelServerLost(_LOST)]),
+            "model_server_lost",
+        ),
+        (ClientClosed("the model client is closed"), None),
+        (_raised_from(ClientClosed("the model client is closed"), explicit=True), None),
+        (RuntimeError(_LOST), None),
+        (_raised_from(RuntimeError(_LOST), explicit=True), None),
+    ],
+    ids=[
+        "lost",
+        "stopping",
+        "wrapped-from",
+        "wrapped-while-handling",
+        "in-a-group",
+        "client-closed",
+        "wrapped-client-closed",
+        "lookalike-text",
+        "wrapped-lookalike-text",
+    ],
+)
+async def test_a_crash_names_a_lost_model_server_by_its_type(
+    started_runner: Runner, error: BaseException, cause: str | None
+) -> None:
+    started_runner._on_model_failure(error)
+    await asyncio.sleep(0.05)  # let the loop run the scheduled eviction callback
+
+    moves = [
+        e.transition
+        for e in _egress(started_runner)
+        if isinstance(e, TransitionEvent) and e.transition.event is SessionEvent.EVICTION
+    ]
+    assert len(moves) == 1
+    assert moves[0].detail["reason"] is EndReason.ERROR
+    assert moves[0].detail.get("cause") == cause
+
+
+def test_a_cycle_in_the_exception_chain_ends_the_search() -> None:
+    first = RuntimeError("first")
+    second = RuntimeError("second")
+    first.__context__ = second
+    second.__context__ = first
+
+    assert _lost_model_server(first) is False
 
 
 async def test_model_crash_mid_session_tears_the_connections_down(

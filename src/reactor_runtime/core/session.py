@@ -68,7 +68,14 @@ class SessionEvent(Enum):
     moving the session straight to ``TERMINATED`` rather than unwinding through
     ``CLOSING``, and carries an :class:`~reactor_runtime.core.model.EndReason`
     in ``detail.reason`` (and, for a crash, the error in ``detail.error``) so a
-    consumer learns why.
+    consumer learns why. A crash whose exception is a
+    :class:`~reactor_runtime.model_server.ModelServerLost`, wraps one in its
+    ``__cause__`` or ``__context__`` chain, or holds one in an exception group
+    also carries ``detail.cause`` set to ``model_server_lost``: the session lost
+    its model server, and the model did not fail on its own. The runtime sets it
+    from the exception's type, never its message, and leaves it out for
+    :class:`~reactor_runtime.model_server.ClientClosed` and for every other
+    crash.
 
     ``INITIALIZATION_FAIL`` records that the model did not come up: its class
     did not import, the manifest's ``runtime.livekit`` block does not match it,

@@ -84,6 +84,7 @@ from reactor_runtime.metrics import (
     ModelMetrics,
     RuntimeMetrics,
 )
+from reactor_runtime.model_server.errors import ClientClosed, ModelServerLost
 from reactor_runtime.protocol import Channel, Codec, ProtocolVersion, select
 from reactor_runtime.protocol.frames import (
     FrameEncodingError,
@@ -183,6 +184,35 @@ def _error_text(error: BaseException) -> str:
     if len(text) > _ERROR_TEXT_LIMIT:
         return text[: _ERROR_TEXT_LIMIT - len(_TRUNCATED)] + _TRUNCATED
     return text
+
+
+# The ``detail.cause`` of a crash's ``eviction`` when the session lost its model
+# server; SessionEvent documents it as part of the journal.
+_MODEL_SERVER_LOST_CAUSE = "model_server_lost"
+
+
+def _lost_model_server(error: BaseException) -> bool:
+    """Say whether *error* is, wraps, or was raised while handling a lost model server.
+
+    The search follows ``__cause__`` and ``__context__``, and the members of an
+    exception group, so a model that re-raises the loss under its own error
+    still counts. A :class:`~reactor_runtime.model_server.ClientClosed` does
+    not: the application closed its own client. Only the type counts, never
+    the message.
+    """
+    seen: set[int] = set()
+    pending: list[BaseException] = [error]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, ModelServerLost) and not isinstance(current, ClientClosed):
+            return True
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(current.exceptions)
+        pending.extend(e for e in (current.__cause__, current.__context__) if e is not None)
+    return False
 
 
 # How long to wait for an upload's bytes to arrive when a command or notification
@@ -1264,11 +1294,16 @@ class Runner(ServiceComponent, ConnectionSink):
         """
         loop = self._loop
         if loop is not None:
-            loop.call_soon_threadsafe(self._evict_on_failure, _error_text(error))
+            loop.call_soon_threadsafe(
+                self._evict_on_failure, _error_text(error), _lost_model_server(error)
+            )
 
-    def _evict_on_failure(self, error: str) -> None:
+    def _evict_on_failure(self, error: str, lost_model_server: bool) -> None:
         """Evict the session to terminated, carrying the crash as its reason."""
-        self._sm.send(SessionEvent.EVICTION, reason=EndReason.ERROR, error=error)
+        detail: dict[str, Any] = {"reason": EndReason.ERROR, "error": error}
+        if lost_model_server:
+            detail["cause"] = _MODEL_SERVER_LOST_CAUSE
+        self._sm.send(SessionEvent.EVICTION, **detail)
 
     def _fail_initialization(self, error: BaseException) -> None:
         """End a boot whose model did not come up, carrying the error as its detail."""
