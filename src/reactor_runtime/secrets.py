@@ -57,7 +57,7 @@ RESERVED_NAMES = frozenset(
 )
 """Names outside ``REACTOR_`` that the runtime reads or sets for its own configuration.
 
-A secret under one of them would replace that setting, so the loader refuses it.
+The loader refuses these names so secrets cannot overwrite runtime configuration.
 """
 
 _MAX_BYTES = 32768
