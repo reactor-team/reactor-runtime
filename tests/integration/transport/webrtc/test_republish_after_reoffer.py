@@ -29,19 +29,21 @@ import pytest
 
 rw = pytest.importorskip("reactor_webrtc")
 
+from tests.integration.transport.webrtc._signalling import (  # noqa: E402
+    TIMEOUT_S,
+    negotiate,
+    new_connection,
+    serve,
+    trickle,
+)
+
 from reactor_runtime import InputBuffer, MediaInput, ReactorApp, ReadMode, Video  # noqa: E402
-from reactor_runtime.core import RuntimeConfig  # noqa: E402
-from reactor_runtime.http.server import build_app  # noqa: E402
-from reactor_runtime.metrics import RuntimeMetrics  # noqa: E402
-from reactor_runtime.runner.runner import Runner  # noqa: E402
-from reactor_runtime.transport.webrtc import WebRtcConfig, WebRtcRouter  # noqa: E402
+from reactor_runtime.transport.webrtc import WebRtcConfig  # noqa: E402
 from reactor_runtime.transport.webrtc.frames import rgb_to_bgra  # noqa: E402
-from reactor_runtime.transport.webrtc.peer import _get_factory, libwebrtc_peer_factory  # noqa: E402
+from reactor_runtime.transport.webrtc.peer import _get_factory  # noqa: E402
 
 pytestmark = pytest.mark.asyncio
 
-_PREFIX = "/sessions/00000000-0000-0000-0000-000000000000/transport/webrtc"
-_TIMEOUT_S = 25.0
 _WIDTH, _HEIGHT = 320, 240
 
 
@@ -86,32 +88,11 @@ class _WebcamModel(ReactorApp):
 
 @asynccontextmanager
 async def _runtime() -> AsyncIterator[httpx.AsyncClient]:
-    """Serve the full HTTP surface over a real runner and a real libwebrtc peer."""
+    """Serve the full runtime over the webcam model, counting its frames afresh."""
     global _seen
     _seen = _WebcamCounter()
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: _WebcamModel)
-        metrics = RuntimeMetrics(version="0.0.0", model="republish:Model")
-        runner = Runner(RuntimeConfig(model_ref="republish:Model"), metrics)
-        await runner.start()
-        router = WebRtcRouter(
-            WebRtcConfig(ping_timeout=0.0, ice_gathering_timeout_ms=4000),
-            libwebrtc_peer_factory,
-            metrics,
-        )
-        app = build_app(runner, [router], runner.health, metrics)
-        try:
-            transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(transport=transport, base_url="http://runtime") as client:
-                response = await client.post("/start_session", json={})
-                assert response.status_code == 200, response.text
-                try:
-                    yield client
-                finally:
-                    # Ending the session closes its connections and their media threads.
-                    await client.post("/stop_session", json={})
-        finally:
-            await runner.stop()
+    async with serve(_WebcamModel, "republish:Model") as http:
+        yield http
 
 
 class _Peer:
@@ -122,11 +103,11 @@ class _Peer:
         self.data_open = threading.Event()
         self.replies: list[dict[str, Any]] = []
         self.replied = threading.Event()
-        self._ice: list[Any] = []
+        self.ice: list[Any] = []
 
         factory = _get_factory(WebRtcConfig())
         observer = rw.PeerConnectionObserver()
-        observer.on_ice_candidate = self._ice.append
+        observer.on_ice_candidate = self.ice.append
         # Dropped at teardown, which is what releases the native peer connection.
         self.pc: Any = factory.create_peer_connection(rw.RtcConfiguration(), observer)
         self.camera: Any = factory.create_video_track("webcam")
@@ -149,10 +130,8 @@ class _Peer:
         self.replied.set()
 
     async def offer(self, http: httpx.AsyncClient, cid: int, *, method: str) -> None:
-        """Offer on *cid*, apply the answer, and add the candidates it carries."""
+        """Offer the ``webcam`` on *cid*, apply the answer, and add its candidates."""
         await self.send.set_track(self.camera)
-        offer = await self.pc.create_offer()
-        await self.pc.set_local_description(offer)
         mapping = [
             {
                 "mid": self.send.mid() or "0",
@@ -161,42 +140,11 @@ class _Peer:
                 "direction": "sendonly",
             }
         ]
-        response = await http.request(
-            method,
-            f"{_PREFIX}/connections/{cid}/sdp_params",
-            json={"sdp_offer": offer.sdp, "track_mapping": mapping},
-        )
-        assert response.status_code == 202, response.text
-
-        response = await _poll_answer(http, cid)
-        assert response.status_code == 200, response.text
-        answer = response.json()["sdp_answer"]
-        await self.pc.set_remote_description(rw.SessionDescription("answer", answer))
-        for candidate in _ice_from_answer(answer):
-            await self.pc.add_ice_candidate(candidate)
-
-    async def trickle(self, http: httpx.AsyncClient, cid: int, stop: asyncio.Event) -> None:
-        while not stop.is_set():
-            pending, self._ice[:] = self._ice[:], []
-            if pending:
-                await http.post(
-                    f"{_PREFIX}/connections/{cid}/ice_candidates",
-                    json={
-                        "candidates": [
-                            {
-                                "candidate": c.candidate,
-                                "sdp_mid": c.sdp_mid,
-                                "sdp_mline_index": c.sdp_mline_index,
-                            }
-                            for c in pending
-                        ]
-                    },
-                )
-            await asyncio.sleep(0.05)
+        await negotiate(http, self.pc, cid, mapping, method=method)
 
     async def wire_open(self) -> None:
         for opened, label in ((self.control_open, "control"), (self.data_open, "data")):
-            assert await asyncio.to_thread(opened.wait, _TIMEOUT_S), (
+            assert await asyncio.to_thread(opened.wait, TIMEOUT_S), (
                 f"the {label} channel never opened"
             )
 
@@ -215,7 +163,7 @@ class _Peer:
             binary=False,
         )
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + _TIMEOUT_S
+        deadline = loop.time() + TIMEOUT_S
         while loop.time() < deadline:
             for reply in self.replies:
                 if reply.get("request_id") == request_id:
@@ -234,39 +182,6 @@ class _Peer:
         self.pc = None
 
 
-async def _poll_answer(http: httpx.AsyncClient, cid: int) -> httpx.Response:
-    """Poll the answer route until negotiation finishes, as a client does over HTTP."""
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + _TIMEOUT_S
-    response = await http.get(f"{_PREFIX}/connections/{cid}/sdp_params")
-    while response.status_code == 202 and loop.time() < deadline:
-        await asyncio.sleep(0.05)
-        response = await http.get(f"{_PREFIX}/connections/{cid}/sdp_params")
-    return response
-
-
-def _ice_from_answer(sdp: str) -> list[Any]:
-    """Pull the candidates the runtime embedded into its non-trickle answer."""
-    candidates: list[Any] = []
-    mline_index = -1
-    mid: str | None = None
-    for line in sdp.replace("\r\n", "\n").split("\n"):
-        if line.startswith("m="):
-            mline_index += 1
-            mid = None
-        elif line.startswith("a=mid:"):
-            mid = line[len("a=mid:") :].strip()
-        elif line.startswith("a=candidate:"):
-            candidates.append(
-                rw.IceCandidate(
-                    candidate=line[len("a=") :].strip(),
-                    sdp_mid=mid,
-                    sdp_mline_index=max(mline_index, 0),
-                )
-            )
-    return candidates
-
-
 @asynccontextmanager
 async def _wire(http: httpx.AsyncClient, cid: int, *, method: str) -> AsyncIterator[_Peer]:
     """Negotiate one peer on *cid* and trickle its candidates while it is in use.
@@ -276,23 +191,17 @@ async def _wire(http: httpx.AsyncClient, cid: int, *, method: str) -> AsyncItera
     """
     peer = _Peer()
     stop = asyncio.Event()
-    trickle: asyncio.Task[None] | None = None
+    trickling: asyncio.Task[None] | None = None
     try:
         await peer.offer(http, cid, method=method)
-        trickle = asyncio.create_task(peer.trickle(http, cid, stop))
+        trickling = asyncio.create_task(trickle(http, cid, peer.ice, stop))
         yield peer
     finally:
         stop.set()
-        if trickle is not None:
-            trickle.cancel()
+        if trickling is not None:
+            trickling.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await trickle
-
-
-async def _new_connection(http: httpx.AsyncClient) -> int:
-    response = await http.post(f"{_PREFIX}/connections")
-    assert response.status_code == 201, response.text
-    return response.json()["connection_id"]
+                await trickling
 
 
 async def _published_then_reoffered(
@@ -303,7 +212,7 @@ async def _published_then_reoffered(
     Returns a stack holding the new wire open, whose peer is the last of
     *peers*. The first peer is left up, its wire replaced by the runtime.
     """
-    cid = await _new_connection(http)
+    cid = await new_connection(http)
     async with _wire(http, cid, method="POST") as first:
         peers.append(first)
         await first.wire_open()
@@ -322,7 +231,7 @@ async def _webcam_frames_arrive(peer: _Peer) -> bool:
     """Push webcam frames from *peer* until the model reads one it sent."""
     baseline = _seen.frames
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + _TIMEOUT_S
+    deadline = loop.time() + TIMEOUT_S
     value = 0
     while loop.time() < deadline:
         if _seen.frames > baseline:
@@ -370,10 +279,9 @@ async def test_a_publish_sent_the_moment_the_new_wire_opens_is_granted() -> None
                 second = peers[-1]
                 await second.wire_open()
                 reply = await second.publish("webcam", "at-open")
-                assert reply.get("error", {}).get("code") != "publish_refused", (
+                assert "error" not in reply, (
                     f"the first publish on the new wire was refused: {reply}"
                 )
-                assert "error" not in reply, reply
     finally:
         for peer in peers:
             peer.release()
