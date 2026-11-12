@@ -38,12 +38,38 @@ _READY_WITHIN_S = 6.0
 # How long the room stays silent from the stop: past the bound by far, so a
 # runtime that waits for the leave is caught.
 _SILENT_S = 12.0
+# Set, every cycle's room connection goes through an ICE forwarder on this one
+# UDP port, which the room connection holds until its leave finishes: a leave
+# that still holds it refuses the next cycle's room connection with a 409. The
+# forwarder's address is the port itself on loopback, where a local LiveKit
+# server reaches it directly.
+_FORWARDER_PORT = int(os.environ.get("ENDURANCE_ICE_FORWARDER_PORT", "0"))
 
 
-def _open_room(runtime: RuntimeProcess, session_id: str, url: str, room: str) -> None:
-    """Connect the session to *room* at *url*, and wait for the room connection to open."""
+def _ice_forwarder() -> dict[str, object]:
+    """The ICE forwarder on ``_FORWARDER_PORT`` a room connection's request names."""
+    return {
+        "addresses": [f"127.0.0.1:{_FORWARDER_PORT}"],
+        "ice_credentials": {"ufrag": "endurance", "pwd": uuid.uuid4().hex},
+        "port": _FORWARDER_PORT,
+    }
+
+
+def _open_room(runtime: RuntimeProcess, session_id: str, url: str, room: str) -> list[str]:
+    """Connect the session to *room* at *url*, and wait for the room connection to open.
+
+    Returns what went wrong: a forwarder port still held refuses the connection.
+    """
     path = f"/sessions/{session_id}/transport/livekit/connections"
-    _, accepted = runtime.request("POST", path, {"url": url, "token": token(room, _MODEL)})
+    body: dict[str, object] = {"url": url, "token": token(room, _MODEL)}
+    if _FORWARDER_PORT:
+        body["ice_forwarder"] = _ice_forwarder()
+    try:
+        _, accepted = runtime.request("POST", path, body)
+    except urllib.error.HTTPError as error:
+        if error.code != 409:
+            raise
+        return [f"the room connection was refused with a 409: {error.read().decode()}"]
     conn_id = accepted["connection_id"]
     deadline = time.monotonic() + _JOIN_WAIT_S
     while time.monotonic() < deadline:
@@ -51,7 +77,7 @@ def _open_room(runtime: RuntimeProcess, session_id: str, url: str, room: str) ->
         if status == 200:
             if body["state"] != "open":
                 raise AssertionError(f"the room connection did not open: {body}")
-            return
+            return []
         time.sleep(0.25)
     raise AssertionError(f"the room connection was still joining after {_JOIN_WAIT_S:g}s")
 
@@ -115,10 +141,10 @@ async def test_room_leave_unanswered(runtime: RuntimeProcess) -> None:
             session = runtime.request(
                 "POST", "/start_session", {"session_id": f"endurance-{cycle}"}
             )[1]
-            _open_room(
+            cycle_failures = _open_room(
                 runtime, session["session_id"], relay.url, f"endurance-{uuid.uuid4().hex[:8]}"
             )
-            cycle_failures = _stop_while_silent(runtime, relay)
+            cycle_failures += _stop_while_silent(runtime, relay)
             # The leave that ran on past the bound has finished once the room
             # answered: the loop is back to the tasks it ran before any session.
             reading, _ = runtime.settled_probe(tasks=sampler.initial_tasks)

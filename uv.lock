@@ -436,25 +436,6 @@ wheels = [
 ]
 
 [[package]]
-name = "livekit"
-version = "1.2.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "aiofiles" },
-    { name = "numpy" },
-    { name = "protobuf" },
-    { name = "types-protobuf" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/b5/2d/18619af995f2532351c36a86920f58a06c76419e2b882e29201803a0e36b/livekit-1.2.0.tar.gz", hash = "sha256:a7ac564de20c54d532ff59ebb92d0018d088c96dc36a81d0e02be8b9efa7584c", size = 402585, upload-time = "2026-10-27T01:44:06.841Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/a8/25/fd82622d8486fc607ea69fe298de61dce7556f4dff999c488c1594ba7af5/livekit-1.2.0-py3-none-macosx_10_15_x86_64.whl", hash = "sha256:1dee2aa01f01951c0798b713d40331dd958e5166196d2d8d1b85e6ce900b0a23", size = 10514737, upload-time = "2026-10-27T01:43:55.715Z" },
-    { url = "https://files.pythonhosted.org/packages/f0/85/52eb4acacb07b3c18597e081600afbcf631a81399371f3ec854b2bf25e76/livekit-1.2.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:08774b3ffe04491515e7ae3bf920051a0a1d40bf7e2f74a499cf9ef444c42e1f", size = 9332628, upload-time = "2026-10-27T01:43:58.003Z" },
-    { url = "https://files.pythonhosted.org/packages/a8/fa/5e1293fb05e55f84c903c1daad8726680e69e33df44a179bedbf6a965735/livekit-1.2.0-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:d6279a25ca7b25667908dc43fbc69374f84fa63b7fc857639483a7a3a3850070", size = 10635470, upload-time = "2026-10-27T01:44:00.353Z" },
-    { url = "https://files.pythonhosted.org/packages/85/83/da52537a2f7147e931a495f72a77e873be7350681c5fea3509f5b42f5342/livekit-1.2.0-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:9eae2fbf857e0af2516eb03f5285eb5edf0ea0b1aa238268291ccb1a7e11d4d4", size = 11865108, upload-time = "2026-10-27T01:44:02.691Z" },
-    { url = "https://files.pythonhosted.org/packages/ed/10/abc4e06a29b3ae2b845fcc243d52da0adcd7b387c881ca5ab3552f60c300/livekit-1.2.0-py3-none-win_amd64.whl", hash = "sha256:34a44cd884badb596c01d3ba99ba2d67de3d84d253bc62a1c07b4739f6b68c32", size = 11014780, upload-time = "2026-10-27T01:44:05.001Z" },
-]
-
-[[package]]
 name = "livekit-api"
 version = "1.2.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1156,6 +1137,22 @@ wheels = [
 ]
 
 [[package]]
+name = "reactor-livekit-transport-client"
+version = "1.2.0.post1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiofiles" },
+    { name = "numpy" },
+    { name = "protobuf" },
+    { name = "types-protobuf" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c2/fb/7714d936d767eb3929c8a05f1850541bec266f5a683d3b7b2856b449c45b/reactor_livekit_transport_client-1.2.0.post1-py3-none-macosx_11_0_arm64.whl", hash = "sha256:ee2aa81ff980d250505d7cd07b20f3255cee5c652e8f86d81cf6329e6b7a8d49", size = 9342046, upload-time = "2026-11-06T19:59:38.963Z" },
+    { url = "https://files.pythonhosted.org/packages/43/68/b550c1862ff6d2aa5decd913a5cb5f5f625090ca2863ed991a75cd004e91/reactor_livekit_transport_client-1.2.0.post1-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:c68ea02e4bc894cb6b106f9e2635716b577e8e89882e35608691628b563a752e", size = 10643983, upload-time = "2026-11-06T19:59:41.852Z" },
+    { url = "https://files.pythonhosted.org/packages/c7/30/2f2317a2611aa5f1ec31854e914b1b015daf5cfc4b3947dceaff7f9c3989/reactor_livekit_transport_client-1.2.0.post1-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:6a2fe5f683ee0a1f00ac159ca82fe0da2e640622e35bf46f4ebe490b60258689", size = 11874014, upload-time = "2026-11-06T19:59:44.868Z" },
+]
+
+[[package]]
 name = "reactor-runtime"
 version = "3.11.5"
 source = { editable = "." }
@@ -1172,20 +1169,20 @@ dependencies = [
 
 [package.optional-dependencies]
 livekit = [
-    { name = "livekit" },
+    { name = "reactor-livekit-transport-client" },
 ]
 
 [package.dev-dependencies]
 dev = [
     { name = "certifi" },
     { name = "httpx" },
-    { name = "livekit" },
     { name = "livekit-api" },
     { name = "opencv-python-headless" },
     { name = "pillow" },
     { name = "psutil" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "reactor-livekit-transport-client" },
     { name = "types-protobuf" },
     { name = "types-pyyaml" },
 ]
@@ -1194,11 +1191,11 @@ dev = [
 requires-dist = [
     { name = "av", specifier = ">=18.0.0" },
     { name = "fastapi", specifier = ">=0.139.0" },
-    { name = "livekit", marker = "extra == 'livekit'", specifier = "==1.2.0" },
     { name = "numpy", specifier = ">=2.1" },
     { name = "prometheus-client", specifier = ">=0.26.0" },
     { name = "protobuf", specifier = ">=7.35.1" },
     { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "reactor-livekit-transport-client", marker = "extra == 'livekit'", specifier = "==1.2.0.post1" },
     { name = "reactor-webrtc", specifier = "==0.24.2" },
     { name = "uvicorn", specifier = ">=0.49.0" },
 ]
@@ -1208,13 +1205,13 @@ provides-extras = ["livekit"]
 dev = [
     { name = "certifi", specifier = ">=2026.10.19" },
     { name = "httpx", specifier = ">=0.28.1" },
-    { name = "livekit", specifier = "==1.2.0" },
     { name = "livekit-api", specifier = ">=1.2.2" },
     { name = "opencv-python-headless", specifier = ">=4.10" },
     { name = "pillow", specifier = ">=10.1" },
     { name = "psutil", specifier = ">=7.0" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "reactor-livekit-transport-client", specifier = "==1.2.0.post1" },
     { name = "types-protobuf" },
     { name = "types-pyyaml", specifier = ">=6.0.12.20260518" },
 ]

@@ -51,16 +51,28 @@ def test_messages_cross_whole_with_their_arrays_inline(
     session, server = links
     audio = np.arange(26880, dtype=np.int16)
 
-    session.send(Hello(slot=1))
-    session.send(Step(request_id=4, timeout=None, payload={"audio": audio}))
-    server.send(Result(request_id=4, output={"echo": audio}))
-    server.send(failure(5, ValueError("bad")))
+    # A frame here is larger than a socketpair's buffer on macOS (8 KiB), so each side
+    # writes from its own thread: a send must not wait on a receive that has not started.
+    def session_sends() -> None:
+        session.send(Hello(slot=1))
+        session.send(Step(request_id=4, timeout=None, payload={"audio": audio}))
+
+    def server_sends() -> None:
+        server.send(Result(request_id=4, output={"echo": audio}))
+        server.send(failure(5, ValueError("bad")))
+
+    senders = [threading.Thread(target=f, daemon=True) for f in (session_sends, server_sends)]
+    for sender in senders:
+        sender.start()
 
     assert server.receive() == Hello(slot=1)
     step = server.receive()
     np.testing.assert_array_equal(step.payload["audio"], audio)
     np.testing.assert_array_equal(session.receive().output["echo"], audio)
     assert session.receive().request_id == 5
+    for sender in senders:
+        sender.join(timeout=5)
+        assert not sender.is_alive()
 
 
 def test_only_protocol_messages_are_sent_or_received(

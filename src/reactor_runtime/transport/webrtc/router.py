@@ -28,9 +28,11 @@ from reactor_runtime.transport.router import (
     OFFERED_CONN_ID_MIN,
     ConnectionIdClaimedError,
     ErrorDetail,
+    IceCredentialsEntry,
     IceServerEntry,
     SessionControl,
     TransportRouter,
+    UdpPort,
     add_session_error_handlers,
 )
 from reactor_runtime.transport.webrtc.acceptor import PortRangeUnavailableError, WebRTCAcceptor
@@ -108,35 +110,6 @@ class TrackMappingEntry(BaseModel):
     direction: str
 
 
-# RFC 8445 §15.4: ice-char = ALPHA / DIGIT / "+" / "/". Anchored, so a value
-# is rejected for containing anything else rather than for merely starting with
-# something valid.
-_ICE_CHAR = r"^[A-Za-z0-9+/]+$"
-
-
-class IceCredentialsEntry(BaseModel):
-    """The ICE credentials a connection should answer with.
-
-    The constraints are RFC 8445 §15.4: both values are ``ice-char``
-    (ALPHA / DIGIT / "+" / "/"), a ufrag is 4..256 of them and a password
-    22..256.
-
-    They are enforced here rather than left to the media engine because of where
-    each failure surfaces. Registering an offer answers 202 and the negotiation
-    runs in the background, so a malformed value rejected downstream reaches the
-    caller only as its answer poll timing out, with the reason in the runtime's
-    logs. Checked here it is a 422 naming the field.
-    """
-
-    ufrag: str = Field(min_length=4, max_length=256, pattern=_ICE_CHAR)
-    pwd: str = Field(min_length=22, max_length=256, pattern=_ICE_CHAR)
-
-
-# A UDP port. Zero is excluded: it asks the kernel for an ephemeral port, which
-# is the one thing a caller pinning a range cannot mean.
-_Port = Annotated[int, Field(ge=1, le=65535)]
-
-
 class SdpParamsRequest(BaseModel):
     """A client's SDP offer, the tracks it declares, and optional overrides.
 
@@ -164,7 +137,7 @@ class SdpParamsRequest(BaseModel):
     track_mapping: list[TrackMappingEntry] = Field(default_factory=list)
     ice_servers: list[IceServerEntry] | None = None
     ice_credentials: IceCredentialsEntry | None = None
-    port_range: tuple[_Port, _Port] | None = None
+    port_range: tuple[UdpPort, UdpPort] | None = None
 
     @model_validator(mode="after")
     def _port_range_is_ordered(self) -> SdpParamsRequest:

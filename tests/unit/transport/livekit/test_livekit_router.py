@@ -1,5 +1,8 @@
 import asyncio
+import importlib.metadata
 import importlib.util
+import logging
+import socket
 from collections.abc import Mapping
 from typing import Any
 
@@ -26,6 +29,7 @@ from reactor_runtime.transport import (
 )
 from reactor_runtime.transport.livekit import LiveKitRouter, livekit_available
 from reactor_runtime.transport.livekit import room as room_module
+from reactor_runtime.transport.livekit import router as router_module
 from reactor_runtime.transport.livekit.room import RoomState
 
 _SID = "s1"
@@ -162,10 +166,12 @@ class FakeRoomSession:
         *,
         on_answer: Any = None,
         ice_servers: Any = (),
+        ice_forwarder: Any = None,
     ) -> None:
         self.conn_id = conn_id
         self.config = config
         self.ice_servers = list(ice_servers)
+        self.ice_forwarder = ice_forwarder
         self.url = url
         self.token = token
         self.state = RoomState.JOINING
@@ -276,6 +282,101 @@ def test_a_room_connection_without_ice_servers_joins_through_the_livekit_server_
 
     (room,) = rooms
     assert room.ice_servers == []
+
+
+_FORWARDER_PWD = "5H4joxyoYh0QO3jpq+iQVPqCuDWPsp4I"
+_FORWARDER = {
+    "addresses": ["203.0.113.10:443", "[2001:db8::1]:443"],
+    "ice_credentials": {"ufrag": "z04yKzdOjjjhPoE5bQE0/NbtKYLwqvo", "pwd": _FORWARDER_PWD},
+    "port": 50001,
+}
+
+
+def test_a_room_connection_joins_through_the_ice_forwarder_the_caller_supplies(
+    rooms: list[FakeRoomSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(router_module, "ice_forwarder_available", lambda: True)
+
+    response = _client(FakeRunner()).post(_CONNECTIONS, json={**_ROOM, "ice_forwarder": _FORWARDER})
+
+    assert response.status_code == 202
+    (room,) = rooms
+    assert room.ice_forwarder.model_dump() == _FORWARDER
+    assert room.ice_servers == []
+
+
+def test_an_ice_forwarder_s_addresses_reach_the_join_in_canonical_form(
+    rooms: list[FakeRoomSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(router_module, "ice_forwarder_available", lambda: True)
+    forwarder = {**_FORWARDER, "addresses": ["203.0.113.10:0443", "[2001:DB8:0::1]:443"]}
+
+    response = _client(FakeRunner()).post(_CONNECTIONS, json={**_ROOM, "ice_forwarder": forwarder})
+
+    assert response.status_code == 202
+    (room,) = rooms
+    assert room.ice_forwarder.addresses == ["203.0.113.10:443", "[2001:db8::1]:443"]
+
+
+def test_an_ice_forwarder_with_an_empty_ice_servers_list_opens(
+    rooms: list[FakeRoomSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(router_module, "ice_forwarder_available", lambda: True)
+    body = {**_ROOM, "ice_forwarder": _FORWARDER, "ice_servers": []}
+
+    response = _client(FakeRunner()).post(_CONNECTIONS, json=body)
+
+    assert response.status_code == 202
+    (room,) = rooms
+    assert room.ice_servers == []
+
+
+def test_an_ice_forwarder_the_runtime_s_sdk_cannot_use_is_refused(
+    rooms: list[FakeRoomSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(router_module, "ice_forwarder_available", lambda: False)
+    runner = FakeRunner()
+
+    response = _client(runner).post(_CONNECTIONS, json={**_ROOM, "ice_forwarder": _FORWARDER})
+
+    assert response.status_code == 400
+    assert "ICE forwarder" in response.json()["detail"]
+    assert _FORWARDER_PWD not in response.text
+    assert _TOKEN not in response.text
+    assert rooms == []
+    assert runner.minted == []
+
+
+def test_an_ice_forwarder_whose_port_another_socket_holds_is_refused(
+    rooms: list[FakeRoomSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(router_module, "ice_forwarder_available", lambda: True)
+    runner = FakeRunner()
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as held:
+        held.bind(("0.0.0.0", 0))
+        port = held.getsockname()[1]
+        forwarder = {**_FORWARDER, "port": port}
+
+        response = _client(runner).post(_CONNECTIONS, json={**_ROOM, "ice_forwarder": forwarder})
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == f"port {port} is already held by another connection"
+    assert _FORWARDER_PWD not in response.text
+    assert _TOKEN not in response.text
+    assert rooms == []
+    assert runner.minted == []
+
+
+def test_an_ice_forwarder_with_ice_servers_is_refused(rooms: list[FakeRoomSession]) -> None:
+    body = {**_ROOM, "ice_forwarder": _FORWARDER, "ice_servers": [{"uris": ["stun:stun.example"]}]}
+
+    response = _client(FakeRunner()).post(_CONNECTIONS, json=body)
+
+    assert response.status_code == 422
+    assert "exclusive" in response.text
+    assert _FORWARDER_PWD not in response.text
+    assert _TOKEN not in response.text
+    assert rooms == []
 
 
 @pytest.mark.parametrize("chosen", [1002, 4999])
@@ -540,6 +641,57 @@ def test_another_session_id_is_not_found(rooms: list[FakeRoomSession]) -> None:
         ({**_ROOM, "connection_id": 10000}, "connection_id"),
         ({**_ROOM, "connection_id": "a room"}, "connection_id"),
         ({**_ROOM, "ice_servers": "turn:turn.example:3478"}, "ice_servers"),
+        ({**_ROOM, "ice_forwarder": {**_FORWARDER, "addresses": []}}, "ice_forwarder"),
+        (
+            {**_ROOM, "ice_forwarder": {**_FORWARDER, "addresses": ["relay.example:443"]}},
+            "ice_forwarder",
+        ),
+        ({**_ROOM, "ice_forwarder": {**_FORWARDER, "addresses": ["0.0.0.0:443"]}}, "ice_forwarder"),
+        (
+            {**_ROOM, "ice_forwarder": {**_FORWARDER, "addresses": ["203.0.113.10"]}},
+            "ice_forwarder",
+        ),
+        (
+            {**_ROOM, "ice_forwarder": {**_FORWARDER, "addresses": ["203.0.113.10:0"]}},
+            "ice_forwarder",
+        ),
+        (
+            {**_ROOM, "ice_forwarder": {**_FORWARDER, "addresses": ["2001:db8::1:443"]}},
+            "ice_forwarder",
+        ),
+        (
+            {**_ROOM, "ice_forwarder": {**_FORWARDER, "addresses": ["[203.0.113.10]:443"]}},
+            "ice_forwarder",
+        ),
+        (
+            {**_ROOM, "ice_forwarder": {**_FORWARDER, "addresses": ["203.0.113.10:٤٤٣"]}},
+            "ice_forwarder",
+        ),
+        (
+            {**_ROOM, "ice_forwarder": {**_FORWARDER, "addresses": ["[fe80::1%eth0]:443"]}},
+            "ice_forwarder",
+        ),
+        ({**_ROOM, "ice_forwarder": {**_FORWARDER, "port": 0}}, "ice_forwarder"),
+        (
+            {
+                **_ROOM,
+                "ice_forwarder": {
+                    **_FORWARDER,
+                    "ice_credentials": {"ufrag": "abc", "pwd": _FORWARDER_PWD},
+                },
+            },
+            "ice_forwarder",
+        ),
+        (
+            {
+                **_ROOM,
+                "ice_forwarder": {
+                    **_FORWARDER,
+                    "ice_credentials": {"ufrag": "abcd:", "pwd": _FORWARDER_PWD},
+                },
+            },
+            "ice_forwarder",
+        ),
         ({**_ROOM, "ice_servers": [{"credentials": _TURN_CREDENTIALS}]}, "ice_servers"),
         (
             {
@@ -560,6 +712,7 @@ def test_a_malformed_body_is_refused_without_repeating_the_token(
     assert response.status_code == 422
     assert _TOKEN not in response.text
     assert _TURN_PASSWORD not in response.text
+    assert _FORWARDER_PWD not in response.text
     assert [error["loc"][:2] for error in response.json()["detail"]] == [["body", field]]
     assert rooms == []
 
@@ -577,3 +730,38 @@ def test_livekit_is_unavailable_when_the_sdk_is_not_installed(
 
 def test_livekit_is_available_in_the_development_environment() -> None:
     assert livekit_available() is True
+
+
+def _installed(monkeypatch: pytest.MonkeyPatch, *names: str) -> None:
+    def version(name: str) -> str:
+        if name not in names:
+            raise importlib.metadata.PackageNotFoundError(name)
+        return "1.2.0"
+
+    monkeypatch.setattr(importlib.metadata, "version", version)
+
+
+def test_mounting_warns_when_both_livekit_distributions_are_installed(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _installed(monkeypatch, "livekit", "reactor-livekit-transport-client")
+
+    with caplog.at_level(logging.WARNING, logger="reactor_runtime.transport.livekit.router"):
+        _client(FakeRunner())
+
+    (warning,) = [r for r in caplog.records if "two distributions" in r.getMessage()]
+    assert warning.__dict__["reactor_fields"]["distributions"] == [
+        "livekit",
+        "reactor-livekit-transport-client",
+    ]
+
+
+def test_mounting_does_not_warn_with_one_livekit_distribution(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _installed(monkeypatch, "reactor-livekit-transport-client")
+
+    with caplog.at_level(logging.WARNING, logger="reactor_runtime.transport.livekit.router"):
+        _client(FakeRunner())
+
+    assert not [r for r in caplog.records if "two distributions" in r.getMessage()]

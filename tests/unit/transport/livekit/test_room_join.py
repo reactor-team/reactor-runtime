@@ -13,6 +13,7 @@ from reactor_runtime.core import ConnId, HealthStatus, TrackDirection, TrackKind
 from reactor_runtime.transport.livekit import LiveKitRouter
 from reactor_runtime.transport.livekit import room as room_module
 from reactor_runtime.transport.livekit.room import RoomSession, RoomState, _masked
+from reactor_runtime.transport.livekit.router import IceForwarderEntry, ice_forwarder_available
 from reactor_runtime.transport.router import IceServerEntry, TurnCredentials
 
 _VIDEO_OUT = {
@@ -132,8 +133,23 @@ _TURN = IceServerEntry(
 _STUN = IceServerEntry(uris=["stun:stun.example:3478"])
 
 
+_FORWARDER = IceForwarderEntry.model_validate(
+    {
+        "addresses": ["203.0.113.10:443", "[2001:db8::1]:443"],
+        "ice_credentials": {
+            "ufrag": "z04yKzdOjjjhPoE5bQE0/NbtKYLwqvo",
+            "pwd": "5H4joxyoYh0QO3jpq+iQVPqCuDWPsp4I",
+        },
+        "port": 50001,
+    }
+)
+
+
 def _session(
-    room: FakeRoom, control: FakeControl, ice_servers: tuple[IceServerEntry, ...] = ()
+    room: FakeRoom,
+    control: FakeControl,
+    ice_servers: tuple[IceServerEntry, ...] = (),
+    ice_forwarder: IceForwarderEntry | None = None,
 ) -> RoomSession:
     return RoomSession(
         ConnId(4711),
@@ -142,6 +158,7 @@ def _session(
         cast(Any, control),
         room=cast(Any, room),
         ice_servers=ice_servers,
+        ice_forwarder=ice_forwarder,
     )
 
 
@@ -249,6 +266,41 @@ async def test_a_refused_connect_keeps_the_turn_credentials_out_of_the_reason() 
     assert (
         session.reason == "the LiveKit room could not be joined: [redacted]:[redacted] was refused"
     )
+
+
+def test_the_installed_sdk_can_send_media_through_an_ice_forwarder() -> None:
+    assert ice_forwarder_available()
+
+
+async def test_the_join_sends_its_media_through_the_caller_s_forwarder() -> None:
+    room, control = FakeRoom(), FakeControl()
+    room.connect_gate.release()
+    session = _session(room, control, ice_forwarder=_FORWARDER)
+
+    session.start()
+    await _settle()
+
+    (options,) = room.connect_options
+    fwd = options.rtc_config.ice_forwarder
+    assert fwd.addresses == ["203.0.113.10:443", "[2001:db8::1]:443"]
+    assert (fwd.credentials.ufrag, fwd.credentials.pwd) == (
+        "z04yKzdOjjjhPoE5bQE0/NbtKYLwqvo",
+        "5H4joxyoYh0QO3jpq+iQVPqCuDWPsp4I",
+    )
+    assert fwd.local_port == 50001
+    assert options.rtc_config.ice_servers == []
+    await session.leave()
+
+
+async def test_a_refused_connect_keeps_the_forwarder_password_out_of_the_reason() -> None:
+    room, control = FakeRoom(), FakeControl()
+    room.connect_gate.release(RuntimeError("bad pwd 5H4joxyoYh0QO3jpq+iQVPqCuDWPsp4I"))
+    session = _session(room, control, ice_forwarder=_FORWARDER)
+
+    session.start()
+    await _settle()
+
+    assert session.reason == "the LiveKit room could not be joined: bad pwd [redacted]"
 
 
 def test_masking_a_secret_that_contains_another_leaves_no_part_of_it() -> None:
