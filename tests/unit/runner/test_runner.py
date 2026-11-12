@@ -87,9 +87,11 @@ from reactor_runtime.recording import ClipResult
 from reactor_runtime.runner.client_stats import ClientStatsGate
 from reactor_runtime.runner.runner import (
     _DRAIN_CLOSE_REASON,
+    _ERROR_TEXT_LIMIT,
     _RUNTIME_STATES,
     SESSION_ID,
     Runner,
+    _error_text,
 )
 from reactor_runtime.runner.session_start import (
     InvalidSessionStartError,
@@ -391,6 +393,10 @@ async def test_start_refuses_a_livekit_block_naming_what_the_model_lacks(
     assert load_failures == []
     assert any("runtime.livekit block does not match" in r.getMessage() for r in caplog.records)
     assert not any("model failed to load" in r.getMessage() for r in caplog.records)
+    # The journal names the mismatch, so a consumer sees it without the log.
+    (failed,) = _moves(runner, SessionEvent.INITIALIZATION_FAIL)
+    assert set(failed.detail) == {"error"}
+    assert failed.detail["error"].startswith("runtime.livekit.")
 
 
 async def test_a_livekit_block_error_from_the_model_itself_is_a_load_failure(
@@ -3147,6 +3153,103 @@ async def test_init_failure_requests_shutdown(monkeypatch: pytest.MonkeyPatch) -
     # A model that refused to load is a clean exit, not a failure: the process
     # had nothing to serve and says so with a zero status.
     assert called == [False]
+
+
+class _ReadOnlyWeights(FakeModel):
+    def load(self, config_path: Path | None) -> None:
+        raise OSError(30, "Read-only file system")
+
+
+class _Silent(FakeModel):
+    def load(self, config_path: Path | None) -> None:
+        raise RuntimeError
+
+
+def _import_fails(ref: str) -> type:
+    raise ModuleNotFoundError("No module named 'tensorrt'")
+
+
+@pytest.mark.parametrize(
+    ("import_model", "error"),
+    [
+        (_import_fails, "No module named 'tensorrt'"),
+        (lambda ref: _ReadOnlyWeights, "[Errno 30] Read-only file system"),
+        # An exception with no message is worded by its repr, not left empty.
+        (lambda ref: _Silent, "RuntimeError()"),
+    ],
+    ids=["import", "load", "no-message"],
+)
+async def test_a_failed_boot_journals_its_error(
+    monkeypatch: pytest.MonkeyPatch, import_model: Callable[[str], type], error: str
+) -> None:
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", import_model)
+    runner = _runner()
+    called: list[bool] = []
+    runner.request_shutdown = lambda *, failure=False: called.append(failure)
+
+    await runner.start()
+    try:
+        (failed,) = _moves(runner, SessionEvent.INITIALIZATION_FAIL)
+        assert failed.detail == {"error": error}
+        assert called == [False]
+    finally:
+        await runner.stop()
+
+
+class _MismatchedCheckpoint(FakeModel):
+    def load(self, config_path: Path | None) -> None:
+        keys = ", ".join(f'"blocks.{index}.attn.weight"' for index in range(2000))
+        raise RuntimeError(f"Error(s) in loading state_dict: Missing key(s): {keys}")
+
+
+async def test_a_long_load_error_is_cut_in_the_journal(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "reactor_runtime.runner.runner.import_model_class", lambda ref: _MismatchedCheckpoint
+    )
+    runner = _runner()
+
+    await runner.start()
+    try:
+        (failed,) = _moves(runner, SessionEvent.INITIALIZATION_FAIL)
+        text = failed.detail["error"]
+        assert text.startswith("Error(s) in loading state_dict: Missing key(s): ")
+        assert text.endswith("… (truncated)")
+        assert len(text) == _ERROR_TEXT_LIMIT
+    finally:
+        await runner.stop()
+
+
+def test_an_error_text_at_the_limit_is_kept_whole() -> None:
+    message = "x" * _ERROR_TEXT_LIMIT
+    assert _error_text(RuntimeError(message)) == message
+
+
+@pytest.mark.parametrize(
+    ("event", "detail", "failure"),
+    [
+        (SessionEvent.EVICTION, {"reason": EndReason.ERROR, "error": "gpu fell off"}, True),
+        (SessionEvent.EVICTION, {"reason": EndReason.EVICTED}, False),
+        (SessionEvent.INITIALIZATION_FAIL, {"error": "weights missing"}, False),
+        # The detail says what happened; it never turns a failed load into a failure.
+        (
+            SessionEvent.INITIALIZATION_FAIL,
+            {"reason": EndReason.ERROR, "error": "weights missing"},
+            False,
+        ),
+    ],
+    ids=["crash", "idle-eviction", "failed-load", "failed-load-with-reason"],
+)
+def test_the_terminal_event_decides_the_exit_status(
+    event: SessionEvent, detail: dict[str, Any], failure: bool
+) -> None:
+    runner = _runner()
+    called: list[bool] = []
+    runner.request_shutdown = lambda *, failure=False: called.append(failure)
+
+    assert runner._sm.send(event, **detail)
+
+    assert runner._sm.current_state is SessionState.TERMINATED
+    assert called == [failure]
 
 
 # --- model run-loop crash -------------------------------------------------

@@ -164,6 +164,27 @@ def _recording_id_from(params: Mapping[str, Any]) -> str:
     return str(params.get("session_id") or uuid.uuid4())
 
 
+# The most characters of an error's text the journal carries. A failed load can
+# raise a message tens of KB long (a strict state-dict load lists every missing
+# and unexpected key), and the journal replays it to every consumer.
+_ERROR_TEXT_LIMIT = 4096
+_TRUNCATED = "… (truncated)"
+
+
+def _error_text(error: BaseException) -> str:
+    """Word *error* for the journal: its message, or its ``repr`` when the message is empty.
+
+    A text longer than :data:`_ERROR_TEXT_LIMIT` characters is cut so that,
+    with the marker that says so, it is exactly that long. The traceback and
+    the whole message stay in the log; the journal carries the words a status
+    can show.
+    """
+    text = str(error) or repr(error)
+    if len(text) > _ERROR_TEXT_LIMIT:
+        return text[: _ERROR_TEXT_LIMIT - len(_TRUNCATED)] + _TRUNCATED
+    return text
+
+
 # How long to wait for an upload's bytes to arrive when a command or notification
 # references it before they are written. A client references an upload over the
 # data channel while its bytes are still being delivered on a separate request,
@@ -441,8 +462,9 @@ class Runner(ServiceComponent, ConnectionSink):
         Bringing the model up is the one step that can fail outright. A failure
         here is terminal for the process — there is no model to serve — so it is
         caught and turned into ``INITIALIZATION_FAIL`` (moving the session to
-        ``TERMINATED``) rather than raised; the dispatch on that move asks the
-        service to bring the process down. ``start`` itself always returns.
+        ``TERMINATED``, with the exception's message as ``detail.error``) rather
+        than raised; the dispatch on that move asks the service to bring the
+        process down. ``start`` itself always returns.
 
         The model load runs off the event loop (it may block while it reads
         weights), so the HTTP surface — already up by the time this runs — stays
@@ -459,16 +481,16 @@ class Runner(ServiceComponent, ConnectionSink):
         self._sm.send(SessionEvent.INITIALIZING)
         started_at = time.monotonic()
 
-        def load_failed() -> None:
+        def load_failed(error: Exception) -> None:
             self._model_metrics.load_failed(since=started_at)
             logger.exception("model failed to load; terminating the session")
-            self._sm.send(SessionEvent.INITIALIZATION_FAIL)
+            self._fail_initialization(error)
 
         try:
             model_cls = import_model_class(self._cfg.model_ref)
             contract = ModelContract.of(model_cls)
-        except Exception:
-            load_failed()
+        except Exception as error:
+            load_failed(error)
             return
         try:
             check_livekit_block(self._cfg.livekit, contract)
@@ -480,7 +502,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 "terminating the session",
                 reason=str(mismatch),
             )
-            self._sm.send(SessionEvent.INITIALIZATION_FAIL)
+            self._fail_initialization(mismatch)
             return
         try:
             model = model_cls()
@@ -502,8 +524,8 @@ class Runner(ServiceComponent, ConnectionSink):
                 step_refusal=self._on_step_refusal,
             )
             bridge.start()
-        except Exception:
-            load_failed()
+        except Exception as error:
+            load_failed(error)
             return
         self._model_metrics.loaded(since=started_at)
         self._bridge = bridge
@@ -1242,11 +1264,15 @@ class Runner(ServiceComponent, ConnectionSink):
         """
         loop = self._loop
         if loop is not None:
-            loop.call_soon_threadsafe(self._evict_on_failure, str(error) or repr(error))
+            loop.call_soon_threadsafe(self._evict_on_failure, _error_text(error))
 
     def _evict_on_failure(self, error: str) -> None:
         """Evict the session to terminated, carrying the crash as its reason."""
         self._sm.send(SessionEvent.EVICTION, reason=EndReason.ERROR, error=error)
+
+    def _fail_initialization(self, error: BaseException) -> None:
+        """End a boot whose model did not come up, carrying the error as its detail."""
+        self._sm.send(SessionEvent.INITIALIZATION_FAIL, error=_error_text(error))
 
     def _on_chunk_ready(self, recording_id: str, idx: int) -> None:
         """Journal a recording segment once it closes, hopping onto the loop.
@@ -2512,12 +2538,12 @@ class Runner(ServiceComponent, ConnectionSink):
         ``CLOSING`` clears the session's uploaded files, tears the connections
         down, and, once they have closed, unwinds the session to ready, carrying
         the end reason through; and entering ``TERMINATED`` asks the service to
-        bring the process down, as a failure when the move carries an error
-        (a crashed model loop) and clean otherwise (a model that refused to
-        load). A crash evicts straight to ``TERMINATED``
-        without passing through ``CLOSING``, so that move runs the same teardown
-        on its way out — minus the ``CLEANUP_COMPLETE`` unwind, which would
-        declare a dead model ready again. Real moves log at info; journal
+        bring the process down, as a failure for an eviction that carries an
+        error (a crashed model loop) and clean for any other end (a model that
+        refused to load, or an idle eviction). A crash evicts straight to
+        ``TERMINATED`` without passing through ``CLOSING``, so that move runs the
+        same teardown on its way out — minus the ``CLEANUP_COMPLETE`` unwind,
+        which would declare a dead model ready again. Real moves log at info; journal
         self-loops log at debug so a per-segment ``chunk_ready`` does not flood
         the log.
 
@@ -2587,11 +2613,15 @@ class Runner(ServiceComponent, ConnectionSink):
                 self._starting_input_done.set()
                 self._spawn_teardown(asyncio.to_thread(self._recorder.stop))
                 self._spawn_teardown(self._connections.close_all())
-            # An eviction carrying an error is a model loop that crashed, and
-            # the process exits as a failure. A failed load is not one: the
-            # process refused to serve before it had anything to serve, and
-            # exits clean.
-            crashed = transition.detail.get("reason") is EndReason.ERROR
+            # The event decides the exit status, so a move's detail only says
+            # what happened. An eviction for an error is a model loop that
+            # crashed, and the process exits as a failure. Any other end exits
+            # clean: a failed load refused to serve before it had anything to
+            # serve, and an idle eviction was asked for.
+            crashed = (
+                transition.event is SessionEvent.EVICTION
+                and transition.detail.get("reason") is EndReason.ERROR
+            )
             self.request_shutdown(failure=crashed)
 
     def _begin_session_inputs(self) -> None:
