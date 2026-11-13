@@ -17,6 +17,7 @@ from contract_helpers import envelope
 from reactor_runtime.core import (
     JOURNAL_EVENTS,
     EndReason,
+    EvictionCause,
     SessionEvent,
     SessionState,
     Transition,
@@ -109,6 +110,10 @@ def test_the_end_reason_wire_values_are_locked() -> None:
         "error",
         "start_refused",
     }
+
+
+def test_the_eviction_cause_wire_values_are_locked() -> None:
+    assert {cause.value for cause in EvictionCause} == {"model_server_lost"}
 
 
 # -- legal edges ----------------------------------------------------------------
@@ -323,7 +328,7 @@ def test_eviction_detail_carries_a_lost_model_server_cause() -> None:
         SessionEvent.EVICTION,
         reason=EndReason.ERROR,
         error="no worker answered",
-        cause="model_server_lost",
+        cause=EvictionCause.MODEL_SERVER_LOST,
     )
     assert payload is not None
     assert payload["detail"] == {

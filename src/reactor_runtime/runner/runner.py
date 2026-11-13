@@ -44,6 +44,7 @@ from reactor_runtime.core import (
     ConnId,
     DecodedStep,
     EndReason,
+    EvictionCause,
     FileUploaded,
     Health,
     HealthStatus,
@@ -184,11 +185,6 @@ def _error_text(error: BaseException) -> str:
     if len(text) > _ERROR_TEXT_LIMIT:
         return text[: _ERROR_TEXT_LIMIT - len(_TRUNCATED)] + _TRUNCATED
     return text
-
-
-# The ``detail.cause`` of a crash's ``eviction`` when the session lost its model
-# server; SessionEvent documents it as part of the journal.
-_MODEL_SERVER_LOST_CAUSE = "model_server_lost"
 
 
 def _lost_model_server(error: BaseException) -> bool:
@@ -1306,7 +1302,7 @@ class Runner(ServiceComponent, ConnectionSink):
         """Evict the session to terminated, carrying the crash as its reason."""
         detail: dict[str, Any] = {"reason": EndReason.ERROR, "error": error}
         if lost_model_server:
-            detail["cause"] = _MODEL_SERVER_LOST_CAUSE
+            detail["cause"] = EvictionCause.MODEL_SERVER_LOST
         self._sm.send(SessionEvent.EVICTION, **detail)
 
     def _fail_initialization(self, error: BaseException) -> None:

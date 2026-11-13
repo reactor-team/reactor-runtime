@@ -45,6 +45,7 @@ from reactor_runtime.core import (
     ConnectionOrigin,
     ConnId,
     EndReason,
+    EvictionCause,
     FileUploaded,
     HealthStatus,
     InputFrame,
@@ -3358,17 +3359,17 @@ _LOST = "model_server_lost: the model server closed the link"
 @pytest.mark.parametrize(
     ("error", "cause"),
     [
-        (ModelServerLost(_LOST), "model_server_lost"),
+        (ModelServerLost(_LOST), EvictionCause.MODEL_SERVER_LOST),
         (
             ModelServerStopping("model_server_lost: the model server is stopping"),
-            "model_server_lost",
+            EvictionCause.MODEL_SERVER_LOST,
         ),
-        (_raised_from(ModelServerLost(_LOST), chain="from"), "model_server_lost"),
-        (_raised_from(ModelServerLost(_LOST), chain="implicit"), "model_server_lost"),
+        (_raised_from(ModelServerLost(_LOST), chain="from"), EvictionCause.MODEL_SERVER_LOST),
+        (_raised_from(ModelServerLost(_LOST), chain="implicit"), EvictionCause.MODEL_SERVER_LOST),
         (_raised_from(ModelServerLost(_LOST), chain="from None"), None),
         (
             ExceptionGroup("step failed", [ValueError("x"), ModelServerLost(_LOST)]),
-            "model_server_lost",
+            EvictionCause.MODEL_SERVER_LOST,
         ),
         (ClientClosed("the model client is closed"), None),
         (_raised_from(ClientClosed("the model client is closed"), chain="from"), None),
@@ -3389,7 +3390,7 @@ _LOST = "model_server_lost: the model server closed the link"
     ],
 )
 async def test_a_crash_names_a_lost_model_server_by_its_type(
-    started_runner: Runner, error: BaseException, cause: str | None
+    started_runner: Runner, error: BaseException, cause: EvictionCause | None
 ) -> None:
     started_runner._on_model_failure(error)
     await asyncio.sleep(0.05)  # let the loop run the scheduled eviction callback
@@ -3401,7 +3402,7 @@ async def test_a_crash_names_a_lost_model_server_by_its_type(
     ]
     assert len(moves) == 1
     assert moves[0].detail["reason"] is EndReason.ERROR
-    assert moves[0].detail.get("cause") == cause
+    assert moves[0].detail.get("cause") is cause
 
 
 def test_a_cycle_in_the_exception_chain_ends_the_search() -> None:

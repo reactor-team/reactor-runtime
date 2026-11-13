@@ -142,11 +142,10 @@ class ModelServerLost(RuntimeError):  # noqa: N818 (named for the event a caller
     that re-raises it ends its session with that message as the error.
     :class:`ClientClosed` says the client is closed.
 
-    A session runtime that crashes with it, directly, under its own exception
-    (``raise WorkerUnavailable(...) from lost``), or through ``crash()``, also
-    journals ``detail.cause`` set to ``model_server_lost`` on its ``eviction``
-    (:class:`~reactor_runtime.core.SessionEvent`), so the platform tells a lost
-    model server from the model's own crash. :class:`ClientClosed` does not.
+    A session runtime that crashes with it, re-raised or wrapped, journals the
+    eviction's ``detail.cause`` as
+    :attr:`~reactor_runtime.core.EvictionCause.MODEL_SERVER_LOST`;
+    :class:`~reactor_runtime.core.SessionEvent` says which shapes count.
     """
 
 
