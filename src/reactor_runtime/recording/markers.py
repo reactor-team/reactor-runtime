@@ -9,7 +9,25 @@ The timeline starts at zero and only moves once the first real frame is fed.
 
 from __future__ import annotations
 
+import math
 import threading
+
+# Slack when rounding the timeline up to a segment boundary. The timeline is a
+# running sum of frame durations, so a position that is exactly on a boundary
+# can land a hair either side of it in floating point.
+_BOUNDARY_EPSILON = 1e-6
+
+
+def end_segment(end: float, chunk_seconds: int) -> int:
+    """Return the index of the segment a range ending at *end* finishes in.
+
+    A range ending on a boundary finishes in the segment before it, including
+    when floating point puts *end* a hair past the boundary. Every place that
+    maps an end marker to a segment uses this, so they all agree.
+    """
+    if chunk_seconds <= 0:
+        return 0
+    return max(0, math.ceil(end / chunk_seconds - _BOUNDARY_EPSILON) - 1)
 
 
 class MarkerBookkeeper:
@@ -37,6 +55,18 @@ class MarkerBookkeeper:
         with self._lock:
             self._media_time += seconds
             self._started = True
+
+    def skip_to_boundary(self, chunk_seconds: int) -> int:
+        """Move the timeline up to the next segment boundary and return its index.
+
+        A position already on a boundary stays where it is. The stretch skipped
+        holds no media: it is the remainder of a segment the recorder sealed
+        early, so the next segment still starts where its index says.
+        """
+        with self._lock:
+            index = math.ceil(self._media_time / chunk_seconds - _BOUNDARY_EPSILON)
+            self._media_time = float(index * chunk_seconds)
+            return index
 
     @property
     def first_real_frame_marker(self) -> float | None:
