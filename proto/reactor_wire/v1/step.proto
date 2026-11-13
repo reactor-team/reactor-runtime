@@ -111,7 +111,7 @@ enum StepFailureCode {
   STEP_FAILURE_CODE_FAILED = 3;
   // The step ran, but its result does not fit in one message on this
   // connection, or the connection refused to send it. It takes a number, and
-  // the result carries no media.
+  // the result carries no media and no data.
   STEP_FAILURE_CODE_RESULT_TOO_LARGE = 4;
   // The handler of one of the request's state keys or commands failed. The
   // calls before it stay applied, the ones after it are skipped, and the step
@@ -154,4 +154,12 @@ message StepResult {
   // the runtime refused: "state.<key>", "commands[<i>]", or
   // "media_input[<i>]". Unset when no single entry is at fault.
   optional string entry = 8;
+  // What the model returned for the step besides its media, opaque to the
+  // transport: bytes the model returned as they are, or a dict it returned
+  // encoded as JSON, the same rule as a frame's metadata. It arrives in this
+  // message, with the step's frames, so a model whose output is data alone
+  // needs no output track. It counts toward the result's size: a result that
+  // does not fit one message on the connection is RESULT_TOO_LARGE and carries
+  // no data. Unset when the model returned none, and when the step failed.
+  optional bytes data = 9;
 }
