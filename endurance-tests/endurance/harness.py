@@ -784,8 +784,10 @@ class StepClient(BareClient):
     close. The client closes without waiting for the unpublish to land, so the
     suite checks only that one of them released it; the unit tests of
     ``StepFrameGate`` check the unpublish alone. A stepped session streams nothing and
-    drops live input, so nothing else is sent. :attr:`unanswered` lists the
-    requests that got no result or a failed one.
+    drops live input, so nothing else is sent. Each result must carry the
+    effect its step applied as its data, which the endurance model returns.
+    :attr:`unanswered` lists the requests that got no result, a failed one, or
+    one with the wrong data.
     """
 
     _clients = itertools.count()
@@ -813,8 +815,9 @@ class StepClient(BareClient):
             frames = (_raw_frame(webcam), _h264_frame(webcam))
             for n in range(STEPS_PER_CYCLE):
                 request_id = f"step-{n}"
+                effect = _EFFECTS[n % len(_EFFECTS)]
                 state = struct_pb2.Struct()
-                state.update({"effect": _EFFECTS[n % len(_EFFECTS)]})
+                state.update({"effect": effect})
                 self._data.send(
                     data_pb2.DataClientMessage(
                         request_id=request_id,
@@ -833,6 +836,8 @@ class StepClient(BareClient):
                     unanswered.append(f"request_step ({request_id}): no reply")
                 elif result.failure_code:
                     unanswered.append(f"request_step ({request_id}): {result.error}")
+                elif result.data != _step_data(effect):
+                    unanswered.append(f"request_step ({request_id}): data {result.data!r}")
                 else:
                     ran += 1
             if publishes:
@@ -879,6 +884,11 @@ class StepClient(BareClient):
         if message.WhichOneof("payload") == "step_result":
             with self._lock:
                 self._results[message.request_id] = message.step_result
+
+
+def _step_data(effect: str) -> bytes:
+    """Return the data the endurance model returns with a step that applied *effect*."""
+    return json.dumps({"effect": effect}, separators=(",", ":")).encode("utf-8")
 
 
 def _h264_frame(rgb: np.ndarray) -> step_pb2.Frame:

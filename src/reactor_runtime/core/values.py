@@ -625,6 +625,8 @@ class CompletedStep:
         files: Extra files the model keeps with the step, keyed by file name.
         error: Why the step failed, or ``None`` when it worked.
         elapsed: Wall-clock seconds the step took, when measured.
+        data: The encoded data the model returned with the step, which its
+            step result carries, or ``None`` when it returned none.
         session: The session the step belongs to, as the number of session
             starts the model had received when the step began. The runtime
             counts the session starts it posts the same way, so it can tell a
@@ -643,6 +645,7 @@ class CompletedStep:
     files: Mapping[str, bytes] = field(default_factory=dict)
     error: str | None = None
     elapsed: float | None = None
+    data: bytes | None = field(default=None, kw_only=True)
     session: int = 0
     fps: float = 30.0
     stages: Mapping[str, float] = field(default_factory=dict)

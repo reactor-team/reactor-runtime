@@ -3,6 +3,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import pytest
@@ -148,6 +149,16 @@ def test_emit_raises_on_metadata_the_wire_cannot_take() -> None:
     _capture_media(core)
     payload = TrackPayload(np.zeros((4, 4, 3), dtype=np.uint8), metadata={"when": object()})
     with pytest.raises(ValueError, match="not JSON-serialisable"):
+        asyncio.run(core.emit(Out(main=payload)))
+
+
+def test_emit_names_the_track_on_metadata_that_refers_to_itself() -> None:
+    core = OutputOnlyCore()
+    _capture_media(core)
+    metadata: dict[str, Any] = {}
+    metadata["self"] = metadata
+    payload = TrackPayload(np.zeros((4, 4, 3), dtype=np.uint8), metadata=metadata)
+    with pytest.raises(ValueError, match="track 'main' metadata is not JSON-serialisable"):
         asyncio.run(core.emit(Out(main=payload)))
 
 

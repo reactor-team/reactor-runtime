@@ -276,7 +276,7 @@ class _EncodedResult:
     """A requested step's result as the model's thread encoded it, without its files.
 
     Exactly one is set: *frame*, the v1 frame ready to send; *oversized*, the
-    size of media that does not fit the connection, never copied; or *error*,
+    size of media and data that does not fit the connection, never copied; or *error*,
     why the media cannot be carried as frames.
     """
 
@@ -1089,6 +1089,8 @@ class Runner(ServiceComponent, ConnectionSink):
         gets the finished frame. Media larger than the connection took when the
         request was admitted is not copied at all. The step's files are left
         out, since whether the step store takes the step is decided on the loop.
+        The data the model returned with the step counts toward the result's
+        size beside its media.
 
         Returns:
             The encoded result, or ``None`` for a step no client requested.
@@ -1097,7 +1099,9 @@ class Runner(ServiceComponent, ConnectionSink):
         if request is None:
             return None
         limit = request.max_message_size
-        size = media_size(step.bundle)
+        # A failed step's result carries no data, so its data takes no room.
+        data = step.data if step.error is None else None
+        size = media_size(step.bundle) + len(data or b"")
         if limit is not None and size > limit:
             return _EncodedResult(oversized=size)
         try:
@@ -1111,6 +1115,7 @@ class Runner(ServiceComponent, ConnectionSink):
             # measures the step, so a missing time does not happen in practice.
             elapsed_seconds=step.elapsed or 0.0,
             error=step.error,
+            data=data,
             failure_code=(
                 step_pb2.STEP_FAILURE_CODE_FAILED
                 if step.error is not None
@@ -2113,13 +2118,14 @@ class Runner(ServiceComponent, ConnectionSink):
     ) -> None:
         """Answer a requested step with its result, built from the step's report.
 
-        The result is the report's media, one entry per output track, so what
-        the client receives is what the step reported and what a saved step
-        keeps, with the seconds its ``generate()`` took (or what the model
-        reported), the same measurement a saved step records as
-        ``generate_s``. When the step store took the step (*saved*), the
-        result names each extra file the model kept with it, which the client
-        reads from the session's step results; the bytes stay out of the
+        The result is the report's media, one entry per output track, and the
+        data the model returned with it, so what the client receives is what
+        the step reported and, for its media, what a saved step keeps, with
+        the seconds its ``generate()`` took (or what the model reported), the
+        same measurement a saved step records as ``generate_s``. When the step
+        store took the step (*saved*), the result names each extra file the
+        model kept with it, which the client reads from the session's step
+        results; the bytes stay out of the
         message, so a file counts toward the message's size only by its name,
         media type, and size. It goes out as one message, before the store has
         written the step: the files are readable once the step's
@@ -2130,8 +2136,9 @@ class Runner(ServiceComponent, ConnectionSink):
         whose model reported a failure answers ``FAILED`` with the model's
         message, as does one whose media cannot be carried as frames. One whose
         result is larger than the connection takes, by its own limit or by the
-        media engine's refusal, answers ``RESULT_TOO_LARGE`` with no media or
-        files, and the session goes on.
+        media engine's refusal, answers ``RESULT_TOO_LARGE`` with no media,
+        data, or files, and the session goes on. A failed step's result carries
+        no data.
 
         *encoded* is the result the model's thread encoded (see
         :meth:`_encode_step_result`); without it, it is encoded here.
@@ -2176,7 +2183,7 @@ class Runner(ServiceComponent, ConnectionSink):
             self._connections.send_step_reply(request.conn_id, lambda _: (Channel.DATA, failed))
             return
         if encoded.frame is None:
-            # Frames alone that outgrow one message were never copied.
+            # Media and data that alone outgrow one message were never copied.
             answer = too_large(encoded.oversized, at_least=True)
             self._connections.send_step_reply(request.conn_id, lambda _: (Channel.DATA, answer))
             return

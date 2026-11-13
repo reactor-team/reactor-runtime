@@ -244,8 +244,9 @@ class ReactorApp(ReactorCore):
         emitted and the time ``generate()`` took. Return a
         :class:`StepCompleted` instead to write that report: the loop emits its
         ``output`` and reports it as given, with the measured time when its
-        ``elapsed`` is unset. Use this to keep extra ``files`` with the step, or
-        to mark a recovered step with an ``error``.
+        ``elapsed`` is unset. Use this to keep extra ``files`` with the step, to
+        return ``data`` with a requested step's result, or to mark a recovered
+        step with an ``error``.
 
         Runs under the step lock.
 

@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
-import json
 import logging
 import math
 import threading
@@ -42,6 +41,7 @@ from reactor_runtime.core.values import (
 from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.input_buffer import InputBuffer
 from reactor_runtime.interface.tracks import MediaInput, Metadata, Output
+from reactor_runtime.interface.tracks.output import encode_metadata
 
 if TYPE_CHECKING:
     # The app package imports this module, so the step type is named for the
@@ -521,6 +521,8 @@ class ReactorCore:
         if self._out_step is None:
             return
         bundle = self._to_bundle(step.output) if step.output is not None else None
+        data = step.data
+        assert data is None or isinstance(data, bytes), "StepCompleted encodes its data when built"
         if fps is None:
             fps = self._last_emit_fps if self._last_emit_fps is not None else float(self.fps)
         self._out_step(
@@ -529,6 +531,7 @@ class ReactorCore:
                 files=dict(step.files),
                 error=step.error,
                 elapsed=step.elapsed,
+                data=data,
                 session=session,
                 fps=fps,
                 stages=dict(stages or {}),
@@ -888,9 +891,7 @@ def _encode_metadata(
 
 def _encode_frame_metadata(track: str, metadata: Metadata) -> bytes:
     """Encode one frame's metadata, leaving bytes the author built untouched."""
-    if isinstance(metadata, bytes):
-        return metadata
     try:
-        return json.dumps(metadata, separators=(",", ":")).encode("utf-8")
-    except TypeError as exc:
+        return encode_metadata(metadata)
+    except (TypeError, ValueError) as exc:
         raise ValueError(f"track '{track}' metadata is not JSON-serialisable: {exc}") from exc
