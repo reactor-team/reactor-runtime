@@ -67,6 +67,14 @@ class CommandOutcome:
         """Return a rejected outcome carrying the failing field and reason."""
         return cls(accepted=False, field=field, reason=reason)
 
+    def refusal(self, key: str) -> str:
+        """Return why the command written under *key* failed the contract."""
+        reason = str(self.reason)
+        # A constraint's reason already opens with the field it names.
+        if not reason.startswith(f"{self.field}:"):
+            reason = f"{self.field}: {reason}"
+        return f"{key} is refused: {reason}"
+
 
 class ModelBridge:
     """The one boundary between the runner and the model.
