@@ -495,7 +495,7 @@ def test_a_step_result_without_a_step_number_reads_as_zero() -> None:
     assert not decoded.step_result.HasField("entry")
 
 
-def test_a_step_result_without_data_encodes_as_it_did_before_the_field() -> None:
+def test_a_step_result_without_data_has_no_data_tag() -> None:
     result = step_pb2.StepResult(step=1, elapsed_seconds=0.5)
     # Field 1 (varint 1), then field 3 (fixed64 0.5): no tag for data.
     assert result.SerializeToString() == b"\x08\x01\x19" + struct.pack("<d", 0.5)

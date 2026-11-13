@@ -156,9 +156,8 @@ message StepResult {
   optional string entry = 8;
   // What the model returned for the step besides its media, opaque to the
   // transport: bytes the model returned as they are, or a dict it returned
-  // encoded as JSON, the same rule as a frame's metadata. It arrives in this
-  // message, with the step's frames, so a model whose output is data alone
-  // needs no output track. It counts toward the result's size: a result that
+  // encoded as UTF-8 JSON. It arrives in this message, with the step's frames,
+  // so a model whose output is data alone needs no output track. It counts toward the result's size: a result that
   // does not fit one message on the connection is RESULT_TOO_LARGE and carries
   // no data. Unset when the model returned none, and when the step failed.
   optional bytes data = 9;
