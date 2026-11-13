@@ -216,8 +216,6 @@ async def _published_then_reoffered(
     async with _wire(http, cid, method="POST") as first:
         peers.append(first)
         await first.wire_open()
-        # Registration follows the data channel opening on the runtime's loop.
-        await asyncio.sleep(0.5)
         reply = await first.publish("webcam", "first")
         assert "error" not in reply, f"the first publish was refused: {reply}"
 
@@ -251,6 +249,8 @@ async def test_a_track_published_before_a_reoffer_is_granted_again_on_the_new_wi
             async with stack:
                 second = peers[-1]
                 await second.wire_open()
+                # Not needed for ordering (see the next test): it publishes on a
+                # wire that has settled, where the next test publishes at open.
                 await asyncio.sleep(0.5)
                 reply = await second.publish("webcam", "again")
                 assert "error" not in reply, f"the publish after the reconnect was refused: {reply}"
@@ -270,6 +270,12 @@ async def test_a_publish_sent_the_moment_the_new_wire_opens_is_granted() -> None
     between. That request must be served by the connection the re-offer
     registered, which holds nothing yet, rather than refused for a track the
     replaced wire published.
+
+    That ordering is the runtime peer's, not loop timing: it holds every inbound
+    frame that arrives before it counts the wire open, and schedules the held
+    frames on the loop right behind its connected callback. That callback
+    registers the connection, which releases the replaced handle's tracks, so
+    the publish is handled only after the re-offered connection is registered.
     """
     peers: list[_Peer] = []
     try:
