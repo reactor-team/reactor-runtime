@@ -145,6 +145,8 @@ logger.info("scene changed", prompt=self.prompt)
 
 Records render as `key=value` text, or as one JSON object per line under `REACTOR_LOG_FORMAT=json`. Every record written during a session carries its id and the runtime's lifecycle state, including the records of `logging.getLogger()` and of the libraries your model imports.
 
+Models can read deployment-managed secrets from the environment.
+
 ## Install
 
 Everything runs through the [`reactor` CLI](https://docs.reactor.inc/deploy/platform/installation). There is nothing to install on your host but the CLI and Docker; the runtime ships inside the image the CLI builds for your workspace.

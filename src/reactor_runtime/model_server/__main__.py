@@ -23,6 +23,7 @@ from reactor_runtime.http import HealthServer
 from reactor_runtime.manifest import load_workspace
 from reactor_runtime.model_server.config import server_process_config
 from reactor_runtime.model_server.process import ModelServerProcess
+from reactor_runtime.secrets import export_secrets
 from reactor_runtime.service import Service
 
 
@@ -30,12 +31,14 @@ def main() -> int:
     """Load the model half and serve it until the process is asked to stop; return the exit status.
 
     Raises:
-        SystemExit: No ``reactor.yaml``, no ``runtime.model_server`` block, a required
-            variable unset, or a malformed value, naming it.
+        SystemExit: Mounted secrets that fail a check, no ``reactor.yaml``, no
+            ``runtime.model_server`` block, a required variable unset, or a malformed
+            value, naming it.
     """
     log.configure(level=log_level_from_env())
     log.set_process(role="model_server")
     log.set_state(None, RuntimeState.LOADING.value)
+    export_secrets()
     cfg = load_workspace()
     if cfg.model_server is None:
         raise SystemExit("reactor.yaml has no runtime.model_server block naming the model half")
