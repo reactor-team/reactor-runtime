@@ -966,6 +966,87 @@ def test_a_watcher_is_told_of_each_input_a_closed_holder_held() -> None:
     assert watcher.freed == ["camera", "mic"]
 
 
+def test_a_reconnect_releases_the_tracks_so_the_new_handle_can_publish_them() -> None:
+    cm, _ = waiting_manager()
+    first = FakeConnection(1)
+    cm.register(first)
+    assert cm.publish_track(ConnId(1), "webcam") is True
+
+    replacement = FakeConnection(1)
+    cm.register(replacement)
+
+    assert cm.publish_track(ConnId(1), "webcam") is True
+    assert replacement.resumed == ["webcam"]
+    assert first.paused == []
+
+
+def test_a_reconnect_tells_each_watcher_of_each_track_it_released() -> None:
+    cm, _ = waiting_manager()
+    watcher = WatchingConnection(2)
+    cm.register(FakeConnection(1))
+    cm.register(watcher)
+    cm.publish_track(ConnId(1), "webcam")
+    cm.publish_track(ConnId(1), "mic")
+
+    cm.register(FakeConnection(1))
+
+    assert watcher.freed == ["webcam", "mic"]
+
+
+def test_a_reconnecting_watcher_is_not_told_of_the_tracks_its_own_id_released() -> None:
+    cm, _ = waiting_manager()
+    first = WatchingConnection(1)
+    cm.register(first)
+    cm.publish_track(ConnId(1), "webcam")
+
+    replacement = WatchingConnection(1)
+    cm.register(replacement)
+
+    assert first.freed == []
+    assert replacement.freed == []
+
+
+def test_a_reconnect_keeps_the_tracks_other_connections_hold() -> None:
+    cm, _ = waiting_manager()
+    watcher = WatchingConnection(3)
+    for conn in (FakeConnection(1), FakeConnection(2), watcher):
+        cm.register(conn)
+    cm.publish_track(ConnId(1), "webcam")
+    cm.publish_track(ConnId(2), "mic")
+
+    cm.register(FakeConnection(1))
+
+    assert watcher.freed == ["webcam"]
+    assert cm.publish_track(ConnId(1), "mic") is False
+    assert cm.publish_track(ConnId(3), "mic") is False
+
+
+def test_a_reconnect_that_releases_tracks_does_not_re_drive_the_session() -> None:
+    cm, sm = waiting_manager()
+    cm.register(FakeConnection(1))
+    cm.publish_track(ConnId(1), "webcam")
+    seen: list[Transition] = []
+    sm.on_transition(seen.append)
+
+    cm.register(FakeConnection(1))
+
+    assert seen == []
+    expect_state(sm, SessionState.STREAMING)
+
+
+def test_registering_the_same_handle_again_keeps_its_tracks() -> None:
+    cm, _ = waiting_manager()
+    conn, watcher = FakeConnection(1), WatchingConnection(2)
+    cm.register(conn)
+    cm.register(watcher)
+    cm.publish_track(ConnId(1), "webcam")
+
+    cm.register(conn)
+
+    assert watcher.freed == []
+    assert cm.publish_track(ConnId(2), "webcam") is False
+
+
 def test_keepalive_does_not_advance_the_session() -> None:
     cm, sm = waiting_manager()
     cm.register(FakeConnection(1))

@@ -7,6 +7,10 @@ connection to arrive moves it to streaming, the last to leave moves it to orphan
 and every open and close in between rides the machine as a self-loop the runner
 turns into a client event.
 
+Published tracks belong to a connection's wire, not to its id. A reconnect that
+re-registers an id with a new handle releases the tracks the id held, and the
+client publishes them again on the new wire.
+
 It is deliberately wire-blind. Connections enter as the neutral ``Connection``
 shape and the manager only ever calls that shape — it never asks which transport
 produced a connection, which is exactly what lets one session mix transports.
@@ -335,6 +339,12 @@ class ConnectionManager:
         replaces the handle without re-driving the session — connection identity
         across a reconnect is the transport's concern, not the manager's.
 
+        A new handle on a known id is a reconnect, and a published track does
+        not survive it: every track the id held is released, and each
+        :class:`InputTrackWatcher` is told, as when the connection drops. The
+        client publishes its tracks again on the new handle. Registering the
+        same handle again changes nothing.
+
         The ``CONNECTION_OPENED`` detail carries the connection's id, and the
         origin a :class:`~reactor_runtime.core.ConnectionOriginSource` names:
         ``system``, ``transport``, and ``identity``. The connection's close
@@ -349,9 +359,11 @@ class ConnectionManager:
                 client, but its open and its later close are self-loops that
                 leave the session in the state it was in.
         """
-        known = conn.id in self._by_id
+        previous = self._by_id.get(conn.id)
+        if previous is not None and previous is not conn:
+            self._release_tracks(conn.id)
         self._by_id = {**self._by_id, conn.id: conn}
-        if known:
+        if previous is not None:
             return
         detail = _connection_detail(conn, system)
         self._details[conn.id] = detail
@@ -386,11 +398,19 @@ class ConnectionManager:
             self._sm.send_without_occupancy(SessionEvent.CONNECTION_CLOSED, **detail)
         else:
             self._sm.send(SessionEvent.CONNECTION_CLOSED, **detail)
+        self._release_tracks(cid)
+
+    def _release_tracks(self, cid: ConnId) -> None:
+        """Free every track *cid* holds and tell each other watcher, without pausing a wire.
+
+        The connection releasing its tracks is not told: on a reconnect its old
+        handle is still registered when the release runs.
+        """
         held = [name for name, owner in self._publishers.items() if owner == cid]
         for name in held:
             del self._publishers[name]
         for name in held:
-            self._announce_input_freed(name)
+            self._announce_input_freed(name, skip=cid)
 
     async def close_all(self) -> None:
         """Close every connection and empty the registry, for session teardown.
@@ -420,7 +440,9 @@ class ConnectionManager:
         First publisher wins: the claim is granted only when the track is unheld
         and the connection is registered, in which case the connection's outbound
         track is resumed. A claim on a track already held — by any connection,
-        including the same one — is refused.
+        including the same one — is refused. A reconnect that registers a new
+        handle on the connection's id releases what it held, so the client
+        publishes its tracks again after a reconnect and the claim is granted.
 
         Returns:
             ``True`` when the slot was granted, ``False`` when refused.
@@ -448,10 +470,13 @@ class ConnectionManager:
             conn.pause_track(name)
         self._announce_input_freed(name)
 
-    def _announce_input_freed(self, name: str) -> None:
-        """Tell each connection that watches input tracks that *name* is free."""
+    def _announce_input_freed(self, name: str, *, skip: ConnId | None = None) -> None:
+        """Tell each connection that watches input tracks that *name* is free.
+
+        A connection whose id is *skip* is not told.
+        """
         for conn in list(self._by_id.values()):
-            if not isinstance(conn, InputTrackWatcher):
+            if conn.id == skip or not isinstance(conn, InputTrackWatcher):
                 continue
             try:
                 conn.input_track_freed(name)
