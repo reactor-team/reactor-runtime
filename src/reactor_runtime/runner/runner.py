@@ -95,7 +95,7 @@ from reactor_runtime.runner.session_start import (
 )
 from reactor_runtime.runner.stages import RunnerStages
 from reactor_runtime.runner.state_machine import SessionStateMachine
-from reactor_runtime.runner.stepped import EncodedResult, StepHost, StepRequests, refused
+from reactor_runtime.runner.stepped import EncodedResult, StepHost, StepRequests
 from reactor_runtime.runner.system_client import SYSTEM_CONN_ID, SystemConnection
 from reactor_runtime.runner.upload_resolution import declares_upload, resolve_uploads
 from reactor_runtime.service import ShutdownHook, no_shutdown
@@ -1340,7 +1340,7 @@ class Runner(ServiceComponent, ConnectionSink):
         for key, name, args in checks:
             outcome = self._bridge.check_command(name, args)
             if not outcome.accepted:
-                return refused(key, outcome)
+                return outcome.refusal(key)
         return None
 
     def stop_session(self, *, moderated: bool = False, reason: str = "") -> None:

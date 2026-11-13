@@ -21,9 +21,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 import numpy.typing as npt
@@ -35,13 +42,13 @@ from reactor_runtime.core import (
     StepRefusal,
     StepRefusalKind,
     TrackDirection,
+    TrackInfo,
     TrackKind,
 )
-from reactor_runtime.interface.internal.bridge import CommandOutcome, ModelBridge
-from reactor_runtime.interface.internal.reactor_core import FrameSource
+from reactor_runtime.interface.internal.bridge import CommandOutcome
+from reactor_runtime.interface.internal.reactor_core import FrameSource, RequestId
 from reactor_runtime.log import get_logger
 from reactor_runtime.message_gateway import InboundStep
-from reactor_runtime.metrics import CommandMetrics
 from reactor_runtime.protocol import Channel, Codec, ProtocolVersion, select
 from reactor_runtime.protocol.frames import (
     FrameEncodingError,
@@ -51,7 +58,6 @@ from reactor_runtime.protocol.frames import (
     media_size,
     track_frames,
 )
-from reactor_runtime.runner.connection_manager import ConnectionManager
 from reactor_runtime.runner.session_start import Generation
 from reactor_runtime.step_results import content_type_of
 from reactor_runtime.upload_store import UnknownUploadError
@@ -95,15 +101,6 @@ class StepInputError(ValueError):
         self.entry = entry
 
 
-def refused(key: str, outcome: CommandOutcome) -> str:
-    """Return why the command written under *key* failed the contract."""
-    reason = str(outcome.reason)
-    # A constraint's reason already opens with the field it names.
-    if not reason.startswith(f"{outcome.field}:"):
-        reason = f"{outcome.field}: {reason}"
-    return f"{key} is refused: {reason}"
-
-
 def step_file_refs(step: CompletedStep) -> list[step_pb2.StepFileRef]:
     """Reference each extra file a saved step keeps, as its step result is saved.
 
@@ -115,6 +112,88 @@ def step_file_refs(step: CompletedStep) -> list[step_pb2.StepFileRef]:
         step_pb2.StepFileRef(name=name, content_type=content_type_of(name), size=len(data))
         for name, data in step.files.items()
     ]
+
+
+class Journal(Protocol):
+    """Records a session event on the runner's journal, as its state machine's ``send``."""
+
+    def __call__(self, event: SessionEvent, /, **detail: Any) -> object:
+        """Record *event*, with its *detail*."""
+        ...
+
+
+class StepConnections(Protocol):
+    """What the stepped path reads from, and sends on, the runner's connections."""
+
+    def message_chunking(self, cid: ConnId) -> bool:
+        """Whether a connection negotiated chunked messages."""
+        ...
+
+    def max_message_size(self, cid: ConnId) -> int | None:
+        """Return the largest message a connection takes; ``None`` when unknown."""
+        ...
+
+    def send_step_reply(
+        self, cid: ConnId, encode: Callable[[ProtocolVersion], tuple[Channel, bytes | str]]
+    ) -> None:
+        """Send a reply to a step request on the data channel."""
+        ...
+
+    async def send_step_result(
+        self, cid: ConnId, frame: bytes, too_large: Callable[[int], bytes]
+    ) -> None:
+        """Send a step's encoded result, or the one *too_large* renders when it does not fit."""
+        ...
+
+
+class StepMetrics(Protocol):
+    """The command instruments a step request's calls are counted on."""
+
+    def accepted(self, command: str, *, since: float) -> None:
+        """Count a command the model took."""
+        ...
+
+    def rejected(self, command: str, *, since: float) -> None:
+        """Count a command the contract refused."""
+        ...
+
+    def unresolved_upload(self, command: str) -> None:
+        """Count a command dropped because an upload it references never arrived."""
+        ...
+
+
+class StepContract(Protocol):
+    """What the stepped path reads from the model's contract."""
+
+    @property
+    def tracks(self) -> Mapping[str, TrackInfo]:
+        """The model's media tracks, by name."""
+        ...
+
+
+class StepBridge(Protocol):
+    """What the stepped path reads from, and hands to, the loaded model's bridge."""
+
+    @property
+    def contract(self) -> StepContract:
+        """The model's contract."""
+        ...
+
+    def input_overflow(self, track: str, frames: int, samples: int = 0) -> str | None:
+        """Say how *track*'s input buffer is bounded, when *frames* do not fit it together."""
+        ...
+
+    def submit_step(
+        self,
+        calls: Sequence[tuple[str, str, dict[str, Any]]],
+        media_input: Mapping[str, Sequence[FrameSource]],
+        *,
+        conn_id: ConnId,
+        request_id: RequestId,
+        max_message_size: int | None = None,
+    ) -> tuple[str, CommandOutcome] | None:
+        """Admit a step request's calls and its step, or return the first call that fails."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -143,17 +222,17 @@ class StepHost:
         spawn: Run a coroutine as a task the runner tracks.
     """
 
-    bridge: Callable[[], ModelBridge | None]
+    bridge: Callable[[], StepBridge | None]
     session_running: Callable[[], bool]
     generation: Callable[[], Generation]
     sessions_posted: Callable[[], int]
     starting_input_done: Callable[[], asyncio.Event]
-    connections: ConnectionManager
-    journal: Callable[..., object]
+    connections: StepConnections
+    journal: Journal
     resolve_uploads: Callable[
         [str, Mapping[str, Any], Mapping[str, str], float], Awaitable[dict[str, Any]]
     ]
-    command_metrics: CommandMetrics
+    command_metrics: StepMetrics
     command_label: Callable[[str], str]
     codec_for: Callable[[ProtocolVersion], Codec]
     spawn: Callable[[Coroutine[Any, Any, None]], None]
@@ -280,7 +359,7 @@ class StepRequests:
             )
             return
 
-        def refuse(entry: str, reason: str) -> None:
+        def refuse_entry(entry: str, reason: str) -> None:
             self._host.journal(SessionEvent.ERROR, message=f"step request: {reason}")
             self.refuse(step.conn_id, step.request_id, reason, entry=entry)
 
@@ -298,13 +377,13 @@ class StepRequests:
                 resolved = await self._host.resolve_uploads(name, args, uploads, self._upload_wait)
             except UnknownUploadError:
                 self._host.command_metrics.unresolved_upload(self._host.command_label(name))
-                refuse(key, f"{key} references an unresolved upload")
+                refuse_entry(key, f"{key} references an unresolved upload")
                 return
             calls.append((key, name, resolved))
         try:
             media_input = self.check_media_input(step.media_input, step.pictures)
         except StepInputError as error:
-            refuse(error.entry, str(error))
+            refuse_entry(error.entry, str(error))
             return
         # Nothing awaits from here to the step, so the whole request is posted
         # or none of it is.
@@ -321,7 +400,7 @@ class StepRequests:
             self._host.command_metrics.rejected(
                 self._host.command_label(name), since=step.received_at
             )
-            refuse(key, refused(key, outcome))
+            refuse_entry(key, outcome.refusal(key))
             return
         # Counted and journalled as a client's own command is, so a step's
         # calls show up in the same metrics and errors.
