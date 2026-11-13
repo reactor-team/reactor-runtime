@@ -276,7 +276,10 @@ Each names the public symbol whose docstring states it.
 - **`process_output()` returns `Output | StepCompleted | None`**
   (`reactor_runtime.ReactorApp.process_output`). Return
   `reactor_runtime.StepCompleted` when a step's report to a step-count session
-  should carry more than the frames.
+  should carry more than the frames, or when a requested step answers with
+  data: its `data` (bytes, or a dict sent as JSON) reaches the requesting
+  client in the step's result, so a model whose output is data alone declares
+  no output track.
 - **`self.output.flush(hold=True)`** drops queued frames and keeps the last one
   on screen instead of cutting to black; `flush()` cuts.
 - **The system client.** A session started with a starting input or a step
@@ -304,6 +307,11 @@ Each names the public symbol whose docstring states it.
 - **A failed load says why on `/events`.** Its `initialization_fail` carries
   the exception's message in `detail.error`, as a crash's `eviction` does
   (`reactor_runtime.core.SessionEvent`); the traceback stays in the log.
+- **Managed secrets are in the environment before the model imports.** A
+  secret mounted under `/run/secrets` and named in
+  `REACTOR_SECRETS_EXPECTED_KEYS` is in `os.environ` by the time the model
+  module imports, so read a token with `os.environ`, never from the mount; a
+  mount that does not match the list stops startup (`reactor_runtime.secrets`).
 - **Step count cap.** A session started with a step count takes at most
   `reactor_runtime.runner.session_start.MAX_STEPS` steps (10,000).
 - **Logging** goes through `reactor_runtime.get_logger`, never `print()`.
