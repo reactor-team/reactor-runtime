@@ -29,6 +29,7 @@ def encode_metadata(metadata: Metadata) -> bytes:
 
     Raises:
         TypeError: A mapping holds a value JSON cannot represent.
+        ValueError: A mapping refers to itself.
     """
     if isinstance(metadata, bytes):
         return metadata

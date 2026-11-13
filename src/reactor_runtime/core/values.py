@@ -645,7 +645,7 @@ class CompletedStep:
     files: Mapping[str, bytes] = field(default_factory=dict)
     error: str | None = None
     elapsed: float | None = None
-    data: bytes | None = None
+    data: bytes | None = field(default=None, kw_only=True)
     session: int = 0
     fps: float = 30.0
     stages: Mapping[str, float] = field(default_factory=dict)

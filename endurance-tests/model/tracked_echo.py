@@ -22,8 +22,8 @@ import weakref
 
 import numpy as np
 
-from echo import Echo, EchoOutput
-from reactor_runtime import StepOutcome, TrackPayload
+from echo import Echo
+from reactor_runtime import StepCompleted, StepOutcome, TrackPayload
 
 BURST = int(os.environ.get("ENDURANCE_BURST", "30"))
 
@@ -87,21 +87,25 @@ def freed_by_gc() -> int:
 
 
 class TrackedEcho(Echo):
-    """Echo at a fixed burst, recording a weak reference to each batch it emits."""
+    """Echo at a fixed burst, recording a weak reference to each batch it emits.
 
-    async def process_output(self, outcome: StepOutcome) -> EchoOutput | None:
+    Every step also returns the effect it applied as its data, which a stepped
+    client reads back from the step's result.
+    """
+
+    # Echo narrows the hook to its output; the runtime calls it as ReactorApp's,
+    # which takes a StepCompleted.
+    async def process_output(self, outcome: StepOutcome) -> StepCompleted:  # ty: ignore[invalid-method-override]
         """Emit as echo does, at the fixed burst, tracking each batch."""
         self.state.burst = BURST
         output = await super().process_output(outcome)
+        data = {"effect": self.state.effect}
         if output is None:
-            return None
+            return StepCompleted(data=data)
         video = output.main_video
         # A batch with metadata comes wrapped in a TrackPayload.
         if isinstance(video, TrackPayload):
-            batch = video.data
+            track(video.data)
         elif isinstance(video, np.ndarray):
-            batch = video
-        else:
-            return output
-        track(batch)
-        return output
+            track(video)
+        return StepCompleted(output=output, data=data)

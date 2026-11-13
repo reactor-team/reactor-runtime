@@ -9,8 +9,9 @@ DESCRIPTION = (
     "One long-lived stepped session. Each cycle a client joins over the v1 protobuf "
     f"protocol, requests {STEPS_PER_CYCLE} steps one after another, each setting the "
     "effect and carrying one webcam frame, raw or H.264 in turn, waits for every result, "
-    "and closes; every other client publishes the webcam first and unpublishes it before "
-    "closing. The runtime is then read once teardown has finished."
+    "checks that it carries the effect as its data, and closes; every other client "
+    "publishes the webcam first and unpublishes it before closing. The runtime "
+    "is then read once teardown has finished."
 )
 
 
