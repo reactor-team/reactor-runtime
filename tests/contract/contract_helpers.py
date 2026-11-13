@@ -49,6 +49,7 @@ from reactor_runtime.core import (
 from reactor_runtime.http.events import format_sse
 from reactor_runtime.http.server import build_app
 from reactor_runtime.metrics import RuntimeMetrics
+from reactor_runtime.model_server import ModelServerLost
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.runner.runner import Runner
 from reactor_runtime.transport.webrtc import (
@@ -122,6 +123,18 @@ class CrashingModel(ReactorApp):
 
     async def run(self) -> None:
         raise RuntimeError("model exploded")
+
+
+class LostModelServerModel(ReactorApp):
+    """A model whose run loop re-raises a lost model server under its own error."""
+
+    def load(self, config_path: Path | None) -> None: ...
+
+    async def run(self) -> None:
+        try:
+            raise ModelServerLost("model_server_lost: the model server closed the link")
+        except ModelServerLost as lost:
+            raise RuntimeError("no worker answered") from lost
 
 
 class UnloadableModel(ReactorApp):

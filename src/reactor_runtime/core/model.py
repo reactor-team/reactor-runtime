@@ -204,6 +204,18 @@ class EndReason(StrEnum):
     START_REFUSED = "start_refused"
 
 
+class EvictionCause(StrEnum):
+    """What made a crash's ``eviction`` happen, journalled in its ``detail.cause``.
+
+    A crash carries a cause only when the runtime can name one; any other
+    crash's ``detail`` has no ``cause`` key.
+    :class:`~reactor_runtime.core.SessionEvent` says when each cause is set.
+    """
+
+    MODEL_SERVER_LOST = "model_server_lost"
+    """The session lost its model server; the model did not fail on its own."""
+
+
 @dataclass(frozen=True)
 class UploadedFile:
     """A file the runtime has fetched and vouched for, ready for the model.
