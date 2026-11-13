@@ -1,4 +1,5 @@
 import json
+import struct
 from typing import Any
 
 import pytest
@@ -438,6 +439,14 @@ _STEP_MESSAGES = [
     ),
     (
         data_pb2.DataServerMessage(
+            request_id="s1d",
+            kind=K.MESSAGE_KIND_RESPONSE,
+            step_result=step_pb2.StepResult(step=2, data=b'{"action": [0.1, 0.2]}'),
+        ),
+        SERVER,
+    ),
+    (
+        data_pb2.DataServerMessage(
             request_id="s2",
             kind=K.MESSAGE_KIND_RESPONSE,
             step_result=step_pb2.StepResult(
@@ -484,6 +493,20 @@ def test_a_step_result_without_a_step_number_reads_as_zero() -> None:
     assert decoded.step_result.step == 0
     assert not decoded.step_result.HasField("code")
     assert not decoded.step_result.HasField("entry")
+
+
+def test_a_step_result_without_data_has_no_data_tag() -> None:
+    result = step_pb2.StepResult(step=1, elapsed_seconds=0.5)
+    # Field 1 (varint 1), then field 3 (fixed64 0.5): no tag for data.
+    assert result.SerializeToString() == b"\x08\x01\x19" + struct.pack("<d", 0.5)
+    assert not step_pb2.StepResult.FromString(result.SerializeToString()).HasField("data")
+
+
+def test_a_step_result_keeps_empty_data_apart_from_no_data() -> None:
+    empty = step_pb2.StepResult(step=1, data=b"")
+    decoded = step_pb2.StepResult.FromString(empty.SerializeToString())
+    assert decoded.HasField("data")
+    assert decoded.data == b""
 
 
 @pytest.mark.parametrize(("message", "direction"), _STEP_MESSAGES)
