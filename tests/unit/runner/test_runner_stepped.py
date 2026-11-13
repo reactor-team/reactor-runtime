@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import threading
 from collections.abc import Callable, Sequence
@@ -44,6 +45,7 @@ from reactor_runtime.core import (
     StepResultsConfig,
 )
 from reactor_runtime.interface.internal.input_buffer import InputBuffer
+from reactor_runtime.interface.tracks.output import OUTPUT_REGISTRY
 from reactor_runtime.message_gateway import InboundStep
 from reactor_runtime.protocol.common import dict_to_struct
 from reactor_runtime.protocol.frames import FrameEncodingError
@@ -118,10 +120,20 @@ class StepModel(ReactorApp):
             return StepCompleted(output=output, files=_KEPT_FILES)
         if self.state.prompt == "fail":
             return StepCompleted(output=output, files=_KEPT_FILES, error="the step went dark")
+        if self.state.prompt == "data":
+            return StepCompleted(output=output, files=_KEPT_FILES, data=_DATA)
+        if self.state.prompt == "data dict":
+            return StepCompleted(output=output, data={"actions": [[0.25, -1]], "done": False})
+        if self.state.prompt == "large data":
+            return StepCompleted(output=output, data=bytes(4096))
+        if self.state.prompt == "fail with data":
+            return StepCompleted(output=output, data=_DATA, error="the step went dark")
         return output
 
 
 _KEPT_FILES = {"depth.png": b"\x89PNG....", "notes.bin": b"abc"}
+# Msgpack for {"actions": [1, 2]}, as a policy model sends its action chunk.
+_DATA = b"\x81\xa7actions\x92\x01\x02"
 
 
 class VideoAndAudio(Output):
@@ -141,6 +153,21 @@ class SilentStepModel(StepModel):
             main_video=np.zeros((2, 2, 3), dtype=np.uint8),
             main_audio=np.zeros((1, 0), dtype=np.int16),
         )
+
+
+class DataOnlyModel(ReactorApp):
+    """Declares no output track and returns its step's actions as data alone."""
+
+    state: State
+
+    async def process_input(self) -> str:
+        return self.state.prompt
+
+    def generate(self, input: str) -> dict[str, Any]:
+        return {"prompt": input, "actions": [1, 2]}
+
+    async def process_output(self, outcome: StepOutcome, /) -> StepCompleted:
+        return StepCompleted(data=outcome.result)
 
 
 class OwnLoop(StepModel):
@@ -1151,6 +1178,105 @@ async def test_a_failed_step_is_answered_with_its_error_and_no_files(
     )
     assert list(result.files) == []
     assert _journalled_steps(saving_runner)[0] is SessionEvent.STEP_COMPLETED
+
+
+async def test_the_data_a_step_returns_arrives_as_it_is_with_its_frames(runner: Runner) -> None:
+    conn = await _stepped(runner)
+    _send(runner, conn, _request_step("r1", state={"prompt": "data"}))
+    await _until(lambda: len(conn.sent) == 1)
+
+    result = conn.replies()[0].step_result
+    assert (result.step, result.failure_code) == (1, step_pb2.STEP_FAILURE_CODE_UNSPECIFIED)
+    assert result.data == _DATA
+    assert [t.track for t in result.tracks] == ["main_video"]
+
+
+async def test_a_dict_a_step_returns_arrives_as_json(runner: Runner) -> None:
+    conn = await _stepped(runner)
+    _send(runner, conn, _request_step("r1", state={"prompt": "data dict"}))
+    await _until(lambda: len(conn.sent) == 1)
+
+    result = conn.replies()[0].step_result
+    assert json.loads(result.data) == {"actions": [[0.25, -1]], "done": False}
+
+
+async def test_a_step_that_returns_no_data_leaves_the_field_unset(runner: Runner) -> None:
+    conn = await _stepped(runner)
+    _send(runner, conn, _request_step("r1"))
+    await _until(lambda: len(conn.sent) == 1)
+
+    assert not conn.replies()[0].step_result.HasField("data")
+
+
+async def test_a_failed_step_carries_no_data(runner: Runner) -> None:
+    conn = await _stepped(runner)
+    _send(runner, conn, _request_step("r1", state={"prompt": "fail with data"}))
+    await _until(lambda: len(conn.sent) == 1)
+
+    result = conn.replies()[0].step_result
+    assert (result.failure_code, result.error) == (
+        step_pb2.STEP_FAILURE_CODE_FAILED,
+        "the step went dark",
+    )
+    assert not result.HasField("data")
+
+
+async def test_a_model_without_output_tracks_returns_its_data_with_no_frames(
+    monkeypatch: pytest.MonkeyPatch, register_model: Callable[[type], None]
+) -> None:
+    register_model(DataOnlyModel)
+    OUTPUT_REGISTRY.clear()
+    runner = await _runner(monkeypatch, DataOnlyModel)
+    try:
+        conn = await _stepped(runner)
+        _send(runner, conn, _request_step("r1", state={"prompt": "reach"}))
+        await _until(lambda: len(conn.sent) == 1)
+
+        result = conn.replies()[0].step_result
+        assert (result.step, result.failure_code) == (1, step_pb2.STEP_FAILURE_CODE_UNSPECIFIED)
+        assert json.loads(result.data) == {"prompt": "reach", "actions": [1, 2]}
+        assert list(result.tracks) == []
+        assert conn.media == []
+    finally:
+        await runner.stop()
+
+
+async def test_data_that_does_not_fit_the_connection_is_answered_result_too_large(
+    runner: Runner,
+) -> None:
+    conn = await _stepped(runner)
+    # The model's 2x2 RGB frame fits; its 4 KiB of data does not.
+    conn.max_message_size = 1024
+    _send(runner, conn, _request_step("r1", state={"prompt": "large data"}))
+    await _until(lambda: len(conn.sent) == 1)
+
+    result = conn.replies()[0].step_result
+    assert (result.step, result.failure_code) == (1, step_pb2.STEP_FAILURE_CODE_RESULT_TOO_LARGE)
+    assert re.fullmatch(
+        r"step 1's result is at least \d+ bytes, more than this connection takes in one message",
+        result.error,
+    )
+    assert not result.HasField("data")
+    assert list(result.tracks) == []
+
+
+async def test_a_saved_step_keeps_its_files_and_not_its_data(saving_runner: Runner) -> None:
+    conn = await _stepped(saving_runner)
+    _send(saving_runner, conn, _request_step("r1", state={"prompt": "data"}))
+    await _until(lambda: len(conn.sent) == 1)
+    assert conn.replies()[0].step_result.data == _DATA
+
+    store = saving_runner.step_store
+    assert store is not None
+    assert store.root is not None
+    root = store.root
+    await _until(lambda: any(root.glob("*/1/result.json")))
+    [step_dir] = [path.parent for path in root.glob("*/1/result.json")]
+    saved = json.loads((step_dir / "result.json").read_text())
+    assert "data" not in saved
+    assert sorted(path.name for path in step_dir.iterdir()) == sorted(
+        ["result.json", "output.mp4", *_KEPT_FILES]
+    )
 
 
 async def test_a_result_too_large_for_the_connection_is_answered_without_media_and_counted(

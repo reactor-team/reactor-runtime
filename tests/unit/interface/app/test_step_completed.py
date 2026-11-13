@@ -41,3 +41,23 @@ def test_file_contents_must_be_bytes() -> None:
     files: dict[str, Any] = {"notes.txt": "text"}
     with pytest.raises(TypeError, match="must be bytes"):
         StepCompleted(files=files)
+
+
+def test_bytes_data_is_kept_as_it_is() -> None:
+    assert StepCompleted(data=b"\x93\x01\x02").data == b"\x93\x01\x02"
+
+
+def test_a_dict_of_data_reads_back_as_compact_json() -> None:
+    step = StepCompleted(data={"actions": [0.5, -1], "done": False})
+    assert step.data == b'{"actions":[0.5,-1],"done":false}'
+
+
+def test_data_that_json_cannot_encode_is_rejected() -> None:
+    with pytest.raises(ValueError, match="not JSON-serialisable"):
+        StepCompleted(data={"when": object()})
+
+
+def test_data_must_be_bytes_or_a_dict() -> None:
+    data: Any = "text"
+    with pytest.raises(TypeError, match="must be bytes or a dict"):
+        StepCompleted(data=data)

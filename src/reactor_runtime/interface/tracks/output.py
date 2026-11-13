@@ -11,6 +11,7 @@ when the model has metadata to send with the frame.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
@@ -21,6 +22,18 @@ from reactor_runtime.interface.tracks.descriptors import _resolve_tracks
 
 Metadata = dict[str, Any] | bytes
 """One frame's metadata: a JSON-serialisable mapping, or bytes the model encoded itself."""
+
+
+def encode_metadata(metadata: Metadata) -> bytes:
+    """Encode a mapping as compact UTF-8 JSON, and return bytes as they are.
+
+    Raises:
+        TypeError: A mapping holds a value JSON cannot represent.
+    """
+    if isinstance(metadata, bytes):
+        return metadata
+    return json.dumps(metadata, separators=(",", ":")).encode("utf-8")
+
 
 OUTPUT_REGISTRY: dict[str, type[Output]] = {}
 """Every :class:`Output` subclass that declared at least one track, by class name.
