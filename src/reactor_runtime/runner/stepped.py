@@ -66,14 +66,14 @@ from reactor_wire.v1 import platform_pb2, step_pb2
 logger = get_logger(__name__)
 
 # The wire code a step the model did not run is answered with, by why it did not.
-REFUSAL_CODES: dict[StepRefusalKind, step_pb2.StepFailureCode] = {
+_REFUSAL_CODES: dict[StepRefusalKind, step_pb2.StepFailureCode] = {
     StepRefusalKind.REFUSED: step_pb2.STEP_FAILURE_CODE_REFUSED,
     StepRefusalKind.NOT_READY: step_pb2.STEP_FAILURE_CODE_NOT_READY,
     StepRefusalKind.COMMAND_FAILED: step_pb2.STEP_FAILURE_CODE_COMMAND_FAILED,
 }
 
 # The runtime's track kind for each kind a wire message names.
-WIRE_TRACK_KINDS = {
+_WIRE_TRACK_KINDS = {
     platform_pb2.TRACK_KIND_VIDEO: TrackKind.VIDEO,
     platform_pb2.TRACK_KIND_AUDIO: TrackKind.AUDIO,
 }
@@ -101,7 +101,7 @@ class StepInputError(ValueError):
         self.entry = entry
 
 
-def step_file_refs(step: CompletedStep) -> list[step_pb2.StepFileRef]:
+def _step_file_refs(step: CompletedStep) -> list[step_pb2.StepFileRef]:
     """Reference each extra file a saved step keeps, as its step result is saved.
 
     A failed step keeps no files, so its result references none.
@@ -279,7 +279,7 @@ class StepRequests:
     Args:
         host: What the stepped path reads from the runner that owns it.
         upload_wait: How long, in seconds, a request waits for each of its
-            uploads' bytes by default.
+            uploads' bytes.
     """
 
     def __init__(self, host: StepHost, *, upload_wait: float) -> None:
@@ -445,7 +445,7 @@ class StepRequests:
                 )
             if entry.track in checked:
                 raise StepInputError(where, f"{where} names {entry.track!r} a second time")
-            kind = WIRE_TRACK_KINDS.get(entry.kind)
+            kind = _WIRE_TRACK_KINDS.get(entry.kind)
             if entry.kind != platform_pb2.TRACK_KIND_UNSPECIFIED and kind is not info.kind:
                 raise StepInputError(
                     where, f"{where} says {entry.track!r} is not a {info.kind} track"
@@ -526,7 +526,7 @@ class StepRequests:
             refusal.conn_id,
             refusal.request_id,
             refusal.reason,
-            failure_code=REFUSAL_CODES[refusal.kind],
+            failure_code=_REFUSAL_CODES[refusal.kind],
             code=refusal.code,
             entry=refusal.entry,
         )
@@ -670,7 +670,7 @@ class StepRequests:
             )
             return
         frame = encoded.frame
-        refs = step_file_refs(step) if saved else ()
+        refs = _step_file_refs(step) if saved else ()
         if refs:
             # Serialized protobuf messages merge when concatenated: the files
             # join the result the model's thread encoded. Only a saved step
