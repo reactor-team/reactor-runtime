@@ -993,6 +993,19 @@ def test_a_reconnect_tells_each_watcher_of_each_track_it_released() -> None:
     assert watcher.freed == ["webcam", "mic"]
 
 
+def test_a_reconnecting_watcher_is_not_told_of_the_tracks_its_own_id_released() -> None:
+    cm, _ = waiting_manager()
+    first = WatchingConnection(1)
+    cm.register(first)
+    cm.publish_track(ConnId(1), "webcam")
+
+    replacement = WatchingConnection(1)
+    cm.register(replacement)
+
+    assert first.freed == []
+    assert replacement.freed == []
+
+
 def test_a_reconnect_keeps_the_tracks_other_connections_hold() -> None:
     cm, _ = waiting_manager()
     watcher = WatchingConnection(3)

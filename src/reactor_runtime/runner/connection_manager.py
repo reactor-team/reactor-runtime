@@ -360,10 +360,10 @@ class ConnectionManager:
                 leave the session in the state it was in.
         """
         previous = self._by_id.get(conn.id)
+        if previous is not None and previous is not conn:
+            self._release_tracks(conn.id)
         self._by_id = {**self._by_id, conn.id: conn}
         if previous is not None:
-            if previous is not conn:
-                self._release_tracks(conn.id)
             return
         detail = _connection_detail(conn, system)
         self._details[conn.id] = detail
@@ -401,12 +401,16 @@ class ConnectionManager:
         self._release_tracks(cid)
 
     def _release_tracks(self, cid: ConnId) -> None:
-        """Free every track *cid* holds and tell each watcher, without pausing a wire."""
+        """Free every track *cid* holds and tell each other watcher, without pausing a wire.
+
+        The connection releasing its tracks is not told: on a reconnect its old
+        handle is still registered when the release runs.
+        """
         held = [name for name, owner in self._publishers.items() if owner == cid]
         for name in held:
             del self._publishers[name]
         for name in held:
-            self._announce_input_freed(name)
+            self._announce_input_freed(name, skip=cid)
 
     async def close_all(self) -> None:
         """Close every connection and empty the registry, for session teardown.
@@ -466,10 +470,13 @@ class ConnectionManager:
             conn.pause_track(name)
         self._announce_input_freed(name)
 
-    def _announce_input_freed(self, name: str) -> None:
-        """Tell each connection that watches input tracks that *name* is free."""
+    def _announce_input_freed(self, name: str, *, skip: ConnId | None = None) -> None:
+        """Tell each connection that watches input tracks that *name* is free.
+
+        A connection whose id is *skip* is not told.
+        """
         for conn in list(self._by_id.values()):
-            if not isinstance(conn, InputTrackWatcher):
+            if conn.id == skip or not isinstance(conn, InputTrackWatcher):
                 continue
             try:
                 conn.input_track_freed(name)
