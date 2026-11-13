@@ -70,7 +70,8 @@ class SessionEvent(Enum):
     in ``detail.reason`` (and, for a crash, the error in ``detail.error``) so a
     consumer learns why. A crash whose exception is a
     :class:`~reactor_runtime.model_server.ModelServerLost`, wraps one in its
-    ``__cause__`` or ``__context__`` chain, or holds one in an exception group
+    ``__cause__`` or ``__context__`` chain (a context the error suppressed with
+    ``raise ... from None`` is not followed), or holds one in an exception group
     also carries ``detail.cause`` set to ``model_server_lost``: the session lost
     its model server, and the model did not fail on its own. The runtime sets it
     from the exception's type, never its message, and leaves it out for

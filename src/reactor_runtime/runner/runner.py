@@ -194,11 +194,12 @@ _MODEL_SERVER_LOST_CAUSE = "model_server_lost"
 def _lost_model_server(error: BaseException) -> bool:
     """Say whether *error* is, wraps, or was raised while handling a lost model server.
 
-    The search follows ``__cause__`` and ``__context__``, and the members of an
-    exception group, so a model that re-raises the loss under its own error
-    still counts. A :class:`~reactor_runtime.model_server.ClientClosed` does
-    not: the application closed its own client. Only the type counts, never
-    the message.
+    The search follows ``__cause__``, ``__context__`` unless the error was
+    raised ``from None``, and the members of an exception group, so a model
+    that re-raises the loss under its own error still counts. A
+    :class:`~reactor_runtime.model_server.ClientClosed` does not: the
+    application closed its own client. Only the type counts, never the
+    message.
     """
     seen: set[int] = set()
     pending: list[BaseException] = [error]
@@ -211,7 +212,10 @@ def _lost_model_server(error: BaseException) -> bool:
             return True
         if isinstance(current, BaseExceptionGroup):
             pending.extend(current.exceptions)
-        pending.extend(e for e in (current.__cause__, current.__context__) if e is not None)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None and not current.__suppress_context__:
+            pending.append(current.__context__)
     return False
 
 

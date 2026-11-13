@@ -8,7 +8,7 @@ import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pytest
@@ -3335,14 +3335,18 @@ class _WorkerUnavailableError(RuntimeError):
     """A model's own error, raised in place of the loss it caught."""
 
 
-def _raised_from(error: BaseException, *, explicit: bool) -> BaseException:
-    """Return a model error raised while handling *error*, chained explicitly or not."""
+def _raised_from(
+    error: BaseException, *, chain: Literal["from", "implicit", "from None"]
+) -> BaseException:
+    """Return a model error raised while handling *error*, chained as *chain* says."""
     try:
         try:
             raise error
         except BaseException as caught:
-            if explicit:
+            if chain == "from":
                 raise _WorkerUnavailableError("no worker answered") from caught
+            if chain == "from None":
+                raise _WorkerUnavailableError("no worker answered") from None
             raise _WorkerUnavailableError("no worker answered")  # noqa: B904 (the implicit chain is the case)
     except _WorkerUnavailableError as wrapped:
         return wrapped
@@ -3359,22 +3363,24 @@ _LOST = "model_server_lost: the model server closed the link"
             ModelServerStopping("model_server_lost: the model server is stopping"),
             "model_server_lost",
         ),
-        (_raised_from(ModelServerLost(_LOST), explicit=True), "model_server_lost"),
-        (_raised_from(ModelServerLost(_LOST), explicit=False), "model_server_lost"),
+        (_raised_from(ModelServerLost(_LOST), chain="from"), "model_server_lost"),
+        (_raised_from(ModelServerLost(_LOST), chain="implicit"), "model_server_lost"),
+        (_raised_from(ModelServerLost(_LOST), chain="from None"), None),
         (
             ExceptionGroup("step failed", [ValueError("x"), ModelServerLost(_LOST)]),
             "model_server_lost",
         ),
         (ClientClosed("the model client is closed"), None),
-        (_raised_from(ClientClosed("the model client is closed"), explicit=True), None),
+        (_raised_from(ClientClosed("the model client is closed"), chain="from"), None),
         (RuntimeError(_LOST), None),
-        (_raised_from(RuntimeError(_LOST), explicit=True), None),
+        (_raised_from(RuntimeError(_LOST), chain="from"), None),
     ],
     ids=[
         "lost",
         "stopping",
         "wrapped-from",
         "wrapped-while-handling",
+        "unrelated-from-none",
         "in-a-group",
         "client-closed",
         "wrapped-client-closed",
