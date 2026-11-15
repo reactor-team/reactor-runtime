@@ -123,6 +123,8 @@ class Sample:
     # H.264 decoders a connection opened for its step frames, alive after the
     # probe's collection, with no client connected. Each holds its threads.
     live_step_decoders: int = 0
+    # Local result snapshots still on disk after their step was discarded.
+    live_local_files: int = 0
 
 
 def cpu_deltas(samples: list[Sample]) -> list[float]:
@@ -425,6 +427,7 @@ ZERO_FIELDS = (
     "live_rooms_leaving",
     "live_step_requests",
     "live_step_decoders",
+    "live_local_files",
 )
 
 

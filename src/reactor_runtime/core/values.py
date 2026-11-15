@@ -17,6 +17,8 @@ from typing import Any, NewType
 import numpy as np
 import numpy.typing as npt
 
+from reactor_runtime.core.local_file import OwnedLocalFile
+
 ConnId = NewType("ConnId", int)
 """Identifier for one client connection within a session.
 
@@ -617,7 +619,7 @@ class CompletedStep:
     """One finished step, as the model reports it to the runtime.
 
     The neutral form of a model's step report: the media as a bundle rather
-    than the model's own output class, and the extra files as bytes, so the
+    than the model's own output class, and the files as bytes or owned snapshots, so the
     runtime can count, journal, and save the step without touching model code.
 
     Attributes:
@@ -642,7 +644,7 @@ class CompletedStep:
     """
 
     bundle: MediaBundle | None
-    files: Mapping[str, bytes] = field(default_factory=dict)
+    files: Mapping[str, bytes | OwnedLocalFile] = field(default_factory=dict)
     error: str | None = None
     elapsed: float | None = None
     data: bytes | None = field(default=None, kw_only=True)

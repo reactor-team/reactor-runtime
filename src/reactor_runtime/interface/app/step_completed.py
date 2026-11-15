@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from reactor_runtime.core.local_file import LocalFile
 from reactor_runtime.interface.tracks import Output
 from reactor_runtime.interface.tracks.output import encode_metadata
 
@@ -26,9 +27,10 @@ class StepCompleted:
 
     Attributes:
         output: The media the step produced, or ``None`` when it produced none.
-        files: Extra files to keep with the step, keyed by file name. A name is
-            one path segment, and ``result.json`` and ``output.mp4`` are taken
-            by the runtime.
+        files: Files to keep with the step, as bytes or ``LocalFile`` values.
+            A name is one path segment. ``result.json`` is reserved;
+            ``output.mp4`` accepts a ``LocalFile`` only when ``output`` is
+            absent. Local files are copied before ``complete_step()`` returns.
         error: Why the step failed, or ``None`` when it worked.
         elapsed: Wall-clock seconds the step took, when measured.
         data: What the step returned besides its media, for the client that
@@ -46,12 +48,12 @@ class StepCompleted:
     Raises:
         ValueError: A file name is empty, holds a path separator, is ``.`` or
             ``..``, or is reserved, or ``data`` is a dict JSON cannot encode.
-        TypeError: A file's contents are not ``bytes``, or ``data`` is neither
+        TypeError: A file's contents are not ``bytes`` or ``LocalFile``, or ``data`` is neither
             ``bytes`` nor a dict.
     """
 
     output: Output | None = None
-    files: Mapping[str, bytes] = field(default_factory=dict)
+    files: Mapping[str, bytes | LocalFile] = field(default_factory=dict)
     error: str | None = None
     elapsed: float | None = None
     data: bytes | dict[str, Any] | None = None
@@ -59,9 +61,12 @@ class StepCompleted:
     def __post_init__(self) -> None:
         """Check the extra files, keep a copy the caller cannot change, and encode the data."""
         for name, data in self.files.items():
-            _check_file_name(name)
-            if not isinstance(data, bytes):
-                raise TypeError(f"step file {name!r} must be bytes, got {type(data).__name__}")
+            if name != "output.mp4" or not isinstance(data, LocalFile) or self.output is not None:
+                _check_file_name(name)
+            if not isinstance(data, bytes | LocalFile):
+                raise TypeError(
+                    f"step file {name!r} must be bytes or LocalFile, got {type(data).__name__}"
+                )
         object.__setattr__(self, "files", dict(self.files))
         if self.data is None:
             return

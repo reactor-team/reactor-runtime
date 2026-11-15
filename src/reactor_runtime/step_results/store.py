@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from reactor_runtime.core import CompletedStep, StepResultsConfig
+from reactor_runtime.core.local_file import OwnedLocalFile, discard_files
 from reactor_runtime.log import get_logger
 from reactor_runtime.step_results.mp4 import write_mp4
 from reactor_runtime.step_results.usage import VideoUsage
@@ -187,15 +188,18 @@ class StepStore:
                 session_id=session_id,
                 step=step,
             )
+            discard_files(completed.files)
             return False
         with self._admit_lock:
             if self._closed:
+                discard_files(completed.files)
                 return False
             self._ensure_started()
             try:
                 self._queue.put_nowait(_Pending(session_id, step, completed, tuple(messages)))
             except queue.Full:
                 self._note_dropped(session_id, step)
+                discard_files(completed.files)
                 return False
             return True
 
@@ -269,6 +273,12 @@ class StepStore:
                     "abandoning step results still waiting to be saved",
                     pending=self._queue.qsize() + self._failed.qsize(),
                 )
+                while True:
+                    try:
+                        abandoned = self._queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    discard_files(abandoned.completed.files)
         self._reaper_stop.set()
         reaper = self._reaper
         if reaper is not None:
@@ -391,6 +401,7 @@ class StepStore:
                     return
                 continue
             if self._abandon.is_set():
+                discard_files(pending.completed.files)
                 return
             self._save_and_announce(pending)
 
@@ -412,6 +423,7 @@ class StepStore:
             except queue.Empty:
                 break
             if self._abandon.is_set():
+                discard_files(pending.completed.files)
                 return False
             self._save_and_announce(pending)
         for pending in failed.steps():
@@ -430,6 +442,8 @@ class StepStore:
                 step=pending.step,
             )
             return
+        finally:
+            discard_files(pending.completed.files)
         try:
             self._on_saved(saved)
         except Exception:
@@ -465,7 +479,10 @@ class StepStore:
                 files.append(_file_entry(path))
             for name, data in completed.files.items() if completed.error is None else ():
                 path = step_dir / name
-                path.write_bytes(data)
+                if isinstance(data, OwnedLocalFile):
+                    data.move_to(path)
+                else:
+                    path.write_bytes(data)
                 files.append(_file_entry(path))
         except Exception as error:
             logger.exception(
@@ -491,8 +508,12 @@ class StepStore:
                 "encode_s": time.perf_counter() - started,
             },
         }
-        _write_atomically(step_dir / RESULT_FILE, json.dumps(result, default=str).encode())
-        self._publish(step_dir, session_dir / str(pending.step))
+        try:
+            _write_atomically(step_dir / RESULT_FILE, json.dumps(result, default=str).encode())
+            self._publish(step_dir, session_dir / str(pending.step))
+        except BaseException:
+            shutil.rmtree(step_dir, ignore_errors=True)
+            raise
         return SavedStep(
             session_id=pending.session_id,
             step=pending.step,

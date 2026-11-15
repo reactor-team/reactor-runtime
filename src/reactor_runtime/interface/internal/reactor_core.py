@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, get_type_hints
 
 import numpy.typing as npt
 
+from reactor_runtime.core.local_file import adopt_files, discard_files
 from reactor_runtime.core.model import Command, ReactorEvent
 from reactor_runtime.core.values import (
     CommandFailure,
@@ -463,6 +464,10 @@ class ReactorCore:
         on, saves it. The output is handed over as it is, so a model must not
         change its arrays after reporting them.
 
+        Local files are copied into runtime-owned staging before this call
+        returns. The caller may then remove its originals. Copy errors are
+        raised here; a failed report does not read its supplied local files.
+
         A report counts toward the session the model is in when the call is
         made. A ``run()`` whose unit of work began in a session that has since
         ended reports into the session it is in by then, so such a loop checks
@@ -525,19 +530,24 @@ class ReactorCore:
         assert data is None or isinstance(data, bytes), "StepCompleted encodes its data when built"
         if fps is None:
             fps = self._last_emit_fps if self._last_emit_fps is not None else float(self.fps)
-        self._out_step(
-            CompletedStep(
-                bundle=bundle,
-                files=dict(step.files),
-                error=step.error,
-                elapsed=step.elapsed,
-                data=data,
-                session=session,
-                fps=fps,
-                stages=dict(stages or {}),
-                request=request,
+        files = adopt_files(step.files) if step.error is None else {}
+        try:
+            self._out_step(
+                CompletedStep(
+                    bundle=bundle,
+                    files=files,
+                    error=step.error,
+                    elapsed=step.elapsed,
+                    data=data,
+                    session=session,
+                    fps=fps,
+                    stages=dict(stages or {}),
+                    request=request,
+                )
             )
-        )
+        except BaseException:
+            discard_files(files)
+            raise
 
     def _playout_rate(self, n_frames: int, compute_time: float | None) -> float:
         """Return the rate *n_frames* play at: their measured throughput, else :attr:`fps`."""

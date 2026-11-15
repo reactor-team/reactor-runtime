@@ -63,6 +63,7 @@ from reactor_runtime.core import (
     TypeSpec,
     UploadedFile,
 )
+from reactor_runtime.core.local_file import discard_files
 from reactor_runtime.event_stream import EventStream
 from reactor_runtime.interface.events.messages import ModelMessage
 from reactor_runtime.interface.internal.bridge import ModelBridge
@@ -1023,6 +1024,8 @@ class Runner(ServiceComponent, ConnectionSink):
         loop = self._loop
         if loop is not None:
             loop.call_soon_threadsafe(self._record_step, step, messages, recipients, encoded)
+        else:
+            discard_files(step.files)
 
     def _record_step(
         self,
@@ -1058,6 +1061,7 @@ class Runner(ServiceComponent, ConnectionSink):
         once journalled.
         """
         if step.session != self._sessions_posted:
+            discard_files(step.files)
             logger.debug(
                 "dropping a step report from an earlier session",
                 reported_session=step.session,
@@ -1067,6 +1071,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 self._steps.end_request(step.request.conn_id, step.request.request_id)
             return
         if self._steps_failed:
+            discard_files(step.files)
             # The failure took the messages sent before it, so these were sent
             # after it, and no step is left for them.
             logger.debug(
@@ -1117,6 +1122,8 @@ class Runner(ServiceComponent, ConnectionSink):
         saved = self._step_store is not None and self._step_store.admit(
             self._recording_id, self._steps_completed, step, messages
         )
+        if not saved:
+            discard_files(step.files)
         self._sm.send(
             SessionEvent.STEP_COMPLETED,
             step=self._steps_completed,

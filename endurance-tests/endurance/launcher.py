@@ -26,6 +26,7 @@ from fastapi import FastAPI
 import reactor_runtime.http.server as http_server
 from reactor_runtime import serve
 from reactor_runtime.core import ConnId, Health
+from reactor_runtime.core.local_file import OwnedLocalFile
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.runner import Runner
 from reactor_runtime.transport.router import TransportRouter
@@ -231,6 +232,7 @@ def _live_transport_objects() -> dict[str, int]:
         "participants": 0,
         "step_decoders": 0,
         "rooms_leaving": 0,
+        "local_files": 0,
     }
     for obj in gc.get_objects():
         if isinstance(obj, WebRTCConnection):
@@ -241,6 +243,8 @@ def _live_transport_objects() -> dict[str, int]:
             counts["pacers"] += 1
         elif isinstance(obj, TrackDecoder):
             counts["step_decoders"] += 1
+        elif isinstance(obj, OwnedLocalFile) and obj.path.exists():
+            counts["local_files"] += 1
         elif participant is not None and isinstance(obj, participant):
             counts["participants"] += 1
         elif room_session is not None and isinstance(obj, room_session):

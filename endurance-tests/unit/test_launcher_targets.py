@@ -6,11 +6,13 @@ endurance run. Update ``endurance/launcher.py`` in the same change.
 """
 
 import inspect
+from pathlib import Path
 
 from endurance import launcher
 
 import reactor_runtime.http.server as http_server
 from reactor_runtime import serve
+from reactor_runtime.core.local_file import LocalFile, OwnedLocalFile
 from reactor_runtime.runner.client_stats import ClientStatsGate
 from reactor_runtime.runner.connection_manager import ConnectionManager
 from reactor_runtime.runner.runner import Runner
@@ -45,3 +47,15 @@ def test_the_counted_transport_classes_are_classes() -> None:
 
 def test_serve_has_the_entry_point_the_launcher_hands_over_to() -> None:
     assert callable(serve.main)
+
+
+def test_probe_counts_owned_local_files_until_they_are_closed(tmp_path: Path) -> None:
+    source = tmp_path / "output"
+    source.write_bytes(b"local result")
+    before = launcher._live_transport_objects()["local_files"]
+    owned = OwnedLocalFile(LocalFile(source))
+    try:
+        assert launcher._live_transport_objects()["local_files"] == before + 1
+    finally:
+        owned.close()
+    assert launcher._live_transport_objects()["local_files"] == before

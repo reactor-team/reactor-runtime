@@ -26,6 +26,7 @@ from reactor_runtime.core import (
     InputFrame,
     UploadedFile,
 )
+from reactor_runtime.core.local_file import LocalFile
 from reactor_runtime.interface.app import InputState, ReactorApp, StepCompleted, StepOutcome
 from reactor_runtime.interface.client import ClientInfo
 from reactor_runtime.interface.events import (
@@ -88,6 +89,7 @@ __all__ = [
     "InputField",
     "InputFrame",
     "InputState",
+    "LocalFile",
     "MediaInput",
     "MessageField",
     "Metadata",
