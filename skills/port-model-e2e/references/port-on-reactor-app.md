@@ -279,7 +279,10 @@ Each names the public symbol whose docstring states it.
   should carry more than the frames, or when a requested step answers with
   data: its `data` (bytes, or a dict sent as JSON) reaches the requesting
   client in the step's result, so a model whose output is data alone declares
-  no output track.
+  no output track. A finished file on disk goes in its `files` as a
+  `reactor_runtime.LocalFile`, kept byte for byte; a step with no frames can
+  supply its `output.mp4` that way. A `LocalFile` returned here is copied after
+  `process_output()` returns, so the file must outlive the method.
 - **`self.output.flush(hold=True)`** drops queued frames and keeps the last one
   on screen instead of cutting to black; `flush()` cuts.
 - **The system client.** A session started with a starting input or a step
