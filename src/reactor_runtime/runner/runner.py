@@ -633,6 +633,8 @@ class Runner(ServiceComponent, ConnectionSink):
             if self._loop is not None:
                 self._spawn_teardown(conn.close())
             return False
+        # A new handle on a known id is a new wire: its streams start over.
+        self._steps.connection_closed(conn.id)
         self._connections.register(conn)
         if self._media_depth is not None:
             conn.set_media_depth(self._media_depth)
@@ -644,6 +646,7 @@ class Runner(ServiceComponent, ConnectionSink):
         """Drop a previously opened connection that has gone away."""
         self._connections.drop(conn_id)
         self._client_stats.forget(conn_id)
+        self._steps.connection_closed(conn_id)
 
     def connection_answered(self, conn_id: ConnId, answer: Mapping[str, str]) -> None:
         """Record a transport's negotiation answer for a connection.
@@ -1078,7 +1081,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 current_session=self._sessions_posted,
             )
             if step.request is not None:
-                self._steps.end_request(step.request.conn_id, step.request.request_id)
+                self._steps.end_request(step.request.conn_id, step.request.request_id, encoded)
             return
         if self._steps_failed:
             discard_files(step.files)
@@ -1089,7 +1092,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 messages=len(messages),
             )
             if step.request is not None:
-                self._steps.end_request(step.request.conn_id, step.request.request_id)
+                self._steps.end_request(step.request.conn_id, step.request.request_id, encoded)
             return
         saved = self._save_step(step, messages)
         if step.stages and step.bundle is not None:

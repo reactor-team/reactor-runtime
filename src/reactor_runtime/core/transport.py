@@ -196,6 +196,23 @@ class MessageStageSource(Protocol):
 
 
 @runtime_checkable
+class StepFrameEncodingSource(Protocol):
+    """A connection that negotiated the encoding each track's step frames take.
+
+    Optional, beside :class:`Connection`, and checked for with ``isinstance``.
+    A connection without it carries every step frame raw.
+    """
+
+    @property
+    def step_frame_encodings(self) -> Mapping[str, int]:
+        """The ``FrameEncoding`` each track's step frames take, by track name.
+
+        Fixed for the connection's life. A track not listed is
+        ``FRAME_ENCODING_RAW``.
+        """
+
+
+@runtime_checkable
 class MessageObserver(Protocol):
     """A connection that also takes what it is sent as plain data.
 

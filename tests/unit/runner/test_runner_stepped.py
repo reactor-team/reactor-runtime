@@ -12,6 +12,7 @@ from typing import Any, cast
 
 import numpy as np
 import pytest
+import reactor_webrtc as rw
 
 from reactor_runtime import (
     ApplicationError,
@@ -52,6 +53,7 @@ from reactor_runtime.protocol.frames import FrameEncodingError
 from reactor_runtime.runner import stepped as stepped_module
 from reactor_runtime.runner.runner import Runner
 from reactor_runtime.runner.session_start import InvalidSessionStartError
+from reactor_runtime.transport import step_frames as step_frames_module
 from reactor_runtime.upload_store import UnknownUploadError
 from reactor_wire.v1 import common_pb2, control_pb2, data_pb2, model_pb2, platform_pb2, step_pb2
 
@@ -1415,3 +1417,259 @@ async def test_a_step_whose_output_cannot_be_encoded_is_answered_failed(
     assert result.elapsed_seconds > 0
     assert (list(result.tracks), list(result.files)) == ([], [])
     assert _journalled_steps(runner) == [SessionEvent.STEP_COMPLETED]
+
+
+# -- encoded output frames -----------------------------------------------------
+
+
+def _output_codec() -> tuple[rw.VideoCodec, int]:
+    """The first codec, H.264 first, this platform both encodes and decodes."""
+    capabilities = rw.VideoCodecs().capabilities()
+    for codec, encoding in (
+        (rw.VideoCodec.H264, step_pb2.FRAME_ENCODING_H264),
+        (rw.VideoCodec.Vp8, step_pb2.FRAME_ENCODING_VP8),
+        (rw.VideoCodec.Vp9, step_pb2.FRAME_ENCODING_VP9),
+        (rw.VideoCodec.Av1, step_pb2.FRAME_ENCODING_AV1),
+    ):
+        if capabilities.can_encode(codec) and capabilities.can_decode(codec):
+            return codec, encoding
+    pytest.skip("this platform has no video codec to encode step frames in")
+
+
+def _picture(step: int, height: int, width: int) -> np.ndarray:
+    """A gradient that moves a little each step, as a model's output does."""
+    rows = np.arange(height, dtype=np.int32)[:, None]
+    cols = np.arange(width, dtype=np.int32)[None, :]
+    picture = np.empty((height, width, 3), dtype=np.uint8)
+    picture[..., 0] = (rows + 2 * step) % 256
+    picture[..., 1] = (cols + 3 * step) % 256
+    picture[..., 2] = (rows + cols) % 256
+    return picture
+
+
+class PictureModel(StepModel):
+    """Returns a moving picture of :attr:`size` each step, or no frames when told to."""
+
+    size = (64, 96)
+
+    def generate(self, input: tuple[str, list[str], list[int]]) -> Out:
+        self.inputs.append(input)
+        return Out(main_video=_picture(len(self.inputs), *self.size))
+
+    async def process_output(self, outcome: StepOutcome, /) -> Output | StepCompleted | None:
+        if self.state.prompt == "no frames":
+            return StepCompleted()
+        return await super().process_output(outcome)
+
+
+class EncodingConnection(V1Connection):
+    """A v1 connection that negotiated *encoding* for the model's output video."""
+
+    def __init__(self, cid: int, encoding: int) -> None:
+        super().__init__(cid)
+        self.step_frame_encodings = {"main_video": encoding, "webcam": step_pb2.FRAME_ENCODING_RAW}
+        self.refuse_sends = 0
+
+    async def send_step_result(self, payload: bytes) -> bool:
+        if self.refuse_sends:
+            self.refuse_sends -= 1
+            return False
+        return await super().send_step_result(payload)
+
+
+@pytest.fixture
+async def picture_runner(
+    monkeypatch: pytest.MonkeyPatch, register_model: Callable[[type], None]
+) -> Any:
+    register_model(PictureModel)
+    runner = await _runner(monkeypatch, PictureModel)
+    try:
+        yield runner
+    finally:
+        await runner.stop()
+
+
+async def _encoding(runner: Runner, encoding: int, cid: int = 1002) -> EncodingConnection:
+    if runner._sm.current_state is SessionState.READY:
+        runner.start_session({"generation": "stepped"})
+    conn = EncodingConnection(cid, encoding)
+    runner.connection_opened(conn)
+    return conn
+
+
+async def _step(
+    runner: Runner, conn: V1Connection, request_id: str, **fields: Any
+) -> step_pb2.StepResult:
+    """Request one step on *conn* and return its result."""
+    sent = len(conn.sent)
+    message = data_pb2.DataClientMessage(
+        request_id=request_id,
+        kind=K.MESSAGE_KIND_REQUEST,
+        request_step=step_pb2.RequestStep(state=dict_to_struct(fields.pop("state", {})), **fields),
+    )
+    _send(runner, conn, message.SerializeToString())
+    await _until(lambda: len(conn.sent) > sent)
+    return conn.replies()[sent].step_result
+
+
+def _video(result: step_pb2.StepResult) -> list[step_pb2.Frame]:
+    [entry] = [entry for entry in result.tracks if entry.track == "main_video"]
+    return list(entry.frames)
+
+
+def _keyframes(result: step_pb2.StepResult) -> list[bool]:
+    return [frame.keyframe for frame in _video(result)]
+
+
+async def test_an_encoded_output_track_is_one_stream_across_steps(picture_runner: Runner) -> None:
+    codec, encoding = _output_codec()
+    conn = await _encoding(picture_runner, encoding)
+    first = await _step(picture_runner, conn, "r1")
+    second = await _step(picture_runner, conn, "r2")
+
+    assert (_keyframes(first), _keyframes(second)) == ([True], [False])
+    decoder = rw.VideoCodecs().decoder(codec)
+    for result in (first, second):
+        [frame] = _video(result)
+        assert (frame.encoding, frame.dtype, list(frame.shape)) == (encoding, "uint8", [64, 96, 3])
+        picture = decoder.decode(frame.data)
+        assert picture is not None
+        assert picture.shape == (64, 96, 3)
+    expected = _picture(2, 64, 96).astype(np.int16)
+    assert np.abs(picture.astype(np.int16) - expected).mean() < 8
+
+
+async def test_a_new_connection_starts_its_stream_at_a_keyframe(picture_runner: Runner) -> None:
+    _, encoding = _output_codec()
+    first = await _encoding(picture_runner, encoding)
+    await _step(picture_runner, first, "r1")
+    await _step(picture_runner, first, "r2")
+
+    # Another client of the same session, an observer, gets its own stream.
+    observer = await _encoding(picture_runner, encoding, cid=1003)
+    assert _keyframes(await _step(picture_runner, observer, "o1")) == [True]
+    assert _keyframes(await _step(picture_runner, first, "r3")) == [False]
+    assert _keyframes(await _step(picture_runner, observer, "o2")) == [False]
+
+
+async def test_a_reconnect_starts_the_stream_over_at_a_keyframe(picture_runner: Runner) -> None:
+    _, encoding = _output_codec()
+    conn = await _encoding(picture_runner, encoding)
+    await _step(picture_runner, conn, "r1")
+
+    again = await _encoding(picture_runner, encoding)
+    assert _keyframes(await _step(picture_runner, again, "r2")) == [True]
+
+
+async def test_a_result_too_large_restarts_the_stream_even_when_no_keyframe_is_asked(
+    picture_runner: Runner,
+) -> None:
+    _, encoding = _output_codec()
+    conn = await _encoding(picture_runner, encoding)
+    await _step(picture_runner, conn, "r1")
+
+    # The raw frame would be 18 KiB; only the encoded one is measured.
+    conn.max_message_size = 64
+    too_large = await _step(picture_runner, conn, "r2")
+    assert too_large.failure_code == step_pb2.STEP_FAILURE_CODE_RESULT_TOO_LARGE
+
+    conn.max_message_size = 64 * 1024 * 1024
+    after = await _step(picture_runner, conn, "r3", request_keyframe=False)
+    assert after.failure_code == step_pb2.STEP_FAILURE_CODE_UNSPECIFIED
+    assert _keyframes(after) == [True]
+
+
+async def test_a_result_the_connection_refuses_restarts_the_stream(
+    picture_runner: Runner,
+) -> None:
+    _, encoding = _output_codec()
+    conn = await _encoding(picture_runner, encoding)
+    await _step(picture_runner, conn, "r1")
+
+    conn.refuse_sends = 1
+    refused = await _step(picture_runner, conn, "r2")
+    assert refused.failure_code == step_pb2.STEP_FAILURE_CODE_RESULT_TOO_LARGE
+    await asyncio.sleep(0.02)
+
+    assert _keyframes(await _step(picture_runner, conn, "r3")) == [True]
+
+
+async def test_request_keyframe_starts_every_encoded_track_at_a_keyframe(
+    picture_runner: Runner,
+) -> None:
+    _, encoding = _output_codec()
+    conn = await _encoding(picture_runner, encoding)
+    await _step(picture_runner, conn, "r1")
+    assert _keyframes(await _step(picture_runner, conn, "r2", request_keyframe=False)) == [False]
+
+    assert _keyframes(await _step(picture_runner, conn, "r3", request_keyframe=True)) == [True]
+    assert _keyframes(await _step(picture_runner, conn, "r4")) == [False]
+
+
+async def test_a_step_without_frames_leaves_the_stream_where_it_was(
+    picture_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    codec, encoding = _output_codec()
+    encoded: list[int] = []
+    encode = step_frames_module.TrackEncoder.encode
+
+    def counting(self: Any, pictures: list[np.ndarray], rate: float | None) -> Any:
+        encoded.append(len(pictures))
+        return encode(self, pictures, rate)
+
+    monkeypatch.setattr(step_frames_module.TrackEncoder, "encode", counting)
+    conn = await _encoding(picture_runner, encoding)
+    first = await _step(picture_runner, conn, "r1")
+    empty = await _step(picture_runner, conn, "r2", state={"prompt": "no frames"})
+    third = await _step(picture_runner, conn, "r3", state={"prompt": "a forest"})
+
+    assert list(empty.tracks) == []
+    assert encoded == [1, 1]
+    assert _keyframes(third) == [False]
+    decoder = rw.VideoCodecs().decoder(codec)
+    for result in (first, third):
+        assert decoder.decode(_video(result)[0].data) is not None
+
+
+async def test_a_connection_that_negotiated_no_encoding_gets_raw_frames(
+    picture_runner: Runner,
+) -> None:
+    # An older client: no encoded step frames in its offer.
+    plain = await _stepped(picture_runner)
+    raw = await _encoding(picture_runner, step_pb2.FRAME_ENCODING_RAW, cid=1003)
+
+    for conn in (plain, raw):
+        [frame] = _video(await _step(picture_runner, conn, "r1"))
+        assert (frame.encoding, frame.keyframe, list(frame.shape)) == (
+            step_pb2.FRAME_ENCODING_RAW,
+            False,
+            [64, 96, 3],
+        )
+        assert len(frame.data) == 64 * 96 * 3
+
+
+async def test_a_one_frame_720p_step_is_tens_of_kilobytes(
+    monkeypatch: pytest.MonkeyPatch, register_model: Callable[[type], None]
+) -> None:
+    _, encoding = _output_codec()
+    monkeypatch.setattr(PictureModel, "size", (720, 1280))
+    register_model(PictureModel)
+    runner = await _runner(monkeypatch, PictureModel)
+    try:
+        conn = await _encoding(runner, encoding)
+        await _step(runner, conn, "r1")
+        await _step(runner, conn, "r2")
+        assert len(conn.sent[-1]) < 100_000
+        assert _keyframes(conn.replies()[-1].step_result) == [False]
+    finally:
+        await runner.stop()
+
+
+async def test_closing_a_connection_frees_its_encoders(picture_runner: Runner) -> None:
+    _, encoding = _output_codec()
+    conn = await _encoding(picture_runner, encoding)
+    await _step(picture_runner, conn, "r1")
+    assert len(picture_runner._steps.streams) == 1
+
+    picture_runner.connection_closed(conn.id)
+    assert len(picture_runner._steps.streams) == 0

@@ -65,6 +65,9 @@ class FakeConnections:
     def max_message_size(self, cid: ConnId) -> int | None:
         return self._max_message_size
 
+    def step_frame_encodings(self, cid: ConnId) -> dict[str, int]:
+        return {}
+
     def send_step_reply(
         self,
         cid: ConnId,

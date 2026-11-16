@@ -28,6 +28,9 @@ of threads the process shares.
 
 A connection's messages reach the runner in the order they arrived, which the
 wire promises: while a request decodes, the messages behind it wait.
+
+The other way, :class:`TrackEncoder` encodes one output video track's step
+frames to one connection, as one stream across the connection's step results.
 """
 
 from __future__ import annotations
@@ -216,6 +219,92 @@ class TrackDecoder:
                 then waits for a keyframe.
         """
         return self._decoder.decode(data)
+
+
+_BITS_PER_PIXEL = 0.25
+"""The bitrate an output track's encoder targets, per pixel of each frame it encodes.
+
+About 30 KB a frame for 720p, whatever the frame rate, which keeps the
+picture close to the model's at a small fraction of its raw size.
+"""
+
+_MIN_BITRATE_BPS = 300_000
+_DEFAULT_RATE = 30.0
+
+
+class TrackEncoder:
+    """One output video track's encoded stream to one connection, kept across its steps.
+
+    Encodes one encoding, on the backend this process has for it: hardware
+    when the platform has one, software otherwise. Its first frame is a
+    keyframe, and so is its first frame after :meth:`request_keyframe`, after
+    a change of frame size, and after a call that failed; every other frame
+    references the one before it. The backend encoder opens with the first
+    frames it is given. Encoding is not thread-safe: one step encodes on it
+    at a time. :meth:`request_keyframe` can be called from any thread.
+
+    Attributes:
+        encoding: The wire encoding of the frames it encodes.
+    """
+
+    def __init__(self, encoding: step_pb2.FrameEncoding.ValueType) -> None:
+        """Prepare an encoder for *encoding*, one of the encoded :class:`FrameEncoding` values."""
+        self.encoding = encoding
+        self._encoder: rw.VideoEncoder | None = None
+        self._keyframe = False
+        self._keyframe_lock = threading.Lock()
+        self._timestamp_us = 0
+
+    def request_keyframe(self) -> None:
+        """Start the next frames this encoder encodes at a keyframe."""
+        with self._keyframe_lock:
+            self._keyframe = True
+
+    def encode(
+        self, pictures: list[npt.NDArray[np.uint8]], rate: float | None
+    ) -> list[rw.EncodedVideoFrame] | None:
+        """Encode *pictures*, ``(H, W, 3)`` ``uint8`` RGB, as the stream's next frames.
+
+        *rate* is the frames per second they play at, which the bitrate is
+        spread over; 30 when unknown.
+
+        Returns:
+            One encoded frame per picture, in order, or ``None`` when they
+            cannot all be encoded: no backend takes the encoding or the frame
+            size (both sides must be even), the backend failed, or it dropped a
+            frame. The stream then starts over, so the encoder's next frames
+            start at a keyframe.
+        """
+        with self._keyframe_lock:
+            keyframe, self._keyframe = self._keyframe, False
+        fps = rate if rate and rate > 0 else _DEFAULT_RATE
+        try:
+            encoded: list[rw.EncodedVideoFrame] = []
+            for picture in pictures:
+                height, width = picture.shape[:2]
+                bitrate = max(_MIN_BITRATE_BPS, int(width * height * fps * _BITS_PER_PIXEL))
+                if self._encoder is None:
+                    codec = _CODECS.get(self.encoding)
+                    if codec is None:
+                        raise rw.CodecUnsupported(f"no codec carries encoding {self.encoding}")
+                    self._encoder = _video_codecs().encoder(
+                        codec, width, height, bitrate_bps=bitrate, framerate=fps
+                    )
+                elif (self._encoder.bitrate_bps, self._encoder.framerate) != (bitrate, fps):
+                    self._encoder.set_rates(bitrate, fps)
+                if keyframe:
+                    self._encoder.request_key_frame()
+                    keyframe = False
+                frame = self._encoder.encode(picture, self._timestamp_us)
+                self._timestamp_us += round(1_000_000 / fps)
+                if frame is None:
+                    raise rw.CodecError("the encoder dropped a frame")
+                encoded.append(frame)
+        except (rw.CodecError, ValueError, TypeError) as error:
+            logger.debug("an output track's frames are sent raw: %s", error)
+            self._encoder = None
+            return None
+        return encoded
 
 
 def decode_step_frames(

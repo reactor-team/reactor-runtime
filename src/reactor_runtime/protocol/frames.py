@@ -11,11 +11,16 @@ added as one more entry without touching the callers.
 The raw encoding carries uncompressed samples in row-major, little-endian
 order: video is ``uint8`` RGB shaped ``(height, width, 3)``, audio is ``int16``
 PCM shaped ``(channels, samples)``.
+
+An encoded output video track is one stream for its life on a connection: its
+frames come from a :class:`StreamEncoder` the caller keeps across steps, and
+:func:`track_frames` hands it each step's frames.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Collection, Mapping, Sequence
 from typing import Any, Protocol
 
 import numpy as np
@@ -59,6 +64,40 @@ class FrameCodec(Protocol):
         Raises:
             FrameEncodingError: The array cannot be carried as one frame of
                 the track kind.
+        """
+        ...
+
+
+class EncodedPicture(Protocol):
+    """One video frame as a :class:`StreamEncoder` encoded it."""
+
+    @property
+    def data(self) -> bytes:
+        """The frame in its encoding's bitstream format."""
+        ...
+
+    @property
+    def key_frame(self) -> bool:
+        """Whether a decoder can start from this frame."""
+        ...
+
+
+class StreamEncoder(Protocol):
+    """Encodes one video track's frames as the next frames of its stream."""
+
+    @property
+    def encoding(self) -> step_pb2.FrameEncoding:
+        """The ``FrameEncoding`` of the frames it encodes."""
+        ...
+
+    def encode(
+        self, pictures: list[npt.NDArray[np.uint8]], rate: float | None
+    ) -> Sequence[EncodedPicture] | None:
+        """Encode *pictures*, ``(H, W, 3)`` ``uint8`` RGB played at *rate*, in order.
+
+        Returns:
+            One encoded frame per picture, or ``None`` when they cannot be
+            encoded; the stream then starts over at a keyframe.
         """
         ...
 
@@ -248,7 +287,10 @@ _WIRE_KINDS = {
 
 
 def track_frames(
-    bundle: MediaBundle | None, *, video_fps: float | None = None
+    bundle: MediaBundle | None,
+    *,
+    video_fps: float | None = None,
+    encoders: Mapping[str, StreamEncoder] | None = None,
 ) -> list[step_pb2.TrackFrames]:
     """Encode a step's media as one entry per output track, in the bundle's order.
 
@@ -258,6 +300,14 @@ def track_frames(
     track with no samples, such as ``(1, 0)``, has no frames: an empty audio
     payload is how a model says it has no audio for the step, and the streamed
     path takes it the same way. A step without media has no tracks.
+
+    A video track with an encoder in *encoders*, by track name, has its frames
+    encoded by it, as the next frames of the track's stream, each marked
+    ``keyframe`` as the encoder made it, with the ``dtype`` and ``shape`` of
+    the picture it decodes to. When the encoder cannot encode them, the
+    track's frames for this step are raw. Every other track is raw. Only the
+    tracks in *bundle* reach their encoder, so a step without frames for a
+    track leaves its stream where it was.
 
     Each entry carries the rate its frames play at: *video_fps*, the step's own
     rate, for a video track, falling back to the track's declared rate, and
@@ -269,33 +319,78 @@ def track_frames(
     """
     if bundle is None:
         return []
-    return [
-        step_pb2.TrackFrames(
-            track=name,
-            kind=_WIRE_KINDS[track.info.kind],
-            frames=[
-                encode_frame(data, track.info.kind, metadata=metadata)
-                for data, metadata in _frames_of(track)
-            ],
-            rate=(
-                video_fps if track.info.kind is TrackKind.VIDEO and video_fps else track.info.rate
-            ),
+    entries: list[step_pb2.TrackFrames] = []
+    for name, track in bundle.tracks.items():
+        kind = track.info.kind
+        rate = video_fps if kind is TrackKind.VIDEO and video_fps else track.info.rate
+        frames = _frames_of(track)
+        encoder = (encoders or {}).get(name) if kind is TrackKind.VIDEO else None
+        wire = _encoded_frames(frames, encoder, rate) if encoder is not None else None
+        if wire is None:
+            wire = [encode_frame(data, kind, metadata=metadata) for data, metadata in frames]
+        entries.append(
+            step_pb2.TrackFrames(track=name, kind=_WIRE_KINDS[kind], frames=wire, rate=rate)
         )
-        for name, track in bundle.tracks.items()
-    ]
+    return entries
 
 
-def media_size(bundle: MediaBundle | None) -> int:
-    """Return the bytes a step's media takes as frames, at least, without copying it.
+def _rgb_picture(data: npt.NDArray[Any]) -> npt.NDArray[np.uint8]:
+    """Return one video frame as contiguous ``(H, W, 3)`` ``uint8``, as the raw encoding takes it.
 
-    Video travels as one byte per element and audio as two, so this is the
-    frames' data alone: a result is never smaller.
+    Raises:
+        FrameEncodingError: The array cannot be carried as one video frame.
+    """
+    try:
+        picture = np.ascontiguousarray(np.asarray(data).astype(np.uint8, copy=False))
+    except (TypeError, ValueError, OverflowError) as error:
+        raise FrameEncodingError(
+            f"a video frame of dtype {np.asarray(data).dtype} cannot be carried: {error}"
+        ) from error
+    if picture.ndim != 3 or 0 in picture.shape or picture.shape[2] != 3:
+        raise FrameEncodingError(f"a video frame cannot be shaped {list(np.shape(data))}")
+    return picture
+
+
+def _encoded_frames(
+    frames: list[tuple[npt.NDArray[Any], bytes | None]], encoder: StreamEncoder, rate: float | None
+) -> list[step_pb2.Frame] | None:
+    """Encode one video track's frames on *encoder*; ``None`` when it cannot encode them.
+
+    Raises:
+        FrameEncodingError: A frame cannot be carried as a video frame at all.
+    """
+    pictures = [_rgb_picture(data) for data, _ in frames]
+    encoded = encoder.encode(pictures, rate)
+    if encoded is None or len(encoded) != len(pictures):
+        return None
+    wire: list[step_pb2.Frame] = []
+    for (_, metadata), picture, out in zip(frames, pictures, encoded, strict=True):
+        frame = step_pb2.Frame(
+            encoding=encoder.encoding,
+            dtype="uint8",
+            shape=list(picture.shape),
+            data=out.data,
+            keyframe=out.key_frame,
+        )
+        if metadata is not None:
+            frame.metadata = metadata
+        wire.append(frame)
+    return wire
+
+
+def media_size(bundle: MediaBundle | None, *, encoded: Collection[str] = ()) -> int:
+    """Return the bytes a step's raw media takes as frames, at least, without copying it.
+
+    Raw video travels as one byte per element and audio as two, so this is the
+    frames' data alone: a result is never smaller. The tracks named in
+    *encoded*, whose size is known only once encoded, count for nothing.
     """
     if bundle is None:
         return 0
     return sum(
         track.data.size * (1 if track.info.kind is TrackKind.VIDEO else 2)
-        for track in bundle.tracks.values()
+        for name, track in bundle.tracks.items()
+        if name not in encoded
     )
 
 

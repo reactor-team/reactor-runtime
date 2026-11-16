@@ -56,6 +56,7 @@ from reactor_runtime.core.transport import (
     MessageObserver,
     MessageStageSource,
     ReplyRoute,
+    StepFrameEncodingSource,
     TransportStatsSource,
 )
 from reactor_runtime.core.typespec import TypeSpec
@@ -147,6 +148,7 @@ __all__ = [
     "SessionState",
     "SharedMemoryConfig",
     "StartingInputApplied",
+    "StepFrameEncodingSource",
     "StepRefusal",
     "StepRefusalKind",
     "StepResultsConfig",

@@ -674,7 +674,7 @@ class V1Client(BareClient):
 
     def close(self) -> None:
         """Close the connection, dropping the channels this client also holds."""
-        self._control = self._data = None
+        self._control = self._data = self._decoder = None
         super().close()
 
     def failures(self) -> list[str]:
@@ -808,6 +808,12 @@ class StepClient(BareClient):
     nothing and drops live input, so nothing else is sent. Each result must
     carry the effect its step applied as its data, which the endurance model
     returns.
+
+    Its offer declares encoded step frames, so the runtime encodes the
+    model's output video to it on one encoder for the connection's life,
+    which the close releases. The client decodes every encoded output frame
+    on one decoder, as an SDK does: the stream must start at a keyframe and
+    every frame must decode to the shape it declares.
     :attr:`unanswered` lists the requests that got no result, a failed one, or
     one with the wrong data, and an answer that got the attribute wrong.
     """
@@ -822,6 +828,7 @@ class StepClient(BareClient):
         self._lock = threading.Lock()
         self._results: dict[str, step_pb2.StepResult] = {}
         self._failed: list[str] = []
+        self._decoder: Any = None
         self.unanswered: list[str] = []
 
     async def run(self, frame: tuple[bytes, int, int]) -> int:
@@ -879,6 +886,8 @@ class StepClient(BareClient):
                     unanswered.append(f"request_step ({request_id}): {result.error}")
                 elif result.data != _step_data(effect):
                     unanswered.append(f"request_step ({request_id}): data {result.data!r}")
+                elif (problem := self._output_problem(result)) is not None:
+                    unanswered.append(f"request_step ({request_id}): {problem}")
                 else:
                     ran += 1
             if publishes:
@@ -895,6 +904,24 @@ class StepClient(BareClient):
             control_pb2.ControlClientMessage(kind=_REQUEST, **track).SerializeToString(),
             binary=True,
         )
+
+    def _output_problem(self, result: step_pb2.StepResult) -> str | None:
+        """Decode *result*'s encoded output frames as the next of one stream; say what is wrong."""
+        for entry in result.tracks:
+            for frame in entry.frames:
+                if frame.encoding == step_pb2.FRAME_ENCODING_RAW:
+                    continue
+                if self._decoder is None:
+                    if not frame.keyframe:
+                        return f"{entry.track}'s encoded frames do not start at a keyframe"
+                    self._decoder = rw.VideoCodecs().decoder(_CODEC_OF[frame.encoding])
+                try:
+                    picture = self._decoder.decode(frame.data)
+                except rw.CodecError as error:
+                    return f"a frame of {entry.track} does not decode: {error}"
+                if picture is None or list(picture.shape) != list(frame.shape):
+                    return f"a frame of {entry.track} does not decode to {list(frame.shape)}"
+        return None
 
     async def _result(self, request_id: str) -> step_pb2.StepResult | None:
         deadline = time.monotonic() + _STEP_WAIT_S
@@ -958,7 +985,7 @@ _STEP_CODECS = (
     (rw.VideoCodec.Vp9, step_pb2.FRAME_ENCODING_VP9),
     (rw.VideoCodec.Av1, step_pb2.FRAME_ENCODING_AV1),
 )
-
+_CODEC_OF = {encoding: codec for codec, encoding in _STEP_CODECS}
 
 def step_codec() -> tuple[rw.VideoCodec, step_pb2.FrameEncoding]:
     """Return the first codec, H.264 first, that this platform both encodes and decodes.
@@ -1322,6 +1349,7 @@ class ResourceSampler:
                 executor_threads=reading.get("executor_threads", 0),
                 live_step_requests=reading.get("step_requests", 0),
                 live_step_decoders=reading["live"].get("step_decoders", 0),
+                live_step_encoders=reading["live"].get("step_encoders", 0),
                 live_local_files=reading["live"].get("local_files", 0),
                 live_recorder_threads=reading.get("recorder_threads", 0),
             )

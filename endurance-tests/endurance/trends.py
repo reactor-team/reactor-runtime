@@ -123,6 +123,9 @@ class Sample:
     # H.264 decoders a connection opened for its step frames, alive after the
     # probe's collection, with no client connected. Each holds its threads.
     live_step_decoders: int = 0
+    # Video encoders a connection held for its encoded step results, alive
+    # after the probe's collection, with no client connected.
+    live_step_encoders: int = 0
     # Step file copies the runtime made and never released through close():
     # copies a step still holds, and copies garbage collection removed.
     live_local_files: int = 0
@@ -431,6 +434,7 @@ ZERO_FIELDS = (
     "live_rooms_leaving",
     "live_step_requests",
     "live_step_decoders",
+    "live_step_encoders",
     "live_local_files",
     "live_recorder_threads",
 )

@@ -8,6 +8,11 @@ that takes no number. When the model reports the step, it encodes the step's
 media on the model's thread and sends the ``StepResult`` back on the data
 channel.
 
+Each output video track a connection negotiated an encoding for is one encoded
+stream to that connection for its life (:class:`OutputStreams`): its frames
+reference the frames of the steps before, and start at a keyframe only where
+the connection's stream starts over.
+
 A client can also push input frames outside any step (``PushFrames``). They
 are never refused: each frame its track can take is written to the track's
 input buffer, and any other is dropped without a word.
@@ -26,11 +31,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import threading
 from collections.abc import (
     AsyncIterator,
     Awaitable,
     Callable,
     Coroutine,
+    Iterable,
     Mapping,
     Sequence,
 )
@@ -65,6 +72,7 @@ from reactor_runtime.protocol.frames import (
 )
 from reactor_runtime.runner.session_start import Generation
 from reactor_runtime.step_results import content_type_of
+from reactor_runtime.transport.step_frames import TrackEncoder
 from reactor_runtime.upload_store import UnknownUploadError
 from reactor_wire.v1 import platform_pb2, step_pb2
 
@@ -88,14 +96,17 @@ _WIRE_TRACK_KINDS = {
 class EncodedResult:
     """A requested step's result as the model's thread encoded it, without its files.
 
-    Exactly one is set: *frame*, the v1 frame ready to send; *oversized*, the
-    size of media and data that does not fit the connection, never copied; or *error*,
-    why the media cannot be carried as frames.
+    Exactly one of *frame*, the v1 frame ready to send, *oversized*, the size
+    of a result that does not fit the connection, or *error*, why the media
+    cannot be carried as frames, is set. *streamed* names the output tracks
+    whose frames in *frame* continue an encoded stream, which starts over when
+    the frame is not sent.
     """
 
     frame: bytes | None = None
     oversized: int = 0
     error: str | None = None
+    streamed: tuple[str, ...] = ()
 
 
 class StepInputError(ValueError):
@@ -140,6 +151,10 @@ class StepConnections(Protocol):
 
     def max_message_size(self, cid: ConnId) -> int | None:
         """Return the largest message a connection takes; ``None`` when unknown."""
+        ...
+
+    def step_frame_encodings(self, cid: ConnId) -> Mapping[str, int]:
+        """Return the ``FrameEncoding`` each track's step frames take on a connection."""
         ...
 
     def send_step_reply(
@@ -288,6 +303,101 @@ class StepOrder:
                 self._order[conn_id] = (lock, users - 1)
 
 
+_STREAMLESS = frozenset({step_pb2.FRAME_ENCODING_UNSPECIFIED, step_pb2.FRAME_ENCODING_RAW})
+"""Encodings whose frames stand alone, so a track in one keeps no encoder."""
+
+
+@dataclass
+class _Streams:
+    """One connection's negotiated encodings, and the encoder of each encoded output track."""
+
+    encodings: Mapping[str, int]
+    encoders: dict[str, TrackEncoder]
+
+
+class OutputStreams:
+    """Each connection's encoded output streams, one :class:`TrackEncoder` per track.
+
+    A connection's entry opens with its first step request, holding the
+    encoding each track negotiated, and lasts until the connection closes or
+    is replaced. Each output track whose encoding is not raw gets its encoder
+    the first time a step encodes for the connection; the encoder's backend
+    opens with the first frames it encodes. A track that is raw on the
+    connection, and every track of a connection that negotiated nothing,
+    keeps no encoder.
+
+    A track's stream starts at a keyframe on a new connection, since its
+    encoder is new, and starts over at one after :meth:`restart` (frames that
+    were encoded and not sent) and :meth:`request_keyframe` (the client lost
+    the stream).
+
+    The loop opens, closes, and restarts entries while the model's thread
+    encodes on them, so every call is thread-safe.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._conns: dict[ConnId, _Streams] = {}
+
+    def __len__(self) -> int:
+        """Return how many connections hold an entry."""
+        with self._lock:
+            return len(self._conns)
+
+    def open(self, conn_id: ConnId, encodings: Mapping[str, int]) -> None:
+        """Hold *conn_id*'s negotiated *encodings*, by track, unless it already has an entry."""
+        with self._lock:
+            if conn_id not in self._conns:
+                self._conns[conn_id] = _Streams(dict(encodings), {})
+
+    def encoders(self, conn_id: ConnId) -> dict[str, TrackEncoder]:
+        """Return the encoder of each encoded track of *conn_id*, by name; empty without an entry.
+
+        Called on the model's thread, the only one that encodes.
+        """
+        with self._lock:
+            streams = self._conns.get(conn_id)
+            if streams is None:
+                return {}
+            for track, encoding in streams.encodings.items():
+                if encoding not in _STREAMLESS and track not in streams.encoders:
+                    streams.encoders[track] = TrackEncoder(encoding)
+            return dict(streams.encoders)
+
+    def request_keyframe(self, conn_id: ConnId) -> None:
+        """Start the next frames of every encoded track of *conn_id* at a keyframe."""
+        self.restart(conn_id, None)
+
+    def restart(self, conn_id: ConnId, tracks: Iterable[str] | None) -> None:
+        """Start the next frames of *tracks* (every track for ``None``) at a keyframe.
+
+        A track whose encoder does not exist yet starts at one anyway.
+        """
+        with self._lock:
+            streams = self._conns.get(conn_id)
+            if streams is None:
+                return
+            names = streams.encoders if tracks is None else tracks
+            for encoder in [streams.encoders[n] for n in names if n in streams.encoders]:
+                encoder.request_keyframe()
+
+    def close(self, conn_id: ConnId) -> None:
+        """Drop *conn_id*'s entry, freeing its encoders off the event loop.
+
+        Freeing an encoder can wait on its backend, a hardware session or
+        threads, so it is left to a worker thread when a loop runs here.
+        """
+        with self._lock:
+            streams = self._conns.pop(conn_id, None)
+        if streams is None or not streams.encoders:
+            return
+        released = list(streams.encoders.values())
+        streams.encoders.clear()
+        # With no running loop, or its executor shut down, they are freed here.
+        with contextlib.suppress(RuntimeError):
+            asyncio.get_running_loop().run_in_executor(None, released.clear)
+
+
 class StepRequests:
     """A runner's stepped path: submit each step request, and answer it.
 
@@ -301,6 +411,7 @@ class StepRequests:
         self._host = host
         self._upload_wait = upload_wait
         self.order = StepOrder()
+        self.streams = OutputStreams()
         # Step results are v1 frames: only the v1 codec carries step traffic.
         self._codec = select(ProtocolVersion.V1)
 
@@ -344,6 +455,10 @@ class StepRequests:
         changes nothing. Neither is journalled or counted toward the session's
         steps. A request with no entries and no frames runs a step on the
         model's current state.
+
+        A request with ``request_keyframe`` set starts the next frames of every
+        encoded output track of its connection at a keyframe, whether it runs
+        or not.
         """
         bridge = self._host.bridge()
         if bridge is None:
@@ -373,6 +488,11 @@ class StepRequests:
                 "WebRTC connection that negotiated data-channel chunking",
             )
             return
+        self.streams.open(step.conn_id, self._host.connections.step_frame_encodings(step.conn_id))
+        if step.request_keyframe:
+            # Kept even when this request is refused: the client lost the
+            # stream, so whatever it receives next starts at a keyframe.
+            self.streams.request_keyframe(step.conn_id)
 
         def refuse_entry(entry: str, reason: str) -> None:
             self._host.journal(SessionEvent.ERROR, message=f"step request: {reason}")
@@ -617,8 +737,24 @@ class StepRequests:
             entry=refusal.entry,
         )
 
-    def end_request(self, conn_id: ConnId, request_id: str) -> None:
-        """Answer a step request whose session ended before its result could go out."""
+    def connection_closed(self, conn_id: ConnId) -> None:
+        """Forget a connection that closed or was replaced, with its output streams.
+
+        A connection that comes back on the same id starts each stream over,
+        at a keyframe.
+        """
+        self.streams.close(conn_id)
+
+    def end_request(
+        self, conn_id: ConnId, request_id: str, encoded: EncodedResult | None = None
+    ) -> None:
+        """Answer a step request whose session ended before its result could go out.
+
+        The encoded streams of *encoded*, the result that is not sent, start
+        over at a keyframe.
+        """
+        if encoded is not None and encoded.streamed:
+            self.streams.restart(conn_id, encoded.streamed)
         self.refuse(
             conn_id,
             request_id,
@@ -629,14 +765,21 @@ class StepRequests:
     def encode_result(self, step: CompletedStep) -> EncodedResult | None:
         """Encode a requested step's result, on the model's thread.
 
-        Copying and serializing a step's media is a result's heaviest work, so
-        all of it happens here, before the hop that keeps the step's replies in
-        order, and not on the runtime loop every connection shares: the loop
-        gets the finished frame. Media larger than the connection took when the
-        request was admitted is not copied at all. The step's files are left
-        out, since whether the step store takes the step is decided on the loop.
-        The data the model returned with the step counts toward the result's
-        size beside its media.
+        Copying, encoding, and serializing a step's media is a result's
+        heaviest work, so all of it happens here, before the hop that keeps the
+        step's replies in order, and not on the runtime loop every connection
+        shares: the loop gets the finished frame. The step's files are left
+        out, since whether the step store takes the step is decided on the
+        loop. The data the model returned with the step counts toward the
+        result's size beside its media.
+
+        Each output video track the connection negotiated an encoding for is
+        encoded on its connection's encoder (see :class:`OutputStreams`), and
+        every other track is raw. The result is measured against the largest
+        message the connection took when the request was admitted once it is
+        encoded; raw media and data that alone outgrow it are not copied, and
+        no encoder moves on for them. An encoded track whose frames do not go
+        out in the result starts its next frames at a keyframe.
 
         Returns:
             The encoded result, or ``None`` for a step no client requested.
@@ -645,15 +788,23 @@ class StepRequests:
         if request is None:
             return None
         limit = request.max_message_size
+        encoders = self.streams.encoders(request.conn_id)
         # A failed step's result carries no data, so its data takes no room.
         data = step.data if step.error is None else None
-        size = media_size(step.bundle) + len(data or b"")
+        size = media_size(step.bundle, encoded=encoders.keys()) + len(data or b"")
         if limit is not None and size > limit:
             return EncodedResult(oversized=size)
         try:
-            tracks = track_frames(step.bundle, video_fps=step.fps)
+            tracks = track_frames(step.bundle, video_fps=step.fps, encoders=encoders)
         except FrameEncodingError as error:
+            # Tracks encoded before the failure moved their streams on.
+            self.streams.restart(request.conn_id, encoders.keys())
             return EncodedResult(error=str(error))
+        streamed = tuple(
+            entry.track
+            for entry in tracks
+            if any(frame.encoding not in _STREAMLESS for frame in entry.frames)
+        )
         result = step_pb2.StepResult(
             step=request.index,
             tracks=tracks,
@@ -670,7 +821,10 @@ class StepRequests:
         )
         _, frame = self._codec.encode_step_result(request.request_id, result)
         assert isinstance(frame, bytes)
-        return EncodedResult(frame=frame)
+        if limit is not None and len(frame) > limit:
+            self.streams.restart(request.conn_id, streamed)
+            return EncodedResult(oversized=len(frame))
+        return EncodedResult(frame=frame, streamed=streamed)
 
     def send_result(
         self,
@@ -701,8 +855,8 @@ class StepRequests:
         message, as does one whose media cannot be carried as frames. One whose
         result is larger than the connection takes, by its own limit or by the
         media engine's refusal, answers ``RESULT_TOO_LARGE`` with no media,
-        data, or files, and the session goes on. A failed step's result carries
-        no data.
+        data, or files, and the session goes on; its encoded tracks start their
+        next frames at a keyframe. A failed step's result carries no data.
 
         *encoded* is the result the model's thread encoded (see
         :meth:`encode_result`); without it, it is encoded here.
@@ -714,9 +868,11 @@ class StepRequests:
             assert encoded is not None
         elapsed = step.elapsed or 0.0
         request_id = request.request_id
+        streamed = encoded.streamed
 
         def too_large(size: int, *, at_least: bool = False) -> bytes:
             logger.warning("a step result does not fit one message", step=index, size=size)
+            self.streams.restart(request.conn_id, streamed)
             measured = f"at least {size}" if at_least else f"{size}"
             _, frame = self._codec.encode_step_result(
                 request_id,

@@ -16,6 +16,7 @@ from reactor_runtime.transport.step_frames import (
     StepFrameGate,
     StepFrameRefusal,
     TrackDecoder,
+    TrackEncoder,
     decode_pushed_frames,
     decode_step_frames,
     encoded_step,
@@ -1070,3 +1071,49 @@ async def test_unpublishing_a_track_forgets_that_its_pushed_stream_broke() -> No
     await _until(lambda: len(rec.steps) == 2)
 
     assert len(rec.replies) == 2
+
+
+# -- the output side: one encoder per track and connection ---------------------
+
+
+@pytest.mark.parametrize("encoding", ENCODINGS)
+def test_a_track_encoder_is_one_stream_across_calls(encoding: step_pb2.FrameEncoding) -> None:
+    pictures = _pictures(4)
+    encoder = TrackEncoder(encoding)
+    first = encoder.encode(pictures[:1], 30.0)
+    rest = encoder.encode(pictures[1:], 30.0)
+    assert first is not None
+    assert rest is not None
+
+    assert [f.key_frame for f in [*first, *rest]] == [True, False, False, False]
+    decoded = _reference([f.data for f in [*first, *rest]], encoding)
+    assert [p.shape for p in decoded] == [(HEIGHT, WIDTH, 3)] * 4
+
+
+def test_a_track_encoder_starts_at_a_keyframe_when_asked() -> None:
+    pictures = _pictures(3)
+    encoder = TrackEncoder(step_pb2.FRAME_ENCODING_H264)
+    assert encoder.encode(pictures[:1], None) is not None
+
+    encoder.request_keyframe()
+    again = encoder.encode(pictures[1:], None)
+
+    assert again is not None
+    assert [f.key_frame for f in again] == [True, False]
+
+
+def test_frames_a_track_encoder_cannot_take_start_the_stream_over() -> None:
+    encoder = TrackEncoder(step_pb2.FRAME_ENCODING_H264)
+    assert encoder.encode(_pictures(1), 30.0) is not None
+
+    # An odd side is a size no encoder takes.
+    assert encoder.encode([np.zeros((HEIGHT + 1, WIDTH, 3), np.uint8)], 30.0) is None
+    after = encoder.encode(_pictures(1), 30.0)
+
+    assert after is not None
+    assert [f.key_frame for f in after] == [True]
+
+
+def test_a_track_encoder_for_an_encoding_with_no_codec_encodes_nothing() -> None:
+    encoder = TrackEncoder(step_pb2.FRAME_ENCODING_RAW)
+    assert encoder.encode(_pictures(1), 30.0) is None
