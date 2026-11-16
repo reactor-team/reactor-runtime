@@ -8,9 +8,14 @@ that takes no number. When the model reports the step, it encodes the step's
 media on the model's thread and sends the ``StepResult`` back on the data
 channel.
 
-A connection's step requests, and in a stepped session its commands, are
-submitted one at a time in the order they arrived (:class:`StepOrder`), so one
-that waits for an upload holds back the ones sent after it.
+A client can also push input frames outside any step (``PushFrames``). They
+are never refused: each frame its track can take is written to the track's
+input buffer, and any other is dropped without a word.
+
+A connection's step requests, its pushed frames, and in a stepped session its
+commands, are submitted one at a time in the order they arrived
+(:class:`StepOrder`), so one that waits for an upload holds back the ones sent
+after it, and frames pushed before a step are written before it runs.
 
 The runner owns the session; the stepped path reads it through a
 :class:`StepHost`, so it can be driven, and tested, without one.
@@ -48,7 +53,7 @@ from reactor_runtime.core import (
 from reactor_runtime.interface.internal.bridge import CommandOutcome
 from reactor_runtime.interface.internal.reactor_core import FrameSource, RequestId
 from reactor_runtime.log import get_logger
-from reactor_runtime.message_gateway import InboundStep
+from reactor_runtime.message_gateway import InboundPush, InboundStep
 from reactor_runtime.protocol import Channel, Codec, ProtocolVersion, select
 from reactor_runtime.protocol.frames import (
     FrameEncodingError,
@@ -199,6 +204,12 @@ class StepBridge(Protocol):
         """Admit a step request's calls and its step, or return the first call that fails."""
         ...
 
+    def push_frames(
+        self, media_input: Mapping[str, Sequence[FrameSource]], *, conn_id: ConnId
+    ) -> None:
+        """Admit frames a client pushed outside any step, in their place among its requests."""
+        ...
+
 
 @dataclass(frozen=True)
 class StepHost:
@@ -243,7 +254,7 @@ class StepHost:
 
 
 class StepOrder:
-    """Each connection's step requests, and stepped commands, one at a time in arrival order.
+    """Each connection's step requests, pushes, and stepped commands, one at a time in order.
 
     Holds, per connection, its lock and how many messages hold or wait for it.
     """
@@ -413,6 +424,77 @@ class StepRequests:
                 self._host.command_label(name), since=step.received_at
             )
             self._host.journal(SessionEvent.COMMAND, name=name, args=args, conn_id=step.conn_id)
+
+    async def submit_client_push(self, push: InboundPush) -> None:
+        """Submit frames a client pushed once the session's starting input is submitted.
+
+        A push takes its place in the connection's step order, as a step
+        request does, so its frames are written after the steps requested
+        before it and before the steps requested after it.
+        """
+        async with self.order.hold(push.conn_id):
+            await self._host.starting_input_done().wait()
+            self.push(push)
+
+    def push(self, push: InboundPush) -> None:
+        """Hand the frames a client pushed to the model, every one its tracks can take.
+
+        A push is never refused and never answered. Outside a running stepped
+        session its frames are dropped. In one, each frame is written to its
+        input track's buffer, which keeps the newest frames when it is full; a
+        frame for a track that is not one of the model's input tracks, of a
+        kind the track is not, that cannot be decoded, or that the transport
+        could not decode, is dropped, and the frames beside it go on.
+        """
+        bridge = self._host.bridge()
+        if bridge is None:
+            return
+        if not self._host.session_running() or self._host.generation() is not Generation.STEPPED:
+            logger.debug(
+                "pushed frames dropped: no stepped session is running", conn_id=push.conn_id
+            )
+            return
+        media_input = self._pushed_frames(bridge, push)
+        if media_input:
+            bridge.push_frames(media_input, conn_id=push.conn_id)
+
+    def _pushed_frames(self, bridge: StepBridge, push: InboundPush) -> dict[str, list[FrameSource]]:
+        """Each pushed frame its input track can take, by track, in the order they were sent."""
+        tracks = {
+            name: info
+            for name, info in bridge.contract.tracks.items()
+            if info.direction is TrackDirection.IN
+        }
+        taken: dict[str, list[FrameSource]] = {}
+        dropped: list[str] = []
+        for index, entry in enumerate(push.tracks):
+            info = tracks.get(entry.track)
+            kind = _WIRE_TRACK_KINDS.get(entry.kind)
+            if info is None or (
+                entry.kind != platform_pb2.TRACK_KIND_UNSPECIFIED and kind is not info.kind
+            ):
+                dropped.append(f"tracks[{index}]")
+                continue
+            frames = taken.setdefault(entry.track, [])
+            for position, frame in enumerate(entry.frames):
+                picture = push.pictures.get((index, position))
+                if picture is not None:
+                    if info.kind is TrackKind.VIDEO:
+                        frames.append(functools.partial(decoded_frame, frame, picture))
+                    else:
+                        dropped.append(f"tracks[{index}].frames[{position}]")
+                    continue
+                try:
+                    check_frame(frame, info.kind)
+                except FrameEncodingError:
+                    # An encoded frame the transport did not decode lands here
+                    # too: its track's stream is broken, and the client was told.
+                    dropped.append(f"tracks[{index}].frames[{position}]")
+                    continue
+                frames.append(functools.partial(decode_frame, frame, info.kind))
+        if dropped:
+            logger.debug("pushed frames dropped", conn_id=push.conn_id, entries=dropped)
+        return {track: frames for track, frames in taken.items() if frames}
 
     def check_media_input(
         self,

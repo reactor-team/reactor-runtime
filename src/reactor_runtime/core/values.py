@@ -537,17 +537,19 @@ class MediaChunk:
 
 @dataclass(frozen=True, eq=False)
 class DecodedStep:
-    """A client's step request whose encoded frames its transport already decoded.
+    """A client's step request or push whose encoded frames its transport already decoded.
 
-    The request goes up as it arrived, its encoded frames still in it, with the
+    The message goes up as it arrived, its encoded frames still in it, with the
     picture each one decodes to beside it, so the runner reads the pictures
-    without the request being rewritten and serialized again.
+    without the message being rewritten and serialized again.
 
     Attributes:
-        payload: The request's wire frame, as the client sent it.
+        payload: The message's wire frame, as the client sent it.
         pictures: The ``(H, W, 3)`` ``uint8`` RGB picture each encoded frame
-            decodes to, keyed by ``(entry, position)``: the index of its
-            ``media_input`` entry, and its position among that entry's frames.
+            decodes to, keyed by ``(entry, position)``: the index of its entry
+            (in a step request's ``media_input``, or a push's ``tracks``), and
+            its position among that entry's frames. A pushed frame that did
+            not decode has no picture.
     """
 
     payload: bytes

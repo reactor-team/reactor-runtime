@@ -327,8 +327,24 @@ class StepEnvelope:
     max_message_size: int | None = None
 
 
-Inbound = CommandEnvelope | StepEnvelope | ReactorEvent
-"""One item of the model's inbound queue: a command, a step request, or a reactor event."""
+@dataclass(frozen=True)
+class PushEnvelope:
+    """Input frames a client of a stepped session pushed outside any step, checked.
+
+    Attributes:
+        media_input: The frames to write to each input track, by track name,
+            in the order the client sent them. Each is decoded on the model's
+            thread, as a step request's are.
+        conn_id: The connection that pushed them.
+    """
+
+    media_input: Mapping[str, tuple[FrameSource, ...]]
+    conn_id: ConnId
+
+
+Inbound = CommandEnvelope | StepEnvelope | PushEnvelope | ReactorEvent
+"""One item of the model's inbound queue: a command, a step request, pushed frames,
+or a reactor event."""
 
 
 class ReactorCore:
@@ -708,6 +724,15 @@ class ReactorCore:
         after every command posted before it.
         """
         self._enqueue(step)
+
+    def submit_push(self, push: PushEnvelope) -> None:
+        """Enqueue frames a client pushed onto the model loop.
+
+        They take their place in the same queue as commands and step requests,
+        so they are written after every step posted before them has run, and
+        before any step posted after them.
+        """
+        self._enqueue(push)
 
     def post_reactor_event(self, event: ReactorEvent) -> None:
         """Enqueue a reactor-authoritative event onto the model loop."""

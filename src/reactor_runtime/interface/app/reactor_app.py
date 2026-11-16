@@ -91,6 +91,7 @@ from reactor_runtime.interface.internal.reactor_core import (
     STEP_SESSION,
     CommandEnvelope,
     CommandTimes,
+    PushEnvelope,
     ReactorCore,
     RequestId,
     StepEnvelope,
@@ -592,10 +593,11 @@ class ReactorApp(ReactorCore):
     async def _inbound_loop(self) -> None:
         """Drain the inbound queue, dispatching each item before taking the next.
 
-        Commands, step requests, and reactor events are handled one at a time
-        in the order they were posted, so a command never runs ahead of a
-        session start or a client connection posted before it, and a step
-        request runs after every command posted before it. A handler or hook
+        Commands, step requests, pushed frames, and reactor events are handled
+        one at a time in the order they were posted, so a command never runs
+        ahead of a session start or a client connection posted before it, and a
+        step request runs after every command and frame posted before it. A
+        handler or hook
         therefore must not wait for a later reactor event: that event is queued
         behind it.
         """
@@ -607,6 +609,8 @@ class ReactorApp(ReactorCore):
                 await self._dispatch_command(item)
             elif isinstance(item, StepEnvelope):
                 await self._dispatch_step(item)
+            elif isinstance(item, PushEnvelope):
+                await self._dispatch_push(item)
             else:
                 await self._dispatch_reactor_event(item)
 
@@ -634,6 +638,24 @@ class ReactorApp(ReactorCore):
         self._pending_step = (request, done)
         self._step_posted.set()
         await done
+
+    async def _dispatch_push(self, push: PushEnvelope) -> None:
+        """Write frames a client pushed to their input tracks.
+
+        A track's buffer keeps its newest frames when it is full, as it does
+        for any input. Frames pushed while no stepped session runs are dropped:
+        only a stepped session's steps read them.
+        """
+        if not self._session_active or not self._stepped:
+            logger.debug("pushed frames dropped: no stepped session is running")
+            return
+        async with self._step_lock:
+            session = self._sessions_started
+            for track, frames in push.media_input.items():
+                buffer = self._input_buffers.get(track)
+                if buffer is not None:
+                    for decode in frames:
+                        buffer.push(decode(), push.conn_id, session)
 
     def _step_closed(self) -> tuple[str, StepRefusalKind] | None:
         """Say why the session takes no step now, or ``None`` when it takes one.

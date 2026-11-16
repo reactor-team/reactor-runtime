@@ -4,8 +4,9 @@ The one place where "what does this payload mean" lives. A payload that arrived
 on any connection is decoded here through the wire :class:`~reactor_runtime.protocol.Codec`
 — the single seam the JSON-to-protobuf swap touches — and routed by what it is:
 a ping marks liveness, a command is handed onward as a decoded
-:class:`InboundCommand` whose ``request_id`` is guaranteed present, and a step
-request as a decoded :class:`InboundStep`.
+:class:`InboundCommand` whose ``request_id`` is guaranteed present, a step
+request as a decoded :class:`InboundStep`, and frames pushed outside a step as
+an :class:`InboundPush`.
 
 The gateway is transport-neutral: a WebSocket frame and a WebRTC data-channel
 frame decode the same way. It does no validation — that belongs to the model
@@ -110,8 +111,33 @@ StepHandler = Callable[[InboundStep], Awaitable[None]]
 """Receives each decoded step request. Owns validation, decoding, and submission."""
 
 
+@dataclass(frozen=True)
+class InboundPush:
+    """Frames a client pushed to the model's input tracks outside any step.
+
+    Attributes:
+        tracks: The frames for each input track, still encoded.
+        conn_id: The connection that pushed them.
+        pictures: The picture the transport decoded each encoded frame to, by
+            ``(entry, position)`` in *tracks*. An encoded frame with no picture
+            here did not decode, and is not written.
+    """
+
+    tracks: tuple[step_pb2.TrackFrames, ...]
+    conn_id: ConnId
+    pictures: Mapping[tuple[int, int], npt.NDArray[np.uint8]] = field(default_factory=dict)
+
+
+PushHandler = Callable[[InboundPush], Awaitable[None]]
+"""Receives each decoded push of input frames. Owns checking and submission."""
+
+
 async def _ignore_step(step: InboundStep) -> None:
     logger.debug("MessageGateway dropped a step request: no step handler is bound")
+
+
+async def _ignore_push(push: InboundPush) -> None:
+    logger.debug("MessageGateway dropped pushed frames: no push handler is bound")
 
 
 class MessageGateway:
@@ -131,6 +157,7 @@ class MessageGateway:
         sink: ConnectionSink,
         on_command: CommandHandler,
         on_step: StepHandler = _ignore_step,
+        on_push: PushHandler = _ignore_push,
     ) -> None:
         """Bind the gateway to its upward sink and command handler.
 
@@ -141,6 +168,7 @@ class MessageGateway:
         self._sink = sink
         self._on_command = on_command
         self._on_step = on_step
+        self._on_push = on_push
         self._codecs: dict[ProtocolVersion, Codec] = {}
 
     def _codec_for(self, version: ProtocolVersion) -> Codec:
@@ -176,8 +204,9 @@ class MessageGateway:
         command, because the gateway runs as a task and cannot see how long the
         frame waited for the event loop.
 
-        *pictures* are what the transport decoded a step request's encoded
-        frames to, and ride the :class:`InboundStep` the frame carries.
+        *pictures* are what the transport decoded the encoded frames of a step
+        request or a push to, and ride the :class:`InboundStep` or
+        :class:`InboundPush` the frame carries.
         """
         try:
             message = self._codec_for(version).decode_inbound(payload, channel)
@@ -228,6 +257,19 @@ class MessageGateway:
                     conn_id=conn_id,
                     request_id=message.request_id or _new_request_id(),
                     received_at=received_at,
+                    pictures=pictures or {},
+                )
+            )
+            return
+
+        if (
+            isinstance(message, data_pb2.DataClientMessage)
+            and message.WhichOneof("payload") == "push_frames"
+        ):
+            await self._on_push(
+                InboundPush(
+                    tracks=tuple(message.push_frames.tracks),
+                    conn_id=conn_id,
                     pictures=pictures or {},
                 )
             )

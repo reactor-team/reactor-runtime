@@ -792,18 +792,22 @@ class StepClient(BareClient):
     It requests :data:`STEPS_PER_CYCLE` steps one after another, each setting
     the model's effect through ``state`` and carrying one small webcam frame in
     ``media_input``, raw on even steps and encoded on odd ones, waits for each
-    step's result, and closes. The encoded frames are one stream across the
-    client's steps, as an SDK sends them: a keyframe first, then frames that
-    each reference the one sent before, in the first codec this platform both
-    encodes and decodes (:func:`step_codec`). Every other client publishes the
-    webcam first and unpublishes it before closing, so the runtime's decoder for
-    the track, which the first encoded frame opens and the later ones keep
-    using, is released by the unpublish or by the close. The client closes
-    without waiting for the unpublish to land, so the suite checks only that
-    one of them released it; the unit tests of ``StepFrameGate`` check the
-    unpublish alone. A stepped session streams nothing and drops live input, so
-    nothing else is sent. Each result must carry the
-    effect its step applied as its data, which the endurance model returns.
+    step's result, and closes. Before each step but the first it also pushes
+    one encoded webcam frame outside the step (``PushFrames``). The encoded
+    frames, pushed and in requests, are one stream across the client's
+    messages, as an SDK sends them: a keyframe first, then frames that each
+    reference the one sent before, in the first codec this platform both
+    encodes and decodes (:func:`step_codec`). A push is never answered; an
+    ``input_decode_failed`` notification for one counts as a failure. Every
+    other client publishes the webcam first and unpublishes it before
+    closing, so the runtime's decoder for the track, which the first encoded
+    frame opens and the later ones keep using, is released by the unpublish or
+    by the close. The client closes without waiting for the unpublish to land,
+    so the suite checks only that one of them released it; the unit tests of
+    ``StepFrameGate`` check the unpublish alone. A stepped session streams
+    nothing and drops live input, so nothing else is sent. Each result must
+    carry the effect its step applied as its data, which the endurance model
+    returns.
     :attr:`unanswered` lists the requests that got no result, a failed one, or
     one with the wrong data, and an answer that got the attribute wrong.
     """
@@ -836,6 +840,20 @@ class StepClient(BareClient):
                 effect = _EFFECTS[n % len(_EFFECTS)]
                 state = struct_pb2.Struct()
                 state.update({"effect": effect})
+                if n > 0:
+                    self._data.send(
+                        data_pb2.DataClientMessage(
+                            kind=_NOTIFICATION,
+                            push_frames=step_pb2.PushFrames(
+                                tracks=[
+                                    step_pb2.TrackFrames(
+                                        track="webcam", frames=[stream.next(webcam)]
+                                    )
+                                ]
+                            ),
+                        ).SerializeToString(),
+                        binary=True,
+                    )
                 self._data.send(
                     data_pb2.DataClientMessage(
                         request_id=request_id,
@@ -924,6 +942,9 @@ class StepClient(BareClient):
         if message.WhichOneof("payload") == "step_result":
             with self._lock:
                 self._results[message.request_id] = message.step_result
+        elif message.WhichOneof("payload") == "error":
+            with self._lock:
+                self._failed.append(f"{message.error.code} on {message.error.track}")
 
 
 def _step_data(effect: str) -> bytes:

@@ -24,9 +24,11 @@ PUBLISH_REFUSED = "publish_refused"
 """The runtime refused a client's request to publish a track."""
 
 INPUT_DECODE_FAILED = "input_decode_failed"
-"""A client's encoded frames for an input track lost the track's stream.
+"""A client's encoded frames for an input track broke the track's stream.
 
-The code of a refused ``StepResult`` whose ``entry`` names the track: the
-runtime dropped the track's decoder, and the client starts the track's next
-frames at a keyframe.
+The runtime drops the track's decoder, and the client starts the track's next
+frames at a keyframe. For a step request, the code of its refused
+``StepResult``, whose ``entry`` names the track. For a push, a notification
+with the track named, not a reply: the push was taken, and the runtime drops
+the track's frames up to its next keyframe.
 """

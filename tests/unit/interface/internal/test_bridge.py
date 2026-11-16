@@ -29,6 +29,7 @@ from reactor_runtime.interface.internal.reactor_core import (
     CommandEnvelope,
     MediaOps,
     MediaSink,
+    PushEnvelope,
     RequestId,
     StepEnvelope,
     StepSink,
@@ -181,6 +182,20 @@ def test_submit_step_with_an_invalid_call_posts_nothing(monkeypatch: pytest.Monk
     entry, outcome = rejected
     assert (entry, outcome.accepted, outcome.field) == ("commands[0]", False, "prompt")
     assert posted == []
+
+
+def test_push_frames_posts_them_in_the_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    bridge, model = make_bridge()
+    posted: list[Any] = []
+    monkeypatch.setattr(model, "_enqueue", posted.append)
+    camera = frame()
+
+    bridge.push_frames({"camera": [lambda: camera]}, conn_id=ConnId(1002))
+
+    (push,) = posted
+    assert isinstance(push, PushEnvelope)
+    assert [source() for source in push.media_input["camera"]] == [camera]
+    assert push.conn_id == ConnId(1002)
 
 
 def test_input_overflow_names_the_bound_frames_do_not_fit() -> None:

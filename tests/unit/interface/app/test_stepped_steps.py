@@ -45,7 +45,11 @@ from reactor_runtime.core.values import (
     StepRefusalKind,
 )
 from reactor_runtime.interface.internal.input_buffer import InputBuffer
-from reactor_runtime.interface.internal.reactor_core import CommandEnvelope, StepEnvelope
+from reactor_runtime.interface.internal.reactor_core import (
+    CommandEnvelope,
+    PushEnvelope,
+    StepEnvelope,
+)
 from reactor_runtime.interface.model.contract import ModelContract
 from reactor_runtime.interface.pipeline.reactor_pipeline import ReactorPipeline
 
@@ -169,6 +173,20 @@ class Harness:
                 media_input=media_input if frames else {},
                 conn_id=CLIENT,
                 request_id=request_id,
+            )
+        )
+
+    def push(self, *values: int) -> None:
+        """Push one webcam frame per value, each filled with it, outside any step."""
+        self.post(
+            PushEnvelope(
+                media_input={
+                    "webcam": tuple(
+                        functools.partial(InputFrame, data=np.full((2, 2, 3), v, dtype=np.uint8))
+                        for v in values
+                    )
+                },
+                conn_id=CLIENT,
             )
         )
 
@@ -404,3 +422,103 @@ async def test_a_requested_step_whose_local_file_cannot_be_taken_over_fails_alon
     assert second.request.request_id == "r2"
     assert second.error is None
     assert second.bundle is not None
+
+
+# ── pushed frames ──────────────────────────────────────────────────────────────
+
+
+class Reader(Stepper):
+    """Reads every buffered webcam frame in each step, and records its value."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.read: list[list[int]] = []
+
+    async def process_input(self) -> tuple[str, list[str], int]:
+        frames = webcam(self).try_read(webcam(self).available, mode=ReadMode.FIFO) or []
+        self.read.append([int(frame.data[0, 0, 0]) for frame in frames])
+        return self.state.prompt, list(self.notes), len(frames)
+
+
+@pytest.fixture
+async def reader(register_model: Callable[[type], None]) -> Any:
+    register_model(Reader)
+    h = Harness(Reader())
+    try:
+        yield h
+    finally:
+        await h.stop()
+
+
+def _read(harness: Harness) -> list[list[int]]:
+    return cast(Reader, harness.app).read
+
+
+async def test_frames_pushed_before_a_step_reach_the_model_before_it_and_after_the_one_before(
+    reader: Harness,
+) -> None:
+    await reader.start()
+    reader.push(1, 2)
+    reader.command("note", text="between")
+    reader.step("r1")
+    reader.push(3)
+    reader.step("r2")
+    await reader.settle()
+
+    assert _read(reader) == [[1, 2], [3]]
+    assert reader.app.notes == ["between"]
+    assert reader.refusals == []
+
+
+async def test_a_full_buffer_keeps_the_newest_pushed_frames_and_refuses_nothing(
+    reader: Harness,
+) -> None:
+    await reader.start()
+    capacity = webcam(reader.app)._maxlen
+    reader.push(*range(capacity + 5))
+    reader.step("r1")
+    await reader.settle()
+
+    assert _read(reader) == [list(range(5, capacity + 5))]
+    assert reader.refusals == []
+
+
+async def test_pushed_frames_and_a_steps_own_frames_share_the_track_in_order(
+    reader: Harness,
+) -> None:
+    await reader.start()
+    reader.push(9)
+    # A step's own frames are written when it runs, after the frames pushed
+    # before it.
+    reader.step("r1", frames=2)
+    reader.push(7)
+    reader.step("r2")
+    await reader.settle()
+
+    assert _read(reader) == [[9, 0, 1], [7]]
+
+
+@pytest.mark.parametrize("session", ["none", "streamed"])
+async def test_frames_pushed_outside_a_stepped_session_are_dropped(
+    harness: Harness, session: str
+) -> None:
+    # Only the inbound queue runs, so nothing but the push could touch the track.
+    harness.tasks = [asyncio.create_task(harness.app._inbound_loop())]
+    if session == "streamed":
+        harness.post(SessionStarted("s", stepped=False))
+    harness.push(1)
+    await harness.settle()
+
+    assert webcam(harness.app).available == 0
+    assert harness.refusals == []
+
+
+async def test_frames_pushed_in_a_stepped_session_wait_in_the_track_for_a_step(
+    harness: Harness,
+) -> None:
+    harness.tasks = [asyncio.create_task(harness.app._inbound_loop())]
+    harness.post(SessionStarted("s", stepped=True))
+    harness.push(1, 2)
+    await harness.settle()
+
+    assert webcam(harness.app).available == 2
