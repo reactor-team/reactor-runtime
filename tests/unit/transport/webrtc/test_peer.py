@@ -1474,6 +1474,106 @@ def test_is_terminal_state() -> None:
     assert not _is_terminal_state(rw.PeerConnectionState.Connecting)
 
 
+# ── Disconnect grace ─────────────────────────────────────────────────────────
+
+
+def _peer_with_grace(grace: float) -> tuple[WebRTCPeer, list[int]]:
+    """A peer on the running loop whose disconnect callback counts its firings."""
+    peer = WebRTCPeer()
+    peer._loop = asyncio.get_running_loop()
+    peer._config = WebRtcConfig(disconnect_grace=grace)
+    lost: list[int] = []
+    peer.on_disconnect(lambda: lost.append(1))
+    return peer, lost
+
+
+async def _state(peer: WebRTCPeer, state: rw.PeerConnectionState) -> None:
+    peer._on_connection_state_change(state)
+    await _settle()
+
+
+async def test_a_disconnect_that_recovers_inside_the_grace_keeps_the_wire() -> None:
+    peer, lost = _peer_with_grace(0.1)
+    await _state(peer, rw.PeerConnectionState.Connected)
+
+    await _state(peer, rw.PeerConnectionState.Disconnected)
+    assert lost == [], "held, not lost"
+    await _state(peer, rw.PeerConnectionState.Connected)
+    await asyncio.sleep(0.15)
+
+    assert lost == []
+    assert not peer._stop_event.is_set()
+    assert peer._grace is None
+
+
+async def test_a_disconnect_past_the_grace_is_reported_lost_once() -> None:
+    peer, lost = _peer_with_grace(0.05)
+    await _state(peer, rw.PeerConnectionState.Connected)
+
+    await _state(peer, rw.PeerConnectionState.Disconnected)
+    await _state(peer, rw.PeerConnectionState.Disconnected)  # repeats change nothing
+    assert lost == []
+    await asyncio.sleep(0.1)
+
+    assert lost == [1]
+    assert peer._stop_event.is_set()
+
+
+async def test_the_default_grace_is_the_ping_timeout() -> None:
+    peer = WebRTCPeer()
+    peer._loop = asyncio.get_running_loop()
+    peer._config = WebRtcConfig(ping_timeout=0.05)
+    lost: list[int] = []
+    peer.on_disconnect(lambda: lost.append(1))
+    await _state(peer, rw.PeerConnectionState.Connected)
+
+    await _state(peer, rw.PeerConnectionState.Disconnected)
+    assert lost == []
+    await asyncio.sleep(0.1)
+
+    assert lost == [1]
+
+
+async def test_failed_during_an_interruption_is_lost_at_once() -> None:
+    peer, lost = _peer_with_grace(10.0)
+    await _state(peer, rw.PeerConnectionState.Connected)
+    await _state(peer, rw.PeerConnectionState.Disconnected)
+
+    await _state(peer, rw.PeerConnectionState.Failed)
+
+    assert lost == [1]
+    assert peer._grace is None, "the grace timer is cancelled with the loss"
+
+
+async def test_closing_an_interrupted_peer_cancels_its_grace() -> None:
+    peer, lost = _peer_with_grace(0.05)
+    await _state(peer, rw.PeerConnectionState.Connected)
+    await _state(peer, rw.PeerConnectionState.Disconnected)
+
+    await peer.close()
+    await asyncio.sleep(0.1)
+
+    assert peer._grace is None
+    assert lost == [], "a peer closed on purpose reports no loss"
+
+
+async def test_a_zero_grace_loses_a_disconnected_wire_at_once() -> None:
+    peer, lost = _peer_with_grace(0.0)
+    await _state(peer, rw.PeerConnectionState.Connected)
+
+    await _state(peer, rw.PeerConnectionState.Disconnected)
+
+    assert lost == [1]
+
+
+async def test_a_disconnect_before_the_wire_came_up_is_lost_at_once() -> None:
+    peer, lost = _peer_with_grace(10.0)
+
+    await _state(peer, rw.PeerConnectionState.Disconnected)
+
+    assert lost == [1]
+
+
 # ── Inbound track naming ─────────────────────────────────────────────────────
 
 

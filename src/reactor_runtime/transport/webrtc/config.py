@@ -118,6 +118,18 @@ class WebRtcConfig:
         transport_policy: Which candidate types to gather.
         ping_timeout: Seconds without a client ping before the connection's
             watchdog declares it lost. ``0`` or less disables the watchdog.
+        disconnect_grace: Seconds a peer connection may stay ``Disconnected``
+            before it is declared lost, or ``None`` (the default) for
+            ``ping_timeout``. libwebrtc reports ``Disconnected`` after a few
+            seconds without packets from the client (a Wi-Fi roam, a saturated
+            uplink, a relay hiccup) and returns to ``Connected`` on its own
+            when they resume; within the grace the connection, its channels
+            and the session stay up. With the default, the ping watchdog alone
+            decides how long a gap a session survives: up to ``ping_timeout``
+            after the client's last ping. ``Failed`` and ``Closed`` are
+            declared lost at once, as is a ``Disconnected`` before the
+            connection first came up. ``0`` or less, or a disabled watchdog
+            with the default, declares ``Disconnected`` lost at once.
         supported_video_codecs: Video codecs offered, in preference order.
         supported_audio_codecs: Audio codecs offered, in preference order.
         hw_codecs_enabled: Whether to use hardware encoder/decoder elements
@@ -214,6 +226,7 @@ class WebRtcConfig:
     port_range: tuple[int, int] | None = None
     transport_policy: IceTransportPolicy = IceTransportPolicy.ALL
     ping_timeout: float = 20.0
+    disconnect_grace: float | None = None
     supported_video_codecs: tuple[CodecEntry, ...] = _DEFAULT_VIDEO_CODECS
     supported_audio_codecs: tuple[CodecEntry, ...] = _DEFAULT_AUDIO_CODECS
     hw_codecs_enabled: bool = False

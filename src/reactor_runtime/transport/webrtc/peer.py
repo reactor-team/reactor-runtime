@@ -382,7 +382,11 @@ def _positive(value: float) -> float | None:
 
 
 def _is_terminal_state(state: rw.PeerConnectionState) -> bool:
-    """Return whether a peer-connection state means the wire is gone.
+    """Return whether a peer-connection state means the wire is down.
+
+    ``Disconnected`` is down but may come back: the peer holds it for
+    ``WebRtcConfig.disconnect_grace`` before declaring it lost. ``Failed`` and
+    ``Closed`` are lost at once.
 
     The binding delivers a fresh enum instance to each callback rather than a
     stable singleton, so states are matched by value equality, never identity.
@@ -409,6 +413,10 @@ class WebRTCPeer:
         self._protocol_sniffed = False
 
         self._loop: asyncio.AbstractEventLoop | None = None
+        # The pending end of a ``Disconnected`` interruption's grace (see
+        # ``WebRtcConfig.disconnect_grace``); ``None`` when the wire is not
+        # interrupted. Only touched on the asyncio loop.
+        self._grace: asyncio.TimerHandle | None = None
 
         # Set by the factory before negotiation.
         self._config = WebRtcConfig()
@@ -713,10 +721,54 @@ class WebRTCPeer:
             with self._ready_lock:
                 self._peer_connected = True
                 self._fire_connected_if_ready()
+            self._on_loop(self._recover)
+        elif state == rw.PeerConnectionState.Disconnected:
+            self._on_loop(self._interrupt)
         elif _is_terminal_state(state):
-            loop = self._loop
-            if loop is not None and not loop.is_closed():
-                loop.call_soon_threadsafe(self._report_loss)
+            self._on_loop(self._report_loss)
+
+    def _on_loop(self, callback: Callable[[], None]) -> None:
+        loop = self._loop
+        if loop is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(callback)
+
+    def _interrupt(self) -> None:
+        """Hold a ``Disconnected`` wire for ``WebRtcConfig.disconnect_grace``.
+
+        Runs on the asyncio loop. A wire that never came up, or a zero grace, is
+        lost at once. Otherwise nothing is released: the connection, its
+        channels and the session stay up, and libwebrtc returning to
+        ``Connected`` ends the interruption (``_recover``). Only a wire still
+        ``Disconnected`` when the grace runs out is reported lost.
+        """
+        if self._stop_event.is_set() or self._grace is not None:
+            return
+        grace = self._config.disconnect_grace
+        if grace is None:
+            grace = self._config.ping_timeout
+        with self._ready_lock:
+            was_up = self._peer_connected
+        loop = self._loop
+        if grace <= 0 or not was_up or loop is None:
+            self._report_loss()
+            return
+        logger.warning(
+            "peer connection Disconnected; holding it up to %.1fs for it to recover", grace
+        )
+        self._grace = loop.call_later(grace, self._grace_expired)
+
+    def _recover(self) -> None:
+        """End a ``Disconnected`` interruption: the wire is back. On the loop."""
+        if self._grace is None:
+            return
+        self._grace.cancel()
+        self._grace = None
+        logger.info("peer connection recovered from Disconnected")
+
+    def _grace_expired(self) -> None:
+        self._grace = None
+        logger.warning("peer connection still Disconnected after the grace; declaring it lost")
+        self._report_loss()
 
     def _on_ice_gathering_change(self, state: rw.IceGatheringState) -> None:
         if state == rw.IceGatheringState.Complete:
@@ -1002,6 +1054,9 @@ class WebRTCPeer:
         the seam's contract that a peer fires disconnect only after it has let go
         of its own wire, so the connection does not close it again.
         """
+        if self._grace is not None:
+            self._grace.cancel()
+            self._grace = None
         if self._stop_event.is_set():
             return
         self._stop_event.set()
@@ -1788,6 +1843,10 @@ class WebRTCPeer:
                 ``_drain_channels``). A connection being replaced passes
                 ``False``: its client is the one reconnecting.
         """
+        # A pending grace timer holds the peer; a closed peer has no grace left.
+        if self._grace is not None:
+            self._grace.cancel()
+            self._grace = None
         await asyncio.to_thread(self._teardown, drain)
 
     def _teardown(self, drain: bool = True) -> None:

@@ -206,11 +206,13 @@ def _webrtc_config_from_env() -> WebRtcConfig:
     """
     bwe_min_kbps, bwe_max_kbps, bwe_initial_kbps = _bwe_limits_from_env()
     sender_max_kbps, sender_min_kbps = _sender_limits_from_env()
+    ping_timeout = float_env("WEBRTC_CLIENT_PING_TIMEOUT_SECONDS", 20.0)
     return WebRtcConfig(
         ice_servers=_ice_servers_from_env(),
         port_range=_port_range_from_env(),
         transport_policy=_ice_policy_from_env(),
-        ping_timeout=float_env("WEBRTC_CLIENT_PING_TIMEOUT_SECONDS", 20.0),
+        ping_timeout=ping_timeout,
+        disconnect_grace=float_env("WEBRTC_DISCONNECT_GRACE_SECONDS", ping_timeout),
         supported_video_codecs=_video_codecs_from_env(),
         bwe_min_kbps=bwe_min_kbps,
         bwe_max_kbps=bwe_max_kbps,
