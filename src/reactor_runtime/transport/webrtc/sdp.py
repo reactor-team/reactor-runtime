@@ -4,6 +4,11 @@ Two string transforms sit on either side of libwebrtc's own SDP handling:
 :func:`deduplicate_bundle_pts` sanitises an inbound offer libwebrtc would
 otherwise reject, and :func:`embed_ice_candidates` folds gathered candidates
 into the outbound answer so it is complete on its own (non-trickle mode).
+
+The rest reads and writes what libwebrtc leaves to the application: a
+session-level attribute of the runtime's own (:func:`has_session_attribute`,
+:func:`add_session_attribute`) and the codecs one m-section lists, in its
+order of preference (:func:`section_codecs`).
 """
 
 from __future__ import annotations
@@ -239,3 +244,86 @@ def bump_session_version(sdp: str, by: int) -> str:
         lines[index] = " ".join(fields)
         break
     return "\r\n".join(lines)
+
+
+ENCODED_STEP_FRAMES = "x-reactor-encoded-step-frames"
+"""The session-level attribute that negotiates encoded step frames.
+
+A stepped client that sends and receives encoded step frames puts it in its
+offer, and a runtime that encodes them repeats it in its answer.
+"""
+
+
+def _session_lines(sdp: str) -> list[str]:
+    """Return the lines before the first m-section, without line endings."""
+    session: list[str] = []
+    for line in sdp.splitlines():
+        if line.startswith("m="):
+            break
+        session.append(line)
+    return session
+
+
+def has_session_attribute(sdp: str, name: str) -> bool:
+    """Return whether *sdp* declares the attribute *name* at session level.
+
+    An attribute inside an m-section does not count. A value after the name
+    (``a=<name>:<value>``) is allowed and ignored.
+    """
+    return any(
+        line.strip() == f"a={name}" or line.startswith(f"a={name}:") for line in _session_lines(sdp)
+    )
+
+
+def add_session_attribute(sdp: str, name: str) -> str:
+    """Declare the attribute *name* at session level, just before the first m-section.
+
+    Returns *sdp* unchanged when it already declares it. A description with no
+    m-section gets the attribute at its end.
+    """
+    if has_session_attribute(sdp, name):
+        return sdp
+    eol = "\r\n" if "\r\n" in sdp else "\n"
+    lines = sdp.split(eol)
+    index = next((i for i, line in enumerate(lines) if line.startswith("m=")), None)
+    if index is None:
+        body = sdp.rstrip(eol)
+        return f"{body}{eol}a={name}{eol}"
+    lines.insert(index, f"a={name}")
+    return eol.join(lines)
+
+
+def section_codecs(sdp: str, mid: str) -> list[str]:
+    """Return the codecs the m-section carrying *mid* lists, most preferred first.
+
+    Each codec is its encoding name from ``a=rtpmap``, upper-cased (``H264``,
+    ``VP8``, ``RTX``), in the order of the m-line's payload types, once each:
+    a codec listed under several payload types (H.264 in several profiles)
+    keeps its first place. In an offer this is the offerer's preference; in an
+    answer, the first codec is the one the section negotiated.
+
+    Returns an empty list when no section carries *mid*.
+    """
+    sections: list[list[str]] = []
+    for line in sdp.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("m="):
+            sections.append([stripped])
+        elif sections:
+            sections[-1].append(stripped)
+    for section in sections:
+        if f"{_MID_PREFIX}{mid}" not in section:
+            continue
+        names: dict[str, str] = {}
+        for line in section:
+            rtpmap = re.match(r"a=rtpmap:(\d+)\s+([^/\s]+)", line)
+            if rtpmap:
+                names.setdefault(rtpmap.group(1), rtpmap.group(2).upper())
+        payload_types = section[0].split()[3:]
+        ordered: list[str] = []
+        for pt in payload_types:
+            name = names.get(pt)
+            if name is not None and name not in ordered:
+                ordered.append(name)
+        return ordered
+    return []

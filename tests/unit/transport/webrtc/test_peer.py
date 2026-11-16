@@ -1462,6 +1462,223 @@ async def test_attach_out_tracks_skips_set_codec_preferences_when_none_configure
     assert video.codec_preference_calls == []
 
 
+# ── Encoded step frames ──────────────────────────────────────────────────────
+
+
+def _m_section(kind: str, mid: str, direction: str, codecs: list[tuple[int, str]]) -> str:
+    """One m-section listing *codecs* as (payload type, rtpmap name), in that order."""
+    pts = " ".join(str(pt) for pt, _ in codecs)
+    lines = [f"m={kind} 9 UDP/TLS/RTP/SAVPF {pts}", f"a=mid:{mid}", f"a={direction}"]
+    rate = "90000" if kind == "video" else "48000/2"
+    lines += [f"a=rtpmap:{pt} {name}/{rate}" for pt, name in codecs]
+    return "\r\n".join(lines) + "\r\n"
+
+
+def _stepped_sdp(*sections: str, encoded: bool = True) -> str:
+    session = "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n"
+    if encoded:
+        session += "a=x-reactor-encoded-step-frames\r\n"
+    return session + "".join(sections)
+
+
+# The client's offer: an output video section that prefers VP9, then H.264,
+# then VP8; an input video section that prefers AV1, then H.264; and an output
+# audio section.
+_STEPPED_OFFER = _stepped_sdp(
+    _m_section("video", "0", "recvonly", [(98, "VP9"), (99, "rtx"), (102, "H264"), (96, "VP8")]),
+    _m_section("video", "1", "sendonly", [(45, "AV1"), (102, "H264"), (127, "H264")]),
+    _m_section("audio", "2", "recvonly", [(111, "opus")]),
+)
+
+_STEPPED_TRACKS = {
+    "0": TrackInfo(name="main_video", kind=TrackKind.VIDEO, direction=TrackDirection.OUT),
+    "1": TrackInfo(name="webcam", kind=TrackKind.VIDEO, direction=TrackDirection.IN),
+    "2": TrackInfo(name="main_audio", kind=TrackKind.AUDIO, direction=TrackDirection.OUT),
+}
+
+
+def _stepped_peer(
+    codecs: peer_module.StepFrameCodecs, *, offer: str = _STEPPED_OFFER
+) -> WebRTCPeer:
+    """A peer as negotiation leaves it after reading a stepped client's offer."""
+    peer = WebRTCPeer()
+    peer._config = WebRtcConfig(supported_video_codecs=({"codec": "VP8"},))
+    peer._track_by_mid = dict(_STEPPED_TRACKS)
+    peer._offer_sdp = offer
+    peer._step_frames_offered = True
+    peer._step_codecs = codecs
+    return peer
+
+
+_ALL_STEP_CODECS = peer_module.StepFrameCodecs(
+    encode=frozenset({"H264", "VP8", "VP9", "AV1"}),
+    decode=frozenset({"H264", "VP8", "VP9", "AV1"}),
+)
+
+
+async def test_a_stepped_offer_leaves_its_output_sections_without_a_track() -> None:
+    """No sender track, no RTP: a stepped session's frames travel in messages."""
+    peer = _stepped_peer(_ALL_STEP_CODECS)
+    out_video = _FakeTransceiver(rw.MediaKind.Video, "0")
+    in_video = _FakeTransceiver(rw.MediaKind.Video, "1")
+    out_audio = _FakeTransceiver(rw.MediaKind.Audio, "2")
+    pc: Any = _FakeTransceiverPeerConnection([out_video, in_video, out_audio])
+
+    await peer._attach_out_tracks(pc, cast("Any", _FakeTrackFactory()))
+
+    assert out_video.track_calls == []
+    assert out_audio.track_calls == []
+    assert out_video.direction_calls == [rw.TransceiverDirection.SendOnly]
+    assert out_audio.direction_calls == [rw.TransceiverDirection.SendOnly]
+    assert out_video.send_bitrate_calls == []
+    assert peer._out_tracks == {}
+    assert in_video.track_calls == []
+    assert in_video.direction_calls == []
+
+
+async def test_a_stepped_offer_sends_no_media_even_once_a_track_is_resumed() -> None:
+    peer = _stepped_peer(_ALL_STEP_CODECS)
+    pc: Any = _FakeTransceiverPeerConnection([_FakeTransceiver(rw.MediaKind.Video, "0")])
+    await peer._attach_out_tracks(pc, cast("Any", _FakeTrackFactory()))
+
+    peer.resume_track("main_video")
+    peer.send_media(_video_bundle("main_video"))
+
+    assert peer._frame_queue.empty()
+
+
+async def test_a_stepped_section_prefers_the_clients_codecs_in_the_clients_order() -> None:
+    peer = _stepped_peer(_ALL_STEP_CODECS)
+    out_video = _FakeTransceiver(rw.MediaKind.Video, "0")
+    in_video = _FakeTransceiver(rw.MediaKind.Video, "1")
+    pc: Any = _FakeTransceiverPeerConnection([out_video, in_video])
+
+    await peer._attach_out_tracks(pc, cast("Any", _FakeTrackFactory()))
+
+    assert out_video.codec_preference_calls == [
+        [rw.VideoCodec.Vp9, rw.VideoCodec.H264, rw.VideoCodec.Vp8]
+    ]
+    assert in_video.codec_preference_calls == [[rw.VideoCodec.Av1, rw.VideoCodec.H264]]
+
+
+async def test_a_stepped_section_keeps_only_the_codecs_its_direction_can_carry() -> None:
+    """An output track needs a codec this process encodes; an input one, one it decodes."""
+    peer = _stepped_peer(
+        peer_module.StepFrameCodecs(encode=frozenset({"H264"}), decode=frozenset({"AV1"}))
+    )
+    out_video = _FakeTransceiver(rw.MediaKind.Video, "0")
+    in_video = _FakeTransceiver(rw.MediaKind.Video, "1")
+    pc: Any = _FakeTransceiverPeerConnection([out_video, in_video])
+
+    await peer._attach_out_tracks(pc, cast("Any", _FakeTrackFactory()))
+
+    assert out_video.codec_preference_calls == [[rw.VideoCodec.H264]]
+    assert in_video.codec_preference_calls == [[rw.VideoCodec.Av1]]
+
+
+async def test_a_stepped_section_without_a_shared_codec_takes_the_configured_order() -> None:
+    peer = _stepped_peer(peer_module.StepFrameCodecs())
+    out_video = _FakeTransceiver(rw.MediaKind.Video, "0")
+    pc: Any = _FakeTransceiverPeerConnection([out_video])
+
+    await peer._attach_out_tracks(pc, cast("Any", _FakeTrackFactory()))
+
+    assert out_video.codec_preference_calls == [[rw.VideoCodec.Vp8]]
+
+
+def test_each_track_takes_the_codec_its_answer_section_negotiated() -> None:
+    peer = _stepped_peer(_ALL_STEP_CODECS)
+    answer = _stepped_sdp(
+        _m_section("video", "0", "sendonly", [(102, "H264"), (98, "VP9")]),
+        _m_section("video", "1", "recvonly", [(45, "AV1"), (102, "H264")]),
+        _m_section("audio", "2", "sendonly", [(111, "opus")]),
+        encoded=False,
+    )
+
+    encodings = peer._negotiated_step_frame_encodings(answer)
+
+    assert encodings == {
+        "main_video": peer_module.step_pb2.FRAME_ENCODING_H264,
+        "webcam": peer_module.step_pb2.FRAME_ENCODING_AV1,
+        "main_audio": peer_module.step_pb2.FRAME_ENCODING_RAW,
+    }
+
+
+def test_a_track_whose_negotiated_codec_cannot_carry_step_frames_is_raw() -> None:
+    """VP9 here decodes but does not encode, so the output track falls back to raw."""
+    peer = _stepped_peer(
+        peer_module.StepFrameCodecs(encode=frozenset({"H264"}), decode=frozenset({"VP9"}))
+    )
+    answer = _stepped_sdp(
+        _m_section("video", "0", "sendonly", [(98, "VP9"), (102, "H264")]),
+        _m_section("video", "1", "recvonly", [(98, "VP9")]),
+        _m_section("video", "3", "recvonly", [(96, "H265")]),
+        encoded=False,
+    )
+    peer._track_by_mid["3"] = TrackInfo(
+        name="depth", kind=TrackKind.VIDEO, direction=TrackDirection.IN
+    )
+
+    encodings = peer._negotiated_step_frame_encodings(answer)
+
+    assert encodings["main_video"] == peer_module.step_pb2.FRAME_ENCODING_RAW
+    assert encodings["webcam"] == peer_module.step_pb2.FRAME_ENCODING_VP9
+    assert encodings["depth"] == peer_module.step_pb2.FRAME_ENCODING_RAW
+
+
+def test_every_track_is_raw_without_step_frame_codecs() -> None:
+    """An offer without the attribute leaves the peer with no codecs to carry step frames in."""
+    peer = WebRTCPeer()
+    peer._track_by_mid = dict(_STEPPED_TRACKS)
+    answer = _stepped_sdp(
+        _m_section("video", "0", "sendonly", [(102, "H264")]),
+        _m_section("video", "1", "recvonly", [(102, "H264")]),
+        encoded=False,
+    )
+
+    peer._step_frame_encodings = peer._negotiated_step_frame_encodings(answer)
+
+    assert set(peer.step_frame_encodings.values()) == {peer_module.step_pb2.FRAME_ENCODING_RAW}
+    assert set(peer.step_frame_encodings) == {"main_video", "webcam", "main_audio"}
+
+
+def test_step_frame_codecs_are_empty_without_the_bindings_standalone_codecs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delattr(peer_module.rw, "VideoCodecs", raising=False)
+    peer_module._step_frame_codecs.cache_clear()
+    try:
+        assert not peer_module._step_frame_codecs()
+    finally:
+        peer_module._step_frame_codecs.cache_clear()
+
+
+def test_step_frame_codecs_read_each_direction_from_the_bindings_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Capabilities:
+        def can_encode(self, codec: Any) -> bool:
+            return codec == rw.VideoCodec.H264
+
+        def can_decode(self, codec: Any) -> bool:
+            return codec in (rw.VideoCodec.H264, rw.VideoCodec.Vp9)
+
+    class _VideoCodecs:
+        def capabilities(self) -> _Capabilities:
+            return _Capabilities()
+
+    monkeypatch.setattr(peer_module.rw, "VideoCodecs", _VideoCodecs, raising=False)
+    peer_module._step_frame_codecs.cache_clear()
+    try:
+        codecs = peer_module._step_frame_codecs()
+    finally:
+        peer_module._step_frame_codecs.cache_clear()
+
+    assert codecs == peer_module.StepFrameCodecs(
+        encode=frozenset({"H264"}), decode=frozenset({"H264", "VP9"})
+    )
+
+
 # ── State classification ─────────────────────────────────────────────────────
 
 
