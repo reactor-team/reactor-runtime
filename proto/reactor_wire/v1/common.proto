@@ -11,8 +11,12 @@ enum MessageKind {
   MESSAGE_KIND_NOTIFICATION = 3;
 }
 
-// Payload of a failed response, correlated to its request by request_id.
+// Payload of a failed response, correlated to its request by request_id, or
+// of a notification that reports a failure no request waits for.
 message Error {
   string code = 1;
   string message = 2;
+  // The track the failure is about, for a failure that has one, such as
+  // input_decode_failed. Unset otherwise.
+  optional string track = 3;
 }

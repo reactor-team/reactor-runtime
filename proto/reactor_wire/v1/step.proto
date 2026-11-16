@@ -7,18 +7,54 @@ import "reactor_wire/v1/model.proto";
 import "reactor_wire/v1/platform.proto";
 
 // How a Frame's data bytes are encoded.
+//
+// Encoded video in a stepped session. A client that can send and receive
+// encoded step frames declares the session-level SDP attribute
+// a=x-reactor-encoded-step-frames in its offer, beside an m-section per
+// published input track and per output track, and lists its codec preferences
+// on each. A runtime that encodes step frames repeats the attribute in its
+// answer, and each video track then carries the codec the answer negotiates
+// on its m-section: H.264, VP8, VP9 or AV1 as the encoding of that name. A
+// track whose m-section negotiates any other codec, an audio track, and every
+// track of a connection whose answer lacks the attribute carry RAW frames.
+// The m-sections carry no media in a stepped session: every frame travels in
+// the data channel's messages. The negotiation holds for the connection, and
+// a new connection negotiates again.
+//
+// An encoded video track is one stream for the track's whole life on a
+// connection, in decode order, and spans requests and results: each step's
+// frames continue from the previous step's frames of the same track, so most
+// of them are inter frames. Each frame decodes to exactly one frame, which
+// keeps the encoded frame's metadata and capture time, and dtype and shape
+// describe that decoded frame: uint8 RGB, (height, width, 3). The data
+// channel is reliable and ordered, so a stream has no gap the transport made,
+// and a sender starts a track's frames at a keyframe only at a break it knows
+// of:
+//   - the first frames of the track sent on a connection, including a
+//     reconnect and an observer that joins;
+//   - the first frames after frames of the track that were encoded but not
+//     sent: a StepResult that is RESULT_TOO_LARGE or that the connection
+//     refused to send, on the runtime's side;
+//   - the first frames after the receiver lost the stream: a RequestStep with
+//     request_keyframe, for the runtime's output, or an input_decode_failed
+//     Error for the track, for the client's input (see PushFrames).
+// A step or a push with no frames for a track sends nothing for it and leaves
+// its stream where it was.
 enum FrameEncoding {
   FRAME_ENCODING_UNSPECIFIED = 0;
   // Uncompressed samples in row-major order, described by dtype and shape:
-  // uint8 RGB for video, little-endian int16 PCM for audio.
+  // uint8 RGB for video, little-endian int16 PCM for audio. Each frame stands
+  // alone.
   FRAME_ENCODING_RAW = 1;
-  // One H.264 access unit (Annex B) of a video track. dtype and shape describe
-  // the frame it decodes to: uint8 RGB, (height, width, 3). The encoded frames
-  // of a track in one request are one stream in decode order, starting at a
-  // keyframe; each decodes to exactly one frame, which keeps the encoded
-  // frame's metadata and capture time. The receiver decodes them before it
-  // checks the request, and refuses the request when it cannot.
+  // One H.264 access unit of a video track, in Annex B byte stream format.
   FRAME_ENCODING_H264 = 2;
+  // One VP8 frame of a video track, as the encoder emits it.
+  FRAME_ENCODING_VP8 = 3;
+  // One VP9 frame of a video track, as the encoder emits it.
+  FRAME_ENCODING_VP9 = 4;
+  // One AV1 temporal unit of a video track: its OBUs, in low-overhead
+  // bitstream format.
+  FRAME_ENCODING_AV1 = 5;
 }
 
 // One frame of a track: a video image or a block of audio samples.
@@ -34,6 +70,10 @@ message Frame {
   optional bytes metadata = 5;
   // When the sender says the frame was captured, in microseconds.
   optional int64 capture_time_us = 6;
+  // Whether the encoded frame is a keyframe, which decodes without the frames
+  // before it. A receiver checks that a track's stream starts at one. False
+  // for RAW frames, which need no other frame to decode.
+  bool keyframe = 7;
 }
 
 // The frames of one track, in the order they were produced.
@@ -74,8 +114,36 @@ message RequestStep {
   repeated Command commands = 2;
   // Frames to write to the model's input tracks, one entry per track. A track
   // takes at most as many frames as its input buffer holds; a request with
-  // more is refused.
+  // more is refused. Encoded frames continue the track's stream, the same one
+  // PushFrames carries. The runtime decodes them before it checks anything
+  // else, so a request it refuses for another reason still moves the stream
+  // on. A frame it cannot decode refuses the request (REFUSED, with the entry
+  // media_input[<i>]), and the track's next frames start at a keyframe.
   repeated TrackFrames media_input = 3;
+  // Whether every encoded output track of this connection starts this step's
+  // frames at a keyframe, for a client whose decoder lost its stream. False or
+  // unset asks for nothing and suppresses none of the keyframes the encoding
+  // rules call for (see FrameEncoding).
+  optional bool request_keyframe = 4;
+}
+
+// Frames for the model's input tracks, sent as the client has them, apart from
+// any step. Fire-and-forget: the runtime sends no response and never refuses
+// one. It handles a PushFrames in the channel's order with the commands and
+// the step requests, so its frames are written before any RequestStep sent
+// after it runs.
+//
+// The runtime decodes every encoded frame as it arrives, even one the model
+// does not read, so the track's stream stays whole (see FrameEncoding). A
+// frame is then written to its track's input buffer, which keeps the newest
+// frames when it is full; a frame the runtime cannot take, for a track that is
+// not one of the model's input tracks or that the buffer drops, is discarded
+// without a word. A frame that cannot be decoded is answered with an Error
+// notification, code input_decode_failed and the track in its track field;
+// the runtime then discards that track's frames up to the next keyframe, and
+// the client starts the track's next frames at one.
+message PushFrames {
+  repeated TrackFrames tracks = 1;
 }
 
 // A file the model kept with a step, beside its media. The bytes are not in
@@ -129,6 +197,9 @@ message StepResult {
   // step_completed, result.json, and the session's step routes. Zero when the
   // step did not run, or, for SESSION_ENDED, when whether it ran is unknown.
   uint64 step = 1;
+  // The step's frames, one entry per output track it produced. Encoded
+  // frames continue the track's stream on this connection from the previous
+  // result (see FrameEncoding).
   repeated TrackFrames tracks = 2;
   // Seconds the step's generate() took, or the time the model reported for the
   // step. A saved step records the same value as generate_s in its
