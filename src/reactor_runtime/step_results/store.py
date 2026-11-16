@@ -1,9 +1,12 @@
 """Saving each finished step as a folder of files, :class:`StepStore`.
 
 A step result is everything one step produced, kept together under
-``<root>/<session_id>/<step>/``: the step's output as one ``output.mp4``, the
-extra files the model kept with it, and ``result.json``, which lists them and
-the measured facts of each video track ``output.mp4`` holds. The
+``<root>/<session_id>/<step>/``: the step's video as one ``output.mp4``, the
+extra files the model kept with it, and ``result.json``, which lists them. The
+runtime encodes ``output.mp4`` from the step's frames and lists the measured
+facts of each video track in ``result.json``. A step with no frames can supply
+``output.mp4`` as a local file instead; it is kept byte for byte, and
+``result.json`` lists no measured facts for it. The
 store writes ``result.json`` last, so a folder that has one is complete, and a
 reader never sees a step that is half written.
 

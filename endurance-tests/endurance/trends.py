@@ -123,7 +123,8 @@ class Sample:
     # H.264 decoders a connection opened for its step frames, alive after the
     # probe's collection, with no client connected. Each holds its threads.
     live_step_decoders: int = 0
-    # Local result snapshots still on disk after their step was discarded.
+    # Step file copies the runtime made and never released through close():
+    # copies a step still holds, and copies garbage collection removed.
     live_local_files: int = 0
 
 

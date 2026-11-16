@@ -13,18 +13,47 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class LocalFile:
-    """Supply one finished local file as a step result, without encoding it.
+    """A finished file on disk to keep with a step, byte for byte, without encoding it.
 
-    Use a value in ``StepCompleted.files``, for example
-    ``files={"output.mp4": LocalFile(path)}``. The file must be regular and
-    closed by its writer. Keep it unchanged until ``complete_step()`` returns;
-    the runtime copies it into owned staging before returning, so the caller
-    can then remove the original. The copy uses bounded memory. Failed steps
-    discard their files. Saving can still fail or be refused when disabled or
-    full; handing over a file does not promise durable storage.
+    Use one as a value in ``StepCompleted.files``, beside ``bytes`` values::
+
+        StepCompleted(files={"output.mp4": LocalFile(path), "notes.json": b"{}"})
+
+    The constructor checks only that ``path`` is a :class:`pathlib.Path`; it
+    does not open the file. The runtime takes the file over when the step is
+    reported: it opens the path without following a symbolic link, requires a
+    regular file, copies it in 64 KiB chunks into a directory of its own, and
+    checks that its size and modification time did not change during the copy.
+    It never moves or deletes the original, so removing it is the model's job.
+    When the model may do so depends on how the step is reported:
+
+    * With ``complete_step()``, the copy is made before the call returns.
+      Remove the file once it returns.
+    * Returned from ``process_output()`` on the default step loop, the copy is
+      made after the method returns, when the loop reports the step. The file
+      must still exist then, so a ``TemporaryDirectory`` opened inside
+      ``process_output()`` is already gone. Keep the file in a directory the
+      model owns, and remove it on a later step or in ``@session_ended``.
+
+    The copy runs on a worker thread, so the model's event loop keeps running,
+    and the call that reports the step waits until it ends. The runtime puts no
+    limit on the file's size; bound what the model hands over. A step reported
+    with ``error`` set never opens its files.
+
+    Handing a file over does not promise it is stored: with step results off,
+    or when a step is not saved, the runtime deletes its copy at once.
 
     Attributes:
-        path: The path to a regular file. Symbolic links are refused.
+        path: The file to keep. A symbolic link is refused.
+
+    Raises:
+        TypeError: ``path`` is not a :class:`pathlib.Path`, when constructed.
+        OSError: The file cannot be opened or read, when the step is reported.
+        ValueError: The file is not a regular file, or it changed during the
+            copy, when the step is reported. ``complete_step()`` raises either
+            error to its caller, which can report a failed step instead. On the
+            default step loop the step is reported as failed, with the reason
+            in its ``error``, and the session goes on.
     """
 
     path: Path

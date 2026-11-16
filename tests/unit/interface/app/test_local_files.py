@@ -1,7 +1,9 @@
 """Local file handoff owns bytes before the model can discard its source."""
 
+import asyncio
 import json
 import os
+import threading
 from pathlib import Path
 
 import pytest
@@ -9,6 +11,7 @@ import pytest
 from reactor_runtime import LocalFile, StepCompleted
 from reactor_runtime.core import CompletedStep, StepResultsConfig
 from reactor_runtime.core.local_file import OwnedLocalFile, adopt_files, discard_files
+from reactor_runtime.interface.internal import reactor_core
 from reactor_runtime.interface.internal.reactor_core import ReactorCore
 from reactor_runtime.step_results import StepStore
 
@@ -166,3 +169,65 @@ def test_local_output_cannot_replace_generated_output_or_manifest(tmp_path: Path
         StepCompleted(output=EmptyOutput(), files={"output.mp4": LocalFile(tmp_path / "file")})
     with pytest.raises(ValueError, match="reserved"):
         StepCompleted(files={"result.json": LocalFile(tmp_path / "file")})
+
+
+def test_output_mp4_still_refuses_bytes() -> None:
+    with pytest.raises(ValueError, match="reserved"):
+        StepCompleted(files={"output.mp4": b"video"})
+
+
+async def test_complete_step_copies_off_the_event_loop(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "file"
+    path.write_bytes(b"video")
+    copied_on: list[threading.Thread] = []
+
+    def record_thread(files):
+        copied_on.append(threading.current_thread())
+        return adopt_files(files)
+
+    monkeypatch.setattr(reactor_core, "adopt_files", record_thread)
+    reports: list[CompletedStep] = []
+    await _app(reports).complete_step(StepCompleted(files={"output.mp4": LocalFile(path)}))
+    assert copied_on
+    assert copied_on[0] is not threading.main_thread()
+    discard_files(reports[0].files)
+
+
+async def test_a_step_without_local_files_is_reported_without_a_copy(monkeypatch) -> None:
+    monkeypatch.setattr(reactor_core, "adopt_files", lambda files: pytest.fail("copied"))
+    reports: list[CompletedStep] = []
+    await _app(reports).complete_step(StepCompleted(files={"notes.json": b"{}"}))
+    assert reports[0].files == {"notes.json": b"{}"}
+
+
+async def test_a_cancelled_complete_step_discards_its_copies(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "file"
+    path.write_bytes(b"video")
+    started = threading.Event()
+    release = threading.Event()
+    copies: list[OwnedLocalFile] = []
+
+    def slow_copy(files):
+        started.set()
+        release.wait(5)
+        adopted = adopt_files(files)
+        copies.extend(value for value in adopted.values() if isinstance(value, OwnedLocalFile))
+        return adopted
+
+    monkeypatch.setattr(reactor_core, "adopt_files", slow_copy)
+    reports: list[CompletedStep] = []
+    task = asyncio.create_task(
+        _app(reports).complete_step(StepCompleted(files={"output.mp4": LocalFile(path)}))
+    )
+    await asyncio.to_thread(started.wait, 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    release.set()
+    for _ in range(100):
+        if copies and not copies[0].path.parent.exists():
+            break
+        await asyncio.sleep(0.01)
+    assert reports == []
+    assert copies
+    assert not copies[0].path.parent.exists()

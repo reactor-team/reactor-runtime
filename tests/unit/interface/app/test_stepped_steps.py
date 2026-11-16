@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import functools
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
@@ -20,10 +21,13 @@ from reactor_runtime import (
     CommandError,
     InputField,
     InputState,
+    LocalFile,
     MediaInput,
     Output,
     ReactorApp,
     ReadMode,
+    StepCompleted,
+    StepOutcome,
     Video,
     event,
 )
@@ -371,3 +375,32 @@ def test_only_the_default_step_loop_supports_stepped_sessions() -> None:
     assert not OwnLoop.supports_stepped()
     assert not Pipeline.supports_stepped()
     assert not OwnCommands.supports_stepped()
+
+
+async def test_a_requested_step_whose_local_file_cannot_be_taken_over_fails_alone(
+    tmp_path: Path,
+) -> None:
+    class LosesItsClip(Stepper):
+        async def process_output(self, outcome: StepOutcome) -> StepCompleted:
+            if self.state.prompt == "lose it":
+                return StepCompleted(files={"output.mp4": LocalFile(tmp_path / "gone.mp4")})
+            return StepCompleted(output=outcome.to_output())
+
+    harness = Harness(LosesItsClip())
+    try:
+        await harness.start()
+        harness.step("r1", ("set_prompt", {"prompt": "lose it"}))
+        harness.step("r2", ("set_prompt", {"prompt": "a lake"}))
+        await harness.settle()
+    finally:
+        await harness.stop()
+
+    first, second = harness.reports
+    assert first.request is not None
+    assert first.request.request_id == "r1"
+    assert first.error == "a step file could not be handed over: No such file or directory"
+    assert first.files == {}
+    assert second.request is not None
+    assert second.request.request_id == "r2"
+    assert second.error is None
+    assert second.bundle is not None
