@@ -28,7 +28,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import av
 import numpy as np
 import psutil
 import reactor_webrtc as rw
@@ -789,17 +788,21 @@ class StepClient(BareClient):
     """A client of a stepped session, speaking v1 as current SDKs do.
 
     Its offer declares encoded step frames, and its answer must declare them
-    back exactly when the runtime can carry them, raw otherwise. It requests
-    :data:`STEPS_PER_CYCLE` steps one after another, each setting the model's
-    effect through ``state`` and carrying one small webcam frame in
-    ``media_input``, raw on even steps and H.264 on odd ones, waits for each
-    step's result, and closes. Every other client publishes the webcam first and
-    unpublishes it before closing, so the runtime's H.264 decoder for the track,
-    which the first encoded frame opens, is released by the unpublish or by the
-    close. The client closes without waiting for the unpublish to land, so the
-    suite checks only that one of them released it; the unit tests of
-    ``StepFrameGate`` check the unpublish alone. A stepped session streams nothing and
-    drops live input, so nothing else is sent. Each result must carry the
+    back exactly when the runtime can carry them, raw otherwise.
+    It requests :data:`STEPS_PER_CYCLE` steps one after another, each setting
+    the model's effect through ``state`` and carrying one small webcam frame in
+    ``media_input``, raw on even steps and encoded on odd ones, waits for each
+    step's result, and closes. The encoded frames are one stream across the
+    client's steps, as an SDK sends them: a keyframe first, then frames that
+    each reference the one sent before, in the first codec this platform both
+    encodes and decodes (:func:`step_codec`). Every other client publishes the
+    webcam first and unpublishes it before closing, so the runtime's decoder for
+    the track, which the first encoded frame opens and the later ones keep
+    using, is released by the unpublish or by the close. The client closes
+    without waiting for the unpublish to land, so the suite checks only that
+    one of them released it; the unit tests of ``StepFrameGate`` check the
+    unpublish alone. A stepped session streams nothing and drops live input, so
+    nothing else is sent. Each result must carry the
     effect its step applied as its data, which the endurance model returns.
     :attr:`unanswered` lists the requests that got no result, a failed one, or
     one with the wrong data, and an answer that got the attribute wrong.
@@ -827,7 +830,7 @@ class StepClient(BareClient):
             if publishes:
                 self._send_track(publish_track=track_pb2.PublishTrack(name="webcam"))
             webcam = np.full((48, 64, 3), 128, dtype=np.uint8)
-            frames = (_raw_frame(webcam), _h264_frame(webcam))
+            stream = _EncodedStream(*webcam.shape[:2])
             for n in range(STEPS_PER_CYCLE):
                 request_id = f"step-{n}"
                 effect = _EFFECTS[n % len(_EFFECTS)]
@@ -840,7 +843,12 @@ class StepClient(BareClient):
                         request_step=step_pb2.RequestStep(
                             state=state,
                             media_input=[
-                                step_pb2.TrackFrames(track="webcam", frames=[frames[n % 2]])
+                                step_pb2.TrackFrames(
+                                    track="webcam",
+                                    frames=[
+                                        _raw_frame(webcam) if n % 2 == 0 else stream.next(webcam)
+                                    ],
+                                )
                             ],
                         ),
                     ).SerializeToString(),
@@ -923,19 +931,48 @@ def _step_data(effect: str) -> bytes:
     return json.dumps({"effect": effect}, separators=(",", ":")).encode("utf-8")
 
 
-def _h264_frame(rgb: np.ndarray) -> step_pb2.Frame:
-    """Return *rgb* as one H.264 wire frame: a keyframe, so it starts a step's stream alone."""
-    encoder = av.CodecContext.create("libx264", "w")
-    encoder.height, encoder.width = rgb.shape[:2]
-    encoder.pix_fmt = "yuv420p"
-    picture = av.VideoFrame.from_ndarray(rgb, format="rgb24")
-    (packet,) = [*encoder.encode(picture), *encoder.encode(None)]
-    return step_pb2.Frame(
-        encoding=step_pb2.FRAME_ENCODING_H264,
-        dtype="uint8",
-        shape=list(rgb.shape),
-        data=bytes(packet),
-    )
+_STEP_CODECS = (
+    (rw.VideoCodec.H264, step_pb2.FRAME_ENCODING_H264),
+    (rw.VideoCodec.Vp8, step_pb2.FRAME_ENCODING_VP8),
+    (rw.VideoCodec.Vp9, step_pb2.FRAME_ENCODING_VP9),
+    (rw.VideoCodec.Av1, step_pb2.FRAME_ENCODING_AV1),
+)
+
+
+def step_codec() -> tuple[rw.VideoCodec, step_pb2.FrameEncoding]:
+    """Return the first codec, H.264 first, that this platform both encodes and decodes.
+
+    The runtime runs on the same machine with the same codecs, so it decodes
+    what the client encodes in it.
+    """
+    capabilities = rw.VideoCodecs().capabilities()
+    for codec, encoding in _STEP_CODECS:
+        if capabilities.can_encode(codec) and capabilities.can_decode(codec):
+            return codec, encoding
+    raise RuntimeError("this platform has no video codec to encode step frames in")
+
+
+class _EncodedStream:
+    """One track's encoded step frames: a keyframe, then frames that reference the last."""
+
+    def __init__(self, height: int, width: int) -> None:
+        codec, self._encoding = step_codec()
+        self._encoder = rw.VideoCodecs().encoder(codec, width, height)
+        self._sent = 0
+
+    def next(self, rgb: np.ndarray) -> step_pb2.Frame:
+        """Return *rgb* as the stream's next wire frame."""
+        encoded = self._encoder.encode(rgb, self._sent * 33_333)
+        if encoded is None:
+            raise RuntimeError("the step frame encoder dropped a frame")
+        self._sent += 1
+        return step_pb2.Frame(
+            encoding=self._encoding,
+            dtype="uint8",
+            shape=list(rgb.shape),
+            data=encoded.data,
+            keyframe=encoded.key_frame,
+        )
 
 
 def _raw_frame(rgb: np.ndarray) -> step_pb2.Frame:

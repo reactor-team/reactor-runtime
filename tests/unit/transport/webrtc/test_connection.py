@@ -2,9 +2,9 @@ import asyncio
 import logging
 from collections.abc import Callable
 
-import av
 import numpy as np
 import pytest
+import reactor_webrtc as rw
 from conftest import FakePeer
 
 from reactor_runtime.core import (
@@ -58,13 +58,10 @@ async def _connect(
 
 def _idr() -> bytes:
     """One 32x32 H.264 keyframe."""
-    codec = av.CodecContext.create("libx264", "w")
-    codec.width, codec.height, codec.pix_fmt = 32, 32, "yuv420p"
-    codec.options = {"g": "4", "bf": "0", "tune": "zerolatency", "x264-params": "scenecut=0"}
-    picture = np.full((32, 32, 3), 90, dtype=np.uint8)
-    packets = [bytes(p) for p in codec.encode(av.VideoFrame.from_ndarray(picture, format="rgb24"))]
-    packets += [bytes(p) for p in codec.encode(None)]
-    return packets[0]
+    encoder = rw.VideoCodecs().encoder(rw.VideoCodec.H264, 32, 32)
+    encoded = encoder.encode(np.full((32, 32, 3), 90, dtype=np.uint8))
+    assert encoded is not None
+    return encoded.data
 
 
 def _h264_step(request_id: str, track: str, data: bytes) -> bytes | str:
@@ -322,7 +319,8 @@ async def test_an_encoded_step_reaches_on_decoded_step_or_is_refused_to_the_clie
     sent = _h264_step("data_1", "webcam", _idr())
     fake_peer.fire_message(sent)
     fake_peer.fire_message(_h264_step("data_2", "webcam", b"\x00\x00\x01\x41 not an idr"))
-    for _ in range(100):
+    # A hardware decoder can take seconds to give up on a frame it cannot decode.
+    for _ in range(1000):
         if len(steps) == 1 and len(fake_peer.messages) == 1:
             break
         await asyncio.sleep(0.01)

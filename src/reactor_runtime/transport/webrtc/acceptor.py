@@ -119,8 +119,8 @@ class WebRTCAcceptor(ConnectionAcceptor):
                 Without a manifest, tracks use the fixed ``unknown`` label.
             video_inputs: Read the names of the model's input video tracks from
                 its declared contract, when a connection negotiates. They are
-                the only tracks a step request's H.264 frames decode for;
-                without them, every step request that carries an H.264 frame
+                the only tracks a step request's encoded frames decode for;
+                without them, every step request that carries an encoded frame
                 is refused.
         """
         self._sink = sink

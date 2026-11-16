@@ -95,8 +95,8 @@ class WebRTCConnection:
             video_tracks: The connection's outbound video tracks, so its pacer can
                 synthesise black frames before the first real one arrives.
             video_inputs: The names of the model's input video tracks, the only
-                tracks a step request's H.264 frames decode for; with none, every
-                step request that carries an H.264 frame is refused.
+                tracks a step request's encoded frames decode for; with none, every
+                step request that carries an encoded frame is refused.
         """
         self.id = conn_id
         self.capabilities = capabilities
@@ -156,7 +156,7 @@ class WebRTCConnection:
 
         *video_inputs* names the model's input video tracks, from its declared
         contract rather than the client's *tracks*: they are the only tracks a
-        step request's H.264 frames decode for, whether or not the client
+        step request's encoded frames decode for, whether or not the client
         negotiated them.
         """
         peer, answer = await peer_factory(conn_id, offer, tracks, config, version)

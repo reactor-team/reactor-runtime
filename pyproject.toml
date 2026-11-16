@@ -42,7 +42,7 @@ dependencies = [
     "prometheus-client>=0.26.0",
     "protobuf>=7.35.1",
     "pyyaml>=6.0.3",
-    "reactor-webrtc==0.24.2",
+    "reactor-webrtc==0.29.0",
     "uvicorn>=0.49.0",
 ]
 
@@ -56,6 +56,11 @@ dependencies = [
 # It ships wheels for macOS arm64, Linux x86_64 and Linux aarch64 only, with
 # no sdist: Windows and Intel macOS cannot install it.
 livekit = ["reactor-livekit-transport-client==1.2.0.post1"]
+
+[tool.uv.sources]
+# reactor-webrtc 0.29.0 is not on PyPI yet: a wheel built locally from its
+# release stands in for it until it is published.
+reactor-webrtc = { path = "/Users/douglas/reactor-workspace/reactor-webrtc-douglas-rea-8469-release-reactor-webrtc-with-standalone-video-cod/target/wheels/reactor_webrtc-0.29.0-cp310-abi3-macosx_11_0_arm64.whl" }
 
 [project.urls]
 Source = "https://github.com/reactor-team/reactor-runtime"

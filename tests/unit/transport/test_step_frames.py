@@ -3,9 +3,9 @@ import threading
 import weakref
 from collections.abc import Callable
 
-import av
 import numpy as np
 import pytest
+import reactor_webrtc as rw
 
 from reactor_runtime.core import DecodedStep
 from reactor_runtime.protocol import Channel, ProtocolVersion
@@ -32,6 +32,37 @@ from reactor_wire.v1 import (
 WIDTH, HEIGHT = 64, 48
 VIDEO_INPUTS = frozenset({"webcam", "other"})
 
+_CODECS = {
+    step_pb2.FRAME_ENCODING_H264: rw.VideoCodec.H264,
+    step_pb2.FRAME_ENCODING_VP8: rw.VideoCodec.Vp8,
+    step_pb2.FRAME_ENCODING_VP9: rw.VideoCodec.Vp9,
+    step_pb2.FRAME_ENCODING_AV1: rw.VideoCodec.Av1,
+}
+_CAPABILITIES = rw.VideoCodecs().capabilities()
+
+
+def _supported(encoding: step_pb2.FrameEncoding) -> bool:
+    codec = _CODECS[encoding]
+    return _CAPABILITIES.can_encode(codec) and _CAPABILITIES.can_decode(codec)
+
+
+ENCODINGS = [
+    pytest.param(
+        encoding,
+        id=step_pb2.FrameEncoding.Name(encoding).removeprefix("FRAME_ENCODING_"),
+        marks=pytest.mark.skipif(
+            not _supported(encoding), reason="no backend for this codec on this platform"
+        ),
+    )
+    for encoding in _CODECS
+]
+"""Each encoded encoding, skipped where this platform can not both encode and decode it."""
+
+requires_h264 = pytest.mark.skipif(
+    not _supported(step_pb2.FRAME_ENCODING_H264), reason="no H.264 backend on this platform"
+)
+pytestmark = requires_h264
+
 
 def _pictures(count: int) -> list[np.ndarray]:
     """A smooth scene sliding one pixel a frame, so the encoder predicts it from the last."""
@@ -43,48 +74,47 @@ def _pictures(count: int) -> list[np.ndarray]:
     return [np.ascontiguousarray(base[i : i + HEIGHT, i : i + WIDTH]) for i in range(count)]
 
 
-def _encode(pictures: list[np.ndarray], **options: str) -> list[bytes]:
-    """Encode *pictures* as an H.264 stream; one access unit per picture."""
-    codec = av.CodecContext.create("libx264", "w")
-    codec.width, codec.height, codec.pix_fmt = WIDTH, HEIGHT, "yuv420p"
-    # One keyframe per four frames, never one on a scene cut, so a stream past
-    # its first frame starts on a predicted frame.
-    codec.options = {
-        "g": "4",
-        "bf": "0",
-        "tune": "zerolatency",
-        "x264-params": "scenecut=0",
-        **options,
-    }
-    packets = []
-    for picture in pictures:
-        packets += codec.encode(av.VideoFrame.from_ndarray(picture, format="rgb24"))
-    packets += codec.encode(None)
-    return [bytes(p) for p in packets]
+def _encode(
+    pictures: list[np.ndarray],
+    encoding: step_pb2.FrameEncoding = step_pb2.FRAME_ENCODING_H264,
+) -> list[bytes]:
+    """Encode *pictures* as one stream: a keyframe, then frames that each reference the last."""
+    encoder = rw.VideoCodecs().encoder(_CODECS[encoding], WIDTH, HEIGHT)
+    frames = []
+    for n, picture in enumerate(pictures):
+        frame = encoder.encode(picture, n * 33_333)
+        assert frame is not None
+        assert frame.key_frame == (n == 0), "the stream holds one keyframe, its first frame"
+        frames.append(frame.data)
+    return frames
 
 
-def _reference(packets: list[bytes]) -> list[np.ndarray]:
-    """What a plain decoder makes of *packets*, in presentation order."""
-    decoder = av.CodecContext.create("h264", "r")
-    frames = [f for p in packets for f in decoder.decode(av.Packet(p))] + decoder.decode(None)
-    return [f.to_ndarray(format="rgb24") for f in frames]
+def _reference(
+    packets: list[bytes], encoding: step_pb2.FrameEncoding = step_pb2.FRAME_ENCODING_H264
+) -> list[np.ndarray]:
+    """What a plain decoder makes of *packets*, a stream from its keyframe."""
+    decoder = rw.VideoCodecs().decoder(_CODECS[encoding])
+    pictures = [decoder.decode(p) for p in packets]
+    assert all(p is not None for p in pictures)
+    return [p for p in pictures if p is not None]
 
 
-def _h264(
+def _frame(
     data: bytes,
+    encoding: step_pb2.FrameEncoding = step_pb2.FRAME_ENCODING_H264,
     *,
     shape: list[int] | None = None,
-    metadata: bytes | None = None,
-    capture_time_us: int | None = None,
 ) -> step_pb2.Frame:
     return step_pb2.Frame(
-        encoding=step_pb2.FRAME_ENCODING_H264,
+        encoding=encoding,
         dtype="uint8",
         shape=[HEIGHT, WIDTH, 3] if shape is None else shape,
         data=data,
-        metadata=metadata,
-        capture_time_us=capture_time_us,
     )
+
+
+def _h264(data: bytes, *, shape: list[int] | None = None) -> step_pb2.Frame:
+    return _frame(data, shape=shape)
 
 
 def _step(*frames: step_pb2.Frame, track: str = "webcam") -> data_pb2.DataClientMessage:
@@ -99,6 +129,19 @@ def _step(*frames: step_pb2.Frame, track: str = "webcam") -> data_pb2.DataClient
             ]
         ),
     )
+
+
+def _entries(*entries: tuple[str, list[step_pb2.Frame]]) -> data_pb2.DataClientMessage:
+    """A step request with one entry per ``(track, frames)``, in order."""
+    message = _step()
+    del message.request_step.media_input[:]
+    for track, frames in entries:
+        message.request_step.media_input.append(
+            step_pb2.TrackFrames(
+                track=track, kind=platform_pb2.TrackKind.TRACK_KIND_VIDEO, frames=frames
+            )
+        )
+    return message
 
 
 def _as_bytes(payload: bytes | str) -> bytes:
@@ -130,39 +173,133 @@ def _decode(
     return outcome
 
 
-def _refused(message: data_pb2.DataClientMessage) -> StepFrameRefusal:
-    outcome = decode_step_frames(message, {}, VIDEO_INPUTS)
+def _refused(
+    message: data_pb2.DataClientMessage, decoders: dict[str, TrackDecoder] | None = None
+) -> StepFrameRefusal:
+    outcome = decode_step_frames(message, {} if decoders is None else decoders, VIDEO_INPUTS)
     assert isinstance(outcome, StepFrameRefusal)
     return outcome
+
+
+def _matches(pictures: Pictures, entry: int, expected: list[np.ndarray]) -> bool:
+    return all(np.array_equal(pictures[entry, i], e) for i, e in enumerate(expected))
 
 
 # ── decode_step_frames ─────────────────────────────────────────────────────────
 
 
-def test_h264_frames_decode_to_their_pictures_and_the_request_is_left_as_it_is() -> None:
-    packets = _encode(_pictures(4))
-    message = _step(*(_h264(p) for p in packets))
+@pytest.mark.parametrize("encoding", ENCODINGS)
+def test_each_encoding_decodes_to_its_pictures_and_the_request_is_left_as_it_is(
+    encoding: step_pb2.FrameEncoding,
+) -> None:
+    pictures = _pictures(4)
+    packets = _encode(pictures, encoding)
+    message = _step(*(_frame(p, encoding) for p in packets))
     sent = message.SerializeToString()
 
-    pictures = _decode(message)
+    decoded = _decode(message)
 
-    assert sorted(pictures) == [(0, 0), (0, 1), (0, 2), (0, 3)]
-    for position, expected in enumerate(_reference(packets)):
-        picture = pictures[0, position]
+    assert sorted(decoded) == [(0, 0), (0, 1), (0, 2), (0, 3)]
+    for position, expected in enumerate(_reference(packets, encoding)):
+        picture = decoded[0, position]
         assert (picture.dtype, picture.shape) == (np.uint8, (HEIGHT, WIDTH, 3))
         assert np.array_equal(picture, expected)
+        # Lossy, but the picture the client encoded.
+        assert np.abs(picture.astype(int) - pictures[position].astype(int)).mean() < 24
     assert message.SerializeToString() == sent
 
 
-def test_a_stream_with_b_frames_decodes_one_picture_per_frame() -> None:
-    packets = _encode(_pictures(8), bf="2", tune="film")
+@pytest.mark.parametrize("encoding", ENCODINGS)
+def test_a_stream_spans_requests_with_no_keyframe_in_the_second(
+    encoding: step_pb2.FrameEncoding,
+) -> None:
+    packets = _encode(_pictures(8), encoding)
+    decoders: dict[str, TrackDecoder] = {}
 
-    pictures = _decode(_step(*(_h264(p) for p in packets)))
+    _decode(_step(*(_frame(p, encoding) for p in packets[:4])), decoders)
+    (decoder,) = decoders.values()
+    # The second request carries only inter frames, which reference the last
+    # frame of the first.
+    pictures = _decode(_step(*(_frame(p, encoding) for p in packets[4:])), decoders)
 
-    assert sorted(pictures) == [(0, p) for p in range(len(packets))]
+    assert decoders == {"webcam": decoder}
+    assert _matches(pictures, 0, _reference(packets, encoding)[4:])
 
 
-def test_raw_frames_beside_h264_ones_are_not_decoded() -> None:
+@pytest.mark.parametrize("encoding", ENCODINGS)
+def test_a_new_connection_whose_first_frame_is_not_a_keyframe_is_refused(
+    encoding: step_pb2.FrameEncoding,
+) -> None:
+    packets = _encode(_pictures(4), encoding)
+    # A connection's gate starts with no decoder, as this empty mapping does.
+    decoders: dict[str, TrackDecoder] = {}
+
+    refusal = _refused(_step(*(_frame(p, encoding) for p in packets[1:])), decoders)
+
+    assert refusal.entry == "media_input[0].frames[0]"
+    assert "must start at a keyframe" in refusal.reason
+    # The track's next request decodes once it starts at a keyframe.
+    assert _matches(
+        _decode(_step(*(_frame(p, encoding) for p in packets)), decoders),
+        0,
+        _reference(packets, encoding),
+    )
+
+
+def test_a_request_refused_after_its_frames_decode_still_moves_the_stream_on() -> None:
+    packets = _encode(_pictures(8))
+    decoders: dict[str, TrackDecoder] = {}
+    _decode(_step(*(_h264(p) for p in packets[:4])), decoders)
+
+    # Its frames decode, but the second is not the shape it declares.
+    bad = _step(_h264(packets[4]), _h264(packets[5], shape=[HEIGHT * 2, WIDTH, 3]))
+    assert _refused(bad, decoders).entry == "media_input[0].frames[1]"
+    pictures = _decode(_step(*(_h264(p) for p in packets[6:])), decoders)
+
+    assert _matches(pictures, 0, _reference(packets)[6:])
+
+
+def test_a_track_whose_frames_do_not_decode_starts_over_and_the_others_go_on() -> None:
+    webcam, other = _encode(_pictures(8)), _encode(_pictures(8))
+    decoders: dict[str, TrackDecoder] = {}
+    _decode(_entries(("webcam", [_h264(p) for p in webcam[:4]])), decoders)
+
+    # "other" opens on an inter frame, which its new decoder cannot start at.
+    refusal = _refused(
+        _entries(
+            ("webcam", [_h264(p) for p in webcam[4:6]]),
+            ("other", [_h264(p) for p in other[1:3]]),
+        ),
+        decoders,
+    )
+    assert refusal.entry == "media_input[1].frames[0]"
+    assert "must start at a keyframe" in refusal.reason
+    assert set(decoders) == {"webcam"}
+
+    pictures = _decode(
+        _entries(
+            ("webcam", [_h264(p) for p in webcam[6:]]),
+            ("other", [_h264(p) for p in other[:2]]),
+        ),
+        decoders,
+    )
+    assert _matches(pictures, 0, _reference(webcam)[6:])
+    assert _matches(pictures, 1, _reference(other)[:2])
+
+
+def test_a_decoder_decodes_from_the_next_keyframe_after_a_corrupt_frame() -> None:
+    packets = _encode(_pictures(4))
+    decoders: dict[str, TrackDecoder] = {}
+    # A keyframe cut short: still one access unit, but its slice data is gone.
+    refusal = _refused(_step(_h264(packets[0][: len(packets[0]) // 3])), decoders)
+    assert refusal.entry == "media_input[0].frames[0]"
+
+    pictures = _decode(_step(*(_h264(p) for p in packets)), decoders)
+
+    assert _matches(pictures, 0, _reference(packets))
+
+
+def test_raw_frames_beside_encoded_ones_are_not_decoded() -> None:
     (packet,) = _encode(_pictures(1))
     raw = step_pb2.Frame(
         encoding=step_pb2.FRAME_ENCODING_RAW, dtype="uint8", shape=[2, 2, 3], data=bytes(12)
@@ -177,116 +314,78 @@ def test_raw_frames_beside_h264_ones_are_not_decoded() -> None:
     assert list(_decode(message)) == [(0, 0)]
 
 
-def test_a_track_without_a_decoder_gets_one_and_keeps_it_for_the_next_request() -> None:
-    packets = _encode(_pictures(8))
+def test_each_track_of_a_request_decodes_on_its_own_decoder() -> None:
+    webcam, other = _encode(_pictures(4)), _encode(_pictures(8)[4:])
     decoders: dict[str, TrackDecoder] = {}
 
-    _decode(_step(*(_h264(p) for p in packets[:4])), decoders)
-    (decoder,) = decoders.values()
-    # The second request starts at the stream's next keyframe, after the
-    # decoder already decoded and flushed the first.
-    pictures = _decode(_step(*(_h264(p) for p in packets[4:])), decoders)
-
-    assert decoders == {"webcam": decoder}
-    expected = _reference(packets[4:])
-    assert all(np.array_equal(pictures[0, i], expected[i]) for i in range(4))
-
-
-def test_a_decoder_decodes_the_next_request_cleanly_after_a_corrupt_one() -> None:
-    packets = _encode(_pictures(4))
-    decoders = {"webcam": TrackDecoder(sliced=False)}
-    # Starts at a keyframe and passes the checks, but its second frame is a
-    # picture's slices cut short, which the decoder conceals.
-    corrupt = _step(_h264(packets[0]), _h264(packets[1][: len(packets[1]) // 3]))
-    decode_step_frames(corrupt, decoders, VIDEO_INPUTS)
-
-    pictures = _decode(_step(*(_h264(p) for p in packets)), decoders)
-
-    expected = _reference(packets)
-    assert all(np.array_equal(pictures[0, i], expected[i]) for i in range(4))
-
-
-def _sliced(slices: int) -> list[bytes]:
-    """Eight frames, each picture cut into *slices* slices."""
-    return _encode(_pictures(8), **{"x264-params": f"scenecut=0:slices={slices}"})
-
-
-def _entries(*entries: tuple[str, list[bytes]]) -> data_pb2.DataClientMessage:
-    """A step request with one entry per ``(track, packets)``, in order."""
-    message = _step()
-    del message.request_step.media_input[:]
-    for track, packets in entries:
-        message.request_step.media_input.append(
-            step_pb2.TrackFrames(
-                track=track,
-                kind=platform_pb2.TrackKind.TRACK_KIND_VIDEO,
-                frames=[_h264(p) for p in packets],
-            )
-        )
-    return message
-
-
-def test_a_stream_of_sliced_pictures_decodes_on_a_slice_threaded_decoder() -> None:
-    packets = _sliced(3)
-    decoders: dict[str, TrackDecoder] = {}
-
-    pictures = _decode(_step(*(_h264(p) for p in packets[:4])), decoders)
-
-    assert decoders["webcam"].sliced
-    expected = _reference(packets[:4])
-    assert all(np.array_equal(pictures[0, i], expected[i]) for i in range(4))
-
-
-def test_a_stream_of_one_slice_per_picture_decodes_on_a_frame_threaded_decoder() -> None:
-    packets = _sliced(1)
-    decoders: dict[str, TrackDecoder] = {}
-
-    _decode(_step(*(_h264(p) for p in packets[:4])), decoders)
-
-    assert not decoders["webcam"].sliced
-
-
-def test_a_track_whose_stream_changes_its_slicing_gets_a_new_decoder() -> None:
-    decoders: dict[str, TrackDecoder] = {}
-    _decode(_step(*(_h264(p) for p in _sliced(1)[:4])), decoders)
-    first = decoders["webcam"]
-
-    packets = _sliced(3)
-    pictures = _decode(_step(*(_h264(p) for p in packets[:4])), decoders)
-
-    assert decoders["webcam"] is not first
-    assert decoders["webcam"].sliced
-    expected = _reference(packets[:4])
-    assert all(np.array_equal(pictures[0, i], expected[i]) for i in range(4))
-
-
-def test_each_track_of_a_request_decodes_to_its_own_pictures() -> None:
-    webcam, other = _sliced(3)[:4], _encode(_pictures(8)[4:])
-    decoders: dict[str, TrackDecoder] = {}
-
-    pictures = _decode(_entries(("webcam", webcam), ("other", other)), decoders)
+    pictures = _decode(
+        _entries(("webcam", [_h264(p) for p in webcam]), ("other", [_h264(p) for p in other])),
+        decoders,
+    )
 
     assert set(decoders) == {"webcam", "other"}
-    for index, packets in enumerate((webcam, other)):
-        expected = _reference(packets)
-        assert all(np.array_equal(pictures[index, i], expected[i]) for i in range(len(packets)))
+    assert decoders["webcam"] is not decoders["other"]
+    assert _matches(pictures, 0, _reference(webcam))
+    assert _matches(pictures, 1, _reference(other))
 
 
-def test_entries_naming_the_same_track_each_decode_to_their_own_pictures() -> None:
+def test_entries_naming_the_same_track_continue_one_stream() -> None:
     packets = _encode(_pictures(8))
     decoders: dict[str, TrackDecoder] = {}
 
-    pictures = _decode(_entries(("webcam", packets[:4]), ("webcam", packets[4:])), decoders)
+    pictures = _decode(
+        _entries(
+            ("webcam", [_h264(p) for p in packets[:4]]),
+            ("webcam", [_h264(p) for p in packets[4:]]),
+        ),
+        decoders,
+    )
 
     assert len(decoders) == 1
-    for index, window in enumerate((packets[:4], packets[4:])):
-        expected = _reference(window)
-        assert all(np.array_equal(pictures[index, i], expected[i]) for i in range(4))
+    expected = _reference(packets)
+    assert _matches(pictures, 0, expected[:4])
+    assert _matches(pictures, 1, expected[4:])
+
+
+@pytest.mark.skipif(
+    not _supported(step_pb2.FRAME_ENCODING_VP8), reason="no VP8 backend on this platform"
+)
+def test_a_track_whose_frames_change_encoding_gets_a_new_decoder_from_a_keyframe() -> None:
+    decoders: dict[str, TrackDecoder] = {}
+    _decode(_step(*(_h264(p) for p in _encode(_pictures(2)))), decoders)
+    first = decoders["webcam"]
+
+    vp8 = _encode(_pictures(2), step_pb2.FRAME_ENCODING_VP8)
+    pictures = _decode(_step(*(_frame(p, step_pb2.FRAME_ENCODING_VP8) for p in vp8)), decoders)
+
+    assert decoders["webcam"] is not first
+    assert decoders["webcam"].encoding == step_pb2.FRAME_ENCODING_VP8
+    assert _matches(pictures, 0, _reference(vp8, step_pb2.FRAME_ENCODING_VP8))
+
+
+@pytest.mark.skipif(
+    not _supported(step_pb2.FRAME_ENCODING_VP8), reason="no VP8 backend on this platform"
+)
+def test_two_encodings_on_one_track_in_a_request_are_refused() -> None:
+    (h264,) = _encode(_pictures(1))
+    (vp8,) = _encode(_pictures(1), step_pb2.FRAME_ENCODING_VP8)
+
+    refusal = _refused(
+        _entries(
+            ("webcam", [_h264(h264)]),
+            ("webcam", [_frame(vp8, step_pb2.FRAME_ENCODING_VP8)]),
+        )
+    )
+
+    assert refusal.entry == "media_input[1].frames[0]"
+    assert "one frame encoding" in refusal.reason
 
 
 def test_the_first_entry_at_fault_is_the_one_refused() -> None:
     packets = _encode(_pictures(4))
-    message = _entries(("webcam", packets), ("other", packets[1:]))
+    message = _entries(
+        ("webcam", [_h264(p) for p in packets]), ("other", [_h264(p) for p in packets[1:]])
+    )
     message.request_step.media_input[0].frames[0].shape[:] = [HEIGHT * 2, WIDTH, 3]
 
     refusal = _refused(message)
@@ -308,6 +407,7 @@ def test_a_track_after_one_at_fault_still_decodes_on_its_decoder() -> None:
 
 
 def test_h264_frames_for_a_track_that_is_not_an_input_video_track_open_no_decoder() -> None:
+def test_encoded_frames_for_a_track_that_is_not_an_input_video_track_open_no_decoder() -> None:
     packets = _encode(_pictures(4))
     decoders: dict[str, TrackDecoder] = {}
 
@@ -333,18 +433,11 @@ def test_an_unknown_encoding_is_refused_naming_its_frame() -> None:
     assert "99 is not supported" in refusal.reason
 
 
-def test_frames_that_do_not_start_at_a_keyframe_are_refused() -> None:
-    packets = _encode(_pictures(4))
-    refusal = _refused(_step(*(_h264(p) for p in packets[1:])))
-
-    assert refusal.entry == "media_input[0].frames[0]"
-    assert "keyframe" in refusal.reason
-
-
 def test_a_frame_holding_a_p_frame_then_an_idr_is_refused() -> None:
-    # A decoder would take the two as one packet and keep only the second picture.
-    packets = _encode(_pictures(8))
-    refusal = _refused(_step(_h264(packets[1] + packets[4])))
+    # A decoder would take the two as one frame and keep only one picture.
+    packets = _encode(_pictures(4))
+    keyframe = _encode(_pictures(1))[0]
+    refusal = _refused(_step(_h264(packets[1] + keyframe)))
 
     assert refusal.entry == "media_input[0].frames[0]"
     assert "more than one access unit" in refusal.reason
@@ -352,7 +445,7 @@ def test_a_frame_holding_a_p_frame_then_an_idr_is_refused() -> None:
 
 def test_a_frame_holding_two_pictures_is_refused() -> None:
     packets = _encode(_pictures(4))
-    refusal = _refused(_step(_h264(packets[0] + packets[1])))
+    refusal = _refused(_step(_h264(packets[1] + packets[2])))
 
     assert refusal.entry == "media_input[0].frames[0]"
     assert "more than one picture" in refusal.reason
@@ -378,7 +471,7 @@ def test_a_frame_that_decodes_to_another_size_is_refused() -> None:
     assert f"[{HEIGHT}, {WIDTH}, 3]" in refusal.reason
 
 
-def test_an_empty_h264_frame_is_refused() -> None:
+def test_an_empty_encoded_frame_is_refused() -> None:
     refusal = _refused(_step(_h264(b"")))
 
     assert refusal.entry == "media_input[0].frames[0]"
@@ -632,5 +725,41 @@ async def test_close_releases_every_decoder_even_one_a_running_decode_opens() ->
 
     gate.close()
     await _settle()
+
+    assert gate.decoders == 0
+
+
+async def test_a_new_connection_starts_its_tracks_over_at_a_keyframe() -> None:
+    packets = _encode(_pictures(8))
+    first, second = _Recorder(), _Recorder()
+    gate = first.gate()
+    gate.submit(_wire(_step(*(_h264(p) for p in packets[:4]))), ProtocolVersion.V1, Channel.DATA)
+    await _until(lambda: len(first.steps) == 1)
+    gate.close()
+
+    # The same client reconnects and goes on with the stream it was sending.
+    again = second.gate()
+    again.submit(_wire(_step(*(_h264(p) for p in packets[4:]))), ProtocolVersion.V1, Channel.DATA)
+    await _until(lambda: len(second.replies) == 1)
+
+    assert second.steps == []
+    answer = data_pb2.DataServerMessage.FromString(second.replies[0])
+    assert answer.step_result.failure_code == step_pb2.STEP_FAILURE_CODE_REFUSED
+    assert "must start at a keyframe" in answer.step_result.error
+
+
+async def test_a_track_that_loses_its_stream_releases_its_decoder() -> None:
+    rec = _Recorder()
+    gate = rec.gate()
+    packets = _encode(_pictures(8))
+    gate.submit(_wire(_step(*(_h264(p) for p in packets[:4]))), ProtocolVersion.V1, Channel.DATA)
+    await _until(lambda: len(rec.steps) == 1)
+    assert gate.decoders == 1
+
+    unknown = _h264(packets[4])
+    # An encoding this build has no name for: the frame cannot decode.
+    setattr(unknown, "encoding", 99)  # noqa: B010
+    gate.submit(_wire(_step(unknown)), ProtocolVersion.V1, Channel.DATA)
+    await _until(lambda: len(rec.replies) == 1)
 
     assert gate.decoders == 0
