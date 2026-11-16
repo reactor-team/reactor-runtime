@@ -5,12 +5,17 @@ renames or reshapes one of these would otherwise first break a release's
 endurance run. Update ``endurance/launcher.py`` in the same change.
 """
 
+import gc
 import inspect
+import warnings
+from pathlib import Path
 
+import pytest
 from endurance import launcher
 
 import reactor_runtime.http.server as http_server
 from reactor_runtime import serve
+from reactor_runtime.core.local_file import LocalFile, OwnedLocalFile
 from reactor_runtime.runner.client_stats import ClientStatsGate
 from reactor_runtime.runner.connection_manager import ConnectionManager
 from reactor_runtime.runner.runner import Runner
@@ -45,3 +50,47 @@ def test_the_counted_transport_classes_are_classes() -> None:
 
 def test_serve_has_the_entry_point_the_launcher_hands_over_to() -> None:
     assert callable(serve.main)
+
+
+def test_owned_local_file_has_the_methods_the_count_wraps() -> None:
+    assert list(inspect.signature(OwnedLocalFile.__init__).parameters) == ["self", "source"]
+    assert list(inspect.signature(OwnedLocalFile.close).parameters) == ["self"]
+
+
+def _local_files() -> int:
+    launcher._install_local_file_count()
+    return launcher._live_transport_objects()["local_files"]
+
+
+def test_probe_counts_owned_local_files_until_they_are_closed(tmp_path: Path) -> None:
+    source = tmp_path / "output"
+    source.write_bytes(b"local result")
+    before = _local_files()
+    owned = OwnedLocalFile(LocalFile(source))
+    try:
+        assert _local_files() == before + 1
+    finally:
+        owned.close()
+        owned.close()
+    assert _local_files() == before
+
+
+def test_probe_counts_a_copy_garbage_collection_removed_without_close(tmp_path: Path) -> None:
+    source = tmp_path / "output"
+    source.write_bytes(b"local result")
+    before = _local_files()
+    owned = OwnedLocalFile(LocalFile(source))
+    copy = owned.path
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ResourceWarning)
+        del owned
+        gc.collect()
+    assert not copy.exists()
+    assert _local_files() == before + 1
+
+
+def test_probe_does_not_count_a_copy_that_failed(tmp_path: Path) -> None:
+    before = _local_files()
+    with pytest.raises(FileNotFoundError):
+        OwnedLocalFile(LocalFile(tmp_path / "missing"))
+    assert _local_files() == before

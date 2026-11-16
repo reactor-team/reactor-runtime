@@ -102,6 +102,8 @@ class StepResultsConfig:
     ``False``). When enabled, every step the model reports is saved as a
     folder: its output in one ``output.mp4``, with each track of the step's
     ``Output`` as its own stream, beside any extra files and a ``result.json``.
+    The codec settings apply to that encode only: a step with no ``Output``
+    that supplies ``output.mp4`` as a local file keeps the file as it is.
     Turning it on is the model's choice, not a session option.
 
     Attributes:

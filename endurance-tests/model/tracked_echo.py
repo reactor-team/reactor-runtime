@@ -19,11 +19,12 @@ import gc
 import os
 import threading
 import weakref
+from pathlib import Path
 
 import numpy as np
 
 from echo import Echo
-from reactor_runtime import StepCompleted, StepOutcome, TrackPayload
+from reactor_runtime import LocalFile, StepCompleted, StepOutcome, TrackPayload
 
 BURST = int(os.environ.get("ENDURANCE_BURST", "30"))
 
@@ -108,4 +109,6 @@ class TrackedEcho(Echo):
             track(video.data)
         elif isinstance(video, np.ndarray):
             track(video)
-        return StepCompleted(output=output, data=data)
+        return StepCompleted(
+            output=output, data=data, files={"source.txt": LocalFile(Path(__file__))}
+        )

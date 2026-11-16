@@ -57,6 +57,7 @@ from dataclasses import replace
 from typing import Any, ClassVar, get_type_hints
 
 from reactor_runtime.codes import INTERNAL_ERROR
+from reactor_runtime.core.local_file import OwnedLocalFile
 from reactor_runtime.core.model import (
     ClientConnected,
     ClientDisconnected,
@@ -248,6 +249,15 @@ class ReactorApp(ReactorCore):
         return ``data`` with a requested step's result, or to mark a recovered
         step with an ``error``.
 
+        A :class:`LocalFile` in the returned report is copied after this method
+        returns, when the loop reports the step, so the file must still exist
+        then: keep it in a directory the model owns, not a ``TemporaryDirectory``
+        opened here, and remove it on a later step or in ``@session_ended``. A
+        file the runtime cannot take over (missing, not a regular file, or
+        changed during the copy) fails the step, with the reason in its
+        ``error``, and the loop goes on; media the step emitted has already
+        gone out.
+
         Runs under the step lock.
 
         This is the one place a model failure is decided. When ``outcome.error``
@@ -408,7 +418,8 @@ class ReactorApp(ReactorCore):
                                 STEP_SESSION.reset(token)
                             frames = self._to_bundle(report.output).frame_count
                             rate = self._playout_rate(frames, pace)
-                        self._report_step(report, session, rate, stages)
+                        report, files = await self._take_returned_files(report)
+                        self._report_step(report, session, rate, stages, files=files)
 
                     # A refused turn waits a little before asking again; a
                     # productive turn yields once so handler tasks already
@@ -509,7 +520,32 @@ class ReactorApp(ReactorCore):
             )
             outcome = self._generate(input)
             returned = await self.process_output(outcome)
-        self._report_step(_step_report(returned, outcome), session, request=accepted)
+        report, files = await self._take_returned_files(_step_report(returned, outcome))
+        self._report_step(report, session, request=accepted, files=files)
+
+    async def _take_returned_files(
+        self, report: StepCompleted
+    ) -> tuple[StepCompleted, dict[str, bytes | OwnedLocalFile]]:
+        """Take over the local files of a report ``process_output()`` returned.
+
+        A file the runtime cannot take over fails the step, not the session:
+        the model's code has already returned, so it has no call to catch the
+        error on. The failed report keeps the step's time and carries the
+        reason; media the step emitted has already gone out.
+        """
+        try:
+            return report, await self._take_step_files(report)
+        except (OSError, ValueError) as error:
+            reason = (
+                (error.strerror or type(error).__name__)
+                if isinstance(error, OSError)
+                else str(error)
+            )
+            logger.warning("step file handoff failed", error=str(error))
+            return StepCompleted(
+                error=f"a step file could not be handed over: {reason}",
+                elapsed=report.elapsed,
+            ), {}
 
     def _refuse_step(
         self,

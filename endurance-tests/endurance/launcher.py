@@ -26,6 +26,7 @@ from fastapi import FastAPI
 import reactor_runtime.http.server as http_server
 from reactor_runtime import serve
 from reactor_runtime.core import ConnId, Health
+from reactor_runtime.core.local_file import OwnedLocalFile
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.runner import Runner
 from reactor_runtime.transport.router import TransportRouter
@@ -153,6 +154,46 @@ def _install_pacer_check() -> None:
     MediaPacer.stop = checked_stop
 
 
+# Step file copies the runtime made, and the ones it released through close(),
+# since start. The difference is every copy not released: one a step still
+# holds, and one garbage collection removed because no path released it, which
+# a walk of live objects cannot see.
+_local_files = {"created": 0, "closed": 0}
+# The ids of the copies made and not yet released, so a repeated close() counts once.
+_open_local_files: set[int] = set()
+_local_files_lock = threading.Lock()
+_local_file_count_installed = False
+
+
+def _install_local_file_count() -> None:
+    """Count every step file copy the runtime makes, and every one it releases."""
+    global _local_file_count_installed
+    if _local_file_count_installed:
+        return
+    _local_file_count_installed = True
+    init = OwnedLocalFile.__init__
+    close = OwnedLocalFile.close
+
+    def counted_init(self: OwnedLocalFile, source: Any) -> None:
+        init(self, source)
+        with _local_files_lock:
+            _local_files["created"] += 1
+            _open_local_files.add(id(self))
+
+    def counted_close(self: OwnedLocalFile) -> None:
+        # A copy that fails part-way closes itself before it counts as made,
+        # and close() may run more than once: count each made copy once.
+        with _local_files_lock:
+            if id(self) in _open_local_files:
+                _open_local_files.discard(id(self))
+                _local_files["closed"] += 1
+        close(self)
+
+    # Swapping in the wrappers is the point; ty reads __init__ as object's overloads.
+    OwnedLocalFile.__init__ = counted_init  # ty: ignore[invalid-assignment]
+    OwnedLocalFile.close = counted_close
+
+
 # Commands answered nowhere, as a data-topic command is, since start, by how
 # they ended: run by the model's handler, or rejected (by the contract, or by
 # the handler failing). The proof the runtime ran a topic packet's command.
@@ -231,6 +272,7 @@ def _live_transport_objects() -> dict[str, int]:
         "participants": 0,
         "step_decoders": 0,
         "rooms_leaving": 0,
+        "local_files": 0,
     }
     for obj in gc.get_objects():
         if isinstance(obj, WebRTCConnection):
@@ -249,6 +291,8 @@ def _live_transport_objects() -> dict[str, int]:
             # their leave counts none.
             leaving = not getattr(obj, "active", False) and not getattr(obj, "settled", True)
             counts["rooms_leaving"] += leaving
+    with _local_files_lock:
+        counts["local_files"] = _local_files["created"] - _local_files["closed"]
     return counts
 
 
@@ -323,6 +367,7 @@ def main() -> None:
     http_server.build_app = build_app  # ty: ignore[invalid-assignment]
     _install_pacer_check()
     _install_command_count()
+    _install_local_file_count()
     serve.main()
 
 

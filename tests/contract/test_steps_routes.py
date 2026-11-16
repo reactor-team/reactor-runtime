@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 from contract_helpers import Harness, JournalReader, SteppingState, running_runtime
 
-from reactor_runtime import CommandError, ReactorApp, StepCompleted, StepOutcome, event
+from reactor_runtime import CommandError, LocalFile, ReactorApp, StepCompleted, StepOutcome, event
 from reactor_runtime.core import RuntimeConfig, StepResultsConfig
 from reactor_runtime.interface.tracks import Output, Video
 
@@ -182,6 +182,34 @@ async def test_step_folders_stay_readable_after_the_session_ends(tmp_path: Path)
         assert harness.runner.descriptor()["state"] == "ready"
         response = await harness.client.get(f"/sessions/{_SESSION_ID}/steps/2/note.txt")
         assert response.status_code == 200
+
+
+async def test_local_mp4_is_served_unchanged_after_session_cleanup(tmp_path: Path) -> None:
+    source = tmp_path / "original.mp4"
+    original = b"\x00\x00\x00\x18ftypmp42" + bytes(range(256)) * 1024
+    source.write_bytes(original)
+
+    class LocalSavingModel(SavingModel):
+        async def process_output(self, outcome: StepOutcome) -> StepCompleted:
+            return StepCompleted(files={"output.mp4": LocalFile(source), "usage.json": b"{}"})
+
+    async with running_runtime(model_cls=LocalSavingModel, cfg=_saving_config()) as harness:
+        ready = await _run_two_saved_steps(harness, tmp_path / "results")
+        journal = JournalReader(harness.runner)
+        try:
+            await journal.expect("cleanup_complete")
+        finally:
+            await journal.aclose()
+        source.unlink()
+        assert ready[0]["detail"]["files"] == ["output.mp4", "usage.json"]
+        response = await harness.client.get(f"/sessions/{_SESSION_ID}/steps/1/output.mp4")
+        assert response.status_code == 200
+        assert response.content == original
+        assert response.headers["content-type"] == "video/mp4"
+        assert int(response.headers["content-length"]) == len(original)
+        result = await harness.client.get(f"/sessions/{_SESSION_ID}/steps/1")
+        assert result.json()["usage"] == []
+        assert result.json()["save_error"] is None
 
 
 async def test_what_is_not_a_complete_step_is_404(tmp_path: Path) -> None:

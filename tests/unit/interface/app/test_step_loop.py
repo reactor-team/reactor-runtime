@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
@@ -19,6 +20,7 @@ from reactor_runtime import (
     InputBuffer,
     InputField,
     InputState,
+    LocalFile,
     MediaInput,
     MessageField,
     ModelMessage,
@@ -29,6 +31,7 @@ from reactor_runtime import (
     Video,
     event,
 )
+from reactor_runtime.core.local_file import OwnedLocalFile, discard_files
 from reactor_runtime.core.model import (
     ClientConnected,
     ClientDisconnected,
@@ -1087,3 +1090,60 @@ async def test_frames_pushed_for_the_next_session_survive_the_last_sessions_rese
     assert kept is not None
     assert [frame.pts for frame in kept] == [2.0]
     await _stop(task)
+
+
+async def test_a_local_file_process_output_returns_is_taken_over_after_it_returns(
+    tmp_path: Path,
+) -> None:
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"video")
+
+    class KeepsAClip(Recording):
+        def generate(self, input: State) -> Path:
+            self.generated += 1
+            return clip
+
+        async def process_output(self, outcome: StepOutcome) -> StepCompleted:
+            return StepCompleted(files={"output.mp4": LocalFile(outcome.result)})
+
+    app = KeepsAClip()
+    steps = _ready_reporting(app)
+    await _go_live(app)
+    task = await _run_for(app)
+    await _stop(task)
+
+    owned = steps[0].files["output.mp4"]
+    assert isinstance(owned, OwnedLocalFile)
+    assert owned.path.read_bytes() == b"video"
+    assert steps[0].error is None
+    for step in steps:
+        discard_files(step.files)
+
+
+async def test_a_local_file_the_loop_cannot_take_over_fails_the_step_not_the_session(
+    tmp_path: Path,
+) -> None:
+    class LosesItsClip(Recording):
+        def generate(self, input: State) -> Frame:
+            self.generated += 1
+            return _frame()
+
+        async def process_output(self, outcome: StepOutcome) -> StepCompleted:
+            return StepCompleted(
+                output=outcome.to_output(),
+                files={"clip.mp4": LocalFile(tmp_path / "gone.mp4")},
+            )
+
+    app = LosesItsClip()
+    steps = _ready_reporting(app)
+    await _go_live(app)
+    task = await _run_for(app)
+    assert not task.done()
+    await _stop(task)
+
+    assert len(steps) > 1
+    assert steps[0].error == "a step file could not be handed over: No such file or directory"
+    assert steps[0].files == {}
+    assert steps[0].bundle is None
+    assert steps[0].elapsed is not None
+    assert app.wire[0] == "media"

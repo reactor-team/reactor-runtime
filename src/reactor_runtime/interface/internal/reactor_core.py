@@ -20,10 +20,11 @@ import time
 from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, get_type_hints
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast, get_type_hints
 
 import numpy.typing as npt
 
+from reactor_runtime.core.local_file import LocalFile, OwnedLocalFile, adopt_files, discard_files
 from reactor_runtime.core.model import Command, ReactorEvent
 from reactor_runtime.core.values import (
     CommandFailure,
@@ -463,6 +464,11 @@ class ReactorCore:
         on, saves it. The output is handed over as it is, so a model must not
         change its arrays after reporting them.
 
+        Each :class:`LocalFile` in ``step.files`` is copied before this call
+        returns, on a worker thread, so the event loop keeps running while the
+        call waits. The caller may remove its originals once it returns. A step
+        with ``error`` set does not open its files.
+
         A report counts toward the session the model is in when the call is
         made. A ``run()`` whose unit of work began in a session that has since
         ended reports into the session it is in by then, so such a loop checks
@@ -470,8 +476,34 @@ class ReactorCore:
 
         Args:
             step: What the step produced.
+
+        Raises:
+            OSError: A local file cannot be opened or read. The step is not
+                reported; report it again, with ``error`` set, to count it.
+            ValueError: A local file is not a regular file, or it changed
+                during the copy. The step is not reported.
         """
-        self._report_step(step, self._sessions_started)
+        session = self._sessions_started
+        files = await self._take_step_files(step)
+        self._report_step(step, session, files=files)
+
+    async def _take_step_files(self, step: StepCompleted) -> dict[str, bytes | OwnedLocalFile]:
+        """Return the files a step report keeps, with each local file copied into the runtime's own.
+
+        A step with no local file needs no copy, so it stays on the loop. A
+        cancelled caller does not stop a copy already running; its copies are
+        discarded when it ends.
+        """
+        if step.error is not None:
+            return {}
+        if not any(isinstance(value, LocalFile) for value in step.files.values()):
+            return dict(cast("Mapping[str, bytes]", step.files))
+        copying = asyncio.ensure_future(asyncio.to_thread(adopt_files, step.files))
+        try:
+            return await asyncio.shield(copying)
+        except asyncio.CancelledError:
+            copying.add_done_callback(_discard_taken_files)
+            raise
 
     def crash(self, error: BaseException) -> None:
         """End the model loop as crashed with *error*, from any thread.
@@ -508,36 +540,46 @@ class ReactorCore:
         fps: float | None = None,
         stages: Mapping[str, float] | None = None,
         request: RequestedStep | None = None,
+        *,
+        files: Mapping[str, bytes | OwnedLocalFile],
     ) -> None:
         """Hand a step report to the bound sink, stamped with *session* and its playout rate.
 
         *fps* is the rate the step's media was emitted at. Without it, the
         report carries the rate of the last emission, or :attr:`fps` before
         any. *stages* is the time the step spent in each of its frame stages,
-        in milliseconds, when the step loop timed them.
-        any. *request* is the client request the step answers, in a stepped
-        session.
+        in milliseconds, when the step loop timed them. *request* is the client
+        request the step answers, in a stepped session. *files* are the step's
+        files as :meth:`_take_step_files` returned them; the sink owns them
+        from here, and they are discarded when no sink is bound.
         """
         if self._out_step is None:
+            discard_files(files)
             return
-        bundle = self._to_bundle(step.output) if step.output is not None else None
-        data = step.data
-        assert data is None or isinstance(data, bytes), "StepCompleted encodes its data when built"
-        if fps is None:
-            fps = self._last_emit_fps if self._last_emit_fps is not None else float(self.fps)
-        self._out_step(
-            CompletedStep(
-                bundle=bundle,
-                files=dict(step.files),
-                error=step.error,
-                elapsed=step.elapsed,
-                data=data,
-                session=session,
-                fps=fps,
-                stages=dict(stages or {}),
-                request=request,
+        try:
+            bundle = self._to_bundle(step.output) if step.output is not None else None
+            data = step.data
+            assert data is None or isinstance(data, bytes), (
+                "StepCompleted encodes its data when built"
             )
-        )
+            if fps is None:
+                fps = self._last_emit_fps if self._last_emit_fps is not None else float(self.fps)
+            self._out_step(
+                CompletedStep(
+                    bundle=bundle,
+                    files=dict(files),
+                    error=step.error,
+                    elapsed=step.elapsed,
+                    data=data,
+                    session=session,
+                    fps=fps,
+                    stages=dict(stages or {}),
+                    request=request,
+                )
+            )
+        except BaseException:
+            discard_files(files)
+            raise
 
     def _playout_rate(self, n_frames: int, compute_time: float | None) -> float:
         """Return the rate *n_frames* play at: their measured throughput, else :attr:`fps`."""
@@ -839,6 +881,12 @@ class ReactorCore:
             if isinstance(hint, type) and issubclass(hint, base) and hint is not base:
                 return attr_name, hint
         return None
+
+
+def _discard_taken_files(copying: asyncio.Future[dict[str, bytes | OwnedLocalFile]]) -> None:
+    """Discard the copies of a step file handoff whose caller was cancelled."""
+    if not copying.cancelled() and copying.exception() is None:
+        discard_files(copying.result())
 
 
 def _input_buffer(info: TrackInfo) -> InputBuffer:

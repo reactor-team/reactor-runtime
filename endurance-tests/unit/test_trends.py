@@ -133,6 +133,7 @@ def test_exact_metrics_cover_every_count() -> None:
         "live_rooms_leaving",
         "live_step_requests",
         "live_step_decoders",
+        "live_local_files",
         "tasks",
         "child_processes",
     ]

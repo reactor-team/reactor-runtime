@@ -229,8 +229,9 @@ connects) and `steps`, after which the runtime closes the session
 (`src/reactor_runtime/runner/session_start.py`, at most 10,000 steps). With a
 `runtime.step_results` block in `reactor.yaml`, each finished step is kept and
 served at `GET /sessions/{id}/steps/{n}` and `/sessions/{id}/steps/{n}/{name}`.
-The saved `output.mp4` is H.264 or H.265 (`src/reactor_runtime/step_results/mp4.py`),
-so it is not a comparison input; compare raw arrays the step writes as extra
+An `output.mp4` the runtime encodes from the step's frames is H.264 or H.265
+(`src/reactor_runtime/step_results/mp4.py`); one the model supplies as a
+`LocalFile` is the model's own encode. Neither is a comparison input; compare raw arrays the step writes as extra
 files instead (`StepCompleted.files`, returned from `process_output()`), or
 use one of the other two routes. Inputs that change mid-session cannot be
 scheduled this way.

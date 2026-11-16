@@ -109,7 +109,11 @@ def _step_file_refs(step: CompletedStep) -> list[step_pb2.StepFileRef]:
     if step.error is not None:
         return []
     return [
-        step_pb2.StepFileRef(name=name, content_type=content_type_of(name), size=len(data))
+        step_pb2.StepFileRef(
+            name=name,
+            content_type=content_type_of(name),
+            size=len(data) if isinstance(data, bytes) else data.size,
+        )
         for name, data in step.files.items()
     ]
 
