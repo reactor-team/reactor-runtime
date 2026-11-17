@@ -987,6 +987,7 @@ _STEP_CODECS = (
 )
 _CODEC_OF = {encoding: codec for codec, encoding in _STEP_CODECS}
 
+
 def step_codec() -> tuple[rw.VideoCodec, step_pb2.FrameEncoding]:
     """Return the first codec, H.264 first, that this platform both encodes and decodes.
 
