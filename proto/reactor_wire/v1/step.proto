@@ -14,12 +14,20 @@ import "reactor_wire/v1/platform.proto";
 // published input track and per output track, and lists its codec preferences
 // on each. A runtime that encodes step frames repeats the attribute in its
 // answer, and each video track then carries the codec the answer negotiates
-// on its m-section: H.264, VP8, VP9 or AV1 as the encoding of that name. A
-// track whose m-section negotiates any other codec, an audio track, and every
-// track of a connection whose answer lacks the attribute carry RAW frames.
-// The m-sections carry no media in a stepped session: every frame travels in
-// the data channel's messages. The negotiation holds for the connection, and
-// a new connection negotiates again.
+// on its m-section: H.264, VP8, VP9 or AV1 as the encoding of that name, and
+// the runtime takes PushFrames. A track whose m-section negotiates any other
+// codec, and an audio track, carry RAW frames. The m-sections carry no media
+// in a stepped session: every frame travels in the data channel's messages.
+// The negotiation holds for the connection, and a new connection negotiates
+// again.
+//
+// A connection whose answer lacks the attribute negotiated nothing: the
+// runtime's results carry RAW frames, and the client sends no PushFrames. Its
+// RequestStep.media_input may still carry H.264 on a video track, as before
+// the attribute existed, and stays accepted: each request's H.264 frames of a
+// track are a stream of their own that starts at a keyframe and continues no
+// earlier request's. The rules below hold only on a connection that
+// negotiated the attribute.
 //
 // An encoded video track is one stream for the track's whole life on a
 // connection, in decode order, and spans requests and results: each step's
@@ -118,8 +126,10 @@ message RequestStep {
   repeated Command commands = 2;
   // Frames to write to the model's input tracks, one entry per track. A track
   // takes at most as many frames as its input buffer holds; a request with
-  // more is refused. Encoded frames continue the track's stream, the same one
-  // PushFrames carries. The runtime decodes them before it checks anything
+  // more is refused. On a connection that negotiated encoded step frames,
+  // encoded frames continue the track's stream, the same one PushFrames
+  // carries; on any other, a track's H.264 frames start at a keyframe in each
+  // request (see FrameEncoding). The runtime decodes them before it checks anything
   // else, so a request it refuses for another reason still moves the stream
   // on. A frame it cannot decode refuses the request (REFUSED, with the entry
   // media_input[<i>] and the code input_decode_failed), and the track's next
@@ -133,8 +143,11 @@ message RequestStep {
 }
 
 // Frames for the model's input tracks, sent as the client has them, apart from
-// any step. Fire-and-forget: the runtime sends no response and never refuses
-// one. It handles a PushFrames in the channel's order with the commands and
+// any step. A client sends one only on a connection whose answer repeats the
+// a=x-reactor-encoded-step-frames attribute (see FrameEncoding): a runtime
+// that does not repeat it need not handle PushFrames, and may drop them
+// without a word. Fire-and-forget: the runtime sends no response and never
+// refuses one. It handles a PushFrames in the channel's order with the commands and
 // the step requests, so its frames are written before any RequestStep sent
 // after it runs.
 //

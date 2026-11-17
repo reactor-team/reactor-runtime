@@ -200,20 +200,22 @@ def decode_step_frames(
     each of them; an entry that sends them to any other track is refused before
     a decoder opens. The request's tracks decode at once, and its pictures
     convert to RGB at once; entries that name the same track decode one after
-    another, on its one decoder. The request is left as it is.
+    another, on its one decoder. An entry at fault does not stop the others:
+    every entry that passes its checks decodes on its track's decoder, so one
+    track's failure leaves every other track's stream where the client expects
+    it. The request is left as it is.
 
     Returns:
         The picture of each encoded frame, by ``(entry, position)``, or why the
         request cannot be decoded: the first entry at fault, in request order.
     """
     streams: list[_Stream] = []
-    refusal: StepFrameRefusal | None = None
+    refusals: list[tuple[int, StepFrameRefusal]] = []
     for index, entry in enumerate(message.request_step.media_input):
         checked = _check_entry(entry, index, video_inputs)
         if isinstance(checked, StepFrameRefusal):
-            refusal = checked
-            break
-        if checked is not None:
+            refusals.append((index, checked))
+        elif checked is not None:
             streams.append(checked)
     for stream in streams:
         decoder = decoders.get(stream.entry.track)
@@ -232,10 +234,11 @@ def decode_step_frames(
     for stream in streams:
         outcome = _pictures_of(stream, decoded[stream.index])
         if isinstance(outcome, StepFrameRefusal):
-            return outcome
-        frames += outcome
-    if refusal is not None:
-        return refusal
+            refusals.append((stream.index, outcome))
+        else:
+            frames += outcome
+    if refusals:
+        return min(refusals, key=lambda refusal: refusal[0])[1]
     arrays = _each(
         lambda f: np.ascontiguousarray(f.to_ndarray(format="rgb24")), [f for _, f in frames]
     )
