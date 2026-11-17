@@ -2219,6 +2219,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 self._starting_input_done.set()
                 self._spawn_teardown(asyncio.to_thread(self._recorder.stop))
                 self._spawn_teardown(self._connections.close_all())
+                self._steps.connections_closed()
             # The event decides the exit status, so a move's detail only says
             # what happened. An eviction for an error is a model loop that
             # crashed, and the process exits as a failure. Any other end exits
@@ -2526,6 +2527,8 @@ class Runner(ServiceComponent, ConnectionSink):
         """Close every connection, logging a failure instead of raising it.
 
         How long the close took is logged either way, so a slow teardown shows.
+        A commanded close reports no connection back as closed, so every
+        connection's output streams are freed here either way.
         """
         started = time.monotonic()
         try:
@@ -2542,6 +2545,8 @@ class Runner(ServiceComponent, ConnectionSink):
                 reason=reason.value,
                 teardown_s=round(time.monotonic() - started, 3),
             )
+        finally:
+            self._steps.connections_closed()
 
     async def _finish_recording(self) -> None:
         """Stop the recorder off the loop, logging a failure instead of raising it.

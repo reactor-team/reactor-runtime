@@ -360,6 +360,9 @@ def _encoded_frames(
         FrameEncodingError: A frame cannot be carried as a video frame at all.
     """
     pictures = [_rgb_picture(data) for data, _ in frames]
+    if not pictures:
+        # An empty batch leaves the stream, and a keyframe it owes, where it was.
+        return []
     encoded = encoder.encode(pictures, rate)
     if encoded is None or len(encoded) != len(pictures):
         return None

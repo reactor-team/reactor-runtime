@@ -41,7 +41,7 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import numpy as np
@@ -306,13 +306,27 @@ class StepOrder:
 _STREAMLESS = frozenset({step_pb2.FRAME_ENCODING_UNSPECIFIED, step_pb2.FRAME_ENCODING_RAW})
 """Encodings whose frames stand alone, so a track in one keeps no encoder."""
 
+_SEND_WAIT = 5.0
+"""Seconds a connection's next result waits for the previous one's send outcome.
+
+A result whose outcome does not come in time is taken as lost: the next
+frames start at a keyframe, which decodes whether it went out or not.
+"""
+
 
 @dataclass
 class _Streams:
-    """One connection's negotiated encodings, and the encoder of each encoded output track."""
+    """One connection's encoded output streams.
+
+    Holds its negotiated encodings, the encoder of each encoded output track,
+    the ids of admitted requests whose result starts at a keyframe, and the
+    results whose frames continue a stream and whose send has no outcome yet.
+    """
 
     encodings: Mapping[str, int]
     encoders: dict[str, TrackEncoder]
+    keyframes: list[str] = field(default_factory=list)
+    sending: list[EncodedResult] = field(default_factory=list)
 
 
 class OutputStreams:
@@ -328,8 +342,15 @@ class OutputStreams:
 
     A track's stream starts at a keyframe on a new connection, since its
     encoder is new, and starts over at one after :meth:`restart` (frames that
-    were encoded and not sent) and :meth:`request_keyframe` (the client lost
-    the stream).
+    were encoded and not sent), at the result of a request marked with
+    :meth:`keyframe_at` (the client lost the stream), and after a marked
+    request that did not run (:meth:`refused`).
+
+    A connection's result whose frames continue a stream is held
+    (:meth:`hold`) until its send has an outcome (:meth:`settle`), and the
+    connection's next result is not encoded before then: a send the
+    connection refuses restarts the stream before the next frames are
+    encoded, so none of them references frames the client never got.
 
     The loop opens, closes, and restarts entries while the model's thread
     encodes on them, so every call is thread-safe.
@@ -337,6 +358,7 @@ class OutputStreams:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._settled = threading.Condition(self._lock)
         self._conns: dict[ConnId, _Streams] = {}
 
     def __len__(self) -> int:
@@ -350,23 +372,63 @@ class OutputStreams:
             if conn_id not in self._conns:
                 self._conns[conn_id] = _Streams(dict(encodings), {})
 
-    def encoders(self, conn_id: ConnId) -> dict[str, TrackEncoder]:
+    def encoders(self, conn_id: ConnId, request_id: str | None = None) -> dict[str, TrackEncoder]:
         """Return the encoder of each encoded track of *conn_id*, by name; empty without an entry.
 
-        Called on the model's thread, the only one that encodes.
+        Called on the model's thread, the only one that encodes, to encode the
+        result of *request_id*. Waits until every result held for the
+        connection is settled, up to :data:`_SEND_WAIT`; past it, the held
+        results are dropped and every track starts at a keyframe. So does
+        every track when *request_id* was marked with :meth:`keyframe_at`.
         """
         with self._lock:
             streams = self._conns.get(conn_id)
             if streams is None:
                 return {}
+            keyframe = False
+            if streams.sending and not self._settled.wait_for(
+                lambda: self._conns.get(conn_id) is not streams or not streams.sending,
+                timeout=_SEND_WAIT,
+            ):
+                streams.sending.clear()
+                keyframe = True
+            if self._conns.get(conn_id) is not streams:
+                return {}
+            if request_id is not None and request_id in streams.keyframes:
+                streams.keyframes.remove(request_id)
+                keyframe = True
             for track, encoding in streams.encodings.items():
                 if encoding not in _STREAMLESS and track not in streams.encoders:
                     streams.encoders[track] = TrackEncoder(encoding)
+            if keyframe:
+                for encoder in streams.encoders.values():
+                    encoder.request_keyframe()
             return dict(streams.encoders)
 
-    def request_keyframe(self, conn_id: ConnId) -> None:
-        """Start the next frames of every encoded track of *conn_id* at a keyframe."""
-        self.restart(conn_id, None)
+    def keyframe_at(self, conn_id: ConnId, request_id: str) -> None:
+        """Start the frames of *request_id*'s result, on every encoded track, at a keyframe.
+
+        Marked when the request is admitted, so the request's own result
+        starts at the keyframe, not a result of a request admitted before it.
+        """
+        with self._lock:
+            streams = self._conns.get(conn_id)
+            if streams is not None:
+                streams.keyframes.append(request_id)
+
+    def refused(self, conn_id: ConnId, request_id: str) -> None:
+        """Start the next frames of every encoded track at a keyframe when *request_id* was marked.
+
+        A marked request that does not run still owes the client a keyframe:
+        it lost the stream, so whatever it receives next starts at one.
+        """
+        with self._lock:
+            streams = self._conns.get(conn_id)
+            if streams is None or request_id not in streams.keyframes:
+                return
+            streams.keyframes.remove(request_id)
+            for encoder in streams.encoders.values():
+                encoder.request_keyframe()
 
     def restart(self, conn_id: ConnId, tracks: Iterable[str] | None) -> None:
         """Start the next frames of *tracks* (every track for ``None``) at a keyframe.
@@ -381,6 +443,21 @@ class OutputStreams:
             for encoder in [streams.encoders[n] for n in names if n in streams.encoders]:
                 encoder.request_keyframe()
 
+    def hold(self, conn_id: ConnId, result: EncodedResult) -> None:
+        """Hold *conn_id*'s next encoding until *result*, which continues a stream, is settled."""
+        with self._lock:
+            streams = self._conns.get(conn_id)
+            if streams is not None:
+                streams.sending.append(result)
+
+    def settle(self, conn_id: ConnId, result: EncodedResult) -> None:
+        """Release a held *result* once its send has an outcome, or it will not be sent."""
+        with self._lock:
+            streams = self._conns.get(conn_id)
+            if streams is not None:
+                streams.sending[:] = [held for held in streams.sending if held is not result]
+            self._settled.notify_all()
+
     def close(self, conn_id: ConnId) -> None:
         """Drop *conn_id*'s entry, freeing its encoders off the event loop.
 
@@ -389,10 +466,25 @@ class OutputStreams:
         """
         with self._lock:
             streams = self._conns.pop(conn_id, None)
-        if streams is None or not streams.encoders:
+            self._settled.notify_all()
+        self._release([] if streams is None else [streams])
+
+    def close_all(self) -> None:
+        """Drop every connection's entry, freeing their encoders as :meth:`close` does."""
+        with self._lock:
+            dropped = list(self._conns.values())
+            self._conns.clear()
+            self._settled.notify_all()
+        self._release(dropped)
+
+    @staticmethod
+    def _release(dropped: list[_Streams]) -> None:
+        """Free the encoders of *dropped* entries, off the event loop when one runs here."""
+        released = [encoder for streams in dropped for encoder in streams.encoders.values()]
+        for streams in dropped:
+            streams.encoders.clear()
+        if not released:
             return
-        released = list(streams.encoders.values())
-        streams.encoders.clear()
         # With no running loop, or its executor shut down, they are freed here.
         with contextlib.suppress(RuntimeError):
             asyncio.get_running_loop().run_in_executor(None, released.clear)
@@ -456,9 +548,10 @@ class StepRequests:
         steps. A request with no entries and no frames runs a step on the
         model's current state.
 
-        A request with ``request_keyframe`` set starts the next frames of every
-        encoded output track of its connection at a keyframe, whether it runs
-        or not.
+        A request with ``request_keyframe`` set starts its own result's frames
+        on every encoded output track of its connection at a keyframe, not
+        those of a request admitted before it; when it does not run, the next
+        frames the connection is sent start at one.
         """
         bridge = self._host.bridge()
         if bridge is None:
@@ -490,11 +583,13 @@ class StepRequests:
             return
         self.streams.open(step.conn_id, self._host.connections.step_frame_encodings(step.conn_id))
         if step.request_keyframe:
-            # Kept even when this request is refused: the client lost the
-            # stream, so whatever it receives next starts at a keyframe.
-            self.streams.request_keyframe(step.conn_id)
+            # Marked before the step is posted, so the model's thread sees it
+            # when it encodes this request's result.
+            self.streams.keyframe_at(step.conn_id, step.request_id)
 
         def refuse_entry(entry: str, reason: str) -> None:
+            if step.request_keyframe:
+                self.streams.refused(step.conn_id, step.request_id)
             self._host.journal(SessionEvent.ERROR, message=f"step request: {reason}")
             self.refuse(step.conn_id, step.request_id, reason, entry=entry)
 
@@ -723,8 +818,10 @@ class StepRequests:
         Called on the model's thread and sent from it, so the answer goes out
         behind any reply to the commands the model handled before the step. A
         refusal from an earlier session is answered as a session that ended,
-        since that session's state is gone.
+        since that session's state is gone. A refused request that asked for a
+        keyframe starts the connection's next frames at one.
         """
+        self.streams.refused(refusal.conn_id, refusal.request_id)
         if refusal.session != self._host.sessions_posted():
             self.end_request(refusal.conn_id, refusal.request_id)
             return
@@ -745,6 +842,10 @@ class StepRequests:
         """
         self.streams.close(conn_id)
 
+    def connections_closed(self) -> None:
+        """Forget every connection's output streams, as the session's teardown closes them all."""
+        self.streams.close_all()
+
     def end_request(
         self, conn_id: ConnId, request_id: str, encoded: EncodedResult | None = None
     ) -> None:
@@ -755,6 +856,7 @@ class StepRequests:
         """
         if encoded is not None and encoded.streamed:
             self.streams.restart(conn_id, encoded.streamed)
+            self.streams.settle(conn_id, encoded)
         self.refuse(
             conn_id,
             request_id,
@@ -781,6 +883,12 @@ class StepRequests:
         no encoder moves on for them. An encoded track whose frames do not go
         out in the result starts its next frames at a keyframe.
 
+        The connection's previous result that continues a stream is waited on
+        until its send has an outcome, so a refused send restarts the stream
+        before these frames are encoded; a result that continues one is held
+        the same way until :meth:`send_result` or :meth:`end_request` settles
+        it.
+
         Returns:
             The encoded result, or ``None`` for a step no client requested.
         """
@@ -788,7 +896,7 @@ class StepRequests:
         if request is None:
             return None
         limit = request.max_message_size
-        encoders = self.streams.encoders(request.conn_id)
+        encoders = self.streams.encoders(request.conn_id, request.request_id)
         # A failed step's result carries no data, so its data takes no room.
         data = step.data if step.error is None else None
         size = media_size(step.bundle, encoded=encoders.keys()) + len(data or b"")
@@ -824,7 +932,10 @@ class StepRequests:
         if limit is not None and len(frame) > limit:
             self.streams.restart(request.conn_id, streamed)
             return EncodedResult(oversized=len(frame))
-        return EncodedResult(frame=frame, streamed=streamed)
+        encoded = EncodedResult(frame=frame, streamed=streamed)
+        if streamed:
+            self.streams.hold(request.conn_id, encoded)
+        return encoded
 
     def send_result(
         self,
@@ -920,4 +1031,13 @@ class StepRequests:
             _, files = self._codec.encode_step_result(request_id, step_pb2.StepResult(files=refs))
             assert isinstance(files, bytes)
             frame += files
-        self._host.spawn(self._host.connections.send_step_result(request.conn_id, frame, too_large))
+        self._host.spawn(self._send_result(request.conn_id, frame, too_large, encoded))
+
+    async def _send_result(
+        self, conn_id: ConnId, frame: bytes, too_large: Callable[[int], bytes], held: EncodedResult
+    ) -> None:
+        """Send a result, then settle it: a refusal has restarted its streams by then."""
+        try:
+            await self._host.connections.send_step_result(conn_id, frame, too_large)
+        finally:
+            self.streams.settle(conn_id, held)

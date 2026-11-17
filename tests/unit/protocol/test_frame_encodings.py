@@ -372,6 +372,16 @@ def test_a_frame_that_is_not_a_picture_is_never_handed_to_the_encoder() -> None:
     assert encoder.calls == []
 
 
+def test_an_empty_batch_is_never_handed_to_the_encoder() -> None:
+    # Handing it over would spend a keyframe the encoder owes on no frames.
+    bundle = MediaBundle(
+        tracks={"v": _track("v", TrackKind.VIDEO, np.zeros((0, 4, 6, 3), dtype=np.uint8))}
+    )
+    encoder = _FakeEncoder()
+    [entry] = track_frames(bundle, encoders={"v": encoder})
+    assert (list(entry.frames), encoder.calls) == ([], [])
+
+
 def test_the_media_size_leaves_out_encoded_tracks() -> None:
     bundle = MediaBundle(
         tracks={

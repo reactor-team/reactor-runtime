@@ -1469,10 +1469,14 @@ class EncodingConnection(V1Connection):
         super().__init__(cid)
         self.step_frame_encodings = {"main_video": encoding, "webcam": step_pb2.FRAME_ENCODING_RAW}
         self.refuse_sends = 0
+        # Set to hold a refused send's outcome until it is set.
+        self.refusal_gate: asyncio.Event | None = None
 
     async def send_step_result(self, payload: bytes) -> bool:
         if self.refuse_sends:
             self.refuse_sends -= 1
+            if self.refusal_gate is not None:
+                await self.refusal_gate.wait()
             return False
         return await super().send_step_result(payload)
 
@@ -1502,14 +1506,24 @@ async def _step(
 ) -> step_pb2.StepResult:
     """Request one step on *conn* and return its result."""
     sent = len(conn.sent)
+    _queue_step(runner, conn, request_id, **fields)
+    await _until(lambda: len(conn.sent) > sent)
+    return conn.replies()[sent].step_result
+
+
+def _queue_step(runner: Runner, conn: V1Connection, request_id: str, **fields: Any) -> None:
+    """Request one step on *conn* without waiting for its result."""
     message = data_pb2.DataClientMessage(
         request_id=request_id,
         kind=K.MESSAGE_KIND_REQUEST,
         request_step=step_pb2.RequestStep(state=dict_to_struct(fields.pop("state", {})), **fields),
     )
     _send(runner, conn, message.SerializeToString())
-    await _until(lambda: len(conn.sent) > sent)
-    return conn.replies()[sent].step_result
+
+
+def _result_of(conn: V1Connection, request_id: str) -> step_pb2.StepResult:
+    [reply] = [reply for reply in conn.replies() if reply.request_id == request_id]
+    return reply.step_result
 
 
 def _video(result: step_pb2.StepResult) -> list[step_pb2.Frame]:
@@ -1594,6 +1608,46 @@ async def test_a_result_the_connection_refuses_restarts_the_stream(
     assert _keyframes(await _step(picture_runner, conn, "r3")) == [True]
 
 
+async def test_a_refused_send_restarts_the_stream_of_a_step_requested_behind_it(
+    picture_runner: Runner,
+) -> None:
+    codec, encoding = _output_codec()
+    conn = await _encoding(picture_runner, encoding)
+    await _step(picture_runner, conn, "r1")
+
+    # Two steps in flight; the first one's send is refused only after the
+    # second has run.
+    conn.refuse_sends = 1
+    conn.refusal_gate = asyncio.Event()
+    _queue_step(picture_runner, conn, "r2")
+    _queue_step(picture_runner, conn, "r3")
+    await _until(lambda: len(models[-1].inputs) == 3)
+    await asyncio.sleep(0.05)
+    conn.refusal_gate.set()
+    await _until(lambda: len(conn.sent) == 3)
+
+    refused = _result_of(conn, "r2")
+    assert refused.failure_code == step_pb2.STEP_FAILURE_CODE_RESULT_TOO_LARGE
+    after = _result_of(conn, "r3")
+    assert _keyframes(after) == [True]
+    assert rw.VideoCodecs().decoder(codec).decode(_video(after)[0].data) is not None
+
+
+async def test_request_keyframe_starts_its_own_step_at_a_keyframe_when_steps_are_queued(
+    picture_runner: Runner,
+) -> None:
+    _, encoding = _output_codec()
+    conn = await _encoding(picture_runner, encoding)
+    await _step(picture_runner, conn, "r1")
+
+    _queue_step(picture_runner, conn, "r2", request_keyframe=False)
+    _queue_step(picture_runner, conn, "r3", request_keyframe=True)
+    await _until(lambda: len(conn.sent) == 3)
+
+    assert _keyframes(_result_of(conn, "r2")) == [False]
+    assert _keyframes(_result_of(conn, "r3")) == [True]
+
+
 async def test_request_keyframe_starts_every_encoded_track_at_a_keyframe(
     picture_runner: Runner,
 ) -> None:
@@ -1672,4 +1726,18 @@ async def test_closing_a_connection_frees_its_encoders(picture_runner: Runner) -
     assert len(picture_runner._steps.streams) == 1
 
     picture_runner.connection_closed(conn.id)
+    assert len(picture_runner._steps.streams) == 0
+
+
+async def test_ending_the_session_frees_every_connections_encoders(
+    picture_runner: Runner,
+) -> None:
+    _, encoding = _output_codec()
+    conn = await _encoding(picture_runner, encoding)
+    await _step(picture_runner, conn, "r1")
+    assert len(picture_runner._steps.streams) == 1
+
+    # The runtime closes the connection itself, which reports no close back.
+    picture_runner.stop_session()
+    await _until(lambda: picture_runner._sm.current_state is SessionState.READY)
     assert len(picture_runner._steps.streams) == 0
