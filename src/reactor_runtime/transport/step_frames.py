@@ -749,8 +749,16 @@ class StepFrameGate:
 
     def _keep(self, decoders: dict[str, TrackDecoder]) -> None:
         """Take *decoders*, a decode's copy of the gate's, as the gate's own."""
-        # A track that lost its stream left the copy, to start over.
-        self._release(name for name in self._decoders if name not in decoders)
+        # A track that lost its stream left the copy, to start over; one whose
+        # encoding changed holds a new decoder there. Either way the old one
+        # is released off the event loop.
+        self._release(
+            [
+                name
+                for name, current in self._decoders.items()
+                if name not in decoders or decoders[name] is not current
+            ]
+        )
         self._decoders.update(decoders)
 
     async def _drain(self) -> None:

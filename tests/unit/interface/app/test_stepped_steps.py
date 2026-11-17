@@ -483,6 +483,48 @@ async def test_a_full_buffer_keeps_the_newest_pushed_frames_and_refuses_nothing(
     assert reader.refusals == []
 
 
+async def test_pushes_queued_one_behind_another_join_and_keep_only_what_the_track_holds(
+    reader: Harness,
+) -> None:
+    app = reader.app
+    capacity = webcam(app).frame_bound
+
+    def put(item: Any) -> None:
+        app._put(reader.queue, item)
+
+    def push(*values: int) -> PushEnvelope:
+        return PushEnvelope(
+            media_input={
+                "webcam": tuple(
+                    functools.partial(InputFrame, data=np.full((2, 2, 3), v, dtype=np.uint8))
+                    for v in values
+                )
+            },
+            conn_id=CLIENT,
+        )
+
+    put(SessionStarted("s", stepped=True))
+    put(ClientConnected(CLIENT, 1))
+    put(push(*range(capacity + 3)))
+    put(push(capacity + 3, capacity + 4))
+    assert app._queued_push is not None
+    assert len(app._queued_push[1]["webcam"]) == capacity
+    put(StepEnvelope(media_input={}, conn_id=CLIENT, request_id="r1"))
+    # Queued behind the step, so it does not join the pushes before it.
+    put(push(99))
+
+    assert reader.queue.qsize() == 5
+    reader.tasks = [
+        asyncio.create_task(app._inbound_loop()),
+        asyncio.create_task(app.run()),
+    ]
+    put(StepEnvelope(media_input={}, conn_id=CLIENT, request_id="r2"))
+    await reader.settle()
+
+    assert _read(reader) == [list(range(5, capacity + 5)), [99]]
+    assert reader.refusals == []
+
+
 async def test_pushed_frames_and_a_steps_own_frames_share_the_track_in_order(
     reader: Harness,
 ) -> None:

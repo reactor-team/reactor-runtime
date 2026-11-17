@@ -605,6 +605,7 @@ class ReactorApp(ReactorCore):
         assert queue is not None
         while True:
             item = await queue.get()
+            self._took(item)
             if isinstance(item, CommandEnvelope):
                 await self._dispatch_command(item)
             elif isinstance(item, StepEnvelope):

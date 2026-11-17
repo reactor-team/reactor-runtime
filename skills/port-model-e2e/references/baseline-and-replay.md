@@ -200,10 +200,13 @@ into that step's request.
 - Result frames travel uncompressed: the raw frame encoding carries video as
   `uint8` RGB `(height, width, 3)` and audio as `int16` PCM
   (`src/reactor_runtime/protocol/frames.py`). Compare those arrays.
-- Live input tracks are ignored in a stepped session; a step reads only the
-  frames its request carries (`src/reactor_runtime/runner/runner.py`,
-  `Runner.media_received`). A video-to-video replay sends each chunk's input frames in
-  that step's request.
+- Live input tracks are ignored in a stepped session
+  (`src/reactor_runtime/runner/runner.py`, `Runner.media_received`); a step
+  reads the frames its request carries and the frames a `PushFrames` message
+  wrote to the input buffers before it, which keep only their newest frames
+  (`src/reactor_runtime/runner/stepped.py`, `StepRequests.push`). A
+  video-to-video replay sends each chunk's input frames in that step's request
+  and pushes nothing, so no step reads frames meant for another.
 - A model that overrides `run()` or `submit_command()` cannot be stepped; the
   start is refused with a message naming the model
   (`ReactorApp.supports_stepped`, `Runner._check_generation`). A port leaves

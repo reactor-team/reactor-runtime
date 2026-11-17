@@ -141,8 +141,13 @@ class InputBuffer:
         """
         return await asyncio.to_thread(self._read, n, timeout, mode)
 
+    @property
+    def frame_bound(self) -> int:
+        """The most frames the buffer holds; it never keeps more than this many."""
+        return self._maxlen if self._max_samples is None else self._max_frames
+
     def _read(self, n: int, timeout: float | None, mode: ReadMode) -> list[InputFrame]:
-        frame_bound = self._maxlen if self._max_samples is None else self._max_frames
+        frame_bound = self.frame_bound
         if n > frame_bound:
             raise ValueError(f"requested {n} frames but the buffer holds at most {frame_bound}")
         with self._condition:
