@@ -32,12 +32,16 @@ import "reactor_wire/v1/platform.proto";
 // of:
 //   - the first frames of the track sent on a connection, including a
 //     reconnect and an observer that joins;
+//   - the first frames after the track is published again on the same
+//     connection: unpublishing a track ends its stream, and the runtime
+//     drops the track's decoder;
 //   - the first frames after frames of the track that were encoded but not
 //     sent: a StepResult that is RESULT_TOO_LARGE or that the connection
 //     refused to send, on the runtime's side;
 //   - the first frames after the receiver lost the stream: a RequestStep with
-//     request_keyframe, for the runtime's output, or an input_decode_failed
-//     Error for the track, for the client's input (see PushFrames).
+//     request_keyframe, for the runtime's output, or input_decode_failed for
+//     the track, for the client's input: as an Error for a PushFrames, or as
+//     a refused StepResult's code for a RequestStep.
 // A step or a push with no frames for a track sends nothing for it and leaves
 // its stream where it was.
 enum FrameEncoding {
@@ -118,7 +122,8 @@ message RequestStep {
   // PushFrames carries. The runtime decodes them before it checks anything
   // else, so a request it refuses for another reason still moves the stream
   // on. A frame it cannot decode refuses the request (REFUSED, with the entry
-  // media_input[<i>]), and the track's next frames start at a keyframe.
+  // media_input[<i>] and the code input_decode_failed), and the track's next
+  // frames start at a keyframe.
   repeated TrackFrames media_input = 3;
   // Whether every encoded output track of this connection starts this step's
   // frames at a keyframe, for a client whose decoder lost its stream. False or
@@ -217,9 +222,11 @@ message StepResult {
   optional string error = 5;
   // What kind of failure error describes; unspecified when the step worked.
   StepFailureCode failure_code = 6;
-  // For COMMAND_FAILED, the stable code the failing handler raised, the code
-  // of its CommandError, which a client branches on; internal_error for an
-  // unplanned failure. Unset for every other outcome.
+  // A stable code a client branches on. For COMMAND_FAILED, the code the
+  // failing handler raised, the code of its CommandError; internal_error for
+  // an unplanned failure. For REFUSED, input_decode_failed when a track's
+  // encoded frames lost its stream: the track named by entry starts its next
+  // frames at a keyframe. Unset for every other outcome.
   optional string code = 7;
   // The entry of the request at fault, for COMMAND_FAILED and for a request
   // the runtime refused: "state.<key>", "commands[<i>]", or
