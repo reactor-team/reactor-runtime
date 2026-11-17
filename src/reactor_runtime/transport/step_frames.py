@@ -42,6 +42,7 @@ import numpy.typing as npt
 import reactor_webrtc as rw
 from google.protobuf.message import DecodeError
 
+from reactor_runtime.codes import INPUT_DECODE_FAILED
 from reactor_runtime.core import DecodedStep
 from reactor_runtime.protocol import Channel, Codec, ProtocolVersion, select
 from reactor_wire.v1 import control_pb2, data_pb2, step_pb2
@@ -75,10 +76,23 @@ class StepFrameRefusal:
         entry: The frame at fault, as the runner names a request's entries
             (``media_input[i].frames[j]``).
         reason: What went wrong, for the client.
+        code: The stable code the refused result carries:
+            ``input_decode_failed`` when a frame of a model input track broke
+            the track's stream, so the client starts the track again at a
+            keyframe. ``None`` when the stream is whole (a frame that decodes
+            to another shape than it declares) or when there is no stream to
+            restart (a track that is not an input video track, an encoding
+            that is not supported): a keyframe would not help.
     """
 
     entry: str
     reason: str
+    code: str | None = None
+
+
+def _stream_lost(entry: str, reason: str) -> StepFrameRefusal:
+    """Refuse a frame that broke its track's stream: the client restarts it at a keyframe."""
+    return StepFrameRefusal(entry, reason, INPUT_DECODE_FAILED)
 
 
 def _codec(version: ProtocolVersion) -> Codec:
@@ -210,7 +224,7 @@ def decode_step_frames(
         if isinstance(checked, StepFrameRefusal):
             track.lost = checked
         elif track.streams and track.streams[0].encoding != checked.encoding:
-            track.lost = StepFrameRefusal(
+            track.lost = _stream_lost(
                 f"media_input[{index}].frames[{checked.positions[0]}]",
                 f"track {entry.track!r} takes one frame encoding in a request",
             )
@@ -333,20 +347,18 @@ def _check_entry(
     for position in positions:
         frame = entry.frames[position]
         if frame.encoding != encoding:
-            return StepFrameRefusal(
+            return _stream_lost(
                 f"{where}.frames[{position}]",
                 f"track {entry.track!r} takes one frame encoding in a request",
             )
         if not frame.data:
-            return StepFrameRefusal(
-                f"{where}.frames[{position}]", "an encoded frame carries no data"
-            )
+            return _stream_lost(f"{where}.frames[{position}]", "an encoded frame carries no data")
         if encoding == step_pb2.FRAME_ENCODING_H264:
             # A decoder takes two concatenated pictures as one frame and
             # returns only one of them, so each is checked as one access unit.
             problem = _access_unit_problem(frame.data)
             if problem is not None:
-                return StepFrameRefusal(
+                return _stream_lost(
                     f"{where}.frames[{position}]",
                     f"the H.264 frame {problem}; each frame is one access unit",
                 )
@@ -439,7 +451,7 @@ def _decode_track(streams: list[_Stream], decoder: TrackDecoder) -> _Decoded:
             except rw.CodecNeedsKeyFrame:
                 return _Decoded(
                     pictures,
-                    StepFrameRefusal(
+                    _stream_lost(
                         where,
                         f"track {stream.entry.track!r} must start at a keyframe: its first "
                         "frame on a connection, and its first after frames that did not decode",
@@ -448,11 +460,11 @@ def _decode_track(streams: list[_Stream], decoder: TrackDecoder) -> _Decoded:
                 )
             except (rw.CodecError, ValueError) as error:
                 return _Decoded(
-                    pictures, StepFrameRefusal(where, f"the frame does not decode: {error}"), True
+                    pictures, _stream_lost(where, f"the frame does not decode: {error}"), True
                 )
             if picture is None:
                 return _Decoded(
-                    pictures, StepFrameRefusal(where, "the frame decoded to no picture"), True
+                    pictures, _stream_lost(where, "the frame decoded to no picture"), True
                 )
             declared = list(frame.shape)
             if declared and declared != list(picture.shape) and mismatch is None:
@@ -466,7 +478,10 @@ def _decode_track(streams: list[_Stream], decoder: TrackDecoder) -> _Decoded:
 
 def _refusal(version: ProtocolVersion, request_id: str, refusal: StepFrameRefusal) -> bytes | str:
     result = step_pb2.StepResult(
-        failure_code=step_pb2.STEP_FAILURE_CODE_REFUSED, error=refusal.reason, entry=refusal.entry
+        failure_code=step_pb2.STEP_FAILURE_CODE_REFUSED,
+        error=refusal.reason,
+        entry=refusal.entry,
+        code=refusal.code,
     )
     _, frame = _codec(version).encode_step_result(request_id, result)
     return frame

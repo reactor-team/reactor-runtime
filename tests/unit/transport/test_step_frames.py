@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import reactor_webrtc as rw
 
+from reactor_runtime.codes import INPUT_DECODE_FAILED
 from reactor_runtime.core import DecodedStep
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.protocol.v1.codec import V1Codec
@@ -238,6 +239,7 @@ def test_a_new_connection_whose_first_frame_is_not_a_keyframe_is_refused(
 
     assert refusal.entry == "media_input[0].frames[0]"
     assert "must start at a keyframe" in refusal.reason
+    assert refusal.code == INPUT_DECODE_FAILED
     # The track's next request decodes once it starts at a keyframe.
     assert _matches(
         _decode(_step(*(_frame(p, encoding) for p in packets)), decoders),
@@ -253,7 +255,10 @@ def test_a_request_refused_after_its_frames_decode_still_moves_the_stream_on() -
 
     # Its frames decode, but the second is not the shape it declares.
     bad = _step(_h264(packets[4]), _h264(packets[5], shape=[HEIGHT * 2, WIDTH, 3]))
-    assert _refused(bad, decoders).entry == "media_input[0].frames[1]"
+    refusal = _refused(bad, decoders)
+    assert refusal.entry == "media_input[0].frames[1]"
+    # The stream is whole, so the client is not told to start over.
+    assert refusal.code is None
     pictures = _decode(_step(*(_h264(p) for p in packets[6:])), decoders)
 
     assert _matches(pictures, 0, _reference(packets)[6:])
@@ -274,6 +279,7 @@ def test_a_track_whose_frames_do_not_decode_starts_over_and_the_others_go_on() -
     )
     assert refusal.entry == "media_input[1].frames[0]"
     assert "must start at a keyframe" in refusal.reason
+    assert refusal.code == INPUT_DECODE_FAILED
     assert set(decoders) == {"webcam"}
 
     pictures = _decode(
@@ -415,6 +421,7 @@ def test_encoded_frames_for_a_track_that_is_not_an_input_video_track_open_no_dec
         _step(*(_h264(p) for p in packets), track="mic"), decoders, VIDEO_INPUTS
     )
 
+    # No code: the track has no stream for a keyframe to restart.
     assert outcome == StepFrameRefusal(
         "media_input[0]",
         "media_input[0] names 'mic', which is not an input video track of the model",
@@ -431,6 +438,8 @@ def test_an_unknown_encoding_is_refused_naming_its_frame() -> None:
 
     assert refusal.entry == "media_input[0].frames[1]"
     assert "99 is not supported" in refusal.reason
+    # Restarting at a keyframe would not help: the encoding is not decoded here.
+    assert refusal.code is None
 
 
 def test_a_frame_holding_a_p_frame_then_an_idr_is_refused() -> None:
@@ -595,6 +604,24 @@ async def test_a_step_that_does_not_decode_is_refused_and_not_delivered() -> Non
     assert answer.kind == common_pb2.MessageKind.MESSAGE_KIND_RESPONSE
     assert answer.step_result.failure_code == step_pb2.STEP_FAILURE_CODE_REFUSED
     assert answer.step_result.entry.startswith("media_input[0]")
+    assert answer.step_result.code == INPUT_DECODE_FAILED
+
+
+async def test_a_step_refused_with_its_stream_whole_carries_no_code() -> None:
+    rec = _Recorder()
+    gate = rec.gate()
+    packets = _encode(_pictures(2))
+    # Both frames decode, but the second is not the shape it declares.
+    bad = _step(_h264(packets[0]), _h264(packets[1], shape=[HEIGHT * 2, WIDTH, 3]))
+
+    gate.submit(_wire(bad), ProtocolVersion.V1, Channel.DATA)
+    await _until(lambda: len(rec.replies) == 1)
+
+    (reply,) = rec.replies
+    answer = data_pb2.DataServerMessage.FromString(reply)
+    assert answer.step_result.failure_code == step_pb2.STEP_FAILURE_CODE_REFUSED
+    assert answer.step_result.entry == "media_input[0].frames[1]"
+    assert not answer.step_result.HasField("code")
 
 
 async def test_close_drops_what_is_still_queued() -> None:
