@@ -402,7 +402,9 @@ def test_the_first_entry_at_fault_is_the_one_refused() -> None:
 def test_a_track_after_one_at_fault_still_decodes_on_its_decoder() -> None:
     packets = _encode(_pictures(4))
     # The first track starts past its keyframe; the second is whole.
-    message = _entries(("webcam", packets[1:]), ("other", packets))
+    message = _entries(
+        ("webcam", [_h264(p) for p in packets[1:]]), ("other", [_h264(p) for p in packets])
+    )
     decoders: dict[str, TrackDecoder] = {}
 
     outcome = decode_step_frames(message, decoders, VIDEO_INPUTS)
@@ -412,7 +414,6 @@ def test_a_track_after_one_at_fault_still_decodes_on_its_decoder() -> None:
     assert set(decoders) == {"other"}
 
 
-def test_h264_frames_for_a_track_that_is_not_an_input_video_track_open_no_decoder() -> None:
 def test_encoded_frames_for_a_track_that_is_not_an_input_video_track_open_no_decoder() -> None:
     packets = _encode(_pictures(4))
     decoders: dict[str, TrackDecoder] = {}
