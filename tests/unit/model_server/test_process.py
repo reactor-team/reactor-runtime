@@ -206,7 +206,7 @@ def test_a_slot_volume_smaller_than_the_slot_bound_stops_the_start(
         SystemExit,
         match=(
             rf"holds {small} bytes and one session needs up to {_SLOT} "
-            r"\(2 \* input \+ output of model\.resources\.workers\.shared_memory,"
+            r"\(2 \* input \+ output of model\.resources\.sessions\.shared_memory,"
         ),
     ):
         asyncio.run(process.start())
@@ -426,7 +426,7 @@ def _spawn(
         f"""\
         model:
           resources:
-            workers:
+            sessions:
               shared_memory:
                 input: 64Ki
                 output: 64Ki

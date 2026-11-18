@@ -469,7 +469,7 @@ model:
     gpu: {type: NVIDIA_H100, count: 1}
     cpu: {request: "4", limit: "8"}
     memory: {request: 32Gi, limit: 48Gi}
-    workers:
+    sessions:
       count: 4
       cpu: {request: "1", limit: "2"}
       memory: {request: 2Gi, limit: 4Gi}
@@ -576,8 +576,8 @@ def test_load_config_refuses_a_model_server_block_of_the_wrong_shape(
         load_config(manifest)
 
 
-def _with_shared_memory(block: str) -> str:
-    return f"model:\n  resources:\n    workers:\n      {block}\nruntime:\n  import: plasma:Plasma\n"
+def _with_shared_memory(block: str, key: str = "sessions") -> str:
+    return f"model:\n  resources:\n    {key}:\n      {block}\nruntime:\n  import: plasma:Plasma\n"
 
 
 # Each value as the Kubernetes quantity grammar reads it, and the whole number of
@@ -659,7 +659,7 @@ def test_a_shared_memory_size_that_is_not_whole_bytes_is_refused_naming_its_key(
         load_config(manifest)
 
     assert str(refused.value) == (
-        "model.resources.workers.shared_memory.output must be a quantity of whole bytes, "
+        "model.resources.sessions.shared_memory.output must be a quantity of whole bytes, "
         f"at least 1, such as 24Mi; got {shown}"
     )
 
@@ -674,7 +674,7 @@ def test_a_shared_memory_size_yaml_reads_as_a_float_is_refused_asking_for_a_stri
     with pytest.raises(
         ValueError,
         match=(
-            r"^model\.resources\.workers\.shared_memory\.input must be a quantity of whole "
+            r"^model\.resources\.sessions\.shared_memory\.input must be a quantity of whole "
             r"bytes, at least 1, such as 24Mi; got [0-9.e+]+, which YAML reads as a float: "
             "write the quantity as a string"
         ),
@@ -723,7 +723,7 @@ def test_load_config_refuses_a_shared_memory_block_of_the_wrong_shape(
     manifest = tmp_path / "reactor.yaml"
     manifest.write_text(_with_shared_memory(block))
 
-    with pytest.raises(ValueError, match=rf"^model\.resources\.workers\.{match}"):
+    with pytest.raises(ValueError, match=rf"^model\.resources\.sessions\.{match}"):
         load_config(manifest)
 
 
@@ -733,9 +733,10 @@ def test_load_config_refuses_a_shared_memory_block_of_the_wrong_shape(
         "model: {name: plasma}",
         "model: {resources: 4}",
         "model: {resources: {gpu: {type: NVIDIA_H100, count: 1}}}",
+        "model: {resources: {sessions: 4}}",
         "model: {resources: {workers: 4}}",
-        "model: {resources: {workers: {count: 4, cpu: {request: '1'}, memory: {limit: 4Gi}}}}",
-        "model: {resources: {workers: {count: 4, gpu: banana, shm: 1}, storage: 1Ti}}",
+        "model: {resources: {sessions: {count: 4, cpu: {request: '1'}, memory: {limit: 4Gi}}}}",
+        "model: {resources: {sessions: {count: 4, gpu: banana, shm: 1}, storage: 1Ti}}",
     ],
 )
 def test_everything_under_model_resources_but_shared_memory_is_left_to_the_deployment(
@@ -840,4 +841,29 @@ def test_load_config_refuses_a_webrtc_block_of_the_wrong_shape(
     manifest.write_text(_with_webrtc(block))
 
     with pytest.raises(ValueError, match=rf"^runtime\.{match}"):
+        load_config(manifest)
+
+
+def test_the_former_workers_block_sizes_shared_memory_as_sessions_does(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(_with_shared_memory("shared_memory: {input: 2Mi, output: 24Mi}", "workers"))
+
+    assert load_config(manifest).shared_memory == SharedMemoryConfig(
+        input_bytes=2 << 20, output_bytes=24 << 20
+    )
+    manifest.write_text(_with_shared_memory("shared_memory: {outptu: 24Mi}", "workers"))
+    with pytest.raises(
+        ValueError, match=r"^model\.resources\.workers\.shared_memory has unknown keys"
+    ):
+        load_config(manifest)
+
+
+def test_a_manifest_that_sets_both_sessions_and_workers_is_refused(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(
+        "model:\n  resources:\n    sessions: {count: 2}\n    workers: {count: 2}\n"
+        "runtime:\n  import: plasma:Plasma\n"
+    )
+
+    with pytest.raises(ValueError, match="sets both `sessions` and `workers`"):
         load_config(manifest)

@@ -29,8 +29,8 @@ from reactor_runtime.core import (
 )
 
 _MANIFEST_ONLY = {
-    "shm_input_bytes": "model.resources.workers.shared_memory.input",
-    "shm_output_bytes": "model.resources.workers.shared_memory.output",
+    "shm_input_bytes": "model.resources.sessions.shared_memory.input",
+    "shm_output_bytes": "model.resources.sessions.shared_memory.output",
 }
 
 
@@ -122,7 +122,7 @@ class ModelServer[RequestT, ResultT]:
             max_batch: 4      # the most requests in one step
 
     How many sessions share the model server is a separate setting,
-    ``model.resources.workers.count``. When the file sets no count, the
+    ``model.resources.sessions.count``. When the file sets no count, the
     ``reactor`` CLI sets it to ``max_batch``; an explicit count stays
     independent of ``max_batch``. With more sessions
     than ``max_batch``, the requests past ``max_batch`` wait for the next
@@ -141,7 +141,7 @@ class ModelServer[RequestT, ResultT]:
             ``runtime.model_server.batch_window`` overrides it.
 
     The sizes of the shared memory each session holds are set in
-    ``reactor.yaml`` (``model.resources.workers.shared_memory``) and nowhere
+    ``reactor.yaml`` (``model.resources.sessions.shared_memory``) and nowhere
     else: a deployment sizes each worker's memory from the manifest, so a class
     that declares them is refused.
 
@@ -318,9 +318,9 @@ class ServerSettings:
         max_batch: The most requests one step receives.
         batch_window: Seconds to wait for a batch to fill.
         shm_input_bytes: Each session's request block, from
-            ``model.resources.workers.shared_memory.input``.
+            ``model.resources.sessions.shared_memory.input``.
         shm_output_bytes: Each session's output block, from
-            ``model.resources.workers.shared_memory.output``.
+            ``model.resources.sessions.shared_memory.output``.
     """
 
     max_batch: int
@@ -356,7 +356,7 @@ class ServerSettings:
             server: The model half's class.
             config: The manifest's ``runtime.model_server`` block, or ``None``
                 when the manifest has none.
-            shared_memory: The manifest's ``model.resources.workers.shared_memory``
+            shared_memory: The manifest's ``model.resources.sessions.shared_memory``
                 block; the default sizes when omitted.
 
         Raises:

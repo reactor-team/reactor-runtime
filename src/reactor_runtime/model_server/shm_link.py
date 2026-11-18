@@ -29,8 +29,8 @@ Each end creates the blocks it writes, and their pages count toward the memory
 of the process that creates them: the session creates its request block when it
 connects (:meth:`UnixShmTransport.connect`), the model server creates the slot's
 output block when it sets the link up. A block is created at the size
-``reactor.yaml`` declares, ``model.resources.workers.shared_memory.input`` for a
-request and ``model.resources.workers.shared_memory.output`` for a result, and
+``reactor.yaml`` declares, ``model.resources.sessions.shared_memory.input`` for a
+request and ``model.resources.sessions.shared_memory.output`` for a result, and
 never grows. A message
 whose arrays do not fit its block is refused before anything is sent, with
 :class:`~reactor_runtime.model_server.PayloadTooLarge` naming both sizes and
@@ -354,7 +354,7 @@ class ShmLink:
             what, key = "request", "input"
         return (
             f"a {what}'s arrays hold {exc.needed} bytes, above the {exc.limit} bytes of its "
-            f"shared-memory block: raise model.resources.workers.shared_memory.{key} in "
+            f"shared-memory block: raise model.resources.sessions.shared_memory.{key} in "
             "reactor.yaml"
         )
 
@@ -505,10 +505,10 @@ class UnixShmTransport:
             omitted. It is the same memory as the model server's directory for
             the session's slot, which the link checks when it opens.
         input_bytes: The size of each request block,
-            ``model.resources.workers.shared_memory.input``. A request whose
+            ``model.resources.sessions.shared_memory.input``. A request whose
             arrays need more is refused.
         output_bytes: The size of each output block,
-            ``model.resources.workers.shared_memory.output``. A result whose
+            ``model.resources.sessions.shared_memory.output``. A result whose
             arrays need more is refused.
         frame_limit: The longest frame a link sends or accepts on the socket;
             the same on both ends of a deployment.
@@ -671,7 +671,7 @@ class UnixShmTransport:
                 raise ModelServerUnreachable(
                     f"slot {slot}'s shared-memory directory {directory} has no room for a "
                     f"{setup.input_bytes}-byte request block: size the session's volume to at "
-                    "least 2 * input + output of model.resources.workers.shared_memory, in "
+                    "least 2 * input + output of model.resources.sessions.shared_memory, in "
                     "whole 64 KiB pages"
                 ) from None
         except BaseException:

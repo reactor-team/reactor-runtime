@@ -3,7 +3,7 @@
 # half that holds one large weight tensor on the GPU.
 model:
   resources:
-    workers:
+    sessions:
       shared_memory:
         output: 1Mi
 runtime:

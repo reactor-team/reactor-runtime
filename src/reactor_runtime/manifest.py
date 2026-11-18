@@ -8,8 +8,8 @@ The ``reactor.yaml`` manifest is the runtime's one configuration file:
 ``runtime.livekit`` block says how a LiveKit room reaches the model, the
 ``runtime.webrtc`` block sizes the largest message a WebRTC connection carries,
 the ``runtime.model_server`` block names the model half of a model split in two,
-and ``model.resources.workers.shared_memory`` sizes the shared memory each of
-that model's workers exchanges with its model server. This module turns that
+and ``model.resources.sessions.shared_memory`` sizes the shared memory each of
+that model's sessions exchanges with its model server. This module turns that
 file into a :class:`~reactor_runtime.core.RuntimeConfig` and the reference into
 the model class — and it is the only code that does either, so every entry
 point resolves the same model from the same directory.
@@ -63,7 +63,7 @@ def load_config(manifest: Path) -> RuntimeConfig:
     ``runtime.step_results`` block configures step results, the
     ``runtime.livekit`` block configures room sessions, the ``runtime.webrtc``
     block sizes WebRTC messages, and the
-    ``runtime.model_server`` block with ``model.resources.workers.shared_memory``
+    ``runtime.model_server`` block with ``model.resources.sessions.shared_memory``
     configures a model split in two; the rest of the manifest, the rest of
     ``model.resources`` included, describes the model to the platform and is
     not the runtime's concern. The config path is passed to the model verbatim
@@ -86,7 +86,9 @@ def load_config(manifest: Path) -> RuntimeConfig:
             wrong shape: a ``step_results.queue`` below 1, a malformed
             ``livekit`` block, a malformed ``webrtc`` block, a malformed
             ``model_server`` block, or a malformed
-            ``model.resources.workers.shared_memory`` block.
+            ``model.resources.sessions.shared_memory`` block, or a
+            ``model.resources`` that sets both ``sessions`` and its former
+            name, ``workers``.
     """
     try:
         document = yaml.safe_load(manifest.read_text())
@@ -203,28 +205,30 @@ def _model_server_from_manifest(runtime: dict[str, Any]) -> ModelServerConfig | 
     return ModelServerConfig(**{_MODEL_SERVER_KEYS[key]: value for key, value in block.items()})
 
 
-_SHARED_MEMORY = "model.resources.workers.shared_memory"
+_SESSIONS_KEYS = ("sessions", "workers")
 _SHARED_MEMORY_KEYS = {"input": "input_bytes", "output": "output_bytes"}
 
 
 def _shared_memory_from_manifest(model: Any) -> SharedMemoryConfig:
-    """Parse ``model.resources.workers.shared_memory`` into a :class:`SharedMemoryConfig`.
+    """Parse ``model.resources.sessions.shared_memory`` into a :class:`SharedMemoryConfig`.
 
-    The block sizes the two shared-memory blocks of each worker of a split
+    The block sizes the two shared-memory blocks of each session of a split
     model, as Kubernetes resource quantities (see :func:`_byte_quantity`)::
 
         model:
           resources:
-            workers:
+            sessions:
               shared_memory:
                 input: 1Mi
                 output: 24Mi
 
-    Only ``shared_memory`` is read. Every other key under ``model.resources``
-    and ``model.resources.workers`` sizes the deployment, not the runtime, and
-    is ignored, as is a ``resources`` or ``workers`` that is not a mapping.
-    Inside ``shared_memory`` an unknown key is refused: a misspelt size would
-    otherwise leave a worker's memory at its default without a word.
+    ``model.resources.workers`` is the block's former name and is read the
+    same way; a manifest that sets both is refused. Only ``shared_memory`` is
+    read. Every other key under ``model.resources`` and its ``sessions`` block
+    sizes the deployment, not the runtime, and is ignored, as is a
+    ``resources`` or ``sessions`` that is not a mapping. Inside
+    ``shared_memory`` an unknown key is refused: a misspelt size would
+    otherwise leave a session's memory at its default without a word.
 
     Args:
         model: The raw ``model:`` value from the manifest, if any.
@@ -235,29 +239,37 @@ def _shared_memory_from_manifest(model: Any) -> SharedMemoryConfig:
         block leaves out or when there is no block.
 
     Raises:
-        ValueError: ``shared_memory`` is not a mapping (an empty
-            ``shared_memory:`` included), names a key other than ``input`` and
-            ``output``, or holds a size that is not a quantity of whole bytes,
-            at least 1.
+        ValueError: ``model.resources`` sets both ``sessions`` and ``workers``;
+            or ``shared_memory`` is not a mapping (an empty ``shared_memory:``
+            included), names a key other than ``input`` and ``output``, or
+            holds a size that is not a quantity of whole bytes, at least 1.
     """
     resources = model.get("resources") if isinstance(model, dict) else None
-    workers = resources.get("workers") if isinstance(resources, dict) else None
-    if not isinstance(workers, dict) or "shared_memory" not in workers:
+    if not isinstance(resources, dict):
         return SharedMemoryConfig()
-    block = workers["shared_memory"]
-    if not isinstance(block, dict):
+    present = [key for key in _SESSIONS_KEYS if key in resources]
+    if len(present) > 1:
         raise ValueError(
-            f"{_SHARED_MEMORY} must be a block with `input` and `output` sizes, got {block!r}"
+            "model.resources sets both `sessions` and `workers`: they are one block, "
+            "keep `sessions`"
         )
+    if not present:
+        return SharedMemoryConfig()
+    sessions = resources[present[0]]
+    if not isinstance(sessions, dict) or "shared_memory" not in sessions:
+        return SharedMemoryConfig()
+    where = f"model.resources.{present[0]}.shared_memory"
+    block = sessions["shared_memory"]
+    if not isinstance(block, dict):
+        raise ValueError(f"{where} must be a block with `input` and `output` sizes, got {block!r}")
     unknown = sorted(set(block) - set(_SHARED_MEMORY_KEYS), key=str)
     if unknown:
         raise ValueError(
-            f"{_SHARED_MEMORY} has unknown keys {unknown}; it takes "
-            f"{', '.join(_SHARED_MEMORY_KEYS)}"
+            f"{where} has unknown keys {unknown}; it takes {', '.join(_SHARED_MEMORY_KEYS)}"
         )
     return SharedMemoryConfig(
         **{
-            _SHARED_MEMORY_KEYS[key]: _byte_quantity(f"{_SHARED_MEMORY}.{key}", value)
+            _SHARED_MEMORY_KEYS[key]: _byte_quantity(f"{where}.{key}", value)
             for key, value in block.items()
         }
     )
