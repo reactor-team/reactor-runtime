@@ -772,7 +772,12 @@ class Runner(ServiceComponent, ConnectionSink):
         self._connections.note_keepalive(conn_id)
 
     def resume_track(self, conn_id: ConnId, name: str) -> None:
-        """Resume an outbound track for one connection, at the client's request."""
+        """Resume an outbound track for one connection, at the client's request.
+
+        In a stepped session the track's next encoded step frames on the
+        connection start at a keyframe.
+        """
+        self._steps.track_resumed(conn_id, name)
         self._connections.resume_track(conn_id, name)
 
     def pause_track(self, conn_id: ConnId, name: str) -> None:

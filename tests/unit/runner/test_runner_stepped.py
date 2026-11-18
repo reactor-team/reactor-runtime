@@ -1575,7 +1575,7 @@ async def test_a_reconnect_starts_the_stream_over_at_a_keyframe(picture_runner: 
     assert _keyframes(await _step(picture_runner, again, "r2")) == [True]
 
 
-async def test_a_result_too_large_restarts_the_stream_even_when_no_keyframe_is_asked(
+async def test_a_result_too_large_restarts_the_stream(
     picture_runner: Runner,
 ) -> None:
     _, encoding = _output_codec()
@@ -1588,7 +1588,7 @@ async def test_a_result_too_large_restarts_the_stream_even_when_no_keyframe_is_a
     assert too_large.failure_code == step_pb2.STEP_FAILURE_CODE_RESULT_TOO_LARGE
 
     conn.max_message_size = 64 * 1024 * 1024
-    after = await _step(picture_runner, conn, "r3", request_keyframe=False)
+    after = await _step(picture_runner, conn, "r3")
     assert after.failure_code == step_pb2.STEP_FAILURE_CODE_UNSPECIFIED
     assert _keyframes(after) == [True]
 
@@ -1633,31 +1633,49 @@ async def test_a_refused_send_restarts_the_stream_of_a_step_requested_behind_it(
     assert rw.VideoCodecs().decoder(codec).decode(_video(after)[0].data) is not None
 
 
-async def test_request_keyframe_starts_its_own_step_at_a_keyframe_when_steps_are_queued(
+async def test_resuming_a_track_starts_its_next_frames_at_a_keyframe(
     picture_runner: Runner,
 ) -> None:
-    _, encoding = _output_codec()
+    codec, encoding = _output_codec()
     conn = await _encoding(picture_runner, encoding)
     await _step(picture_runner, conn, "r1")
+    assert _keyframes(await _step(picture_runner, conn, "r2")) == [False]
 
-    _queue_step(picture_runner, conn, "r2", request_keyframe=False)
-    _queue_step(picture_runner, conn, "r3", request_keyframe=True)
-    await _until(lambda: len(conn.sent) == 3)
+    # A client whose decoder lost the stream pauses and resumes the track.
+    picture_runner.pause_track(conn.id, "main_video")
+    picture_runner.resume_track(conn.id, "main_video")
+    after = await _step(picture_runner, conn, "r3")
 
-    assert _keyframes(_result_of(conn, "r2")) == [False]
-    assert _keyframes(_result_of(conn, "r3")) == [True]
-
-
-async def test_request_keyframe_starts_every_encoded_track_at_a_keyframe(
-    picture_runner: Runner,
-) -> None:
-    _, encoding = _output_codec()
-    conn = await _encoding(picture_runner, encoding)
-    await _step(picture_runner, conn, "r1")
-    assert _keyframes(await _step(picture_runner, conn, "r2", request_keyframe=False)) == [False]
-
-    assert _keyframes(await _step(picture_runner, conn, "r3", request_keyframe=True)) == [True]
+    assert _keyframes(after) == [True]
+    assert rw.VideoCodecs().decoder(codec).decode(_video(after)[0].data) is not None
     assert _keyframes(await _step(picture_runner, conn, "r4")) == [False]
+
+
+async def test_resuming_another_track_leaves_the_stream_where_it_was(
+    picture_runner: Runner,
+) -> None:
+    _, encoding = _output_codec()
+    conn = await _encoding(picture_runner, encoding)
+    await _step(picture_runner, conn, "r1")
+
+    picture_runner.resume_track(conn.id, "webcam")
+
+    assert _keyframes(await _step(picture_runner, conn, "r2")) == [False]
+
+
+async def test_resuming_a_track_on_another_connection_leaves_this_stream_where_it_was(
+    picture_runner: Runner,
+) -> None:
+    _, encoding = _output_codec()
+    conn = await _encoding(picture_runner, encoding)
+    other = await _encoding(picture_runner, encoding, cid=1003)
+    await _step(picture_runner, conn, "r1")
+    await _step(picture_runner, other, "o1")
+
+    picture_runner.resume_track(other.id, "main_video")
+
+    assert _keyframes(await _step(picture_runner, conn, "r2")) == [False]
+    assert _keyframes(await _step(picture_runner, other, "o2")) == [True]
 
 
 async def test_a_step_without_frames_leaves_the_stream_where_it_was(

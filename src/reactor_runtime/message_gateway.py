@@ -96,8 +96,6 @@ class InboundStep:
             on a monotonic clock.
         pictures: The picture the transport decoded each encoded frame to, by
             ``(entry, position)`` in *media_input*; empty when it decoded none.
-        request_keyframe: Whether the client asked every encoded output track
-            of the connection to start its next frames at a keyframe.
     """
 
     state: Mapping[str, Any]
@@ -107,7 +105,6 @@ class InboundStep:
     request_id: str
     received_at: float
     pictures: Mapping[tuple[int, int], npt.NDArray[np.uint8]] = field(default_factory=dict)
-    request_keyframe: bool = False
 
 
 StepHandler = Callable[[InboundStep], Awaitable[None]]
@@ -261,7 +258,6 @@ class MessageGateway:
                     request_id=message.request_id or _new_request_id(),
                     received_at=received_at,
                     pictures=pictures or {},
-                    request_keyframe=request.request_keyframe,
                 )
             )
             return

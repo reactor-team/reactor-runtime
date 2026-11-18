@@ -319,13 +319,12 @@ class _Streams:
     """One connection's encoded output streams.
 
     Holds its negotiated encodings, the encoder of each encoded output track,
-    the ids of admitted requests whose result starts at a keyframe, and the
-    results whose frames continue a stream and whose send has no outcome yet.
+    and the results whose frames continue a stream and whose send has no
+    outcome yet.
     """
 
     encodings: Mapping[str, int]
     encoders: dict[str, TrackEncoder]
-    keyframes: list[str] = field(default_factory=list)
     sending: list[EncodedResult] = field(default_factory=list)
 
 
@@ -341,10 +340,9 @@ class OutputStreams:
     keeps no encoder.
 
     A track's stream starts at a keyframe on a new connection, since its
-    encoder is new, and starts over at one after :meth:`restart` (frames that
-    were encoded and not sent), at the result of a request marked with
-    :meth:`keyframe_at` (the client lost the stream), and after a marked
-    request that did not run (:meth:`refused`).
+    encoder is new, and starts over at one after :meth:`restart`: frames that
+    were encoded and not sent, or a track the client resumed because its
+    decoder lost the stream.
 
     A connection's result whose frames continue a stream is held
     (:meth:`hold`) until its send has an outcome (:meth:`settle`), and the
@@ -372,14 +370,13 @@ class OutputStreams:
             if conn_id not in self._conns:
                 self._conns[conn_id] = _Streams(dict(encodings), {})
 
-    def encoders(self, conn_id: ConnId, request_id: str | None = None) -> dict[str, TrackEncoder]:
+    def encoders(self, conn_id: ConnId) -> dict[str, TrackEncoder]:
         """Return the encoder of each encoded track of *conn_id*, by name; empty without an entry.
 
-        Called on the model's thread, the only one that encodes, to encode the
-        result of *request_id*. Waits until every result held for the
+        Called on the model's thread, the only one that encodes, to encode a
+        step's result. Waits until every result held for the
         connection is settled, up to :data:`_SEND_WAIT`; past it, the held
-        results are dropped and every track starts at a keyframe. So does
-        every track when *request_id* was marked with :meth:`keyframe_at`.
+        results are dropped and every track starts at a keyframe.
         """
         with self._lock:
             streams = self._conns.get(conn_id)
@@ -394,9 +391,6 @@ class OutputStreams:
                 keyframe = True
             if self._conns.get(conn_id) is not streams:
                 return {}
-            if request_id is not None and request_id in streams.keyframes:
-                streams.keyframes.remove(request_id)
-                keyframe = True
             for track, encoding in streams.encodings.items():
                 if encoding not in _STREAMLESS and track not in streams.encoders:
                     streams.encoders[track] = TrackEncoder(encoding)
@@ -404,31 +398,6 @@ class OutputStreams:
                 for encoder in streams.encoders.values():
                     encoder.request_keyframe()
             return dict(streams.encoders)
-
-    def keyframe_at(self, conn_id: ConnId, request_id: str) -> None:
-        """Start the frames of *request_id*'s result, on every encoded track, at a keyframe.
-
-        Marked when the request is admitted, so the request's own result
-        starts at the keyframe, not a result of a request admitted before it.
-        """
-        with self._lock:
-            streams = self._conns.get(conn_id)
-            if streams is not None:
-                streams.keyframes.append(request_id)
-
-    def refused(self, conn_id: ConnId, request_id: str) -> None:
-        """Start the next frames of every encoded track at a keyframe when *request_id* was marked.
-
-        A marked request that does not run still owes the client a keyframe:
-        it lost the stream, so whatever it receives next starts at one.
-        """
-        with self._lock:
-            streams = self._conns.get(conn_id)
-            if streams is None or request_id not in streams.keyframes:
-                return
-            streams.keyframes.remove(request_id)
-            for encoder in streams.encoders.values():
-                encoder.request_keyframe()
 
     def restart(self, conn_id: ConnId, tracks: Iterable[str] | None) -> None:
         """Start the next frames of *tracks* (every track for ``None``) at a keyframe.
@@ -547,11 +516,6 @@ class StepRequests:
         changes nothing. Neither is journalled or counted toward the session's
         steps. A request with no entries and no frames runs a step on the
         model's current state.
-
-        A request with ``request_keyframe`` set starts its own result's frames
-        on every encoded output track of its connection at a keyframe, not
-        those of a request admitted before it; when it does not run, the next
-        frames the connection is sent start at one.
         """
         bridge = self._host.bridge()
         if bridge is None:
@@ -582,14 +546,8 @@ class StepRequests:
             )
             return
         self.streams.open(step.conn_id, self._host.connections.step_frame_encodings(step.conn_id))
-        if step.request_keyframe:
-            # Marked before the step is posted, so the model's thread sees it
-            # when it encodes this request's result.
-            self.streams.keyframe_at(step.conn_id, step.request_id)
 
         def refuse_entry(entry: str, reason: str) -> None:
-            if step.request_keyframe:
-                self.streams.refused(step.conn_id, step.request_id)
             self._host.journal(SessionEvent.ERROR, message=f"step request: {reason}")
             self.refuse(step.conn_id, step.request_id, reason, entry=entry)
 
@@ -818,10 +776,8 @@ class StepRequests:
         Called on the model's thread and sent from it, so the answer goes out
         behind any reply to the commands the model handled before the step. A
         refusal from an earlier session is answered as a session that ended,
-        since that session's state is gone. A refused request that asked for a
-        keyframe starts the connection's next frames at one.
+        since that session's state is gone.
         """
-        self.streams.refused(refusal.conn_id, refusal.request_id)
         if refusal.session != self._host.sessions_posted():
             self.end_request(refusal.conn_id, refusal.request_id)
             return
@@ -833,6 +789,15 @@ class StepRequests:
             code=refusal.code,
             entry=refusal.entry,
         )
+
+    def track_resumed(self, conn_id: ConnId, name: str) -> None:
+        """Start the next frames of output track *name* on *conn_id* at a keyframe.
+
+        A client resumes a track whose decoder lost its stream, so its next
+        frames are a stream that decodes on its own. The connection's other
+        tracks continue their streams.
+        """
+        self.streams.restart(conn_id, [name])
 
     def connection_closed(self, conn_id: ConnId) -> None:
         """Forget a connection that closed or was replaced, with its output streams.
@@ -896,7 +861,7 @@ class StepRequests:
         if request is None:
             return None
         limit = request.max_message_size
-        encoders = self.streams.encoders(request.conn_id, request.request_id)
+        encoders = self.streams.encoders(request.conn_id)
         # A failed step's result carries no data, so its data takes no room.
         data = step.data if step.error is None else None
         size = media_size(step.bundle, encoded=encoders.keys()) + len(data or b"")
