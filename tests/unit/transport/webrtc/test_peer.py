@@ -1597,6 +1597,7 @@ def test_each_track_takes_the_codec_its_answer_section_negotiated() -> None:
 
     encodings = peer._negotiated_step_frame_encodings(answer)
 
+    assert peer._step_frames_answered
     assert encodings == {
         "main_video": peer_module.step_pb2.FRAME_ENCODING_H264,
         "webcam": peer_module.step_pb2.FRAME_ENCODING_AV1,
@@ -1604,14 +1605,35 @@ def test_each_track_takes_the_codec_its_answer_section_negotiated() -> None:
     }
 
 
-def test_a_track_whose_negotiated_codec_cannot_carry_step_frames_is_raw() -> None:
-    """VP9 here decodes but does not encode, so the output track falls back to raw."""
+def test_a_section_whose_negotiated_codec_cannot_carry_step_frames_makes_the_connection_raw() -> (
+    None
+):
+    """VP9 here decodes but does not encode, so the output track cannot carry it.
+
+    The client reads VP9 from the answer as well, so the answer leaves the
+    attribute out and both peers read every track as raw.
+    """
     peer = _stepped_peer(
         peer_module.StepFrameCodecs(encode=frozenset({"H264"}), decode=frozenset({"VP9"}))
     )
     answer = _stepped_sdp(
         _m_section("video", "0", "sendonly", [(98, "VP9"), (102, "H264")]),
         _m_section("video", "1", "recvonly", [(98, "VP9")]),
+        encoded=False,
+    )
+
+    encodings = peer._negotiated_step_frame_encodings(answer)
+
+    assert set(encodings.values()) == {peer_module.step_pb2.FRAME_ENCODING_RAW}
+    assert set(encodings) == {"main_video", "webcam", "main_audio"}
+    assert not peer._step_frames_answered
+
+
+def test_a_section_that_negotiated_a_codec_outside_the_wire_makes_the_connection_raw() -> None:
+    peer = _stepped_peer(_ALL_STEP_CODECS)
+    answer = _stepped_sdp(
+        _m_section("video", "0", "sendonly", [(102, "H264")]),
+        _m_section("video", "1", "recvonly", [(102, "H264")]),
         _m_section("video", "3", "recvonly", [(96, "H265")]),
         encoded=False,
     )
@@ -1621,9 +1643,8 @@ def test_a_track_whose_negotiated_codec_cannot_carry_step_frames_is_raw() -> Non
 
     encodings = peer._negotiated_step_frame_encodings(answer)
 
-    assert encodings["main_video"] == peer_module.step_pb2.FRAME_ENCODING_RAW
-    assert encodings["webcam"] == peer_module.step_pb2.FRAME_ENCODING_VP9
-    assert encodings["depth"] == peer_module.step_pb2.FRAME_ENCODING_RAW
+    assert set(encodings.values()) == {peer_module.step_pb2.FRAME_ENCODING_RAW}
+    assert not peer._step_frames_answered
 
 
 def test_every_track_is_raw_without_step_frame_codecs() -> None:

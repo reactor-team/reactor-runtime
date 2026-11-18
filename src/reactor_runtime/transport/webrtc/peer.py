@@ -103,9 +103,11 @@ RTP, whatever the client resumes. Each video section prefers the client's
 codecs that this process can carry step frames in, encoded for an output
 track and decoded for an input one, and the answer's first codec on the
 section is the track's encoding (:attr:`WebRTCPeer.step_frame_encodings`).
-The answer repeats the attribute when this process has such codecs at all.
-Every track is ``RAW`` without it: an audio track, a section that negotiated
-another codec, and a connection whose offer did not declare it.
+The client reads the same codec from the answer, so the answer repeats the
+attribute only when every mapped video section negotiated a codec this process
+can carry that track's step frames in. Otherwise the answer leaves it out and
+every track is ``RAW``, as it is on a connection whose offer did not declare
+it. An audio track is always ``RAW``.
 
 Threading
 ---------
@@ -495,6 +497,7 @@ class WebRTCPeer:
         # Encoded step frames note).
         self._step_frames_offered = False
         self._step_codecs = StepFrameCodecs()
+        self._step_frames_answered = False
         self._step_frame_encodings: dict[str, step_pb2.FrameEncoding.ValueType] = {}
 
         # Inbound callbacks the connection registers; invoked on the asyncio loop.
@@ -736,7 +739,7 @@ class WebRTCPeer:
         answer_sdp = embed_ice_candidates(answer.sdp, candidates)
         # Only the client reads the attribute, so it is added to the answer the
         # client gets rather than to the one libwebrtc holds.
-        if self._step_codecs:
+        if self._step_frames_answered:
             answer_sdp = add_session_attribute(answer_sdp, ENCODED_STEP_FRAMES)
         return answer_sdp
 
@@ -746,17 +749,36 @@ class WebRTCPeer:
         """Read each mapped track's step frame encoding from the answer.
 
         A video track takes the encoding of the first codec its section lists,
-        the one the section negotiated, when this connection can carry step
-        frames in it; every other track is ``RAW``.
+        the one the section negotiated; every other track is ``RAW``. The
+        client reads the same codec from the answer, so the answer declares
+        encoded step frames only when this connection can carry every mapped
+        video track in the codec its section negotiated, in that track's
+        direction. A section that negotiated a codec this process cannot use
+        that way makes every track ``RAW`` and leaves the attribute out of the
+        answer, so both peers read the connection as raw.
         """
-        encodings: dict[str, step_pb2.FrameEncoding.ValueType] = {}
+        raw: dict[str, step_pb2.FrameEncoding.ValueType] = {
+            info.name: step_pb2.FRAME_ENCODING_RAW for info in self._track_by_mid.values()
+        }
+        if not (self._step_frames_offered and self._step_codecs):
+            return raw
+        encodings = dict(raw)
         for mid, info in self._track_by_mid.items():
-            encoding = step_pb2.FRAME_ENCODING_RAW
-            if info.kind is TrackKind.VIDEO:
-                negotiated = section_codecs(answer_sdp, mid)[:1]
-                if negotiated and negotiated[0] in self._step_codecs.for_direction(info.direction):
-                    encoding = _STEP_FRAME_ENCODINGS[negotiated[0]]
-            encodings[info.name] = encoding
+            if info.kind is not TrackKind.VIDEO:
+                continue
+            negotiated = section_codecs(answer_sdp, mid)[:1]
+            if not negotiated or negotiated[0] not in self._step_codecs.for_direction(
+                info.direction
+            ):
+                logger.info(
+                    "track %r negotiated %s, which this process cannot carry its step frames "
+                    "in; every step frame of the connection stays raw",
+                    info.name,
+                    negotiated[0] if negotiated else "no codec",
+                )
+                return raw
+            encodings[info.name] = _STEP_FRAME_ENCODINGS[negotiated[0]]
+        self._step_frames_answered = True
         return encodings
 
     @property
