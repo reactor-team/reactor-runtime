@@ -1670,7 +1670,7 @@ def test_step_frame_codecs_are_empty_and_warn_when_the_capabilities_cannot_be_re
         def capabilities(self) -> Any:
             raise RuntimeError("no codec backend")
 
-    monkeypatch.setattr(peer_module.rw, "VideoCodecs", _Broken)
+    monkeypatch.setattr(peer_module, "video_codecs", _Broken)
     peer_module._step_frame_codecs.cache_clear()
     try:
         with caplog.at_level("WARNING", logger=peer_module.logger.name):
@@ -1690,7 +1690,6 @@ def test_step_frame_codecs_read_the_real_bindings_capabilities() -> None:
 
     assert "VP8" in codecs.encode
     assert "VP8" in codecs.decode
-    assert set(peer_module._STEP_FRAME_ENCODINGS) <= set(peer_module._VIDEO_CODEC_BY_NAME)
 
 
 def test_step_frame_codecs_read_each_direction_from_the_bindings_capabilities(
@@ -1707,7 +1706,7 @@ def test_step_frame_codecs_read_each_direction_from_the_bindings_capabilities(
         def capabilities(self) -> _Capabilities:
             return _Capabilities()
 
-    monkeypatch.setattr(peer_module.rw, "VideoCodecs", _VideoCodecs)
+    monkeypatch.setattr(peer_module, "video_codecs", _VideoCodecs)
     peer_module._step_frame_codecs.cache_clear()
     try:
         codecs = peer_module._step_frame_codecs()

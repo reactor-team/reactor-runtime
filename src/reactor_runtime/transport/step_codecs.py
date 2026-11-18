@@ -5,11 +5,13 @@ the wire (``FrameEncoding``), by the name an SDP ``rtpmap`` gives it (``H264``,
 ``VP8``...), and by the ``reactor_webrtc`` codec that encodes or decodes it.
 :data:`STEP_FRAME_CODECS` holds the three together, so the negotiation that
 picks a track's codec and the encoders and decoders that carry its frames
-cannot disagree on which codecs exist.
+cannot disagree on which codecs exist, and :func:`video_codecs` is the one
+set of codec backends they all open them with.
 """
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -51,3 +53,18 @@ BY_ENCODING: Mapping[step_pb2.FrameEncoding.ValueType, StepFrameCodec] = Mapping
     {codec.encoding: codec for codec in STEP_FRAME_CODECS}
 )
 """:data:`STEP_FRAME_CODECS` by wire encoding."""
+
+_backends_lock = threading.Lock()
+_backends: list[rw.VideoCodecs] = []
+
+
+def video_codecs() -> rw.VideoCodecs:
+    """Return the process's video codec backends, collected on first use.
+
+    Safe to call from any thread: the step frame decoders and encoders open
+    their codecs on worker threads.
+    """
+    with _backends_lock:
+        if not _backends:
+            _backends.append(rw.VideoCodecs())
+        return _backends[0]

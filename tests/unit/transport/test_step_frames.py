@@ -776,7 +776,9 @@ async def test_a_new_connection_starts_its_tracks_over_at_a_keyframe() -> None:
     assert "must start at a keyframe" in answer.step_result.error
 
 
-async def test_a_track_that_loses_its_stream_releases_its_decoder() -> None:
+async def test_a_track_that_loses_its_stream_releases_its_decoder(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     rec = _Recorder()
     gate = rec.gate()
     packets = _encode(_pictures(8))
@@ -786,10 +788,13 @@ async def test_a_track_that_loses_its_stream_releases_its_decoder() -> None:
 
     empty = _h264(packets[4])
     empty.data = b""
-    gate.submit(_wire(_step(empty)), ProtocolVersion.V1, Channel.DATA)
-    await _until(lambda: len(rec.replies) == 1)
+    with caplog.at_level("WARNING", logger="reactor_runtime.transport.step_frames"):
+        gate.submit(_wire(_step(empty)), ProtocolVersion.V1, Channel.DATA)
+        await _until(lambda: len(rec.replies) == 1)
 
     assert gate.decoders == 0
+    # The operator's log names the codec whose stream broke.
+    assert "encoding=FRAME_ENCODING_H264" in caplog.text
 
 
 async def test_an_unknown_encoding_keeps_the_tracks_decoder_and_stream() -> None:

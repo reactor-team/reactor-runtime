@@ -154,7 +154,7 @@ from reactor_runtime.core import (
     TrackKind,
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion, sniff
-from reactor_runtime.transport.step_codecs import BY_SDP_NAME, STEP_FRAME_CODECS
+from reactor_runtime.transport.step_codecs import BY_SDP_NAME, STEP_FRAME_CODECS, video_codecs
 from reactor_runtime.transport.webrtc.config import WebRtcConfig
 from reactor_runtime.transport.webrtc.frame_stages import FrameStageWindow
 from reactor_runtime.transport.webrtc.frames import (
@@ -373,7 +373,7 @@ def _step_frame_codecs() -> StepFrameCodecs:
     raw.
     """
     try:
-        capabilities = rw.VideoCodecs().capabilities()
+        capabilities = video_codecs().capabilities()
     except Exception:
         logger.warning("could not read the video codecs; step frames stay raw", exc_info=True)
         return StepFrameCodecs()
