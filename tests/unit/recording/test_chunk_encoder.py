@@ -261,6 +261,22 @@ def test_a_taller_frame_is_pillarboxed_with_bars_left_and_right(tmp_path: Path) 
     assert _lit(last[:4, 32])
 
 
+def test_a_new_letterbox_size_clears_the_bars_the_last_one_drew_over(tmp_path: Path) -> None:
+    # A wide frame paints the middle rows edge to edge. The tall frames after it
+    # expose those edges as side bars, which must come out black, not stale.
+    encoder = _encoder(tmp_path)
+    encoder.feed_video(_gray(64, 64))
+    encoder.feed_video(_gray(128, 64))
+    for _ in range(5):
+        encoder.feed_video(_gray(32, 64))
+    encoder.stop()
+
+    last = _last_frame(tmp_path)
+    assert not _lit(last[32, :4])
+    assert not _lit(last[32, 60:])
+    assert _lit(last[32, 28:36])
+
+
 def test_a_frame_of_another_size_is_letterboxed_onto_the_target_size(tmp_path: Path) -> None:
     encoder = ChunkEncoder(
         output_dir=tmp_path,
@@ -281,8 +297,8 @@ def test_a_frame_of_another_size_is_letterboxed_onto_the_target_size(tmp_path: P
 
 
 def test_an_odd_first_frame_opens_at_the_even_size_below_it(tmp_path: Path) -> None:
-    # 4:2:0 needs an even width and height: an odd first frame used to fail the
-    # encoder open and turn recording off for the session.
+    # 4:2:0 needs an even width and height, so the size is rounded down rather
+    # than failing the encoder open.
     encoder = _encoder(tmp_path)
     for _ in range(5):
         encoder.feed_video(_gray(65, 49))
