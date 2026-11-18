@@ -269,19 +269,23 @@ python -m reactor_runtime.schema --path . --version v0.1.0 --out schema.json
 Each names the public symbol whose docstring states it.
 
 - **The step loop decides replay.** Do not override `run()` or
-  `submit_command()`. A class that keeps both can serve a stepped session —
-  one step per request, with state, commands and frames in the request, or
-  frames pushed to the input tracks ahead of it
+  `submit_command()`. A class that keeps both can serve a stepped session,
+  one step per request with state, commands and frames in the request
   (`reactor_runtime.ReactorApp.supports_stepped`). Phase 5 replays the baseline
-  through exactly that.
+  through exactly that. Frames can also be pushed to the input tracks ahead
+  of a step (`reactor_runtime.runner.stepped.StepRequests.push`).
 - **Step frames reach the model as RGB, whatever the client sent.** A stepped
-  client's video frames may arrive encoded (H.264, VP8, VP9 or AV1); the
-  runtime decodes them, so `process_input()` reads `uint8` RGB
-  `(height, width, 3)` either way. Output video is encoded for each client
-  that negotiated a codec, so the frames it receives are lossy; a client that
-  negotiates none receives them raw, byte for byte
-  (`reactor_runtime.protocol.frames.track_frames`). A comparison of step
-  results against a baseline turns the client's step-frame encoding off.
+  client's video frames, in a request or a push, may arrive encoded (H.264,
+  VP8, VP9 or AV1). The runtime decodes them to RGB before the model reads
+  them (`reactor_runtime.transport.step_frames.StepFrameGate`,
+  `reactor_runtime.transport.step_frames.TrackDecoder.decode`).
+- **Step output is lossy for a client that negotiates it.** A client whose
+  offer declares encoded step frames gets output video encoded in the codec
+  its track's section negotiated
+  (`reactor_runtime.transport.webrtc.sdp.ENCODED_STEP_FRAMES`,
+  `reactor_runtime.transport.webrtc.peer.WebRTCPeer.step_frame_encodings`,
+  `reactor_runtime.transport.step_frames.TrackEncoder`). A replay client
+  omits `a=x-reactor-encoded-step-frames`, so its step results stay raw.
 - **`process_output()` returns `Output | StepCompleted | None`**
   (`reactor_runtime.ReactorApp.process_output`). Return
   `reactor_runtime.StepCompleted` when a step's report to a step-count session

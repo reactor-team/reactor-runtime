@@ -197,9 +197,13 @@ step's result is returned to the requester
 an exact replay of a schedule: put each step's inputs from `conditions.yaml`
 into that step's request.
 
-- Result frames travel uncompressed: the raw frame encoding carries video as
-  `uint8` RGB `(height, width, 3)` and audio as `int16` PCM
-  (`src/reactor_runtime/protocol/frames.py`). Compare those arrays.
+- Result frames are raw when the replay client does not declare
+  `a=x-reactor-encoded-step-frames` in its offer
+  (`src/reactor_runtime/transport/webrtc/sdp.py`, `ENCODED_STEP_FRAMES`): the
+  raw frame encoding carries video as `uint8` RGB `(height, width, 3)` and
+  audio as `int16` PCM (`src/reactor_runtime/protocol/frames.py`). A client
+  that declares it receives lossy H.264, VP8, VP9 or AV1 video, so leave the
+  attribute out of baseline comparisons and compare the raw arrays.
 - Live input tracks are ignored in a stepped session
   (`src/reactor_runtime/runner/runner.py`, `Runner.media_received`); a step
   reads the frames its request carries and the frames a `PushFrames` message
