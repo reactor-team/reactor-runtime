@@ -12,8 +12,10 @@ Separately, once that boundary segment has actually landed on disk the recorder
 notifies an external consumer (the runner journals it on ``/events``), so a
 director learns a clip is genuinely fetchable rather than merely requested.
 
-A segment normally closes when the next one starts. A model that stops emitting
-(a pause, say) would leave a requested clip's boundary segment open
+A segment is fetchable as soon as its file is on disk: the encoder writes each
+segment under a temporary name and renames it once the segment is whole, which
+happens when the media reaches the next segment boundary. A model that stops
+emitting (a pause, say) would leave a requested clip's boundary segment open
 indefinitely, so the recorder seals it instead: once the output has been idle
 for longer than the model's own cadence and a clip is waiting, it closes the
 encoder, which writes the segment out at its real length, and moves the timeline
@@ -88,17 +90,14 @@ _DROP_LOG_INTERVAL_SECONDS = 5.0
 _AUDIO_BACKLOG_FRAMES = 2
 
 _INIT_FILENAME = "init.mp4"
-# Written into a recording's directory once it is finished, so its final segment
-# (which has no successor to prove it closed) is recognised as fetchable.
+# Written into a recording's directory once it is finished, with every segment
+# on disk. It starts the recording's retention window.
 _COMPLETE_MARKER = ".complete"
-# Written instead when the recording ended with its final segment unclosed. It
-# ages the recording out like a finished one, but never makes that segment
-# fetchable.
+# Written instead when the recording ended with its final segment unclosed. That
+# segment never reaches its final name, so a range ending in it is gone rather
+# than pending; the marker ages the recording out like a finished one.
 _INCOMPLETE_MARKER = ".incomplete"
 _END_MARKERS = (_COMPLETE_MARKER, _INCOMPLETE_MARKER)
-# Written beside a segment the recorder sealed while the recording was idle, so
-# the segment is recognised as fetchable before it has a successor.
-_SEALED_PATTERN = "chunk_{:05d}.sealed"
 # Written when a seal fixes where the next part starts, before any of its frames
 # are encoded, so the segments from there on are known to need that part's init
 # checked against ``init.mp4`` before they are served.
@@ -135,7 +134,8 @@ _CADENCE_WINDOW = 5
 # ``/clips/chunks/{id}/{file}``.
 _SESSION_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 # init plus the zero-padded fMP4 segments the encoder produces; anything else is
-# not a recording artifact.
+# not a recording artifact. A segment still being written carries a ``.tmp``
+# suffix, so it never matches.
 _CHUNK_FILENAME_RE = re.compile(r"^(init\.mp4|chunk_\d{5}\.m4s)$")
 
 _AudioArray = npt.NDArray[Any]
@@ -426,9 +426,9 @@ class Recorder:
         self._ensure_reaper()
         self._session_id = session_id
         # A session recorded under an id used before would inherit that run's
-        # files: its completion marker reads as finished, its seal and part
-        # markers would close or misattribute this run's segments, and its
-        # segments would stand in for this run's successors. So the directory
+        # files: its completion marker reads as finished, its part markers
+        # would misattribute this run's segments, and its segments would be
+        # served as this run's before they are written. So the directory
         # starts empty. Claiming and emptying it under the reaper's lock makes
         # the pair atomic against a sweep, so neither a sweep in flight nor a
         # later one can delete a live recording.
@@ -907,13 +907,14 @@ class Recorder:
         return any(not self._boundary_ready(session_dir, idx) for idx in boundaries)
 
     def _seal(self, encoder: ChunkEncoder) -> None:
-        """Close *encoder*, mark its last segment fetchable, and skip to the next boundary.
+        """Close *encoder*, which writes its open segment out, and skip to the next boundary.
 
-        Closing writes the open segment out at the length actually recorded. The
-        timeline then moves up to the next boundary, where the next emission
-        opens a fresh encoder, so segment indices keep naming the same stretch
-        of the grid. Audio still buffered belongs to video before the seal and
-        is dropped rather than paired with what follows it.
+        Closing writes the open segment out at the length actually recorded, so
+        it is fetchable once this returns. The timeline then moves up to the
+        next boundary, where the next emission opens a fresh encoder, so segment
+        indices keep naming the same stretch of the grid. Audio still buffered
+        belongs to video before the seal and is dropped rather than paired with
+        what follows it.
         """
         markers = self._markers
         session_dir = self._session_dir
@@ -933,10 +934,11 @@ class Recorder:
         try:
             (session_dir / _PART_MARKER_PATTERN.format(next_segment)).write_text("")
             self._part_starts.append(next_segment)
-            (session_dir / _SEALED_PATTERN.format(sealed)).write_text("")
         except OSError:
             logger.exception(
-                "failed to mark a sealed segment", session_id=self._session_id, segment=sealed
+                "failed to mark where the next recording part starts",
+                session_id=self._session_id,
+                segment=next_segment,
             )
         self._encoder = None
         self._next_segment = next_segment
@@ -1138,7 +1140,7 @@ class Recorder:
         Walks the closed media segments in order (and the init segment once it is
         readable), notifying the consumer once per segment so a recording can be
         mirrored as it is produced. A segment counts as closed the same way the
-        clip manifest treats it: its successor exists, or the recording finished.
+        clip manifest treats it: its file is on disk under its final name.
         """
         session_dir = self._session_dir
         recording_id = self._session_id
@@ -1255,18 +1257,12 @@ class Recorder:
         """Return whether the boundary segment is on disk and closed."""
         if not self._init_ready(session_dir):
             return False
+        # The encoder renames a segment to its final name only once it is
+        # whole, so a segment under that name is closed.
         boundary = session_dir / f"chunk_{boundary_idx:05d}.m4s"
         if not boundary.is_file():
             return False
-        # A segment is closed once its successor exists (ffmpeg has rolled over),
-        # the recorder sealed it while idle, or the recording itself has finished.
-        successor = session_dir / f"chunk_{boundary_idx + 1:05d}.m4s"
-        closed = (
-            successor.is_file()
-            or (session_dir / _SEALED_PATTERN.format(boundary_idx)).is_file()
-            or (session_dir / _COMPLETE_MARKER).is_file()
-        )
-        return closed and self._part_verdict(session_dir, boundary_idx) is _PartInit.OK
+        return self._part_verdict(session_dir, boundary_idx) is _PartInit.OK
 
     def _part_verdict(self, session_dir: Path, segment: int) -> _PartInit:
         """Check *segment*'s part init as :func:`_part_init` does, from memory when live.
@@ -1288,16 +1284,15 @@ class Recorder:
     @staticmethod
     def _init_ready(session_dir: Path) -> bool:
         """Return whether the init segment carries its codec headers yet."""
+        # The encoder creates init empty and writes its headers when the first
+        # segment ends, before it renames that segment to its final name. So
+        # the first segment under its final name is what proves init whole.
         init = session_dir / _INIT_FILENAME
-        if not init.is_file():
-            return False
         try:
-            if init.stat().st_size > 0:
-                return True
+            if init.stat().st_size == 0:
+                return False
         except OSError:
             return False
-        # ffmpeg creates init empty and flushes its headers with the first
-        # segment, so the first chunk appearing is the signal init is usable.
         return (session_dir / "chunk_00000.m4s").is_file()
 
 

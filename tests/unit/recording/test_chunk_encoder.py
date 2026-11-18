@@ -1,3 +1,4 @@
+import contextlib
 import threading
 import time
 from pathlib import Path
@@ -110,8 +111,8 @@ def test_segments_close_on_the_configured_boundary(tmp_path: Path) -> None:
 
 
 def test_segments_land_on_disk_before_the_recording_ends(tmp_path: Path) -> None:
-    # The recorder serves a segment as soon as its successor exists, so segments
-    # have to appear while the recording is still running.
+    # The recorder serves a segment as soon as it is written, so segments have
+    # to appear while the recording is still running.
     encoder = _encoder(tmp_path, chunk_seconds=1)
     try:
         for _ in range(_FRAME_RATE * 2):
@@ -119,6 +120,37 @@ def test_segments_land_on_disk_before_the_recording_ends(tmp_path: Path) -> None
         assert list(tmp_path.glob("chunk_*.m4s"))
     finally:
         encoder.stop()
+
+
+def test_a_segment_appears_under_its_final_name_only_once_whole(tmp_path: Path) -> None:
+    # The muxer writes a segment file in pieces. The recorder serves any segment
+    # under its final name, so every size seen there must be the final one.
+    seen: dict[str, set[int]] = {}
+    stop = threading.Event()
+
+    def watch() -> None:
+        while not stop.is_set():
+            for path in tmp_path.glob("chunk_*.m4s"):
+                with contextlib.suppress(OSError):
+                    seen.setdefault(path.name, set()).add(path.stat().st_size)
+
+    watcher = threading.Thread(target=watch)
+    watcher.start()
+    encoder = _encoder(tmp_path, chunk_seconds=1)
+    rng = np.random.default_rng(0)
+    try:
+        # Noise keeps each segment well above one write buffer.
+        for _ in range(_FRAME_RATE * 3):
+            encoder.feed_video(rng.integers(0, 255, (240, 320, 3), dtype=np.uint8))
+    finally:
+        encoder.stop()
+        stop.set()
+        watcher.join()
+
+    assert len(seen) == 3
+    for name, sizes in seen.items():
+        assert sizes == {(tmp_path / name).stat().st_size}
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_a_later_part_continues_the_numbering_and_the_timeline(tmp_path: Path) -> None:

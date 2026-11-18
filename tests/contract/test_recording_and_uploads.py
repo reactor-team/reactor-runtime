@@ -92,7 +92,8 @@ async def test_a_ready_manifest_references_the_locked_chunk_paths(
 
 
 async def test_a_pending_clip_is_202_with_retry_after(harness: Harness, tmp_path: Path) -> None:
-    _seed_recording(harness.runner, tmp_path, "init.mp4", "chunk_00000.m4s")
+    # The boundary segment is still under the encoder's temporary name.
+    _seed_recording(harness.runner, tmp_path, "init.mp4", "chunk_00000.m4s.tmp")
 
     response = await harness.client.get(f"/clips?session_id={_RECORDING_ID}&start=0&end=4")
 

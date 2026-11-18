@@ -301,7 +301,11 @@ class ChunkEncoder:
                 "hls_segment_type": "fmp4",
                 "hls_time": str(config.chunk_seconds),
                 "hls_list_size": "0",
-                "hls_flags": "independent_segments",
+                # The muxer writes a segment file in pieces once the segment
+                # ends. Writing it under a temporary name and renaming it when
+                # whole means a segment under its final name is always complete,
+                # which is what the recorder serves and announces on.
+                "hls_flags": "independent_segments+temp_file",
                 "hls_fmp4_init_filename": init_name,
                 "hls_segment_filename": str(self._output_dir / _SEGMENT_PATTERN),
                 "start_number": str(first),

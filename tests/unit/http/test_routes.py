@@ -622,7 +622,8 @@ async def test_clips_is_pending_until_the_boundary_lands(
     client: tuple[httpx.AsyncClient, Runner], tmp_path: Path
 ) -> None:
     http_client, runner = client
-    _seed_recording(runner, tmp_path, "init.mp4", "chunk_00000.m4s")
+    # The boundary segment is still under the encoder's temporary name.
+    _seed_recording(runner, tmp_path, "init.mp4", "chunk_00000.m4s.tmp")
 
     response = await http_client.get(f"/clips?session_id={_RECORDING_ID}&start=0&end=4")
 
