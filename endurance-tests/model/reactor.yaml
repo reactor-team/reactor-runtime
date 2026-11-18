@@ -1,8 +1,9 @@
 $schema: reactor/v2
 
 # The endurance suite's model: examples/echo, with every output batch tracked
-# so the probe can tell whether anything still holds one. No recording, so the
-# recorder holds no media of its own.
+# so the probe can tell whether anything still holds one. Recording is left at
+# its default, on, so the recorder runs in every streamed session as it does in
+# a deployed model.
 model:
   name: echo-endurance
   version: v0.0.1

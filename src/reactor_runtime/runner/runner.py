@@ -1540,7 +1540,13 @@ class Runner(ServiceComponent, ConnectionSink):
         serves, each as ``{"protocol": ..., "version": ...}``.
         ``generation`` names how the live session generates, ``"streamed"`` or
         ``"stepped"``, and reads ``"streamed"`` outside a session.
+        ``recording.enabled`` says whether the session is recorded: false for a
+        stepped session, which is never recorded, and for a model that turns
+        recording off.
         """
+        starting = self._session_start.starting_input
+        running = self._sm.current_state in _RUNNING_STATES
+        generation = self._session_start.generation if running else Generation.STREAMED
         descriptor: dict[str, Any] = {
             "session_id": self._session_id,
             "state": self._sm.current_state.name.lower(),
@@ -1550,19 +1556,15 @@ class Runner(ServiceComponent, ConnectionSink):
             "selected_transport": self._selected_transport(),
             "transports": [dict(transport) for transport in self._transports],
             "recording": {
-                "enabled": self._cfg.recording.enabled,
+                "enabled": self._cfg.recording.enabled and generation is Generation.STREAMED,
                 "chunk_seconds": self._cfg.recording.chunk_seconds,
             },
             "step_results": {"enabled": self._cfg.step_results.enabled},
+            # Always present, so a client can tell a runtime that honours the
+            # start's ``generation`` from one that ignores the key. Outside a
+            # session it names the mode a start without the key gets.
+            "generation": generation.value,
         }
-        starting = self._session_start.starting_input
-        running = self._sm.current_state in _RUNNING_STATES
-        # Always present, so a client can tell a runtime that honours the
-        # start's ``generation`` from one that ignores the key. Outside a
-        # session it names the mode a start without the key gets.
-        descriptor["generation"] = (
-            self._session_start.generation.value if running else Generation.STREAMED.value
-        )
         if starting is not None and running:
             descriptor["starting_input"] = {"applied": len(starting.as_commands())}
         if self._bridge is None:

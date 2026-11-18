@@ -45,6 +45,12 @@ def part_init_filename(first_segment: int) -> str:
 # yuv420p with the Main profile is the universally-compatible sub-profile.
 _PIXEL_FORMAT = "yuv420p"
 _PROFILE = "Main"
+# How many frame threads x264 encodes with. Each frame thread holds one more
+# frame back, so it delays every segment's file by a frame. Left to itself
+# x264 picks up to 1.5 per core: on a many-core host a 1080p segment then lands
+# about a second late and the encode costs more CPU, not less. Eight threads
+# still encode 4K faster than real time.
+_X264_THREADS = 8
 
 
 def _even(size: int) -> int:
@@ -80,7 +86,7 @@ def _video_options(config: RecordingConfig, keyframe_interval: int) -> dict[str,
         # x264 sliced threads (auto-enabled by the zerolatency tune) can deadlock
         # at higher resolutions; frame threads avoid it and the recorder does not
         # need per-frame latency.
-        options["x264-params"] = f"sliced-threads=0:{gop}"
+        options["x264-params"] = f"sliced-threads=0:threads={_X264_THREADS}:{gop}"
     else:
         # x265 prints a configuration banner to stderr at its default verbosity,
         # which libav's own log level does not reach.
