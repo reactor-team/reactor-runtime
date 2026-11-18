@@ -41,6 +41,15 @@ from reactor_runtime.transport.webrtc.signaling import IceCandidate
 from reactor_runtime.transport.webrtc.stats import OutboundMediaHealth, PeerStats, TrackStat
 from reactor_wire.v1 import control_pb2, data_pb2, platform_pb2, step_pb2
 
+_VIDEO_CAPABILITIES = rw.VideoCodecs().capabilities()
+requires_h264 = pytest.mark.skipif(
+    not (
+        _VIDEO_CAPABILITIES.can_encode(rw.VideoCodec.H264)
+        and _VIDEO_CAPABILITIES.can_decode(rw.VideoCodec.H264)
+    ),
+    reason="no H.264 backend on this platform",
+)
+
 
 class FakeSink:
     """A ConnectionSink that records every fact pushed up to it."""
@@ -354,6 +363,7 @@ async def test_sink_callbacks_are_wired(
     fake_peer.fire_disconnect()
 
 
+@requires_h264
 async def test_a_decoded_step_reaches_the_sink_with_the_connection_id(
     fake_peer: FakePeer,
     factory_for: Callable[..., WebRtcPeerFactory],

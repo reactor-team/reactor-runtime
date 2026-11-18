@@ -35,6 +35,15 @@ from reactor_runtime.transport.webrtc import (
 from reactor_runtime.transport.webrtc.signaling import IceCandidate
 from reactor_wire.v1 import control_pb2, data_pb2, platform_pb2, step_pb2
 
+_VIDEO_CAPABILITIES = rw.VideoCodecs().capabilities()
+requires_h264 = pytest.mark.skipif(
+    not (
+        _VIDEO_CAPABILITIES.can_encode(rw.VideoCodec.H264)
+        and _VIDEO_CAPABILITIES.can_decode(rw.VideoCodec.H264)
+    ),
+    reason="no H.264 backend on this platform",
+)
+
 
 async def _connect(
     peer: FakePeer,
@@ -302,6 +311,7 @@ async def test_a_client_stats_frame_goes_to_on_client_stats_not_on_message(
     assert messages == [ping]
 
 
+@requires_h264
 async def test_an_encoded_step_reaches_on_decoded_step_or_is_refused_to_the_client(
     fake_peer: FakePeer,
     factory_for: Callable[..., WebRtcPeerFactory],
@@ -337,6 +347,7 @@ async def test_an_encoded_step_reaches_on_decoded_step_or_is_refused_to_the_clie
     assert answer.step_result.failure_code == step_pb2.STEP_FAILURE_CODE_REFUSED
 
 
+@requires_h264
 async def test_step_frames_decode_for_the_model_inputs_not_for_the_tracks_the_client_offers(
     fake_peer: FakePeer,
     factory_for: Callable[..., WebRtcPeerFactory],
