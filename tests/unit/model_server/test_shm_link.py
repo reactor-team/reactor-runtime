@@ -213,7 +213,7 @@ def test_a_request_larger_than_its_block_is_refused_and_the_link_goes_on(root: P
             session.send(Step(request_id=1, timeout=None, payload=np.ones(5000, dtype=np.uint8)))
         assert str(refused.value) == (
             "a request's arrays hold 5000 bytes, above the 4096 bytes of its shared-memory "
-            "block: raise model.resources.workers.shared_memory.input in reactor.yaml"
+            "block: raise model.resources.sessions.shared_memory.input in reactor.yaml"
         )
 
         session.send(Step(request_id=2, timeout=None, payload=np.ones(4096, dtype=np.uint8)))
@@ -231,7 +231,7 @@ def test_a_result_larger_than_its_block_is_refused_naming_the_output_size(root: 
     session, server = pair.open()
     try:
         with pytest.raises(
-            PayloadTooLarge, match=r"model\.resources\.workers\.shared_memory\.output"
+            PayloadTooLarge, match=r"model\.resources\.sessions\.shared_memory\.output"
         ):
             server.send(Result(request_id=1, output=np.ones(5000, dtype=np.uint8)))
 

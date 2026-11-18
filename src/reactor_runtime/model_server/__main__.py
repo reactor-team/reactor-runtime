@@ -1,9 +1,9 @@
 """Run a split model's model half: ``python -m reactor_runtime.model_server``.
 
 Run it in the model's workspace, beside the session runtimes' ``python -m
-reactor_runtime.serve``, the model's workers. The manifest names the model half
-(``runtime.model_server``) and its serving settings, and sizes each worker's
-shared memory (``model.resources.workers.shared_memory``); the deployment names
+reactor_runtime.serve``, one for each session. The manifest names the model half
+(``runtime.model_server``) and its serving settings, and sizes each session's
+shared memory (``model.resources.sessions.shared_memory``); the deployment names
 the rest through the environment
 (:func:`~reactor_runtime.model_server.config.server_process_config`).
 The process is the runtime's service with two components, the model server and
