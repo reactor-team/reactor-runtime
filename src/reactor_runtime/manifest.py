@@ -418,8 +418,9 @@ def _recording_from_manifest(runtime: dict[str, Any], document: dict[str, Any]) 
 
     The block nests under ``runtime:``. A top-level ``recording:`` block is
     still honored for older manifests, and the nested block wins when both are
-    present. A missing or non-mapping block leaves recording disabled at its
-    defaults. Unknown keys are ignored so a manifest can carry forward-looking
+    present. A missing or non-mapping block leaves the recorder at its
+    defaults, which record every streamed session; ``enabled: false`` turns it
+    off. Unknown keys are ignored so a manifest can carry forward-looking
     settings without breaking an older runtime.
 
     Args:

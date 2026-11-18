@@ -139,7 +139,8 @@ every PR that touches the runtime:
   connection streaming for hours, a model run in worker processes, stepped
   sessions and their step requests, room participants with their RPC and
   data-topic commands and media inputs, and room connections closed while
-  their server does not answer; uploads, clips and recordings have none yet.
+  their server does not answer. Every streamed session is recorded, as in a
+  deployed model, but uploads and clip requests have no scenario yet.
 - **A change to what the launcher hooks** (`MediaPacer.stop`,
   `http_server.build_app`, `Runner._connections`, the transport classes the
   probe counts): update `endurance/launcher.py` in the same PR.

@@ -2631,7 +2631,7 @@ async def test_descriptor_renders_the_v0_shape(started_runner: Runner) -> None:
     assert caps["commands"] == []
     assert "emission_fps" not in caps
     # Recording metadata rides the descriptor so a consumer can mirror it at start.
-    assert descriptor["recording"] == {"enabled": False, "chunk_seconds": 4}
+    assert descriptor["recording"] == {"enabled": True, "chunk_seconds": 4}
 
 
 async def test_schema_renders_the_model_contract(started_runner: Runner) -> None:
@@ -3049,9 +3049,15 @@ async def test_stop_awaits_outstanding_teardown(monkeypatch: pytest.MonkeyPatch)
 async def test_drain_with_zero_grace_still_unwinds_to_ready(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # A session that is not recorded closes its wires alone, within the one
+    # turn of the loop a zero grace period allows.
     created_models.clear()
     monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
-    runner = Runner(RuntimeConfig(model_ref="fake:Model", grace_period=0))
+    runner = Runner(
+        RuntimeConfig(
+            model_ref="fake:Model", grace_period=0, recording=RecordingConfig(enabled=False)
+        )
+    )
     await runner.start()
     try:
         runner.start_session({})
@@ -3060,6 +3066,31 @@ async def test_drain_with_zero_grace_still_unwinds_to_ready(
         _expect_state(runner, SessionState.READY)
     finally:
         await runner.stop()
+
+
+async def test_a_recorded_session_drained_with_zero_grace_unwinds_by_the_stop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Finishing a recording runs off the loop, so a zero grace period can end
+    # the drain while the session is still closing; the stop then waits for it.
+    created_models.clear()
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
+    runner = Runner(
+        RuntimeConfig(
+            model_ref="fake:Model",
+            grace_period=0,
+            recording=RecordingConfig(recording_dir=str(tmp_path)),
+        )
+    )
+    await runner.start()
+    try:
+        runner.start_session({})
+        assert runner.recorder.recording
+        await runner.drain()
+    finally:
+        await runner.stop()
+    _expect_state(runner, SessionState.READY)
+    assert not runner.recorder.recording
 
 
 async def test_connection_open_and_close_are_journalled(started_runner: Runner) -> None:

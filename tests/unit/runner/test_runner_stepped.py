@@ -340,6 +340,18 @@ async def test_the_descriptor_echoes_the_generation_always(runner: Runner) -> No
     assert runner.descriptor()["generation"] == "streamed"
 
 
+async def test_the_descriptor_reports_a_stepped_session_as_not_recorded(runner: Runner) -> None:
+    # Recording is on by default, but a stepped session is never recorded, so
+    # a consumer that reads the descriptor at start must not expect a recording.
+    assert runner.descriptor()["recording"]["enabled"] is True
+    runner.start_session({"generation": "stepped"})
+    assert runner.descriptor()["recording"]["enabled"] is False
+    runner.stop_session()
+    await _until(lambda: runner._sm.current_state is SessionState.READY)
+    runner.start_session({})
+    assert runner.descriptor()["recording"]["enabled"] is True
+
+
 async def test_an_unknown_generation_is_refused_and_the_session_stays_ready(
     runner: Runner,
 ) -> None:

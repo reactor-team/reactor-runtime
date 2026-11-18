@@ -49,11 +49,13 @@ class ServiceComponent(Protocol):
 class RecordingConfig:
     """The recorder's tunables, drawn from the manifest's ``recording:`` block.
 
-    A model with no ``recording:`` block records nothing (``enabled`` is
-    ``False``); flipping ``enabled`` on is enough for the common single-track
-    case. ``video_track`` / ``audio_track`` only need naming when the model
-    declares more than one track of that kind — otherwise the recorder picks the
-    lone track of each kind automatically. The encoder fields surface straight
+    Every streamed session is recorded by default, so a model with no
+    ``recording:`` block records at these defaults; ``enabled: false`` turns
+    recording off. A stepped session is never recorded: its media reaches the
+    client in each step's result. ``video_track`` / ``audio_track`` only need
+    naming when the model declares more than one track of that kind — otherwise
+    the recorder picks the lone track of each kind automatically, and a model
+    that emits no video records nothing. The encoder fields surface straight
     into the ffmpeg invocation.
 
     A recording keeps one size for the whole session: ``target_width`` by
@@ -63,7 +65,8 @@ class RecordingConfig:
     kept, and centred on black. Each session picks its size again.
 
     Attributes:
-        enabled: Whether the runtime records the session at all.
+        enabled: Whether the runtime records streamed sessions. ``True`` by
+            default.
         chunk_seconds: HLS segment length and the forced-keyframe interval.
         clip_max_seconds: Upper bound a snap-clip request is capped to.
         skip_leading_black: Drop gap-fill frames before the first real frame and
@@ -74,7 +77,9 @@ class RecordingConfig:
         audio_track: The output track to record, or ``None`` to auto-pick the
             lone audio track (recording stays video-only when there is none).
         video_codec: ``"h264"`` or ``"h265"``.
-        video_preset: The libx264/libx265 preset.
+        video_preset: The libx264/libx265 preset. ``veryfast`` by default: a
+            lighter preset saves CPU but costs about twice the bitrate at the
+            same quality target.
         video_crf: The constant-rate-factor quality target.
         target_width: Fixed encode width. Used only when ``target_height`` is
             also set; otherwise both dimensions follow the session's first frame.
@@ -86,7 +91,7 @@ class RecordingConfig:
             fresh temporary directory.
     """
 
-    enabled: bool = False
+    enabled: bool = True
     chunk_seconds: int = 4
     clip_max_seconds: int = 300
     skip_leading_black: bool = True
@@ -404,7 +409,8 @@ class RuntimeConfig:
         exit_timeout: Seconds the orderly shutdown may take, on top of any
             session drain it includes, before the process is forced to exit.
         orphan_timeout: Seconds a session may stay client-less before it closes.
-        recording: The recorder's configuration; disabled by default.
+        recording: The recorder's configuration; streamed sessions are
+            recorded by default.
         step_results: How each finished step is saved; disabled by default.
         livekit: How a LiveKit room reaches the model; empty by default.
         model_server: The model half of a model split in two, from

@@ -115,11 +115,34 @@ def test_load_config_rejects_a_document_that_is_not_a_mapping(tmp_path: Path) ->
         load_config(manifest)
 
 
-def test_load_config_leaves_recording_at_defaults_when_absent(tmp_path: Path) -> None:
+def test_load_config_records_at_the_defaults_when_the_block_is_absent(tmp_path: Path) -> None:
     manifest = tmp_path / "reactor.yaml"
     manifest.write_text("runtime:\n  import: pipeline:Demo\n")
 
-    assert load_config(manifest).recording == RecordingConfig()
+    recording = load_config(manifest).recording
+    assert recording == RecordingConfig()
+    assert recording.enabled is True
+    assert recording.video_preset == "veryfast"
+
+
+def test_load_config_turns_recording_off_when_the_block_says_so(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text("runtime:\n  import: pipeline:Demo\n  recording:\n    enabled: false\n")
+
+    recording = load_config(manifest).recording
+    assert recording.enabled is False
+    assert recording.chunk_seconds == RecordingConfig().chunk_seconds
+
+
+def test_load_config_keeps_an_explicit_preset(tmp_path: Path) -> None:
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(
+        "runtime:\n  import: pipeline:Demo\n  recording:\n    video:\n      preset: ultrafast\n"
+    )
+
+    recording = load_config(manifest).recording
+    assert recording.enabled is True
+    assert recording.video_preset == "ultrafast"
 
 
 def test_load_config_reads_the_recording_block_nested_under_runtime(tmp_path: Path) -> None:
@@ -172,14 +195,14 @@ def test_load_config_prefers_the_nested_recording_block(tmp_path: Path) -> None:
         "  recording:\n"
         "    chunk_seconds: 9\n"
         "recording:\n"
-        "  enabled: true\n"
+        "  enabled: false\n"
         "  chunk_seconds: 4\n"
     )
 
     recording = load_config(manifest).recording
 
     assert recording.chunk_seconds == 9
-    assert recording.enabled is False
+    assert recording.enabled is True
 
 
 def test_load_config_ignores_unknown_recording_keys(tmp_path: Path) -> None:
