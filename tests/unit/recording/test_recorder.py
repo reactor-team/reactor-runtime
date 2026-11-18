@@ -78,37 +78,39 @@ def test_manifest_serves_a_closed_range(tmp_path: Path) -> None:
     assert result.body.endswith("#EXT-X-ENDLIST\n")
 
 
-def test_manifest_is_pending_until_the_boundary_closes(tmp_path: Path) -> None:
+def test_manifest_is_pending_while_the_boundary_is_being_written(tmp_path: Path) -> None:
     recorder = _serving_recorder(tmp_path)
-    # The boundary segment exists but has no successor and no completion marker.
+    # The encoder writes a segment under a temporary name until it is whole.
+    _write_segments(tmp_path, "init.mp4", "chunk_00000.m4s", "chunk_00001.m4s.tmp")
+    assert isinstance(recorder.manifest(_SID, 0.0, 8.0), Pending)
+
+
+def test_manifest_serves_a_segment_as_soon_as_it_is_written(tmp_path: Path) -> None:
+    # The boundary segment has no successor and the recording is not finished:
+    # its file under the final name is enough.
+    recorder = _serving_recorder(tmp_path)
     _write_segments(tmp_path, "init.mp4", "chunk_00000.m4s")
-    assert isinstance(recorder.manifest(_SID, 0.0, 4.0), Pending)
-
-
-def test_manifest_serves_a_finished_recordings_final_segment(tmp_path: Path) -> None:
-    recorder = _serving_recorder(tmp_path)
-    _write_segments(tmp_path, "init.mp4", "chunk_00000.m4s", ".complete")
-    assert isinstance(recorder.manifest(_SID, 0.0, 4.0), ClipManifest)
+    assert isinstance(recorder.manifest(_SID, 0.0, 3.667), ClipManifest)
 
 
 def test_manifest_never_serves_the_final_segment_of_an_incomplete_recording(
     tmp_path: Path,
 ) -> None:
-    # The encoder could not close the output, so the last segment is unfinished.
-    # A range ending there is gone, not pending forever; earlier ranges, closed
-    # by their successor, are still served.
+    # The encoder could not close the output, so the last segment never reached
+    # its final name. A range ending there is gone, not pending forever; earlier
+    # ranges are still served.
     recorder = _serving_recorder(tmp_path)
-    _write_segments(tmp_path, "init.mp4", "chunk_00000.m4s", "chunk_00001.m4s", ".incomplete")
+    _write_segments(tmp_path, "init.mp4", "chunk_00000.m4s", "chunk_00001.m4s.tmp", ".incomplete")
     assert isinstance(recorder.manifest(_SID, 0.0, 4.0), ClipManifest)
     assert isinstance(recorder.manifest(_SID, 0.0, 8.0), Gone)
 
 
-def test_manifest_serves_a_segment_sealed_while_idle(tmp_path: Path) -> None:
-    # A segment sealed for a waiting clip has no successor yet and the recording
-    # has not finished, but the seal marker says it is closed.
+def test_manifest_waits_for_init_to_carry_its_headers(tmp_path: Path) -> None:
+    # The encoder creates init empty and fills it as the first segment ends.
     recorder = _serving_recorder(tmp_path)
-    _write_segments(tmp_path, "init.mp4", "chunk_00000.m4s", "chunk_00000.sealed")
-    assert isinstance(recorder.manifest(_SID, 0.0, 3.667), ClipManifest)
+    session_dir = _write_segments(tmp_path, "chunk_00000.m4s")
+    (session_dir / "init.mp4").write_bytes(b"")
+    assert isinstance(recorder.manifest(_SID, 0.0, 4.0), Pending)
 
 
 def test_manifest_is_gone_for_an_unknown_recording(tmp_path: Path) -> None:
@@ -142,6 +144,13 @@ def test_chunk_path_rejects_a_non_artifact_name(tmp_path: Path) -> None:
     recorder = _serving_recorder(tmp_path)
     _write_segments(tmp_path, "init.mp4")
     assert recorder.chunk_path(_SID, "secrets.txt") is None
+
+
+def test_chunk_path_never_serves_a_segment_being_written(tmp_path: Path) -> None:
+    recorder = _serving_recorder(tmp_path)
+    _write_segments(tmp_path, "init.mp4", "chunk_00000.m4s.tmp")
+    assert recorder.chunk_path(_SID, "chunk_00000.m4s.tmp") is None
+    assert recorder.chunk_path(_SID, "chunk_00000.m4s") is None
 
 
 def test_chunk_path_is_none_for_a_missing_segment(tmp_path: Path) -> None:
@@ -247,8 +256,8 @@ def test_a_landed_clip_notifies_the_consumer(tmp_path: Path) -> None:
         assert recorder._session_dir is not None
         recorder._markers.advance(1.0)
         clip = recorder.request_clip(30.0)
-        # The boundary segment lands once the encoder has rolled to the next one.
-        for name in ("init.mp4", "chunk_00000.m4s", "chunk_00001.m4s"):
+        # The boundary segment lands once the encoder has written it whole.
+        for name in ("init.mp4", "chunk_00000.m4s"):
             (recorder._session_dir / name).write_bytes(b"data")
         recorder._fire_ready_clips()
         assert fired == [clip]
@@ -295,35 +304,37 @@ def test_closed_chunks_are_announced_in_order(tmp_path: Path) -> None:
     fired: list[tuple[str, int]] = []
     recorder = _serving_recorder(tmp_path)
     recorder._on_chunk_ready = lambda rec, idx: fired.append((rec, idx))
-    session_dir = _write_segments(tmp_path, "init.mp4", "chunk_00000.m4s", "chunk_00001.m4s")
+    session_dir = _write_segments(tmp_path, "init.mp4", "chunk_00000.m4s", "chunk_00001.m4s.tmp")
     recorder._session_dir = session_dir
     recorder._session_id = _SID
 
-    # init is readable and chunk 0 is closed (chunk 1 is its successor); chunk 1
-    # has no successor yet, so it is not announced.
+    # init and chunk 0 are written; chunk 1 is still under its temporary name.
     recorder._fire_ready_chunks()
     assert fired == [(_SID, -1), (_SID, 0)]
 
-    # chunk 1 closes once chunk 2 appears; earlier segments are not re-announced.
-    (session_dir / "chunk_00002.m4s").write_bytes(b"data")
+    # chunk 1 is announced once it is renamed; earlier segments are not again.
+    (session_dir / "chunk_00001.m4s.tmp").rename(session_dir / "chunk_00001.m4s")
     recorder._fire_ready_chunks()
     assert fired == [(_SID, -1), (_SID, 0), (_SID, 1)]
 
 
-def test_the_final_chunk_is_announced_on_completion(tmp_path: Path) -> None:
+def test_init_is_announced_with_the_first_segment(tmp_path: Path) -> None:
+    # The encoder creates init empty and fills it before it renames the first
+    # segment, so init is announced together with segment 0, never before.
     fired: list[tuple[str, int]] = []
     recorder = _serving_recorder(tmp_path)
     recorder._on_chunk_ready = lambda rec, idx: fired.append((rec, idx))
-    session_dir = _write_segments(tmp_path, "init.mp4", "chunk_00000.m4s")
+    session_dir = _write_segments(tmp_path, "chunk_00000.m4s.tmp")
+    (session_dir / "init.mp4").write_bytes(b"")
     recorder._session_dir = session_dir
     recorder._session_id = _SID
 
-    # No successor yet, so only the init segment is announced.
     recorder._fire_ready_chunks()
-    assert fired == [(_SID, -1)]
+    (session_dir / "init.mp4").write_bytes(b"data")
+    recorder._fire_ready_chunks()
+    assert fired == []
 
-    # The completion marker closes the final segment.
-    (session_dir / ".complete").write_bytes(b"")
+    (session_dir / "chunk_00000.m4s.tmp").rename(session_dir / "chunk_00000.m4s")
     recorder._fire_ready_chunks()
     assert fired == [(_SID, -1), (_SID, 0)]
 
@@ -841,6 +852,43 @@ def test_encodes_segments_and_serves_a_manifest(tmp_path: Path) -> None:
         recorder.stop()
 
 
+def test_a_segment_is_announced_whole_as_soon_as_the_encoder_writes_it(tmp_path: Path) -> None:
+    # The encoder writes segment 0 when the media reaches the boundary of
+    # segment 1. It is announced then, whole and with init filled, rather than
+    # once segment 1 is written too, a segment later.
+    seen: dict[int, tuple[float, int, int, bool]] = {}
+    recorder = Recorder(RecordingConfig(enabled=True, chunk_seconds=1, recording_dir=str(tmp_path)))
+
+    def on_chunk_ready(_: str, idx: int) -> None:
+        if idx != 0 or recorder._markers is None:
+            return
+        session_dir = tmp_path / _SID
+        seen[idx] = (
+            recorder._markers.now_marker(),
+            (session_dir / "chunk_00000.m4s").stat().st_size,
+            (session_dir / "init.mp4").stat().st_size,
+            (session_dir / "chunk_00001.m4s").exists(),
+        )
+
+    recorder._on_chunk_ready = on_chunk_ready
+    recorder.start(_SID)
+    try:
+        deadline = time.monotonic() + 10.0
+        while 0 not in seen and time.monotonic() < deadline:
+            _emit(recorder, emissions=1, frames=2)
+            time.sleep(2 / 30)
+    finally:
+        recorder.stop()
+
+    assert 0 in seen, "segment 0 was never announced within 10 s"
+    announced_at, size, init_size, successor_written = seen[0]
+    assert announced_at < 2.0
+    assert not successor_written
+    assert size == (tmp_path / _SID / "chunk_00000.m4s").stat().st_size
+    assert init_size > 0
+    assert not list((tmp_path / _SID).glob("*.tmp"))
+
+
 @pytest.mark.parametrize("attempt", range(3))
 def test_records_a_real_frame_size_with_audio(tmp_path: Path, attempt: int) -> None:
     # A recording at a size a model actually emits, with audio alongside it, has to
@@ -940,7 +988,8 @@ def test_a_clip_waiting_on_an_idle_segment_is_sealed_and_recording_resumes_after
 
         assert _wait_for(lambda: fired == [clip])
         assert isinstance(recorder.manifest(_SID, clip.start_marker, clip.end_marker), ClipManifest)
-        assert (session_dir / "chunk_00000.sealed").is_file()
+        assert (session_dir / "chunk_00000.m4s").is_file()
+        assert (session_dir / "part_00001.start").is_file()
         # The rest of the sealed segment is skipped, so the next frame lands on
         # the boundary where segment 1 begins.
         assert recorder._markers.now_marker() == 1.0
@@ -1003,7 +1052,7 @@ def test_an_idle_segment_with_no_clip_waiting_stays_open(tmp_path: Path) -> None
         time.sleep(0.6)
         assert recorder._encoder is encoder
         assert recorder._markers.now_marker() == pytest.approx(20 / 30)
-        assert not list((tmp_path / _SID).glob("*.sealed"))
+        assert not list((tmp_path / _SID).glob("part_*.start"))
     finally:
         recorder.stop()
 
@@ -1023,7 +1072,7 @@ def test_the_gap_between_emissions_is_not_taken_for_a_pause(tmp_path: Path) -> N
             time.sleep(0.25)
             _emit(recorder, emissions=1, frames=15)
             assert recorder._encoder is encoder
-        assert not list((tmp_path / _SID).glob("*.sealed"))
+        assert not list((tmp_path / _SID).glob("part_*.start"))
     finally:
         recorder.stop()
 
@@ -1047,7 +1096,7 @@ def test_a_regular_cadence_slower_than_the_idle_floor_is_not_taken_for_a_pause(
             time.sleep(0.4)
             _emit(recorder, emissions=1, frames=3)
             assert recorder._encoder is encoder
-        assert not list((tmp_path / _SID).glob("*.sealed"))
+        assert not list((tmp_path / _SID).glob("part_*.start"))
     finally:
         recorder.stop()
 
@@ -1120,7 +1169,6 @@ def test_a_part_whose_init_differs_is_withheld(tmp_path: Path) -> None:
         tmp_path,
         "init.mp4",
         "chunk_00000.m4s",
-        "chunk_00000.sealed",
         "part_00001.start",
         "chunk_00001.m4s",
         "chunk_00002.m4s",
@@ -1290,13 +1338,12 @@ def test_start_clears_a_stale_completion_marker_from_a_reused_id(
 
 
 def test_start_under_a_reused_id_drops_everything_the_earlier_run_left(tmp_path: Path) -> None:
-    # An earlier run's seal and part markers would close or misattribute this
-    # run's segments, and its segments would stand in for this run's
-    # successors, so a reused id starts from an empty directory.
+    # An earlier run's part markers would misattribute this run's segments, and
+    # its segments would read as this run's before they are written, so a
+    # reused id starts from an empty directory.
     session_dir = tmp_path / _SID
     session_dir.mkdir(parents=True)
     leftovers = [
-        "chunk_00000.sealed",
         "part_00001.start",
         part_init_filename(1),
         "init.mp4",
