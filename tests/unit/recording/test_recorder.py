@@ -880,6 +880,7 @@ def test_a_segment_is_announced_whole_as_soon_as_the_encoder_writes_it(tmp_path:
     finally:
         recorder.stop()
 
+    assert 0 in seen, "segment 0 was never announced within 10 s"
     announced_at, size, init_size, successor_written = seen[0]
     assert announced_at < 2.0
     assert not successor_written

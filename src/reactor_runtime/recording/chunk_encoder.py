@@ -97,6 +97,14 @@ class ChunkEncoder:
     still covers the stretch of the grid its index names, and the earlier
     part's ``init.mp4`` decodes it.
 
+    Output contract: a segment is written under a temporary name
+    (``chunk_NNNNN.m4s.tmp``) and renamed to ``chunk_NNNNN.m4s`` only once it
+    is whole, which happens when the media reaches the next segment boundary or
+    :meth:`stop` writes the trailer. A part's init is created empty and filled
+    before that part's first segment is renamed. So a segment under its final
+    name is complete, and the init that decodes it is readable with it. A
+    segment left unclosed by a failed :meth:`stop` never reaches its final name.
+
     The recorded timeline is media time, not wall-clock time: a frame is stamped
     at the next position on a fixed *frame_rate* grid and an audio block at the
     sample that follows the last one. The recorder resamples each chunk onto that
@@ -301,10 +309,8 @@ class ChunkEncoder:
                 "hls_segment_type": "fmp4",
                 "hls_time": str(config.chunk_seconds),
                 "hls_list_size": "0",
-                # The muxer writes a segment file in pieces once the segment
-                # ends. Writing it under a temporary name and renaming it when
-                # whole means a segment under its final name is always complete,
-                # which is what the recorder serves and announces on.
+                # The muxer writes a segment file in pieces; temp_file gives
+                # the rename the class's output contract rests on.
                 "hls_flags": "independent_segments+temp_file",
                 "hls_fmp4_init_filename": init_name,
                 "hls_segment_filename": str(self._output_dir / _SEGMENT_PATTERN),

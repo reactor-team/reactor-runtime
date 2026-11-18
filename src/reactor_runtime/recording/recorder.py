@@ -12,10 +12,10 @@ Separately, once that boundary segment has actually landed on disk the recorder
 notifies an external consumer (the runner journals it on ``/events``), so a
 director learns a clip is genuinely fetchable rather than merely requested.
 
-A segment is fetchable as soon as its file is on disk: the encoder writes each
-segment under a temporary name and renames it once the segment is whole, which
-happens when the media reaches the next segment boundary. A model that stops
-emitting (a pause, say) would leave a requested clip's boundary segment open
+A segment is fetchable as soon as it is on disk under its final name, which
+:class:`~reactor_runtime.recording.chunk_encoder.ChunkEncoder`'s output
+contract makes it only once whole, at the next segment boundary. A model that
+stops emitting (a pause, say) would leave a requested clip's boundary segment open
 indefinitely, so the recorder seals it instead: once the output has been idle
 for longer than the model's own cadence and a clip is waiting, it closes the
 encoder, which writes the segment out at its real length, and moves the timeline
@@ -1257,8 +1257,7 @@ class Recorder:
         """Return whether the boundary segment is on disk and closed."""
         if not self._init_ready(session_dir):
             return False
-        # The encoder renames a segment to its final name only once it is
-        # whole, so a segment under that name is closed.
+        # A segment under its final name is closed (ChunkEncoder's output contract).
         boundary = session_dir / f"chunk_{boundary_idx:05d}.m4s"
         if not boundary.is_file():
             return False
@@ -1284,9 +1283,8 @@ class Recorder:
     @staticmethod
     def _init_ready(session_dir: Path) -> bool:
         """Return whether the init segment carries its codec headers yet."""
-        # The encoder creates init empty and writes its headers when the first
-        # segment ends, before it renames that segment to its final name. So
-        # the first segment under its final name is what proves init whole.
+        # Init is filled before segment 0 gets its final name (ChunkEncoder's
+        # output contract), so segment 0 under that name proves init whole.
         init = session_dir / _INIT_FILENAME
         try:
             if init.stat().st_size == 0:
