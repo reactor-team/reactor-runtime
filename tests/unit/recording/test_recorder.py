@@ -888,6 +888,35 @@ def test_a_segment_is_announced_whole_as_soon_as_the_encoder_writes_it(tmp_path:
     assert not list((tmp_path / _SID).glob("*.tmp"))
 
 
+def test_each_session_takes_its_size_from_its_own_first_frame(tmp_path: Path) -> None:
+    # One session keeps one size, and frames of another size are letterboxed
+    # into it. The next session starts over from its own first frame.
+    second_sid = "00000000-0000-0000-0000-000000000002"
+    recorder = Recorder(RecordingConfig(enabled=True, chunk_seconds=1, recording_dir=str(tmp_path)))
+    for sid, sizes in ((_SID, [(64, 48), (48, 64)]), (second_sid, [(48, 64)])):
+        recorder.start(sid)
+        try:
+            for width, height in sizes:
+                for _ in range(15):
+                    recorder.on_chunk(
+                        MediaChunk(
+                            bundle=_av_bundle(width, height), fps=30.0, n_frames=1, wait=True
+                        )
+                    )
+        finally:
+            recorder.stop()
+    recorder.close()
+
+    for sid, size in ((_SID, (64, 48)), (second_sid, (48, 64))):
+        session_dir = tmp_path / sid
+        merged = tmp_path / f"{sid}.mp4"
+        parts = [session_dir / "init.mp4", *sorted(session_dir.glob("chunk_*.m4s"))]
+        merged.write_bytes(b"".join(part.read_bytes() for part in parts))
+        with av.open(str(merged)) as container:
+            stream = container.streams.video[0]
+            assert (stream.width, stream.height) == size
+
+
 @pytest.mark.parametrize("attempt", range(3))
 def test_records_a_real_frame_size_with_audio(tmp_path: Path, attempt: int) -> None:
     # A recording at a size a model actually emits, with audio alongside it, has to

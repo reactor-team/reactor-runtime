@@ -47,6 +47,11 @@ _PIXEL_FORMAT = "yuv420p"
 _PROFILE = "Main"
 
 
+def _even(size: int) -> int:
+    """Return *size* rounded down to an even number, at least 2."""
+    return max(2, size - size % 2)
+
+
 class EncoderStoppedError(RuntimeError):
     """A feed arrived after :meth:`ChunkEncoder.stop` closed the output.
 
@@ -159,6 +164,10 @@ class ChunkEncoder:
         self._lock = threading.Lock()
         self._failed = False
         self._stopped = False
+        # The letterbox a frame of another size is drawn on, and the size of
+        # the picture inside it.
+        self._canvas: npt.NDArray[np.uint8] | None = None
+        self._canvas_fit: tuple[int, int] | None = None
 
     @property
     def output_dir(self) -> Path:
@@ -178,11 +187,15 @@ class ChunkEncoder:
     def feed_video(self, frame: npt.NDArray[Any]) -> None:
         """Encode a single ``(H, W, 3)`` ``uint8`` frame at the next grid position.
 
-        A frame sized differently from the one the encoder opened with is scaled
-        onto that size, so a changing resolution never breaks the recording. A
-        video-only recording gets its slot of silence here too, so the audio
-        timeline advances in step with the video whether or not the model emits
-        any sound.
+        The first frame opens the output at *frame_size*, else at the configured
+        target size, else at the frame's own size, with the width and height
+        rounded down to even numbers, which the 4:2:0 output needs. A frame of
+        any other size is letterboxed onto that canvas: scaled to fit with its
+        aspect ratio kept, and centred on black. So a model that changes its
+        resolution or aspect ratio mid-recording is neither stretched nor breaks
+        the recording. A video-only recording gets its slot of silence here too,
+        so the audio timeline advances in step with the video whether or not the
+        model emits any sound.
 
         Raises:
             ValueError: If *frame* is not a three-channel image.
@@ -202,9 +215,9 @@ class ChunkEncoder:
                 if self._frame_size is not None:
                     self._open(*self._frame_size)
                 elif width and height:
-                    self._open(int(width), int(height))
+                    self._open(_even(int(width)), _even(int(height)))
                 else:
-                    self._open(int(frame.shape[1]), int(frame.shape[0]))
+                    self._open(_even(int(frame.shape[1])), _even(int(frame.shape[0])))
             try:
                 self._write_video(frame)
                 if not self._has_audio:
@@ -353,11 +366,40 @@ class ChunkEncoder:
         """Encode one frame at the next grid position and mux what comes out."""
         assert self._container is not None
         assert self._video is not None
-        picture = av.VideoFrame.from_ndarray(np.ascontiguousarray(frame), format="rgb24")
+        picture = av.VideoFrame.from_ndarray(self._fit(frame), format="rgb24")
         picture.pts = self._video_pts
         picture.time_base = Fraction(1, self._frame_rate)
         self._video_pts += 1
         self._container.mux(self._video.encode(picture))
+
+    def _fit(self, frame: npt.NDArray[Any]) -> npt.NDArray[Any]:
+        """Return *frame* letterboxed onto the opened size, or as it is when it matches."""
+        assert self._frame_size is not None
+        width, height = self._frame_size
+        frame_height, frame_width = int(frame.shape[0]), int(frame.shape[1])
+        if (frame_width, frame_height) == (width, height):
+            return np.ascontiguousarray(frame)
+        scale = min(width / frame_width, height / frame_height)
+        fit = (
+            min(width, max(1, round(frame_width * scale))),
+            min(height, max(1, round(frame_height * scale))),
+        )
+        fitted = (
+            av.VideoFrame.from_ndarray(np.ascontiguousarray(frame), format="rgb24")
+            .reformat(width=fit[0], height=fit[1])
+            .to_ndarray()
+        )
+        if fit == (width, height):
+            return fitted
+        # The bars stay black between frames of one size, so only a new size
+        # needs a fresh canvas.
+        if self._canvas is None or self._canvas_fit != fit:
+            self._canvas = np.zeros((height, width, 3), dtype=np.uint8)
+            self._canvas_fit = fit
+        top = (height - fit[1]) // 2
+        left = (width - fit[0]) // 2
+        self._canvas[top : top + fit[1], left : left + fit[0]] = fitted
+        return self._canvas
 
     def _write_audio(self, samples: npt.NDArray[Any]) -> None:
         """Encode PCM samples at the next audio position and mux what comes out."""
