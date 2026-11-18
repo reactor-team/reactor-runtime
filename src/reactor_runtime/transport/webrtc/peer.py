@@ -154,7 +154,7 @@ from reactor_runtime.core import (
     TrackKind,
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion, sniff
-from reactor_runtime.transport.step_codecs import BY_SDP_NAME, STEP_FRAME_CODECS
+from reactor_runtime.transport.step_codecs import BY_SDP_NAME, STEP_FRAME_CODECS, video_codecs
 from reactor_runtime.transport.webrtc.config import WebRtcConfig
 from reactor_runtime.transport.webrtc.frame_stages import FrameStageWindow
 from reactor_runtime.transport.webrtc.frames import (
@@ -368,12 +368,10 @@ class StepFrameCodecs:
 def _step_frame_codecs() -> StepFrameCodecs:
     """Return the codecs this process can carry step frames in, read once.
 
-    They come from the binding's standalone video codecs. A binding that has
-    none, or whose capabilities cannot be read, carries every step frame raw.
+    They come from the binding's standalone video codecs. When their
+    capabilities cannot be read, a warning is logged and every step frame is
+    raw.
     """
-    video_codecs = getattr(rw, "VideoCodecs", None)
-    if video_codecs is None:
-        return StepFrameCodecs()
     try:
         capabilities = video_codecs().capabilities()
     except Exception:

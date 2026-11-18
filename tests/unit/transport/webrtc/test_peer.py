@@ -1663,15 +1663,33 @@ def test_every_track_is_raw_without_step_frame_codecs() -> None:
     assert set(peer.step_frame_encodings) == {"main_video", "webcam", "main_audio"}
 
 
-def test_step_frame_codecs_are_empty_without_the_bindings_standalone_codecs(
-    monkeypatch: pytest.MonkeyPatch,
+def test_step_frame_codecs_are_empty_and_warn_when_the_capabilities_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.delattr(peer_module.rw, "VideoCodecs", raising=False)
+    class _Broken:
+        def capabilities(self) -> Any:
+            raise RuntimeError("no codec backend")
+
+    monkeypatch.setattr(peer_module, "video_codecs", _Broken)
     peer_module._step_frame_codecs.cache_clear()
     try:
-        assert not peer_module._step_frame_codecs()
+        with caplog.at_level("WARNING", logger=peer_module.logger.name):
+            assert not peer_module._step_frame_codecs()
     finally:
         peer_module._step_frame_codecs.cache_clear()
+    assert "step frames stay raw" in caplog.text
+
+
+def test_step_frame_codecs_read_the_real_bindings_capabilities() -> None:
+    """The pinned binding's codec names resolve, and VP8 is carried both ways everywhere."""
+    peer_module._step_frame_codecs.cache_clear()
+    try:
+        codecs = peer_module._step_frame_codecs()
+    finally:
+        peer_module._step_frame_codecs.cache_clear()
+
+    assert "VP8" in codecs.encode
+    assert "VP8" in codecs.decode
 
 
 def test_step_frame_codecs_read_each_direction_from_the_bindings_capabilities(
@@ -1688,7 +1706,7 @@ def test_step_frame_codecs_read_each_direction_from_the_bindings_capabilities(
         def capabilities(self) -> _Capabilities:
             return _Capabilities()
 
-    monkeypatch.setattr(peer_module.rw, "VideoCodecs", _VideoCodecs, raising=False)
+    monkeypatch.setattr(peer_module, "video_codecs", _VideoCodecs)
     peer_module._step_frame_codecs.cache_clear()
     try:
         codecs = peer_module._step_frame_codecs()

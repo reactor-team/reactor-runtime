@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import reactor_webrtc as rw
 
-from reactor_runtime.transport.step_codecs import BY_ENCODING, BY_SDP_NAME, STEP_FRAME_CODECS
+from reactor_runtime.transport.step_codecs import (
+    BY_ENCODING,
+    BY_SDP_NAME,
+    STEP_FRAME_CODECS,
+    video_codecs,
+)
 from reactor_wire.v1 import step_pb2
 
 
@@ -35,3 +40,7 @@ def test_each_sdp_name_is_the_bindings_codec_name() -> None:
 
     for codec in STEP_FRAME_CODECS:
         assert variants[codec.sdp_name] == codec.codec
+
+
+def test_the_video_codec_backends_are_collected_once() -> None:
+    assert video_codecs() is video_codecs()
