@@ -4245,6 +4245,42 @@ async def _recording_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     return runner
 
 
+async def test_a_uuid_session_id_is_the_recording_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runner = await _recording_runner(monkeypatch, tmp_path)
+    session_id = "0b0e9b3c-5c0e-4bde-9a43-1c2f0d6e7a18"
+    try:
+        runner.start_session({"session_id": session_id})
+        assert runner.recorder._session_id == session_id
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.parametrize("session_id", ["endurance-0", "0B0E9B3C-5C0E-4BDE-9A43-1C2F0D6E7A18"])
+async def test_a_session_id_that_is_not_a_lowercase_uuid_is_recorded_under_a_fresh_one(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    session_id: str,
+) -> None:
+    # The recorder names a directory after its id and refuses any other shape.
+    # Recording is on by default, so such a session is still recorded.
+    runner = await _recording_runner(monkeypatch, tmp_path)
+    try:
+        with caplog.at_level(logging.INFO, logger="reactor_runtime.runner.runner"):
+            runner.start_session({"session_id": session_id})
+        recording_id = runner.recorder._session_id
+        assert runner.recorder.recording
+        assert recording_id is not None
+        assert str(uuid.UUID(recording_id)) == recording_id
+        assert (tmp_path / recording_id).is_dir()
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert any("recording it under a fresh id" in r.message for r in caplog.records)
+    finally:
+        await runner.stop()
+
+
 async def test_recorder_starts_on_session_start_and_stops_on_close(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

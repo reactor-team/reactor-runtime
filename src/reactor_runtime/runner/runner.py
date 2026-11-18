@@ -145,11 +145,20 @@ def _recording_id_from(params: Mapping[str, Any]) -> str:
     """Resolve a session's recording id from its start parameters.
 
     A ``session_id`` in *params* is adopted as the recording id, so a caller can
-    align both clips and logs with the id it knows the session by. Absent one, a
-    fresh id is minted per session so sequential recordings in a reused process
-    never overwrite each other.
+    align both clips and logs with the id it knows the session by; a recording
+    itself takes only a lowercase UUID (see ``Runner._start_recorder``). Absent
+    one, a fresh id is minted per session so sequential recordings in a reused
+    process never overwrite each other.
     """
     return str(params.get("session_id") or uuid.uuid4())
+
+
+def _is_recording_id(session_id: str) -> bool:
+    """Return whether *session_id* is a lowercase UUID, the only id a recording takes."""
+    try:
+        return str(uuid.UUID(session_id)) == session_id
+    except ValueError:
+        return False
 
 
 # The most characters of an error's text the journal carries. A failed load can
@@ -2331,9 +2340,21 @@ class Runner(ServiceComponent, ConnectionSink):
         workers. Recording must never break the session: a recorder that fails to
         start logs and is left disabled rather than raising into the transition
         path.
+
+        The recording is stored and addressed under the session's id when that
+        id is a lowercase UUID. The recorder names a directory after it and
+        takes no other shape, so a session started under any other id is
+        recorded under a fresh UUID, which ``chunk_ready`` and every clip carry.
         """
+        recording_id = self._recording_id
+        if not _is_recording_id(recording_id):
+            recording_id = str(uuid.uuid4())
+            logger.info(
+                "session id is not a lowercase UUID; recording it under a fresh id",
+                recording_id=recording_id,
+            )
         try:
-            self._recorder.start(self._recording_id)
+            self._recorder.start(recording_id)
         except Exception:
             logger.exception("failed to start the recorder; continuing without recording")
 
