@@ -330,9 +330,10 @@ restart the loop). Weights are still located with `get_weights_path()` (now impo
 from `reactor_runtime`); it returns `$REACTOR_WEIGHTS_PATH` or
 `~/.cache/reactor_registry`.
 
-Recording needs nothing from the model either: the `recording:` block in
-`reactor.yaml` configures the recorder, and clip requests are answered off the
-runtime's own surface. Keep the block as it is.
+Recording needs nothing from the model either: every streamed session is
+recorded by default, the `recording:` block in `reactor.yaml` tunes the
+recorder or turns it off (`enabled: false`), and clip requests are answered off
+the runtime's own surface. Keep an existing block as it is.
 
 Once the breaks above are cleared the model should import, `load`, and run; a
 `reactor.yaml` naming the `ReactorApp` via `runtime.import` is all the runtime

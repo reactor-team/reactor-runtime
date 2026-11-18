@@ -38,7 +38,7 @@ def test_runtime_config_requires_a_model_ref_and_defaults_the_rest() -> None:
     assert cfg.port == 8080
     assert cfg.grace_period == 30.0
     assert cfg.recording == RecordingConfig()
-    assert cfg.recording.enabled is False
+    assert cfg.recording.enabled is True
 
 
 def test_runtime_config_overrides() -> None:

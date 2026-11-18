@@ -435,3 +435,27 @@ def test_the_gop_is_pinned_to_the_chunk_length(codec: str, key: str) -> None:
 
     assert "keyint=60:min-keyint=60" in options[key]
     assert "scenecut=0" in options[key]
+
+
+def test_x264_is_capped_at_eight_frame_threads() -> None:
+    options = _video_options(RecordingConfig(enabled=True, video_codec="h264"), 60)
+
+    assert "threads=8" in options["x264-params"].split(":")
+
+
+def test_a_segment_lands_within_a_few_frames_of_its_boundary(tmp_path: Path) -> None:
+    # Each x264 frame thread holds a frame back. Capped, a 1080p segment is on
+    # disk a handful of frames after its boundary, whatever the host's cores.
+    encoder = _encoder(tmp_path, chunk_seconds=1)
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    landed_at = -1
+    try:
+        for index in range(_FRAME_RATE * 2):
+            encoder.feed_video(frame)
+            if (tmp_path / "chunk_00000.m4s").exists():
+                landed_at = index
+                break
+    finally:
+        encoder.stop()
+
+    assert _FRAME_RATE <= landed_at <= _FRAME_RATE + 10

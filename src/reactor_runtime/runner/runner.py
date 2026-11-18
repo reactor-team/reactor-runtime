@@ -145,11 +145,20 @@ def _recording_id_from(params: Mapping[str, Any]) -> str:
     """Resolve a session's recording id from its start parameters.
 
     A ``session_id`` in *params* is adopted as the recording id, so a caller can
-    align both clips and logs with the id it knows the session by. Absent one, a
-    fresh id is minted per session so sequential recordings in a reused process
-    never overwrite each other.
+    align both clips and logs with the id it knows the session by; a recording
+    itself takes only a lowercase UUID (see ``Runner._start_recorder``). Absent
+    one, a fresh id is minted per session so sequential recordings in a reused
+    process never overwrite each other.
     """
     return str(params.get("session_id") or uuid.uuid4())
+
+
+def _is_recording_id(session_id: str) -> bool:
+    """Return whether *session_id* is a lowercase UUID, the only id a recording takes."""
+    try:
+        return str(uuid.UUID(session_id)) == session_id
+    except ValueError:
+        return False
 
 
 # The most characters of an error's text the journal carries. A failed load can
@@ -1540,7 +1549,15 @@ class Runner(ServiceComponent, ConnectionSink):
         serves, each as ``{"protocol": ..., "version": ...}``.
         ``generation`` names how the live session generates, ``"streamed"`` or
         ``"stepped"``, and reads ``"streamed"`` outside a session.
+        ``recording.enabled`` says whether the session is recorded: false for a
+        stepped session, which is never recorded, for a model that declares no
+        output video track, and for a model that turns recording off.
         """
+        starting = self._session_start.starting_input
+        running = self._sm.current_state in _RUNNING_STATES
+        generation = self._session_start.generation if running else Generation.STREAMED
+        # Before the model loads its tracks are unknown, so only the config decides.
+        emits_video = self._bridge is None or TrackKind.VIDEO in self._output_kinds.values()
         descriptor: dict[str, Any] = {
             "session_id": self._session_id,
             "state": self._sm.current_state.name.lower(),
@@ -1550,19 +1567,17 @@ class Runner(ServiceComponent, ConnectionSink):
             "selected_transport": self._selected_transport(),
             "transports": [dict(transport) for transport in self._transports],
             "recording": {
-                "enabled": self._cfg.recording.enabled,
+                "enabled": self._cfg.recording.enabled
+                and generation is Generation.STREAMED
+                and emits_video,
                 "chunk_seconds": self._cfg.recording.chunk_seconds,
             },
             "step_results": {"enabled": self._cfg.step_results.enabled},
+            # Always present, so a client can tell a runtime that honours the
+            # start's ``generation`` from one that ignores the key. Outside a
+            # session it names the mode a start without the key gets.
+            "generation": generation.value,
         }
-        starting = self._session_start.starting_input
-        running = self._sm.current_state in _RUNNING_STATES
-        # Always present, so a client can tell a runtime that honours the
-        # start's ``generation`` from one that ignores the key. Outside a
-        # session it names the mode a start without the key gets.
-        descriptor["generation"] = (
-            self._session_start.generation.value if running else Generation.STREAMED.value
-        )
         if starting is not None and running:
             descriptor["starting_input"] = {"applied": len(starting.as_commands())}
         if self._bridge is None:
@@ -2325,9 +2340,21 @@ class Runner(ServiceComponent, ConnectionSink):
         workers. Recording must never break the session: a recorder that fails to
         start logs and is left disabled rather than raising into the transition
         path.
+
+        The recording is stored and addressed under the session's id when that
+        id is a lowercase UUID. The recorder names a directory after it and
+        takes no other shape, so a session started under any other id is
+        recorded under a fresh UUID, which ``chunk_ready`` and every clip carry.
         """
+        recording_id = self._recording_id
+        if not _is_recording_id(recording_id):
+            recording_id = str(uuid.uuid4())
+            logger.info(
+                "session id is not a lowercase UUID; recording it under a fresh id",
+                recording_id=recording_id,
+            )
         try:
-            self._recorder.start(self._recording_id)
+            self._recorder.start(recording_id)
         except Exception:
             logger.exception("failed to start the recorder; continuing without recording")
 

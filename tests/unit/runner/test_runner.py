@@ -908,6 +908,17 @@ async def test_a_command_received_outside_the_protocol_is_checked_by_the_contrac
     assert (kind, request_id, code) == ("failed", "rpc-2", INVALID_COMMAND)
 
 
+async def _until_ready(runner: Runner) -> None:
+    """Wait for a stopped session to unwind to ready, finishing its recording included."""
+    for _ in range(500):
+        if runner._sm.current_state is SessionState.READY:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(
+        f"the session is {runner._sm.current_state}, not ready, 5 s after its stop"
+    )
+
+
 async def _until_journalled(runner: Runner, event: SessionEvent, count: int) -> None:
     for _ in range(200):
         if len(_moves(runner, event)) >= count:
@@ -1076,7 +1087,7 @@ async def test_a_wire_admitted_in_an_earlier_session_cannot_join_the_next(
     stale_id = started_runner.new_conn_id("webrtc")
     started_runner.offer_admitted(stale_id)
     started_runner.stop_session()
-    await asyncio.sleep(0.01)
+    await _until_ready(started_runner)
     _expect_state(started_runner, SessionState.READY)
     started_runner.start_session({})
 
@@ -1185,7 +1196,7 @@ async def test_the_stamped_state_tracks_the_lifecycle(started_runner: Runner) ->
     _expect_state(started_runner, SessionState.STREAMING)
     assert (log.get_state(), log.get_runtime_state()) == ("streaming", "serving")
     started_runner.stop_session()
-    await asyncio.sleep(0.01)
+    await _until_ready(started_runner)
     _expect_state(started_runner, SessionState.READY)
     assert (log.get_state(), log.get_runtime_state()) == ("ready", "available")
 
@@ -1231,7 +1242,7 @@ async def test_a_record_written_in_session_carries_state_and_id(
 async def test_closing_a_session_releases_the_stamped_id(started_runner: Runner) -> None:
     started_runner.start_session({"session_id": "11111111-2222-3333-4444-555555555555"})
     started_runner.stop_session()
-    await asyncio.sleep(0.01)
+    await _until_ready(started_runner)
     _expect_state(started_runner, SessionState.READY)
     # The process may host another session, so a stale id would misattribute it.
     await started_runner._drain_teardown()
@@ -1275,7 +1286,7 @@ async def _two_sessions_with_a_started_barrier(
         assert await asyncio.to_thread(started.wait, 2.0), "first session_started never ran"
         started.clear()
         runner.stop_session()
-        await asyncio.sleep(0.01)
+        await _until_ready(runner)
         _expect_state(runner, SessionState.READY)
         runner.start_session({"session_id": second_sid})
         assert await asyncio.to_thread(started.wait, 2.0), "second session_started never ran"
@@ -1326,7 +1337,7 @@ async def test_session_ended_hook_records_are_stamped(
         sid = "11111111-2222-3333-4444-555555555555"
         runner.start_session({"session_id": sid})
         runner.stop_session()
-        await asyncio.sleep(0.01)
+        await _until_ready(runner)
         _expect_state(runner, SessionState.READY)
         await runner._drain_teardown()
         # Released only after the hook, so the release doubles as its barrier.
@@ -1339,7 +1350,7 @@ async def test_session_ended_hook_records_are_stamped(
 async def test_a_second_session_stamps_its_own_id(started_runner: Runner) -> None:
     started_runner.start_session({"session_id": "11111111-1111-1111-1111-111111111111"})
     started_runner.stop_session()
-    await asyncio.sleep(0.01)
+    await _until_ready(started_runner)
     started_runner.start_session({"session_id": "22222222-2222-2222-2222-222222222222"})
     assert log.get_session_id() == "22222222-2222-2222-2222-222222222222"
 
@@ -1399,7 +1410,7 @@ async def test_the_runner_records_its_session_on_the_registry_it_was_given(
     try:
         runner.start_session({})
         runner.stop_session()
-        await asyncio.sleep(0.01)
+        await _until_ready(runner)
     finally:
         await runner.stop()
 
@@ -2631,7 +2642,7 @@ async def test_descriptor_renders_the_v0_shape(started_runner: Runner) -> None:
     assert caps["commands"] == []
     assert "emission_fps" not in caps
     # Recording metadata rides the descriptor so a consumer can mirror it at start.
-    assert descriptor["recording"] == {"enabled": False, "chunk_seconds": 4}
+    assert descriptor["recording"] == {"enabled": True, "chunk_seconds": 4}
 
 
 async def test_schema_renders_the_model_contract(started_runner: Runner) -> None:
@@ -2701,7 +2712,7 @@ async def test_session_end_crosses_into_the_model_after_cleanup(
     events = _record_reactor_events(started_runner, monkeypatch)
     started_runner.start_session({})
     started_runner.stop_session()
-    await asyncio.sleep(0.01)
+    await _until_ready(started_runner)
     assert started_runner._sm.current_state is SessionState.READY
     ended = [e for e in events if isinstance(e, SessionEnded)]
     assert len(ended) == 1
@@ -2953,7 +2964,7 @@ async def test_session_end_tears_down_connections(started_runner: Runner) -> Non
     started_runner.connection_opened(conn)
     _expect_state(started_runner, SessionState.STREAMING)
     started_runner.stop_session()
-    await asyncio.sleep(0.01)
+    await _until_ready(started_runner)
     _expect_state(started_runner, SessionState.READY)
     assert started_runner._connections.count == 0
     assert conn.closed is True
@@ -2993,7 +3004,7 @@ async def test_teardown_logs_how_long_the_connections_took_to_close(
     started_runner.connection_opened(FakeConnection(1))
     with caplog.at_level(logging.INFO, logger="reactor_runtime.runner.runner"):
         started_runner.stop_session()
-        await asyncio.sleep(0.01)
+        await _until_ready(started_runner)
     _expect_state(started_runner, SessionState.READY)
     (record,) = [r for r in caplog.records if r.getMessage() == "session connections closed"]
     fields = record.__dict__["reactor_fields"]
@@ -3012,7 +3023,7 @@ async def test_a_close_that_fails_logs_the_error_with_the_teardown_time_and_no_s
     started_runner.connection_opened(FailingClose(1))
     with caplog.at_level(logging.INFO, logger="reactor_runtime.runner.runner"):
         started_runner.stop_session()
-        await asyncio.sleep(0.01)
+        await _until_ready(started_runner)
     _expect_state(started_runner, SessionState.READY)
     messages = [r.getMessage() for r in caplog.records]
     assert "session connections closed" not in messages
@@ -3049,9 +3060,15 @@ async def test_stop_awaits_outstanding_teardown(monkeypatch: pytest.MonkeyPatch)
 async def test_drain_with_zero_grace_still_unwinds_to_ready(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # A session that is not recorded closes its wires alone, within the one
+    # turn of the loop a zero grace period allows.
     created_models.clear()
     monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
-    runner = Runner(RuntimeConfig(model_ref="fake:Model", grace_period=0))
+    runner = Runner(
+        RuntimeConfig(
+            model_ref="fake:Model", grace_period=0, recording=RecordingConfig(enabled=False)
+        )
+    )
     await runner.start()
     try:
         runner.start_session({})
@@ -3060,6 +3077,31 @@ async def test_drain_with_zero_grace_still_unwinds_to_ready(
         _expect_state(runner, SessionState.READY)
     finally:
         await runner.stop()
+
+
+async def test_a_recorded_session_drained_with_zero_grace_unwinds_by_the_stop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Finishing a recording runs off the loop, so a zero grace period can end
+    # the drain while the session is still closing; the stop then waits for it.
+    created_models.clear()
+    monkeypatch.setattr("reactor_runtime.runner.runner.import_model_class", lambda ref: FakeModel)
+    runner = Runner(
+        RuntimeConfig(
+            model_ref="fake:Model",
+            grace_period=0,
+            recording=RecordingConfig(recording_dir=str(tmp_path)),
+        )
+    )
+    await runner.start()
+    try:
+        runner.start_session({})
+        assert runner.recorder.recording
+        await runner.drain()
+    finally:
+        await runner.stop()
+    _expect_state(runner, SessionState.READY)
+    assert not runner.recorder.recording
 
 
 async def test_connection_open_and_close_are_journalled(started_runner: Runner) -> None:
@@ -4076,7 +4118,7 @@ async def test_no_gap_is_measured_across_a_session_boundary(started_runner: Runn
     started_runner.start_session({})
     started_runner._emit_media(chunk)
     started_runner.stop_session()
-    await asyncio.sleep(0.01)
+    await _until_ready(started_runner)
 
     started_runner.start_session({})
     started_runner._emit_media(chunk)
@@ -4140,7 +4182,7 @@ async def test_upload_store_is_cleared_on_session_stop(started_runner: Runner) -
     started_runner.uploads.put(upload_id, b"hi")
 
     started_runner.stop_session()
-    await asyncio.sleep(0.01)
+    await _until_ready(started_runner)
 
     with pytest.raises(UnknownUploadError):
         await started_runner.uploads.fetch(upload_id)
@@ -4212,6 +4254,42 @@ async def _recording_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     )
     await runner.start()
     return runner
+
+
+async def test_a_uuid_session_id_is_the_recording_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runner = await _recording_runner(monkeypatch, tmp_path)
+    session_id = "0b0e9b3c-5c0e-4bde-9a43-1c2f0d6e7a18"
+    try:
+        runner.start_session({"session_id": session_id})
+        assert runner.recorder._session_id == session_id
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.parametrize("session_id", ["endurance-0", "0B0E9B3C-5C0E-4BDE-9A43-1C2F0D6E7A18"])
+async def test_a_session_id_that_is_not_a_lowercase_uuid_is_recorded_under_a_fresh_one(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    session_id: str,
+) -> None:
+    # The recorder names a directory after its id and refuses any other shape.
+    # Recording is on by default, so such a session is still recorded.
+    runner = await _recording_runner(monkeypatch, tmp_path)
+    try:
+        with caplog.at_level(logging.INFO, logger="reactor_runtime.runner.runner"):
+            runner.start_session({"session_id": session_id})
+        recording_id = runner.recorder._session_id
+        assert runner.recorder.recording
+        assert recording_id is not None
+        assert str(uuid.UUID(recording_id)) == recording_id
+        assert (tmp_path / recording_id).is_dir()
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert any("recording it under a fresh id" in r.message for r in caplog.records)
+    finally:
+        await runner.stop()
 
 
 async def test_recorder_starts_on_session_start_and_stops_on_close(
@@ -5002,7 +5080,7 @@ async def test_inbound_media_is_pushed_for_the_live_session(
     started_runner.start_session({})
     started_runner.media_received(ConnId(1), "mic", frame)
     started_runner.stop_session()
-    await asyncio.sleep(0.01)
+    await _until_ready(started_runner)
     started_runner.start_session({})
     started_runner.media_received(ConnId(1), "mic", frame)
 
@@ -5074,7 +5152,7 @@ async def test_a_connection_that_fails_after_its_session_ended_is_not_journalled
     conn_id = started_runner.new_conn_id("room")
     started_runner.offer_admitted(conn_id)
     started_runner.stop_session()
-    await asyncio.sleep(0.01)
+    await _until_ready(started_runner)
     _expect_state(started_runner, SessionState.READY)
     started_runner.start_session({})
 
@@ -5090,7 +5168,7 @@ async def test_a_late_failure_on_an_id_the_next_session_reuses_leaves_that_conne
     conn_id = started_runner.new_conn_id("room")
     started_runner.offer_admitted(conn_id)
     started_runner.stop_session()
-    await asyncio.sleep(0.01)
+    await _until_ready(started_runner)
     started_runner.start_session({})
     # The next session's WebRTC client offers on the same id.
     started_runner.claim_conn_id(conn_id, "webrtc")
