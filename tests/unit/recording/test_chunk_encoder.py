@@ -10,7 +10,6 @@ import pytest
 
 from reactor_runtime.core import RecordingConfig
 from reactor_runtime.recording.chunk_encoder import (
-    _X264_THREADS,
     ChunkEncoder,
     EncoderStoppedError,
     _video_options,
@@ -438,6 +437,12 @@ def test_the_gop_is_pinned_to_the_chunk_length(codec: str, key: str) -> None:
     assert "scenecut=0" in options[key]
 
 
+def test_x264_is_capped_at_eight_frame_threads() -> None:
+    options = _video_options(RecordingConfig(enabled=True, video_codec="h264"), 60)
+
+    assert "threads=8" in options["x264-params"].split(":")
+
+
 def test_a_segment_lands_within_a_few_frames_of_its_boundary(tmp_path: Path) -> None:
     # Each x264 frame thread holds a frame back. Capped, a 1080p segment is on
     # disk a handful of frames after its boundary, whatever the host's cores.
@@ -453,4 +458,4 @@ def test_a_segment_lands_within_a_few_frames_of_its_boundary(tmp_path: Path) -> 
     finally:
         encoder.stop()
 
-    assert _FRAME_RATE <= landed_at <= _FRAME_RATE + _X264_THREADS + 2
+    assert _FRAME_RATE <= landed_at <= _FRAME_RATE + 10

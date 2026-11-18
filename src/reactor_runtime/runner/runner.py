@@ -1541,12 +1541,14 @@ class Runner(ServiceComponent, ConnectionSink):
         ``generation`` names how the live session generates, ``"streamed"`` or
         ``"stepped"``, and reads ``"streamed"`` outside a session.
         ``recording.enabled`` says whether the session is recorded: false for a
-        stepped session, which is never recorded, and for a model that turns
-        recording off.
+        stepped session, which is never recorded, for a model that declares no
+        output video track, and for a model that turns recording off.
         """
         starting = self._session_start.starting_input
         running = self._sm.current_state in _RUNNING_STATES
         generation = self._session_start.generation if running else Generation.STREAMED
+        # Before the model loads its tracks are unknown, so only the config decides.
+        emits_video = self._bridge is None or TrackKind.VIDEO in self._output_kinds.values()
         descriptor: dict[str, Any] = {
             "session_id": self._session_id,
             "state": self._sm.current_state.name.lower(),
@@ -1556,7 +1558,9 @@ class Runner(ServiceComponent, ConnectionSink):
             "selected_transport": self._selected_transport(),
             "transports": [dict(transport) for transport in self._transports],
             "recording": {
-                "enabled": self._cfg.recording.enabled and generation is Generation.STREAMED,
+                "enabled": self._cfg.recording.enabled
+                and generation is Generation.STREAMED
+                and emits_video,
                 "chunk_seconds": self._cfg.recording.chunk_seconds,
             },
             "step_results": {"enabled": self._cfg.step_results.enabled},

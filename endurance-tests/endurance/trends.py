@@ -126,6 +126,9 @@ class Sample:
     # Step file copies the runtime made and never released through close():
     # copies a step still holds, and copies garbage collection removed.
     live_local_files: int = 0
+    # The recorder's per-session threads still alive while no session is
+    # being recorded: a recording that did not unwind with its session.
+    live_recorder_threads: int = 0
 
 
 def cpu_deltas(samples: list[Sample]) -> list[float]:
@@ -429,6 +432,7 @@ ZERO_FIELDS = (
     "live_step_requests",
     "live_step_decoders",
     "live_local_files",
+    "live_recorder_threads",
 )
 
 

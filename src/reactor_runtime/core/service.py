@@ -58,6 +58,15 @@ class RecordingConfig:
     that emits no video records nothing. The encoder fields surface straight
     into the ffmpeg invocation.
 
+    Recording has a cost even when no client asks for a clip. The encoder runs
+    off the model's thread but takes CPU from the same host: at 1080p with the
+    defaults, about one CPU-second per second of media, and about 8.5 Mb/s of
+    disk (roughly 3.8 GB an hour) on camera-like content. The files are written
+    under ``recording_dir`` (``REACTOR_RECORDINGS_DIR``), one directory per
+    session, and served over ``GET /clips`` and ``GET /clips/chunks``. A
+    running recording has no size cap; a finished one is deleted 300 seconds
+    after its session ends.
+
     A recording keeps one size for the whole session: ``target_width`` by
     ``target_height`` when both are set, otherwise the size of the session's
     first frame, either way rounded down to an even width and height. A frame

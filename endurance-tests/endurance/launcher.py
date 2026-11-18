@@ -250,6 +250,17 @@ def _step_requests(runner: Runner) -> int:
     return len(runner._steps.order) + len(failed)
 
 
+# The threads a recording runs for its own session; the reaper outlives sessions.
+_RECORDER_THREADS = frozenset({"recording-feed", "recording-watch"})
+
+
+def _recorder_threads(runner: Runner) -> int:
+    """Count the recorder's per-session threads still alive while no session is recorded."""
+    if runner.recorder.recording:
+        return 0
+    return sum(1 for thread in threading.enumerate() if thread.name in _RECORDER_THREADS)
+
+
 def _live_transport_objects() -> dict[str, int]:
     from reactor_runtime.transport.step_frames import TrackDecoder
     from reactor_runtime.transport.webrtc.connection import WebRTCConnection
@@ -350,6 +361,7 @@ def build_app(
             "topic_commands": dict(_topic_commands),
             "input_frames": _input_frames(runner),
             "step_requests": _step_requests(runner),
+            "recorder_threads": _recorder_threads(runner),
             "tasks": len(asyncio.all_tasks()),
             "executor_threads": _executor_threads(),
         }

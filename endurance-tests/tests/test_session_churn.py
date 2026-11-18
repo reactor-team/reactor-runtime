@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import urllib.error
+import uuid
 from collections.abc import Mapping
 
 from endurance.churn import CycleOutcome, Released, run_cycles
 from endurance.harness import CLOSE_TIMEOUT_S, RuntimeProcess, V1Client, gray_frame
 
 DESCRIPTION = (
-    "Each cycle starts a session under a fresh id, a v1 client joins and streams a "
+    "Each cycle starts a recorded session under a fresh id, a v1 client joins and streams a "
     "webcam both ways until 60 frames come back, and the session is stopped. The stop "
     "rotates: a plain stop, the client leaving first and the orphaned session stopped "
     "after, a stop with a close reason, and a moderated stop, each of the last two "
@@ -35,7 +36,9 @@ async def test_session_churn(runtime: RuntimeProcess) -> None:
 
     async def cycle(n: int) -> CycleOutcome:
         stop = STOPS[n % len(STOPS)]
-        session = runtime.request("POST", "/start_session", {"session_id": f"endurance-{n}"})[1]
+        # A fresh UUID, which the recorder takes as the recording id, so every
+        # cycle records its session and the probe sees the recording unwind.
+        session = runtime.request("POST", "/start_session", {"session_id": str(uuid.uuid4())})[1]
         client = V1Client(runtime, session["session_id"])
         failures: list[str] = []
         released: Released | None = None
