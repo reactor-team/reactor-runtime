@@ -13,13 +13,16 @@ import "reactor_wire/v1/platform.proto";
 // a=x-reactor-encoded-step-frames in its offer, beside an m-section per
 // published input track and per output track, and lists its codec preferences
 // on each. A runtime that encodes step frames repeats the attribute in its
-// answer, and each video track then carries the codec the answer negotiates
-// on its m-section: H.264, VP8, VP9 or AV1 as the encoding of that name, and
-// the runtime takes PushFrames. A track whose m-section negotiates any other
-// codec, and an audio track, carry RAW frames. The m-sections carry no media
-// in a stepped session: every frame travels in the data channel's messages.
-// The negotiation holds for the connection, and a new connection negotiates
-// again.
+// answer and takes PushFrames. The negotiation selects the encoding of the
+// runtime's output: each output video track carries the codec the answer
+// negotiates on its m-section, H.264, VP8, VP9 or AV1 as the encoding of that
+// name, and a track whose m-section negotiates any other codec, and an audio
+// track, carry RAW frames. Input frames name their own encoding in
+// Frame.encoding, and the runtime decodes every encoding it supports on any
+// input track; the codec negotiated on an input track's m-section is the one
+// it prefers. The m-sections carry no media in a stepped session: every frame
+// travels in the data channel's messages. The negotiation holds for the
+// connection, and a new connection negotiates again.
 //
 // A connection whose answer lacks the attribute negotiated nothing: the
 // runtime's results carry RAW frames, and the client sends no PushFrames. Its
@@ -49,11 +52,18 @@ import "reactor_wire/v1/platform.proto";
 //   - the first frames of an output track after a ResumeTrack for it on the
 //     connection: a client whose decoder lost the track's stream sends
 //     PauseTrack and ResumeTrack to start it again;
-//   - the first frames of an input track after input_decode_failed for it:
-//     as an Error for a PushFrames, or as a refused StepResult's code for a
-//     RequestStep.
+//   - the first frames of an input track after input_decode_failed for it.
 // A step or a push with no frames for a track sends nothing for it and leaves
 // its stream where it was.
+//
+// A receiver waiting for a keyframe, at the start of a stream or after it lost
+// one, drops the track's frames until one marked Frame.keyframe, and decodes
+// from it. When the runtime cannot decode a frame of an input track, the track
+// loses its stream: the runtime answers with the code input_decode_failed, as
+// an Error naming the track in its track field for a PushFrames, or as a
+// refused StepResult's code, with the frame in entry, for a RequestStep. It
+// then drops that track's frames up to the next keyframe, and the client
+// starts the track's next frames at one.
 enum FrameEncoding {
   FRAME_ENCODING_UNSPECIFIED = 0;
   // Uncompressed samples in row-major order, described by dtype and shape:
@@ -85,8 +95,9 @@ message Frame {
   // When the sender says the frame was captured, in microseconds.
   optional int64 capture_time_us = 6;
   // Whether the encoded frame is a keyframe, which decodes without the frames
-  // before it. A receiver checks that a track's stream starts at one. False
-  // for RAW frames, which need no other frame to decode.
+  // before it. A sender marks every keyframe it sends: a receiver waiting for
+  // one drops the frames that are not marked (see FrameEncoding). False for
+  // RAW frames, which need no other frame to decode.
   bool keyframe = 7;
 }
 
@@ -131,11 +142,10 @@ message RequestStep {
   // more is refused. On a connection that negotiated encoded step frames,
   // encoded frames continue the track's stream, the same one PushFrames
   // carries; on any other, a track's H.264 frames start at a keyframe in each
-  // request (see FrameEncoding). The runtime decodes them before it checks anything
-  // else, so a request it refuses for another reason still moves the stream
-  // on. A frame it cannot decode refuses the request (REFUSED, with the entry
-  // media_input[<i>] and the code input_decode_failed), and the track's next
-  // frames start at a keyframe.
+  // request (see FrameEncoding). The runtime decodes them before it checks
+  // anything else, so a request it refuses for another reason still moves the
+  // stream on. A frame it cannot decode refuses the request with the code
+  // input_decode_failed (see FrameEncoding).
   repeated TrackFrames media_input = 3;
 }
 
@@ -154,9 +164,7 @@ message RequestStep {
 // frames when it is full; a frame the runtime cannot take, for a track that is
 // not one of the model's input tracks or that the buffer drops, is discarded
 // without a word. A frame that cannot be decoded is answered with an Error
-// notification, code input_decode_failed and the track in its track field;
-// the runtime then discards that track's frames up to the next keyframe, and
-// the client starts the track's next frames at one.
+// notification, code input_decode_failed (see FrameEncoding).
 message PushFrames {
   repeated TrackFrames tracks = 1;
 }
@@ -235,12 +243,14 @@ message StepResult {
   // A stable code a client branches on. For COMMAND_FAILED, the code the
   // failing handler raised, the code of its CommandError; internal_error for
   // an unplanned failure. For REFUSED, input_decode_failed when a track's
-  // encoded frames lost its stream: the track named by entry starts its next
-  // frames at a keyframe. Unset for every other outcome.
+  // encoded frames lost its stream (see FrameEncoding). Unset for every other
+  // outcome.
   optional string code = 7;
   // The entry of the request at fault, for COMMAND_FAILED and for a request
-  // the runtime refused: "state.<key>", "commands[<i>]", or
-  // "media_input[<i>]". Unset when no single entry is at fault.
+  // the runtime refused: "state.<key>", "commands[<i>]", "media_input[<i>]",
+  // or "media_input[<i>].frames[<j>]" for a frame of that entry.
+  // input_decode_failed always names the frame. Unset when no single entry is
+  // at fault.
   optional string entry = 8;
   // What the model returned for the step besides its media, opaque to the
   // transport: bytes the model returned as they are, or a dict it returned
