@@ -154,6 +154,7 @@ from reactor_runtime.core import (
     TrackKind,
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion, sniff
+from reactor_runtime.transport.step_codecs import BY_SDP_NAME, STEP_FRAME_CODECS
 from reactor_runtime.transport.webrtc.config import WebRtcConfig
 from reactor_runtime.transport.webrtc.frame_stages import FrameStageWindow
 from reactor_runtime.transport.webrtc.frames import (
@@ -342,16 +343,6 @@ def _video_codec_preferences(config: WebRtcConfig) -> list[rw.VideoCodec]:
     ]
 
 
-# The codecs a step frame can be encoded in, by the name an SDP rtpmap gives
-# them, each with the wire encoding its frames are carried as.
-_STEP_FRAME_ENCODINGS: dict[str, step_pb2.FrameEncoding.ValueType] = {
-    "H264": step_pb2.FRAME_ENCODING_H264,
-    "VP8": step_pb2.FRAME_ENCODING_VP8,
-    "VP9": step_pb2.FRAME_ENCODING_VP9,
-    "AV1": step_pb2.FRAME_ENCODING_AV1,
-}
-
-
 @dataclass(frozen=True)
 class StepFrameCodecs:
     """The codecs this process can carry step frames in, by SDP name (``H264``, ``VP8``...).
@@ -388,10 +379,9 @@ def _step_frame_codecs() -> StepFrameCodecs:
     except Exception:
         logger.warning("could not read the video codecs; step frames stay raw", exc_info=True)
         return StepFrameCodecs()
-    names = [name for name in _STEP_FRAME_ENCODINGS if name in _VIDEO_CODEC_BY_NAME]
     return StepFrameCodecs(
-        encode=frozenset(n for n in names if capabilities.can_encode(_VIDEO_CODEC_BY_NAME[n])),
-        decode=frozenset(n for n in names if capabilities.can_decode(_VIDEO_CODEC_BY_NAME[n])),
+        encode=frozenset(c.sdp_name for c in STEP_FRAME_CODECS if capabilities.can_encode(c.codec)),
+        decode=frozenset(c.sdp_name for c in STEP_FRAME_CODECS if capabilities.can_decode(c.codec)),
     )
 
 
@@ -777,7 +767,7 @@ class WebRTCPeer:
                     negotiated[0] if negotiated else "no codec",
                 )
                 return raw
-            encodings[info.name] = _STEP_FRAME_ENCODINGS[negotiated[0]]
+            encodings[info.name] = BY_SDP_NAME[negotiated[0]].encoding
         self._step_frames_answered = True
         return encodings
 
@@ -808,9 +798,9 @@ class WebRTCPeer:
             return []
         usable = self._step_codecs.for_direction(info.direction)
         return [
-            _VIDEO_CODEC_BY_NAME[name]
+            BY_SDP_NAME[name].codec
             for name in section_codecs(self._offer_sdp, mid)
-            if name in usable and name in _VIDEO_CODEC_BY_NAME
+            if name in usable and name in BY_SDP_NAME
         ]
 
     async def _attach_out_tracks(
