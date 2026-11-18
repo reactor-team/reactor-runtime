@@ -197,16 +197,119 @@ def test_a_later_part_continues_the_numbering_and_the_timeline(tmp_path: Path) -
 # -- frame handling ---------------------------------------------------------
 
 
-def test_a_resized_frame_is_scaled_onto_the_opened_size(tmp_path: Path) -> None:
+def _gray(width: int, height: int) -> np.ndarray[Any, Any]:
+    return np.full((height, width, 3), 200, dtype=np.uint8)
+
+
+def _last_frame(output_dir: Path) -> np.ndarray[Any, Any]:
+    """Decode the recording and return its last frame as ``(H, W, 3)`` RGB."""
+    with _decode(output_dir) as container:
+        frames = [frame.to_ndarray(format="rgb24") for frame in container.decode(video=0)]
+    return frames[-1]
+
+
+def _lit(row: np.ndarray[Any, Any]) -> bool:
+    """Whether a run of pixels is the gray picture rather than a black bar."""
+    return bool(row.mean() > 150)
+
+
+def test_a_resized_frame_with_the_same_aspect_ratio_fills_the_opened_size(
+    tmp_path: Path,
+) -> None:
     encoder = _encoder(tmp_path)
-    encoder.feed_video(_frame(64))
-    encoder.feed_video(_frame(32))
+    encoder.feed_video(_gray(64, 64))
+    for _ in range(5):
+        encoder.feed_video(_gray(32, 32))
     encoder.stop()
 
     with _decode(tmp_path) as container:
         stream = container.streams.video[0]
         assert (stream.width, stream.height) == (64, 64)
-        assert _frame_count(container) == 2
+    last = _last_frame(tmp_path)
+    assert _lit(last[2])
+    assert _lit(last[:, 2])
+
+
+def test_a_wider_frame_is_letterboxed_with_bars_above_and_below(tmp_path: Path) -> None:
+    # A 2:1 frame on a square canvas fills the width and half the height, with
+    # 16-pixel bars above and below, instead of being squeezed to a square.
+    encoder = _encoder(tmp_path)
+    encoder.feed_video(_gray(64, 64))
+    for _ in range(5):
+        encoder.feed_video(_gray(128, 64))
+    encoder.stop()
+
+    last = _last_frame(tmp_path)
+    assert last.shape == (64, 64, 3)
+    assert not _lit(last[4])
+    assert not _lit(last[59])
+    assert _lit(last[32])
+    assert _lit(last[32, :4])
+
+
+def test_a_taller_frame_is_pillarboxed_with_bars_left_and_right(tmp_path: Path) -> None:
+    encoder = _encoder(tmp_path)
+    encoder.feed_video(_gray(64, 64))
+    for _ in range(5):
+        encoder.feed_video(_gray(32, 64))
+    encoder.stop()
+
+    last = _last_frame(tmp_path)
+    assert not _lit(last[:, 4])
+    assert not _lit(last[:, 59])
+    assert _lit(last[:, 32])
+    assert _lit(last[:4, 32])
+
+
+def test_a_new_letterbox_size_clears_the_bars_the_last_one_drew_over(tmp_path: Path) -> None:
+    # A wide frame paints the middle rows edge to edge. The tall frames after it
+    # expose those edges as side bars, which must come out black, not stale.
+    encoder = _encoder(tmp_path)
+    encoder.feed_video(_gray(64, 64))
+    encoder.feed_video(_gray(128, 64))
+    for _ in range(5):
+        encoder.feed_video(_gray(32, 64))
+    encoder.stop()
+
+    last = _last_frame(tmp_path)
+    assert not _lit(last[32, :4])
+    assert not _lit(last[32, 60:])
+    assert _lit(last[32, 28:36])
+
+
+def test_a_frame_of_another_size_is_letterboxed_onto_the_target_size(tmp_path: Path) -> None:
+    encoder = ChunkEncoder(
+        output_dir=tmp_path,
+        config=RecordingConfig(enabled=True, target_width=64, target_height=32),
+        has_audio=False,
+        audio_sample_rate=48_000,
+        frame_rate=_FRAME_RATE,
+    )
+    for _ in range(5):
+        encoder.feed_video(_gray(64, 64))
+    encoder.stop()
+
+    last = _last_frame(tmp_path)
+    assert last.shape == (32, 64, 3)
+    assert not _lit(last[:, 4])
+    assert not _lit(last[:, 59])
+    assert _lit(last[:, 32])
+
+
+def test_an_odd_first_frame_opens_at_the_even_size_below_it(tmp_path: Path) -> None:
+    # 4:2:0 needs an even width and height, so the size is rounded down rather
+    # than failing the encoder open.
+    encoder = _encoder(tmp_path)
+    for _ in range(5):
+        encoder.feed_video(_gray(65, 49))
+    assert encoder.frame_size == (64, 48)
+    encoder.stop()
+
+    assert not encoder.failed
+    with _decode(tmp_path) as container:
+        stream = container.streams.video[0]
+        assert (stream.width, stream.height) == (64, 48)
+        assert _frame_count(container) == 5
 
 
 def test_the_configured_target_size_wins_over_the_first_frame(tmp_path: Path) -> None:
@@ -223,6 +326,20 @@ def test_the_configured_target_size_wins_over_the_first_frame(tmp_path: Path) ->
     with _decode(tmp_path) as container:
         stream = container.streams.video[0]
         assert (stream.width, stream.height) == (48, 32)
+
+
+def test_an_odd_target_size_is_rounded_down_to_even(tmp_path: Path) -> None:
+    encoder = ChunkEncoder(
+        output_dir=tmp_path,
+        config=RecordingConfig(enabled=True, target_width=49, target_height=33),
+        has_audio=False,
+        audio_sample_rate=48_000,
+        frame_rate=_FRAME_RATE,
+    )
+    encoder.feed_video(_frame(64))
+    assert encoder.frame_size == (48, 32)
+    encoder.stop()
+    assert not encoder.failed
 
 
 def test_feed_video_rejects_a_frame_that_is_not_three_channel(tmp_path: Path) -> None:

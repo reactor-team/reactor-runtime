@@ -56,6 +56,12 @@ class RecordingConfig:
     lone track of each kind automatically. The encoder fields surface straight
     into the ffmpeg invocation.
 
+    A recording keeps one size for the whole session: ``target_width`` by
+    ``target_height`` when both are set, otherwise the size of the session's
+    first frame, either way rounded down to an even width and height. A frame
+    of another size is letterboxed onto it: scaled to fit with its aspect ratio
+    kept, and centred on black. Each session picks its size again.
+
     Attributes:
         enabled: Whether the runtime records the session at all.
         chunk_seconds: HLS segment length and the forced-keyframe interval.
@@ -70,8 +76,10 @@ class RecordingConfig:
         video_codec: ``"h264"`` or ``"h265"``.
         video_preset: The libx264/libx265 preset.
         video_crf: The constant-rate-factor quality target.
-        target_width: Fixed encode width, or ``None`` to follow the first frame.
-        target_height: Fixed encode height, or ``None`` to follow the first frame.
+        target_width: Fixed encode width. Used only when ``target_height`` is
+            also set; otherwise both dimensions follow the session's first frame.
+        target_height: Fixed encode height. Used only when ``target_width`` is
+            also set; otherwise both dimensions follow the session's first frame.
         audio_codec: The audio codec, e.g. ``"aac"``.
         audio_bitrate_kbps: The audio bitrate in kilobits per second.
         recording_dir: Directory clips are written under, or ``None`` to use a
