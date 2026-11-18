@@ -784,10 +784,27 @@ async def test_a_track_that_loses_its_stream_releases_its_decoder() -> None:
     await _until(lambda: len(rec.steps) == 1)
     assert gate.decoders == 1
 
-    unknown = _h264(packets[4])
-    # An encoding this build has no name for: the frame cannot decode.
-    setattr(unknown, "encoding", 99)  # noqa: B010
-    gate.submit(_wire(_step(unknown)), ProtocolVersion.V1, Channel.DATA)
+    empty = _h264(packets[4])
+    empty.data = b""
+    gate.submit(_wire(_step(empty)), ProtocolVersion.V1, Channel.DATA)
     await _until(lambda: len(rec.replies) == 1)
 
     assert gate.decoders == 0
+
+
+async def test_an_unknown_encoding_keeps_the_tracks_decoder_and_stream() -> None:
+    rec = _Recorder()
+    gate = rec.gate()
+    packets = _encode(_pictures(8))
+    gate.submit(_wire(_step(*(_h264(p) for p in packets[:4]))), ProtocolVersion.V1, Channel.DATA)
+    await _until(lambda: len(rec.steps) == 1)
+
+    unknown = _h264(packets[4])
+    # An encoding this build has no name for: the frame never reaches the decoder.
+    setattr(unknown, "encoding", 99)  # noqa: B010
+    gate.submit(_wire(_step(unknown)), ProtocolVersion.V1, Channel.DATA)
+    await _until(lambda: len(rec.replies) == 1)
+    assert gate.decoders == 1
+
+    gate.submit(_wire(_step(*(_h264(p) for p in packets[4:]))), ProtocolVersion.V1, Channel.DATA)
+    await _until(lambda: len(rec.steps) == 2)

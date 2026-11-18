@@ -202,11 +202,13 @@ def decode_step_frames(
     left as it is.
 
     Every frame that can decode does, even in a request that is refused, so a
-    track's stream moves on with each request. A track whose frames cannot
-    decode (an encoding this process does not decode, a frame the decoder
-    rejects, frames that do not start at a keyframe where the stream needs one)
-    loses its stream: its decoder leaves *decoders*, and its next frames must
-    start at a keyframe.
+    track's stream moves on with each request. A track whose frames break its
+    stream (a frame the decoder rejects, frames that do not start at a keyframe
+    where the stream needs one) loses it: the refusal carries
+    ``input_decode_failed``, its decoder leaves *decoders*, and its next
+    frames must start at a keyframe. A refusal without that code (an encoding
+    this process does not decode, a track that is not an input video track)
+    leaves the track's decoder and stream where they were.
 
     Returns:
         The RGB picture of each encoded frame, by ``(entry, position)``, or why
@@ -251,7 +253,10 @@ def decode_step_frames(
     for track in tracks.values():
         if track.lost is not None:
             refusals.append(track.lost)
-            decoders.pop(track.name, None)
+            # A refusal without the code never reached the decoder, so the
+            # track's stream is whole and its decoder stays.
+            if track.lost.code == INPUT_DECODE_FAILED:
+                decoders.pop(track.name, None)
     if refusals:
         return min(refusals, key=lambda refusal: _entry_order(refusal.entry))
     return pictures
@@ -506,6 +511,10 @@ class StepFrameGate:
     track's stream from one request to the next, and a new gate's start at a
     keyframe. Encoded frames sent to any other track are refused.
 
+    A request's decode runs before any message behind it, so on a backend
+    whose failing decode takes seconds, the connection's later messages,
+    controls and unpublishes included, stay queued for that time.
+
     Runs on the event loop the connection's callbacks run on.
     """
 
@@ -593,7 +602,12 @@ class StepFrameGate:
                 self._release(name for name in self._decoders if name not in decoders)
                 self._decoders.update(decoders)
                 if isinstance(outcome, StepFrameRefusal):
-                    logger.debug("step request refused at %s: %s", outcome.entry, outcome.reason)
+                    if outcome.code == INPUT_DECODE_FAILED:
+                        logger.warning("input stream lost at %s: %s", outcome.entry, outcome.reason)
+                    else:
+                        logger.debug(
+                            "step request refused at %s: %s", outcome.entry, outcome.reason
+                        )
                     self._reply(_refusal(version, message.request_id, outcome))
                     continue
                 self._deliver_step(DecodedStep(payload=payload, pictures=outcome), version)
