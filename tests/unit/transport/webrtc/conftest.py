@@ -51,6 +51,7 @@ class FakePeer:
 
     max_message_size = 64 * 1024 * 1024
     message_chunking = True
+    step_frame_encodings: dict[str, int] = {}  # noqa: RUF012 - replaced per test, never mutated
 
     async def send_step_result(self, payload: bytes) -> bool:
         self.send_message(payload)

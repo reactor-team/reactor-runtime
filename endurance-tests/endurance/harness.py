@@ -39,7 +39,12 @@ from endurance.report import MetricResult
 from endurance.trends import ENDURANCE_DURATION_SECONDS, Sample
 from reactor_runtime.transport.webrtc.config import WebRtcConfig
 from reactor_runtime.transport.webrtc.frames import rgb_to_bgra
-from reactor_runtime.transport.webrtc.peer import _get_factory
+from reactor_runtime.transport.webrtc.peer import _get_factory, _step_frame_codecs
+from reactor_runtime.transport.webrtc.sdp import (
+    ENCODED_STEP_FRAMES,
+    add_session_attribute,
+    has_session_attribute,
+)
 from reactor_wire.v1 import (
     common_pb2,
     control_pb2,
@@ -419,7 +424,7 @@ class BareClient:
         self._runtime.request(
             "POST",
             f"{self._base}/connections/{cid}/sdp_params",
-            {"sdp_offer": offer.sdp, "track_mapping": mapping},
+            {"sdp_offer": self._offer_sdp(offer.sdp), "track_mapping": mapping},
         )
         deadline = time.monotonic() + 20
         while True:
@@ -431,6 +436,7 @@ class BareClient:
             if time.monotonic() > deadline:
                 raise TimeoutError("the runtime never produced an SDP answer")
             await asyncio.sleep(0.05)
+        self._check_answer(answer["sdp_answer"])
         await pc.set_remote_description(rw.SessionDescription("answer", answer["sdp_answer"]))
         for candidate in _candidates_from(answer["sdp_answer"]):
             await pc.add_ice_candidate(candidate)
@@ -458,6 +464,13 @@ class BareClient:
             await asyncio.sleep(0.05)
 
         self._start_wire(control, data)
+
+    def _offer_sdp(self, sdp: str) -> str:
+        """Return the offer the runtime gets for the one libwebrtc made; the same one here."""
+        return sdp
+
+    def _check_answer(self, sdp: str) -> None:
+        """Read the runtime's answer before it is applied; a bare client checks nothing."""
 
     def _start_wire(self, control: Any, data: Any) -> None:
         """Publish the webcam and resume both output tracks, in v0 JSON."""
@@ -775,8 +788,10 @@ _STEP_WAIT_S = 10.0
 class StepClient(BareClient):
     """A client of a stepped session, speaking v1 as current SDKs do.
 
-    It requests :data:`STEPS_PER_CYCLE` steps one after another, each setting
-    the model's effect through ``state`` and carrying one small webcam frame in
+    Its offer declares encoded step frames, and its answer must declare them
+    back exactly when the runtime can carry them, raw otherwise. It requests
+    :data:`STEPS_PER_CYCLE` steps one after another, each setting the model's
+    effect through ``state`` and carrying one small webcam frame in
     ``media_input``, raw on even steps and H.264 on odd ones, waits for each
     step's result, and closes. Every other client publishes the webcam first and
     unpublishes it before closing, so the runtime's H.264 decoder for the track,
@@ -787,7 +802,7 @@ class StepClient(BareClient):
     drops live input, so nothing else is sent. Each result must carry the
     effect its step applied as its data, which the endurance model returns.
     :attr:`unanswered` lists the requests that got no result, a failed one, or
-    one with the wrong data.
+    one with the wrong data, and an answer that got the attribute wrong.
     """
 
     _clients = itertools.count()
@@ -863,6 +878,23 @@ class StepClient(BareClient):
                     return self._results.pop(request_id)
             await asyncio.sleep(0.01)
         return None
+
+    def _offer_sdp(self, sdp: str) -> str:
+        """Declare encoded step frames, as a current SDK's stepped client does."""
+        return add_session_attribute(sdp, ENCODED_STEP_FRAMES)
+
+    def _check_answer(self, sdp: str) -> None:
+        """Check the answer echoes encoded step frames exactly when the runtime can carry them.
+
+        The runtime runs on the same binding as this client, so the codecs it
+        reads are the ones read here. With none, it must fall back to raw step
+        frames and leave the attribute out of its answer.
+        """
+        expected = bool(_step_frame_codecs())
+        if has_session_attribute(sdp, ENCODED_STEP_FRAMES) != expected:
+            state = "without" if expected else "with"
+            with self._lock:
+                self._failed.append(f"sdp answer: {state} {ENCODED_STEP_FRAMES}")
 
     def _start_wire(self, control: Any, data: Any) -> None:
         # The control channel stays open beside the data channel, as an SDK's does.

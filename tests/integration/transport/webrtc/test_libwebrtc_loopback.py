@@ -37,6 +37,7 @@ from reactor_runtime.core.values import (  # noqa: E402
     TrackKind,
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion  # noqa: E402
+from reactor_runtime.transport.webrtc import peer as peer_module  # noqa: E402
 from reactor_runtime.transport.webrtc.config import (  # noqa: E402
     IceCredentials,
     WebRtcConfig,
@@ -47,12 +48,17 @@ from reactor_runtime.transport.webrtc.peer import (  # noqa: E402
     _get_factory,
     libwebrtc_peer_factory,
 )
+from reactor_runtime.transport.webrtc.sdp import (  # noqa: E402
+    ENCODED_STEP_FRAMES,
+    add_session_attribute,
+)
 from reactor_runtime.transport.webrtc.signaling import (  # noqa: E402
     IceCandidate,
     MappedTrack,
     SdpOffer,
     TrackMap,
 )
+from reactor_wire.v1 import step_pb2  # noqa: E402
 
 pytestmark = pytest.mark.asyncio
 
@@ -985,5 +991,143 @@ async def test_libwebrtc_peer_factory_applies_configured_video_codec_preference(
         # Reordered, not dropped: the default codec is still offered somewhere.
         assert f" {default_first}/" in answer.sdp
     finally:
+        await peer.close()
+        client.pc = None  # type: ignore[assignment]
+
+
+# What the step frame tests let this process carry step frames in, whatever the
+# binding's own codecs are: VP8 out, VP8 and VP9 in. libwebrtc carries both in
+# every build, so the SDP can negotiate them anywhere.
+_STEP_CODECS = peer_module.StepFrameCodecs(
+    encode=frozenset({"VP8"}), decode=frozenset({"VP8", "VP9"})
+)
+
+
+async def _stepped_client(factory: rw.PeerConnectionFactory) -> tuple[_Client, str]:
+    """A stepped client preferring VP9, then VP8, on both of its video sections."""
+    client = await _Client.create(factory)
+    for transceiver in (client.recv, client.send):
+        await transceiver.set_codec_preferences([rw.VideoCodec.Vp9, rw.VideoCodec.Vp8])
+    offer_sdp = await client.create_offer()
+    return client, add_session_attribute(offer_sdp, ENCODED_STEP_FRAMES)
+
+
+async def test_a_stepped_client_negotiates_each_tracks_step_frame_encoding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each video track takes the client's first codec this process can carry it in.
+
+    The output track skips VP9, which this process does not encode, and takes
+    VP8; the input track takes VP9, the client's first choice, which it decodes.
+    """
+    monkeypatch.setattr(peer_module, "_step_frame_codecs", lambda: _STEP_CODECS)
+    factory = _get_factory(WebRtcConfig())
+    client, offer_sdp = await _stepped_client(factory)
+
+    peer, answer = await libwebrtc_peer_factory(
+        ConnId(110),
+        SdpOffer(sdp=offer_sdp),
+        client.track_map(),
+        WebRtcConfig(ice_gathering_timeout_ms=500),
+        ProtocolVersion.V1,
+    )
+    try:
+        assert "a=x-reactor-encoded-step-frames\r\n" in answer.sdp
+        assert peer.step_frame_encodings == {
+            "out_video": step_pb2.FRAME_ENCODING_VP8,
+            "out_audio": step_pb2.FRAME_ENCODING_RAW,
+            "in_video": step_pb2.FRAME_ENCODING_VP9,
+        }
+    finally:
+        await peer.close()
+        client.pc = None  # type: ignore[assignment]
+
+
+async def test_an_offer_without_encoded_step_frames_keeps_every_track_raw(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client that does not declare encoded step frames connects as it always has."""
+    monkeypatch.setattr(peer_module, "_step_frame_codecs", lambda: _STEP_CODECS)
+    factory = _get_factory(WebRtcConfig())
+    client = await _Client.create(factory)
+    offer_sdp = await client.create_offer()
+    connected = asyncio.Event()
+
+    peer, answer = await libwebrtc_peer_factory(
+        ConnId(111),
+        SdpOffer(sdp=offer_sdp),
+        client.track_map(),
+        WebRtcConfig(ice_gathering_timeout_ms=4000),
+        ProtocolVersion.V1,
+    )
+    peer.on_message(lambda *_: None)
+    peer.on_media(lambda *_: None)
+    peer.on_ping(lambda: None)
+    peer.on_connected(connected.set)
+    peer.on_disconnect(lambda: None)
+
+    stop_trickle = asyncio.Event()
+    trickle_task = asyncio.create_task(_trickle_until(client, peer, stop_trickle))
+    try:
+        assert ENCODED_STEP_FRAMES not in answer.sdp
+        assert set(peer.step_frame_encodings.values()) == {step_pb2.FRAME_ENCODING_RAW}
+        await client.accept_answer(answer.sdp)
+        assert await _reached(connected), "a client without the attribute must still connect"
+    finally:
+        stop_trickle.set()
+        trickle_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await trickle_task
+        await peer.close()
+        client.pc = None  # type: ignore[assignment]
+
+
+async def test_a_stepped_connection_sends_no_media_on_its_tracks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stepped session's frames travel in messages, so its media sections stay silent.
+
+    The client resumes the output track and the model's media is handed to the
+    peer, as a streamed session would; nothing reaches the client's receiver.
+    """
+    monkeypatch.setattr(peer_module, "_step_frame_codecs", lambda: _STEP_CODECS)
+    factory = _get_factory(WebRtcConfig())
+    client, offer_sdp = await _stepped_client(factory)
+    connected = asyncio.Event()
+
+    peer, answer = await libwebrtc_peer_factory(
+        ConnId(112),
+        SdpOffer(sdp=offer_sdp),
+        client.track_map(),
+        WebRtcConfig(ice_gathering_timeout_ms=4000),
+        ProtocolVersion.V1,
+    )
+    peer.on_message(lambda *_: None)
+    peer.on_media(lambda *_: None)
+    peer.on_ping(lambda: None)
+    peer.on_connected(connected.set)
+    peer.on_disconnect(lambda: None)
+
+    stop_trickle = asyncio.Event()
+    trickle_task = asyncio.create_task(_trickle_until(client, peer, stop_trickle))
+    try:
+        await client.accept_answer(answer.sdp)
+        assert await _reached(connected), "the stepped client never connected"
+        peer.resume_track("out_video")
+        peer.resume_track("out_audio")
+        info = TrackInfo(name="out_video", kind=TrackKind.VIDEO, direction=TrackDirection.OUT)
+        for value in range(30):
+            peer.send_media(
+                MediaBundle(tracks={"out_video": TrackData(info=info, data=_solid_frame(value))})
+            )
+            await asyncio.sleep(0.033)
+
+        assert client.received_video == 0
+        assert client.received_audio == 0
+    finally:
+        stop_trickle.set()
+        trickle_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await trickle_task
         await peer.close()
         client.pc = None  # type: ignore[assignment]

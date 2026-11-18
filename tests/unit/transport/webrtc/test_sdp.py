@@ -7,9 +7,13 @@ directly, without the ``reactor_webrtc`` wheel.
 import pytest
 
 from reactor_runtime.transport.webrtc.sdp import (
+    ENCODED_STEP_FRAMES,
+    add_session_attribute,
     bump_session_version,
     deduplicate_bundle_pts,
     embed_ice_candidates,
+    has_session_attribute,
+    section_codecs,
     set_media_direction,
 )
 
@@ -175,3 +179,76 @@ def test_bump_session_version_leaves_a_description_with_no_origin_alone() -> Non
 def test_bump_session_version_leaves_an_unparsable_origin_alone() -> None:
     sdp = "v=0\r\no=- session two IN IP4 127.0.0.1\r\n"
     assert bump_session_version(sdp, 1) == sdp
+
+
+# ── Encoded step frames ──────────────────────────────────────────────────────
+
+_STEPPED_OFFER = (
+    "v=0\r\n"
+    "o=- 0 0 IN IP4 0.0.0.0\r\n"
+    "s=-\r\n"
+    "a=x-reactor-encoded-step-frames\r\n"
+    "m=video 9 UDP/TLS/RTP/SAVPF 98 99 102 103 96\r\n"
+    "a=mid:0\r\n"
+    "a=rtpmap:98 VP9/90000\r\n"
+    "a=rtpmap:99 rtx/90000\r\n"
+    "a=fmtp:99 apt=98\r\n"
+    "a=rtpmap:102 H264/90000\r\n"
+    "a=rtpmap:103 h264/90000\r\n"
+    "a=rtpmap:96 VP8/90000\r\n"
+    "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
+    "a=mid:1\r\n"
+    "a=rtpmap:111 opus/48000/2\r\n"
+)
+
+
+def test_has_session_attribute_finds_the_session_level_declaration() -> None:
+    assert has_session_attribute(_STEPPED_OFFER, ENCODED_STEP_FRAMES)
+    assert not has_session_attribute(_TWO_SECTION_ANSWER, ENCODED_STEP_FRAMES)
+
+
+def test_has_session_attribute_accepts_a_value() -> None:
+    sdp = _TWO_SECTION_ANSWER.replace("s=-\r\n", "s=-\r\na=x-reactor-encoded-step-frames:1\r\n")
+    assert has_session_attribute(sdp, ENCODED_STEP_FRAMES)
+
+
+def test_has_session_attribute_ignores_one_inside_an_m_section() -> None:
+    sdp = _TWO_SECTION_ANSWER + "a=x-reactor-encoded-step-frames\r\n"
+    assert not has_session_attribute(sdp, ENCODED_STEP_FRAMES)
+
+
+def test_has_session_attribute_ignores_a_longer_name() -> None:
+    sdp = _TWO_SECTION_ANSWER.replace("s=-\r\n", "s=-\r\na=x-reactor-encoded-step-frames-v2\r\n")
+    assert not has_session_attribute(sdp, ENCODED_STEP_FRAMES)
+
+
+def test_add_session_attribute_goes_before_the_first_m_section() -> None:
+    sdp = add_session_attribute(_TWO_SECTION_ANSWER, ENCODED_STEP_FRAMES)
+
+    lines = sdp.split("\r\n")
+    assert lines.index("a=x-reactor-encoded-step-frames") == lines.index("s=-") + 1
+    assert has_session_attribute(sdp, ENCODED_STEP_FRAMES)
+    assert sdp.replace("a=x-reactor-encoded-step-frames\r\n", "") == _TWO_SECTION_ANSWER
+
+
+def test_add_session_attribute_is_idempotent() -> None:
+    once = add_session_attribute(_TWO_SECTION_ANSWER, ENCODED_STEP_FRAMES)
+    assert add_session_attribute(once, ENCODED_STEP_FRAMES) == once
+
+
+def test_add_session_attribute_appends_to_a_description_without_sections() -> None:
+    sdp = add_session_attribute("v=0\r\ns=-\r\n", ENCODED_STEP_FRAMES)
+    assert sdp == "v=0\r\ns=-\r\na=x-reactor-encoded-step-frames\r\n"
+
+
+def test_section_codecs_lists_a_sections_codecs_in_payload_order_once_each() -> None:
+    assert section_codecs(_STEPPED_OFFER, "0") == ["VP9", "RTX", "H264", "VP8"]
+    assert section_codecs(_STEPPED_OFFER, "1") == ["OPUS"]
+
+
+def test_section_codecs_is_empty_for_an_unknown_mid() -> None:
+    assert section_codecs(_STEPPED_OFFER, "7") == []
+
+
+def test_section_codecs_reads_bare_newlines() -> None:
+    assert section_codecs(_STEPPED_OFFER.replace("\r\n", "\n"), "0")[0] == "VP9"

@@ -92,6 +92,23 @@ audio unable to carry one, stamping video alone would move one stream's clock
 and leave the other's where it was, which pairs worse than dating both by when
 they reached the encoder.
 
+Encoded step frames
+-------------------
+A stepped client that carries its step frames encoded declares
+``a=x-reactor-encoded-step-frames`` in its offer, beside an m-section per
+input and output track whose codec list is its preference for that track.
+Those sections carry no media: every frame travels in data-channel messages.
+So the peer attaches no sender track to them, and nothing it sends reaches
+RTP, whatever the client resumes. Each video section prefers the client's
+codecs that this process can carry step frames in, encoded for an output
+track and decoded for an input one, and the answer's first codec on the
+section is the track's encoding (:attr:`WebRTCPeer.step_frame_encodings`).
+The client reads the same codec from the answer, so the answer repeats the
+attribute only when every mapped video section negotiated a codec this process
+can carry that track's step frames in. Otherwise the answer leaves it out and
+every track is ``RAW``, as it is on a connection whose offer did not declare
+it. An audio track is always ``RAW``.
+
 Threading
 ---------
 * The asyncio loop thread runs negotiation, ``add_ice``, stats, and close, and
@@ -115,11 +132,13 @@ Threading
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import queue
 import threading
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -135,6 +154,7 @@ from reactor_runtime.core import (
     TrackKind,
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion, sniff
+from reactor_runtime.transport.step_codecs import BY_SDP_NAME, STEP_FRAME_CODECS
 from reactor_runtime.transport.webrtc.config import WebRtcConfig
 from reactor_runtime.transport.webrtc.frame_stages import FrameStageWindow
 from reactor_runtime.transport.webrtc.frames import (
@@ -146,10 +166,14 @@ from reactor_runtime.transport.webrtc.frames import (
 )
 from reactor_runtime.transport.webrtc.message_stages import MessageStageWindow
 from reactor_runtime.transport.webrtc.sdp import (
+    ENCODED_STEP_FRAMES,
     Candidate,
+    add_session_attribute,
     bump_session_version,
     deduplicate_bundle_pts,
     embed_ice_candidates,
+    has_session_attribute,
+    section_codecs,
     set_media_direction,
 )
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpAnswer, SdpOffer, TrackMap
@@ -161,6 +185,7 @@ from reactor_runtime.transport.webrtc.stats import (
     SenderTiming,
     TrackStat,
 )
+from reactor_wire.v1 import step_pb2
 
 logger = logging.getLogger(__name__)
 
@@ -318,6 +343,48 @@ def _video_codec_preferences(config: WebRtcConfig) -> list[rw.VideoCodec]:
     ]
 
 
+@dataclass(frozen=True)
+class StepFrameCodecs:
+    """The codecs this process can carry step frames in, by SDP name (``H264``, ``VP8``...).
+
+    Attributes:
+        encode: The codecs it can encode, for a track the model sends.
+        decode: The codecs it can decode, for a track the model receives.
+    """
+
+    encode: frozenset[str] = frozenset()
+    decode: frozenset[str] = frozenset()
+
+    def __bool__(self) -> bool:
+        """Return whether there is any codec at all, in either direction."""
+        return bool(self.encode or self.decode)
+
+    def for_direction(self, direction: TrackDirection) -> frozenset[str]:
+        """Return the codecs a track flowing in *direction* can be carried in."""
+        return self.encode if direction is TrackDirection.OUT else self.decode
+
+
+@functools.cache
+def _step_frame_codecs() -> StepFrameCodecs:
+    """Return the codecs this process can carry step frames in, read once.
+
+    They come from the binding's standalone video codecs. A binding that has
+    none, or whose capabilities cannot be read, carries every step frame raw.
+    """
+    video_codecs = getattr(rw, "VideoCodecs", None)
+    if video_codecs is None:
+        return StepFrameCodecs()
+    try:
+        capabilities = video_codecs().capabilities()
+    except Exception:
+        logger.warning("could not read the video codecs; step frames stay raw", exc_info=True)
+        return StepFrameCodecs()
+    return StepFrameCodecs(
+        encode=frozenset(c.sdp_name for c in STEP_FRAME_CODECS if capabilities.can_encode(c.codec)),
+        decode=frozenset(c.sdp_name for c in STEP_FRAME_CODECS if capabilities.can_decode(c.codec)),
+    )
+
+
 async def _apply_bitrate_limits(pc: rw.PeerConnection, config: WebRtcConfig) -> None:
     """Apply the configured congestion-control bitrate limits to a fresh peer connection.
 
@@ -414,6 +481,14 @@ class WebRTCPeer:
         self._config = WebRtcConfig()
         self._track_map = TrackMap()
         self._track_by_mid: dict[str, TrackInfo] = {}
+        # Whether the offer declared encoded step frames, which also says its
+        # media sections carry nothing; the codecs this connection may carry
+        # step frames in; and what each track negotiated (see the module's
+        # Encoded step frames note).
+        self._step_frames_offered = False
+        self._step_codecs = StepFrameCodecs()
+        self._step_frames_answered = False
+        self._step_frame_encodings: dict[str, step_pb2.FrameEncoding.ValueType] = {}
 
         # Inbound callbacks the connection registers; invoked on the asyncio loop.
         self._cb_message: Callable[[bytes | str, ProtocolVersion, Channel], None] | None = None
@@ -606,6 +681,9 @@ class WebRTCPeer:
         await _apply_bitrate_limits(pc, self._config)
 
         self._offer_sdp = deduplicate_bundle_pts(sdp_offer)
+        self._step_frames_offered = has_session_attribute(self._offer_sdp, ENCODED_STEP_FRAMES)
+        if self._step_frames_offered:
+            self._step_codecs = _step_frame_codecs()
         offer = rw.SessionDescription("offer", self._offer_sdp)
         await pc.set_remote_description(offer)
         self._raise_if_stopped()
@@ -622,6 +700,7 @@ class WebRTCPeer:
         if credentials is not None:
             answer = answer.with_ice_credentials(credentials.ufrag, credentials.pwd)
         self._answer_sdp = answer.sdp
+        self._step_frame_encodings = self._negotiated_step_frame_encodings(answer.sdp)
         await pc.set_local_description(answer)
         # The answer describes every outbound track as sending, which is the
         # session a joining client expects to read.
@@ -647,7 +726,82 @@ class WebRTCPeer:
         for info in self._track_by_mid.values():
             if info.direction is TrackDirection.OUT:
                 self.pause_track(info.name)
-        return embed_ice_candidates(answer.sdp, candidates)
+        answer_sdp = embed_ice_candidates(answer.sdp, candidates)
+        # Only the client reads the attribute, so it is added to the answer the
+        # client gets rather than to the one libwebrtc holds.
+        if self._step_frames_answered:
+            answer_sdp = add_session_attribute(answer_sdp, ENCODED_STEP_FRAMES)
+        return answer_sdp
+
+    def _negotiated_step_frame_encodings(
+        self, answer_sdp: str
+    ) -> dict[str, step_pb2.FrameEncoding.ValueType]:
+        """Read each mapped track's step frame encoding from the answer.
+
+        A video track takes the encoding of the first codec its section lists,
+        the one the section negotiated; every other track is ``RAW``. The
+        client reads the same codec from the answer, so the answer declares
+        encoded step frames only when this connection can carry every mapped
+        video track in the codec its section negotiated, in that track's
+        direction. A section that negotiated a codec this process cannot use
+        that way makes every track ``RAW`` and leaves the attribute out of the
+        answer, so both peers read the connection as raw.
+        """
+        raw: dict[str, step_pb2.FrameEncoding.ValueType] = {
+            info.name: step_pb2.FRAME_ENCODING_RAW for info in self._track_by_mid.values()
+        }
+        if not (self._step_frames_offered and self._step_codecs):
+            return raw
+        encodings = dict(raw)
+        for mid, info in self._track_by_mid.items():
+            if info.kind is not TrackKind.VIDEO:
+                continue
+            negotiated = section_codecs(answer_sdp, mid)[:1]
+            if not negotiated or negotiated[0] not in self._step_codecs.for_direction(
+                info.direction
+            ):
+                logger.info(
+                    "track %r negotiated %s, which this process cannot carry its step frames "
+                    "in; every step frame of the connection stays raw",
+                    info.name,
+                    negotiated[0] if negotiated else "no codec",
+                )
+                return raw
+            encodings[info.name] = BY_SDP_NAME[negotiated[0]].encoding
+        self._step_frames_answered = True
+        return encodings
+
+    @property
+    def step_frame_encodings(self) -> Mapping[str, step_pb2.FrameEncoding.ValueType]:
+        """The encoding each track's step frames take on this connection, by track name.
+
+        Fixed by negotiation for the connection's life. Every track the client
+        mapped is listed, ``FRAME_ENCODING_RAW`` unless the client declared
+        encoded step frames and the track's section negotiated a codec this
+        process can encode (for a track the model sends) or decode (for one it
+        receives). A track not listed is ``RAW`` too.
+        """
+        return dict(self._step_frame_encodings)
+
+    def _step_codec_preferences(
+        self, mid: str | None, info: TrackInfo | None
+    ) -> list[rw.VideoCodec]:
+        """Return a stepped video section's codec preferences: the client's, as far as they go.
+
+        The client's codecs for the section, in its order, that this connection
+        can carry the track's step frames in. Empty for a section that is not
+        a stepped video track's, and for one that shares no such codec.
+        """
+        if not self._step_frames_offered or mid is None or info is None:
+            return []
+        if info.kind is not TrackKind.VIDEO:
+            return []
+        usable = self._step_codecs.for_direction(info.direction)
+        return [
+            BY_SDP_NAME[name].codec
+            for name in section_codecs(self._offer_sdp, mid)
+            if name in usable and name in BY_SDP_NAME
+        ]
 
     async def _attach_out_tracks(
         self,
@@ -671,6 +825,13 @@ class WebRTCPeer:
         negotiation completes — ``set_codec_preferences`` here only shapes what
         gets negotiated.
 
+        An offer that declares encoded step frames changes two things (see the
+        module's Encoded step frames note): an ``OUT`` transceiver goes
+        send-only with no track, so it never carries media, and a mapped video
+        transceiver prefers the client's codecs this connection can carry the
+        track's step frames in, falling back to the configured order when there
+        are none.
+
         ``transceivers()``, ``set_direction()``, ``set_track()``, and
         ``set_codec_preferences()`` are all natively awaitable. Must run before
         ``create_answer()``: a codec preference only takes effect on the next
@@ -681,7 +842,13 @@ class WebRTCPeer:
         for transceiver in transceivers:
             mid = transceiver.mid()
             info = self._track_by_mid.get(mid) if mid is not None else None
-            if info is not None and info.direction is TrackDirection.OUT:
+            if (
+                self._step_frames_offered
+                and info is not None
+                and info.direction is TrackDirection.OUT
+            ):
+                await transceiver.set_direction(rw.TransceiverDirection.SendOnly)
+            elif info is not None and info.direction is TrackDirection.OUT:
                 if info.kind is TrackKind.VIDEO:
                     track = factory.create_video_track(info.name)
                 else:
@@ -696,8 +863,11 @@ class WebRTCPeer:
                 if info.kind is TrackKind.VIDEO:
                     await _apply_sender_bitrate(transceiver, self._config)
                 self._out_tracks[info.name] = track
-            if codec_preferences and transceiver.kind() == rw.MediaKind.Video:
-                await transceiver.set_codec_preferences(codec_preferences)
+            if transceiver.kind() != rw.MediaKind.Video:
+                continue
+            preferences = self._step_codec_preferences(mid, info) or codec_preferences
+            if preferences:
+                await transceiver.set_codec_preferences(preferences)
 
     def _raise_if_stopped(self) -> None:
         if self._stop_event.is_set():
@@ -1564,7 +1734,8 @@ class WebRTCPeer:
         without its track sends nothing at all.
 
         The tracks themselves are reused: creating fresh ones would restart the
-        streams this exists to leave alone.
+        streams this exists to leave alone. A transceiver that never had a
+        track, a stepped one, gets none and no sender bound.
         """
         for transceiver in await pc.transceivers():
             mid = transceiver.mid()
@@ -1579,7 +1750,7 @@ class WebRTCPeer:
                 if info.name in paused
                 else rw.TransceiverDirection.SendOnly
             )
-            if info.kind is TrackKind.VIDEO:
+            if info.kind is TrackKind.VIDEO and track is not None:
                 await _apply_sender_bitrate(transceiver, self._config)
 
     # =========================================================================

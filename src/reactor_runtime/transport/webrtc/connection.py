@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import replace
 
 from reactor_runtime.core import (
@@ -41,6 +41,7 @@ from reactor_runtime.transport.webrtc.reading import transport_reading
 from reactor_runtime.transport.webrtc.signaling import IceCandidate, SdpAnswer, SdpOffer, TrackMap
 from reactor_runtime.transport.webrtc.stats import OutboundMediaHealth, PeerStats
 from reactor_runtime.transport.webrtc.version import TRANSPORT_NAME
+from reactor_wire.v1 import step_pb2
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +282,18 @@ class WebRTCConnection:
     def message_chunking(self) -> bool:
         """Whether the data channel negotiated chunked messages with this client."""
         return self._peer.message_chunking
+
+    @property
+    def step_frame_encodings(self) -> Mapping[str, step_pb2.FrameEncoding.ValueType]:
+        """The encoding each track's step frames take with this client, by track name.
+
+        Negotiated in the SDP when the connection was made, and fixed for its
+        life: a track whose section negotiated a codec this process can carry
+        step frames in takes that codec's encoding, and every other track,
+        listed or not, is ``FRAME_ENCODING_RAW``. See
+        :attr:`WebRTCPeer.step_frame_encodings`.
+        """
+        return self._peer.step_frame_encodings
 
     async def send_step_result(self, payload: bytes) -> bool:
         """Send an already-encoded step result on the data channel, where step requests arrive.
