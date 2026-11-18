@@ -156,7 +156,7 @@ class StepConnections(Protocol):
         """Return the largest message a connection takes; ``None`` when unknown."""
         ...
 
-    def step_frame_encodings(self, cid: ConnId) -> Mapping[str, int]:
+    def step_frame_encodings(self, cid: ConnId) -> Mapping[str, step_pb2.FrameEncoding.ValueType]:
         """Return the ``FrameEncoding`` each track's step frames take on a connection."""
         ...
 
@@ -327,7 +327,7 @@ class _Streams:
     outcome yet.
     """
 
-    encodings: Mapping[str, int]
+    encodings: Mapping[str, step_pb2.FrameEncoding.ValueType]
     encoders: dict[str, TrackEncoder]
     generation: int
     sending: list[EncodedResult] = field(default_factory=list)
@@ -370,7 +370,9 @@ class OutputStreams:
         with self._lock:
             return len(self._conns)
 
-    def open(self, conn_id: ConnId, encodings: Mapping[str, int]) -> int:
+    def open(
+        self, conn_id: ConnId, encodings: Mapping[str, step_pb2.FrameEncoding.ValueType]
+    ) -> int:
         """Hold *conn_id*'s negotiated *encodings*, by track, unless it already has an entry.
 
         Returns:
@@ -416,7 +418,7 @@ class OutputStreams:
                 return gone
             for track, encoding in streams.encodings.items():
                 if encoding not in _STREAMLESS and track not in streams.encoders:
-                    streams.encoders[track] = TrackEncoder(encoding)
+                    streams.encoders[track] = TrackEncoder(encoding, track)
             if keyframe:
                 for encoder in streams.encoders.values():
                     encoder.request_keyframe()

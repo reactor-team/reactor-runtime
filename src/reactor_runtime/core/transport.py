@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Mapping
 from enum import StrEnum
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from reactor_runtime.core.stats import TransportReading
 from reactor_runtime.core.values import (
@@ -29,6 +29,9 @@ from reactor_runtime.core.values import (
     MediaChunk,
     MessageStage,
 )
+
+if TYPE_CHECKING:
+    from reactor_wire.v1 import step_pb2
 from reactor_runtime.protocol import Channel, ProtocolVersion
 
 
@@ -204,7 +207,7 @@ class StepFrameEncodingSource(Protocol):
     """
 
     @property
-    def step_frame_encodings(self) -> Mapping[str, int]:
+    def step_frame_encodings(self) -> Mapping[str, step_pb2.FrameEncoding.ValueType]:
         """The ``FrameEncoding`` each track's step frames take, by track name.
 
         Fixed for the connection's life. A track not listed is

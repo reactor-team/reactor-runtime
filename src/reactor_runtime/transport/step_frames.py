@@ -39,6 +39,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import threading
 from collections import deque
 from collections.abc import Callable, Collection, Iterable
 from concurrent.futures import ThreadPoolExecutor
@@ -243,14 +244,23 @@ class TrackEncoder:
     frames it is given. Encoding is not thread-safe: one step encodes on it
     at a time. :meth:`request_keyframe` can be called from any thread.
 
+    A call that fails sends its frames raw. The first such fallback is logged
+    as a warning, with the track, the encoding and why; later ones are counted
+    in :attr:`raw_fallbacks` and in :func:`raw_fallbacks`.
+
     Attributes:
         encoding: The wire encoding of the frames it encodes.
+        track: The output track it encodes, for the operator's log.
+        raw_fallbacks: How many calls failed, so their frames went out raw.
     """
 
-    def __init__(self, encoding: step_pb2.FrameEncoding.ValueType) -> None:
+    def __init__(self, encoding: step_pb2.FrameEncoding.ValueType, track: str = "") -> None:
         """Prepare an encoder for *encoding*, one of the encoded :class:`FrameEncoding` values."""
         self.encoding = encoding
+        self.track = track
+        self.raw_fallbacks = 0
         self._encoder: rw.VideoEncoder | None = None
+        self._size: tuple[int, int] | None = None
         self._keyframe = False
         self._keyframe_lock = threading.Lock()
         self._timestamp_us = 0
@@ -283,13 +293,18 @@ class TrackEncoder:
             for picture in pictures:
                 height, width = picture.shape[:2]
                 bitrate = max(_MIN_BITRATE_BPS, int(width * height * fps * _BITS_PER_PIXEL))
+                # The backend opens at one frame size, so a new size opens a
+                # new one, whose first frame is a keyframe.
+                if self._encoder is not None and self._size != (width, height):
+                    self._encoder = None
                 if self._encoder is None:
-                    codec = _CODECS.get(self.encoding)
+                    codec = BY_ENCODING.get(self.encoding)
                     if codec is None:
                         raise rw.CodecUnsupported(f"no codec carries encoding {self.encoding}")
-                    self._encoder = _video_codecs().encoder(
-                        codec, width, height, bitrate_bps=bitrate, framerate=fps
+                    self._encoder = video_codecs().encoder(
+                        codec.codec, width, height, bitrate_bps=bitrate, framerate=fps
                     )
+                    self._size = (width, height)
                 elif (self._encoder.bitrate_bps, self._encoder.framerate) != (bitrate, fps):
                     self._encoder.set_rates(bitrate, fps)
                 if keyframe:
@@ -300,11 +315,35 @@ class TrackEncoder:
                 if frame is None:
                     raise rw.CodecError("the encoder dropped a frame")
                 encoded.append(frame)
-        except (rw.CodecError, ValueError, TypeError) as error:
-            logger.debug("an output track's frames are sent raw: %s", error)
+        except (rw.CodecError, ValueError, TypeError):
+            if not self.raw_fallbacks:
+                logger.warning(
+                    "step output track %r is sent raw after %s encoding failed",
+                    self.track,
+                    _encoding_name(self.encoding),
+                    exc_info=True,
+                )
+            self.raw_fallbacks += 1
+            _count_raw_fallback()
             self._encoder = None
+            self._size = None
             return None
         return encoded
+
+
+_raw_fallbacks_lock = threading.Lock()
+_raw_fallbacks = 0
+
+
+def _count_raw_fallback() -> None:
+    global _raw_fallbacks
+    with _raw_fallbacks_lock:
+        _raw_fallbacks += 1
+
+
+def raw_fallbacks() -> int:
+    """How many times, in this process, a negotiated encoded step output track went out raw."""
+    return _raw_fallbacks
 
 
 def decode_step_frames(
