@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import itertools
 import threading
 from collections.abc import (
     AsyncIterator,
@@ -97,16 +98,18 @@ class EncodedResult:
     """A requested step's result as the model's thread encoded it, without its files.
 
     Exactly one of *frame*, the v1 frame ready to send, *oversized*, the size
-    of a result that does not fit the connection, or *error*, why the media
-    cannot be carried as frames, is set. *streamed* names the output tracks
-    whose frames in *frame* continue an encoded stream, which starts over when
-    the frame is not sent.
+    of a result that does not fit the connection, *error*, why the media
+    cannot be carried as frames, or *stale*, a result whose connection closed
+    or was replaced after the request was admitted, is set. *streamed* names
+    the output tracks whose frames in *frame* continue an encoded stream,
+    which starts over when the frame is not sent.
     """
 
     frame: bytes | None = None
     oversized: int = 0
     error: str | None = None
     streamed: tuple[str, ...] = ()
+    stale: bool = False
 
 
 class StepInputError(ValueError):
@@ -215,6 +218,7 @@ class StepBridge(Protocol):
         conn_id: ConnId,
         request_id: RequestId,
         max_message_size: int | None = None,
+        stream_generation: int | None = None,
     ) -> tuple[str, CommandOutcome] | None:
         """Admit a step request's calls and its step, or return the first call that fails."""
         ...
@@ -325,6 +329,7 @@ class _Streams:
 
     encodings: Mapping[str, int]
     encoders: dict[str, TrackEncoder]
+    generation: int
     sending: list[EncodedResult] = field(default_factory=list)
 
 
@@ -358,30 +363,48 @@ class OutputStreams:
         self._lock = threading.Lock()
         self._settled = threading.Condition(self._lock)
         self._conns: dict[ConnId, _Streams] = {}
+        self._generations = itertools.count(1)
 
     def __len__(self) -> int:
         """Return how many connections hold an entry."""
         with self._lock:
             return len(self._conns)
 
-    def open(self, conn_id: ConnId, encodings: Mapping[str, int]) -> None:
-        """Hold *conn_id*'s negotiated *encodings*, by track, unless it already has an entry."""
-        with self._lock:
-            if conn_id not in self._conns:
-                self._conns[conn_id] = _Streams(dict(encodings), {})
+    def open(self, conn_id: ConnId, encodings: Mapping[str, int]) -> int:
+        """Hold *conn_id*'s negotiated *encodings*, by track, unless it already has an entry.
 
-    def encoders(self, conn_id: ConnId) -> dict[str, TrackEncoder]:
+        Returns:
+            The entry's generation, new for each entry: a request admitted
+            under it encodes on its streams only while the entry lasts (see
+            :meth:`encoders`).
+        """
+        with self._lock:
+            streams = self._conns.get(conn_id)
+            if streams is None:
+                streams = _Streams(dict(encodings), {}, next(self._generations))
+                self._conns[conn_id] = streams
+            return streams.generation
+
+    def encoders(
+        self, conn_id: ConnId, generation: int | None = None
+    ) -> dict[str, TrackEncoder] | None:
         """Return the encoder of each encoded track of *conn_id*, by name; empty without an entry.
+
+        ``None`` when *generation* is given and the connection's entry is not
+        that one any more, or is gone: the connection closed or was replaced
+        after the request was admitted, so its result belongs to no stream
+        here.
 
         Called on the model's thread, the only one that encodes, to encode a
         step's result. Waits until every result held for the
         connection is settled, up to :data:`_SEND_WAIT`; past it, the held
         results are dropped and every track starts at a keyframe.
         """
+        gone = None if generation is not None else {}
         with self._lock:
             streams = self._conns.get(conn_id)
-            if streams is None:
-                return {}
+            if streams is None or generation not in (None, streams.generation):
+                return gone
             keyframe = False
             if streams.sending and not self._settled.wait_for(
                 lambda: self._conns.get(conn_id) is not streams or not streams.sending,
@@ -390,7 +413,7 @@ class OutputStreams:
                 streams.sending.clear()
                 keyframe = True
             if self._conns.get(conn_id) is not streams:
-                return {}
+                return gone
             for track, encoding in streams.encodings.items():
                 if encoding not in _STREAMLESS and track not in streams.encoders:
                     streams.encoders[track] = TrackEncoder(encoding)
@@ -545,7 +568,9 @@ class StepRequests:
                 "WebRTC connection that negotiated data-channel chunking",
             )
             return
-        self.streams.open(step.conn_id, self._host.connections.step_frame_encodings(step.conn_id))
+        generation = self.streams.open(
+            step.conn_id, self._host.connections.step_frame_encodings(step.conn_id)
+        )
 
         def refuse_entry(entry: str, reason: str) -> None:
             self._host.journal(SessionEvent.ERROR, message=f"step request: {reason}")
@@ -581,6 +606,7 @@ class StepRequests:
             conn_id=step.conn_id,
             request_id=step.request_id,
             max_message_size=self._host.connections.max_message_size(step.conn_id),
+            stream_generation=generation,
         )
         if rejected is not None:
             key, outcome = rejected
@@ -817,8 +843,11 @@ class StepRequests:
         """Answer a step request whose session ended before its result could go out.
 
         The encoded streams of *encoded*, the result that is not sent, start
-        over at a keyframe.
+        over at a keyframe. A stale result's connection is gone, so it is not
+        answered.
         """
+        if encoded is not None and encoded.stale:
+            return
         if encoded is not None and encoded.streamed:
             self.streams.restart(conn_id, encoded.streamed)
             self.streams.settle(conn_id, encoded)
@@ -846,7 +875,10 @@ class StepRequests:
         message the connection took when the request was admitted once it is
         encoded; raw media and data that alone outgrow it are not copied, and
         no encoder moves on for them. An encoded track whose frames do not go
-        out in the result starts its next frames at a keyframe.
+        out in the result starts its next frames at a keyframe. A request whose
+        connection closed or was replaced after it was admitted is not encoded:
+        its result is stale, and no stream of the connection's replacement
+        moves on for it.
 
         The connection's previous result that continues a stream is waited on
         until its send has an outcome, so a refused send restarts the stream
@@ -861,7 +893,9 @@ class StepRequests:
         if request is None:
             return None
         limit = request.max_message_size
-        encoders = self.streams.encoders(request.conn_id)
+        encoders = self.streams.encoders(request.conn_id, request.stream_generation)
+        if encoders is None:
+            return EncodedResult(stale=True)
         # A failed step's result carries no data, so its data takes no room.
         data = step.data if step.error is None else None
         size = media_size(step.bundle, encoded=encoders.keys()) + len(data or b"")
@@ -935,13 +969,22 @@ class StepRequests:
         next frames at a keyframe. A failed step's result carries no data.
 
         *encoded* is the result the model's thread encoded (see
-        :meth:`encode_result`); without it, it is encoded here.
+        :meth:`encode_result`); without it, it is encoded here. A stale
+        result, whose connection closed or was replaced after the request was
+        admitted, is not sent: the connection on that id now is another one.
         """
         request = step.request
         assert request is not None
         if encoded is None:
             encoded = self.encode_result(step)
             assert encoded is not None
+        if encoded.stale:
+            logger.debug(
+                "dropping the result of a step whose connection was replaced",
+                step=index,
+                conn_id=request.conn_id,
+            )
+            return
         elapsed = step.elapsed or 0.0
         request_id = request.request_id
         streamed = encoded.streamed

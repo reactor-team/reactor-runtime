@@ -1737,6 +1737,37 @@ async def test_a_one_frame_720p_step_is_tens_of_kilobytes(
         await runner.stop()
 
 
+async def test_a_replaced_connections_step_leaves_its_replacements_stream_alone(
+    picture_runner: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    codec, encoding = _output_codec()
+    release = threading.Event()
+    generate = PictureModel.generate
+
+    def held(self: PictureModel, input: tuple[str, list[str], list[int]]) -> Any:
+        release.wait(5)
+        return generate(self, input)
+
+    monkeypatch.setattr(PictureModel, "generate", held)
+    old = await _encoding(picture_runner, encoding)
+    _queue_step(picture_runner, old, "r1")
+    await _until(lambda: len(models) > 0)
+    await asyncio.sleep(0.05)
+
+    # The same id reconnects and asks for a step while the old one still runs.
+    new = await _encoding(picture_runner, encoding)
+    _queue_step(picture_runner, new, "r2")
+    await asyncio.sleep(0.05)
+    release.set()
+    await _until(lambda: len(new.sent) == 1)
+    await asyncio.sleep(0.05)
+
+    assert [reply.request_id for reply in new.replies()] == ["r2"]
+    result = _result_of(new, "r2")
+    assert _keyframes(result) == [True]
+    assert rw.VideoCodecs().decoder(codec).decode(_video(result)[0].data) is not None
+
+
 async def test_closing_a_connection_frees_its_encoders(picture_runner: Runner) -> None:
     _, encoding = _output_codec()
     conn = await _encoding(picture_runner, encoding)

@@ -142,6 +142,7 @@ class FakeBridge:
         conn_id: ConnId,
         request_id: str,
         max_message_size: int | None = None,
+        stream_generation: int | None = None,
     ) -> tuple[str, CommandOutcome] | None:
         if self.rejection is None:
             self.log.append(request_id)

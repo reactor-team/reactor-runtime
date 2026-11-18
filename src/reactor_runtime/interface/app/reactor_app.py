@@ -518,6 +518,7 @@ class ReactorApp(ReactorCore):
                 request.request_id,
                 self._steps_accepted,
                 max_message_size=request.max_message_size,
+                stream_generation=request.stream_generation,
             )
             outcome = self._generate(input)
             returned = await self.process_output(outcome)
