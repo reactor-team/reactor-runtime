@@ -368,14 +368,12 @@ class StepFrameCodecs:
 def _step_frame_codecs() -> StepFrameCodecs:
     """Return the codecs this process can carry step frames in, read once.
 
-    They come from the binding's standalone video codecs. A binding that has
-    none, or whose capabilities cannot be read, carries every step frame raw.
+    They come from the binding's standalone video codecs. When their
+    capabilities cannot be read, a warning is logged and every step frame is
+    raw.
     """
-    video_codecs = getattr(rw, "VideoCodecs", None)
-    if video_codecs is None:
-        return StepFrameCodecs()
     try:
-        capabilities = video_codecs().capabilities()
+        capabilities = rw.VideoCodecs().capabilities()
     except Exception:
         logger.warning("could not read the video codecs; step frames stay raw", exc_info=True)
         return StepFrameCodecs()

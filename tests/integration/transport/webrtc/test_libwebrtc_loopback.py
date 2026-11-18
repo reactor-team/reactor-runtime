@@ -1043,6 +1043,32 @@ async def test_a_stepped_client_negotiates_each_tracks_step_frame_encoding(
         client.pc = None  # type: ignore[assignment]
 
 
+async def test_a_stepped_client_negotiates_vp8_with_the_bindings_own_codecs() -> None:
+    """The real capabilities probe, unpatched: VP8 is carried both ways in every build."""
+    peer_module._step_frame_codecs.cache_clear()
+    factory = _get_factory(WebRtcConfig())
+    client = await _Client.create(factory)
+    for transceiver in (client.recv, client.send):
+        await transceiver.set_codec_preferences([rw.VideoCodec.Vp8])
+    offer_sdp = add_session_attribute(await client.create_offer(), ENCODED_STEP_FRAMES)
+
+    peer, answer = await libwebrtc_peer_factory(
+        ConnId(113),
+        SdpOffer(sdp=offer_sdp),
+        client.track_map(),
+        WebRtcConfig(ice_gathering_timeout_ms=500),
+        ProtocolVersion.V1,
+    )
+    try:
+        assert f"a={ENCODED_STEP_FRAMES}\r\n" in answer.sdp
+        assert peer.step_frame_encodings["out_video"] == step_pb2.FRAME_ENCODING_VP8
+        assert peer.step_frame_encodings["in_video"] == step_pb2.FRAME_ENCODING_VP8
+    finally:
+        await peer.close()
+        client.pc = None  # type: ignore[assignment]
+        peer_module._step_frame_codecs.cache_clear()
+
+
 async def test_an_offer_without_encoded_step_frames_keeps_every_track_raw(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
