@@ -7,12 +7,15 @@ message PublishTrack {
   string name = 1;
 }
 
-// Stop sending an input track without releasing the publisher slot.
+// Stop sending the named output track to this connection. The other
+// connections and the model are unaffected.
 message PauseTrack {
   string name = 1;
 }
 
-// Resume a paused input track.
+// Send a paused output track to this connection again. Output tracks start
+// paused, so this is also how a connection first receives one. An encoded step
+// track's first frames after it start at a keyframe (see FrameEncoding).
 message ResumeTrack {
   string name = 1;
 }

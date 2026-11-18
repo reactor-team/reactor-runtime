@@ -46,10 +46,12 @@ import "reactor_wire/v1/platform.proto";
 //   - the first frames after frames of the track that were encoded but not
 //     sent: a StepResult that is RESULT_TOO_LARGE or that the connection
 //     refused to send, on the runtime's side;
-//   - the first frames after the receiver lost the stream: a RequestStep with
-//     request_keyframe, for the runtime's output, or input_decode_failed for
-//     the track, for the client's input: as an Error for a PushFrames, or as
-//     a refused StepResult's code for a RequestStep.
+//   - the first frames of an output track after a ResumeTrack for it on the
+//     connection: a client whose decoder lost the track's stream sends
+//     PauseTrack and ResumeTrack to start it again;
+//   - the first frames of an input track after input_decode_failed for it:
+//     as an Error for a PushFrames, or as a refused StepResult's code for a
+//     RequestStep.
 // A step or a push with no frames for a track sends nothing for it and leaves
 // its stream where it was.
 enum FrameEncoding {
@@ -135,11 +137,6 @@ message RequestStep {
   // media_input[<i>] and the code input_decode_failed), and the track's next
   // frames start at a keyframe.
   repeated TrackFrames media_input = 3;
-  // Whether every encoded output track of this connection starts this step's
-  // frames at a keyframe, for a client whose decoder lost its stream. False or
-  // unset asks for nothing and suppresses none of the keyframes the encoding
-  // rules call for (see FrameEncoding).
-  optional bool request_keyframe = 4;
 }
 
 // Frames for the model's input tracks, sent as the client has them, apart from
