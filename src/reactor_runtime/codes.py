@@ -28,7 +28,8 @@ INPUT_DECODE_FAILED = "input_decode_failed"
 
 The runtime drops the track's decoder, and the client starts the track's next
 frames at a keyframe. For a step request, the code of its refused
-``StepResult``, whose ``entry`` names the track. For a push, a notification
+``StepResult``, whose ``entry`` names the frame that broke the stream
+(``media_input[i].frames[j]``). For a push, a notification
 with the track named, not a reply: the push was taken, and the runtime drops
 the track's frames up to its next keyframe.
 """

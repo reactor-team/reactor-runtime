@@ -18,7 +18,7 @@ from reactor_runtime.transport.step_frames import (
     TrackDecoder,
     decode_pushed_frames,
     decode_step_frames,
-    encoded_input,
+    encoded_step,
     unpublished_track,
 )
 from reactor_wire.v1 import (
@@ -425,7 +425,7 @@ def test_encoded_frames_for_a_track_that_is_not_an_input_video_track_open_no_dec
 
     # No code: the track has no stream for a keyframe to restart.
     assert outcome == StepFrameRefusal(
-        "media_input[0]",
+        0,
         "media_input[0] names 'mic', which is not an input video track of the model",
     )
     assert decoders == {}
@@ -489,7 +489,7 @@ def test_an_empty_encoded_frame_is_refused() -> None:
     assert "no data" in refusal.reason
 
 
-# ── encoded_input ──────────────────────────────────────────────────────────────
+# ── encoded_step ───────────────────────────────────────────────────────────────
 
 
 def test_only_a_v1_data_step_with_an_encoded_frame_is_picked_out() -> None:
@@ -506,12 +506,12 @@ def test_only_a_v1_data_step_with_an_encoded_frame_is_picked_out() -> None:
         data_pb2.DataClientMessage(request_id="data_1", command=model_pb2.Command(type="ping"))
     )
 
-    assert encoded_input(encoded, ProtocolVersion.V1, Channel.DATA) is not None
-    assert encoded_input(raw, ProtocolVersion.V1, Channel.DATA) is None
-    assert encoded_input(command, ProtocolVersion.V1, Channel.DATA) is None
-    assert encoded_input(encoded, ProtocolVersion.V1, Channel.CONTROL) is None
-    assert encoded_input(encoded, ProtocolVersion.V0, Channel.DATA) is None
-    assert encoded_input(b"\xff not protobuf", ProtocolVersion.V1, Channel.DATA) is None
+    assert encoded_step(encoded, ProtocolVersion.V1, Channel.DATA) is not None
+    assert encoded_step(raw, ProtocolVersion.V1, Channel.DATA) is None
+    assert encoded_step(command, ProtocolVersion.V1, Channel.DATA) is None
+    assert encoded_step(encoded, ProtocolVersion.V1, Channel.CONTROL) is None
+    assert encoded_step(encoded, ProtocolVersion.V0, Channel.DATA) is None
+    assert encoded_step(b"\xff not protobuf", ProtocolVersion.V1, Channel.DATA) is None
 
 
 # ── StepFrameGate ──────────────────────────────────────────────────────────────
@@ -868,10 +868,8 @@ def test_a_push_with_an_encoded_frame_is_picked_out() -> None:
         encoding=step_pb2.FRAME_ENCODING_RAW, dtype="uint8", shape=[1, 1, 3], data=bytes(3)
     )
 
-    assert encoded_input(
-        _wire(_push(("webcam", [_h264(packet)]))), ProtocolVersion.V1, Channel.DATA
-    )
-    assert encoded_input(_wire(_push(("webcam", [raw]))), ProtocolVersion.V1, Channel.DATA) is None
+    assert encoded_step(_wire(_push(("webcam", [_h264(packet)]))), ProtocolVersion.V1, Channel.DATA)
+    assert encoded_step(_wire(_push(("webcam", [raw]))), ProtocolVersion.V1, Channel.DATA) is None
 
 
 def test_every_pushed_frame_decodes_even_ones_the_model_will_drop_so_the_stream_goes_on() -> None:
@@ -1014,6 +1012,45 @@ async def test_a_push_that_does_not_decode_is_delivered_and_the_client_is_told_o
     # Never a refusal: every push goes up, the dropped frames without pictures.
     assert [sorted(step.pictures) for step in rec.steps] == [[], [], [(0, 0), (0, 1)]]
     assert gate.decoders == 1
+
+
+async def test_a_step_that_breaks_a_stream_is_not_reported_again_by_the_push_behind_it() -> None:
+    rec = _Recorder()
+    gate = rec.gate()
+    frames = _encode_keyed(_pictures(6), {0, 4})
+
+    # The step's first frame is not a keyframe; the client had already
+    # pipelined a push of more inter frames before it heard.
+    gate.submit(_wire(_step(*frames[1:3])), ProtocolVersion.V1, Channel.DATA)
+    gate.submit(_wire(_push(("webcam", frames[3:4]))), ProtocolVersion.V1, Channel.DATA)
+    gate.submit(_wire(_push(("webcam", frames[4:]))), ProtocolVersion.V1, Channel.DATA)
+    await _until(lambda: len(rec.steps) == 2)
+
+    # One report of the break, the step's refusal; the push waits for the keyframe.
+    (refusal,) = rec.replies
+    assert data_pb2.DataServerMessage.FromString(refusal).step_result.code == (
+        "input_decode_failed"
+    )
+    assert [sorted(step.pictures) for step in rec.steps] == [[], [(0, 0), (0, 1)]]
+
+
+async def test_a_step_keyframe_restarts_a_stream_a_push_broke() -> None:
+    rec = _Recorder()
+    gate = rec.gate()
+    frames = _encode_keyed(_pictures(6), {0})
+
+    gate.submit(_wire(_push(("webcam", frames[1:2]))), ProtocolVersion.V1, Channel.DATA)
+    gate.submit(_wire(_step(*frames[:3])), ProtocolVersion.V1, Channel.DATA)
+    # The step restarted the stream, so the push's inter frames decode on it.
+    gate.submit(_wire(_push(("webcam", frames[3:]))), ProtocolVersion.V1, Channel.DATA)
+    await _until(lambda: len(rec.steps) == 3)
+
+    assert len(rec.replies) == 1  # the push's notice, nothing after it
+    assert [sorted(step.pictures) for step in rec.steps] == [
+        [],
+        [(0, 0), (0, 1), (0, 2)],
+        [(0, 0), (0, 1), (0, 2)],
+    ]
 
 
 async def test_unpublishing_a_track_forgets_that_its_pushed_stream_broke() -> None:

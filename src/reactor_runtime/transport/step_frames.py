@@ -78,8 +78,7 @@ class StepFrameRefusal:
     """Why a request's encoded frames could not be decoded.
 
     Attributes:
-        entry: The frame at fault, as the runner names a request's entries
-            (``media_input[i].frames[j]``).
+        index: The ``media_input`` entry at fault.
         reason: What went wrong, for the client.
         code: The stable code the refused result carries:
             ``input_decode_failed`` when a frame of a model input track broke
@@ -90,19 +89,35 @@ class StepFrameRefusal:
             that is not supported): a keyframe would not help.
         encoding: The encoding of the track whose stream broke, for the
             operator's log; ``None`` when no stream broke.
+        position: The frame at fault within the entry, ``None`` when the
+            fault is the whole entry's.
     """
 
-    entry: str
+    index: int
     reason: str
     code: str | None = None
     encoding: step_pb2.FrameEncoding.ValueType | None = None
+    position: int | None = None
+
+    @property
+    def entry(self) -> str:
+        """The entry or frame at fault, as the runner names a request's entries.
+
+        ``media_input[i].frames[j]`` for a frame, ``media_input[i]`` for a whole entry.
+        """
+        where = f"media_input[{self.index}]"
+        return where if self.position is None else f"{where}.frames[{self.position}]"
+
+    def order(self) -> tuple[int, int]:
+        """Where the fault is in the request, for picking the first of several."""
+        return self.index, -1 if self.position is None else self.position
 
 
 def _stream_lost(
-    entry: str, reason: str, encoding: step_pb2.FrameEncoding.ValueType
+    index: int, position: int, reason: str, encoding: step_pb2.FrameEncoding.ValueType
 ) -> StepFrameRefusal:
     """Refuse a frame that broke its *encoding* track's stream: the client restarts it."""
-    return StepFrameRefusal(entry, reason, INPUT_DECODE_FAILED, encoding)
+    return StepFrameRefusal(index, reason, INPUT_DECODE_FAILED, encoding, position)
 
 
 def _codec(version: ProtocolVersion) -> Codec:
@@ -113,7 +128,7 @@ def _codec(version: ProtocolVersion) -> Codec:
     return codec
 
 
-def encoded_input(
+def encoded_step(
     payload: bytes | str, version: ProtocolVersion, channel: Channel
 ) -> data_pb2.DataClientMessage | None:
     """Return the step request or push *payload* carries if one of its frames is encoded.
@@ -121,6 +136,9 @@ def encoded_input(
     ``None`` for any other message. Only a v1 data-channel frame can carry a
     step request or a push. A frame that does not parse is the runner's to
     reject, so it is returned as ``None`` too.
+
+    A push is named in the step vocabulary, as :class:`DecodedStep` and
+    ``deliver_step`` name it: its frames are step input sent outside a step.
     """
     if version is not ProtocolVersion.V1 or channel is not Channel.DATA or isinstance(payload, str):
         return None
@@ -204,6 +222,7 @@ def decode_step_frames(
     message: data_pb2.DataClientMessage,
     decoders: dict[str, TrackDecoder],
     video_inputs: Collection[str],
+    lost: set[str] | None = None,
 ) -> Pictures | StepFrameRefusal:
     """Decode each encoded frame of *message*'s step request to its picture.
 
@@ -226,6 +245,12 @@ def decode_step_frames(
     this process does not decode, a track that is not an input video track)
     leaves the track's decoder and stream where they were.
 
+    *lost*, when given, holds the tracks whose stream broke and has not
+    restarted, the set a push keeps (:func:`decode_pushed_frames`): a track
+    whose stream this request breaks joins it, and one whose frames decode
+    leaves it, so a push behind the request does not report the same break
+    again.
+
     Returns:
         The RGB picture of each encoded frame, by ``(entry, position)``, or why
         the request cannot be decoded: the first entry at fault, in request
@@ -243,7 +268,8 @@ def decode_step_frames(
             track.lost = checked
         elif track.streams and track.streams[0].encoding != checked.encoding:
             track.lost = _stream_lost(
-                f"media_input[{index}].frames[{checked.positions[0]}]",
+                index,
+                checked.positions[0],
                 f"track {entry.track!r} takes one frame encoding in a request",
                 track.streams[0].encoding,
             )
@@ -274,8 +300,12 @@ def decode_step_frames(
             # track's stream is whole and its decoder stays.
             if track.lost.code == INPUT_DECODE_FAILED:
                 decoders.pop(track.name, None)
+                if lost is not None:
+                    lost.add(track.name)
+        elif lost is not None and track.name in decoders:
+            lost.discard(track.name)
     if refusals:
-        return min(refusals, key=lambda refusal: _entry_order(refusal.entry))
+        return min(refusals, key=StepFrameRefusal.order)
     return pictures
 
 
@@ -320,12 +350,6 @@ def _each[T, R](work: Callable[[T], R], items: list[T]) -> list[R]:
     return list(_POOL.map(work, items))
 
 
-def _entry_order(entry: str) -> tuple[int, int]:
-    """Order a refusal's entry (``media_input[i]`` or ``media_input[i].frames[j]``) by request."""
-    numbers = [int(part.split("]")[0]) for part in entry.split("[")[1:]]
-    return numbers[0], numbers[1] if len(numbers) > 1 else -1
-
-
 def _check_entry(
     entry: step_pb2.TrackFrames, index: int, video_inputs: Collection[str]
 ) -> _Stream | StepFrameRefusal | None:
@@ -338,11 +362,11 @@ def _check_entry(
         if entry.frames[position].encoding not in BY_ENCODING:
             name = _encoding_name(entry.frames[position].encoding)
             return StepFrameRefusal(
-                f"{where}.frames[{position}]", f"frame encoding {name} is not supported"
+                index, f"frame encoding {name} is not supported", position=position
             )
     if entry.track not in video_inputs:
         return StepFrameRefusal(
-            where,
+            index,
             f"{where} names {entry.track!r}, which is not an input video track of the model",
         )
     encoding = entry.frames[positions[0]].encoding
@@ -350,13 +374,14 @@ def _check_entry(
         frame = entry.frames[position]
         if frame.encoding != encoding:
             return _stream_lost(
-                f"{where}.frames[{position}]",
+                index,
+                position,
                 f"track {entry.track!r} takes one frame encoding in a request",
                 encoding,
             )
         problem = _data_problem(frame)
         if problem is not None:
-            return _stream_lost(f"{where}.frames[{position}]", problem, encoding)
+            return _stream_lost(index, position, problem, encoding)
     return _Stream(index=index, entry=entry, positions=positions, encoding=encoding)
 
 
@@ -427,18 +452,50 @@ def _access_unit_problem(data: bytes) -> str | None:
     return None
 
 
-def _decoder_for(stream: _Stream, current: TrackDecoder | None) -> TrackDecoder | StepFrameRefusal:
-    """Return the decoder *stream*'s track decodes on: *current*, or a new one for its encoding."""
-    if current is not None and current.encoding == stream.encoding:
+_NEEDS_KEYFRAME = (
+    "the track's stream must start at a keyframe: its first frame on a connection, "
+    "and its first after frames that did not decode"
+)
+
+
+def _open_decoder(
+    encoding: step_pb2.FrameEncoding.ValueType, current: TrackDecoder | None
+) -> TrackDecoder | str:
+    """Return the decoder an *encoding* frame decodes on: *current*, or a new one; else why not.
+
+    Shared by step requests and pushes, so both open a track's decoder alike.
+    """
+    if current is not None and current.encoding == encoding:
         return current
     try:
-        return TrackDecoder(stream.encoding)
+        return TrackDecoder(encoding)
     except rw.CodecError as error:
-        name = _encoding_name(stream.encoding)
-        return StepFrameRefusal(
-            f"media_input[{stream.index}].frames[{stream.positions[0]}]",
-            f"frame encoding {name} is not supported here: {error}",
-        )
+        return f"frame encoding {_encoding_name(encoding)} is not supported here: {error}"
+
+
+def _decode_frame(decoder: TrackDecoder, data: bytes) -> npt.NDArray[np.uint8] | str:
+    """Decode one frame of *decoder*'s stream to its picture, or say why it broke the stream.
+
+    Shared by step requests and pushes, so a frame breaks a track's stream on
+    the same faults either way.
+    """
+    try:
+        picture = decoder.decode(data)
+    except rw.CodecNeedsKeyFrame:
+        return _NEEDS_KEYFRAME
+    except (rw.CodecError, ValueError) as error:
+        return f"the frame does not decode: {error}"
+    if picture is None:
+        return "the frame decoded to no picture"
+    return picture
+
+
+def _decoder_for(stream: _Stream, current: TrackDecoder | None) -> TrackDecoder | StepFrameRefusal:
+    """Return the decoder *stream*'s track decodes on: *current*, or a new one for its encoding."""
+    decoder = _open_decoder(stream.encoding, current)
+    if isinstance(decoder, str):
+        return StepFrameRefusal(stream.index, decoder, position=stream.positions[0])
+    return decoder
 
 
 def _decode_track(streams: list[_Stream], decoder: TrackDecoder) -> _Decoded:
@@ -452,38 +509,17 @@ def _decode_track(streams: list[_Stream], decoder: TrackDecoder) -> _Decoded:
     mismatch: StepFrameRefusal | None = None
     for stream in streams:
         for position in stream.positions:
-            where = f"media_input[{stream.index}].frames[{position}]"
             frame = stream.entry.frames[position]
-            try:
-                picture = decoder.decode(frame.data)
-            except rw.CodecNeedsKeyFrame:
-                return _Decoded(
-                    pictures,
-                    _stream_lost(
-                        where,
-                        f"track {stream.entry.track!r} must start at a keyframe: its first "
-                        "frame on a connection, and its first after frames that did not decode",
-                        stream.encoding,
-                    ),
-                    lost=True,
-                )
-            except (rw.CodecError, ValueError) as error:
-                return _Decoded(
-                    pictures,
-                    _stream_lost(where, f"the frame does not decode: {error}", stream.encoding),
-                    True,
-                )
-            if picture is None:
-                return _Decoded(
-                    pictures,
-                    _stream_lost(where, "the frame decoded to no picture", stream.encoding),
-                    True,
-                )
+            picture = _decode_frame(decoder, frame.data)
+            if isinstance(picture, str):
+                lost = _stream_lost(stream.index, position, picture, stream.encoding)
+                return _Decoded(pictures, lost, lost=True)
             declared = list(frame.shape)
             if declared and declared != list(picture.shape) and mismatch is None:
                 mismatch = StepFrameRefusal(
-                    where,
+                    stream.index,
                     f"the frame decodes to {list(picture.shape)}, not the {declared} it declares",
+                    position=position,
                 )
             pictures[stream.index, position] = picture
     return _Decoded(pictures, mismatch)
@@ -605,24 +641,13 @@ def _push_frame(
     problem = _data_problem(frame)
     if problem is not None:
         return problem
-    if decoder is None or decoder.encoding != frame.encoding:
-        try:
-            decoder = TrackDecoder(frame.encoding)
-        except rw.CodecError as error:
-            name = _encoding_name(frame.encoding)
-            return f"frame encoding {name} is not supported here: {error}"
-    try:
-        picture = decoder.decode(frame.data)
-    except rw.CodecNeedsKeyFrame:
-        return (
-            "the track's stream must start at a keyframe: its first frame on a connection, "
-            "and its first after frames that did not decode"
-        )
-    except (rw.CodecError, ValueError) as error:
-        return f"the frame does not decode: {error}"
-    if picture is None:
-        return "the frame decoded to no picture"
-    return decoder, picture
+    opened = _open_decoder(frame.encoding, decoder)
+    if isinstance(opened, str):
+        return opened
+    picture = _decode_frame(opened, frame.data)
+    if isinstance(picture, str):
+        return picture
+    return opened, picture
 
 
 def _decode_failed(version: ProtocolVersion, track: str, reason: str) -> bytes | str:
@@ -710,7 +735,7 @@ class StepFrameGate:
 
     def submit(self, payload: bytes | str, version: ProtocolVersion, channel: Channel) -> None:
         """Take one inbound message: deliver it now, or queue it behind a decode."""
-        if self._draining is None and encoded_input(payload, version, channel) is None:
+        if self._draining is None and encoded_step(payload, version, channel) is None:
             self._pass(payload, version, channel)
             return
         self._backlog.append((payload, version, channel))
@@ -765,7 +790,7 @@ class StepFrameGate:
         try:
             while self._backlog:
                 payload, version, channel = self._backlog.popleft()
-                message = encoded_input(payload, version, channel)
+                message = encoded_step(payload, version, channel)
                 if message is None or not isinstance(payload, bytes):
                     self._pass(payload, version, channel)
                     continue
@@ -786,13 +811,14 @@ class StepFrameGate:
                         DecodedStep(payload=payload, pictures=pushed.pictures), version
                     )
                     continue
+                lost = set(self._lost)
                 outcome = await asyncio.to_thread(
-                    decode_step_frames, message, decoders, self._video_inputs
+                    decode_step_frames, message, decoders, self._video_inputs, lost
                 )
                 self._keep(decoders)
-                # A track whose stream a request's keyframe restarted has its
-                # decoder again.
-                self._lost.difference_update(decoders)
+                # A track whose stream the request broke waits for a keyframe
+                # in a push too, and one the request restarted no longer does.
+                self._lost = lost
                 if isinstance(outcome, StepFrameRefusal):
                     if outcome.code == INPUT_DECODE_FAILED:
                         logger.warning(
