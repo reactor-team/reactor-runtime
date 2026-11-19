@@ -133,6 +133,7 @@ def test_exact_metrics_cover_every_count() -> None:
         "live_rooms_leaving",
         "live_step_requests",
         "live_step_decoders",
+        "live_step_encoders",
         "live_local_files",
         "live_recorder_threads",
         "tasks",
@@ -166,6 +167,15 @@ def test_a_step_decoder_left_alive_fails_its_cycle() -> None:
 
     assert decoders.status == "fail"
     assert retained_cycles(samples) == 1
+
+
+def test_a_step_encoder_left_alive_fails_its_cycle() -> None:
+    samples = _samples(4)
+    samples[2] = dataclasses.replace(samples[2], live_step_encoders=1)
+
+    [encoders] = [m for m in exact_metrics(samples) if m.name == "live_step_encoders"]
+
+    assert encoders.status == "fail"
 
 
 def test_a_participant_left_alive_fails_its_cycle() -> None:

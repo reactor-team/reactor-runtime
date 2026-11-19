@@ -633,6 +633,8 @@ class Runner(ServiceComponent, ConnectionSink):
             if self._loop is not None:
                 self._spawn_teardown(conn.close())
             return False
+        # A new handle on a known id is a new wire: its streams start over.
+        self._steps.connection_closed(conn.id)
         self._connections.register(conn)
         if self._media_depth is not None:
             conn.set_media_depth(self._media_depth)
@@ -644,6 +646,7 @@ class Runner(ServiceComponent, ConnectionSink):
         """Drop a previously opened connection that has gone away."""
         self._connections.drop(conn_id)
         self._client_stats.forget(conn_id)
+        self._steps.connection_closed(conn_id)
 
     def connection_answered(self, conn_id: ConnId, answer: Mapping[str, str]) -> None:
         """Record a transport's negotiation answer for a connection.
@@ -769,7 +772,12 @@ class Runner(ServiceComponent, ConnectionSink):
         self._connections.note_keepalive(conn_id)
 
     def resume_track(self, conn_id: ConnId, name: str) -> None:
-        """Resume an outbound track for one connection, at the client's request."""
+        """Resume an outbound track for one connection, at the client's request.
+
+        In a stepped session the track's next encoded step frames on the
+        connection start at a keyframe.
+        """
+        self._steps.track_resumed(conn_id, name)
         self._connections.resume_track(conn_id, name)
 
     def pause_track(self, conn_id: ConnId, name: str) -> None:
@@ -1078,7 +1086,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 current_session=self._sessions_posted,
             )
             if step.request is not None:
-                self._steps.end_request(step.request.conn_id, step.request.request_id)
+                self._steps.end_request(step.request.conn_id, step.request.request_id, encoded)
             return
         if self._steps_failed:
             discard_files(step.files)
@@ -1089,7 +1097,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 messages=len(messages),
             )
             if step.request is not None:
-                self._steps.end_request(step.request.conn_id, step.request.request_id)
+                self._steps.end_request(step.request.conn_id, step.request.request_id, encoded)
             return
         saved = self._save_step(step, messages)
         if step.stages and step.bundle is not None:
@@ -2216,6 +2224,7 @@ class Runner(ServiceComponent, ConnectionSink):
                 self._starting_input_done.set()
                 self._spawn_teardown(asyncio.to_thread(self._recorder.stop))
                 self._spawn_teardown(self._connections.close_all())
+                self._steps.connections_closed()
             # The event decides the exit status, so a move's detail only says
             # what happened. An eviction for an error is a model loop that
             # crashed, and the process exits as a failure. Any other end exits
@@ -2523,6 +2532,8 @@ class Runner(ServiceComponent, ConnectionSink):
         """Close every connection, logging a failure instead of raising it.
 
         How long the close took is logged either way, so a slow teardown shows.
+        A commanded close reports no connection back as closed, so every
+        connection's output streams are freed here either way.
         """
         started = time.monotonic()
         try:
@@ -2539,6 +2550,8 @@ class Runner(ServiceComponent, ConnectionSink):
                 reason=reason.value,
                 teardown_s=round(time.monotonic() - started, 3),
             )
+        finally:
+            self._steps.connections_closed()
 
     async def _finish_recording(self) -> None:
         """Stop the recorder off the loop, logging a failure instead of raising it.

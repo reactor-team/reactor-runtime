@@ -320,12 +320,15 @@ class StepEnvelope:
         max_message_size: The largest message the connection took when the
             request was admitted, carried to the step's result; ``None`` when
             unknown.
+        stream_generation: The opening of the connection's output streams the
+            request was admitted on, carried to the step's result.
     """
 
     media_input: Mapping[str, tuple[FrameSource, ...]]
     conn_id: ConnId
     request_id: RequestId
     max_message_size: int | None = None
+    stream_generation: int | None = None
 
 
 @dataclass(frozen=True)

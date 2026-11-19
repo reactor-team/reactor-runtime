@@ -262,7 +262,7 @@ def _recorder_threads(runner: Runner) -> int:
 
 
 def _live_transport_objects() -> dict[str, int]:
-    from reactor_runtime.transport.step_frames import TrackDecoder
+    from reactor_runtime.transport.step_frames import TrackDecoder, TrackEncoder
     from reactor_runtime.transport.webrtc.connection import WebRTCConnection
     from reactor_runtime.transport.webrtc.pacer import MediaPacer
     from reactor_runtime.transport.webrtc.peer import WebRTCPeer
@@ -282,6 +282,7 @@ def _live_transport_objects() -> dict[str, int]:
         "pacers": 0,
         "participants": 0,
         "step_decoders": 0,
+        "step_encoders": 0,
         "rooms_leaving": 0,
         "local_files": 0,
     }
@@ -294,6 +295,8 @@ def _live_transport_objects() -> dict[str, int]:
             counts["pacers"] += 1
         elif isinstance(obj, TrackDecoder):
             counts["step_decoders"] += 1
+        elif isinstance(obj, TrackEncoder):
+            counts["step_encoders"] += 1
         elif participant is not None and isinstance(obj, participant):
             counts["participants"] += 1
         elif room_session is not None and isinstance(obj, room_session):

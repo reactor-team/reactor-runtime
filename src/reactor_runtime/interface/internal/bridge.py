@@ -179,6 +179,7 @@ class ModelBridge:
         conn_id: ConnId,
         request_id: RequestId,
         max_message_size: int | None = None,
+        stream_generation: int | None = None,
     ) -> tuple[str, CommandOutcome] | None:
         """Check a step request's calls, then admit them and the step, or none of it.
 
@@ -199,6 +200,8 @@ class ModelBridge:
             request_id: The request id the step's response carries.
             max_message_size: The largest message the connection takes, carried
                 to the step's result.
+            stream_generation: The opening of the connection's output streams
+                the request was admitted on, carried to the step's result.
 
         Returns:
             ``None`` when the request was admitted, else the first call that
@@ -220,6 +223,7 @@ class ModelBridge:
                 conn_id=conn_id,
                 request_id=request_id,
                 max_message_size=max_message_size,
+                stream_generation=stream_generation,
             )
         )
         return None

@@ -570,12 +570,17 @@ class RequestedStep:
             request was admitted, so the step's result is sized against it
             without reading the connection from the model's thread; ``None``
             when unknown.
+        stream_generation: Which opening of the connection's output streams
+            the request was admitted on, so a result whose connection was
+            replaced since is not encoded on, or sent to, its replacement;
+            ``None`` when the runtime keeps none.
     """
 
     conn_id: ConnId
     request_id: str
     index: int
     max_message_size: int | None = None
+    stream_generation: int | None = None
 
 
 class StepRefusalKind(StrEnum):

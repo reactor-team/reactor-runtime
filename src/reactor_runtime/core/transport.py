@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Mapping
 from enum import StrEnum
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from reactor_runtime.core.stats import TransportReading
 from reactor_runtime.core.values import (
@@ -29,6 +29,9 @@ from reactor_runtime.core.values import (
     MediaChunk,
     MessageStage,
 )
+
+if TYPE_CHECKING:
+    from reactor_wire.v1 import step_pb2
 from reactor_runtime.protocol import Channel, ProtocolVersion
 
 
@@ -193,6 +196,23 @@ class MessageStageSource(Protocol):
 
     def take_message_stages(self) -> tuple[MessageStage, ...]:
         """Return the message stage times since the previous take, and start them again."""
+
+
+@runtime_checkable
+class StepFrameEncodingSource(Protocol):
+    """A connection that negotiated the encoding each track's step frames take.
+
+    Optional, beside :class:`Connection`, and checked for with ``isinstance``.
+    A connection without it carries every step frame raw.
+    """
+
+    @property
+    def step_frame_encodings(self) -> Mapping[str, step_pb2.FrameEncoding.ValueType]:
+        """The ``FrameEncoding`` each track's step frames take, by track name.
+
+        Fixed for the connection's life. A track not listed is
+        ``FRAME_ENCODING_RAW``.
+        """
 
 
 @runtime_checkable

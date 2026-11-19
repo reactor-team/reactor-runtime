@@ -11,6 +11,7 @@ from reactor_runtime.protocol.frames import (
     check_frame,
     decode_frame,
     encode_frame,
+    media_size,
     track_frames,
 )
 from reactor_wire.v1 import platform_pb2, step_pb2
@@ -302,3 +303,91 @@ def test_an_empty_audio_track_of_another_shape_cannot_be_encoded(shape: tuple[in
     )
     with pytest.raises(FrameEncodingError, match="cannot be shaped"):
         track_frames(bundle)
+
+
+class _Picture:
+    def __init__(self, data: bytes, key_frame: bool) -> None:
+        self.data = data
+        self.key_frame = key_frame
+
+
+class _FakeEncoder:
+    """Encodes each picture as its first byte; ``fails`` makes it give up on every call."""
+
+    encoding = step_pb2.FRAME_ENCODING_VP8
+
+    def __init__(self, *, fails: bool = False) -> None:
+        self.fails = fails
+        self.calls: list[tuple[list[np.ndarray], float | None]] = []
+
+    def encode(self, pictures: list[np.ndarray], rate: float | None) -> list[_Picture] | None:
+        self.calls.append((pictures, rate))
+        if self.fails:
+            return None
+        return [_Picture(bytes([p[0, 0, 0]]), i == 0) for i, p in enumerate(pictures)]
+
+
+def test_a_video_track_with_an_encoder_carries_its_encoded_stream() -> None:
+    batch = np.stack([np.full((4, 6, 3), i, dtype=np.uint8) for i in range(2)])
+    bundle = MediaBundle(
+        tracks={
+            "v": _track("v", TrackKind.VIDEO, batch, [b"m0", b"m1"]),
+            "a": _track("a", TrackKind.AUDIO, np.zeros((1, 480), dtype=np.int16)),
+        }
+    )
+    encoder = _FakeEncoder()
+    video, audio = track_frames(bundle, video_fps=24.0, encoders={"v": encoder, "a": encoder})
+
+    assert [(f.encoding, f.dtype, list(f.shape)) for f in video.frames] == [
+        (step_pb2.FRAME_ENCODING_VP8, "uint8", [4, 6, 3]),
+    ] * 2
+    assert [(f.data, f.keyframe, f.metadata) for f in video.frames] == [
+        (b"\x00", True, b"m0"),
+        (b"\x01", False, b"m1"),
+    ]
+    assert video.rate == 24.0
+    assert [f.encoding for f in audio.frames] == [RAW]
+    [(pictures, rate)] = encoder.calls
+    assert (len(pictures), rate) == (2, 24.0)
+
+
+def test_a_track_its_encoder_cannot_encode_goes_raw_for_the_step() -> None:
+    image = np.full((2, 2, 3), 9, dtype=np.uint8)
+    bundle = MediaBundle(tracks={"v": _track("v", TrackKind.VIDEO, image)})
+
+    [entry] = track_frames(bundle, encoders={"v": _FakeEncoder(fails=True)})
+
+    [frame] = entry.frames
+    assert (frame.encoding, frame.keyframe) == (RAW, False)
+    np.testing.assert_array_equal(decode_frame(frame, TrackKind.VIDEO).data, image)
+
+
+def test_a_frame_that_is_not_a_picture_is_never_handed_to_the_encoder() -> None:
+    bundle = MediaBundle(
+        tracks={"v": _track("v", TrackKind.VIDEO, np.zeros((2, 2, 4), dtype=np.uint8))}
+    )
+    encoder = _FakeEncoder()
+    with pytest.raises(FrameEncodingError):
+        track_frames(bundle, encoders={"v": encoder})
+    assert encoder.calls == []
+
+
+def test_an_empty_batch_is_never_handed_to_the_encoder() -> None:
+    # Handing it over would spend a keyframe the encoder owes on no frames.
+    bundle = MediaBundle(
+        tracks={"v": _track("v", TrackKind.VIDEO, np.zeros((0, 4, 6, 3), dtype=np.uint8))}
+    )
+    encoder = _FakeEncoder()
+    [entry] = track_frames(bundle, encoders={"v": encoder})
+    assert (list(entry.frames), encoder.calls) == ([], [])
+
+
+def test_the_media_size_leaves_out_encoded_tracks() -> None:
+    bundle = MediaBundle(
+        tracks={
+            "v": _track("v", TrackKind.VIDEO, np.zeros((2, 2, 3), dtype=np.uint8)),
+            "a": _track("a", TrackKind.AUDIO, np.zeros((1, 480), dtype=np.int16)),
+        }
+    )
+    assert media_size(bundle) == 12 + 960
+    assert media_size(bundle, encoded={"v"}) == 960

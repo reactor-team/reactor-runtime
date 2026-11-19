@@ -60,6 +60,7 @@ from reactor_runtime.core import (
     MessageObserver,
     MessageStageSource,
     SessionEvent,
+    StepFrameEncodingSource,
     TransportReading,
     TransportStatsSource,
 )
@@ -73,6 +74,7 @@ from reactor_runtime.transport.router import (
     ConnectionIdClaimedError,
     ConnectionsExhaustedError,
 )
+from reactor_wire.v1 import step_pb2
 
 logger = get_logger(__name__)
 
@@ -624,6 +626,17 @@ class ConnectionManager:
         """Whether a registered connection negotiated chunked messages; ``False`` when unknown."""
         conn = self._by_id.get(cid)
         return conn is not None and conn.message_chunking
+
+    def step_frame_encodings(self, cid: ConnId) -> Mapping[str, step_pb2.FrameEncoding.ValueType]:
+        """Return the encoding each track's step frames take on a registered connection.
+
+        Empty, so every track is raw, for a connection that is not registered
+        or whose transport negotiates no encoding.
+        """
+        conn = self._by_id.get(cid)
+        if not isinstance(conn, StepFrameEncodingSource):
+            return {}
+        return conn.step_frame_encodings
 
     def send_control(self, cid: ConnId, encode: Callable[[ProtocolVersion], bytes | str]) -> None:
         """Encode and send a control frame to one connection in its codec, if registered.

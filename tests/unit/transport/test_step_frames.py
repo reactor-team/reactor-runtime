@@ -11,11 +11,13 @@ from reactor_runtime.codes import INPUT_DECODE_FAILED
 from reactor_runtime.core import DecodedStep
 from reactor_runtime.protocol import Channel, ProtocolVersion
 from reactor_runtime.protocol.v1.codec import V1Codec
+from reactor_runtime.transport import step_frames as step_frames_module
 from reactor_runtime.transport.step_frames import (
     Pictures,
     StepFrameGate,
     StepFrameRefusal,
     TrackDecoder,
+    TrackEncoder,
     decode_pushed_frames,
     decode_step_frames,
     encoded_step,
@@ -1070,3 +1072,128 @@ async def test_unpublishing_a_track_forgets_that_its_pushed_stream_broke() -> No
     await _until(lambda: len(rec.steps) == 2)
 
     assert len(rec.replies) == 2
+
+
+# -- the output side: one encoder per track and connection ---------------------
+
+
+@pytest.mark.parametrize("encoding", ENCODINGS)
+def test_a_track_encoder_is_one_stream_across_calls(encoding: step_pb2.FrameEncoding) -> None:
+    pictures = _pictures(4)
+    encoder = TrackEncoder(encoding)
+    first = encoder.encode(pictures[:1], 30.0)
+    rest = encoder.encode(pictures[1:], 30.0)
+    assert first is not None
+    assert rest is not None
+
+    assert [f.key_frame for f in [*first, *rest]] == [True, False, False, False]
+    decoded = _reference([f.data for f in [*first, *rest]], encoding)
+    assert [p.shape for p in decoded] == [(HEIGHT, WIDTH, 3)] * 4
+
+
+def test_a_track_encoder_starts_at_a_keyframe_when_asked() -> None:
+    pictures = _pictures(3)
+    encoder = TrackEncoder(step_pb2.FRAME_ENCODING_H264)
+    assert encoder.encode(pictures[:1], None) is not None
+
+    encoder.request_keyframe()
+    again = encoder.encode(pictures[1:], None)
+
+    assert again is not None
+    assert [f.key_frame for f in again] == [True, False]
+
+
+def test_frames_a_track_encoder_cannot_take_start_the_stream_over() -> None:
+    encoder = TrackEncoder(step_pb2.FRAME_ENCODING_H264)
+    assert encoder.encode(_pictures(1), 30.0) is not None
+
+    # An odd side is a size no encoder takes.
+    assert encoder.encode([np.zeros((HEIGHT + 1, WIDTH, 3), np.uint8)], 30.0) is None
+    after = encoder.encode(_pictures(1), 30.0)
+
+    assert after is not None
+    assert [f.key_frame for f in after] == [True]
+
+
+def test_a_new_frame_size_starts_the_stream_over_at_a_keyframe_in_the_same_call() -> None:
+    encoder = TrackEncoder(step_pb2.FRAME_ENCODING_H264)
+    assert encoder.encode(_pictures(2), 30.0) is not None
+
+    larger = [np.zeros((HEIGHT * 2, WIDTH * 2, 3), np.uint8)] * 2
+    resized = encoder.encode(larger, 30.0)
+
+    # Encoded, not sent raw: the backend reopens at the new size.
+    assert resized is not None
+    assert [f.key_frame for f in resized] == [True, False]
+    assert encoder.raw_fallbacks == 0
+
+
+def test_a_new_frame_size_reopens_a_backend_that_takes_only_its_opening_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened: list[tuple[int, int]] = []
+
+    class _Frame:
+        def __init__(self, key_frame: bool) -> None:
+            self.key_frame = key_frame
+
+    class _Encoder:
+        def __init__(self, width: int, height: int, bitrate_bps: int, framerate: float) -> None:
+            self.size = (width, height)
+            self.bitrate_bps, self.framerate = bitrate_bps, framerate
+            self.sent = 0
+
+        def set_rates(self, bitrate_bps: int, framerate: float) -> None:
+            self.bitrate_bps, self.framerate = bitrate_bps, framerate
+
+        def request_key_frame(self) -> None:
+            self.sent = 0
+
+        def encode(self, picture: np.ndarray, timestamp_us: int) -> _Frame:
+            height, width = picture.shape[:2]
+            if (width, height) != self.size:
+                raise rw.CodecError("the frame size changed")
+            self.sent += 1
+            return _Frame(self.sent == 1)
+
+    class _Codecs:
+        def encoder(
+            self, codec: object, width: int, height: int, *, bitrate_bps: int, framerate: float
+        ) -> _Encoder:
+            opened.append((width, height))
+            return _Encoder(width, height, bitrate_bps, framerate)
+
+    monkeypatch.setattr(step_frames_module, "video_codecs", _Codecs)
+    encoder = TrackEncoder(step_pb2.FRAME_ENCODING_H264)
+    assert encoder.encode(_pictures(2), 30.0) is not None
+
+    resized = encoder.encode([np.zeros((HEIGHT * 2, WIDTH * 2, 3), np.uint8)] * 2, 30.0)
+
+    assert resized is not None
+    assert [f.key_frame for f in resized] == [True, False]
+    assert opened == [(WIDTH, HEIGHT), (WIDTH * 2, HEIGHT * 2)]
+
+
+def test_a_raw_fallback_is_warned_about_once_and_counted_every_time(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    encoder = TrackEncoder(step_pb2.FRAME_ENCODING_H264, "main_video")
+    odd = [np.zeros((HEIGHT + 1, WIDTH, 3), np.uint8)]
+    before = step_frames_module.raw_fallbacks()
+
+    with caplog.at_level("WARNING", logger=step_frames_module.logger.name):
+        assert encoder.encode(odd, 30.0) is None
+        assert encoder.encode(odd, 30.0) is None
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "'main_video'" in warnings[0].getMessage()
+    assert "FRAME_ENCODING_H264" in warnings[0].getMessage()
+    assert warnings[0].exc_info is not None
+    assert encoder.raw_fallbacks == 2
+    assert step_frames_module.raw_fallbacks() - before == 2
+
+
+def test_a_track_encoder_for_an_encoding_with_no_codec_encodes_nothing() -> None:
+    encoder = TrackEncoder(step_pb2.FRAME_ENCODING_RAW)
+    assert encoder.encode(_pictures(1), 30.0) is None
