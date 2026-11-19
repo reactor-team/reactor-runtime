@@ -154,7 +154,12 @@ from reactor_runtime.core import (
     TrackKind,
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion, sniff
-from reactor_runtime.transport.step_codecs import BY_SDP_NAME, STEP_FRAME_CODECS, video_codecs
+from reactor_runtime.transport.step_codecs import (
+    BY_SDP_NAME,
+    STEP_FRAME_CODECS,
+    use_nvdec,
+    video_codecs,
+)
 from reactor_runtime.transport.webrtc.config import WebRtcConfig
 from reactor_runtime.transport.webrtc.frame_stages import FrameStageWindow
 from reactor_runtime.transport.webrtc.frames import (
@@ -267,9 +272,10 @@ def _get_factory(config: WebRtcConfig) -> rw.PeerConnectionFactory:
 
     The engine carries the SPED half of *config*'s WARP setting, which libwebrtc
     reads from the engine's environment rather than per connection, and its
-    data-channel chunking with its largest message. The engine outlives the
-    connection that built it, so the first connection to arrive fixes all of
-    them for the process.
+    data-channel chunking with its largest message, and NVDEC decode, which
+    the step frame codecs follow too. The engine outlives the connection that
+    built it, so the first connection to arrive fixes all of them for the
+    process.
     """
     global _factory
     if _factory is None:
@@ -282,6 +288,11 @@ def _get_factory(config: WebRtcConfig) -> rw.PeerConnectionFactory:
                         max_message_size=config.max_message_size,
                         send_buffer_limit=_send_buffer_limit(config.max_message_size),
                     )
+                if config.nvdec:
+                    builder.with_nvdec()
+                # Before any step frame decoder opens: connections build the
+                # engine before they read the offer's step frames.
+                use_nvdec(config.nvdec)
                 _factory = builder.build()
     return _factory
 

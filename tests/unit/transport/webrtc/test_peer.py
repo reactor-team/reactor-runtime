@@ -1150,14 +1150,17 @@ def test_build_rtc_config_leaves_snap_off_when_warp_is_off() -> None:
 
 # The message limit and the queue limit the last recorded chunking request asked for.
 _chunking_sizes: list[int] = []
+# What the step frame codecs were told about NVDEC, in call order.
+_step_nvdec: list[bool] = []
 
 
 def _record_factory_builds(monkeypatch: pytest.MonkeyPatch) -> list[object]:
     """Point the peer at a recording builder, returning what it is asked for.
 
-    Each SPED flag is recorded as itself and each chunking request as
-    ``"dc_chunking"``, in call order; the sizes of the last chunking request
-    are in ``_chunking_sizes``.
+    Each SPED flag is recorded as itself, each chunking request as
+    ``"dc_chunking"`` and each NVDEC request as ``"nvdec"``, in call order; the
+    sizes of the last chunking request are in ``_chunking_sizes``, and what the
+    step frame codecs were told about NVDEC is in ``_step_nvdec``.
     """
     recorded: list[object] = []
 
@@ -1169,11 +1172,16 @@ def _record_factory_builds(monkeypatch: pytest.MonkeyPatch) -> list[object]:
             _chunking_sizes[:] = [max_message_size, send_buffer_limit]
             recorded.append("dc_chunking")
 
+        def with_nvdec(self) -> None:
+            recorded.append("nvdec")
+
         def build(self) -> object:
             return SimpleNamespace()
 
     _chunking_sizes.clear()
+    _step_nvdec.clear()
     monkeypatch.setattr(peer_module, "_factory", None)
+    monkeypatch.setattr(peer_module, "use_nvdec", _step_nvdec.append)
     monkeypatch.setattr(peer_module.rw, "PeerConnectionFactoryBuilder", _Builder)
     return recorded
 
@@ -1192,6 +1200,32 @@ def test_get_factory_builds_the_engine_once(monkeypatch: pytest.MonkeyPatch) -> 
     second = peer_module._get_factory(WebRtcConfig(warp=False, dc_chunking=False))
     assert first is second
     assert recorded == [True, "dc_chunking"]
+
+
+def test_the_engine_decodes_in_software_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded = _record_factory_builds(monkeypatch)
+    peer_module._get_factory(WebRtcConfig())
+    assert "nvdec" not in recorded
+    assert _step_nvdec == [False]
+
+
+def test_nvdec_reaches_the_engine_and_the_step_frame_codecs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded = _record_factory_builds(monkeypatch)
+    peer_module._get_factory(WebRtcConfig(nvdec=True))
+    assert "nvdec" in recorded
+    assert _step_nvdec == [True]
+
+
+def test_the_first_connection_fixes_nvdec_for_the_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded = _record_factory_builds(monkeypatch)
+    peer_module._get_factory(WebRtcConfig(nvdec=True))
+    peer_module._get_factory(WebRtcConfig(nvdec=False))
+    assert recorded.count("nvdec") == 1
+    assert _step_nvdec == [True]
 
 
 # ── Data-channel chunking ────────────────────────────────────────────────────
