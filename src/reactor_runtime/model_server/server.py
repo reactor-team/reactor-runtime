@@ -58,6 +58,17 @@ class ServerRequest[T]:
     session_id: str | None = None
 
 
+DEFAULT_BATCH_WINDOW = 0.005
+"""Seconds a batch waits to fill when ``max_batch`` is above 1 and nothing
+sets ``batch_window``: 5 ms.
+
+With no wait, the first request to arrive steps alone and the others follow
+in the next step, so a stream of sessions settles into split batches. A few
+milliseconds lets them step together. A ``max_batch`` of 1 has nothing to
+wait for, and waits 0. Set ``batch_window: 0`` to never wait.
+"""
+
+
 class ModelServer[RequestT, ResultT]:
     """Base class for the model half: weights loaded once, one batch stepped at a time.
 
@@ -139,8 +150,10 @@ class ModelServer[RequestT, ResultT]:
     are for type checkers alone; nothing checks them at run time.
 
     Class attributes:
-        batch_window: Seconds to wait for a batch to fill, 0 by default;
-            ``runtime.model_server.batch_window`` overrides it.
+        batch_window: Seconds to wait for a batch to fill;
+            ``runtime.model_server.batch_window`` overrides it. With neither
+            set, it is :data:`DEFAULT_BATCH_WINDOW` when ``max_batch`` is
+            above 1, and 0 otherwise.
 
     The sizes of the shared memory each session holds are set in
     ``reactor.yaml`` (``model.resources.sessions.shared_memory``) and nowhere
@@ -350,9 +363,10 @@ class ServerSettings:
         ``max_batch`` is ``runtime.model_server.max_batch``; a class that
         declares ``max_batch`` (deprecated) supplies it when the manifest sets
         none and caps what the manifest may set, and 1 applies when neither
-        does. ``batch_window`` is the
-        manifest's, else the class's. The shared memory sizes are the
-        manifest's, with the runtime's defaults for what it leaves out.
+        does. ``batch_window`` is the manifest's, else one the class declares,
+        else :data:`DEFAULT_BATCH_WINDOW` when the ``max_batch`` it serves
+        with is above 1, else 0. The shared memory sizes are the manifest's,
+        with the runtime's defaults for what it leaves out.
 
         Args:
             server: The model half's class.
@@ -381,9 +395,12 @@ class ServerSettings:
             max_batch = declared
         else:
             max_batch = 1
-        batch_window = float(server.batch_window)
         if config is not None and config.batch_window is not None:
             batch_window = float(config.batch_window)
+        elif _declared(server, "batch_window") is None and max_batch > 1:
+            batch_window = DEFAULT_BATCH_WINDOW
+        else:
+            batch_window = float(server.batch_window)
         return cls(
             max_batch=max_batch,
             batch_window=batch_window,
@@ -402,11 +419,16 @@ def is_max_batch_declared(server: type[ModelServer]) -> bool:
 
 
 def _declared_max_batch(server: type[ModelServer]) -> Any:
+    return _declared(server, "max_batch")
+
+
+def _declared(server: type[ModelServer], name: str) -> Any:
+    """The value *server*, or a base below :class:`ModelServer`, declares for *name*."""
     for klass in server.__mro__:
         if klass is ModelServer:
             return None
-        if "max_batch" in vars(klass):
-            return vars(klass)["max_batch"]
+        if name in vars(klass):
+            return vars(klass)[name]
     return None
 
 
