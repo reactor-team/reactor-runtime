@@ -83,7 +83,9 @@ class ModelServer[RequestT, ResultT]:
     * A session has at most one request waiting or running.
     * Requests are taken in arrival order. When the model server is free and a
       request waits, it waits up to ``batch_window`` more seconds for others,
-      stopping early once ``max_batch`` wait or every open session has one,
+      stopping early once ``max_batch`` wait or every live session has one
+      (one that opened, reset or sent a request in the last two seconds; a
+      session runtime with no client never holds a batch back for long),
       then steps up to ``max_batch`` of them together.
     * A session that connects, or a request that arrives, while a step runs
       joins the next step, never the running one.
