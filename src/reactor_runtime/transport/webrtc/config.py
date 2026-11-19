@@ -219,6 +219,12 @@ class WebRtcConfig:
             CUDA context; each open decoder holds its own surfaces in GPU
             memory.
 
+            A picture NVDEC decodes also turns RGB on the GPU. That RGB can
+            differ from the CPU's conversion of the same picture by up to 2
+            levels per channel, because the GPU rounds in floating point, so
+            a comparison of the model's output against a baseline made with
+            software decoding leaves ``nvdec`` off.
+
             It is process-wide like ``dc_chunking``: the media engine and the
             step frame codecs carry it, and both are built on the first
             connection.

@@ -278,7 +278,11 @@ Each names the public symbol whose docstring states it.
   client's video frames, in a request or a push, may arrive encoded (H.264,
   VP8, VP9 or AV1). The runtime decodes them to RGB before the model reads
   them (`reactor_runtime.transport.step_frames.StepFrameGate`,
-  `reactor_runtime.transport.step_frames.TrackDecoder.decode`).
+  `reactor_runtime.transport.step_frames.TrackDecoder.decode`). With
+  `WEBRTC_NVDEC=1` on an NVIDIA GPU they decode and turn RGB on the GPU
+  (`reactor_runtime.transport.webrtc.config.WebRtcConfig`), up to 2 levels
+  per channel away from the CPU's RGB, so a comparison against a baseline
+  leaves it off.
 - **Step output is lossy for a client that negotiates it.** A client whose
   offer declares encoded step frames gets output video encoded in the codec
   its track's section negotiated
