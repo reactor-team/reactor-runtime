@@ -30,6 +30,7 @@ from reactor_runtime.interface.internal.reactor_core import (
     FrameTimingSink,
     MediaOps,
     MediaSink,
+    PushEnvelope,
     ReactorCore,
     RequestId,
     StepEnvelope,
@@ -222,6 +223,28 @@ class ModelBridge:
             )
         )
         return None
+
+    def push_frames(
+        self, media_input: Mapping[str, Sequence[FrameSource]], *, conn_id: ConnId
+    ) -> None:
+        """Admit frames a client pushed outside any step, in their place among its requests.
+
+        They are posted to the same queue as commands and steps, so the model
+        writes them after every step posted before them has run and before any
+        step posted after them. Nothing is checked here: every frame was checked
+        against its input track when it arrived.
+
+        Args:
+            media_input: The checked frames to write to each input track, by
+                name.
+            conn_id: The connection that pushed them.
+        """
+        self._model.submit_push(
+            PushEnvelope(
+                media_input={track: tuple(frames) for track, frames in media_input.items()},
+                conn_id=conn_id,
+            )
+        )
 
     def input_overflow(self, track: str, frames: int, samples: int = 0) -> str | None:
         """Say how *track*'s input buffer is bounded, when *frames* do not fit it together.

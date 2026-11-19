@@ -16,6 +16,7 @@ from reactor_runtime.transport.step_frames import (
     StepFrameGate,
     StepFrameRefusal,
     TrackDecoder,
+    decode_pushed_frames,
     decode_step_frames,
     encoded_step,
     unpublished_track,
@@ -424,7 +425,7 @@ def test_encoded_frames_for_a_track_that_is_not_an_input_video_track_open_no_dec
 
     # No code: the track has no stream for a keyframe to restart.
     assert outcome == StepFrameRefusal(
-        "media_input[0]",
+        0,
         "media_input[0] names 'mic', which is not an input video track of the model",
     )
     assert decoders == {}
@@ -813,3 +814,259 @@ async def test_an_unknown_encoding_keeps_the_tracks_decoder_and_stream() -> None
 
     gate.submit(_wire(_step(*(_h264(p) for p in packets[4:]))), ProtocolVersion.V1, Channel.DATA)
     await _until(lambda: len(rec.steps) == 2)
+
+
+# ── pushed frames ──────────────────────────────────────────────────────────────
+
+
+def _keyed(packets: list[bytes], keyframes: set[int]) -> list[step_pb2.Frame]:
+    """H.264 frames of *packets*, the ones at *keyframes* marked as keyframes."""
+    return [
+        step_pb2.Frame(
+            encoding=step_pb2.FRAME_ENCODING_H264,
+            dtype="uint8",
+            shape=[HEIGHT, WIDTH, 3],
+            data=packet,
+            keyframe=n in keyframes,
+        )
+        for n, packet in enumerate(packets)
+    ]
+
+
+def _encode_keyed(pictures: list[np.ndarray], keyframes: set[int]) -> list[step_pb2.Frame]:
+    """Encode *pictures* as one H.264 stream with a keyframe at each of *keyframes*."""
+    encoder = rw.VideoCodecs().encoder(rw.VideoCodec.H264, WIDTH, HEIGHT)
+    frames = []
+    for n, picture in enumerate(pictures):
+        if n in keyframes:
+            encoder.request_key_frame()
+        frame = encoder.encode(picture, n * 33_333)
+        assert frame is not None
+        assert frame.key_frame == (n in keyframes)
+        frames.append(frame.data)
+    return _keyed(frames, keyframes)
+
+
+def _push(*entries: tuple[str, list[step_pb2.Frame]]) -> data_pb2.DataClientMessage:
+    """A push with one entry per ``(track, frames)``, in order."""
+    return data_pb2.DataClientMessage(
+        kind=common_pb2.MessageKind.MESSAGE_KIND_NOTIFICATION,
+        push_frames=step_pb2.PushFrames(
+            tracks=[
+                step_pb2.TrackFrames(
+                    track=track, kind=platform_pb2.TrackKind.TRACK_KIND_VIDEO, frames=frames
+                )
+                for track, frames in entries
+            ]
+        ),
+    )
+
+
+def test_a_push_with_an_encoded_frame_is_picked_out() -> None:
+    (packet,) = _encode(_pictures(1))
+    raw = step_pb2.Frame(
+        encoding=step_pb2.FRAME_ENCODING_RAW, dtype="uint8", shape=[1, 1, 3], data=bytes(3)
+    )
+
+    assert encoded_step(_wire(_push(("webcam", [_h264(packet)]))), ProtocolVersion.V1, Channel.DATA)
+    assert encoded_step(_wire(_push(("webcam", [raw]))), ProtocolVersion.V1, Channel.DATA) is None
+
+
+def test_every_pushed_frame_decodes_even_ones_the_model_will_drop_so_the_stream_goes_on() -> None:
+    # The model's buffer may keep only the newest of these; the decoder still
+    # sees every one, so the next push's inter frames decode against them.
+    packets = _encode(_pictures(8))
+    decoders: dict[str, TrackDecoder] = {}
+    lost: set[str] = set()
+
+    first = decode_pushed_frames(
+        _push(("webcam", _keyed(packets[:6], {0}))), decoders, VIDEO_INPUTS, lost
+    )
+    second = decode_pushed_frames(
+        _push(("webcam", _keyed(packets[6:], set()))), decoders, VIDEO_INPUTS, lost
+    )
+
+    assert first.failed == second.failed == {}
+    assert sorted(first.pictures) == [(0, i) for i in range(6)]
+    reference = _reference(packets)
+    assert _matches(second.pictures, 0, reference[6:])
+    assert lost == set()
+
+
+def test_pushes_and_step_requests_carry_one_stream_per_track() -> None:
+    packets = _encode(_pictures(9))
+    decoders: dict[str, TrackDecoder] = {}
+    lost: set[str] = set()
+    reference = _reference(packets)
+
+    pushed = decode_pushed_frames(
+        _push(("webcam", _keyed(packets[:3], {0}))), decoders, VIDEO_INPUTS, lost
+    )
+    stepped = _decode(_step(*(_h264(p) for p in packets[3:6])), decoders)
+    again = decode_pushed_frames(
+        _push(("webcam", _keyed(packets[6:], set()))), decoders, VIDEO_INPUTS, lost
+    )
+
+    assert _matches(pushed.pictures, 0, reference[:3])
+    assert _matches(stepped, 0, reference[3:6])
+    assert _matches(again.pictures, 0, reference[6:])
+
+
+def test_a_frame_that_does_not_decode_is_reported_once_and_the_track_resumes_at_a_keyframe() -> (
+    None
+):
+    frames = _encode_keyed(_pictures(10), {0, 6})
+    decoders: dict[str, TrackDecoder] = {}
+    lost: set[str] = set()
+    decode_pushed_frames(_push(("webcam", frames[:2])), decoders, VIDEO_INPUTS, lost)
+
+    corrupt = step_pb2.Frame()
+    corrupt.CopyFrom(frames[2])
+    corrupt.data = b"\x00\x00\x00\x01\x41" + bytes(8)
+    broken = decode_pushed_frames(
+        _push(("webcam", [corrupt, *frames[3:5]])), decoders, VIDEO_INPUTS, lost
+    )
+    # Inter frames after the break are dropped without another notice.
+    waiting = decode_pushed_frames(_push(("webcam", [frames[5]])), decoders, VIDEO_INPUTS, lost)
+    resumed = decode_pushed_frames(_push(("webcam", frames[6:])), decoders, VIDEO_INPUTS, lost)
+
+    assert list(broken.failed) == ["webcam"]
+    assert broken.failed["webcam"].startswith("tracks[0].frames[0]")
+    assert broken.pictures == {}
+    assert (waiting.failed, waiting.pictures) == ({}, {})
+    assert resumed.failed == {}
+    assert sorted(resumed.pictures) == [(0, i) for i in range(4)]
+    assert lost == set()
+    assert "webcam" in decoders
+
+
+def test_a_new_connections_first_pushed_frame_must_be_a_keyframe() -> None:
+    packets = _encode(_pictures(4))
+    decoders: dict[str, TrackDecoder] = {}
+    lost: set[str] = set()
+
+    pushed = decode_pushed_frames(
+        _push(("webcam", _keyed(packets[1:], set()))), decoders, VIDEO_INPUTS, lost
+    )
+
+    assert "must start at a keyframe" in pushed.failed["webcam"]
+    assert pushed.pictures == {}
+    assert (decoders, lost) == ({}, {"webcam"})
+
+
+def test_pushed_frames_for_a_track_that_is_not_an_input_video_track_are_not_decoded() -> None:
+    packets = _encode(_pictures(2))
+    decoders: dict[str, TrackDecoder] = {}
+
+    pushed = decode_pushed_frames(
+        _push(("mic", _keyed(packets, {0})), ("webcam", _keyed(packets, {0}))),
+        decoders,
+        VIDEO_INPUTS,
+        set(),
+    )
+
+    assert pushed.failed == {}
+    assert sorted(pushed.pictures) == [(1, 0), (1, 1)]
+    assert list(decoders) == ["webcam"]
+
+
+async def test_a_push_goes_up_with_its_pictures_in_order_with_commands_and_steps() -> None:
+    rec = _Recorder()
+    gate = rec.gate()
+    packets = _encode(_pictures(6))
+    push = _wire(_push(("webcam", _keyed(packets[:3], {0}))))
+    command = _wire(
+        data_pb2.DataClientMessage(request_id="data_8", command=model_pb2.Command(type="ping"))
+    )
+    request = _wire(_step(*(_h264(p) for p in packets[3:])))
+
+    gate.submit(push, ProtocolVersion.V1, Channel.DATA)
+    gate.submit(command, ProtocolVersion.V1, Channel.DATA)
+    gate.submit(request, ProtocolVersion.V1, Channel.DATA)
+    await _until(lambda: len(rec.order) == 3)
+
+    assert rec.order == ["step", "message", "step"]
+    pushed, stepped = rec.steps
+    assert pushed.payload == push
+    assert sorted(pushed.pictures) == [(0, 0), (0, 1), (0, 2)]
+    assert sorted(stepped.pictures) == [(0, 0), (0, 1), (0, 2)]
+    assert rec.replies == []
+
+
+async def test_a_push_that_does_not_decode_is_delivered_and_the_client_is_told_once() -> None:
+    rec = _Recorder()
+    gate = rec.gate()
+    frames = _encode_keyed(_pictures(6), {0, 4})
+
+    # A first push that does not start at a keyframe, then more inter frames.
+    gate.submit(_wire(_push(("webcam", frames[1:3]))), ProtocolVersion.V1, Channel.DATA)
+    gate.submit(_wire(_push(("webcam", frames[3:4]))), ProtocolVersion.V1, Channel.DATA)
+    gate.submit(_wire(_push(("webcam", frames[4:]))), ProtocolVersion.V1, Channel.DATA)
+    await _until(lambda: len(rec.steps) == 3)
+
+    (notice,) = rec.replies
+    answer = data_pb2.DataServerMessage.FromString(notice)
+    assert answer.kind == common_pb2.MessageKind.MESSAGE_KIND_NOTIFICATION
+    assert answer.WhichOneof("payload") == "error"
+    assert (answer.error.code, answer.error.track) == ("input_decode_failed", "webcam")
+    # Never a refusal: every push goes up, the dropped frames without pictures.
+    assert [sorted(step.pictures) for step in rec.steps] == [[], [], [(0, 0), (0, 1)]]
+    assert gate.decoders == 1
+
+
+async def test_a_step_that_breaks_a_stream_is_not_reported_again_by_the_push_behind_it() -> None:
+    rec = _Recorder()
+    gate = rec.gate()
+    frames = _encode_keyed(_pictures(6), {0, 4})
+
+    # The step's first frame is not a keyframe; the client had already
+    # pipelined a push of more inter frames before it heard.
+    gate.submit(_wire(_step(*frames[1:3])), ProtocolVersion.V1, Channel.DATA)
+    gate.submit(_wire(_push(("webcam", frames[3:4]))), ProtocolVersion.V1, Channel.DATA)
+    gate.submit(_wire(_push(("webcam", frames[4:]))), ProtocolVersion.V1, Channel.DATA)
+    await _until(lambda: len(rec.steps) == 2)
+
+    # One report of the break, the step's refusal; the push waits for the keyframe.
+    (refusal,) = rec.replies
+    assert data_pb2.DataServerMessage.FromString(refusal).step_result.code == (
+        "input_decode_failed"
+    )
+    assert [sorted(step.pictures) for step in rec.steps] == [[], [(0, 0), (0, 1)]]
+
+
+async def test_a_step_keyframe_restarts_a_stream_a_push_broke() -> None:
+    rec = _Recorder()
+    gate = rec.gate()
+    frames = _encode_keyed(_pictures(6), {0})
+
+    gate.submit(_wire(_push(("webcam", frames[1:2]))), ProtocolVersion.V1, Channel.DATA)
+    gate.submit(_wire(_step(*frames[:3])), ProtocolVersion.V1, Channel.DATA)
+    # The step restarted the stream, so the push's inter frames decode on it.
+    gate.submit(_wire(_push(("webcam", frames[3:]))), ProtocolVersion.V1, Channel.DATA)
+    await _until(lambda: len(rec.steps) == 3)
+
+    assert len(rec.replies) == 1  # the push's notice, nothing after it
+    assert [sorted(step.pictures) for step in rec.steps] == [
+        [],
+        [(0, 0), (0, 1), (0, 2)],
+        [(0, 0), (0, 1), (0, 2)],
+    ]
+
+
+async def test_unpublishing_a_track_forgets_that_its_pushed_stream_broke() -> None:
+    rec = _Recorder()
+    gate = rec.gate()
+    packets = _encode(_pictures(4))
+    gate.submit(
+        _wire(_push(("webcam", _keyed(packets[1:2], set())))), ProtocolVersion.V1, Channel.DATA
+    )
+    await _until(lambda: len(rec.steps) == 1)
+
+    gate.submit(_unpublish("webcam"), ProtocolVersion.V1, Channel.CONTROL)
+    # Published again, its first frame breaks a new stream, which is told again.
+    gate.submit(
+        _wire(_push(("webcam", _keyed(packets[2:3], set())))), ProtocolVersion.V1, Channel.DATA
+    )
+    await _until(lambda: len(rec.steps) == 2)
+
+    assert len(rec.replies) == 2

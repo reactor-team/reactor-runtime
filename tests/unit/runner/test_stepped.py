@@ -26,7 +26,7 @@ from reactor_runtime.core import (
 )
 from reactor_runtime.interface.internal.bridge import CommandOutcome
 from reactor_runtime.interface.internal.reactor_core import FrameSource
-from reactor_runtime.message_gateway import InboundStep, StepCommand
+from reactor_runtime.message_gateway import InboundPush, InboundStep, StepCommand
 from reactor_runtime.runner.session_start import Generation
 from reactor_runtime.runner.stepped import (
     StepHost,
@@ -123,6 +123,10 @@ class FakeBridge:
         self.overflow = overflow
         self.rejection = rejection
         self.submitted: list[Submitted] = []
+        self.pushed: list[tuple[dict[str, list[FrameSource]], ConnId]] = []
+        # What reached the model, in order: each admitted step's request id,
+        # and "push" for each push.
+        self.log: list[str] = []
 
     def input_overflow(self, track: str, frames: int, samples: int = 0) -> str | None:
         return self.overflow
@@ -137,6 +141,7 @@ class FakeBridge:
         max_message_size: int | None = None,
     ) -> tuple[str, CommandOutcome] | None:
         if self.rejection is None:
+            self.log.append(request_id)
             self.submitted.append(
                 Submitted(
                     list(calls),
@@ -147,6 +152,12 @@ class FakeBridge:
                 )
             )
         return self.rejection
+
+    def push_frames(
+        self, media_input: Mapping[str, Sequence[FrameSource]], *, conn_id: ConnId
+    ) -> None:
+        self.log.append("push")
+        self.pushed.append(({track: list(f) for track, f in media_input.items()}, conn_id))
 
 
 async def _resolve_uploads(
@@ -175,8 +186,14 @@ def _requests(
     sessions: int = 1,
     bridge: FakeBridge | None = None,
     max_message_size: int | None = None,
+    resolve_uploads: Callable[
+        [str, Mapping[str, Any], Mapping[str, str], float], Coroutine[Any, Any, dict[str, Any]]
+    ] = _resolve_uploads,
 ) -> Harness:
     connections = FakeConnections(max_message_size=max_message_size)
+    # The starting input is done, so a client's messages go straight on.
+    started = asyncio.Event()
+    started.set()
     bridge = bridge or FakeBridge()
     metrics = FakeMetrics()
     journalled: list[tuple[SessionEvent, dict[str, Any]]] = []
@@ -190,10 +207,10 @@ def _requests(
         session_running=lambda: running,
         generation=lambda: generation,
         sessions_posted=lambda: sessions,
-        starting_input_done=asyncio.Event,
+        starting_input_done=lambda: started,
         connections=connections,
         journal=journal,
-        resolve_uploads=_resolve_uploads,
+        resolve_uploads=resolve_uploads,
         command_metrics=metrics,
         command_label=lambda name: name,
         codec_for=protocol.select,
@@ -552,3 +569,106 @@ async def test_an_unsaved_steps_result_names_no_files() -> None:
 
     [reply] = harness.connections.results
     assert list(reply.step_result.files) == []
+
+
+# ── pushed frames ──────────────────────────────────────────────────────────────
+
+
+def _push(
+    *tracks: step_pb2.TrackFrames, pictures: Mapping[tuple[int, int], Any] | None = None
+) -> InboundPush:
+    return InboundPush(tracks=tuple(tracks), conn_id=CLIENT, pictures=pictures or {})
+
+
+async def test_pushed_frames_reach_the_model_by_track_and_are_never_answered() -> None:
+    harness = _requests()
+    picture = np.full((2, 2, 3), 9, dtype=np.uint8)
+    push = _push(
+        step_pb2.TrackFrames(track="webcam", frames=[_frame(1)]),
+        step_pb2.TrackFrames(
+            track="webcam",
+            frames=[step_pb2.Frame(encoding=step_pb2.FRAME_ENCODING_H264, data=b"\x00")],
+        ),
+        pictures={(1, 0): picture},
+    )
+
+    await harness.steps.submit_client_push(push)
+
+    [(media_input, conn_id)] = harness.bridge.pushed
+    assert conn_id == CLIENT
+    assert [int(source().data[0, 0, 0]) for source in media_input["webcam"]] == [1, 9]
+    assert harness.connections.replies == []
+    assert harness.journal == []
+
+
+async def test_pushed_frames_a_track_cannot_take_are_dropped_and_the_rest_go_on() -> None:
+    harness = _requests()
+    undecoded = step_pb2.Frame(encoding=step_pb2.FRAME_ENCODING_H264, data=b"\x00")
+    push = _push(
+        step_pb2.TrackFrames(track="screen", frames=[_frame(1)]),
+        step_pb2.TrackFrames(
+            track="webcam", kind=platform_pb2.TRACK_KIND_AUDIO, frames=[_frame(2)]
+        ),
+        step_pb2.TrackFrames(track="webcam", frames=[undecoded, step_pb2.Frame(), _frame(3)]),
+        step_pb2.TrackFrames(track="mic", frames=[step_pb2.Frame()]),
+        pictures={(3, 0): np.zeros((2, 2, 3), dtype=np.uint8)},
+    )
+
+    harness.steps.push(push)
+
+    [(media_input, _)] = harness.bridge.pushed
+    assert list(media_input) == ["webcam"]
+    assert [int(source().data[0, 0, 0]) for source in media_input["webcam"]] == [3]
+    assert harness.connections.replies == []
+
+
+async def test_a_push_with_nothing_a_track_can_take_does_not_reach_the_model() -> None:
+    harness = _requests()
+
+    harness.steps.push(_push(step_pb2.TrackFrames(track="screen", frames=[_frame(1)])))
+
+    assert harness.bridge.pushed == []
+
+
+@pytest.mark.parametrize(
+    ("running", "generation"), [(False, Generation.STEPPED), (True, Generation.STREAMED)]
+)
+async def test_frames_pushed_outside_a_running_stepped_session_are_dropped_unanswered(
+    running: bool, generation: Generation
+) -> None:
+    harness = _requests(running=running, generation=generation)
+
+    await harness.steps.submit_client_push(
+        _push(step_pb2.TrackFrames(track="webcam", frames=[_frame(1)]))
+    )
+
+    assert harness.bridge.pushed == []
+    assert harness.connections.replies == []
+
+
+async def test_pushes_keep_their_place_among_steps_and_commands_that_wait() -> None:
+    release = asyncio.Event()
+
+    async def slow_uploads(
+        name: str, args: Mapping[str, Any], uploads: Mapping[str, str], wait: float
+    ) -> dict[str, Any]:
+        if "slow" in uploads.values():
+            await release.wait()
+        return await _resolve_uploads(name, args, uploads, wait)
+
+    harness = _requests(resolve_uploads=slow_uploads)
+    waiting = _step("r1", commands=[StepCommand("show", {}, {"image": "slow"})])
+    frames = step_pb2.TrackFrames(track="webcam", frames=[_frame(1)])
+
+    tasks = [
+        asyncio.create_task(harness.steps.submit_client_step(waiting)),
+        asyncio.create_task(harness.steps.submit_client_push(_push(frames))),
+        asyncio.create_task(harness.steps.submit_client_step(_step("r2"))),
+        asyncio.create_task(harness.steps.submit_client_push(_push(frames))),
+    ]
+    await asyncio.sleep(0.01)
+    assert harness.bridge.log == []
+    release.set()
+    await asyncio.gather(*tasks)
+
+    assert harness.bridge.log == ["r1", "push", "r2", "push"]

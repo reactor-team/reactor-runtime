@@ -77,7 +77,7 @@ counts live memory rather than the free memory glibc keeps cached.
 | `distributed_echo` | The v1 connection churn on `model-distributed/`, where the echo's engine runs in a worker process behind a `DistributedRunner`, so every frame crosses to the worker and back through shared memory. |
 | `split_echo` | The v1 connection churn on `model-split/`, the echo split in two: the runtime serves the application half, and the scenario starts a model server (`python -m reactor_runtime.model_server`) beside it, so every frame crosses its socket and shared memory. The session's one link to the model server lasts the run. It runs twice: the model returns each result from `step()`, then returns a future a completion thread resolves (skipped on a runtime that takes no futures); after every cycle the model-server probe must report zero retained requests. |
 | `abrupt_disconnect` | The v1 churn, with each client in its own process (`endurance/abrupt.py`), killed with `SIGKILL` a moment after its frames came back instead of closing. The runtime learns the client is gone only from the wire going silent, as it does when a client crashes or loses its network. |
-| `stepped_session_churn` | One long-lived stepped session. Each cycle a v1 client declares `x-reactor-encoded-step-frames` in its offer, requests 10 steps one after another, each setting the effect through `state` and carrying one webcam frame in `media_input`, raw and encoded in turn, its encoded frames one stream across its steps that the runtime decodes on one decoder per track, waits for every result, and closes. Every step must run (`short_cycles`), every request must get its result, carrying the effect the step applied as its data, and the answer must declare the attribute back exactly when the runtime can carry encoded step frames, raw otherwise (`unanswered_requests`). |
+| `stepped_session_churn` | One long-lived stepped session. Each cycle a v1 client declares `x-reactor-encoded-step-frames` in its offer, requests 10 steps one after another, each setting the effect through `state` and carrying one webcam frame in `media_input`, raw and encoded in turn, and pushes one encoded webcam frame with `PushFrames` before each step but the first, its encoded frames, pushed and requested, one stream across its messages that the runtime decodes on one decoder per track, waits for every result, and closes. Every step must run (`short_cycles`), every request must get its result, carrying the effect the step applied as its data, and the answer must declare the attribute back exactly when the runtime can carry encoded step frames, raw otherwise (`unanswered_requests`). |
 
 ## Running it
 
@@ -138,7 +138,7 @@ every PR that touches the runtime:
   that dies without closing, sessions started and stopped, with and without a
   close reason or a moderation verdict, several clients on one session, one
   connection streaming for hours, a model run in worker processes, stepped
-  sessions and their step requests, room participants with their RPC and
+  sessions with their step requests and pushed frames, room participants with their RPC and
   data-topic commands and media inputs, and room connections closed while
   their server does not answer. Every streamed session is recorded, as in a
   deployed model, but uploads and clip requests have no scenario yet.

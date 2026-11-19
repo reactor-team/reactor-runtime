@@ -378,6 +378,7 @@ class Runner(ServiceComponent, ConnectionSink):
             sink=self,
             on_command=self._submit_client_command,
             on_step=self._steps.submit_client_step,
+            on_push=self._steps.submit_client_push,
         )
         self._bridge: ModelBridge | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -681,7 +682,7 @@ class Runner(ServiceComponent, ConnectionSink):
     def decoded_step_received(
         self, conn_id: ConnId, step: DecodedStep, version: ProtocolVersion
     ) -> None:
-        """Hand a step request whose encoded frames the transport decoded to the gateway.
+        """Hand a step request or push whose encoded frames the transport decoded to the gateway.
 
         Scheduled and stamped as :meth:`message_received` does a frame, so the
         request keeps its place among the connection's messages.

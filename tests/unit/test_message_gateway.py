@@ -15,6 +15,7 @@ from reactor_runtime.core import (
 )
 from reactor_runtime.message_gateway import (
     InboundCommand,
+    InboundPush,
     InboundStep,
     MessageGateway,
     StepCommand,
@@ -439,3 +440,33 @@ async def test_a_step_request_without_a_step_handler_is_dropped() -> None:
     _, frame = V1Codec().encode(message)
     await gateway.handle(ConnId(4), frame, Channel.DATA, ProtocolVersion.V1, received_at=_ARRIVED)
     assert received == []
+
+
+async def test_pushed_frames_are_handed_to_the_push_handler_with_their_pictures() -> None:
+    pushes: list[InboundPush] = []
+
+    async def on_push(push: InboundPush) -> None:
+        pushes.append(push)
+
+    async def on_command(command: InboundCommand) -> None:
+        raise AssertionError("a push is not a command")
+
+    gateway = MessageGateway(sink=FakeSink(), on_command=on_command, on_push=on_push)
+    pictures = {(0, 0): np.zeros((2, 2, 3), dtype=np.uint8)}
+    tracks = [step_pb2.TrackFrames(track="webcam", frames=[step_pb2.Frame()])]
+    _, frame = V1Codec().encode(
+        data_pb2.DataClientMessage(push_frames=step_pb2.PushFrames(tracks=tracks))
+    )
+    await gateway.handle(
+        ConnId(4),
+        frame,
+        Channel.DATA,
+        ProtocolVersion.V1,
+        received_at=_ARRIVED,
+        pictures=pictures,
+    )
+
+    (push,) = pushes
+    assert push.conn_id == ConnId(4)
+    assert [entry.track for entry in push.tracks] == ["webcam"]
+    assert push.pictures is pictures

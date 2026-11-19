@@ -17,7 +17,8 @@ import logging
 import math
 import threading
 import time
-from collections.abc import Callable, Coroutine, Mapping
+from collections import deque
+from collections.abc import Callable, Coroutine, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast, get_type_hints
@@ -327,8 +328,25 @@ class StepEnvelope:
     max_message_size: int | None = None
 
 
-Inbound = CommandEnvelope | StepEnvelope | ReactorEvent
-"""One item of the model's inbound queue: a command, a step request, or a reactor event."""
+@dataclass(frozen=True)
+class PushEnvelope:
+    """Input frames a client of a stepped session pushed outside any step, checked.
+
+    Attributes:
+        media_input: The frames to write to each input track, by track name,
+            in the order the client sent them, at most as many as the track's
+            buffer holds. Each is decoded on the model's thread, as a step
+            request's are.
+        conn_id: The connection that pushed them.
+    """
+
+    media_input: Mapping[str, Sequence[FrameSource]]
+    conn_id: ConnId
+
+
+Inbound = CommandEnvelope | StepEnvelope | PushEnvelope | ReactorEvent
+"""One item of the model's inbound queue: a command, a step request, pushed frames,
+or a reactor event."""
 
 
 class ReactorCore:
@@ -378,6 +396,10 @@ class ReactorCore:
         self._loop_task: asyncio.Task[None] | None = None
 
         self._inbound_q: asyncio.Queue[Inbound] | None = None
+        # The push last put on the inbound queue, and its frames by track, until
+        # the queue takes it or anything else is put behind it. Kept on the
+        # model loop only.
+        self._queued_push: tuple[PushEnvelope, dict[str, deque[FrameSource]]] | None = None
 
         self._out_broadcast: BroadcastSink | None = None
         self._out_addressed: AddressedSink | None = None
@@ -709,6 +731,31 @@ class ReactorCore:
         """
         self._enqueue(step)
 
+    def submit_push(self, push: PushEnvelope) -> None:
+        """Enqueue frames a client pushed onto the model loop.
+
+        They take their place in the same queue as commands and step requests,
+        so they are written after every step posted before them has run, and
+        before any step posted after them. Only each track's newest frames are
+        kept, as many as its buffer holds: the buffer would evict the others.
+        Frames the same connection pushes while its last push is still at the
+        queue's tail join that push, within the same bound, so pushes that
+        wait behind a long step hold no more than the buffers keep.
+        """
+        self._enqueue(
+            PushEnvelope(
+                media_input={
+                    track: self._newest(track, frames) for track, frames in push.media_input.items()
+                },
+                conn_id=push.conn_id,
+            )
+        )
+
+    def _newest(self, track: str, frames: Iterable[FrameSource]) -> deque[FrameSource]:
+        """*frames*, but only as many of the newest as *track*'s buffer holds."""
+        buffer = self._input_buffers.get(track)
+        return deque(frames, maxlen=None if buffer is None else buffer.frame_bound)
+
     def post_reactor_event(self, event: ReactorEvent) -> None:
         """Enqueue a reactor-authoritative event onto the model loop."""
         self._enqueue(event)
@@ -744,7 +791,36 @@ class ReactorCore:
         if queue is None or self._loop.is_closed():
             return
         with contextlib.suppress(RuntimeError):
-            self._loop.call_soon_threadsafe(queue.put_nowait, item)
+            self._loop.call_soon_threadsafe(self._put, queue, item)
+
+    def _put(self, queue: asyncio.Queue[Inbound], item: Inbound) -> None:
+        """Put *item* on *queue*, on the model loop, joining a push to the one at its tail.
+
+        A push joins the push last put when both come from the same connection
+        and that push is still queued with nothing behind it, so its frames are
+        written where they would have been. Each track keeps only as many of
+        the newest frames as its buffer holds.
+        """
+        queued = self._queued_push
+        if not isinstance(item, PushEnvelope):
+            self._queued_push = None
+        elif queued is not None and queued[0].conn_id == item.conn_id:
+            held = queued[1]
+            for track, frames in item.media_input.items():
+                held.setdefault(track, self._newest(track, ())).extend(frames)
+            return
+        else:
+            held = {
+                track: self._newest(track, frames) for track, frames in item.media_input.items()
+            }
+            item = PushEnvelope(media_input=held, conn_id=item.conn_id)
+            self._queued_push = (item, held)
+        queue.put_nowait(item)
+
+    def _took(self, item: Inbound) -> None:
+        """Note that the inbound queue handed out *item*: no later push joins it now."""
+        if self._queued_push is not None and self._queued_push[0] is item:
+            self._queued_push = None
 
     # -- thread lifecycle (start_thread is the only thing that spawns) --------
 

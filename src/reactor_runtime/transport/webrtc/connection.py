@@ -110,8 +110,9 @@ class WebRTCConnection:
 
         self._on_message: Callable[[bytes | str, ProtocolVersion, Channel], None] | None = None
         self._on_decoded_step: Callable[[DecodedStep, ProtocolVersion], None] | None = None
-        # Decodes the encoded frames of a step request before it goes up, in
-        # arrival order; a request it cannot decode is answered here.
+        # Decodes the encoded frames of a step request or a push before it goes
+        # up, in arrival order; a request it cannot decode is answered here, as
+        # is a push that breaks a track's stream.
         self._steps = StepFrameGate(
             self._forward_message, self._forward_step, self.send_message, video_inputs
         )
