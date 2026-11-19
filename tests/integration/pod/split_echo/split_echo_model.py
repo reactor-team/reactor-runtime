@@ -11,9 +11,8 @@ from reactor_runtime.model_server import ModelServer, ServerRequest
 
 
 class SplitEchoModel(ModelServer[EchoInput, EchoResult]):
-    """Apply each session's effect to its frame, up to four sessions a step."""
+    """Apply each session's effect to its frame, every session in one step."""
 
-    max_batch = 4
     batch_window = 0.002
 
     def load(self, config_path: Path | None) -> None:

@@ -10,3 +10,4 @@ runtime:
   import: split_echo:SplitEcho
   model_server:
     import: gpu_model:GpuEchoModel
+    max_batch: 3

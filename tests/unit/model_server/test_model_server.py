@@ -75,8 +75,15 @@ def test_a_subclass_with_limits_out_of_range_is_refused(attrs: dict[str, Any], m
 
 
 class PlasmaModel(ModelServer[Tick, Frame]):
-    max_batch = 4
     batch_window = 0.002
+
+
+class ClassBatchModel(PlasmaModel):
+    max_batch = 4
+
+
+class InheritsClassBatch(ClassBatchModel):
+    pass
 
 
 def test_the_default_hooks_report_healthy_and_step_must_be_written() -> None:
@@ -95,7 +102,7 @@ def test_the_default_hooks_report_healthy_and_step_must_be_written() -> None:
 def test_without_a_manifest_block_the_class_and_the_runtime_defaults_apply() -> None:
     settings = ServerSettings.resolve(PlasmaModel, None)
     assert settings == ServerSettings(
-        max_batch=4,
+        max_batch=1,
         batch_window=0.002,
         shm_input_bytes=DEFAULT_SHM_INPUT_BYTES,
         shm_output_bytes=DEFAULT_SHM_OUTPUT_BYTES,
@@ -103,7 +110,7 @@ def test_without_a_manifest_block_the_class_and_the_runtime_defaults_apply() -> 
     assert settings.shm_slot_bytes == 2 * DEFAULT_SHM_INPUT_BYTES + DEFAULT_SHM_OUTPUT_BYTES
 
 
-def test_the_manifest_lowers_max_batch_and_sets_the_rest() -> None:
+def test_the_manifest_sets_max_batch_and_the_rest() -> None:
     config = ModelServerConfig(import_ref="plasma_model:PlasmaModel", max_batch=2, batch_window=0)
     shared_memory = SharedMemoryConfig(input_bytes=2 << 20, output_bytes=32 << 20)
     assert ServerSettings.resolve(PlasmaModel, config, shared_memory) == ServerSettings(
@@ -164,9 +171,30 @@ def test_the_default_output_block_fits_a_video_step() -> None:
     assert DEFAULT_SHM_OUTPUT_BYTES == 32 << 20
 
 
-def test_the_manifest_cannot_raise_max_batch_above_the_class() -> None:
-    config = ModelServerConfig(import_ref="plasma_model:PlasmaModel", max_batch=8)
+@pytest.mark.parametrize("server", [ClassBatchModel, InheritsClassBatch])
+def test_a_class_max_batch_applies_when_the_manifest_sets_none(
+    server: type[ModelServer],
+) -> None:
+    for config in (None, ModelServerConfig(import_ref="m:C")):
+        assert ServerSettings.resolve(server, config).max_batch == 4
+    same = ModelServerConfig(import_ref="m:C", max_batch=4)
+    assert ServerSettings.resolve(server, same).max_batch == 4
+
+
+def test_the_manifest_lowers_a_class_max_batch() -> None:
+    config = ModelServerConfig(import_ref="plasma_model:ClassBatchModel", max_batch=2)
+    assert ServerSettings.resolve(ClassBatchModel, config).max_batch == 2
+
+
+def test_a_manifest_max_batch_above_the_class_is_refused() -> None:
+    config = ModelServerConfig(import_ref="plasma_model:ClassBatchModel", max_batch=8)
     with pytest.raises(
-        ValueError, match=r"runtime\.model_server\.max_batch is 8, above PlasmaModel\.max_batch = 4"
+        ValueError,
+        match=r"runtime\.model_server\.max_batch is 8, above ClassBatchModel\.max_batch = 4",
     ):
-        ServerSettings.resolve(PlasmaModel, config)
+        ServerSettings.resolve(ClassBatchModel, config)
+
+
+def test_the_manifest_max_batch_applies_above_the_default() -> None:
+    config = ModelServerConfig(import_ref="plasma_model:PlasmaModel", max_batch=16)
+    assert ServerSettings.resolve(PlasmaModel, config).max_batch == 16
