@@ -6,6 +6,7 @@ import contextlib
 import errno
 import os
 import pickle
+import re
 import socket
 import threading
 import time
@@ -14,8 +15,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from reactor_runtime.core import SHM_PAGE_BYTES
 from reactor_runtime.ipc import Block, SharedSlotAllocationFailed, blocks
 from reactor_runtime.ipc import slot as slot_module
+from reactor_runtime.manifest import load_config
 from reactor_runtime.model_server import (
     ModelServerLink,
     ModelServerUnreachable,
@@ -212,8 +215,9 @@ def test_a_request_larger_than_its_block_is_refused_and_the_link_goes_on(root: P
         with pytest.raises(PayloadTooLarge) as refused:
             session.send(Step(request_id=1, timeout=None, payload=np.ones(5000, dtype=np.uint8)))
         assert str(refused.value) == (
-            "a request's arrays hold 5000 bytes, above the 4096 bytes of its shared-memory "
-            "block: raise model.resources.sessions.shared_memory.input in reactor.yaml"
+            "a request's arrays hold 5000 bytes (4.9 KiB), above the 4096 bytes (4.0 KiB) of its "
+            "shared-memory block: set model.resources.sessions.shared_memory.input to 64Ki or "
+            "more in reactor.yaml"
         )
 
         session.send(Step(request_id=2, timeout=None, payload=np.ones(4096, dtype=np.uint8)))
@@ -891,3 +895,102 @@ def test_closing_the_session_end_ends_a_blocked_receive(root: Path) -> None:
 
     assert len(outcome) == 1
     assert isinstance(outcome[0], Closed)
+
+
+@pytest.mark.parametrize(
+    ("arrays", "key"),
+    [
+        # One array, several arrays (the error counts them all, not just the
+        # one that overflowed), and a size past 1 MiB.
+        ([np.ones(5000, dtype=np.uint8)], "input"),
+        ([np.ones(3000, dtype=np.uint8), np.ones(3000, dtype=np.uint8)], "input"),
+        ([np.ones(5000, dtype=np.uint8), np.ones((3, 4000), dtype=np.float32)], "output"),
+        ([np.ones(3 << 20, dtype=np.uint8)], "output"),
+    ],
+)
+def test_the_size_a_refusal_suggests_holds_the_message_it_refused(
+    root: Path, arrays: list[np.ndarray], key: str
+) -> None:
+    # The value the error names, read the way reactor.yaml is read, gives a
+    # block the same message fits in.
+    message = (
+        Step(request_id=1, timeout=None, payload=arrays)
+        if key == "input"
+        else Result(request_id=1, output=arrays)
+    )
+    for name in ("small", "large"):
+        (root / name / "s0").mkdir(parents=True)
+    pair = Pair(root / "small", _transport(root / "small"))
+    session, server = pair.open()
+    try:
+        with pytest.raises(PayloadTooLarge) as refused:
+            (session if key == "input" else server).send(message)
+    finally:
+        session.close()
+        server.close()
+        pair.listener.close()
+    match = re.search(
+        rf"set model\.resources\.sessions\.shared_memory\.{key} to (\S+) or more",
+        str(refused.value),
+    )
+    assert match is not None, str(refused.value)
+    manifest = root / "reactor.yaml"
+    manifest.write_text(
+        "model:\n  resources:\n    sessions:\n      shared_memory:\n"
+        f"        {key}: {match.group(1)}\nruntime:\n  import: m:M\n"
+    )
+    size = getattr(load_config(manifest).shared_memory, f"{key}_bytes")
+    needed = sum(a.nbytes for a in arrays)
+    assert size > needed
+
+    pair = Pair(root / "large", _transport(root / "large", size=size))
+    session, server = pair.open()
+    try:
+        if key == "input":
+            session.send(message)
+            got = server.receive().payload
+        else:
+            server.send(message)
+            got = session.receive().output
+        for sent, received in zip(arrays, got, strict=True):
+            np.testing.assert_array_equal(sent, received)
+    finally:
+        session.close()
+        server.close()
+        pair.listener.close()
+
+
+@pytest.mark.parametrize(
+    ("size", "suggested"),
+    [
+        (0, "64Ki"),
+        (1, "64Ki"),
+        (52_428, "64Ki"),  # a quarter more is 65535 bytes: one page
+        (52_429, "128Ki"),  # a quarter more passes one page
+        (65_536, "128Ki"),
+        (196_608, "256Ki"),  # one 256x256 RGB frame
+        (838_860, "1Mi"),  # a quarter more is just under 1 MiB, in whole pages 1 MiB
+        (1 << 20, "2Mi"),
+        (2_764_800, "4Mi"),  # one 1280x720 RGB frame
+        (40 << 20, "50Mi"),
+        ((32 << 20) + 1, "41Mi"),
+    ],
+)
+def test_suggested_shm_size(size: int, suggested: str) -> None:
+    assert shm_link.suggested_shm_size(size) == suggested
+
+
+@pytest.mark.parametrize("size", [0, 1, 4095, 65_535, 65_536, 999_999, 1 << 20, (1 << 30) + 7])
+def test_a_suggested_size_is_whole_pages_above_the_size_with_a_quarter_more(
+    tmp_path: Path, size: int
+) -> None:
+    value = shm_link.suggested_shm_size(size)
+    manifest = tmp_path / "reactor.yaml"
+    manifest.write_text(
+        "model:\n  resources:\n    sessions:\n      shared_memory:\n"
+        f"        output: {value}\nruntime:\n  import: m:M\n"
+    )
+    read = load_config(manifest).shared_memory.output_bytes
+    assert read > size
+    assert read * 4 >= size * 5
+    assert read % SHM_PAGE_BYTES == 0
