@@ -61,6 +61,30 @@ def int_env(name: str, default: int) -> int:
         raise SystemExit(f"{name} {raw!r} must be an integer") from None
 
 
+_TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
+_FALSE_WORDS = frozenset({"0", "false", "no", "off"})
+
+
+def bool_env(name: str, default: bool) -> bool:
+    """Return env var *name* as a bool, or *default* when unset/empty.
+
+    ``1``, ``true``, ``yes`` and ``on`` are true; ``0``, ``false``, ``no`` and
+    ``off`` are false; case is ignored.
+
+    Raises:
+        SystemExit: If the value is set but is none of those words.
+    """
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    word = raw.lower()
+    if word in _TRUE_WORDS:
+        return True
+    if word in _FALSE_WORDS:
+        return False
+    raise SystemExit(f"{name} {raw!r} must be one of 1/0, true/false, yes/no, on/off")
+
+
 def log_level_from_env() -> int:
     """Resolve ``REACTOR_LOG_LEVEL`` to a logging level, defaulting to ``INFO``."""
     name = os.getenv("REACTOR_LOG_LEVEL", "INFO").strip().upper()

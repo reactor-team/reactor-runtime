@@ -207,6 +207,21 @@ class WebRtcConfig:
 
             It is process-wide like ``dc_chunking``: the media engine carries
             it and is built on the first connection.
+        nvdec: Whether to decode received video on NVDEC, the video decoder of
+            NVIDIA GPUs, ahead of the software decoders: both the video tracks
+            of a streamed session and the encoded step frames of a stepped
+            one. Off by default; ``WEBRTC_NVDEC=1`` turns it on. It covers
+            H.264, VP8, VP9 (profile 0) and AV1 (main), each where the GPU
+            decodes it, on Linux. Without an NVIDIA GPU or driver video
+            decodes in software as before, and a stream the GPU refuses (10-bit
+            AV1, a size beyond its limits) falls back to software.
+            ``CUDA_VISIBLE_DEVICES`` picks the GPU, which shares the model's
+            CUDA context; each open decoder holds its own surfaces in GPU
+            memory.
+
+            It is process-wide like ``dc_chunking``: the media engine and the
+            step frame codecs carry it, and both are built on the first
+            connection.
     """
 
     ice_servers: tuple[IceServer, ...] = ()
@@ -235,3 +250,4 @@ class WebRtcConfig:
     warp: bool = True
     dc_chunking: bool = True
     max_message_size: int = DEFAULT_MAX_MESSAGE_BYTES
+    nvdec: bool = False

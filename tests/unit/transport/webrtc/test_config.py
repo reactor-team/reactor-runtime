@@ -12,6 +12,7 @@ def test_defaults_match_the_old_transport_settings() -> None:
     assert cfg.transport_policy is IceTransportPolicy.ALL
     assert cfg.ping_timeout == 20.0
     assert cfg.hw_codecs_enabled is False
+    assert cfg.nvdec is False
     assert cfg.bwe_min_kbps == 500
     assert cfg.bwe_max_kbps == 10000
     assert cfg.bwe_initial_kbps == 4000

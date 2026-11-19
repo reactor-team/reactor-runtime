@@ -11,6 +11,7 @@ set of codec backends they all open them with.
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -19,6 +20,8 @@ from types import MappingProxyType
 import reactor_webrtc as rw
 
 from reactor_wire.v1 import step_pb2
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -56,15 +59,37 @@ BY_ENCODING: Mapping[step_pb2.FrameEncoding.ValueType, StepFrameCodec] = Mapping
 
 _backends_lock = threading.Lock()
 _backends: list[rw.VideoCodecs] = []
+_nvdec = False
+
+
+def use_nvdec(enabled: bool) -> None:
+    """Decode step frames on NVDEC where an NVIDIA GPU decodes their codec.
+
+    Process-wide, like the media engine: it applies when :func:`video_codecs`
+    first collects the backends, so it must be set before then. A later call
+    that would change it is ignored with a warning.
+    """
+    global _nvdec
+    with _backends_lock:
+        if _backends and enabled != _nvdec:
+            logger.warning(
+                "NVDEC for step frames stays %s: the video codecs are already open",
+                "on" if _nvdec else "off",
+            )
+            return
+        _nvdec = enabled
 
 
 def video_codecs() -> rw.VideoCodecs:
     """Return the process's video codec backends, collected on first use.
+
+    With :func:`use_nvdec` on, NVDEC is the first decoder of each codec the
+    GPU decodes, ahead of the software decoders; without a GPU it is left out.
 
     Safe to call from any thread: the step frame decoders and encoders open
     their codecs on worker threads.
     """
     with _backends_lock:
         if not _backends:
-            _backends.append(rw.VideoCodecs())
+            _backends.append(rw.VideoCodecs(nvdec=_nvdec))
         return _backends[0]

@@ -25,7 +25,13 @@ import os
 
 from reactor_runtime import log
 from reactor_runtime.core import RuntimeConfig, RuntimeState, SessionState
-from reactor_runtime.environment import duration_env, float_env, int_env, log_level_from_env
+from reactor_runtime.environment import (
+    bool_env,
+    duration_env,
+    float_env,
+    int_env,
+    log_level_from_env,
+)
 from reactor_runtime.http import HttpServer
 from reactor_runtime.manifest import load_workspace
 from reactor_runtime.metrics import RuntimeMetrics
@@ -217,6 +223,7 @@ def _webrtc_config_from_env() -> WebRtcConfig:
         bwe_initial_kbps=bwe_initial_kbps,
         sender_max_kbps=sender_max_kbps,
         sender_min_kbps=sender_min_kbps,
+        nvdec=bool_env("WEBRTC_NVDEC", False),
     )
 
 
