@@ -120,8 +120,8 @@ class WebRtcConfig:
             watchdog declares it lost. ``0`` or less disables the watchdog.
         supported_video_codecs: Video codecs offered, in preference order.
         supported_audio_codecs: Audio codecs offered, in preference order.
-        hw_codecs_enabled: Whether to use hardware encoder/decoder elements
-            instead of software ones.
+        hw_codecs_enabled: Reserved for choosing hardware codecs; it has no
+            effect. ``nvdec`` decodes received video on NVIDIA GPUs.
         rtp_header_extensions: RTP header extension URIs mirrored in answers
             when the offer includes them.
         bwe_min_kbps: Floor for the congestion-control bitrate estimate.

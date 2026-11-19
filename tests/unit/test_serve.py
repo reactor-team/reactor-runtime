@@ -11,6 +11,7 @@ from reactor_runtime.http import HttpServer
 from reactor_runtime.metrics import RuntimeMetrics
 from reactor_runtime.protocol import ProtocolVersion
 from reactor_runtime.runner import Runner
+from reactor_runtime.secrets import RESERVED_NAMES
 from reactor_runtime.serve import (
     _apply_env,
     _assemble,
@@ -353,6 +354,11 @@ def test_webrtc_config_falls_back_to_a_public_stun_when_unconfigured() -> None:
     assert config.bwe_initial_kbps == WebRtcConfig.bwe_initial_kbps
     assert config.sender_max_kbps == WebRtcConfig.sender_max_kbps
     assert config.sender_min_kbps == WebRtcConfig.sender_min_kbps
+
+
+def test_every_webrtc_variable_is_reserved_from_secrets() -> None:
+    # A mounted secret may not replace a setting the WebRTC transport reads.
+    assert set(_WEBRTC_ENV) <= RESERVED_NAMES
 
 
 def test_webrtc_config_decodes_in_software_unless_nvdec_is_asked_for() -> None:
