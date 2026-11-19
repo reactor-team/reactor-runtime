@@ -269,10 +269,23 @@ python -m reactor_runtime.schema --path . --version v0.1.0 --out schema.json
 Each names the public symbol whose docstring states it.
 
 - **The step loop decides replay.** Do not override `run()` or
-  `submit_command()`. A class that keeps both can serve a stepped session —
-  one step per request, with state, commands and frames in the request
+  `submit_command()`. A class that keeps both can serve a stepped session,
+  one step per request with state, commands and frames in the request
   (`reactor_runtime.ReactorApp.supports_stepped`). Phase 5 replays the baseline
-  through exactly that.
+  through exactly that. Frames can also be pushed to the input tracks ahead
+  of a step (`reactor_runtime.runner.stepped.StepRequests.push`).
+- **Step frames reach the model as RGB, whatever the client sent.** A stepped
+  client's video frames, in a request or a push, may arrive encoded (H.264,
+  VP8, VP9 or AV1). The runtime decodes them to RGB before the model reads
+  them (`reactor_runtime.transport.step_frames.StepFrameGate`,
+  `reactor_runtime.transport.step_frames.TrackDecoder.decode`).
+- **Step output is lossy for a client that negotiates it.** A client whose
+  offer declares encoded step frames gets output video encoded in the codec
+  its track's section negotiated
+  (`reactor_runtime.transport.webrtc.sdp.ENCODED_STEP_FRAMES`,
+  `reactor_runtime.transport.webrtc.peer.WebRTCPeer.step_frame_encodings`,
+  `reactor_runtime.transport.step_frames.TrackEncoder`). A replay client
+  omits `a=x-reactor-encoded-step-frames`, so its step results stay raw.
 - **`process_output()` returns `Output | StepCompleted | None`**
   (`reactor_runtime.ReactorApp.process_output`). Return
   `reactor_runtime.StepCompleted` when a step's report to a step-count session
@@ -298,10 +311,10 @@ Each names the public symbol whose docstring states it.
   `reactor_runtime.session_started` and `reactor_runtime.session_ended` fire
   once per session; `reactor_runtime.disconnected` does not fire when the
   session itself ends (§5).
-- **Posted order.** Commands, step requests and lifecycle events are handled
-  one at a time in the order posted, so a handler or hook must never wait for
-  a later event — it is queued behind the wait. `await self.connected.wait()`
-  inside a hook is the shape this rules out.
+- **Posted order.** Commands, step requests, pushed input frames and
+  lifecycle events are handled one at a time in the order posted, so a handler
+  or hook must never wait for a later event — it is queued behind the wait.
+  `await self.connected.wait()` inside a hook is the shape this rules out.
 - **Refusing.** `reactor_runtime.CommandError` refuses a command;
   `reactor_runtime.ApplicationError` from `process_input()` refuses a step, and
   the loop asks again.
