@@ -20,7 +20,6 @@ WEIGHT_BYTES = 2 << 30
 class GpuEchoModel(ModelServer[EchoInput, EchoResult]):
     """Invert each session's frame on the GPU, batched, after a matmul with the weights."""
 
-    max_batch = 4
     batch_window = 0.002
 
     def load(self, config_path: Path | None) -> None:

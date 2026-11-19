@@ -17,7 +17,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 import pytest
@@ -65,19 +65,35 @@ class BrokenLoad(Doubler):
         raise RuntimeError("no weights")
 
 
+class WarmUp(Doubler):
+    warmed_at: ClassVar[list[int]] = []
+
+    def load(self, config_path: Path | None) -> None:
+        WarmUp.warmed_at.append(self.max_batch)
+
+
+class ClassBatch(WarmUp):
+    max_batch = 2
+
+
 # Every block one page of the slot bound, so the volumes below are whole pages
 # of it on any host.
 _BLOCK = SHM_PAGE_BYTES
 _SLOT = shm_slot_bytes(_BLOCK, _BLOCK)
 
 
-def _process(root: Path, ref: str = f"{__name__}:Doubler", sessions: int = 1) -> ModelServerProcess:
+def _process(
+    root: Path,
+    ref: str = f"{__name__}:Doubler",
+    sessions: int = 1,
+    max_batch: int | None = None,
+) -> ModelServerProcess:
     for slot in range(sessions):
         (root / f"s{slot}").mkdir(exist_ok=True)
     config = ServerProcessConfig(
         socket=str(root / "sock"), max_sessions=sessions, slot_directory=str(root / "s{slot}")
     )
-    model_server = ModelServerConfig(import_ref=ref)
+    model_server = ModelServerConfig(import_ref=ref, max_batch=max_batch)
     shared_memory = SharedMemoryConfig(input_bytes=_BLOCK, output_bytes=_BLOCK)
     return ModelServerProcess(model_server, shared_memory, root / "config.yml", config)
 
@@ -215,6 +231,102 @@ def test_a_failed_load_terminates_and_asks_the_process_to_exit_cleanly(
     assert not (tmp_path / "sock").exists()
 
 
+def _start_and_stop(process: ModelServerProcess) -> None:
+    async def run() -> None:
+        await process.start()
+        await process.drain()
+        await process.stop()
+
+    asyncio.run(run())
+
+
+def _warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
+@pytest.fixture(autouse=True)
+def _fresh_warm_ups() -> None:
+    WarmUp.warmed_at.clear()
+
+
+@pytest.mark.parametrize(
+    ("sessions", "max_batch"),
+    [(2, 2), (3, 1), (1, 2)],
+    ids=["as-many-sessions", "more-sessions-in-turn", "fewer-sessions"],
+)
+def test_the_model_loads_with_the_manifests_max_batch_whatever_the_session_count(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, sessions: int, max_batch: int
+) -> None:
+    process = _process(tmp_path, f"{__name__}:WarmUp", sessions=sessions, max_batch=max_batch)
+
+    with caplog.at_level(logging.INFO, logger="reactor_runtime.model_server.process"):
+        _start_and_stop(process)
+
+    assert WarmUp.warmed_at == [max_batch]
+    assert _warnings(caplog) == []
+    [loaded] = [r for r in caplog.records if r.getMessage() == "model loaded"]
+    fields = getattr(loaded, "reactor_fields", {})
+    assert (fields["max_batch"], fields["sessions"]) == (max_batch, sessions)
+
+
+def test_without_a_manifest_or_class_value_the_model_loads_with_one(tmp_path: Path) -> None:
+    _start_and_stop(_process(tmp_path, f"{__name__}:WarmUp"))
+
+    assert WarmUp.warmed_at == [1]
+
+
+class InheritsClassBatch(ClassBatch):
+    pass
+
+
+@pytest.mark.parametrize(
+    ("model", "manifest", "served"),
+    [
+        ("ClassBatch", None, 2),
+        ("InheritsClassBatch", None, 2),
+        ("ClassBatch", 2, 2),
+        ("ClassBatch", 1, 1),
+    ],
+    ids=["class-only", "inherited", "manifest-equal", "manifest-lower"],
+)
+def test_a_class_max_batch_serves_beside_the_manifest_and_warns(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    model: str,
+    manifest: int | None,
+    served: int,
+) -> None:
+    ref = f"{__name__}:{model}"
+    process = _process(tmp_path, ref, sessions=2, max_batch=manifest)
+
+    with caplog.at_level(logging.WARNING, logger="reactor_runtime.model_server.process"):
+        _start_and_stop(process)
+
+    assert WarmUp.warmed_at == [served]
+    [warning] = _warnings(caplog)
+    if manifest is None:
+        assert "move the class's value to runtime.model_server.max_batch in reactor.yaml" in (
+            warning.getMessage()
+        )
+    else:
+        assert "remove max_batch from the class; reactor.yaml already sets it" in (
+            warning.getMessage()
+        )
+    assert getattr(warning, "reactor_fields", {}) == {
+        "model": ref,
+        "class_max_batch": 2,
+        "max_batch": served,
+    }
+
+
+def test_a_manifest_max_batch_above_the_class_stops_the_start(tmp_path: Path) -> None:
+    process = _process(tmp_path, f"{__name__}:ClassBatch", sessions=3, max_batch=3)
+    with pytest.raises(
+        SystemExit, match=r"max_batch is 3, above ClassBatch\.max_batch = 2: remove max_batch"
+    ):
+        asyncio.run(process.start())
+
+
 def test_a_misspelled_module_stops_the_start_naming_it(tmp_path: Path) -> None:
     with pytest.raises(
         SystemExit,
@@ -286,8 +398,6 @@ class Frame:
     pixels: np.ndarray
 
 class Doubler(ModelServer):
-    max_batch = 2
-
     def step(self, requests):
         return [Frame(r.payload.pixels * 2) for r in requests]
 """
@@ -308,26 +418,27 @@ def _health(port: int) -> dict[str, Any] | None:
 
 
 def _spawn(
-    root: Path, model: str, ref: str = "doubler:Doubler"
+    root: Path, model: str, ref: str = "doubler:Doubler", max_batch: int | None = None
 ) -> tuple[subprocess.Popen[bytes], int]:
     """Start ``python -m reactor_runtime.model_server`` on a workspace holding *model*."""
     (root / f"{ref.partition(':')[0]}.py").write_text(model)
-    (root / "reactor.yaml").write_text(
-        textwrap.dedent(
-            f"""\
-            model:
-              resources:
-                workers:
-                  shared_memory:
-                    input: 64Ki
-                    output: 64Ki
-            runtime:
-              import: app:App
-              model_server:
-                import: {ref}
-            """
-        )
+    manifest = textwrap.dedent(
+        f"""\
+        model:
+          resources:
+            workers:
+              shared_memory:
+                input: 64Ki
+                output: 64Ki
+        runtime:
+          import: app:App
+          model_server:
+            import: {ref}
+        """
     )
+    if max_batch is not None:
+        manifest += f"    max_batch: {max_batch}\n"
+    (root / "reactor.yaml").write_text(manifest)
     (root / "s0").mkdir()
     port = _free_port()
     env = {
@@ -377,6 +488,32 @@ def test_python_m_model_server_serves_a_workspace_and_stops_on_sigterm(tmp_path:
             server.kill()
             server.wait()
         sys.modules.pop("doubler", None)
+
+
+def test_python_m_model_server_loads_with_max_batch_from_reactor_yaml(tmp_path: Path) -> None:
+    model = _MODEL + textwrap.dedent(
+        """
+        from pathlib import Path
+
+        class Recorded(Doubler):
+            def load(self, config_path):
+                Path("loaded_max_batch").write_text(str(self.max_batch))
+        """
+    )
+    server, port = _spawn(tmp_path, model, "doubler:Recorded", max_batch=3)
+    try:
+        deadline = time.monotonic() + 60
+        while (_health(port) or {}).get("state") != "available":
+            assert server.poll() is None, server.stdout.read().decode() if server.stdout else ""
+            assert time.monotonic() < deadline, "the model server did not become available"
+            time.sleep(0.1)
+        assert (tmp_path / "loaded_max_batch").read_text() == "3"
+        server.send_signal(signal.SIGTERM)
+        assert server.wait(timeout=60) == 0
+    finally:
+        if server.poll() is None:
+            server.kill()
+            server.wait()
 
 
 def test_python_m_model_server_exits_cleanly_when_the_model_fails_to_load(tmp_path: Path) -> None:
