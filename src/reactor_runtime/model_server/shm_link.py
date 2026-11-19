@@ -33,10 +33,10 @@ output block when it sets the link up. A block is created at the size
 request and ``model.resources.sessions.shared_memory.output`` for a result, and
 never grows. A message
 whose arrays do not fit its block is refused before anything is sent, with
-:class:`~reactor_runtime.model_server.PayloadTooLarge` naming both sizes and
-the key to raise, and so is one whose header, the part pickle keeps inline
-(a torch tensor, a non-contiguous array), passes the frame limit; the request
-fails alone and the link goes on.
+:class:`~reactor_runtime.model_server.PayloadTooLarge` naming both sizes, the
+key to raise and a value for it (:func:`suggested_shm_size`), and so is one
+whose header, the part pickle keeps inline (a torch tensor, a non-contiguous
+array), passes the frame limit; the request fails alone and the link goes on.
 
 A slot holds a second request block in one case. When the session sends a
 :class:`~reactor_runtime.model_server.protocol.Cancel`, it moves to a fresh
@@ -91,7 +91,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from reactor_runtime.core import DEFAULT_SHM_INPUT_BYTES, DEFAULT_SHM_OUTPUT_BYTES
+from reactor_runtime.core import DEFAULT_SHM_INPUT_BYTES, DEFAULT_SHM_OUTPUT_BYTES, SHM_PAGE_BYTES
 from reactor_runtime.ipc import (
     SharedSlot,
     SharedSlotAllocationFailed,
@@ -353,9 +353,10 @@ class ShmLink:
         else:
             what, key = "request", "input"
         return (
-            f"a {what}'s arrays hold {exc.needed} bytes, above the {exc.limit} bytes of its "
-            f"shared-memory block: raise model.resources.sessions.shared_memory.{key} in "
-            "reactor.yaml"
+            f"a {what}'s arrays hold {exc.needed} bytes ({_human_bytes(exc.needed)}), above the "
+            f"{exc.limit} bytes ({_human_bytes(exc.limit)}) of its shared-memory block: set "
+            f"model.resources.sessions.shared_memory.{key} to {suggested_shm_size(exc.needed)} "
+            "or more in reactor.yaml"
         )
 
     def _header_too_large(self, message: Any, size: int, limit: int) -> str:
@@ -764,6 +765,31 @@ def _accepts(address: str) -> bool:
     finally:
         probe.close()
     return True
+
+
+def suggested_shm_size(size: int) -> str:
+    """Return a ``shared_memory`` size, as ``reactor.yaml`` takes it, that holds *size* bytes.
+
+    The value is *size* and a quarter more, since a model's next request or
+    result can be somewhat larger than the one measured, rounded up to whole
+    MiB (``"50Mi"``), or, below 1 MiB, to whole 64 KiB pages (``"256Ki"``),
+    the unit a block is reserved in. It is always above *size*.
+
+    Args:
+        size: The bytes a request's or a result's arrays hold, at least 0.
+    """
+    wanted = -(-max(size + 1, -(-size * 5 // 4)) // SHM_PAGE_BYTES) * SHM_PAGE_BYTES
+    if wanted < 1 << 20:
+        return f"{wanted >> 10}Ki"
+    return f"{-(-wanted // (1 << 20))}Mi"
+
+
+def _human_bytes(size: int) -> str:
+    """*size* in the largest binary unit it reaches, to one decimal place."""
+    for unit, shift in (("GiB", 30), ("MiB", 20), ("KiB", 10)):
+        if size >= 1 << shift:
+            return f"{size / (1 << shift):.1f} {unit}"
+    return f"{size} bytes"
 
 
 def _fixed_slot(prefix: str, size: int, directory: Path | None) -> SharedSlot:
