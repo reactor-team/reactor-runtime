@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import logging
 import os
 import pickle
 import re
@@ -33,6 +34,7 @@ from reactor_runtime.model_server.protocol import (
     Closed,
     Hello,
     ProtocolError,
+    Reset,
     Result,
     Signal,
     Step,
@@ -994,3 +996,182 @@ def test_a_suggested_size_is_whole_pages_above_the_size_with_a_quarter_more(
     assert read > size
     assert read * 4 >= size * 5
     assert read % SHM_PAGE_BYTES == 0
+
+
+def _use_records(caplog: pytest.LogCaptureFixture, message: str) -> list[dict[str, object]]:
+    return [getattr(r, "reactor_fields", {}) for r in caplog.records if r.getMessage() == message]
+
+
+def test_each_end_reports_its_largest_message_once_when_the_link_closes(
+    root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # 4096-byte blocks: requests of 100, 1000 and 300 bytes, results of 2000
+    # and 50. Each end reports what it wrote, against its own block and key.
+    pair = Pair(root, _transport(root))
+    session, server = pair.open(slot=0)
+    with caplog.at_level(logging.INFO, logger="reactor_runtime.model_server.shm_link"):
+        try:
+            for request_id, (sent, returned) in enumerate([(100, 2000), (1000, 50), (300, 50)]):
+                session.send(
+                    Step(request_id=request_id, timeout=None, payload=np.ones(sent, dtype=np.uint8))
+                )
+                assert server.receive().request_id == request_id
+                server.send(Result(request_id=request_id, output=np.ones(returned, dtype=np.uint8)))
+                assert session.receive().request_id == request_id
+            session.send(Signal(signal=np.ones(8, dtype=np.uint8)))  # not in a block
+            server.receive()
+        finally:
+            session.close()
+            server.close()
+            session.close()  # closing twice reports once
+            pair.listener.close()
+
+    records = _use_records(caplog, "shared memory use")
+    by_key = {r["key"]: r for r in records}
+    assert len(records) == 2
+    assert by_key["model.resources.sessions.shared_memory.input"] == {
+        "key": "model.resources.sessions.shared_memory.input",
+        "messages": 3,
+        "largest_bytes": 1000,
+        "block_bytes": 4096,
+        "used": "1000 bytes of 4.0 KiB (24%)",
+        "suggested": "64Ki",
+        "slot": 0,
+        "session_id": None,
+    }
+    output = by_key["model.resources.sessions.shared_memory.output"]
+    assert (output["messages"], output["largest_bytes"], output["block_bytes"], output["slot"]) == (
+        3,
+        2000,
+        4096,
+        0,
+    )
+    assert not _use_records(
+        caplog, "shared memory block nearly full: a larger message fails its step"
+    )
+
+
+def test_a_link_that_carried_no_step_reports_nothing(
+    root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    pair = Pair(root, _transport(root))
+    session, server = pair.open()
+    with caplog.at_level(logging.INFO, logger="reactor_runtime.model_server.shm_link"):
+        session.close()
+        server.close()
+        pair.listener.close()
+    assert not _use_records(caplog, "shared memory use")
+
+
+def test_a_message_past_nine_tenths_of_its_block_warns_once_naming_a_size(
+    root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    near_full = "shared memory block nearly full: a larger message fails its step"
+    pair = Pair(root, _transport(root))
+    session, server = pair.open(slot=0)
+    with caplog.at_level(logging.INFO, logger="reactor_runtime.model_server.shm_link"):
+        try:
+            # 3686 bytes is nine tenths of 4096 rounded down: not past it.
+            session.send(Step(request_id=1, timeout=None, payload=np.ones(3686, dtype=np.uint8)))
+            server.receive()
+            assert not _use_records(caplog, near_full)
+            for request_id in (2, 3):
+                session.send(
+                    Step(
+                        request_id=request_id,
+                        timeout=None,
+                        payload=np.ones(3687 + request_id, dtype=np.uint8),
+                    )
+                )
+                server.receive()
+            # A refused message is not counted: it was never written whole.
+            with pytest.raises(PayloadTooLarge):
+                session.send(
+                    Step(request_id=4, timeout=None, payload=np.ones(5000, dtype=np.uint8))
+                )
+        finally:
+            session.close()
+            server.close()
+            pair.listener.close()
+
+    [warning] = _use_records(caplog, near_full)
+    assert warning == {
+        "key": "model.resources.sessions.shared_memory.input",
+        "used_bytes": 3689,
+        "block_bytes": 4096,
+        "used": "3.6 KiB of 4.0 KiB",
+        "suggested": "64Ki",
+        "slot": 0,
+        "session_id": None,
+    }
+    [use] = [
+        r for r in _use_records(caplog, "shared memory use") if str(r["key"]).endswith(".input")
+    ]
+    assert (use["messages"], use["largest_bytes"]) == (3, 3690)
+
+
+def test_each_session_on_a_link_gets_its_own_report_at_the_next_reset(
+    root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A session runtime keeps its link across sessions: each reset ends one
+    # session's counts and starts the next one's from zero.
+    pair = Pair(root, _transport(root))
+    session, server = pair.open(slot=0)
+    with caplog.at_level(logging.INFO, logger="reactor_runtime.model_server.shm_link"):
+        try:
+            request_id = 10
+            for session_id, (sent, returned) in (("first", (1000, 3000)), ("second", (200, 500))):
+                session.send(Reset(request_id=request_id, session_id=session_id))
+                server.receive()
+                request_id += 1
+                for size in (sent, sent // 2):
+                    session.send(
+                        Step(
+                            request_id=request_id,
+                            timeout=None,
+                            payload=np.ones(size, dtype=np.uint8),
+                        )
+                    )
+                    server.receive()
+                    server.send(
+                        Result(request_id=request_id, output=np.ones(returned, dtype=np.uint8))
+                    )
+                    session.receive()
+                    request_id += 1
+            records = _use_records(caplog, "shared memory use")
+            # The second reset reported the first session, on both ends.
+            assert sorted((r["key"], r["session_id"], r["largest_bytes"]) for r in records) == [
+                ("model.resources.sessions.shared_memory.input", "first", 1000),
+                ("model.resources.sessions.shared_memory.output", "first", 3000),
+            ]
+        finally:
+            session.close()
+            server.close()
+            pair.listener.close()
+
+    records = _use_records(caplog, "shared memory use")
+    assert sorted(
+        (r["key"], r["session_id"], r["largest_bytes"], r["messages"]) for r in records
+    ) == [
+        ("model.resources.sessions.shared_memory.input", "first", 1000, 2),
+        ("model.resources.sessions.shared_memory.input", "second", 200, 2),
+        ("model.resources.sessions.shared_memory.output", "first", 3000, 2),
+        ("model.resources.sessions.shared_memory.output", "second", 500, 2),
+    ]
+
+
+def test_a_reset_with_no_step_since_the_last_reports_nothing(
+    root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    pair = Pair(root, _transport(root))
+    session, server = pair.open()
+    with caplog.at_level(logging.INFO, logger="reactor_runtime.model_server.shm_link"):
+        try:
+            for request_id, session_id in ((1, "a"), (2, "b")):
+                session.send(Reset(request_id=request_id, session_id=session_id))
+                server.receive()
+        finally:
+            session.close()
+            server.close()
+            pair.listener.close()
+    assert not _use_records(caplog, "shared memory use")

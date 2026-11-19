@@ -571,6 +571,42 @@ def test_a_result_past_its_block_names_a_size_that_serves_it(tmp_path: Path) -> 
         sys.modules.pop("doubler", None)
 
 
+def test_the_model_server_logs_a_sessions_shared_memory_use_when_it_ends(tmp_path: Path) -> None:
+    sys.modules.pop("doubler", None)
+    server, port = _spawn(tmp_path, _SIZED, "doubler:Sized")
+    try:
+        _wait_available(server, port)
+        sys.path.insert(0, str(tmp_path))
+        try:
+            import doubler  # type: ignore[import-not-found]  # ty: ignore[unresolved-import]  # the workspace's own module
+        finally:
+            sys.path.remove(str(tmp_path))
+        client = ModelClient.connect(
+            LinkConfig(socket=str(tmp_path / "sock"), slot=0, shm_dir=tmp_path / "s0")
+        )
+        client.reset()
+        for size in (100, 5000, 300):
+            assert client.step(doubler.Tick(np.array([size], dtype=np.int64))).pixels.nbytes == size
+        client.close()
+        deadline = time.monotonic() + 30
+        while (tmp_path / "s0").exists() and any((tmp_path / "s0").iterdir()):
+            assert time.monotonic() < deadline, "the model server kept the session's blocks"
+            time.sleep(0.05)
+    finally:
+        _stop(server)
+        sys.modules.pop("doubler", None)
+    output = server.stdout.read().decode() if server.stdout else ""
+    [line] = [line for line in output.splitlines() if "shared memory use" in line]
+    for field in (
+        "model.resources.sessions.shared_memory.output",
+        "largest_bytes=5000",
+        "block_bytes=65536",
+        "messages=3",
+        "slot=0",
+    ):
+        assert field in line, line
+
+
 def test_python_m_model_server_loads_with_max_batch_from_reactor_yaml(tmp_path: Path) -> None:
     model = _MODEL + textwrap.dedent(
         """
