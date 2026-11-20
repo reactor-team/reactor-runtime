@@ -148,16 +148,30 @@ class Service:
         completion, is not cut short, no later component is started, and the
         components that started are then drained and stopped. The exit deadline
         still bounds the whole wind-down, a start that outlasts it included.
+
+        A component whose start raises ``SystemExit`` refuses the start, as a
+        malformed setting does. The refusal is logged as an error that names the
+        component and the reason, the components that started are drained and
+        stopped, the ``runtime stopped`` line carries the status the process
+        exits with, and the ``SystemExit`` propagates to the caller.
         """
         order = list(reversed(self._topological_order()))
         started: list[ServiceComponent] = []
+        refused: SystemExit | None = None
         # Before any component starts: a SIGTERM during a long start (a model's
         # load) is a shutdown request like any other, not the default action.
         self._install_signal_handlers()
         try:
             for component in order:
                 logger.info("starting component", component=component.name)
-                await component.start()
+                try:
+                    await component.start()
+                except SystemExit as exc:
+                    refused = exc
+                    logger.error(
+                        "start refused", component=component.name, reason=_exit_reason(exc)
+                    )
+                    raise
                 started.append(component)
                 if self._shutdown.is_set():
                     logger.info(
@@ -187,7 +201,8 @@ class Service:
                     await component.stop()
                 except Exception:
                     logger.exception("component failed to stop", component=component.name)
-            logger.info("runtime stopped", exit_code=self.exit_code)
+            code = self.exit_code if refused is None else _exit_status(refused)
+            logger.info("runtime stopped", exit_code=code)
             self._disarm_deadline()
 
     def request_shutdown(self, *, failure: bool = False) -> None:
@@ -324,3 +339,26 @@ class Service:
         for name in self._components:
             visit(name)
         return ordered
+
+
+def _exit_status(exc: SystemExit) -> int:
+    """Return the status the interpreter exits with when *exc* reaches it.
+
+    An integer code exits as its low eight bits (``SystemExit(256)`` exits 0,
+    ``SystemExit(-1)`` exits 255, ``SystemExit(True)`` exits 1), and any other
+    non-``None`` code, a message included, exits 1.
+    """
+    if exc.code is None:
+        return 0
+    return int(exc.code) & 0xFF if isinstance(exc.code, int) else 1
+
+
+def _exit_reason(exc: SystemExit) -> str:
+    """Return the message a ``SystemExit`` carries, or its status when it has none.
+
+    The interpreter prints any code that is neither ``None`` nor an integer as
+    ``str(code)`` before exiting 1, so such a code is the message too.
+    """
+    if exc.code is None or isinstance(exc.code, int):
+        return f"exit status {_exit_status(exc)}"
+    return str(exc.code)
