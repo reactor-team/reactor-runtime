@@ -35,6 +35,7 @@ from reactor_runtime.model_server import (
     LinkConfig,
     ModelClient,
     ModelServer,
+    PayloadTooLarge,
     ServerRequest,
 )
 from reactor_runtime.model_server.__main__ import main as model_server_main
@@ -418,7 +419,11 @@ def _health(port: int) -> dict[str, Any] | None:
 
 
 def _spawn(
-    root: Path, model: str, ref: str = "doubler:Doubler", max_batch: int | None = None
+    root: Path,
+    model: str,
+    ref: str = "doubler:Doubler",
+    max_batch: int | None = None,
+    output: str = "64Ki",
 ) -> tuple[subprocess.Popen[bytes], int]:
     """Start ``python -m reactor_runtime.model_server`` on a workspace holding *model*."""
     (root / f"{ref.partition(':')[0]}.py").write_text(model)
@@ -429,7 +434,7 @@ def _spawn(
             sessions:
               shared_memory:
                 input: 64Ki
-                output: 64Ki
+                output: {output}
         runtime:
           import: app:App
           model_server:
@@ -487,6 +492,81 @@ def test_python_m_model_server_serves_a_workspace_and_stops_on_sigterm(tmp_path:
         if server.poll() is None:
             server.kill()
             server.wait()
+        sys.modules.pop("doubler", None)
+
+
+_SIZED = _MODEL + textwrap.dedent(
+    """
+    class Sized(ModelServer):
+        def step(self, requests):
+            return [Frame(np.ones(int(r.payload.pixels[0]), dtype=np.uint8)) for r in requests]
+    """
+)
+
+
+def _wait_available(server: subprocess.Popen[bytes], port: int) -> None:
+    deadline = time.monotonic() + 60
+    while (_health(port) or {}).get("state") != "available":
+        assert server.poll() is None, server.stdout.read().decode() if server.stdout else ""
+        assert time.monotonic() < deadline, "the model server did not become available"
+        time.sleep(0.1)
+
+
+def _stop(server: subprocess.Popen[bytes]) -> None:
+    if server.poll() is None:
+        server.send_signal(signal.SIGTERM)
+        try:
+            server.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            server.kill()
+            server.wait()
+
+
+def test_a_result_past_its_block_names_a_size_that_serves_it(tmp_path: Path) -> None:
+    # Across real processes and real shared memory: the result is refused with
+    # a size to set, the session goes on, and a model server given that size
+    # returns the same result.
+    sys.modules.pop("doubler", None)
+    first = tmp_path / "first"
+    first.mkdir()
+    server, port = _spawn(first, _SIZED, "doubler:Sized")
+    try:
+        _wait_available(server, port)
+        sys.path.insert(0, str(first))
+        try:
+            import doubler  # type: ignore[import-not-found]  # ty: ignore[unresolved-import]  # the workspace's own module
+        finally:
+            sys.path.remove(str(first))
+        client = ModelClient.connect(
+            LinkConfig(socket=str(first / "sock"), slot=0, shm_dir=first / "s0")
+        )
+        client.reset()
+        with pytest.raises(PayloadTooLarge) as refused:
+            client.step(doubler.Tick(np.array([100_000], dtype=np.int64)))
+        assert str(refused.value) == (
+            "a result's arrays hold 100000 bytes (97.7 KiB), above the 65536 bytes (64.0 KiB) "
+            "of its shared-memory block: set model.resources.sessions.shared_memory.output to "
+            "128Ki or more in reactor.yaml"
+        )
+        assert client.step(doubler.Tick(np.array([16], dtype=np.int64))).pixels.nbytes == 16
+        client.close()
+    finally:
+        _stop(server)
+
+    second = tmp_path / "second"
+    second.mkdir()
+    server, port = _spawn(second, _SIZED, "doubler:Sized", output="128Ki")
+    try:
+        _wait_available(server, port)
+        client = ModelClient.connect(
+            LinkConfig(socket=str(second / "sock"), slot=0, shm_dir=second / "s0")
+        )
+        client.reset()
+        frame = client.step(doubler.Tick(np.array([100_000], dtype=np.int64)))
+        client.close()
+        np.testing.assert_array_equal(frame.pixels, np.ones(100_000, dtype=np.uint8))
+    finally:
+        _stop(server)
         sys.modules.pop("doubler", None)
 
 
