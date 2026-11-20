@@ -94,8 +94,7 @@ one step per client request instead of streaming. Start the session with
 runs any command, and its result carries the step's four frames on
 `main_video`, each with its `{"step": n}` metadata. A step `process_input`
 refuses, while paused or before a seed, answers `REFUSED` and takes no number.
-With the Python SDK, from the release that adds stepped sessions
-(`Reactor.step()`):
+With the Python SDK, version 1.13.0 or later (`Reactor.step()`):
 
 ```python
 from reactor_sdk import Reactor, StepCommand
