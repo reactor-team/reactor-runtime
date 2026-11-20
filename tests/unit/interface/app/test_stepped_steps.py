@@ -33,6 +33,7 @@ from reactor_runtime import (
 )
 from reactor_runtime.core.model import (
     ClientConnected,
+    ClientDisconnected,
     EndReason,
     SessionEnded,
     SessionStarted,
@@ -374,7 +375,55 @@ async def test_a_model_failure_in_a_requested_step_ends_the_loop() -> None:
     await h.stop()
 
 
-def test_only_the_default_step_loop_supports_stepped_sessions() -> None:
+class OwnStreamedLoop(Stepper):
+    """Replaces the streamed half of the loop and keeps the step on request."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.streamed_turns = 0
+        self.finish_turn = asyncio.Event()
+
+    async def _run_streamed(self) -> None:
+        self.streamed_turns += 1
+        await self.finish_turn.wait()
+        self.finish_turn.clear()
+
+
+async def test_a_loop_that_replaces_only_its_streamed_half_still_serves_stepped_sessions() -> None:
+    h = Harness(OwnStreamedLoop())
+    try:
+        await h.start()
+        h.step("r1", ("set_prompt", {"prompt": "a lake"}))
+        await h.settle()
+    finally:
+        await h.stop()
+
+    app = cast(OwnStreamedLoop, h.app)
+    assert app.inputs == [("a lake", [], 0)]
+    assert [r.request.request_id for r in h.reports if r.request] == ["r1"]
+    assert app.streamed_turns == 0
+
+
+async def test_a_streamed_session_runs_the_replacement_each_time_the_gate_opens() -> None:
+    app = OwnStreamedLoop()
+    h = Harness(app)
+    try:
+        await h.start(stepped=False)
+        h.post(ClientDisconnected(CLIENT, 0))
+        await h.settle()
+        app.finish_turn.set()
+        await h.settle()
+        assert app.streamed_turns == 1
+        h.post(ClientConnected(CLIENT, 1))
+        await h.settle()
+    finally:
+        await h.stop()
+
+    assert app.streamed_turns == 2
+    assert app.inputs == []
+
+
+def test_a_model_runs_a_step_on_request_unless_it_replaces_run_or_submit_command() -> None:
     class OwnLoop(Stepper):
         async def run(self) -> None:
             await asyncio.sleep(0)
@@ -390,6 +439,7 @@ def test_only_the_default_step_loop_supports_stepped_sessions() -> None:
             super().submit_command(command, conn_id, request_id)
 
     assert Stepper.supports_stepped()
+    assert OwnStreamedLoop.supports_stepped()
     assert not OwnLoop.supports_stepped()
     assert not Pipeline.supports_stepped()
     assert not OwnCommands.supports_stepped()
