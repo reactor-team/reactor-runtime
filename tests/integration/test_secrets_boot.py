@@ -55,7 +55,7 @@ class Model(ReactorApp):
 _SERVER_MANIFEST = """\
 model:
   resources:
-    workers:
+    sessions:
       shared_memory:
         input: 64Ki
         output: 64Ki

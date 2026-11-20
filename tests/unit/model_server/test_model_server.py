@@ -51,8 +51,8 @@ def test_a_subclass_declares_nothing_and_its_type_parameters_are_for_type_checke
 @pytest.mark.parametrize(
     ("attribute", "key"),
     [
-        ("shm_input_bytes", r"model\.resources\.workers\.shared_memory\.input"),
-        ("shm_output_bytes", r"model\.resources\.workers\.shared_memory\.output"),
+        ("shm_input_bytes", r"model\.resources\.sessions\.shared_memory\.input"),
+        ("shm_output_bytes", r"model\.resources\.sessions\.shared_memory\.output"),
     ],
 )
 def test_a_subclass_that_sets_what_the_manifest_owns_is_refused(attribute: str, key: str) -> None:
@@ -162,7 +162,7 @@ def test_a_shared_memory_size_that_is_not_a_positive_integer_is_refused(
     sizes: dict[str, Any], key: str
 ) -> None:
     with pytest.raises(
-        ValueError, match=rf"model\.resources\.workers\.shared_memory\.{key} must be a positive"
+        ValueError, match=rf"model\.resources\.sessions\.shared_memory\.{key} must be a positive"
     ):
         SharedMemoryConfig(**sizes)
 

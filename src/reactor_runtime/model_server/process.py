@@ -49,7 +49,7 @@ class ModelServerProcess:
 
     Args:
         model_server: The manifest's ``runtime.model_server`` block.
-        shared_memory: The manifest's ``model.resources.workers.shared_memory``
+        shared_memory: The manifest's ``model.resources.sessions.shared_memory``
             block, the size of each worker's blocks.
         config_path: The model's config file, handed to ``load()``.
         process: What the deployment set: the socket, the session count, the
@@ -250,7 +250,7 @@ def _check_room(transport: UnixShmTransport, slots: int, settings: ServerSetting
             raise SystemExit(
                 f"slot {slot}'s shared-memory volume {directory} holds {total} bytes and one "
                 f"session needs up to {settings.shm_slot_bytes} (2 * input + output of "
-                "model.resources.workers.shared_memory, in whole 64 KiB pages): size the "
+                "model.resources.sessions.shared_memory, in whole 64 KiB pages): size the "
                 "session's memory-backed volume to fit them"
             )
 
