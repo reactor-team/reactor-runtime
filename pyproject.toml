@@ -145,11 +145,12 @@ python-version = "3.12"
 # Import roots ty would not otherwise search: the repo root, so the example
 # models (`examples`, first-party but outside the package) resolve the way
 # pytest's pythonpath makes them importable; the WebRTC test directory, so
-# its tests can import their sibling `conftest` for the shared peer fakes; and
+# its tests can import their sibling `conftest` for the shared peer fakes; the
+# director tests, for their sibling `director_harness`; and
 # the contract suite, so its tests can import their sibling `contract_helpers`;
 # and each example workspace, whose two modules import each other as top-level
 # names, the way the runtime imports a workspace; the endurance suite's
-# root, so its `endurance` package resolves; and its model, imported by name.
+# root, so its `endurance` package resolves; and its models, imported by name.
 extra-paths = [
     ".",
     "examples/starter",
@@ -157,10 +158,12 @@ extra-paths = [
     "examples/waypoint",
     "tests/integration/pod/split_echo",
     "tests/unit/transport/webrtc",
+    "tests/unit/apps/director",
     "tests/contract",
     "endurance-tests",
     "endurance-tests/model",
     "endurance-tests/model-split",
+    "endurance-tests/model-director",
 ]
 
 [tool.ty.src]

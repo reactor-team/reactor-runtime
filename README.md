@@ -21,6 +21,7 @@ Reactor Runtime turns an inference pipeline into a real-time, interactive media 
 - ✅ **Typed, validated commands.** Declare the commands your model accepts with standard Python types and constraints. The runtime validates every payload before your handler runs and compiles the surface into an OpenAPI schema that drives typed client SDKs.
 - 🎬 **Every session recorded.** The runtime records each streamed session as it plays, and a client asks for the last seconds of it, or all of it, and fetches the clip over HTTP while the session is still running.
 - 🗂️ **Step results.** Start a session with its input and a number of steps, and keep each step's output as a folder of files.
+- 🎞️ **Whole-shot models.** For a model that builds a whole shot of video in one call, subclass `ReactorDirectorApp` and write `generate()`: its parameters become the client's inputs, and the class queues shots, continues one from another, plays them, and reports each as a step.
 - 🧩 **Many sessions, one copy of the weights.** Split a model into a model half that one model server process loads once and an application half each session runtime runs, and every session shares its weights and GPU.
 - 🔎 **Traceable logs.** `get_logger()` writes structured records, and every record a session writes carries its id, so one filter recovers a whole run.
 - 📦 **One container, anywhere.** The `reactor` CLI scaffolds a workspace, builds a small image, and runs it locally. The same image deploys to [Reactor](https://reactor.inc)'s GPU cloud unchanged.
