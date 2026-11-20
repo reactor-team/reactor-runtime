@@ -252,7 +252,9 @@ DEFAULT_SHM_OUTPUT_BYTES = 32 << 20
 
 Sized for a step that returns video. A model whose results are larger sets
 ``model.resources.sessions.shared_memory.output``; one whose results are small
-sets it lower, since every session's blocks are reserved up front.
+sets it lower, since every session's blocks are reserved up front. The
+``shared memory use`` line each end logs when a session ends gives the largest
+message it wrote and a size that holds it.
 """
 
 
