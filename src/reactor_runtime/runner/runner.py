@@ -1306,8 +1306,9 @@ class Runner(ServiceComponent, ConnectionSink):
     def _check_generation(self, start: SessionStart) -> None:
         """Refuse a stepped session for a model that cannot run one.
 
-        Only the default step loop of ``ReactorApp`` runs a step per request. A
-        model that drives its own ``run()``, a ``ReactorPipeline`` among them,
+        Only a ``ReactorApp`` that keeps its ``run()`` runs a step per request:
+        one on the default step loop, or a ``ReactorDirectorApp``. A model that
+        drives its own ``run()``, a ``ReactorPipeline`` among them,
         is refused rather than started in a mode it would ignore, and so is a
         model that overrides ``submit_command()``, which drops the step request
         a command belongs to.
@@ -1319,8 +1320,8 @@ class Runner(ServiceComponent, ConnectionSink):
             return
         if not self._bridge.supports_stepped:
             raise InvalidSessionStartError(
-                f"generation 'stepped' needs a model that runs the default ReactorApp step "
-                f"loop and command path; {self._bridge.contract.model} drives its own run() "
+                f"generation 'stepped' needs a model that keeps ReactorApp's run() and "
+                f"command path; {self._bridge.contract.model} drives its own run() "
                 f"or overrides submit_command()"
             )
 

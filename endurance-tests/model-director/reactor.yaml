@@ -1,0 +1,14 @@
+$schema: reactor/v2
+
+# The endurance suite's director model: a ReactorDirectorApp that builds plain
+# shots on the CPU, with step results on, so each shot a session builds is
+# saved as that session's step the way a request for one generation is.
+model:
+  name: director-endurance
+  version: v0.0.1
+  description: A director model with plain shots, for the endurance suite.
+
+runtime:
+  import: director_reel:DirectorReel
+  step_results:
+    enabled: true
