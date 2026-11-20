@@ -359,8 +359,11 @@ class ModelServerConfig:
 
     Attributes:
         import_ref: The model half, a ``ModelServer`` subclass, as ``"module:Class"``.
-        max_batch: The most requests one step receives; ``None`` keeps the
-            class's ``max_batch``, which this may only lower.
+        max_batch: The most requests one step receives; ``None`` serves with
+            the class's deprecated ``max_batch``, else 1. How many sessions
+            share the model server is ``model.resources.workers.count``; when
+            the file sets no count, the ``reactor`` CLI sets it to
+            ``max_batch``, and an explicit count stays independent.
         batch_window: Seconds the model server waits for a batch to fill;
             ``None`` keeps the class's ``batch_window``.
 

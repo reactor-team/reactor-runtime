@@ -172,7 +172,7 @@ def _model_server_from_manifest(runtime: dict[str, Any]) -> ModelServerConfig | 
             batch_window: 0.005
 
     An unknown key is refused rather than ignored: a misspelt setting would
-    otherwise leave the model server at its class's value without a word.
+    otherwise leave the model server at its default without a word.
 
     Args:
         runtime: The manifest's ``runtime`` section.
