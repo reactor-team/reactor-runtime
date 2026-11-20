@@ -82,8 +82,8 @@ A step that carries no webcam frame is refused: `process_input` answers
 With `burst` above `1`, a step that only gathers its frame carries no media,
 and the step that fills the batch carries every frame of it.
 
-With the Python SDK, from the release that adds stepped sessions
-(`Reactor.step()`), against the `reactor run` above:
+With the Python SDK, version 1.13.0 or later (`Reactor.step()`), against the
+`reactor run` above:
 
 ```python
 from reactor_sdk import Reactor

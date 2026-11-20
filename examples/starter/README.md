@@ -76,8 +76,8 @@ The class leaves `run()` to the runtime, so the same code serves a stepped
 session, where the animation advances one frame per client request instead of
 streaming. Start the session with `"generation": "stepped"`; each request sets
 any of the settings through `state`, and its result carries the one frame it
-rendered on `main_video`. With the Python SDK, from the release that adds
-stepped sessions (`Reactor.step()`):
+rendered on `main_video`. With the Python SDK, version 1.13.0 or later
+(`Reactor.step()`):
 
 ```python
 from reactor_sdk import Reactor
