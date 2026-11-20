@@ -325,10 +325,15 @@ async def test_a_room_connection_joins_the_room_and_publishes_the_output(
     assert dict(opened.detail) == {"conn_id": conn_id, "system": True, "transport": "livekit"}
     assert {"protocol": "livekit", "version": "1.0"} in runner.descriptor()["transports"]
 
+    # In audio frames of 10 ms: the time the tone has to reach its level, the time
+    # the receiver then has to settle, and the stretch of tone that is judged.
+    startup, settle, judged = 150, 50, 150
     watcher = Watcher()
     await watcher.join(room_name)
     try:
-        await _until(lambda: len(watcher.video) >= 75 and len(watcher.audio) >= 300)
+        await _until(
+            lambda: len(watcher.video) >= 75 and len(watcher.audio) >= startup + settle + judged
+        )
         # Track declarations are process-wide, so other modules of the run add theirs.
         assert {"main_video", "main_audio"} <= set(watcher.tracks)
 
@@ -340,16 +345,17 @@ async def test_a_room_connection_joins_the_room_and_publishes_the_output(
         assert watcher.audio_rates == {RATE}
         # The receiver's level wobbles while it starts up, and on a loaded host its
         # jitter buffer can still drop out briefly in the few hundred milliseconds
-        # after the tone first holds its level for 100 ms. From half a second
-        # (50 blocks of 10 ms) past that point, no block is quiet.
+        # after the tone first holds its level. From half a second (50 blocks of
+        # 10 ms) after the start of the first 100 ms the tone holds its level, no
+        # block is quiet.
         received = np.concatenate(watcher.audio)
         blocks = received[: len(received) // 240 * 240].reshape(-1, 240)
         rms = np.sqrt((blocks.astype(np.float64) ** 2).mean(axis=1))
         level = 0.25 * 32767 * 0.5
         held = np.convolve(rms > level, np.ones(10), mode="valid") == 10
         assert held.any(), "the tone never held its level"
-        settled = int(np.argmax(held)) + 50
-        assert len(rms) - settled >= 150, "the tone held its level too late to judge"
+        settled = int(np.argmax(held)) + settle
+        assert len(rms) - settled >= judged, "the tone held its level too late to judge"
         assert rms[settled:].min() > level, "the tone has a silent gap"
         steady = blocks[settled:].reshape(-1)
         spectrum = np.abs(np.fft.rfft(steady.astype(np.float64)))
