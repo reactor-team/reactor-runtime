@@ -17,7 +17,7 @@ from reactor_runtime.core import (
     SharedMemoryConfig,
     shm_slot_bytes,
 )
-from reactor_runtime.model_server import ModelServer, ServerSettings
+from reactor_runtime.model_server import DEFAULT_BATCH_WINDOW, ModelServer, ServerSettings
 
 
 @dataclass(frozen=True)
@@ -198,3 +198,43 @@ def test_a_manifest_max_batch_above_the_class_is_refused() -> None:
 def test_the_manifest_max_batch_applies_above_the_default() -> None:
     config = ModelServerConfig(import_ref="plasma_model:PlasmaModel", max_batch=16)
     assert ServerSettings.resolve(PlasmaModel, config).max_batch == 16
+
+
+class _Plain(ModelServer):
+    def step(self, requests):  # pragma: no cover - not stepped
+        return []
+
+
+class _ClassWindow(_Plain):
+    batch_window = 0.02
+
+
+class _ClassBatch(_Plain):
+    max_batch = 8
+
+
+class _ClassBatchAndWindow(_Plain):
+    max_batch = 16
+    batch_window = 0.0
+
+
+@pytest.mark.parametrize(
+    ("server", "max_batch", "batch_window", "expected"),
+    [
+        (_Plain, 8, None, DEFAULT_BATCH_WINDOW),  # the reactor.yaml form batches
+        (_Plain, 1, None, 0.0),  # one request per step: nothing to wait for
+        (_Plain, None, None, 0.0),  # no max_batch: 1
+        (_Plain, 8, 0.0, 0.0),  # the manifest's window wins, 0 included
+        (_Plain, 8, 0.03, 0.03),
+        (_ClassWindow, 8, None, 0.02),  # the class's window wins over the default
+        (_ClassBatch, None, None, DEFAULT_BATCH_WINDOW),  # one rule, wherever max_batch is set
+        (_ClassBatch, 4, None, DEFAULT_BATCH_WINDOW),  # a manifest that lowers a class value
+        (_ClassBatch, 1, None, 0.0),  # lowered to 1: nothing to wait for
+        (_ClassBatchAndWindow, None, None, 0.0),  # the class's window wins, 0 included
+    ],
+)
+def test_batch_window_defaults_to_a_few_milliseconds_when_max_batch_is_above_1(
+    server: type[ModelServer], max_batch: int | None, batch_window: float | None, expected: float
+) -> None:
+    config = ModelServerConfig(import_ref="m:M", max_batch=max_batch, batch_window=batch_window)
+    assert ServerSettings.resolve(server, config).batch_window == expected
