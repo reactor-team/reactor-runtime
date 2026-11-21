@@ -609,9 +609,11 @@ class ModelServerCore:
                         self._cond.wait(max(min(self._next_wake(_IDLE_WAIT), deadline - now), 0.0))
                         continue
                 elif not events:
-                    open_sessions = sum(
-                        1 for c in self._connections.values() if c.state is ConnectionState.OPEN
-                    )
+                    open_sessions = {
+                        number
+                        for number, c in self._connections.items()
+                        if c.state is ConnectionState.OPEN
+                    }
                     turn = self._policy.take(now, open_sessions)
                     if not turn.batch and not turn.expired and not overdue:
                         wait = _IDLE_WAIT if turn.wake_at is None else turn.wake_at - now
@@ -723,6 +725,7 @@ class ModelServerCore:
                 connection.move(ConnectionState.OPEN)
                 self._connections[connection.number] = connection
                 self._by_slot[connection.slot] = connection
+                self._policy.live(connection.number, time.monotonic())
         if not serving:
             # The model server began to stop while the model opened the session:
             # close it, not refuse it, as _hello does, after the model closed the
@@ -784,6 +787,8 @@ class ModelServerCore:
         assert connection.slot is not None
         with self._cond:
             dropped = self._policy.drop(connection.number)
+            # A reset starts a session, whose first request is about to come.
+            self._policy.live(connection.number, time.monotonic())
             running = self._drop_pending(connection)
             dropped.extend(p.waiting for p in running if not p.answered)
         _cancel(running)

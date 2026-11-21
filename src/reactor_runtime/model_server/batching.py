@@ -9,8 +9,15 @@ requests whose timeout passed, and when to look again. That keeps the policy
 from __future__ import annotations
 
 import itertools
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from typing import Any
+
+LIVE_SECONDS = 2.0
+"""How recently a session must have opened, reset or sent a request to count
+as live: a session with a client steps every frame, while a session runtime
+that serves no client sends nothing. Only live sessions are waited for when a
+batch fills."""
 
 
 @dataclass(eq=False)
@@ -63,7 +70,10 @@ class BatchPolicy:
     * Requests are taken in arrival order, up to ``max_batch`` at a time.
     * Once a request waits, the batch may wait up to ``batch_window`` seconds
       after it arrived for others, and is taken early once ``max_batch``
-      requests wait or every open session that can send one has one waiting.
+      requests wait or every live session that can send one has one waiting.
+      A session is live when it opened, reset or sent a request in the last
+      :data:`LIVE_SECONDS` (:meth:`live`): a session runtime that serves no
+      client sends nothing, so it holds a batch back for at most that long.
       A session whose request is running, its future included, cannot send
       another, so it does not count. A model that schedules work across its
       own stages, and returns futures, sets ``batch_window`` to 0 and is
@@ -81,15 +91,22 @@ class BatchPolicy:
         self._waiting: list[Waiting] = []
         self._busy: set[int] = set()
         self._order = itertools.count()
+        # When each session last sent a request, to tell live sessions apart.
+        self._last_sent: dict[int, float] = {}
 
     def add(self, request: Waiting) -> bool:
         """Queue *request*; return ``False`` if its session already has one waiting or running."""
         if request.connection in self._busy:
             return False
         request.order = next(self._order)
+        self._last_sent[request.connection] = request.arrived
         self._busy.add(request.connection)
         self._waiting.append(request)
         return True
+
+    def live(self, connection: int, now: float) -> None:
+        """Count *connection* as live from *now*: it opened, or a session started on it."""
+        self._last_sent[connection] = now
 
     def cancel(self, connection: int, request_id: int) -> bool:
         """Withdraw a waiting request; return whether it was still waiting."""
@@ -117,14 +134,16 @@ class BatchPolicy:
         """How many requests wait."""
         return len(self._waiting)
 
-    def take(self, now: float, open_sessions: int) -> Turn:
-        """Decide what to step at *now*, given how many sessions are open.
+    def take(self, now: float, open_sessions: Collection[int]) -> Turn:
+        """Decide what to step at *now*, given the sessions that are open.
 
-        Of the *open_sessions*, those whose request is running count as unable
-        to send, so a batch is full once every other one has a request waiting.
-        The batch taken is removed from the queue, and its sessions stay busy
+        Of the *open_sessions*, the live ones count (see :data:`LIVE_SECONDS`),
+        and those whose request is running count as unable to send, so a
+        batch is full once every other live one has a request waiting. The
+        batch taken is removed from the queue, and its sessions stay busy
         until :meth:`finished`.
         """
+        self._last_sent = {c: t for c, t in self._last_sent.items() if c in open_sessions}
         expired = [r for r in self._waiting if r.deadline is not None and r.deadline <= now]
         if expired:
             self._waiting = [r for r in self._waiting if r not in expired]
@@ -133,12 +152,23 @@ class BatchPolicy:
         if not self._waiting:
             return Turn([], expired, None)
         first = self._waiting[0]
-        running = len(self._busy) - len({r.connection for r in self._waiting})
-        full = len(self._waiting) >= min(self._max_batch, max(open_sessions - running, 1))
+        waiting = {r.connection for r in self._waiting}
+        # A session with a request waiting always counts; another counts
+        # while it is live and not running a request.
+        can_send = waiting | {
+            c
+            for c, sent in self._last_sent.items()
+            if now - sent < LIVE_SECONDS and c not in self._busy
+        }
+        full = len(self._waiting) >= min(self._max_batch, max(len(can_send), 1))
         until = first.arrived + self._window
         if not full and now < until:
             deadlines = [r.deadline for r in self._waiting if r.deadline is not None]
-            return Turn([], expired, min([until, *deadlines]))
+            # A live session the batch still waits for stops counting when it
+            # has been quiet for LIVE_SECONDS: look again then, since the batch
+            # may be full without it. Each of these is after now.
+            quiet = [self._last_sent[c] + LIVE_SECONDS for c in can_send if c not in waiting]
+            return Turn([], expired, min([until, *deadlines, *quiet]))
         batch = self._waiting[: self._max_batch]
         self._waiting = self._waiting[self._max_batch :]
         return Turn(batch, expired, None)
