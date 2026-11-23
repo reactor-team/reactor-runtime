@@ -79,16 +79,19 @@ class WaypointModel:
         self.seed_id: int | None = None
         self.index = 0
 
-    def load(self, config_path: Path | None) -> None:
+    def load(self, config_path: Path | None, weights_root: Path) -> None:
         """Construct the engine on the GPU and warm up its compiled kernels.
 
-        Reads ``model_uri``, ``quant``, ``device``, and ``warmup_steps`` from the
-        YAML at *config_path*. The heavy imports happen here, so the module
-        imports on a machine without a GPU.
+        Reads ``quant``, ``device``, and ``warmup_steps`` from the YAML at
+        *config_path*. The heavy imports happen here, so the module imports on
+        a machine without a GPU. The engine fetches the autoencoder that the
+        checkpoint's ``config.yaml`` names from Hugging Face.
 
         Args:
             config_path: The file ``runtime.config`` in ``reactor.yaml`` names,
                 or ``None`` for the defaults.
+            weights_root: The directory that holds the Waypoint-1.5-1B
+                checkpoint: its ``config.yaml`` and ``model.safetensors``.
         """
         _, world_engine_cls, _ = _backend()
 
@@ -96,7 +99,7 @@ class WaypointModel:
         if config_path is not None:
             config = yaml.safe_load(config_path.read_text()) or {}
         self.engine = world_engine_cls(
-            config.get("model_uri", "Overworld/Waypoint-1.5-1B"),
+            str(weights_root),
             quant=config.get("quant"),
             device=config.get("device", "cuda"),
         )

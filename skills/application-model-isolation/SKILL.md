@@ -40,14 +40,14 @@ notebook and the application half readable without opening the model.
 
 ### 1. The model half is a plain class with three methods
 
-`load(config_path)`, `generate(input)`, `reset()`. It imports nothing
-from `reactor_runtime`. It does not know clients, tracks, commands, or the
-loop exist.
+`load(config_path, weights_root)`, `generate(input)`, `reset()`. It imports
+nothing from `reactor_runtime`. It does not know clients, tracks, commands, or
+the loop exist.
 
 ```python
 # waypoint_model.py
 class WaypointModel:
-    def load(self, config_path: Path | None) -> None: ...
+    def load(self, config_path: Path | None, weights_root: Path) -> None: ...
     def generate(self, input: WaypointInput) -> WaypointResult: ...
     def reset(self) -> None: ...
 ```
@@ -62,7 +62,7 @@ or one process per GPU; `generate()` does not change.
 # waypoint.py
 def load(self, config_path: Path | None) -> None:
     self.engine = WaypointModel()
-    self.engine.load(config_path)
+    self.engine.load(config_path, get_weights_path())
 ```
 
 Four things a larger model adds to this rule:
@@ -94,8 +94,8 @@ Four things a larger model adds to this rule:
       self.engine.load(config_path, get_weights_path())
   ```
 
-  The constructor takes nothing. A model that fetches its weights elsewhere,
-  as Waypoint does from Hugging Face, leaves the parameter out. Keep
+  The constructor takes nothing. A model with no weights under the weights
+  directory leaves the parameter out. Keep
   `load()`'s arguments to values that pickle, paths and scalars: the
   runtime's `DistributedRunner` constructs the model half in its own process
   and calls `load(**load_kwargs)` with exactly what the application passed,

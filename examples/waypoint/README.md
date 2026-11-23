@@ -36,8 +36,7 @@ the engine compiles kernels at load, `git` as a system package, because
 `world_engine` installs from its git tag, and `UV_INDEX_STRATEGY` in
 `build_env`, because `world_engine`'s build needs a `setuptools` newer than
 the one the PyTorch index carries. There is nothing to install on your
-host but the CLI and Docker. The weights come from Hugging Face on first load;
-set `HF_TOKEN` if the repository asks for one.
+host but the CLI and Docker.
 
 ```sh
 cd examples/waypoint
@@ -54,9 +53,30 @@ the [Reactor Sandbox](https://reactor-sandbox.vercel.app/) (pick **Local
 (Direct)**) and upload an image with `set_image`; frames start on the next
 step.
 
-`config.yml` holds the model's own settings: the weights to load, the
-quantization, and how many idle steps to run at load so the compiled kernels
-are ready before the first client waits on them.
+`config.yml` holds the model's own settings: the quantization, the device,
+and how many idle steps to run at load so the compiled kernels are ready
+before the first client waits on them.
+
+## Weights
+
+The weights are the Waypoint-1.5-1B checkpoint on Hugging Face, pinned to a
+commit in `reactor.yaml`'s `runtime.weights_path`. `reactor run` downloads
+that revision once into the local Hugging Face cache (the whole repository,
+about 11 GB; it asks first, and `--yes` skips the question) and mounts it in
+the container. The application resolves the mount with `get_weights_path()`
+and passes it to the model half's `load()`, which hands the directory to the
+engine. The model half never imports `reactor_runtime`.
+
+A deploy names the same reference, so Reactor stores the files and syncs them
+to each instance:
+
+```sh
+reactor deploy production --gpu NVIDIA_RTX6000_PROx1 \
+  --weights hf://Overworld/Waypoint-1.5-1B@391f92827075edcf4a8b3c8a2ddae010698f8636
+```
+
+The checkpoint's `config.yaml` names a separate autoencoder, about 23 MB,
+which the engine downloads from Hugging Face when the model loads.
 
 ## Commands
 

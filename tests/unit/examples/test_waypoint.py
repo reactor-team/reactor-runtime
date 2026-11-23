@@ -16,6 +16,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+import yaml
 from PIL import Image
 from waypoint_model import NotSeeded, WaypointInput, WaypointModel, WaypointResult
 
@@ -33,7 +34,8 @@ _SEED = np.full((720, 1280, 3), 7, dtype=np.uint8)
 class FakeEngine:
     """Records what the model half asks of the engine and returns four frames."""
 
-    def __init__(self) -> None:
+    def __init__(self, model_uri: str | None = None, **kwargs: Any) -> None:
+        self.model_uri = model_uri
         self.resets = 0
         self.appended: list[Any] = []
         self.generated: list[Any] = []
@@ -68,7 +70,7 @@ def fake_world_engine(monkeypatch: pytest.MonkeyPatch) -> None:
     torch.no_grad = lambda: _NoGrad()  # type: ignore[ty:unresolved-attribute]
     world_engine = types.ModuleType("world_engine")
     world_engine.CtrlInput = _CtrlInput  # type: ignore[ty:unresolved-attribute]
-    world_engine.WorldEngine = lambda *args, **kwargs: FakeEngine()  # type: ignore[ty:unresolved-attribute]
+    world_engine.WorldEngine = FakeEngine  # type: ignore[ty:unresolved-attribute]
     monkeypatch.setitem(sys.modules, "torch", torch)
     monkeypatch.setitem(sys.modules, "world_engine", world_engine)
 
@@ -159,13 +161,32 @@ def test_load_constructs_the_engine_and_runs_the_warmup(
     fake_world_engine: None, tmp_path: Path
 ) -> None:
     config = tmp_path / "config.yml"
-    config.write_text("model_uri: local/weights\nwarmup_steps: 3\n")
+    config.write_text("warmup_steps: 3\n")
     model = WaypointModel()
-    model.load(config)
+    model.load(config, tmp_path / "weights")
     assert isinstance(model.engine, FakeEngine)
+    assert model.engine.model_uri == str(tmp_path / "weights")
     assert len(model.engine.generated) == 3
     assert model.seed_id is None
     assert model.index == 0
+
+
+def test_the_application_loads_the_model_from_the_weights_root(
+    fake_world_engine: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("REACTOR_WEIGHTS_PATH", str(tmp_path))
+    app = Waypoint()
+    app.load(None)
+    assert isinstance(app.engine.engine, FakeEngine)
+    assert app.engine.engine.model_uri == str(tmp_path)
+
+
+def test_the_manifest_pins_the_weights_to_a_commit() -> None:
+    raw = yaml.safe_load((_EXAMPLE_DIR / "reactor.yaml").read_text())
+    reference = raw["runtime"]["weights_path"]
+    assert reference.startswith("hf://Overworld/Waypoint-1.5-1B@")
+    assert len(reference.rsplit("@", 1)[1]) == 40
+    assert "resources" not in raw["model"]
 
 
 def test_a_new_seed_id_starts_a_world_from_the_seed(fake_world_engine: None) -> None:
