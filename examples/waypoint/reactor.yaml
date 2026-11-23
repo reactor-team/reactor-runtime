@@ -1,22 +1,23 @@
 $schema: reactor/v2
 
 # `reactor build` / `reactor run` read this file: `model:` describes the model,
-# `runtime:` names the class to serve and the config file it reads, and
-# `build:` defines the image every build produces. There is no Dockerfile; the
-# image is generated from the `build:` block.
+# `runtime:` names the class to serve, the config file it reads, and the
+# weights it mounts, and `build:` defines the image every build produces.
+# There is no Dockerfile; the image is generated from the `build:` block.
 model:
   name: waypoint
   version: v0.1.0
   description: |
     Waypoint 1.5: an explorable world seeded from an uploaded frame and driven
     in real time by keyboard and mouse controls. Four frames per step at 1280x720.
-  resources:
-    gpu:
-      count: 1
 
 runtime:
   import: waypoint:Waypoint
   config: config.yml
+  # The weights `get_weights_path()` resolves to on a local run: the
+  # Waypoint-1.5-1B checkpoint, pinned to a commit. A deploy names the same
+  # reference with `--weights`.
+  weights_path: hf://Overworld/Waypoint-1.5-1B@391f92827075edcf4a8b3c8a2ddae010698f8636
   recording:
     enabled: true
     chunk_seconds: 4

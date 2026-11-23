@@ -28,8 +28,9 @@ Copy the shape of [`examples/waypoint/`](../../../examples/waypoint/README.md):
 a GPU model with weights, two modules (`waypoint.py` is the application half,
 `waypoint_model.py` the model half), a config file the runtime hands to
 `load()`, a `reactor.yaml` with no Dockerfile, and a GPU-free unit test in
-`tests/unit/examples/test_waypoint.py`. Its model half reads a hub id from
-config; a ported model reads a local path instead (below).
+`tests/unit/examples/test_waypoint.py`. Its model half loads the checkpoint
+from the weights root the application passes to `load()`, as a ported model
+does (below).
 
 ```
 <model>/

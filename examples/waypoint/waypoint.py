@@ -40,6 +40,7 @@ from reactor_runtime import (
     connected,
     event,
     get_logger,
+    get_weights_path,
     session_ended,
 )
 
@@ -139,9 +140,9 @@ class Waypoint(ReactorApp):
     state: WaypointState
 
     def load(self, config_path: Path | None) -> None:
-        """Construct the model half and load its weights once."""
+        """Construct the model half and load its weights once, from the weights root."""
         self.engine = WaypointModel()
-        self.engine.load(config_path)
+        self.engine.load(config_path, get_weights_path())
         self.progress_interval = 50
         self.last_index = -1
 
