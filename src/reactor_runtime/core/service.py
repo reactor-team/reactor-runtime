@@ -367,7 +367,9 @@ class ModelServerConfig:
             the file sets no count, the ``reactor`` CLI sets it to
             ``max_batch``, and an explicit count stays independent.
         batch_window: Seconds the model server waits for a batch to fill;
-            ``None`` keeps the class's ``batch_window``.
+            ``None`` keeps the one the class declares, else
+            ``reactor_runtime.model_server.DEFAULT_BATCH_WINDOW`` (5 ms) when
+            the model serves with a ``max_batch`` above 1, else 0.
 
     Raises:
         ValueError: ``import`` is not ``"module:Class"`` with both parts,
