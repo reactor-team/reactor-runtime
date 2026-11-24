@@ -546,7 +546,7 @@ def test_a_callback_that_fails_marks_the_server_unhealthy(
     monkeypatch.undo()
     with rig.server._cond:
         rig.server._pending.clear()
-        rig.server._policy.finished(list(rig.server._connections))
+        rig.server._policy.finished(list(rig.server._connections), time.monotonic())
 
 
 def test_a_result_the_session_cannot_take_closes_it(
