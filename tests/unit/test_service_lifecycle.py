@@ -229,6 +229,64 @@ async def test_failed_start_drains_and_stops_only_what_started(
     assert trace == ["start:http", "start-fail:runner", "drain:http", "stop:http"]
 
 
+class RefusingComponent(FakeComponent):
+    """A component whose start refuses with a ``SystemExit``, as a malformed setting does."""
+
+    def __init__(self, name: str, code: object, *, trace: list[str]) -> None:
+        super().__init__(name, trace=trace)
+        self._code = code
+
+    async def start(self) -> None:
+        self._trace.append(f"start-refused:{self.name}")
+        raise SystemExit(self._code)
+
+
+@pytest.mark.parametrize(
+    ("code", "status", "reason"),
+    [
+        (
+            "runtime.model_server.max_batch is 4, above Model.max_batch = 2",
+            1,
+            "runtime.model_server.max_batch is 4, above Model.max_batch = 2",
+        ),
+        (3, 3, "exit status 3"),
+        (None, 0, "exit status 0"),
+        (True, 1, "exit status 1"),
+        (256, 0, "exit status 0"),
+        (-1, 255, "exit status 255"),
+        (ValueError("bad manifest"), 1, "bad manifest"),
+    ],
+    ids=["message", "status", "none", "bool", "wraps", "negative", "object"],
+)
+async def test_a_refused_start_logs_the_reason_and_the_status_the_process_exits_with(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    code: object,
+    status: int,
+    reason: str,
+) -> None:
+    _no_signals(monkeypatch)
+    trace: list[str] = []
+    service = Service()
+    service.add(RefusingComponent("model_server", code, trace=trace))
+    service.add(FakeComponent("http", ("model_server",), trace=trace))
+
+    with (
+        caplog.at_level(logging.INFO, logger="reactor_runtime.service"),
+        pytest.raises(SystemExit) as raised,
+    ):
+        await service.run()
+
+    assert raised.value.code == code
+    assert trace == ["start:http", "start-refused:model_server", "drain:http", "stop:http"]
+    [refused] = [r for r in caplog.records if r.getMessage() == "start refused"]
+    assert refused.levelno == logging.ERROR
+    assert getattr(refused, "reactor_fields", {}) == {"component": "model_server", "reason": reason}
+    [stopped] = [r for r in caplog.records if r.getMessage() == "runtime stopped"]
+    assert getattr(stopped, "reactor_fields", {}) == {"exit_code": status}
+    assert service.exit_code == 0
+
+
 async def test_shutdown_winds_down_the_rest_when_a_component_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
