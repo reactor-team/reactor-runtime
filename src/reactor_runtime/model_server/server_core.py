@@ -350,7 +350,9 @@ class ModelServerCore:
             ]
             pending = list(self._pending.values())
             self._pending.clear()
-            self._policy.finished([p.waiting.connection for p in pending if not p.detached])
+            self._policy.finished(
+                [p.waiting.connection for p in pending if not p.detached], time.monotonic()
+            )
             self._cond.notify_all()
             opening = list(self._opening)
             self._opening.clear()
@@ -609,9 +611,11 @@ class ModelServerCore:
                         self._cond.wait(max(min(self._next_wake(_IDLE_WAIT), deadline - now), 0.0))
                         continue
                 elif not events:
-                    open_sessions = sum(
-                        1 for c in self._connections.values() if c.state is ConnectionState.OPEN
-                    )
+                    open_sessions = {
+                        number
+                        for number, c in self._connections.items()
+                        if c.state is ConnectionState.OPEN
+                    }
                     turn = self._policy.take(now, open_sessions)
                     if not turn.batch and not turn.expired and not overdue:
                         wait = _IDLE_WAIT if turn.wake_at is None else turn.wake_at - now
@@ -723,6 +727,7 @@ class ModelServerCore:
                 connection.move(ConnectionState.OPEN)
                 self._connections[connection.number] = connection
                 self._by_slot[connection.slot] = connection
+                self._policy.live(connection.number, time.monotonic())
         if not serving:
             # The model server began to stop while the model opened the session:
             # close it, not refuse it, as _hello does, after the model closed the
@@ -784,6 +789,8 @@ class ModelServerCore:
         assert connection.slot is not None
         with self._cond:
             dropped = self._policy.drop(connection.number)
+            # A reset starts a session, whose first request is about to come.
+            self._policy.live(connection.number, time.monotonic())
             running = self._drop_pending(connection)
             dropped.extend(p.waiting for p in running if not p.answered)
         _cancel(running)
@@ -844,7 +851,7 @@ class ModelServerCore:
             # Every session of the batch left before it ran: step() is never
             # called with no request.
             with self._cond:
-                self._policy.finished([r.connection for r in batch])
+                self._policy.finished([r.connection for r in batch], time.monotonic())
             return
         now = time.monotonic()
         pending = [
@@ -928,7 +935,7 @@ class ModelServerCore:
                 **connection.where(),
             )
         if not item.detached:
-            self._policy.finished([connection.number])
+            self._policy.finished([connection.number], time.monotonic())
         self._cond.notify_all()
 
     def _drop_pending(self, connection: Connection) -> list[_Pending]:

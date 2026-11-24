@@ -26,6 +26,7 @@ from reactor_runtime.model_server import (
     ServerSettings,
     StepExpired,
     StreamLink,
+    batching,
     server_core,
 )
 from reactor_runtime.model_server.batching import Waiting
@@ -787,3 +788,24 @@ def test_close_with_room_delivers_every_queued_answer_first() -> None:
             peer.receive()
     finally:
         peer.close()
+
+
+def test_an_idle_session_runtime_stops_holding_a_batch_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Two session runtimes connect; only one serves a client. Once the other
+    # has been quiet for LIVE_SECONDS, the live session's step runs at once
+    # instead of waiting out the window for a request that never comes.
+    monkeypatch.setattr(batching, "LIVE_SECONDS", 0.2)
+    rig = _rig(batch_window=5.0)
+    live, idle = rig.session(0), rig.session(1)
+    try:
+        time.sleep(0.3)
+        started = time.monotonic()
+        live.send(Step(request_id=1, timeout=None, payload=Tick(1)))
+        assert live.receive() == Result(1, Echo(1, 0, 1, None))
+        assert time.monotonic() - started < 2.0
+    finally:
+        idle.close()
+        asyncio.run(rig.server.drain())
+        asyncio.run(rig.server.stop())
