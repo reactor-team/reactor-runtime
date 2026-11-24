@@ -118,6 +118,11 @@ class SharedSlot:
         """The most one call may hold, or ``None`` when the block grows without bound."""
         return self._max_bytes
 
+    @property
+    def used(self) -> int:
+        """Bytes the current call has written so far: the whole call once it is written."""
+        return self._cursor
+
     def begin(self) -> None:
         """Start a new call; the next write lands at offset zero."""
         self._cursor = 0

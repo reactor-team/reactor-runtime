@@ -60,6 +60,18 @@ therefore holds at most two request blocks and one output block, in whole
 64 KiB pages: :func:`~reactor_runtime.core.shm_slot_bytes`, the size a
 deployment gives each slot's volume.
 
+Each end reports how much of its block a model uses, so an author can size the
+blocks from a real run. A link serves one session after another, each opened
+by a :class:`~reactor_runtime.model_server.protocol.Reset`. When the next
+reset arrives, or the link closes, each end logs ``shared memory use`` for the
+session that ends, if it carried a step or a result: the key that sizes its
+block, the number of messages written into it, the largest of them, the
+block's size, a value that holds the largest (:func:`suggested_shm_size`), the
+slot and the session's id. The session's end logs the request block, the model
+server's end the output block. The first message of a session that fills more
+than nine tenths of a block also logs a warning at once, since a somewhat
+larger one fails its step.
+
 Blocks are named by who writes them: ``<prefix>s<slot>_`` for a session's
 requests and ``<prefix>m<slot>_`` for the model server's outputs, where the
 prefix is the deployment's (``rrms_`` by default). A process that starts
@@ -112,6 +124,7 @@ from reactor_runtime.model_server.protocol import (
     Cancel,
     Closed,
     ProtocolError,
+    Reset,
     Result,
     Step,
     check_message,
@@ -188,6 +201,7 @@ class ShmLink:
         writer: SharedSlot | None,
         directory: Path | None,
         server: UnixShmTransport | None = None,
+        slot: int | None = None,
     ) -> None:
         """Hold the stream and the blocks; use the transport to build one."""
         self._stream = stream
@@ -200,8 +214,15 @@ class ShmLink:
         self._server = server
         self._peer_prefix: str | None = None
         self._probe: str | None = None
-        self._slot: int | None = None
+        self._slot: int | None = slot
         self._released = False
+        # The most bytes one message wrote into this end's block, how many
+        # messages did, and whether the warning for a nearly full block was given.
+        self._largest = 0
+        self._written = 0
+        self._near_full_reported = False
+        # The session the counts belong to: the one the last reset opened.
+        self._session_id: str | None = None
         self._lock = threading.Lock()
         # Held while a message's arrays are copied out, so a release from
         # another thread never unmaps a block mid-copy.
@@ -232,9 +253,10 @@ class ShmLink:
                 raise Closed(
                     "the link is closed" if self._released else "the link is not set up yet"
                 )
+            writer = self._writer
             uses_block = isinstance(message, Step | Result)
             try:
-                header = pack(message, self._writer if uses_block else None)
+                header = pack(message, writer if uses_block else None)
             except SharedSlotLimitExceeded as exc:
                 raise PayloadTooLarge(self._arrays_too_large(exc)) from None
             limit = self._stream.frame_limit
@@ -244,6 +266,10 @@ class ShmLink:
                 self._send_cancel(header)
             else:
                 self._stream.send_bytes(header)
+            if uses_block:
+                self._record_use(writer.used, writer.capacity)
+            elif isinstance(message, Reset):
+                self._next_session(message, writer.capacity)
 
     def _send_cancel(self, header: bytes) -> None:
         writer = self._writer
@@ -310,7 +336,12 @@ class ShmLink:
                 raise ProtocolError(f"a message's arrays cannot be read: {exc}") from None
             except pickle.UnpicklingError as exc:
                 raise ProtocolError(f"a frame does not hold a message: {exc}") from None
-            return check_message(message)
+            message = check_message(message)
+            if self._server is not None and isinstance(message, Reset):
+                with self._lock:
+                    if self._writer is not None:
+                        self._next_session(message, self._writer.capacity)
+            return message
 
     def close(self) -> None:
         """Close the socket and release this end's blocks. Idempotent.
@@ -333,6 +364,7 @@ class ShmLink:
             writer, self._writer = self._writer, None
             retired, self._retired = self._retired, None
             self._released = True
+        capacity = writer.capacity if writer is not None else 0
         for block in (writer, retired):
             if block is not None:
                 block.close()
@@ -346,6 +378,55 @@ class ShmLink:
             unlink_blocks(self._peer_prefix, self._directory)
         if self._server is not None and self._slot is not None:
             self._server._let_go(self._slot, self)
+        if writer is not None and self._written:
+            self._report_use(capacity)
+
+    def _key(self) -> str:
+        """The ``reactor.yaml`` key that sizes this end's block."""
+        end = "output" if self._server is not None else "input"
+        return f"model.resources.sessions.shared_memory.{end}"
+
+    def _record_use(self, used: int, capacity: int) -> None:
+        """Count one message's *used* bytes, and warn once when it nearly fills the block."""
+        self._written += 1
+        self._largest = max(self._largest, used)
+        if self._near_full_reported or used * 10 <= capacity * 9:
+            return
+        self._near_full_reported = True
+        logger.warning(
+            "shared memory block nearly full: a larger message fails its step",
+            key=self._key(),
+            used_bytes=used,
+            block_bytes=capacity,
+            used=f"{_human_bytes(used)} of {_human_bytes(capacity)}",
+            suggested=suggested_shm_size(used),
+            slot=self._slot,
+            session_id=self._session_id,
+        )
+
+    def _next_session(self, reset: Reset, capacity: int) -> None:
+        """Report the session that a reset ends, and count the next one from zero."""
+        if self._written:
+            self._report_use(capacity)
+        self._largest = 0
+        self._written = 0
+        self._near_full_reported = False
+        self._session_id = reset.session_id
+
+    def _report_use(self, capacity: int) -> None:
+        """Log the largest message this end wrote into its block for one session."""
+        logger.info(
+            "shared memory use",
+            key=self._key(),
+            messages=self._written,
+            largest_bytes=self._largest,
+            block_bytes=capacity,
+            used=f"{_human_bytes(self._largest)} of {_human_bytes(capacity)} "
+            f"({100 * self._largest // capacity}%)",
+            suggested=suggested_shm_size(self._largest),
+            slot=self._slot,
+            session_id=self._session_id,
+        )
 
     def _arrays_too_large(self, exc: SharedSlotLimitExceeded) -> str:
         if self._server is not None:
@@ -679,7 +760,7 @@ class UnixShmTransport:
             stream.close()
             raise
         sock.settimeout(None)
-        return ShmLink(stream, writer=writer, directory=directory)
+        return ShmLink(stream, writer=writer, directory=directory, slot=slot)
 
     def _handshake(
         self,
