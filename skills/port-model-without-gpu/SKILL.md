@@ -20,10 +20,11 @@ from `port-model-e2e`** and [`application-model-isolation`](../application-model
 adds only what the remote loop needs ([`references/port-additions.md`](references/port-additions.md)).
 
 > **Status: experimental.** Written for the project + environment CLI (v1.20261124+). The measured facts
-> (timings, failure messages, resource limits) come from ports run with the previous CLI on one endpoint with
-> B200 GPUs (multi-GPU on RTX 6000 Pro): a 1.3B video model and a 14B variant, each served on its first deploy,
-> the 14B also on 2 GPUs. They depend on the platform, not on the command set. Where this skill says
-> "unverified", no run has confirmed the behaviour with the new CLI yet.
+> (timings, failure messages, resource limits) come from ports run on one endpoint with B200 GPUs (multi-GPU on
+> RTX 6000 Pro): a 1.3B video model and a 14B variant, each served on its first deploy, the 14B also on 2 GPUs.
+> The deploys, build timings and the main failure cases (GPU and host memory, a hung chunk, a hung warm-up, a
+> restart) were run on this CLI; the remaining failure cases ran on the previous one and depend on the platform,
+> not on the command set. Where this skill says "unverified", no run has confirmed the behaviour yet.
 
 **In:** a model's source repository, pinned to a commit, and **one weights directory** holding every file
 the model loads: on the machine you work from, or as one public Hugging Face repo. The machine needs a network

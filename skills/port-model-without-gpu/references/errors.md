@@ -5,8 +5,9 @@ multi-GPU rows ran on RTX 6000 Pro. The load-failure, per-chunk, hang and resour
 on purpose in a working port (a wrong weight file name, a wrong tensor shape, an allocation past the limit, a
 sleep), so the message and the delay are what a real bug of that kind produces.
 
-The runs used the previous CLI. The phases, reasons and messages come from the platform and the runtime, so they
-are expected to read the same; the commands below are the project + environment ones. `<env>` is the environment
+The phases, reasons and messages below were seen on the current CLI for GPU and host memory, a hung chunk, a
+hung warm-up and a restart, and on the previous CLI for the rest; they come from the platform and the runtime. The
+commands below are the project + environment ones. `<env>` is the environment
 (`production`, `staging`); the project comes from the nearest `reactor.yaml`, or `-p <org>/<name>`.
 
 ## Where each kind of message appears
@@ -23,7 +24,7 @@ are expected to read the same; the commands below are the project + environment 
 | Client messages | the client's `message` / `error` events (`messages.jsonl` from `session_check.py`) | command refusals, the model's own messages | live |
 
 The serve log is JSON lines mixed with plain-text lines. Pull the errors and their tracebacks with (field names
-as seen with the previous CLI; check one raw line first):
+as seen on the current CLI; check one raw line first):
 
 ```sh
 reactor logs <env> --since 30m --raw \
