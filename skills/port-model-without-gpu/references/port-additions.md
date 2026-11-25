@@ -107,11 +107,11 @@ else:
   with each rank's shape instead of hanging. On a 2-GPU sequence-parallel port it cost nothing measurable per
   chunk. The failures and their messages are in [`errors.md`](errors.md), Resource failures.
 
-## 5. Observability (required, a stopgap)
+## 5. Observability (required)
 
 The platform shows an instance's phase and the lines your code logs. It does not show how long a chunk took,
-whether a chunk is stuck, or what a process holds. Every port logs three things until the platform reports them
-itself; when it does, drop the matching part. These are log lines in the model, not the runtime's `/metrics`
+whether a chunk is stuck, or what a process holds. Every port logs three things, so each of
+those shows in `reactor logs`. These are log lines in the model, not the runtime's `/metrics`
 ([`instrumenting-observability`](../../instrumenting-observability/SKILL.md) covers that). Python `logging` lines
 and `faulthandler`'s plain-text stderr both reach `reactor logs`.
 
