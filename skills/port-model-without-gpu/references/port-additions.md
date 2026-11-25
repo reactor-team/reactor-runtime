@@ -119,7 +119,7 @@ and `faulthandler`'s plain-text stderr both reach `reactor logs`.
 |---|---|
 | **(a) A timing line per chunk and per warm-up chunk**: generate seconds, frames, fps. In a session from `StepOutcome.elapsed` in `process_output()`; in warm-up from `time.perf_counter()` around the call | The runtime measures `elapsed` but does not log it. Without the line there is no way to tell whether the model keeps up with playout, or that chunk time grows as a cache fills (a 14B port: 2.7 s to 4.1 s per chunk) |
 | **(b) A stall watchdog**: `faulthandler.dump_traceback_later(bound, repeat=True)` before `generate()` and before each warm-up chunk, cancelled after. The bound for warm-up chunk 0 is longer, because it compiles | A chunk planted to hang 180 s: the instance stayed `in_session`, and the client still received about 13 frames per second. Nothing on the platform or the client noticed. Only the stack dump, every 60 s, named the line. A warm-up that never ends kept the instance in `loading` for 25+ minutes (no startup timeout exists), holding its GPU, with no other log line |
-| **(c) A resource line**: GPU allocated / reserved, host RSS, `/dev/shm` used of total. At a session's first chunk, every 10 chunks, and at session end | A planted `/dev/shm` leak showed in the line (`/dev/shm 26.56 of 32.0 GiB used` at chunk 25) before the crash at chunk 31. A host-memory kill leaves no traceback; a rising RSS in this line is the only trace |
+| **(c) A resource line**: GPU allocated / reserved, host RSS of the container's memory limit (read from the cgroup), `/dev/shm` used of total. At a session's first chunk, every 10 chunks, and at session end | A planted `/dev/shm` leak showed in the line (`/dev/shm 26.56 of 32.0 GiB used` at chunk 25) before the crash at chunk 31. A host-memory kill leaves no traceback, and the limit is shown nowhere else; RSS against the limit in this line is the only trace |
 
 The model half (it imports nothing from the runtime):
 
@@ -131,6 +131,16 @@ WARMUP_STALL_S = float(os.environ.get("PORT_WARMUP_STALL_S", "300"))  # chunk 0 
 
 def chunk_line(label, seconds, frames):
     return f"{label}: generate {seconds:.2f} s, {frames} frames, {frames / max(seconds, 1e-9):.1f} fps"
+
+def host_limit():
+    # The container's host-memory limit, which Reactor sets and shows nowhere else (96 GiB on a 1 x B200 instance).
+    for path in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):  # cgroup v2, v1
+        try:
+            v = open(path).read().strip()
+        except OSError:
+            continue
+        return "none" if v == "max" or int(v) > 2**60 else f"{int(v) / 2**30:.1f} GiB"
+    return "unknown"
 
 def resource_line(tag):
     gpu = rss = shm = "n/a"
@@ -144,6 +154,7 @@ def resource_line(tag):
     try:
         with open("/proc/self/status") as f:
             rss = next(f"{int(l.split()[1]) / 2**20:.1f} GiB" for l in f if l.startswith("VmRSS:"))
+        rss += f", limit {host_limit()}"
     except Exception:
         pass
     try:
