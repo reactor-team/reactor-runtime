@@ -14,7 +14,7 @@ remote runs, and the record of what could not be proven.
 | Vendor the source whole | `port-on-reactor-app.md` §1 | none |
 | Kinds of input, the input table, command names, lifecycle, events | `port-on-reactor-app.md` §2 and [`patterns/README.md`](../../port-model-e2e/patterns/README.md) | no person is asked at the start; take the proposed kinds and write them down (§3 below) |
 | Weights: one root, relative paths, checkpoint asserted | `port-on-reactor-app.md` §3; hub loads removed as in [`source-and-weights.md`](../../port-model-e2e/references/source-and-weights.md) §2 (inventory) and §7 (rewrite, offline switches) | §7's `--network none` gate cannot run; `HF_HUB_OFFLINE=1` in `build.runtime_env` makes a missed hub load fail at the first deploy instead |
-| One chunk per step | [`streaming-refactor.md`](../../port-model-e2e/references/streaming-refactor.md) | its steps cannot be proven bit-identical against a baseline; each one goes on the unproven list (§3) |
+| One chunk per step | [`streaming-refactor.md`](../../port-model-e2e/references/streaming-refactor.md) | each step goes on the unproven list (§3) |
 | Session setup, live controls, where encoding happens | `port-on-reactor-app.md` §5 | none |
 | Warm-up covers every shape | `port-on-reactor-app.md` §6 | it is also the only run of the per-chunk code before a user (§2 below) |
 | Refusals, descriptions, moderation | `port-on-reactor-app.md` §7 and §8 | none |
@@ -40,12 +40,10 @@ A traceback in `reactor logs` is the only debugger, and each fix loop costs abou
 - **A missing weight file raises from `load()` with the full path it looked for**, so the instance's MESSAGE
   column names it.
 
-## 3. Write down what cannot be proven
+## 3. Write down the choices no run has checked
 
-`port-model-e2e` proves the port against a recorded baseline
-([`baseline-and-replay.md`](../../port-model-e2e/references/baseline-and-replay.md)). Without a GPU there is no
-baseline, so nothing proves the port computes what the source computes. Keep a list, in the workspace README or
-the report, of every choice the port made that a run would otherwise have checked, each marked **unproven**:
+Keep a list, in the workspace README or the report, of every choice the port made that no run has checked, each
+marked **unproven**, so the person who plays the model knows what to look at:
 
 - how random noise is drawn, and every step of a streaming refactor;
 - a value the source never defined (a frame rate, a chunk size picked for streaming);

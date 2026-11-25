@@ -1,6 +1,6 @@
 ---
 name: port-model-without-gpu
-description: "Port a research model to Reactor and get it serving on the platform when you have NO GPU anywhere: the platform is the only place the code runs. The porting itself (the ReactorApp, the application/model split, commands, weights, chunk streaming, warm-up) is taught by port-model-e2e and read from there; this skill is the loop around it - an account and GPU-allocation check, local checks without a GPU (lint, an import test in the built image, a CPU shape smoke run), one `reactor deploy <environment>` with the project + environment CLI (v1.20261124 or later) that builds remotely and rolls out with the weights (a local folder or a pinned public `hf://` repo), every error read from `reactor environment instances` and `reactor logs`, and a fix. Parity with the source cannot be proven, only written down as unproven. Every port logs a timing line per chunk, a stall watchdog and a resource line, as a stopgap until the platform reports these itself. Covers multi-GPU ports. Includes scripts for the account check, the session token and a session-check client. Use when someone says \"port this model but I have no GPU\", \"build and serve it remotely\", \"port without a local GPU\", or when the porting machine has no CUDA device. NOT for porting on a GPU node where the source can run (port-model-e2e), not for speeding up an already-served model, and not for the older model + release CLI (`reactor model publish`). Status: experimental."
+description: "Port a research model to Reactor and get it serving on the platform, with the platform as the place the code runs and is tested: for anyone with no GPU, or none like the platform's GPUs. The porting itself (the ReactorApp, the application/model split, commands, weights, chunk streaming, warm-up) is taught by port-model-e2e and read from there; this skill is the loop around it - an account and GPU-allocation check, local checks without a GPU (lint, an import test in the built image, a CPU shape smoke run), one `reactor deploy <environment>` with the project + environment CLI (v1.20261124 or later) that builds remotely and rolls out with the weights (a local folder or a pinned public `hf://` repo), every error read from `reactor environment instances` and `reactor logs`, and a fix. Choices no run has checked are listed for the person who plays the model. Every port logs a timing line per chunk, a stall watchdog and a resource line, as a stopgap until the platform reports these itself. Covers multi-GPU ports. Includes scripts for the account check, the session token and a session-check client. Use when someone says \"port this model but I have no GPU\", \"build and serve it remotely\", \"port without a local GPU\", or when the porting machine has no CUDA device. For porting and testing on a GPU node of your own, use port-model-e2e; not for speeding up an already-served model, and not for the older model + release CLI (`reactor model publish`). Status: experimental."
 ---
 
 # Port a model without a local GPU
@@ -9,13 +9,14 @@ description: "Port a research model to Reactor and get it serving on the platfor
 
 | | [`port-model-e2e`](../port-model-e2e/SKILL.md) | `port-model-without-gpu` (this skill) |
 |---|---|---|
-| You have | a GPU node you can run containers on | no GPU anywhere on your side |
+| You have | a GPU node you can run containers on | no GPU, or none like the platform's |
 | The loop | run the source's example as a baseline, port, replay the baseline on the port, serve on the node | local static checks → `reactor deploy` → read `reactor environment instances` / `reactor logs` → fix |
-| Parity with the source | proven, step by step, against the recorded baseline | cannot be proven; every unchecked choice is written down as unproven |
+| Where the code is tested | on your node | on the platform, on the GPU the model will serve on |
 | Where it ends | served on the node, with a local play page | an environment of a project on the platform, `ready`, played from a frontend |
 
-Use `port-model-e2e` whenever a GPU node is available, even if the port will later be deployed: a baseline and a
-replay prove what this skill can only record. Use this skill when none is. Either way the **porting content comes
+Use this skill when the model is meant to serve on the platform and you have no GPU like its GPUs at hand: no GPU at
+all, or a local one of another type or size. Every run happens on the hardware the model will serve on. Use
+`port-model-e2e` to port and test on a GPU node of your own. Either way the **porting content comes
 from `port-model-e2e`** and [`application-model-isolation`](../application-model-isolation/SKILL.md); this skill
 adds only what the remote loop needs ([`references/port-additions.md`](references/port-additions.md)).
 
@@ -135,7 +136,8 @@ Four points decide how short Phases 5 and 6 are:
 - **Observability, required until the platform reports it** (`port-additions.md` §5): a timing line per chunk, a
   stall watchdog around each chunk (inside every rank on multi-GPU), and a resource line.
 
-Without a GPU nothing proves the port matches the source: keep the unproven list (`port-additions.md` §3).
+Keep a list of the choices the port made that no run has checked (`port-additions.md` §3), so the person who plays
+the model knows what to look at.
 
 ## Phase 3: local checks, no GPU
 
