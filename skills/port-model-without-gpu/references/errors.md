@@ -13,7 +13,7 @@ are expected to read the same; the commands below are the project + environment 
 
 | Source | Command | What it holds | Arrives |
 |---|---|---|---|
-| Build output | printed by `reactor deploy <env>` (or `reactor build --remote`) | the image build: dependency resolution, `build.run` steps | the build took ~8.5-9 min; with the previous CLI its log arrived in one block at the end (unverified for the new CLI) |
+| Build output | printed by `reactor deploy <env>` (or `reactor build --remote`) | the image build: dependency resolution, `build.run` steps | the build took ~9-10 min; its log arrives in one block at the end, so silence during the build is normal |
 | Deploy result | the same command, after the build | the plan against the account's allocation and regions; the rollout | seconds for a refusal; the rollout after that |
 | Environment status | `reactor status <env>` | the revision's state: `deploying`, `ready`, `degraded`, `failed`, `stopped`, with instances by phase per region | live; `--wait-for ready --timeout 30m` exits non-zero if the revision fails |
 | Instance table | `reactor environment instances <env>` | per instance slot: PHASE, time in it, RESTARTS, REASON and a one-line MESSAGE | a load failure showed ~2-3 min after the image was ready |
@@ -44,7 +44,7 @@ and `pending` with `waiting_for_capacity`.
 ENV=production; start=$(date +%s)
 while sleep 30; do
   out="$(reactor environment instances "$ENV")"; date -u +%T; printf '%s\n' "$out"
-  # image_pull_failed cleared on its own within ~2 min of a new image (previous CLI): allow 5 min.
+  # image_pull_failed cleared on its own within ~2 min of every new image: allow 5 min.
   if (( $(date +%s) - start < 300 )); then rest="$(grep -v image_pull_failed <<<"$out")"; else rest="$out"; fi
   grep -Eq 'load_failed|crash_loop|[[:space:]]failed[[:space:]]' <<<"$rest" && { echo PROBLEM; break; }
   reactor status "$ENV" | grep -Eq '(^|[[:space:]])ready([[:space:]]|$)' && { echo READY; break; }
@@ -62,7 +62,7 @@ from its help, not from a run; adjust the patterns to what it prints.
 | Remote build | `reactor deploy` fails after ~9 min | the build output | fix `requirements.txt` / `build:` / `.dockerignore`; deploy again. Phase 3's import test in the local image catches most of these first |
 | Build context too large | the deploy refuses before building | the CLI's message | limits: 4096 entries, 32 MiB per file, 256 MiB total, 64 MiB compressed; move large files to `.dockerignore` |
 | Deploy refused | "no '<GPU>' allocation", or a region error | the deploy output | pick `--gpu TYPExN` and `--require-regions` from `check_account.sh`; deploy again |
-| Image pull right after a new image | PHASE `failed`, REASON `image_pull_failed`, "The image of a container of the model's pod cannot be pulled" | the instance table | wait. It cleared on its own about 2 min later and the instance became `ready` (previous CLI). Change nothing |
+| Image pull right after a new image | PHASE `failed`, REASON `image_pull_failed`, "The image of a container of the model's pod cannot be pulled" | the instance table | wait. It cleared on its own within about 2 min and the instance became `ready`, on every new image so far. `reactor deploy` may exit with "revision N failed" on it; check the instance table before treating that as a failure. Change nothing |
 | Long `syncing_weights` | the phase lasts minutes | the instance table | normal for an `hf://` set: 86 GB took about 10 min. A machine that already holds the set skips most of it. If it never advances, check the set: `reactor environment show <env>` for its digest, `reactor weights show <tag-or-digest>` |
 | Stuck in `loading` | PHASE `loading` far past the warm-up time; no REASON. Seen for 25+ min with a warm-up that never returned. There is no startup timeout, and the instance holds its GPU | the watchdog's stack dumps in the serve log, repeated every bound, name the line | fix the hang; meanwhile scale to 0 or roll back. Without the watchdog the log shows nothing after the last warm-up line |
 | Load failure | PHASE `failed`, REASON `load_failed`, MESSAGE = the exception's message, ~2-3 min after the image was ready. RESTARTS climbs | the full traceback is the `exc_info` of the `model failed to load; terminating the session` record in the serve log (jq filter above) | fix the code or config; `reactor deploy <env>`. Meanwhile scale to 0 or roll back (below) |
@@ -97,9 +97,9 @@ one instance. A hung instance stayed in `terminating` for about 5-6 min before i
 
 ### The cost of one fix loop
 
-About 9 min of remote build + 2-3 min from the image to the error, so about 12 min per attempt (the previous CLI
-added 1-2.5 min of promotion between them; `reactor deploy` has no separate promotion step, and its end-to-end
-time is not yet measured). Remote builds share no layer cache: a one-line fix reinstalls every dependency. Read the
+About 10 min of remote build, about 1.3 min of promotion ("Promoting the image to project"), then 2-3 min from
+the image to the error, so about 13-14 min per attempt. A one-comment change measured 9.8 min of build, 1.3 min
+of promotion and 3.5 min to `ready` on a machine that already held the weights. Remote builds share no layer cache: a one-line fix reinstalls every dependency. Read the
 whole traceback and fix everything it implies before rebuilding. A bug the warm-up does not reach costs the same
 loop plus a session.
 

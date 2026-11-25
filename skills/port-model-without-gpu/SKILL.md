@@ -183,7 +183,8 @@ your warm-up time (no startup timeout exists; read the watchdog's stack dumps) a
 
 Find the row in `references/errors.md`, read the message where it says, fix, and `reactor deploy <env>` again.
 
-**One fix loop takes about 12 min:** about 9 min of remote build, then 2-3 min from the image to the error. Remote
+**One fix loop takes about 13-14 min:** about 10 min of remote build, about 1 min of promotion, then 2-3 min from
+the image to the error. Remote
 builds share no layer cache, so a one-line fix reinstalls every dependency. Read the whole traceback and fix
 everything it implies before rebuilding. Phase 3's import test and smoke run catch a whole class of these for free.
 

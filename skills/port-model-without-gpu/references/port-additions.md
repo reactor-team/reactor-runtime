@@ -26,7 +26,7 @@ remote runs, and the record of what could not be proven.
 
 ## 2. Make the platform's answer enough to debug from
 
-A traceback in `reactor logs` is the only debugger, and each fix loop costs about 12 minutes (SKILL.md Phase 6).
+A traceback in `reactor logs` is the only debugger, and each fix loop costs about 13-14 minutes (SKILL.md Phase 6).
 
 - **Shape asserts at every module boundary, with the shapes in the message**, so one traceback names both sides:
 

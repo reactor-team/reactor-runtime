@@ -1,6 +1,6 @@
 # Local checks without a GPU
 
-A remote fix loop costs about 12 minutes (SKILL.md Phase 6). Each check below costs seconds to minutes on the
+A remote fix loop costs about 13-14 minutes (SKILL.md Phase 6). Each check below costs seconds to minutes on the
 porting machine and removes a class of failure from that loop. Run them in this order; each catches what the
 earlier ones cannot.
 
@@ -85,7 +85,12 @@ The tags in the file name must match the image: `cu12` the CUDA major version, `
 The remote CUDA base image is `nvidia/cuda:<cuda_version>-devel-ubuntu24.04` (it has `nvcc`), so a source build
 works, only slowly.
 
-A prebuilt wheel installed in a remote build without compiling (the build log shows `+ flash-attn==2.8.3+cu12torch2.8cxx11abitrue`). Log which attention backend the model actually uses at start-up, because a source that falls back to SDPA when the import fails does so silently. Whether the attention calls then use flash-attn at run time, and how much faster a chunk is, was not yet measured.
+A prebuilt wheel installed in a remote build without compiling (the build log shows
+`+ flash-attn==2.8.3+cu12torch2.8cxx11abitrue`) and loaded at run time: the serve log printed
+`attention backend: flash_attn_2=True flash_attn_3=False`. Log that line at start-up, because a source that falls
+back to SDPA when the import fails does so silently. On a 14B video DiT on one B200, warm-up chunks took 3.1–4.1 s
+with flash-attn and 3.1–4.1 s with PyTorch SDPA, so the extension cost a dependency and bought no measurable speed
+there. Measure before keeping one.
 
 If the extension is optional in the source, keep a fallback (for example PyTorch SDPA) and log which path the
 model took at load, so the serve log says which kernel ran.
