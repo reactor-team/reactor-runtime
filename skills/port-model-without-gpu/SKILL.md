@@ -1,6 +1,6 @@
 ---
 name: port-model-without-gpu
-description: "Port a research model to Reactor and get it serving on the platform, with the platform as the place the code runs and is tested: for anyone with no GPU, or none like the platform's GPUs. The porting itself (the ReactorApp, the application/model split, commands, weights, chunk streaming, warm-up) is taught by port-model-e2e and read from there; this skill is the loop around it - an account and GPU-allocation check, local checks without a GPU (lint, an import test in the built image, a CPU shape smoke run), one `reactor deploy <environment>` with the project + environment CLI (v1.20261124 or later) that builds remotely and rolls out with the weights (a local folder or a pinned public `hf://` repo), every error read from `reactor environment instances` and `reactor logs`, and a fix. Choices no run has checked are listed for the person who plays the model. Every port logs a timing line per chunk, a stall watchdog and a resource line, as a stopgap until the platform reports these itself. Covers multi-GPU ports. Includes scripts for the account check, the session token and a session-check client. Use when someone says \"port this model but I have no GPU\", \"build and serve it remotely\", \"port without a local GPU\", or when the porting machine has no CUDA device. For porting and testing on a GPU node of your own, use port-model-e2e; not for speeding up an already-served model, and not for the older model + release CLI (`reactor model publish`). Status: experimental."
+description: "Port a research model to Reactor and get it serving on the platform, with the platform as the place the code runs and is tested: for anyone with no GPU, or none like the platform's GPUs. The porting itself (the ReactorApp, the application/model split, commands, weights, chunk streaming, warm-up) is taught by port-model-e2e and read from there; this skill is the loop around it - an account and GPU-allocation check, local checks without a GPU (lint, an import test in the built image, a CPU shape smoke run), one `reactor deploy <environment>` with the project + environment CLI (v1.20261124 or later) that builds remotely and rolls out with the weights (a local folder or a pinned public `hf://` repo), every error read from `reactor environment instances` and `reactor logs`, and a fix. Choices no run has checked are listed for the person who plays the model. Every port logs a timing line per chunk, a stall watchdog and a resource line, as a stopgap until the platform reports these itself. Covers multi-GPU ports. Use when someone says \"port this model but I have no GPU\", \"build and serve it remotely\", \"port without a local GPU\", or when the porting machine has no CUDA device. For porting and testing on a GPU node of your own, use port-model-e2e; not for speeding up an already-served model, and not for the older model + release CLI (`reactor model publish`). Status: experimental."
 ---
 
 # Port a model without a local GPU
@@ -61,15 +61,12 @@ In CLI v1.20261124.15, `--help` on a two-word command (`reactor environment upda
 | `references/reactor-yaml.md` | Phases 2, 5 | The `reactor.yaml` fields that still apply, the scaffold defaults to change, which settings moved to the environment |
 | `references/local-checks.md` | Phase 3 | What can be checked without a GPU, and what each check catches; CUDA extensions |
 | `references/errors.md` | Phases 5-6 | Every failure seen so far, resource failures and hangs included: where its message appears, how long it takes, how to fix it; changing an environment without a build |
-| `scripts/check_account.sh` | Phase 0 | Sign-in, account slug, GPU allocation, one PASS/FAIL line each |
-| `scripts/mint_token.sh` | Phase 7 | Mints a short-lived session token scoped to one model (and environment); prints only the JWT |
-| `scripts/session_check.py` | Phase 7 | A Python SDK client: connects, sends your commands, records the video, writes `summary.json`. Untested end to end |
 
 ## Phases
 
 | Phase | What | Exit criterion |
 |---|---|---|
-| 0 | Account readiness, GPU count, placement | `check_account.sh` passes for the GPU type and count per instance |
+| 0 | Account readiness, GPU count, placement | the account has an org slug and an allocation of the GPU type and count per instance |
 | 1 | Read the source against the weights directory | every file the code loads is found in the given weights directory |
 | 2 | Write the port | a workspace written to `port-model-e2e` Phase 4 plus `port-additions.md` (observability and the unproven list included), whose model reads only from the weights path; scaffold defaults fixed |
 | 3 | Local checks, no GPU | `references/local-checks.md`: validate, lint, import test, CPU shape smoke, build context, dependency pins |
@@ -83,13 +80,21 @@ In CLI v1.20261124.15, `--help` on a two-word command (`reactor environment upda
 ```sh
 reactor auth login                       # or export REACTOR_API_KEY; REACTOR_SERVER picks the endpoint
 reactor whoami                           # "Account Slug": the <org> of every project name
-reactor doctor                           # key, server reachability, Docker, workspace files
-scripts/check_account.sh NVIDIA_B200 1   # the GPU type and count per instance the model needs
+```
+
+The GPU allocation is shown only by the Platform API. Send the key as a header from a process substitution, never
+in argv:
+
+```sh
+auth() { printf 'Authorization: Bearer %s\n' "$REACTOR_API_KEY"; }
+S="${REACTOR_SERVER:-https://api.reactor.inc}"
+ACCOUNT_ID="$(curl -sS -H @<(auth) "$S/me" | jq -r .account_id)"
+curl -sS -H @<(auth) "$S/accounts/$ACCOUNT_ID/accelerators" | jq -c '.accelerators[] | {region, gpu_type, gpu_count, held, available}'
 ```
 
 - **No org slug** (`Account Slug: not set`). Every project is `<org>/<name>`, and a project create needs the slug.
   Finish the account's Serve setup, or ask Reactor support to set it.
-- **No allocation of that GPU type in a region.** Only `GET /accounts/{id}/accelerators` (the script) shows the
+- **No allocation of that GPU type in a region.** Only `GET /accounts/{id}/accelerators` shows the
   account's grants. `reactor gpu list` and `reactor region list` list what the platform supports, not what the
   account holds. `held` counts GPUs your running environments hold, including one you are about to replace.
 
@@ -201,16 +206,30 @@ log alone said what was wrong and where, and what you had to guess.
 
 ## Phase 7: session check, then a person plays it
 
+A client needs a short-lived session token scoped to the model, minted with the API key (sent as a header, as in
+Phase 0). `<org>/<name>` is production; `<org>/<name>:<environment>` names another environment:
+
 ```sh
-export REACTOR_JWT="$(scripts/mint_token.sh <org>/<name>)"          # <org>/<name>:staging for staging
-python scripts/session_check.py --model <org>/<name> --commands commands.json \
-  --first-frame first.jpg --seconds 30 --out out/session-1
+curl -sS -X POST "$S/tokens" -H @<(auth) -H 'Content-Type: application/json' -d '{
+  "expires_after": 1800,
+  "authorization_details": [{"type": "session",
+    "resources": {"models": {"match": ["<org>/<name>"]}},
+    "constraints": {"max_sessions": 2, "max_session_duration_seconds": 1800}}]}' | jq -r .jwt
 ```
 
-`commands.json` holds the model's own example inputs as a list of commands; the script's header shows the
-format. It needs `reactor-sdk`, `numpy`, `pillow`, `imageio`, `imageio-ffmpeg`, and no GPU. Read `summary.json`:
-connect time, start to first frame, frame count and size, frames per second, every message the model sent. A
-working 1.3B video model on one B200 connected in about 2 s and sent its first frame about 1 s after `start`.
+Write the client for the model's own commands with the public Python SDK (`pip install reactor-sdk numpy`): connect
+with the token, upload the first-frame input if the model takes one, send the source's example inputs, record the
+video track for a fixed time after the first frame, and keep every message the model sends. Record: connect time,
+start to first frame, frames received and their size, frames per second. A working 1.3B video model on one B200
+connected in about 2 s and sent its first frame about 1 s after `start`.
+
+Where the SDK differs from its reference pages (measured with reactor-sdk 1.15.0):
+
+- Reading frames needs `numpy`, which the package does not install.
+- The first argument of `track_received` is a Track object (it printed as `<Track 'main_video' video recvonly>`), not
+  the track's name, so a handler that compares it with `"main_video"` never matches.
+- Whole numbers in model messages arrive as floats; a 64-bit seed loses its last digits. Send and log seeds as
+  strings if they must replay a run.
 
 Read the serve log's timing lines for the session too: frames per second at the client is the playout rate; the
 generate time per chunk says whether the model keeps up.

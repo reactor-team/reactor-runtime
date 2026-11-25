@@ -22,7 +22,7 @@ remote runs, and the record of what could not be proven.
 | Runtime facts a port relies on | `port-on-reactor-app.md` §10 | none |
 | Multi-GPU | `port-on-reactor-app.md` §4 | the GPU count comes from `--gpu TYPExN`, not `model.resources.gpu.count`; the rest is in §4 below |
 | GPU-free tests of the application half | `port-on-reactor-app.md` §12 | run them in the image `reactor build` makes, next to [`local-checks.md`](local-checks.md) |
-| The served-model checklist | [`checklist.md`](../../port-model-e2e/references/checklist.md) | each check runs against the deployed environment through `scripts/session_check.py` and the serve log, or goes on the unproven list |
+| The served-model checklist | [`checklist.md`](../../port-model-e2e/references/checklist.md) | each check runs against the deployed environment through a session client (SKILL.md Phase 7) and the serve log, or goes on the unproven list |
 
 ## 2. Make the platform's answer enough to debug from
 

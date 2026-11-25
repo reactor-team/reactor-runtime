@@ -21,7 +21,7 @@ commands below are the project + environment ones. `<env>` is the environment
 | Serve log | `reactor logs <env> --since 30m --raw` (`--follow` to tail) | the runtime's JSON records, the full traceback in `exc_info`, your timing, resource and watchdog lines (`port-additions.md` §5) | with the instance table |
 | Session log | `reactor logs --session <session-id>` | one session's records | during the session |
 | Revisions | `reactor environment history <env>`, `reactor environment show <env> [-o json]` | what each revision deployed: image and weights digests, GPU, variables | seconds |
-| Client messages | the client's `message` / `error` events (`messages.jsonl` from `session_check.py`) | command refusals, the model's own messages | live |
+| Client messages | the client's `message` / `error` events (as your client logs them) | command refusals, the model's own messages | live |
 
 The serve log is JSON lines mixed with plain-text lines. Pull the errors and their tracebacks with (field names
 as seen on the current CLI; check one raw line first):
@@ -62,7 +62,7 @@ from its help, not from a run; adjust the patterns to what it prints.
 | No org slug | `reactor whoami` shows `Account Slug: not set`; a project create is refused | `whoami`'s last line says how to set it | finish the account's Serve setup or ask Reactor support; then `model.name: <org>/<name>` |
 | Remote build | `reactor deploy` fails after ~9 min | the build output | fix `requirements.txt` / `build:` / `.dockerignore`; deploy again. Phase 3's import test in the local image catches most of these first |
 | Build context too large | the deploy refuses before building | the CLI's message | limits: 4096 entries, 32 MiB per file, 256 MiB total, 64 MiB compressed; move large files to `.dockerignore` |
-| Deploy refused | "no '<GPU>' allocation", or a region error | the deploy output | pick `--gpu TYPExN` and `--require-regions` from `check_account.sh`; deploy again |
+| Deploy refused | "no '<GPU>' allocation", or a region error | the deploy output | pick `--gpu TYPExN` and `--require-regions` from the allocation (SKILL.md Phase 0); deploy again |
 | Image pull right after a new image | PHASE `failed`, REASON `image_pull_failed`, "The image of a container of the model's pod cannot be pulled" | the instance table | wait. It cleared on its own within about 2 min and the instance became `ready`, on every new image so far. `reactor deploy` may exit with "revision N failed" on it; check the instance table before treating that as a failure. Change nothing |
 | Long `syncing_weights` | the phase lasts minutes | the instance table | normal for an `hf://` set: 86 GB took about 10 min. A machine that already holds the set skips most of it. If it never advances, check the set: `reactor environment show <env>` for its digest, `reactor weights show <tag-or-digest>` |
 | Stuck in `loading` | PHASE `loading` far past the warm-up time; no REASON. Seen for 25+ min with a warm-up that never returned. There is no startup timeout, and the instance holds its GPU | the watchdog's stack dumps in the serve log, repeated every bound, name the line | fix the hang; meanwhile scale to 0 or roll back. Without the watchdog the log shows nothing after the last warm-up line |
