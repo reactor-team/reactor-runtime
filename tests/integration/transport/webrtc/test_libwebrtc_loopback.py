@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import re
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +39,7 @@ from reactor_runtime.core.values import (  # noqa: E402
     TrackKind,
 )
 from reactor_runtime.protocol import Channel, ProtocolVersion  # noqa: E402
+from reactor_runtime.serve import _webrtc_config_from_env  # noqa: E402
 from reactor_runtime.transport.webrtc import peer as peer_module  # noqa: E402
 from reactor_runtime.transport.webrtc.config import (  # noqa: E402
     IceCredentials,
@@ -414,6 +417,57 @@ async def test_a_connection_without_supplied_credentials_still_connects() -> Non
         assert "a=ice-ufrag:" in answer.sdp
         await client.accept_answer(answer.sdp)
         assert await _reached(connected), "the default path must still connect"
+    finally:
+        stop_trickle.set()
+        trickle_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await trickle_task
+        await peer.close()
+        client.pc = None  # type: ignore[assignment]
+
+
+async def test_stun_none_answers_without_waiting_out_the_gathering_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``STUN_SERVERS=none`` answers once host candidates are in, then connects.
+
+    The gathering timeout is set far above the bound asserted on the answer, so
+    an answer that waited on gathering it could never finish fails the bound
+    instead of passing slowly.
+    """
+    monkeypatch.setenv("STUN_SERVERS", "none")
+    monkeypatch.delenv("TURN_SERVERS", raising=False)
+    config = dataclasses.replace(_webrtc_config_from_env(), ice_gathering_timeout_ms=10_000)
+    assert config.ice_servers == ()
+
+    factory = _get_factory(WebRtcConfig())
+    client = await _Client.create(factory)
+    offer_sdp = await client.create_offer()
+    connected = asyncio.Event()
+
+    started = time.monotonic()
+    peer, answer = await libwebrtc_peer_factory(
+        ConnId(4),
+        SdpOffer(sdp=offer_sdp),
+        client.track_map(),
+        config,
+        ProtocolVersion.V0,
+    )
+    answered_in = time.monotonic() - started
+    peer.on_message(lambda *_: None)
+    peer.on_media(lambda *_: None)
+    peer.on_ping(lambda: None)
+    peer.on_connected(connected.set)
+    peer.on_disconnect(lambda: None)
+
+    stop_trickle = asyncio.Event()
+    trickle_task = asyncio.create_task(_trickle_until(client, peer, stop_trickle))
+    try:
+        assert answered_in < 2.0, f"answer took {answered_in:.2f} s"
+        assert "a=candidate:" in answer.sdp, "the answer must carry host candidates"
+        assert "typ srflx" not in answer.sdp
+        await client.accept_answer(answer.sdp)
+        assert await _reached(connected), "host candidates alone must connect over loopback"
     finally:
         stop_trickle.set()
         trickle_task.cancel()

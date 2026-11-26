@@ -356,6 +356,111 @@ def test_webrtc_config_falls_back_to_a_public_stun_when_unconfigured() -> None:
     assert config.sender_min_kbps == WebRtcConfig.sender_min_kbps
 
 
+@pytest.mark.parametrize("raw", ["", " ", ","])
+def test_webrtc_config_falls_back_to_a_public_stun_when_stun_servers_is_blank(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    monkeypatch.setenv("STUN_SERVERS", raw)
+
+    config = _webrtc_config_from_env()
+
+    assert [server.urls for server in config.ice_servers] == [("stun:stun.l.google.com:19302",)]
+
+
+def test_webrtc_config_reads_stun_servers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STUN_SERVERS", "stun:a.example:3478, stun:b.example:19302")
+
+    config = _webrtc_config_from_env()
+
+    assert [server.urls for server in config.ice_servers] == [
+        ("stun:a.example:3478",),
+        ("stun:b.example:19302",),
+    ]
+    assert all(server.username is None for server in config.ice_servers)
+    assert all(server.credential is None for server in config.ice_servers)
+
+
+def test_webrtc_config_reads_turn_servers_without_the_public_stun(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TURN_SERVERS", "user;secret;turn:relay.example:3478?transport=tcp")
+
+    config = _webrtc_config_from_env()
+
+    assert len(config.ice_servers) == 1
+    turn = config.ice_servers[0]
+    assert turn.urls == ("turn:relay.example:3478?transport=tcp",)
+    assert turn.username == "user"
+    assert turn.credential == "secret"
+
+
+def test_webrtc_config_lists_stun_before_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STUN_SERVERS", "stun:a.example:3478")
+    monkeypatch.setenv("TURN_SERVERS", "user;secret;turn:relay.example:3478")
+
+    config = _webrtc_config_from_env()
+
+    assert [server.urls for server in config.ice_servers] == [
+        ("stun:a.example:3478",),
+        ("turn:relay.example:3478",),
+    ]
+
+
+@pytest.mark.parametrize("entry", ["turn:relay.example:3478", "user;turn:relay.example", ";;"])
+def test_webrtc_config_refuses_a_malformed_turn_server(
+    monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    monkeypatch.setenv("TURN_SERVERS", entry)
+
+    with pytest.raises(SystemExit, match="TURN_SERVERS"):
+        _webrtc_config_from_env()
+
+
+@pytest.mark.parametrize("raw", ["none", "NONE", " None ", "none,"])
+def test_webrtc_config_gathers_without_ice_servers_when_stun_is_none(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    monkeypatch.setenv("STUN_SERVERS", raw)
+
+    config = _webrtc_config_from_env()
+
+    assert config.ice_servers == ()
+
+
+def test_webrtc_config_keeps_turn_servers_when_stun_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STUN_SERVERS", "none")
+    monkeypatch.setenv("TURN_SERVERS", "user;secret;turn:relay.example:3478")
+
+    config = _webrtc_config_from_env()
+
+    assert [server.urls for server in config.ice_servers] == [("turn:relay.example:3478",)]
+    assert config.ice_servers[0].username == "user"
+
+
+def test_webrtc_config_still_refuses_a_malformed_turn_server_when_stun_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STUN_SERVERS", "none")
+    monkeypatch.setenv("TURN_SERVERS", "turn:relay.example:3478")
+
+    with pytest.raises(SystemExit, match="TURN_SERVERS"):
+        _webrtc_config_from_env()
+
+
+@pytest.mark.parametrize(
+    "raw", ["none,stun:a.example:3478", "stun:a.example:3478,NONE", "none,none"]
+)
+def test_webrtc_config_refuses_none_beside_stun_urls(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    monkeypatch.setenv("STUN_SERVERS", raw)
+
+    with pytest.raises(SystemExit, match="STUN_SERVERS"):
+        _webrtc_config_from_env()
+
+
 def test_every_webrtc_variable_is_reserved_from_secrets() -> None:
     # A mounted secret may not replace a setting the WebRTC transport reads.
     assert set(_WEBRTC_ENV) <= RESERVED_NAMES
