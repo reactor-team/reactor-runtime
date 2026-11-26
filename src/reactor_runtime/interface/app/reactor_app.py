@@ -170,6 +170,8 @@ class ReactorApp(ReactorCore):
     _pending_step: tuple[StepEnvelope, asyncio.Future[None]] | None
     _failed_step_calls: dict[tuple[ConnId, str], StepRefusal]
     _step_posted: asyncio.Event
+    _fps_pinned: bool
+    _last_refusal: str | None
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
@@ -328,8 +330,7 @@ class ReactorApp(ReactorCore):
                 does not start the loop again. A model that expects an error
                 recovers from it in :meth:`process_output` instead.
         """
-        fps_pinned = _fps_is_author_pinned(type(self))
-        last_refusal: str | None = None
+        self._fps_pinned = _fps_is_author_pinned(type(self))
         self._step_requested.set()
         while True:
             await self._next_turn()
@@ -346,90 +347,110 @@ class ReactorApp(ReactorCore):
                     if not done.done():
                         done.set_result(None)
                 continue
-            drops = self._gate_drops
-            # The session this run serves. The next one can start before the
+            # The session this turn serves. The next one can start before the
             # reset below, and its frames must survive it.
             served = self._sessions_started
             try:
-                while self._live.is_set() and self._gate_drops == drops:
-                    # 1. Wait for a step request. While this await is pending the
-                    #    event loop runs the handlers that arrived; each takes the
-                    #    step lock, so none can run once the lock below is held.
-                    await self._step_requested.wait()
-                    self._step_requested.clear()
-
-                    # The step lock is held from the first line of process_input()
-                    # to the return of process_output(). Both hooks are async and
-                    # may await; the lock is what stops a handler, a lifecycle
-                    # hook, or the session boundary's write to self.state from
-                    # landing in one of those gaps.
-                    async with self._step_lock:
-                        # The step belongs to the session it began in, even if
-                        # that session ends while it emits.
-                        session = self._sessions_started
-                        # 2. The application gate.
-                        input_started = time.perf_counter()
-                        try:
-                            input = await self.process_input()
-                        except ApplicationError as refused:
-                            # Frames a refused turn read belong to no step.
-                            self._report_input_waits(session, report=False)
-                            # One record per change of reason, not one per turn.
-                            reason = f"{type(refused).__name__}: {refused}"
-                            if reason != last_refusal:
-                                logger.debug(
-                                    "step refused",
-                                    reason=str(refused),
-                                    kind=type(refused).__name__,
-                                )
-                                last_refusal = reason
-                            returned = None
-                            outcome = None
-                        else:
-                            last_refusal = None
-                            input_ms = (time.perf_counter() - input_started) * 1000.0
-                            self._report_input_waits(session)
-                            # 3. The model.
-                            outcome = self._generate(input)
-
-                            # 4. The application collects the outcome into media,
-                            #    sends its messages, or recovers. A raise ends the
-                            #    loop.
-                            output_started = time.perf_counter()
-                            returned = await self.process_output(outcome)
-                            stages = self._step_stages(
-                                input_ms,
-                                outcome.elapsed,
-                                (time.perf_counter() - output_started) * 1000.0,
-                            )
-
-                    # 5. Emit outside the lock, so a handler can run while the
-                    #    wire is full, then report the step that ran.
-                    if outcome is not None:
-                        report = _step_report(returned, outcome)
-                        rate = None
-                        if report.output is not None:
-                            pace = None if fps_pinned else outcome.elapsed
-                            # The media is the step's, so it carries the
-                            # session the step began in, as the report does.
-                            token = STEP_SESSION.set(session)
-                            try:
-                                await self.emit(report.output, compute_time=pace)
-                            finally:
-                                STEP_SESSION.reset(token)
-                            frames = self._to_bundle(report.output).frame_count
-                            rate = self._playout_rate(frames, pace)
-                        report, files = await self._take_returned_files(report)
-                        self._report_step(report, session, rate, stages, files=files)
-
-                    # A refused turn waits a little before asking again; a
-                    # productive turn yields once so handler tasks already
-                    # runnable get their turn, then asks again right away.
-                    await asyncio.sleep(_REFUSED_SLEEP if outcome is None else 0)
-                    self._step_requested.set()
+                await self._run_streamed()
             finally:
                 for buffer in self._input_buffers.values():
                     buffer.reset(through_session=served)
+
+    async def _run_streamed(self) -> None:
+        """Run steps back to back while the gate stays open.
+
+        The streamed half of :meth:`run`, called each time the gate opens.
+        :meth:`run` resets the input buffers once it returns, so the next
+        session or client starts from empty tracks.
+
+        A class built on :class:`ReactorApp` inside this package that drives
+        a streamed session differently overrides this method rather than
+        :meth:`run`, so it keeps serving stepped sessions. An override must
+        return once the gate drops, which it reads as :attr:`_gate_drops`
+        changing from its value on entry, and must hold :attr:`_step_lock`
+        wherever it reads or writes what a command handler or a lifecycle
+        hook also touches. Overriding :meth:`_run_requested_step` as well is
+        optional: without it, a stepped session runs the three step hooks
+        once per request. An author overrides :meth:`run` or the three step
+        hooks, never this.
+        """
+        drops = self._gate_drops
+        while self._live.is_set() and self._gate_drops == drops:
+            # 1. Wait for a step request. While this await is pending the
+            #    event loop runs the handlers that arrived; each takes the
+            #    step lock, so none can run once the lock below is held.
+            await self._step_requested.wait()
+            self._step_requested.clear()
+
+            # The step lock is held from the first line of process_input()
+            # to the return of process_output(). Both hooks are async and
+            # may await; the lock is what stops a handler, a lifecycle
+            # hook, or the session boundary's write to self.state from
+            # landing in one of those gaps.
+            async with self._step_lock:
+                # The step belongs to the session it began in, even if
+                # that session ends while it emits.
+                session = self._sessions_started
+                # 2. The application gate.
+                input_started = time.perf_counter()
+                try:
+                    input = await self.process_input()
+                except ApplicationError as refused:
+                    # Frames a refused turn read belong to no step.
+                    self._report_input_waits(session, report=False)
+                    # One record per change of reason, not one per turn.
+                    reason = f"{type(refused).__name__}: {refused}"
+                    if reason != self._last_refusal:
+                        logger.debug(
+                            "step refused",
+                            reason=str(refused),
+                            kind=type(refused).__name__,
+                        )
+                        self._last_refusal = reason
+                    returned = None
+                    outcome = None
+                else:
+                    self._last_refusal = None
+                    input_ms = (time.perf_counter() - input_started) * 1000.0
+                    self._report_input_waits(session)
+                    # 3. The model.
+                    outcome = self._generate(input)
+
+                    # 4. The application collects the outcome into media,
+                    #    sends its messages, or recovers. A raise ends the
+                    #    loop.
+                    output_started = time.perf_counter()
+                    returned = await self.process_output(outcome)
+                    stages = self._step_stages(
+                        input_ms,
+                        outcome.elapsed,
+                        (time.perf_counter() - output_started) * 1000.0,
+                    )
+
+            # 5. Emit outside the lock, so a handler can run while the
+            #    wire is full, then report the step that ran.
+            if outcome is not None:
+                report = _step_report(returned, outcome)
+                rate = None
+                if report.output is not None:
+                    pace = None if self._fps_pinned else outcome.elapsed
+                    # The media is the step's, so it carries the
+                    # session the step began in, as the report does.
+                    token = STEP_SESSION.set(session)
+                    try:
+                        await self.emit(report.output, compute_time=pace)
+                    finally:
+                        STEP_SESSION.reset(token)
+                    frames = self._to_bundle(report.output).frame_count
+                    rate = self._playout_rate(frames, pace)
+                report, files = await self._take_returned_files(report)
+                self._report_step(report, session, rate, stages, files=files)
+
+            # A refused turn waits a little before asking again; a
+            # productive turn yields once so handler tasks already
+            # runnable get their turn, then asks again right away.
+            await asyncio.sleep(_REFUSED_SLEEP if outcome is None else 0)
+            self._step_requested.set()
 
     @staticmethod
     def _step_stages(
@@ -458,12 +479,12 @@ class ReactorApp(ReactorCore):
 
     @classmethod
     def supports_stepped(cls) -> bool:
-        """Return whether the class runs the default step loop a stepped session needs.
+        """Return whether the class runs a step when a client requests one.
 
         A class that overrides ``run()`` drives its own loop, so it has no step
         to run on request. A class that overrides ``submit_command()`` takes a
         command without the step request that carries it, so a failed handler
-        could not stop its step.
+        could not stop its step. A class that keeps both runs one.
         """
         return cls.run is ReactorApp.run and cls.submit_command is ReactorCore.submit_command
 
@@ -586,6 +607,10 @@ class ReactorApp(ReactorCore):
         self._pending_step = None
         self._step_posted = asyncio.Event()
         self._failed_step_calls = {}
+        # Meaningful only once run() starts, which reads whether fps is pinned.
+        self._fps_pinned = False
+        # The reason last logged for a refused step, kept across gate openings.
+        self._last_refusal = None
 
     def _background_coros(self) -> list[Coroutine[Any, Any, None]]:
         """Run the inbound drain loop alongside ``run()``."""

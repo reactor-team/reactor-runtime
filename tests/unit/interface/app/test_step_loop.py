@@ -641,6 +641,29 @@ async def test_a_refusal_is_logged_once_per_change_of_reason(
     assert reasons == ["paused", "no prompt"]
 
 
+async def test_a_refusal_is_not_logged_again_when_the_gate_reopens(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from reactor_runtime.interface.app import reactor_app
+
+    class Refusing(OnlyGenerate):
+        async def process_input(self) -> State:
+            raise ApplicationError("paused")
+
+    app = Refusing()
+    _ready(app)
+    await _go_live(app)
+    with caplog.at_level(logging.DEBUG, logger=reactor_app.__name__):
+        task = await _run_for(app, seconds=0.03)
+        await app._dispatch_reactor_event(ClientDisconnected(ConnId(1001), 0))
+        await asyncio.sleep(0.01)
+        await app._dispatch_reactor_event(ClientConnected(ConnId(1001), 1))
+        await asyncio.sleep(0.03)
+    await _stop(task)
+    refused = [record for record in caplog.records if "step refused" in record.getMessage()]
+    assert len(refused) == 1
+
+
 async def test_playout_paces_from_the_generate_time_not_the_whole_step() -> None:
     class SlowPrepare(OnlyGenerate):
         async def process_input(self) -> State:
@@ -670,6 +693,22 @@ async def test_fps_pinned_in_load_is_honoured() -> None:
     task = await _run_for(app)
     assert app.emitted[0][1] is None
     await _stop(task)
+
+
+async def test_whether_fps_is_pinned_is_read_once_when_run_starts() -> None:
+    class Unpinned(OnlyGenerate):
+        pass
+
+    app = Unpinned()
+    _ready(app)
+    task = await _run_for(app, seconds=0.01)
+    # Pinned after run() started: the loop keeps pacing from the measured time.
+    Unpinned.fps = 12
+    await _go_live(app)
+    await asyncio.sleep(0.02)
+    await _stop(task)
+    assert app.emitted
+    assert all(compute_time is not None for _, compute_time in app.emitted)
 
 
 async def test_fps_assigned_on_the_output_in_load_does_not_pin() -> None:
