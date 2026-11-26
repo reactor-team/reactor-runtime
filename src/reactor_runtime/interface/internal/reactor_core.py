@@ -913,7 +913,7 @@ class ReactorCore:
     def supports_stepped(cls) -> bool:
         """Return whether the model can serve a stepped session.
 
-        Only the default step loop of :class:`ReactorApp` runs a step per
+        Only a :class:`ReactorApp` that keeps its ``run()`` runs a step per
         request; an engine on its own has no step loop at all.
         """
         return False

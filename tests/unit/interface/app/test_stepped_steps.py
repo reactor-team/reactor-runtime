@@ -423,6 +423,26 @@ async def test_a_streamed_session_runs_the_replacement_each_time_the_gate_opens(
     assert app.inputs == []
 
 
+async def test_the_input_buffers_reset_when_a_replacement_streamed_loop_returns() -> None:
+    app = OwnStreamedLoop()
+    h = Harness(app)
+    try:
+        await h.start(stepped=False)
+        frame = InputFrame(data=np.zeros((2, 2, 3), dtype=np.uint8))
+        webcam(app).push(frame, CLIENT, app._sessions_started)
+        assert webcam(app).available == 1
+        h.post(ClientDisconnected(CLIENT, 0))
+        await h.settle()
+        app.finish_turn.set()
+        await h.settle()
+    finally:
+        await h.stop()
+
+    # The replacement never touches the buffers; run() resets them for it.
+    assert app.streamed_turns == 1
+    assert webcam(app).available == 0
+
+
 def test_a_model_runs_a_step_on_request_unless_it_replaces_run_or_submit_command() -> None:
     class OwnLoop(Stepper):
         async def run(self) -> None:
