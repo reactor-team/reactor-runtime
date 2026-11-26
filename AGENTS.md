@@ -69,8 +69,11 @@ falls behind.
 `application-model-isolation` (the application/model split),
 `maintaining-examples` (the examples and their pins), `port-model-e2e`
 (porting a research model end to end, with the command standard in its
-`patterns/`), `instrumenting-observability`, and the migration skills for
-models written for older runtimes.
+`patterns/`), `port-model-without-gpu` (the same goal with the platform as the
+place the code runs and is tested: remote build, deploy, and every error read
+from the platform),
+`instrumenting-observability`, and the migration skills for models written
+for older runtimes.
 They state facts about the runtime, so they follow it the way the README does:
 
 - A PR that makes a statement in a skill wrong (a public symbol renamed, a
