@@ -132,8 +132,8 @@ class Sample:
     # The recorder's per-session threads still alive while no session is
     # being recorded: a recording that did not unwind with its session.
     live_recorder_threads: int = 0
-    # Stamped robot states a robot model still keeps from observe messages,
-    # with no client connected.
+    # Stamped robot inputs a robot model still keeps, observe states and the
+    # synchronizer's held frames and states, with no client connected.
     live_observed_states: int = 0
 
 

@@ -251,9 +251,17 @@ def _step_requests(runner: Runner) -> int:
 
 
 def _observed_states(runner: Runner) -> int:
-    """Count the stamped robot states a robot model keeps, none for any other model."""
+    """Count the stamped inputs a robot model keeps, none for any other model.
+
+    These are the states its ``observe`` messages left, and the states and
+    camera frames its synchronizer holds for a capture not yet joined.
+    """
     model = runner._bridge._model if runner._bridge is not None else None
-    return len(getattr(model, "_observed", ()))
+    held = len(getattr(model, "_observed", ()))
+    sync = getattr(model, "_sync", None)
+    if sync is not None:
+        held += sum(sync.stats().buffered.values())
+    return held
 
 
 # The threads a recording runs for its own session; the reaper outlives sessions.
