@@ -118,7 +118,9 @@ once the cycle's client is gone, and checks and reports the run. A churn of a
 different client is one call to `run_churn(...)` with a `BareClient`
 subclass, or with any client that has its `run()` and `unanswered`
 (`ChurnClient`). A scenario that does more per cycle passes `run_cycles` its
-own cycle, as `session_churn` does. CI picks the file up as its own job.
+own cycle, as `session_churn` does. CI runs each collected test as its own job
+with the whole duration, so a parametrized scenario (`split_echo`) gets one job
+per case.
 
 ## When a change needs this suite
 
