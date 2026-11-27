@@ -219,7 +219,9 @@ async def test_a_slow_model_skips_captures_instead_of_queueing_them() -> None:
     assert 2 <= len(stamps) < sent // 3
     stats = app._sync.stats()
     assert stats.skipped + stats.dropped > 0
-    assert stats.taken == len(stamps)
+    # The loop is cancelled while generate() may still run on its thread, so
+    # the last capture taken may not have been recorded yet.
+    assert len(stamps) <= stats.taken <= len(stamps) + 1
 
 
 async def test_a_class_fps_spaces_the_steps() -> None:

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
+from dataclasses import dataclass, replace
 from typing import Any
 
 from reactor_runtime.apps.robot.loop import PolicyPacer, read_camera
+from reactor_runtime.apps.robot.messages import ActionsFailed, ActionsMessage
 from reactor_runtime.apps.robot.observe import (
     INVALID_OBSERVE,
     ObserveBuffer,
@@ -94,9 +97,28 @@ class ReactorRobotApp(ReactorApp):
             observation is ready. As on a ``ReactorApp``, a pinned ``fps``
             is also the rate emitted media plays out at.
 
+    After ``process_output()`` returns, a step whose ``generate()`` returned
+    :class:`Actions` sends an ``actions`` message
+    (:class:`~reactor_runtime.apps.robot.messages.ActionsMessage`) to every
+    connection, stamped with the step and the ``capture_time_us`` of its
+    observation, before the step's media and report. This delivery is the
+    class's own: ``process_output()`` cannot replace or suppress it, only add
+    to it. Actions whose ``extra`` cannot be written as JSON are not sent; the
+    step is answered with ``actions_failed`` instead and reported with the
+    error. Every step that ran is reported with :meth:`complete_step`, as on a
+    ``ReactorApp``.
+
+    When ``generate()`` raises, the default ``process_output()`` sends
+    ``actions_failed``
+    (:class:`~reactor_runtime.apps.robot.messages.ActionsFailed`) with the
+    step, the capture stamp and the error, reports the step with that error,
+    and the loop goes on with the next observation.
+
     A stepped session runs the three hooks once per request, as on a
     ``ReactorApp``. Its frames do not go through the synchronizer, so the
-    default ``process_input()`` refuses its steps with :data:`NO_OBSERVATION`.
+    default ``process_input()`` refuses its steps with :data:`NO_OBSERVATION`;
+    and as its steps have no capture, nothing is delivered and an error from
+    ``generate()`` is re-raised, as on a ``ReactorApp``.
     """
 
     _observed: ObserveBuffer
@@ -104,6 +126,7 @@ class ReactorRobotApp(ReactorApp):
     _cameras: tuple[str, ...]
     _unstamped: int
     _policy_steps: int
+    _capture: _StepCapture | None
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
@@ -121,6 +144,7 @@ class ReactorRobotApp(ReactorApp):
         self._sync = InputSynchronizer(tracks=self._cameras, data_tracks=(STATE_TRACK,))
         self._unstamped = 0
         self._policy_steps = 0
+        self._capture = None
 
     async def process_input(self) -> Any:
         """Return the observation of the newest complete capture not used yet.
@@ -143,28 +167,64 @@ class ReactorRobotApp(ReactorApp):
         taken = self._sync.take()
         if taken is None:
             raise ApplicationError(NO_OBSERVATION)
-        frames: dict[str, InputFrame] = dict(taken.frames)
+        frames: dict[str, _Received] = dict(taken.frames)
+        state: _Received = taken.data[STATE_TRACK]
+        self._capture = _StepCapture(
+            step=self._policy_steps,
+            capture_time_us=taken.capture_time_us,
+            received_at=min(part.at for part in (state, *frames.values())),
+        )
         return Observation(
             step=self._policy_steps,
             capture_time_us=taken.capture_time_us,
-            frames={name: frame.data for name, frame in frames.items()},
-            state=taken.data[STATE_TRACK],
+            frames={name: part.item.data for name, part in frames.items()},
+            state=state.item,
             skew_us=dict.fromkeys(frames, 0),
         )
 
     async def process_output(self, outcome: StepOutcome, /) -> Output | StepCompleted | None:
         """Turn what ``generate()`` did into what the client receives.
 
-        :class:`Actions` emit no media; the step is reported with nothing on
-        it. Any other result is read as on a ``ReactorApp``, and an error
-        ``generate()`` raised is re-raised, which ends the model loop.
+        :class:`Actions` emit no media; the class sends them as the
+        ``actions`` message once this method returns, whatever it returns.
+        When ``generate()`` raised, the error is logged, ``actions_failed``
+        is sent to every connection with the step, the capture stamp and the
+        error as ``"<type>: <message>"``, and the step is reported with that
+        error; the policy loop goes on with the next observation. Any other
+        result is read as on a ``ReactorApp``.
+
+        Override to add effects or recover differently; an override that
+        handles ``outcome.error`` itself sends its own messages, and one that
+        re-raises ends the model loop, as on a ``ReactorApp``.
 
         Returns:
-            ``None`` for :class:`Actions`, otherwise what
+            ``None`` for :class:`Actions`, a :class:`StepCompleted` holding the
+            error for a failed ``generate()``, otherwise what
             :meth:`ReactorApp.process_output` returns.
+
+        Raises:
+            Exception: The error ``generate()`` raised, when the step has no
+                capture to answer, as in a stepped session.
         """
         if outcome.error is None and isinstance(outcome.result, Actions):
             return None
+        capture = self._capture
+        if outcome.error is not None and capture is not None:
+            reason = f"{type(outcome.error).__name__}: {outcome.error}"
+            logger.warning(
+                "generate failed",
+                step=capture.step,
+                capture_time_us=capture.capture_time_us,
+                exc_info=outcome.error,
+            )
+            await self.send(
+                ActionsFailed(
+                    step=capture.step,
+                    capture_time_us=capture.capture_time_us,
+                    reason=reason,
+                )
+            )
+            return StepCompleted(error=reason)
         return await super().process_output(outcome)
 
     @event(
@@ -203,7 +263,7 @@ class ReactorRobotApp(ReactorApp):
             raise CommandError(INVALID_OBSERVE, str(refused)) from None
         entry = StampedState(stamp, robot_state, time.monotonic())
         self._observed.push(entry)
-        self._sync.push(STATE_TRACK, entry.capture_time_us, entry.state)
+        self._push_state(entry)
 
     async def _dispatch_reactor_event(self, event: ReactorEvent) -> None:
         """Run the lifecycle as a ``ReactorApp`` does, then drop the inputs it ends."""
@@ -231,7 +291,7 @@ class ReactorRobotApp(ReactorApp):
         drops = self._gate_drops
         self._sync.reset()
         for entry in self._observed.entries():
-            self._sync.push(STATE_TRACK, entry.capture_time_us, entry.state)
+            self._push_state(entry)
         readers = [
             asyncio.create_task(read_camera(name, self._input_buffers[name], self._take_frame))
             for name in self._cameras
@@ -260,28 +320,41 @@ class ReactorRobotApp(ReactorApp):
         async with self._step_lock:
             session = self._sessions_started
             input_started = time.perf_counter()
+            self._capture = None
             try:
-                observation = await self.process_input()
-            except ApplicationError as refused:
-                self._report_input_waits(session, report=False)
-                reason = f"{type(refused).__name__}: {refused}"
-                if reason != self._last_refusal:
-                    logger.debug("step refused", reason=str(refused), kind=type(refused).__name__)
-                    self._last_refusal = reason
-                return False
-            pacer.started()
-            self._last_refusal = None
-            self._policy_steps += 1
-            input_ms = (time.perf_counter() - input_started) * 1000.0
-            self._report_input_waits(session)
-            outcome: StepOutcome = await asyncio.to_thread(self._generate, observation)
-            output_started = time.perf_counter()
-            returned = await self.process_output(outcome)
-            stages = self._step_stages(
-                input_ms, outcome.elapsed, (time.perf_counter() - output_started) * 1000.0
-            )
+                try:
+                    observation = await self.process_input()
+                except ApplicationError as refused:
+                    self._report_input_waits(session, report=False)
+                    reason = f"{type(refused).__name__}: {refused}"
+                    if reason != self._last_refusal:
+                        logger.debug(
+                            "step refused", reason=str(refused), kind=type(refused).__name__
+                        )
+                        self._last_refusal = reason
+                    return False
+                pacer.started()
+                self._last_refusal = None
+                if isinstance(observation, Observation) and self._capture is None:
+                    self._capture = _StepCapture(
+                        observation.step, observation.capture_time_us, time.monotonic()
+                    )
+                self._policy_steps += 1
+                input_ms = (time.perf_counter() - input_started) * 1000.0
+                self._report_input_waits(session)
+                outcome: StepOutcome = await asyncio.to_thread(self._generate, observation)
+                output_started = time.perf_counter()
+                returned = await self.process_output(outcome)
+                stages = self._step_stages(
+                    input_ms, outcome.elapsed, (time.perf_counter() - output_started) * 1000.0
+                )
+                undelivered = await self._deliver_actions(outcome)
+            finally:
+                self._capture = None
 
         report = _step_report(returned, outcome)
+        if undelivered is not None:
+            report = replace(report, error=undelivered)
         rate = None
         if report.output is not None:
             pace = None if self._fps_pinned else outcome.elapsed
@@ -295,12 +368,73 @@ class ReactorRobotApp(ReactorApp):
         self._report_step(report, session, rate, stages, files=files)
         return True
 
+    async def _deliver_actions(self, outcome: StepOutcome) -> str | None:
+        """Send the step's actions to every connection; return why they were not sent, if not.
+
+        Sends nothing for a step whose ``generate()`` did not return
+        :class:`Actions`, or whose capture is unknown.
+        """
+        actions = outcome.result
+        capture = self._capture
+        if outcome.error is not None or not isinstance(actions, Actions) or capture is None:
+            if isinstance(actions, Actions) and capture is None:
+                logger.warning("actions not sent: the step's input is not an Observation")
+            return None
+        extra = dict(actions.extra)
+        try:
+            json.dumps(extra)
+        except (TypeError, ValueError) as error:
+            reason = f"Actions.extra is not JSON: {error}"
+            logger.warning("actions not sent", step=capture.step, reason=reason)
+            await self.send(
+                ActionsFailed(
+                    step=capture.step, capture_time_us=capture.capture_time_us, reason=reason
+                )
+            )
+            return reason
+        await self.send(
+            ActionsMessage(
+                step=capture.step,
+                capture_time_us=capture.capture_time_us,
+                chunk=actions.chunk.tolist(),
+                dt_ms=actions.dt_ms,
+                names=None if actions.names is None else list(actions.names),
+                extra=extra,
+                generate_ms=outcome.elapsed * 1000.0,
+                observation_age_ms=(time.monotonic() - capture.received_at) * 1000.0,
+            )
+        )
+        return None
+
+    def _push_state(self, entry: StampedState) -> None:
+        """Hand one stamped robot state to the synchronizer, with when it arrived."""
+        self._sync.push(
+            STATE_TRACK, entry.capture_time_us, _Received(entry.state, entry.received_at)
+        )
+
     def _take_frame(self, camera: str, frame: InputFrame) -> None:
         """Hand one camera frame to the synchronizer, or count it when it has no stamp."""
         if frame.capture_time_us is None:
             self._unstamped += 1
             return
-        self._sync.push(camera, frame.capture_time_us, frame)
+        self._sync.push(camera, frame.capture_time_us, _Received(frame, time.monotonic()))
+
+
+@dataclass(frozen=True, slots=True)
+class _Received:
+    """One frame or state in the synchronizer, with when the runtime took it (monotonic seconds)."""
+
+    item: Any
+    at: float
+
+
+@dataclass(frozen=True, slots=True)
+class _StepCapture:
+    """The capture the running step observed: its step, its stamp and when it first arrived."""
+
+    step: int
+    capture_time_us: int
+    received_at: float
 
 
 def _camera_names(cls: type[ReactorApp]) -> tuple[str, ...]:
