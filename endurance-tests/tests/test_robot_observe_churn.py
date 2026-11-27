@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import time
 from collections.abc import Iterator
@@ -15,7 +16,7 @@ import pytest
 if importlib.util.find_spec("reactor_runtime.apps.robot") is None:
     pytest.skip("this runtime has no robot app", allow_module_level=True)
 from endurance.churn import run_churn
-from endurance.harness import SUITE_DIR, RuntimeEndpoint, RuntimeProcess, V1Client
+from endurance.harness import _FPS, SUITE_DIR, RuntimeEndpoint, RuntimeProcess, V1Client
 from endurance.report import DEFAULT_OUTPUT_DIR
 from google.protobuf import struct_pb2
 
@@ -25,11 +26,13 @@ from reactor_wire.v1 import common_pb2, data_pb2, model_pb2
 DESCRIPTION = (
     "One long-lived session on the tracked echo built on ReactorRobotApp. Each cycle a "
     "v1 client joins and streams until 60 frames come back, as in connection_churn_v1, "
-    "and with every frame it sends an observe message carrying a capture stamp and a "
-    "robot state, more than the model's observe buffer holds, so the buffer fills and "
-    "evicts. Every tenth frame it also sends a malformed observe, which must be refused "
-    "with invalid_observe. Once the client has left, the model must hold no stamped "
-    "state (live_observed_states)."
+    "and with every frame it sends an observe message carrying the frame's capture stamp "
+    "and a robot state, more than the model's observe buffer holds, so the buffer fills "
+    "and evicts. The model echoes a frame only once its state has joined it by stamp, so "
+    "every frame back went through the robot app's camera reader and synchronizer. Every "
+    "tenth frame the client also sends a malformed observe, which must be refused with "
+    "invalid_observe. Once the client has left, the model must hold no stamped state "
+    "and no input waiting to be joined (live_observed_states)."
 )
 
 # One malformed observe per this many frames.
@@ -38,7 +41,7 @@ _REQUEST = common_pb2.MessageKind.MESSAGE_KIND_REQUEST
 
 
 class ObserveClient(V1Client):
-    """A :class:`V1Client` that also sends its robot state, stamped, with every frame.
+    """A :class:`V1Client` that also sends its robot state with every frame, both stamped alike.
 
     A malformed observe it sends must come back refused with
     ``invalid_observe``; any other answer is listed in :attr:`unanswered`.
@@ -48,6 +51,8 @@ class ObserveClient(V1Client):
         """Create a client for *session_id*; nothing connects until :meth:`run`."""
         super().__init__(runtime, session_id)
         self._frames = 0
+        # The capture stamp of the frame about to be pushed and of its state.
+        self._stamp = 0
         # Request ids of the malformed observes, owed a refusal.
         self._refusals: set[str] = set()
 
@@ -55,9 +60,10 @@ class ObserveClient(V1Client):
         super()._on_tick()
         n = self._frames
         self._frames += 1
+        self._stamp = time.monotonic_ns() // 1000
         self._send_observe(
             f"observe-{n}",
-            {"capture_time_us": time.monotonic_ns() // 1000, "state": {"joints": [n % 7, 0.5]}},
+            {"capture_time_us": self._stamp, "state": {"joints": [n % 7, 0.5]}},
         )
         if n % _REFUSAL_EVERY == 0:
             request_id = f"observe-refused-{n}"
@@ -65,6 +71,19 @@ class ObserveClient(V1Client):
                 self._pending[request_id] = ("observe", frozenset())
                 self._refusals.add(request_id)
             self._send_observe(request_id, {"capture_time_us": "late", "state": [n]})
+
+    async def _push_frame(self, frame: tuple[bytes, int, int]) -> None:
+        """Push a webcam frame stamped with the capture stamp its observe carries."""
+        if not self._stamp:
+            await super()._push_frame(frame)
+            return
+        bgra, width, height = frame
+        # The stamp rides in the frame's trailer, which this binding appends
+        # only to a frame that carries user data, so the frame carries some.
+        self._camera.push_video_frame(
+            bgra, width, height, user_data=b"{}", capture_time_us=self._stamp
+        )
+        await asyncio.sleep(1 / _FPS)
 
     def _send_observe(self, request_id: str, data: dict[str, Any]) -> None:
         args = struct_pb2.Struct()

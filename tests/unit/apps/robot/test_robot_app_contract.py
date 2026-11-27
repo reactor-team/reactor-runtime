@@ -186,7 +186,9 @@ async def test_the_default_step_loop_runs_generate_and_reports_each_step(
     assert app.sessions == 1
     assert app.observations
     assert app.observations[0].task == "pick up the cube"
-    assert len(app.emitted) == len(app.observations)
+    # The loop is cancelled at any await, the robot app's generate() on its
+    # worker thread included, so the last step may have run without its emit.
+    assert len(app.observations) - 1 <= len(app.emitted) <= len(app.observations)
     assert len(app.observations) - 1 <= len(steps) <= len(app.observations)
     assert steps[0].bundle is not None
     assert set(steps[0].bundle.tracks) == {"scene_view"}
