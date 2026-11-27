@@ -43,6 +43,7 @@ from reactor_runtime.model_server.link import (
     StreamLink,
 )
 from reactor_runtime.model_server.server import (
+    MAX_BATCH_ON_CLASS_REFUSED_IN,
     ModelServer,
     ServerRequest,
     ServerSettings,
@@ -51,6 +52,7 @@ from reactor_runtime.model_server.server_core import ModelServerCore
 from reactor_runtime.model_server.shm_link import ShmLink, UnixShmListener, UnixShmTransport
 
 __all__ = [
+    "MAX_BATCH_ON_CLASS_REFUSED_IN",
     "BatchFailed",
     "ClientClosed",
     "LinkConfig",

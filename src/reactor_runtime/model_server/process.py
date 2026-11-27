@@ -32,7 +32,12 @@ from reactor_runtime.log import get_logger, set_state
 from reactor_runtime.model_server.config import ServerProcessConfig
 from reactor_runtime.model_server.errors import ModelServerUnreachable
 from reactor_runtime.model_server.link import LinkTransport
-from reactor_runtime.model_server.server import ModelServer, ServerSettings
+from reactor_runtime.model_server.server import (
+    MAX_BATCH_ON_CLASS_REFUSED_IN,
+    ModelServer,
+    ServerSettings,
+    is_max_batch_declared,
+)
 from reactor_runtime.model_server.server_core import ModelServerCore
 from reactor_runtime.model_server.shm_link import UnixShmTransport
 from reactor_runtime.service import ShutdownHook, no_shutdown
@@ -90,8 +95,8 @@ class ModelServerProcess:
 
         Raises:
             SystemExit: The manifest names no ``ModelServer`` subclass or a
-                module that does not exist, a setting is outside what the class
-                allows, a slot's shared-memory path is not a directory or its
+                module that does not exist, sets ``max_batch`` above the one
+                the class declares, a slot's shared-memory path is not a directory or its
                 volume is too small, or another model server already listens on
                 the socket.
         """
@@ -101,6 +106,18 @@ class ModelServerProcess:
             settings = ServerSettings.resolve(cls, self._model_server, self._shared_memory)
         except ValueError as exc:
             raise SystemExit(f"{ref}: {exc}") from None
+        if is_max_batch_declared(cls):
+            if self._model_server.max_batch is None:
+                action = "move the class's value to runtime.model_server.max_batch in reactor.yaml"
+            else:
+                action = "remove max_batch from the class; reactor.yaml already sets it"
+            logger.warning(
+                f"max_batch on the model server class is deprecated, and reactor-runtime "
+                f"{MAX_BATCH_ON_CLASS_REFUSED_IN} refuses it: {action}",
+                model=ref,
+                class_max_batch=cls.max_batch,
+                max_batch=settings.max_batch,
+            )
         transport = self._transport or UnixShmTransport(
             slot_directory=self._process.slot_directory,
             input_bytes=settings.shm_input_bytes,
@@ -114,6 +131,7 @@ class ModelServerProcess:
             _check_room(transport, self._process.max_sessions, settings)
         model = cls()
         model.device = _device()
+        model.max_batch = settings.max_batch
         started = time.monotonic()
         logger.info("loading the model", model=ref, device=model.device)
         try:
@@ -128,6 +146,7 @@ class ModelServerProcess:
             model=ref,
             seconds=round(time.monotonic() - started, 2),
             max_batch=settings.max_batch,
+            sessions=self._process.max_sessions,
             shm_slot_bytes=settings.shm_slot_bytes,
         )
         self._server = ModelServerCore(

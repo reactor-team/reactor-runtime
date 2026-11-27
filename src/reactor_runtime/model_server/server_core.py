@@ -176,7 +176,9 @@ class ModelServerCore:
         model: The model half, already loaded.
         transport: Opens the links sessions connect through.
         address: Where sessions connect.
-        settings: The serving settings (:meth:`ServerSettings.resolve`).
+        settings: The serving settings (:meth:`ServerSettings.resolve`). The
+            caller sets the model's ``max_batch`` from them before ``load()``,
+            as :class:`ModelServerProcess` does.
         max_sessions: The deployment's session count: only slots ``0`` to
             ``max_sessions - 1`` are served, and at most that many connections
             may be opening at once.

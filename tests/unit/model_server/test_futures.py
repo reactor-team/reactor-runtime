@@ -104,8 +104,6 @@ class _Model(ModelServer[int, int]):
     ``step()``, as a pipeline whose work starts there does.
     """
 
-    max_batch = 4
-
     def __init__(self) -> None:
         self.requests: queue.Queue[list[ServerRequest[int]]] = queue.Queue()
         self.futures: queue.Queue[Future[int]] = queue.Queue()

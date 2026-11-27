@@ -58,14 +58,19 @@ class ServerRequest[T]:
     session_id: str | None = None
 
 
+MAX_BATCH_ON_CLASS_REFUSED_IN = "3.13.0"
+"""The reactor-runtime release that refuses ``max_batch`` declared on a
+:class:`ModelServer` class; until then the declaration works and logs a
+deprecation warning. ``runtime.model_server.max_batch`` in ``reactor.yaml``
+replaces it."""
+
+
 class ModelServer[RequestT, ResultT]:
     """Base class for the model half: weights loaded once, one batch stepped at a time.
 
     A subclass declares what it can serve and writes :meth:`step`::
 
         class PlasmaModel(ModelServer[Tick, Frame]):
-            max_batch = 4             # the most requests one step can take
-
             def load(self, config_path):
                 self.palette = load_palette(config_path)
 
@@ -116,6 +121,21 @@ class ModelServer[RequestT, ResultT]:
             # writing the slot's state, then resolve its futures.
             self.pipeline.discard(slot, generation)
 
+    ``reactor.yaml`` sets how many requests one step can take::
+
+        runtime:
+          model_server:
+            import: plasma_model:PlasmaModel
+            max_batch: 4      # the most requests in one step
+
+    How many sessions share the model server is a separate setting,
+    ``model.resources.workers.count``. When the file sets no count, the
+    ``reactor`` CLI sets it to ``max_batch``; an explicit count stays
+    independent of ``max_batch``. With more sessions
+    than ``max_batch``, the requests past ``max_batch`` wait for the next
+    step, so a model that runs one request per step keeps ``max_batch`` at 1
+    and serves its sessions in turn.
+
     What crosses between the halves is pickled, so a request, a result and a
     signal can be any value pickle takes. Plain data, such as frozen
     dataclasses of numbers, strings and numpy arrays, is the convention: the
@@ -124,9 +144,6 @@ class ModelServer[RequestT, ResultT]:
     are for type checkers alone; nothing checks them at run time.
 
     Class attributes:
-        max_batch: The most requests one step can take, 1 by default.
-            ``runtime.model_server.max_batch`` in ``reactor.yaml`` may lower
-            it, never raise it.
         batch_window: Seconds to wait for a batch to fill, 0 by default;
             ``runtime.model_server.batch_window`` overrides it.
 
@@ -138,6 +155,18 @@ class ModelServer[RequestT, ResultT]:
     Attributes:
         device: ``"cuda"`` when torch sees a GPU in the model server's process,
             else ``"cpu"``. Set before :meth:`load` runs.
+        max_batch: The most requests one step receives, from
+            ``runtime.model_server.max_batch`` in ``reactor.yaml``; 1 when
+            neither the manifest nor a deprecated class declaration sets it.
+            Set after the constructor, over any value the constructor
+            sets, and before :meth:`load` runs, so ``load()`` can warm the
+            model up at the full batch.
+
+    A subclass that declares ``max_batch`` itself is deprecated, and the
+    model server logs a warning that names the key to move it to. It serves
+    with the class value when ``reactor.yaml`` sets none, with the manifest's
+    when it is at most the class value, and refuses to start when the
+    manifest's is above it.
 
     Raises:
         TypeError: When a subclass is defined with a setting the manifest owns.
@@ -145,10 +174,10 @@ class ModelServer[RequestT, ResultT]:
             ``batch_window`` out of range.
     """
 
-    max_batch: ClassVar[int] = 1
     batch_window: ClassVar[float] = 0.0
 
     device: str
+    max_batch: int = 1
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Check the subclass's declarations as it is defined."""
@@ -159,7 +188,9 @@ class ModelServer[RequestT, ResultT]:
                     f"{cls.__name__}.{attribute}: set it in reactor.yaml as {key}, "
                     "where a deployment reads it"
                 )
-        _positive_int(f"{cls.__name__}.max_batch", cls.max_batch)
+        declared = _declared_max_batch(cls)
+        if declared is not None:
+            _positive_int(f"{cls.__name__}.max_batch", declared)
         _seconds(f"{cls.__name__}.batch_window", cls.batch_window)
 
     def load(self, config_path: Path | None) -> None:
@@ -218,7 +249,7 @@ class ModelServer[RequestT, ResultT]:
           and are short: they finish the request and queue its answer.
 
         Args:
-            requests: Between one and the effective ``max_batch`` requests, at
+            requests: Between one and ``max_batch`` requests, at
                 most one per session, in arrival order.
 
         Returns:
@@ -288,7 +319,7 @@ class ModelServer[RequestT, ResultT]:
 
 @dataclass(frozen=True)
 class ServerSettings:
-    """The settings a model server serves with: its class's, as ``reactor.yaml`` adjusts them.
+    """The settings a model server serves with, from ``reactor.yaml`` and its class.
 
     Attributes:
         max_batch: The most requests one step receives.
@@ -321,31 +352,41 @@ class ServerSettings:
     ) -> ServerSettings:
         """Return the settings *server* serves with under the manifest.
 
-        The class is the authority on ``max_batch``: the manifest may lower it,
-        not raise it. The manifest sets the rest, with the runtime's defaults
-        for what it leaves out.
+        ``max_batch`` is ``runtime.model_server.max_batch``; a class that
+        declares ``max_batch`` (deprecated) supplies it when the manifest sets
+        none and caps what the manifest may set, and 1 applies when neither
+        does. ``batch_window`` is the
+        manifest's, else the class's. The shared memory sizes are the
+        manifest's, with the runtime's defaults for what it leaves out.
 
         Args:
             server: The model half's class.
             config: The manifest's ``runtime.model_server`` block, or ``None``
-                to serve with the class's settings.
+                when the manifest has none.
             shared_memory: The manifest's ``model.resources.workers.shared_memory``
                 block; the default sizes when omitted.
 
         Raises:
-            ValueError: The manifest raises ``max_batch`` above the class's.
+            ValueError: The manifest sets ``max_batch`` above the one the class
+                declares.
         """
         blocks = shared_memory or SharedMemoryConfig()
-        max_batch = server.max_batch
+        declared = _declared_max_batch(server)
+        configured = config.max_batch if config is not None else None
+        if declared is not None and configured is not None and configured > declared:
+            raise ValueError(
+                f"runtime.model_server.max_batch is {configured}, above "
+                f"{server.__name__}.max_batch = {declared}: remove max_batch from the class, "
+                "reactor.yaml sets it"
+            )
+        if configured is not None:
+            max_batch = configured
+        elif declared is not None:
+            _positive_int(f"{server.__name__}.max_batch", declared)
+            max_batch = declared
+        else:
+            max_batch = 1
         batch_window = float(server.batch_window)
-        if config is not None and config.max_batch is not None:
-            if config.max_batch > server.max_batch:
-                raise ValueError(
-                    f"runtime.model_server.max_batch is {config.max_batch}, above "
-                    f"{server.__name__}.max_batch = {server.max_batch}: the manifest may only "
-                    "lower it"
-                )
-            max_batch = config.max_batch
         if config is not None and config.batch_window is not None:
             batch_window = float(config.batch_window)
         return cls(
@@ -354,6 +395,26 @@ class ServerSettings:
             shm_input_bytes=blocks.input_bytes,
             shm_output_bytes=blocks.output_bytes,
         )
+
+
+def is_max_batch_declared(server: type[ModelServer]) -> bool:
+    """Return whether *server*, or a base below :class:`ModelServer`, declares ``max_batch``.
+
+    Such a declaration is deprecated: ``runtime.model_server.max_batch`` in
+    ``reactor.yaml`` sets it, and reactor-runtime
+    :data:`MAX_BATCH_ON_CLASS_REFUSED_IN` refuses a class that declares it. A
+    model pinned to an earlier release keeps working as it does.
+    """
+    return _declared_max_batch(server) is not None
+
+
+def _declared_max_batch(server: type[ModelServer]) -> Any:
+    for klass in server.__mro__:
+        if klass is ModelServer:
+            return None
+        if "max_batch" in vars(klass):
+            return vars(klass)["max_batch"]
+    return None
 
 
 def _positive_int(where: str, value: Any) -> None:

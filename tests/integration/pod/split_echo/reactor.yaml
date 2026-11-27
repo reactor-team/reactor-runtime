@@ -5,3 +5,4 @@ runtime:
   import: split_echo:SplitEcho
   model_server:
     import: split_echo_model:SplitEchoModel
+    max_batch: 3

@@ -76,8 +76,6 @@ class Other:
 
 
 class EchoModel(ModelServer[Tick, Echo]):
-    max_batch = 4
-
     def __init__(self) -> None:
         self.batches: list[list[int]] = []
         self.events: list[tuple[str, int, int]] = []
@@ -190,6 +188,7 @@ def _rig(
     model = model or EchoModel()
     transport = transport or PairTransport()
     settings = ServerSettings(max_batch, batch_window, 1 << 20, 1 << 20)
+    model.max_batch = settings.max_batch  # what ModelServerProcess does before load()
     server = ModelServerCore(
         model, transport, "unused", settings=settings, max_sessions=4, stuck_after=stuck_after
     )
