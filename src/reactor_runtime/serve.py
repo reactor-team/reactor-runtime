@@ -52,7 +52,8 @@ from reactor_runtime.transport.webrtc.router import WebRtcRouter
 # Public STUN server used when no STUN/TURN is configured, so the SDP answer
 # carries a server-reflexive candidate. A same-host client still connects on
 # host candidates without it, but anything across a NAT needs one. An operator
-# overrides it (or adds TURN) through STUN_SERVERS / TURN_SERVERS.
+# overrides it (or adds TURN) through STUN_SERVERS / TURN_SERVERS, or turns it
+# off with STUN_SERVERS=none.
 _DEFAULT_STUN_SERVER = "stun:stun.l.google.com:19302"
 
 logger = log.get_logger(__name__)
@@ -79,17 +80,41 @@ def _ice_servers_from_env() -> tuple[IceServer, ...]:
     falls back to a single public STUN server so the runtime still gathers a
     server-reflexive candidate.
 
+    ``STUN_SERVERS=none`` turns STUN off: the runtime gathers host candidates
+    only (plus any ``TURN_SERVERS``), and answers as soon as they are gathered
+    instead of waiting on a STUN server. Use it when the client runs on the
+    same host or network as the runtime, where host candidates are enough.
+
+    Every other ``STUN_SERVERS`` entry must start with ``stun:`` or ``stuns:``,
+    in lower case: those are the only credential-less servers the media engine
+    accepts, and any other entry would fail every connection, so the runtime
+    refuses to start instead.
+
     Raises:
-        SystemExit: If a ``TURN_SERVERS`` entry is not ``username;credential;url``.
+        SystemExit: If a ``TURN_SERVERS`` entry is not ``username;credential;url``,
+            if ``STUN_SERVERS`` lists ``none`` beside a URL, or if a
+            ``STUN_SERVERS`` entry does not start with ``stun:`` or ``stuns:``.
     """
-    servers: list[IceServer] = [IceServer(urls=(url,)) for url in _csv("STUN_SERVERS")]
+    stun = _csv("STUN_SERVERS")
+    stun_off = [url.lower() for url in stun] == ["none"]
+    if not stun_off and any(url.lower() == "none" for url in stun):
+        raise SystemExit("STUN_SERVERS must be either 'none' or a list of stun: URLs, not both")
+    if stun_off:
+        stun = []
+    for url in stun:
+        # Case-sensitive: the media engine refuses an upper-case scheme.
+        if not url.startswith(("stun:", "stuns:")):
+            raise SystemExit(f"STUN_SERVERS entry {url!r} must start with stun: or stuns:")
+    servers: list[IceServer] = [IceServer(urls=(url,)) for url in stun]
     for entry in _csv("TURN_SERVERS"):
         parts = [part.strip() for part in entry.split(";", 2)]
         if len(parts) != 3 or not all(parts):
             raise SystemExit(f"TURN_SERVERS entry {entry!r} must be 'username;credential;url'")
         username, credential, url = parts
         servers.append(IceServer(urls=(url,), username=username, credential=credential))
-    return tuple(servers) or (IceServer(urls=(_DEFAULT_STUN_SERVER,)),)
+    if servers or stun_off:
+        return tuple(servers)
+    return (IceServer(urls=(_DEFAULT_STUN_SERVER,)),)
 
 
 def _port_range_from_env() -> tuple[int, int] | None:
