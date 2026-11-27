@@ -132,6 +132,9 @@ class Sample:
     # The recorder's per-session threads still alive while no session is
     # being recorded: a recording that did not unwind with its session.
     live_recorder_threads: int = 0
+    # Stamped robot states a robot model still keeps from observe messages,
+    # with no client connected.
+    live_observed_states: int = 0
 
 
 def cpu_deltas(samples: list[Sample]) -> list[float]:
@@ -437,6 +440,7 @@ ZERO_FIELDS = (
     "live_step_encoders",
     "live_local_files",
     "live_recorder_threads",
+    "live_observed_states",
 )
 
 
