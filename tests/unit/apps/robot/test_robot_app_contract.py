@@ -206,12 +206,19 @@ async def test_a_refused_step_never_reaches_generate(cls: type[Policy]) -> None:
     assert steps == []
 
 
-@pytest.mark.parametrize("cls", [BrokenPlainPolicy, BrokenRobotPolicy])
-async def test_an_error_from_generate_ends_the_loop(
-    cls: type[BrokenPlainPolicy | BrokenRobotPolicy],
-) -> None:
-    app = cls()
+async def test_an_error_from_generate_ends_the_loop_of_a_reactor_app() -> None:
+    app = BrokenPlainPolicy()
     _ready(app)
     await _go_live(app)
     with pytest.raises(RuntimeError, match="no policy here"):
         await asyncio.wait_for(app.run(), timeout=1.0)
+
+
+async def test_an_error_from_generate_is_reported_and_the_robot_loop_goes_on() -> None:
+    app = BrokenRobotPolicy()
+    steps = _ready(app)
+    await _go_live(app)
+    await _run_for(app, 0.05)
+
+    assert len(steps) >= 2
+    assert all(step.error == "RuntimeError: no policy here" for step in steps)
