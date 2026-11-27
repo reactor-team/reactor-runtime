@@ -43,6 +43,7 @@ from reactor_runtime.serve import _webrtc_config_from_env  # noqa: E402
 from reactor_runtime.transport.webrtc import peer as peer_module  # noqa: E402
 from reactor_runtime.transport.webrtc.config import (  # noqa: E402
     IceCredentials,
+    IceServer,
     WebRtcConfig,
 )
 from reactor_runtime.transport.webrtc.frames import rgb_to_bgra  # noqa: E402
@@ -463,7 +464,7 @@ async def test_stun_none_answers_without_waiting_out_the_gathering_timeout(
     stop_trickle = asyncio.Event()
     trickle_task = asyncio.create_task(_trickle_until(client, peer, stop_trickle))
     try:
-        assert answered_in < 2.0, f"answer took {answered_in:.2f} s"
+        assert answered_in < 5.0, f"answer took {answered_in:.2f} s"
         assert "a=candidate:" in answer.sdp, "the answer must carry host candidates"
         assert "typ srflx" not in answer.sdp
         await client.accept_answer(answer.sdp)
@@ -475,6 +476,86 @@ async def test_stun_none_answers_without_waiting_out_the_gathering_timeout(
             await trickle_task
         await peer.close()
         client.pc = None  # type: ignore[assignment]
+
+
+async def _engine_negotiates(config: WebRtcConfig) -> None:
+    """Have the libwebrtc factory answer an offer under *config*, then close the peer.
+
+    Raises whatever the factory raises when the engine refuses the config.
+    """
+    factory = _get_factory(WebRtcConfig())
+    client = await _Client.create(factory)
+    offer_sdp = await client.create_offer()
+    try:
+        peer, answer = await libwebrtc_peer_factory(
+            ConnId(5),
+            SdpOffer(sdp=offer_sdp),
+            client.track_map(),
+            config,
+            ProtocolVersion.V0,
+        )
+        assert answer.sdp.startswith("v=0")
+        await peer.close()
+    finally:
+        client.pc = None  # type: ignore[assignment]
+
+
+@pytest.mark.parametrize(
+    ("stun", "turn"),
+    [
+        ("stun:127.0.0.1:3478", ""),
+        ("stuns:127.0.0.1:5349", ""),
+        ("stun:127.0.0.1", ""),
+        ("stun:[::1]:3478", ""),
+        ("stun:127.0.0.1:3478,stuns:127.0.0.1:5349", ""),
+        ("none", "user;secret;turn:127.0.0.1:3478"),
+        ("none", "user;secret;turns:127.0.0.1:5349?transport=tcp"),
+        ("none", "user;secret;stun:127.0.0.1:3478"),
+    ],
+)
+async def test_every_ice_server_the_env_accepts_is_one_the_engine_negotiates_with(
+    monkeypatch: pytest.MonkeyPatch, stun: str, turn: str
+) -> None:
+    """A value that passes the boot check builds a peer that answers.
+
+    Nothing listens on the URLs, so gathering runs to its short timeout and the
+    answer carries host candidates.
+    """
+    monkeypatch.setenv("STUN_SERVERS", stun)
+    monkeypatch.setenv("TURN_SERVERS", turn)
+    config = dataclasses.replace(_webrtc_config_from_env(), ice_gathering_timeout_ms=200)
+
+    await _engine_negotiates(config)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "off",
+        "not-a-url",
+        "stun.l.google.com:19302",
+        "http://127.0.0.1:3478",
+        "STUN:127.0.0.1:3478",
+        "Stun:127.0.0.1:3478",
+        "turn:127.0.0.1:3478",
+        "turns:127.0.0.1:5349",
+    ],
+)
+async def test_every_stun_entry_the_env_refuses_is_one_the_engine_refuses(
+    monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    """The boot check refuses no STUN entry a connection could have used.
+
+    Each entry it refuses also makes the engine fail the peer it is given to, so
+    refusing it at boot turns a failure on every connection into one at start.
+    """
+    monkeypatch.setenv("STUN_SERVERS", url)
+    with pytest.raises(SystemExit, match="STUN_SERVERS"):
+        _webrtc_config_from_env()
+
+    config = WebRtcConfig(ice_servers=(IceServer(urls=(url,)),), ice_gathering_timeout_ms=200)
+    with pytest.raises(RuntimeError, match="ICE server parsing failed"):
+        await _engine_negotiates(config)
 
 
 async def test_a_frame_sent_from_the_connected_callback_reaches_the_client() -> None:

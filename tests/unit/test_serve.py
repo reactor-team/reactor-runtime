@@ -461,6 +461,73 @@ def test_webrtc_config_refuses_none_beside_stun_urls(
         _webrtc_config_from_env()
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "stun:a.example:3478",
+        "stuns:a.example:5349",
+        "stun:a.example",
+        "stun:192.0.2.1:3478",
+        "stun:[2001:db8::1]:3478",
+        "stun:a.example:3478, stuns:b.example:5349",
+    ],
+)
+def test_webrtc_config_accepts_stun_and_stuns_urls(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    monkeypatch.setenv("STUN_SERVERS", raw)
+
+    config = _webrtc_config_from_env()
+
+    assert [server.urls[0] for server in config.ice_servers] == [
+        url.strip() for url in raw.split(",")
+    ]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "off",
+        "not-a-url",
+        "stun.l.google.com:19302",
+        "http://stun.example:3478",
+        "STUN:stun.example:3478",
+        "Stun:stun.example:3478",
+        "turn:relay.example:3478",
+        "turns:relay.example:5349",
+        "stun:a.example:3478,off",
+    ],
+)
+def test_webrtc_config_refuses_a_stun_entry_without_a_stun_scheme(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    monkeypatch.setenv("STUN_SERVERS", raw)
+
+    with pytest.raises(SystemExit, match=r"STUN_SERVERS entry .* must start with stun: or stuns:"):
+        _webrtc_config_from_env()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "turn:relay.example:3478",
+        "turns:relay.example:5349?transport=tcp",
+        "stun:relay.example:3478",
+        "stuns:relay.example:5349",
+    ],
+)
+def test_webrtc_config_leaves_turn_server_urls_as_they_are(
+    monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    # The scheme check covers STUN_SERVERS alone. A TURN_SERVERS entry carries
+    # credentials, so the media engine also takes a stun: URL there.
+    monkeypatch.setenv("TURN_SERVERS", f"user;secret;{url}")
+
+    config = _webrtc_config_from_env()
+
+    assert [server.urls[0] for server in config.ice_servers] == [url]
+
+
 def test_every_webrtc_variable_is_reserved_from_secrets() -> None:
     # A mounted secret may not replace a setting the WebRTC transport reads.
     assert set(_WEBRTC_ENV) <= RESERVED_NAMES

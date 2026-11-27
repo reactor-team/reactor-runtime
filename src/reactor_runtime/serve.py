@@ -85,9 +85,15 @@ def _ice_servers_from_env() -> tuple[IceServer, ...]:
     instead of waiting on a STUN server. Use it when the client runs on the
     same host or network as the runtime, where host candidates are enough.
 
+    Every other ``STUN_SERVERS`` entry must start with ``stun:`` or ``stuns:``,
+    in lower case: those are the only credential-less servers the media engine
+    accepts, and any other entry would fail every connection, so the runtime
+    refuses to start instead.
+
     Raises:
         SystemExit: If a ``TURN_SERVERS`` entry is not ``username;credential;url``,
-            or if ``STUN_SERVERS`` lists ``none`` beside a URL.
+            if ``STUN_SERVERS`` lists ``none`` beside a URL, or if a
+            ``STUN_SERVERS`` entry does not start with ``stun:`` or ``stuns:``.
     """
     stun = _csv("STUN_SERVERS")
     stun_off = [url.lower() for url in stun] == ["none"]
@@ -95,6 +101,10 @@ def _ice_servers_from_env() -> tuple[IceServer, ...]:
         raise SystemExit("STUN_SERVERS must be either 'none' or a list of stun: URLs, not both")
     if stun_off:
         stun = []
+    for url in stun:
+        # Case-sensitive: the media engine refuses an upper-case scheme.
+        if not url.startswith(("stun:", "stuns:")):
+            raise SystemExit(f"STUN_SERVERS entry {url!r} must start with stun: or stuns:")
     servers: list[IceServer] = [IceServer(urls=(url,)) for url in stun]
     for entry in _csv("TURN_SERVERS"):
         parts = [part.strip() for part in entry.split(";", 2)]
