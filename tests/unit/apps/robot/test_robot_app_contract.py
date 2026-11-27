@@ -150,12 +150,14 @@ def test_the_package_exports_the_app_and_its_step_types() -> None:
     assert issubclass(ReactorRobotApp, ReactorApp)
 
 
-def test_a_subclass_builds_the_same_contract_as_a_reactor_app() -> None:
+def test_a_subclass_builds_the_contract_of_a_reactor_app_plus_observe() -> None:
     plain = ModelContract.of(PlainPolicy).render_schema(name="policy")
     robot = ModelContract.of(RobotPolicy).render_schema(name="policy")
 
-    assert robot == plain
-    assert set(robot.commands) == {"home", "set_task", "set_paused"}
+    assert set(plain.commands) == {"home", "set_task", "set_paused"}
+    assert set(robot.commands) == {*plain.commands, "observe"}
+    assert {name: robot.commands[name] for name in plain.commands} == plain.commands
+    assert robot.tracks == plain.tracks
     assert set(robot.tracks) == {"scene", "scene_view"}
 
 

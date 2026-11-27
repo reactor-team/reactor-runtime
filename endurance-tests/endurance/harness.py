@@ -1353,6 +1353,7 @@ class ResourceSampler:
                 live_step_encoders=reading["live"].get("step_encoders", 0),
                 live_local_files=reading["live"].get("local_files", 0),
                 live_recorder_threads=reading.get("recorder_threads", 0),
+                live_observed_states=reading.get("observed_states", 0),
             )
         self._baseline.freed_by_gc = freed
         self._baseline.holding_after_stop = holding

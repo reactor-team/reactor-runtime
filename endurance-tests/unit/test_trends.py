@@ -136,6 +136,7 @@ def test_exact_metrics_cover_every_count() -> None:
         "live_step_encoders",
         "live_local_files",
         "live_recorder_threads",
+        "live_observed_states",
         "tasks",
         "child_processes",
     ]
@@ -157,6 +158,15 @@ def test_a_recorder_thread_left_alive_fails_its_cycle() -> None:
     [threads] = [m for m in exact_metrics(samples) if m.name == "live_recorder_threads"]
 
     assert threads.status == "fail"
+
+
+def test_an_observed_state_left_behind_fails_its_cycle() -> None:
+    samples = _samples(4)
+    samples[2] = dataclasses.replace(samples[2], live_observed_states=1)
+
+    [states] = [m for m in exact_metrics(samples) if m.name == "live_observed_states"]
+
+    assert states.status == "fail"
 
 
 def test_a_step_decoder_left_alive_fails_its_cycle() -> None:

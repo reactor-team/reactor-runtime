@@ -1,0 +1,12 @@
+$schema: reactor/v2
+
+# The endurance suite's tracked echo as a robot policy: it streams like the
+# tracked echo and also takes the stamped robot state a client sends as
+# observe messages, which it keeps per session.
+model:
+  name: echo-endurance-robot
+  version: v0.0.1
+  description: The endurance suite's tracked echo on ReactorRobotApp, taking observe messages.
+
+runtime:
+  import: robot_echo:RobotEcho

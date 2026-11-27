@@ -250,6 +250,12 @@ def _step_requests(runner: Runner) -> int:
     return len(runner._steps.order) + len(failed)
 
 
+def _observed_states(runner: Runner) -> int:
+    """Count the stamped robot states a robot model keeps, none for any other model."""
+    model = runner._bridge._model if runner._bridge is not None else None
+    return len(getattr(model, "_observed", ()))
+
+
 # The threads a recording runs for its own session; the reaper outlives sessions.
 _RECORDER_THREADS = frozenset({"recording-feed", "recording-watch"})
 
@@ -364,6 +370,7 @@ def build_app(
             "topic_commands": dict(_topic_commands),
             "input_frames": _input_frames(runner),
             "step_requests": _step_requests(runner),
+            "observed_states": _observed_states(runner),
             "recorder_threads": _recorder_threads(runner),
             "tasks": len(asyncio.all_tasks()),
             "executor_threads": _executor_threads(),
