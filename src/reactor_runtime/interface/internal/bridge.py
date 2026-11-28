@@ -103,8 +103,9 @@ class ModelBridge:
     def supports_stepped(self) -> bool:
         """Whether the model can serve a stepped session.
 
-        True for a model that runs the default step loop of ``ReactorApp``. A
-        model that drives its own ``run()``, such as a ``ReactorPipeline``,
+        True for a ``ReactorApp`` that keeps its ``run()``: one on the default
+        step loop, or a ``ReactorDirectorApp``. A model that drives its own
+        ``run()``, such as a ``ReactorPipeline``,
         has no step to run on request; one that overrides ``submit_command()``
         cannot tie a failed handler to its step.
         """
